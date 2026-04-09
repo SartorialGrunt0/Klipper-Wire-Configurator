@@ -1,0 +1,143 @@
+# System Spec
+
+## Scope
+This document provides the system requirements for the klipper wire configurator software. It is focused easily viewing, creating, and modifying printer.cfg files (and sub-files) in a graphical format. 
+
+## Intended Use
+The software shall import, export, modify and generate .cfg files based upon the loaded klipper configuration files into the software.
+
+## Use Environment
+It shall run as a software program on a raspberry pi as a webclient as well as a standalone webpage that is displayed on a webpage for viewing viewing, creating, and modifying printer.cfg files in a graphical representation from a phone or desktop computer.
+
+## Major Features
+The software shall have the following high-level features:
+
+- A web UI for user interaction.
+- An installer/uninstaller for ease of use setup.
+- A graphical interface representing configuration with symbols and wires to create configuration and connections.
+- A traditional text view of the configuration.
+- The ability to import an existing printer.cfg or other .cfg files.
+- The ability to generate .cfg files from examples as a baseline.
+- The ability to modify a generated or imported configuration file graphically.
+- The ability to export loaded configuration files.
+- The ability to error check the configuration.
+
+# Functional and Performance Requirements
+
+## Installer/Uninstaller
+
+The software shall have a linux arm installer for raspberry pi.
+
+The installer shall allow the user to specify a file path and WebUI Port.
+
+## Web UI
+
+The software shall have a WebUI specified http port.
+
+The WebUI shall support importing, generating, and exporting configuration files.
+
+Generating configuration files shall allow them to start as blank or select a config example. 
+
+Importing a configuration file shall attempt to detect the board type.
+
+Selecting a config example shall support a fuzzy search option.
+
+The WebUI shall have a graphical view of loaded configuration files for each board (such as the mainboards, toolhead boards, expander boards, usb accelerometers, the SBC, USB/CAN probes, or any other components).
+
+The graphical view shall have a unique configuration file for each hardware component, where the primary mainboard is defined as "printer.cfg". All other components shall be in a unique configuration file that are imported into printer.cfg.
+
+### Graphical View
+
+The graphical view shall have a generic outline representing the component type with the following outlines:
+
+- SBC (with optional MCU option)
+- Mainboard
+- Expander board
+- Toolhead board
+- Probe
+- Accelerometer
+- Other (generic square)
+
+The graphical view shall have an add button that creates bubble tied to the hardware component outline with a trace that can assigned to different sub-components including the following:
+
+- MCU
+- Printer
+- Steppers
+- Stepper Drivers
+- Extruders
+- Heaters
+- Fans
+- Endstops
+- Motors
+- Temperature Sensors
+- Servos
+- Probes
+- LEDs
+- Displays
+- Filament Sensors
+- Anything else available but not listed here
+
+The graphical view shall allow you to configure features under those hardware components and sub-components including:
+
+- Input Shaper
+- Bed Mesh
+- Quad Gantry Level
+- Z Tilt
+- Screws Tilt Adjust
+- Bed Screws
+- Bed Tilt
+- Resonance Tester
+- Firmware Retraction
+- pause_resume
+- force_move
+- virtual sdcard
+- idle timeout
+- gcode macro
+- homing override
+- endstop phase
+- safe z home
+- Anything else availble but not listed here.
+
+The features shall be under their relevant component and unavailable if lacking the required hardware.
+
+Configuration settings are shown when the user selects a bubble.
+
+Settings are shown as drop down if a fixed option or text boxes if an number defined value. 
+
+Settings that are assigned by default are hidden. Settings that must be defined are shown and blank by default if not yet assigned. The user can add those hidden values with an add button and select and define them with the default shown. Setting values can only be defined once.
+
+All components shall allow the user to define an optional title.
+
+The exported configuration files shall use the defined name with the exception of printer.cfg (which must be assigned to at least one major hardware component).
+
+All bubbles shall have names the defaults to the component but can be renamed.
+
+All major hardware component image outline, sub-component bubbles, and feature bubbles shall have a default symbol/image. The symbol can be replaced with a user defined image with an import image button.
+
+All hardware components, sub-components, and features shall be able to shown as its traditional text format with a button to switch the view.
+
+Errors in the configuration shall be highlighted in red.
+
+#### Connecting Components
+
+The graphical view shall allow the user to create, move, and delte trace lines between connecting components, sub-components, and features. 
+
+Major components have communications trace lines with options for USB, CANBus, or UART that must be tied to the SBC.
+
+Major components have outbound configuration trace lines connected to other Major components that define which document they are imported to. Printer.cfg does not have an output configuration trace line as it is the central configuration that all others must point to directly or through another component.
+
+Sub-components have outbound trace lines that must be connected to a major component. Note the SBC does not count as a major componet unless defined as an MCU.
+
+Features have an output trace line that must be connected to a major component or sub-component.
+
+All major hardware components must have a communucations trace to the SBC. 
+
+All hardware sub-component must have a trace back to a major hardware component.
+
+All features must have a trace back to a major component or sub-component.
+
+Communications lines are color coded by type and shown as a dashed line.
+
+Configuration lines are solid lines color coded by major hardware component type.
+
+### Specifications
