@@ -1,0 +1,107 @@
+@import "tailwindcss";
+
+:root {
+  --color-bg-primary: #0f172a;
+  --color-bg-secondary: #1e293b;
+  --color-bg-tertiary: #334155;
+  --color-text-primary: #f1f5f9;
+  --color-text-secondary: #94a3b8;
+  --color-accent: #38bdf8;
+  --color-accent-hover: #7dd3fc;
+  --color-error: #f87171;
+  --color-warning: #fbbf24;
+  --color-success: #34d399;
+
+  /* Component type colors */
+  --color-sbc: #8b5cf6;
+  --color-mainboard: #3b82f6;
+  --color-toolhead: #f97316;
+  --color-expander: #06b6d4;
+  --color-probe: #ec4899;
+  --color-accelerometer: #84cc16;
+  --color-other: #6b7280;
+
+  /* Communication type colors */
+  --color-usb: #22c55e;
+  --color-canbus: #eab308;
+  --color-uart: #a855f7;
+}
+
+body {
+  background-color: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--color-bg-secondary);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-bg-tertiary);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+
+/* React Flow customizations */
+.react-flow__background {
+  background-color: var(--color-bg-primary) !important;
+}
+.react-flow__minimap {
+  background-color: var(--color-bg-secondary) !important;
+  border: 1px solid var(--color-bg-tertiary) !important;
+  border-radius: 8px !important;
+}
+.react-flow__controls {
+  border-radius: 8px !important;
+  overflow: hidden;
+  border: 1px solid var(--color-bg-tertiary) !important;
+}
+.react-flow__controls-button {
+  background-color: var(--color-bg-secondary) !important;
+  color: var(--color-text-primary) !important;
+  border-bottom: 1px solid var(--color-bg-tertiary) !important;
+}
+.react-flow__controls-button:hover {
+  background-color: var(--color-bg-tertiary) !important;
+}
+
+/* Custom node styles */
+.kwc-node {
+  border-radius: 12px;
+  border: 2px solid;
+  transition: box-shadow 0.2s;
+  min-width: 180px;
+}
+.kwc-node:hover {
+  box-shadow: 0 0 20px rgba(56, 189, 248, 0.3);
+}
+.kwc-node.selected {
+  box-shadow: 0 0 0 2px var(--color-accent), 0 0 20px rgba(56, 189, 248, 0.4);
+}
+.kwc-node-header {
+  padding: 8px 12px;
+  border-radius: 10px 10px 0 0;
+  font-weight: 600;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.kwc-node-body {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+/* Error highlight */
+.kwc-error {
+  border-color: var(--color-error) !important;
+  box-shadow: 0 0 12px rgba(248, 113, 113, 0.3);
+}
