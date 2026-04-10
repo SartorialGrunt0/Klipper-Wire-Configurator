@@ -1,6 +1,7 @@
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
 import type { SubComponentNodeData } from '../../types/graph';
+import NodeActions from './NodeActions';
 
 const GROUP_COLORS: Record<string, string> = {
   stepper: '#3b82f6',
@@ -40,11 +41,13 @@ const GROUP_ICONS: Record<string, string> = {
   other: '⬜',
 };
 
-function SubComponentNode({ data, selected }: NodeProps) {
+function SubComponentNode({ data, selected, id }: NodeProps) {
   const nodeData = data as unknown as SubComponentNodeData;
   const color = GROUP_COLORS[nodeData.componentGroup] || GROUP_COLORS.other;
   const icon = GROUP_ICONS[nodeData.componentGroup] || GROUP_ICONS.other;
   const isSuppressed = !!(nodeData as Record<string, unknown>).isSuppressed;
+  // Hide connection handles when this node lives inside a hardware/group container
+  const isEmbedded = !!nodeData.parentHardwareId;
 
   const activeParams = nodeData.section.params.filter((p) => !p.is_commented_out);
 
@@ -58,14 +61,18 @@ function SubComponentNode({ data, selected }: NodeProps) {
         opacity: isSuppressed ? 0.45 : 1,
       }}
     >
-      <Handle type="target" position={Position.Left} id="left-in"
-        style={{ background: color, width: 8, height: 8 }} />
-      <Handle type="source" position={Position.Right} id="right-out"
-        style={{ background: color, width: 8, height: 8 }} />
-      <Handle type="target" position={Position.Top} id="top-in"
-        style={{ background: color, width: 8, height: 8 }} />
-      <Handle type="source" position={Position.Bottom} id="bottom-out"
-        style={{ background: color, width: 8, height: 8 }} />
+      {!isEmbedded && (
+        <>
+          <Handle type="target" position={Position.Left} id="left-in"
+            style={{ background: color, width: 12, height: 12 }} />
+          <Handle type="source" position={Position.Right} id="right-out"
+            style={{ background: color, width: 12, height: 12 }} />
+          <Handle type="target" position={Position.Top} id="top-in"
+            style={{ background: color, width: 12, height: 12 }} />
+          <Handle type="source" position={Position.Bottom} id="bottom-out"
+            style={{ background: color, width: 12, height: 12 }} />
+        </>
+      )}
 
       <div
         className="kwc-node-header"
@@ -80,10 +87,13 @@ function SubComponentNode({ data, selected }: NodeProps) {
           {nodeData.label}
         </span>
         {isSuppressed && (
-          <span className="ml-auto text-[9px] px-1 py-0.5 rounded bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">
+          <span className="text-[9px] px-1 py-0.5 rounded bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">
             OFF
           </span>
         )}
+        <div className="ml-auto shrink-0">
+          <NodeActions nodeId={id} color={color} />
+        </div>
       </div>
 
       <div className="kwc-node-body">

@@ -9,7 +9,7 @@ interface AddMenuProps {
   onClose: () => void;
 }
 
-type MenuTab = 'hardware' | 'sub_component' | 'feature' | 'connection';
+type MenuTab = 'hardware' | 'sub_component' | 'feature' | 'connection' | 'group';
 
 const HARDWARE_OPTIONS: Array<{ type: HardwareType; label: string; icon: string; description?: string }> = [
   { type: 'mainboard', label: 'Mainboard', icon: '📟', description: 'Main printer control board' },
@@ -59,8 +59,13 @@ export default function AddMenu({ onClose }: AddMenuProps) {
   const [templates, setTemplates] = useState<ExampleConfig[]>([]);
   const [templateLoading, setTemplateLoading] = useState(false);
 
+  // Custom group creation state
+  const [customGroupLabel, setCustomGroupLabel] = useState('');
+  const [customGroupColor, setCustomGroupColor] = useState('#64748b');
+  const [customGroupParent, setCustomGroupParent] = useState<string>('');
+
   const { schemas } = useConfigStore();
-  const { addHardwareNode, addSubComponentNode, addFeatureNode, addCommunicationEdge, nodes } = useGraphStore();
+  const { addHardwareNode, addSubComponentNode, addFeatureNode, addCommunicationEdge, addCustomGroupNode, nodes } = useGraphStore();
   const { configFiles, activeFile, addSection } = useConfigStore();
 
   const hardwareNodes = nodes.filter((n) => n.type === 'hardware');
@@ -79,7 +84,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
           const filtered = (res as { examples?: ExampleConfig[]; results?: ExampleConfig[] }).results
             || (res as { examples: ExampleConfig[] }).examples || [];
           setTemplates(filtered.filter((e) =>
-            e.category === 'generic' || e.filename.startsWith('generic-')
+            e.category === 'generic' || e.category === 'example' || e.filename.startsWith('generic-')
           ));
         })
         .catch(() => setTemplates([]));
@@ -228,6 +233,14 @@ export default function AddMenu({ onClose }: AddMenuProps) {
     // Keep menu open for multi-select
   };
 
+  const handleAddCustomGroup = () => {
+    const label = customGroupLabel.trim() || 'Custom Group';
+    const parentId = customGroupParent || undefined;
+    addCustomGroupNode(label, customGroupColor, undefined, parentId);
+    setCustomGroupLabel('');
+    onClose();
+  };
+
   return (
     <div className="absolute inset-0 z-50 flex items-start justify-center pt-16 bg-black/40" onClick={onClose}>
       <div
@@ -236,7 +249,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
       >
         {/* Tabs */}
         <div className="flex border-b border-[var(--color-bg-tertiary)]">
-          {(['hardware', 'sub_component', 'feature', 'connection'] as MenuTab[]).map((t) => (
+          {(['hardware', 'sub_component', 'feature', 'connection', 'group'] as MenuTab[]).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -246,7 +259,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
                   : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
               }`}
             >
-              {t === 'hardware' ? 'Hardware' : t === 'sub_component' ? 'Sub-Components' : t === 'feature' ? 'Features' : 'Connections'}
+              {t === 'hardware' ? 'Hardware' : t === 'sub_component' ? 'Sub-Components' : t === 'feature' ? 'Features' : t === 'group' ? 'Groups' : 'Connections'}
             </button>
           ))}
         </div>
@@ -500,6 +513,105 @@ export default function AddMenu({ onClose }: AddMenuProps) {
               <p className="text-xs text-[var(--color-text-secondary)] mt-4">
                 All hardware components must have a communication trace to the host.
               </p>
+            </div>
+          )}
+
+          {/* Groups Tab */}
+          {tab === 'group' && (
+            <div className="space-y-4">
+              <p className="text-xs text-[var(--color-text-secondary)]">
+                Create a custom group container to organise sub-components and features.
+                Groups can be standalone or nested inside hardware nodes.
+                Drag nodes in/out of groups freely on the canvas.
+              </p>
+
+              {/* Label */}
+              <div>
+                <label className="text-xs text-[var(--color-text-secondary)] mb-1 block">
+                  Group name
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g. Z Motors, Toolhead, Extras…"
+                  value={customGroupLabel}
+                  onChange={(e) => setCustomGroupLabel(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg text-sm bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)]"
+                />
+              </div>
+
+              {/* Color picker */}
+              <div>
+                <label className="text-xs text-[var(--color-text-secondary)] mb-2 block">
+                  Border colour
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    '#64748b', '#38bdf8', '#f472b6', '#a78bfa',
+                    '#22c55e', '#f97316', '#ef4444', '#f59e0b',
+                    '#06b6d4', '#8b5cf6', '#ec4899', '#84cc16',
+                  ].map((c) => (
+                    <button
+                      key={c}
+                      onClick={() => setCustomGroupColor(c)}
+                      className="w-7 h-7 rounded-full border-2 transition-all"
+                      style={{
+                        backgroundColor: c,
+                        borderColor: customGroupColor === c ? '#fff' : 'transparent',
+                        boxShadow: customGroupColor === c ? `0 0 0 2px ${c}` : 'none',
+                      }}
+                    />
+                  ))}
+                  {/* Native colour input for custom colour */}
+                  <label
+                    className="w-7 h-7 rounded-full border-2 border-[var(--color-bg-tertiary)] flex items-center justify-center cursor-pointer hover:border-[var(--color-accent)]"
+                    title="Custom colour"
+                  >
+                    <input
+                      type="color"
+                      value={customGroupColor}
+                      onChange={(e) => setCustomGroupColor(e.target.value)}
+                      className="sr-only"
+                    />
+                    <span className="text-[10px]">+</span>
+                  </label>
+                </div>
+              </div>
+
+              {/* Optional parent hardware */}
+              {hardwareNodes.length > 0 && (
+                <div>
+                  <label className="text-xs text-[var(--color-text-secondary)] mb-1 block">
+                    Place inside hardware node (optional)
+                  </label>
+                  <select
+                    value={customGroupParent}
+                    onChange={(e) => setCustomGroupParent(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg text-sm bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)]"
+                  >
+                    <option value="">— Standalone (top level) —</option>
+                    {hardwareNodes.map((n) => (
+                      <option key={n.id} value={n.id}>
+                        {(n.data as Record<string, unknown>).label as string}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {/* Preview */}
+              <div
+                className="p-3 rounded-lg border-2 border-dashed text-sm font-semibold"
+                style={{ borderColor: customGroupColor, color: customGroupColor, backgroundColor: `${customGroupColor}0a` }}
+              >
+                📦 {customGroupLabel || 'Custom Group'}
+              </div>
+
+              <button
+                onClick={handleAddCustomGroup}
+                className="w-full py-2.5 rounded-lg text-sm font-semibold bg-[var(--color-accent)] text-[var(--color-bg-primary)] hover:bg-[var(--color-accent-hover)] transition-colors"
+              >
+                Create Group
+              </button>
             </div>
           )}
         </div>

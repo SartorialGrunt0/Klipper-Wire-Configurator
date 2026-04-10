@@ -62,6 +62,8 @@ const CONTAINER_PADDING_BOTTOM = 20;
 const CHILD_LEFT_X = 12;
 /** X position (relative to parent) for right-column children (sub-components) */
 const CHILD_RIGHT_X = 312;
+/** Height of a hardware node when collapsed (just the header) */
+const COLLAPSED_HEIGHT = 72;
 
 function computeHardwareSize(leftCount: number, rightCount: number) {
   const rows = Math.max(leftCount, rightCount, 0);
@@ -82,6 +84,7 @@ interface GraphState {
   /* Node operations */
   addNode: (node: AppNode) => void;
   removeNode: (id: string) => void;
+  duplicateNode: (id: string) => void;
   updateNodeData: (id: string, data: Partial<AppNode['data']>) => void;
   setSelectedNode: (id: string | null) => void;
 
@@ -99,6 +102,21 @@ interface GraphState {
     configFile: string,
     position?: { x: number; y: number },
   ) => string;
+
+  toggleHardwareCollapse: (id: string) => void;
+
+  addCustomGroupNode: (
+    label: string,
+    color: string,
+    position?: { x: number; y: number },
+    parentId?: string,
+  ) => string;
+
+  reparentNode: (
+    nodeId: string,
+    newParentId: string | null,
+    absolutePos?: { x: number; y: number },
+  ) => void;
 
   addSubComponentNode: (
     parentId: string,
@@ -135,6 +153,13 @@ interface GraphState {
   setNodes: (nodes: AppNode[]) => void;
   setEdges: (edges: AppEdge[]) => void;
   clearGraph: () => void;
+
+  /* Undo / Redo */
+  undo: () => void;
+  redo: () => void;
+  canUndo: boolean;
+  canRedo: boolean;
+  pushHistory: () => void;
 }
 
 let nodeIdCounter = 0;
@@ -147,6 +172,45 @@ function nextEdgeId(): string {
   return `edge_${++edgeIdCounter}`;
 }
 
+// ── History for undo/redo ─────────────────────────────────────────
+interface HistoryEntry {
+  nodes: AppNode[];
+  edges: AppEdge[];
+}
+const MAX_HISTORY = 50;
+const undoStack: HistoryEntry[] = [];
+const redoStack: HistoryEntry[] = [];
+
+/**
+ * Sort nodes so that parent nodes always appear before their children.
+ * ReactFlow requires this ordering to avoid "Parent node not found" errors.
+ */
+function sortNodesParentsFirst(nodes: AppNode[]): AppNode[] {
+  const parentless: AppNode[] = [];
+  const childrenByParent = new Map<string, AppNode[]>();
+  for (const n of nodes) {
+    if (!n.parentId) {
+      parentless.push(n);
+    } else {
+      const list = childrenByParent.get(n.parentId) || [];
+      list.push(n);
+      childrenByParent.set(n.parentId, list);
+    }
+  }
+  const result: AppNode[] = [];
+  for (const n of parentless) {
+    result.push(n);
+    const children = childrenByParent.get(n.id);
+    if (children) result.push(...children);
+  }
+  // Include orphans (parent not in current array) at the end
+  const inResult = new Set(result.map((n) => n.id));
+  for (const n of nodes) {
+    if (!inResult.has(n.id)) result.push(n);
+  }
+  return result;
+}
+
 export const useGraphStore = create<GraphState>((set, get) => ({
   nodes: [],
   edges: [],
@@ -155,7 +219,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 
   onNodesChange: (changes) =>
     set((s) => ({
-      nodes: applyNodeChanges(changes, s.nodes) as AppNode[],
+      nodes: sortNodesParentsFirst(applyNodeChanges(changes, s.nodes) as AppNode[]),
     })),
 
   onEdgesChange: (changes) => {
@@ -181,6 +245,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 
   onConnect: (connection) => {
     if (!connection.source || !connection.target) return;
+    get().pushHistory();
     const { nodes, edges } = get();
     const sourceNode = nodes.find((n) => n.id === connection.source);
     const targetNode = nodes.find((n) => n.id === connection.target);
@@ -276,8 +341,9 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     set((s) => ({ edges: [...s.edges, newEdge] }));
   },
 
-  addNode: (node) => set((s) => ({ nodes: [...s.nodes, node] })),
-  removeNode: (id) =>
+  addNode: (node) => { get().pushHistory(); set((s) => ({ nodes: sortNodesParentsFirst([...s.nodes, node]) })); },
+  removeNode: (id) => {
+    get().pushHistory();
     set((s) => {
       // Collect the node and all its children (parentId-based)
       const childIds = new Set(s.nodes.filter((n) => n.parentId === id).map((n) => n.id));
@@ -286,7 +352,24 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         nodes: s.nodes.filter((n) => !removedIds.has(n.id)),
         edges: s.edges.filter((e) => !removedIds.has(e.source) && !removedIds.has(e.target)),
       };
-    }),
+    });
+  },
+
+  duplicateNode: (id) => {
+    get().pushHistory();
+    const state = get();
+    const node = state.nodes.find((n) => n.id === id);
+    if (!node) return;
+    const newId = nextNodeId();
+    const clone: AppNode = {
+      ...node,
+      id: newId,
+      position: { x: node.position.x + 40, y: node.position.y + 40 },
+      data: { ...node.data },
+      selected: false,
+    } as AppNode;
+    set((s) => ({ nodes: sortNodesParentsFirst([...s.nodes, clone]) }));
+  },
 
   updateNodeData: (id, data) =>
     set((s) => ({
@@ -351,7 +434,6 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       type: 'subComponent',
       position: pos,
       parentId,
-      extent: 'parent',
       data: {
         label,
         sectionType,
@@ -374,12 +456,12 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       const { width, height } = computeHardwareSize(leftCount, newRightCount);
 
       return {
-        nodes: [
+        nodes: sortNodesParentsFirst([
           ...s.nodes.map((n) =>
             n.id === parentId ? { ...n, style: { ...n.style, width, height } } : n,
           ),
           node as AppNode,
-        ],
+        ]),
         // No edge — parent relationship is established via parentId
       };
     });
@@ -405,7 +487,6 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       type: 'feature',
       position: pos,
       parentId,
-      extent: 'parent',
       data: {
         label,
         sectionType,
@@ -427,12 +508,12 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       const { width, height } = computeHardwareSize(newLeftCount, rightCount);
 
       return {
-        nodes: [
+        nodes: sortNodesParentsFirst([
           ...s.nodes.map((n) =>
             n.id === parentId ? { ...n, style: { ...n.style, width, height } } : n,
           ),
           node as AppNode,
-        ],
+        ]),
       };
     });
     return id;
@@ -462,7 +543,6 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       type: 'group',
       position: pos,
       parentId,
-      extent: 'parent',
       data: {
         label,
         componentGroup,
@@ -491,15 +571,201 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       const { width, height } = computeHardwareSize(newLeftCount, newRightCount);
 
       return {
-        nodes: [
+        nodes: sortNodesParentsFirst([
           ...s.nodes.map((n) =>
             n.id === parentId ? { ...n, style: { ...n.style, width, height } } : n,
           ),
           node as AppNode,
-        ],
+        ]),
       };
     });
     return id;
+  },
+
+  toggleHardwareCollapse: (id) => {
+    set((s) => {
+      const hwNode = s.nodes.find((n) => n.id === id);
+      if (!hwNode) return s;
+      const currentData = hwNode.data as Record<string, unknown>;
+      const isCollapsed = !(currentData.collapsed as boolean);
+
+      // Compute expanded size based on current children
+      const children = s.nodes.filter((n) => n.parentId === id);
+      const leftCount = children.filter((n) => {
+        const d = n.data as Record<string, unknown>;
+        return n.type === 'feature' || (n.type === 'group' && d.isFeature);
+      }).length;
+      const rightCount = children.filter((n) => {
+        const d = n.data as Record<string, unknown>;
+        return n.type === 'subComponent' || (n.type === 'group' && !d.isFeature);
+      }).length;
+      const expandedSize = computeHardwareSize(leftCount, rightCount);
+
+      return {
+        nodes: s.nodes.map((n) => {
+          if (n.id === id) {
+            return {
+              ...n,
+              data: { ...n.data, collapsed: isCollapsed },
+              style: {
+                ...n.style,
+                width: expandedSize.width,
+                height: isCollapsed ? COLLAPSED_HEIGHT : expandedSize.height,
+              },
+            };
+          }
+          if (n.parentId === id) {
+            return { ...n, hidden: isCollapsed };
+          }
+          return n;
+        }) as AppNode[],
+      };
+    });
+  },
+
+  addCustomGroupNode: (label, color, position, parentId) => {
+    const id = nextNodeId();
+    const pos = position || { x: Math.random() * 500 + 100, y: Math.random() * 300 + 100 };
+    const { width, height } = computeHardwareSize(0, 0);
+    const node: Node = {
+      id,
+      type: 'customGroup',
+      position: pos,
+      parentId: parentId ?? undefined,
+      style: { width, height },
+      data: {
+        label,
+        color,
+        collapsed: false,
+        hasErrors: false,
+      },
+    };
+    set((s) => ({ nodes: [...s.nodes, node as AppNode] }));
+    return id;
+  },
+
+  reparentNode: (nodeId, newParentId, absolutePos) => {
+    get().pushHistory();
+    const currentState = get();
+    const node = currentState.nodes.find((n) => n.id === nodeId);
+    if (!node) return;
+
+    const oldParentId = node.parentId ?? null;
+    if (oldParentId === newParentId) return;
+
+    const oldParentNode = oldParentId ? currentState.nodes.find((n) => n.id === oldParentId) : null;
+    const newParentNode = newParentId ? currentState.nodes.find((n) => n.id === newParentId) : null;
+
+    // Compute new position
+    let newX = absolutePos ? absolutePos.x : node.position.x;
+    let newY = absolutePos ? absolutePos.y : node.position.y;
+
+    if (newParentNode) {
+      // Snap to grid: determine column and row based on node type
+      const nodeData = node.data as Record<string, unknown>;
+      const isFeatureColumn = node.type === 'feature' || (node.type === 'group' && !!nodeData.isFeature);
+      const existingSiblings = currentState.nodes.filter((n) => {
+        if (n.parentId !== newParentId || n.id === nodeId) return false;
+        const d = n.data as Record<string, unknown>;
+        if (isFeatureColumn) {
+          return n.type === 'feature' || (n.type === 'group' && !!d.isFeature);
+        }
+        return n.type === 'subComponent' || (n.type === 'group' && !d.isFeature);
+      });
+      const slotIdx = existingSiblings.length;
+      newX = isFeatureColumn ? CHILD_LEFT_X : CHILD_RIGHT_X;
+      newY = CONTAINER_HEADER_HEIGHT + slotIdx * CHILD_SLOT_HEIGHT;
+    } else if (absolutePos) {
+      newX = absolutePos.x;
+      newY = absolutePos.y;
+    }
+
+    // Gather config info before state update
+    const nodeData = node.data as Record<string, unknown>;
+    const sectionHeader = nodeData.sectionHeader as string | undefined;
+    const oldConfigFile = oldParentNode
+      ? ((oldParentNode.data as Record<string, unknown>).configFile as string | undefined)
+      : undefined;
+    const newConfigFile = newParentNode
+      ? ((newParentNode.data as Record<string, unknown>).configFile as string | undefined)
+      : sectionHeader
+      ? `${sectionHeader.split(' ')[0]}.cfg`
+      : undefined;
+
+    set((s) => {
+      const updatedNode: AppNode = {
+        ...node,
+        position: { x: newX, y: newY },
+        parentId: newParentId ?? undefined,
+      } as AppNode;
+
+      const newNodes = s.nodes.map((n) => (n.id === nodeId ? updatedNode : n)) as AppNode[];
+
+      // Helper to reposition children in their two-column grid
+      const repositionChildren = (parentId: string) => {
+        const children = newNodes.filter((n) => n.parentId === parentId);
+        const leftChildren = children.filter((n) => {
+          const d = n.data as Record<string, unknown>;
+          return n.type === 'feature' || (n.type === 'group' && !!d.isFeature);
+        });
+        const rightChildren = children.filter((n) => {
+          const d = n.data as Record<string, unknown>;
+          return n.type === 'subComponent' || (n.type === 'group' && !d.isFeature);
+        });
+        leftChildren.forEach((child, i) => {
+          const idx = newNodes.findIndex((n) => n.id === child.id);
+          if (idx >= 0) newNodes[idx] = { ...newNodes[idx], position: { x: CHILD_LEFT_X, y: CONTAINER_HEADER_HEIGHT + i * CHILD_SLOT_HEIGHT } };
+        });
+        rightChildren.forEach((child, i) => {
+          const idx = newNodes.findIndex((n) => n.id === child.id);
+          if (idx >= 0) newNodes[idx] = { ...newNodes[idx], position: { x: CHILD_RIGHT_X, y: CONTAINER_HEADER_HEIGHT + i * CHILD_SLOT_HEIGHT } };
+        });
+        // Resize parent
+        const sz = computeHardwareSize(leftChildren.length, rightChildren.length);
+        const pIdx = newNodes.findIndex((n) => n.id === parentId);
+        if (pIdx >= 0) {
+          const pData = newNodes[pIdx].data as Record<string, unknown>;
+          const isCollapsed = !!pData.collapsed;
+          newNodes[pIdx] = { ...newNodes[pIdx], style: { ...newNodes[pIdx].style, ...sz, height: isCollapsed ? COLLAPSED_HEIGHT : sz.height } };
+        }
+      };
+
+      if (oldParentId) repositionChildren(oldParentId);
+      if (newParentId) repositionChildren(newParentId);
+
+      // Update data to reflect new parent
+      const movedIdx = newNodes.findIndex((n) => n.id === nodeId);
+      if (movedIdx >= 0) {
+        const movedData = { ...newNodes[movedIdx].data } as Record<string, unknown>;
+        if ('parentHardwareId' in movedData) {
+          movedData.parentHardwareId = newParentId ?? '';
+        }
+        if (newNodes[movedIdx].type === 'feature') {
+          movedData.parentId = newParentId ?? '';
+        }
+        newNodes[movedIdx] = { ...newNodes[movedIdx], data: movedData } as AppNode;
+      }
+
+      return { nodes: sortNodesParentsFirst(newNodes) };
+    });
+
+    // Move section between config files
+    if (sectionHeader && oldConfigFile && newConfigFile && oldConfigFile !== newConfigFile) {
+      const configState = useConfigStore.getState();
+      const section = configState.getSection(oldConfigFile, sectionHeader);
+      if (section) {
+        if (!configState.configFiles[newConfigFile]) {
+          configState.setConfigFile(newConfigFile, {
+            filename: newConfigFile,
+            sections: [],
+            includes: [],
+            header_comments: [],
+          });
+        }
+        configState.addSection(newConfigFile, section);
+        configState.removeSection(oldConfigFile, sectionHeader);
+      }
+    }
   },
 
   addCommunicationEdge: (sourceId, targetId, commType) => {
@@ -528,7 +794,44 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     return id;
   },
 
-  setNodes: (nodes) => set({ nodes }),
+  setNodes: (nodes) => set({ nodes: sortNodesParentsFirst(nodes) }),
   setEdges: (edges) => set({ edges }),
   clearGraph: () => set({ nodes: [], edges: [], selectedNodeId: null }),
+
+  canUndo: false,
+  canRedo: false,
+
+  pushHistory: () => {
+    const { nodes, edges } = get();
+    undoStack.push({ nodes: [...nodes], edges: [...edges] });
+    if (undoStack.length > MAX_HISTORY) undoStack.shift();
+    redoStack.length = 0;
+    set({ canUndo: true, canRedo: false });
+  },
+
+  undo: () => {
+    if (undoStack.length === 0) return;
+    const { nodes, edges } = get();
+    redoStack.push({ nodes: [...nodes], edges: [...edges] });
+    const prev = undoStack.pop()!;
+    set({
+      nodes: prev.nodes,
+      edges: prev.edges,
+      canUndo: undoStack.length > 0,
+      canRedo: true,
+    });
+  },
+
+  redo: () => {
+    if (redoStack.length === 0) return;
+    const { nodes, edges } = get();
+    undoStack.push({ nodes: [...nodes], edges: [...edges] });
+    const next = redoStack.pop()!;
+    set({
+      nodes: next.nodes,
+      edges: next.edges,
+      canUndo: true,
+      canRedo: redoStack.length > 0,
+    });
+  },
 }));

@@ -1,6 +1,9 @@
-import { memo, useState } from 'react';
+import { memo, useState, useCallback } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
 import type { GroupNodeData, GroupChildItem } from '../../types/graph';
+import { useGraphStore } from '../../stores/graphStore';
+import { useConfigStore } from '../../stores/configStore';
+import NodeActions from './NodeActions';
 
 const GROUP_COLORS: Record<string, string> = {
   stepper: '#3b82f6',
@@ -44,13 +47,22 @@ const GROUP_ICONS: Record<string, string> = {
   other: '⬜',
 };
 
-function GroupNode({ data, selected }: NodeProps) {
+function GroupNode({ data, selected, id }: NodeProps) {
   const nodeData = data as unknown as GroupNodeData;
   const [expanded, setExpanded] = useState(false);
   const color = GROUP_COLORS[nodeData.componentGroup] || GROUP_COLORS.other;
   const icon = GROUP_ICONS[nodeData.componentGroup] || GROUP_ICONS.other;
   const isFeature = nodeData.isFeature;
   const children: GroupChildItem[] = nodeData.children || [];
+
+  const { setSelectedNode } = useGraphStore();
+  const { setSelectedSection } = useConfigStore();
+
+  const handleChildClick = useCallback((e: React.MouseEvent, child: GroupChildItem) => {
+    e.stopPropagation();
+    setSelectedNode(id);
+    setSelectedSection(child.sectionHeader);
+  }, [id, setSelectedNode, setSelectedSection]);
 
   return (
     <div
@@ -63,13 +75,13 @@ function GroupNode({ data, selected }: NodeProps) {
       }}
     >
       <Handle type="target" position={Position.Left} id="left-in"
-        style={{ background: color, width: 8, height: 8 }} />
+        style={{ background: color, width: 12, height: 12 }} />
       <Handle type="source" position={Position.Right} id="right-out"
-        style={{ background: color, width: 8, height: 8 }} />
+        style={{ background: color, width: 12, height: 12 }} />
       <Handle type="target" position={Position.Top} id="top-in"
-        style={{ background: color, width: 8, height: 8 }} />
+        style={{ background: color, width: 12, height: 12 }} />
       <Handle type="source" position={Position.Bottom} id="bottom-out"
-        style={{ background: color, width: 8, height: 8 }} />
+        style={{ background: color, width: 12, height: 12 }} />
 
       {/* Header - clickable to expand/collapse */}
       <div
@@ -94,6 +106,7 @@ function GroupNode({ data, selected }: NodeProps) {
           }}>
             ▼
           </span>
+          <NodeActions nodeId={id} color={color} />
         </span>
       </div>
 
@@ -122,8 +135,9 @@ function GroupNode({ data, selected }: NodeProps) {
             {children.map((child) => (
               <div
                 key={child.sectionHeader}
-                className="p-1.5 rounded-lg border transition-colors hover:bg-[var(--color-bg-primary)]"
+                className="p-1.5 rounded-lg border transition-colors hover:bg-[var(--color-bg-primary)] cursor-pointer"
                 style={{ borderColor: `${color}33` }}
+                onClick={(e) => handleChildClick(e, child)}
               >
                 <div className="text-[11px] font-medium text-[var(--color-text-primary)] truncate">
                   {child.label}

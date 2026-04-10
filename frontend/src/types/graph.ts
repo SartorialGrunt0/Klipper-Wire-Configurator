@@ -10,6 +10,7 @@ export interface HardwareNodeData {
   sections: ConfigSection[];
   customImage?: string;
   hasErrors: boolean;
+  collapsed?: boolean;
   [key: string]: unknown;
 }
 
@@ -54,6 +55,14 @@ export interface GroupNodeData {
   [key: string]: unknown;
 }
 
+export interface CustomGroupNodeData {
+  label: string;
+  color: string;
+  collapsed?: boolean;
+  hasErrors: boolean;
+  [key: string]: unknown;
+}
+
 /* ── Custom Edge Data ────────────────────────────────── */
 
 export interface CommunicationEdgeData {
@@ -74,7 +83,8 @@ export type HardwareNode = Node<HardwareNodeData, 'hardware'>;
 export type SubComponentNode = Node<SubComponentNodeData, 'subComponent'>;
 export type FeatureNode = Node<FeatureNodeData, 'feature'>;
 export type GroupNode = Node<GroupNodeData, 'group'>;
-export type AppNode = HardwareNode | SubComponentNode | FeatureNode | GroupNode;
+export type CustomGroupNode = Node<CustomGroupNodeData, 'customGroup'>;
+export type AppNode = HardwareNode | SubComponentNode | FeatureNode | GroupNode | CustomGroupNode;
 
 export type CommunicationEdge = Edge<CommunicationEdgeData>;
 export type ConfigurationEdge = Edge<ConfigurationEdgeData>;

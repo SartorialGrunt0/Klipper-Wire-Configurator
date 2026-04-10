@@ -115,3 +115,18 @@ body {
 .react-flow__node:has(> .kwc-hardware-container) {
   z-index: 0 !important;
 }
+
+/* Enlarge handle hit area for easier connections */
+.react-flow__handle {
+  position: relative;
+}
+.react-flow__handle::after {
+  content: '';
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+}
