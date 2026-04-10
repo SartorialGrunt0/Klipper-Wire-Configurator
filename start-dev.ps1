@@ -28,6 +28,13 @@ Start-Sleep -Seconds 2
 
 # Start Frontend (Vite on port 5173)
 Write-Host 'Starting frontend (Vite on port 5173)...' -ForegroundColor Green
+$nodeModules = Join-Path $frontendDir 'node_modules'
+if (-not (Test-Path $nodeModules)) {
+    Write-Host 'Installing frontend dependencies...' -ForegroundColor Yellow
+    Push-Location $frontendDir
+    npm install
+    Pop-Location
+}
 $frontendJob = Start-Job -ScriptBlock {
     Set-Location $using:frontendDir
     npm run dev
