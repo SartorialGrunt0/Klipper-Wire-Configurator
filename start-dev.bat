@@ -27,6 +27,11 @@ timeout /t 2 /nobreak
 
 REM Start Frontend (Vite on port 5173)
 echo Starting frontend (Vite on port 5173)...
+if not exist "%FRONTEND_DIR%\node_modules" (
+    echo Installing frontend dependencies...
+    cd /d "%FRONTEND_DIR%"
+    npm install
+)
 start "Klipper Wire Configurator - Frontend" cmd /k cd /d "%FRONTEND_DIR%" ^&^& npm run dev
 
 REM Wait a moment for frontend to start

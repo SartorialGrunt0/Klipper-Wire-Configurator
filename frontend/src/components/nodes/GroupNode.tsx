@@ -59,8 +59,7 @@ function GroupNode({ data, selected }: NodeProps) {
         borderColor: color,
         borderStyle: isFeature ? 'dashed' : 'solid',
         backgroundColor: 'var(--color-bg-secondary)',
-        minWidth: expanded ? 220 : 180,
-        maxWidth: 280,
+        width: 268,
       }}
     >
       <Handle type="target" position={Position.Left} id="left-in"
@@ -103,7 +102,7 @@ function GroupNode({ data, selected }: NodeProps) {
         <div className="kwc-node-body">
           <div className="space-y-0.5">
             {children.slice(0, 4).map((child) => (
-              <div key={child.sectionHeader} className="text-[10px] text-[var(--color-text-secondary)] truncate max-w-[200px]">
+              <div key={child.sectionHeader} className="text-[10px] text-[var(--color-text-secondary)] truncate max-w-[240px]">
                 {child.label}
               </div>
             ))}

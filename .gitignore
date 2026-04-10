@@ -1,0 +1,32 @@
+# TypeScript build info
+*.tsbuildinfo
+frontend/tsconfig.tsbuildinfo
+
+# Dependencies
+node_modules/
+frontend/node_modules/
+
+# Build output
+frontend/dist/
+frontend/.vite/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Editor
+.DS_Store
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*

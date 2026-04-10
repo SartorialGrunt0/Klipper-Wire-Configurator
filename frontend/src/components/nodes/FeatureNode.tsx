@@ -60,7 +60,7 @@ function FeatureNode({ data, selected }: NodeProps) {
         borderColor: color,
         borderStyle: 'dashed',
         backgroundColor: 'var(--color-bg-secondary)',
-        minWidth: 150,
+        width: 268,
         opacity: isSuppressed ? 0.45 : 1,
       }}
     >

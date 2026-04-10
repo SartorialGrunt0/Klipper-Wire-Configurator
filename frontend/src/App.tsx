@@ -140,6 +140,7 @@ export default function App() {
               snapGrid={[20, 20]}
               deleteKeyCode="Delete"
               className="bg-[var(--color-bg-primary)]"
+              elevateNodesOnSelect={false}
             >
               <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="#334155" />
               <Controls />
