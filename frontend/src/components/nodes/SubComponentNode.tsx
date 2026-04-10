@@ -54,7 +54,7 @@ function SubComponentNode({ data, selected }: NodeProps) {
       style={{
         borderColor: color,
         backgroundColor: 'var(--color-bg-secondary)',
-        minWidth: 160,
+        width: 268,
         opacity: isSuppressed ? 0.45 : 1,
       }}
     >

@@ -1,0 +1,5 @@
+name = "klipper-wire-configurator"
+pages_build_output_dir = "frontend/dist"
+
+[build]
+command = "cd frontend && npm ci && npm run build"

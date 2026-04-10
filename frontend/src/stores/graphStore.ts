@@ -49,6 +49,26 @@ function getHardwareColor(hwType: string): string {
   return HW_COLORS[hwType] || HW_COLORS.other;
 }
 
+// ── Container layout constants ────────────────────────────────
+/** Total width of a hardware container node */
+const CONTAINER_WIDTH = 600;
+/** Height reserved for the hardware node header/info area */
+const CONTAINER_HEADER_HEIGHT = 130;
+/** Vertical slot size per child node (collapsed) */
+const CHILD_SLOT_HEIGHT = 130;
+/** Padding below last child row */
+const CONTAINER_PADDING_BOTTOM = 20;
+/** X position (relative to parent) for left-column children (features) */
+const CHILD_LEFT_X = 12;
+/** X position (relative to parent) for right-column children (sub-components) */
+const CHILD_RIGHT_X = 312;
+
+function computeHardwareSize(leftCount: number, rightCount: number) {
+  const rows = Math.max(leftCount, rightCount, 0);
+  const height = CONTAINER_HEADER_HEIGHT + rows * CHILD_SLOT_HEIGHT + CONTAINER_PADDING_BOTTOM;
+  return { width: CONTAINER_WIDTH, height: Math.max(height, 160) };
+}
+
 interface GraphState {
   nodes: AppNode[];
   edges: AppEdge[];
@@ -171,25 +191,8 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     const srcData = sourceNode.data as Record<string, unknown>;
     const tgtData = targetNode.data as Record<string, unknown>;
 
-    // Sub-component/feature → hardware: only one parent edge allowed, replace existing
+    // Sub-component/feature → hardware: relationship is now established via parentId, ignore
     if ((srcType === 'subComponent' || srcType === 'feature') && tgtType === 'hardware') {
-      const existing = edges.filter(
-        (e) => e.source === connection.source && nodes.find((n) => n.id === e.target)?.type === 'hardware'
-      );
-      const id = nextEdgeId();
-      const hwColor = getHardwareColor((tgtData.hardwareType as string) || 'other');
-      const newEdge: AppEdge = {
-        id,
-        source: connection.source,
-        target: connection.target,
-        sourceHandle: connection.sourceHandle ?? undefined,
-        targetHandle: connection.targetHandle ?? undefined,
-        data: { edgeType: 'configuration', sourceHardwareType: (tgtData.hardwareType || 'other') as HardwareType, color: hwColor },
-        type: 'configuration',
-      };
-      set((s) => ({
-        edges: [...s.edges.filter((e) => !existing.some((ex) => ex.id === e.id)), newEdge],
-      }));
       return;
     }
 
@@ -275,10 +278,15 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 
   addNode: (node) => set((s) => ({ nodes: [...s.nodes, node] })),
   removeNode: (id) =>
-    set((s) => ({
-      nodes: s.nodes.filter((n) => n.id !== id),
-      edges: s.edges.filter((e) => e.source !== id && e.target !== id),
-    })),
+    set((s) => {
+      // Collect the node and all its children (parentId-based)
+      const childIds = new Set(s.nodes.filter((n) => n.parentId === id).map((n) => n.id));
+      const removedIds = new Set([id, ...childIds]);
+      return {
+        nodes: s.nodes.filter((n) => !removedIds.has(n.id)),
+        edges: s.edges.filter((e) => !removedIds.has(e.source) && !removedIds.has(e.target)),
+      };
+    }),
 
   updateNodeData: (id, data) =>
     set((s) => ({
@@ -303,10 +311,12 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   addHardwareNode: (hwType, label, configFile, position) => {
     const id = nextNodeId();
     const pos = position || { x: Math.random() * 600, y: Math.random() * 400 };
+    const { width, height } = computeHardwareSize(0, 0);
     const node: Node = {
       id,
       type: 'hardware',
       position: pos,
+      style: { width, height },
       data: {
         label,
         hardwareType: hwType,
@@ -321,17 +331,17 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 
   addSubComponentNode: (parentId, sectionType, label, sectionHeader) => {
     const id = nextNodeId();
-    const parentNode = get().nodes.find((n) => n.id === parentId);
-    // Count all right-side children (subComponent + group non-feature)
+
+    // Count current right-side children (sub-components + non-feature groups)
     const rightChildren = get().nodes.filter((n) => {
+      if (n.parentId !== parentId) return false;
       const d = n.data as Record<string, unknown>;
-      if (d.parentHardwareId !== parentId) return false;
       return n.type === 'subComponent' || (n.type === 'group' && !d.isFeature);
     });
-    const childCount = rightChildren.length;
-    const pos = parentNode
-      ? { x: parentNode.position.x + 300, y: parentNode.position.y - 50 + childCount * 80 }
-      : { x: 400, y: 200 };
+    const rightIdx = rightChildren.length;
+
+    // Position is relative to the parent hardware node
+    const pos = { x: CHILD_RIGHT_X, y: CONTAINER_HEADER_HEIGHT + rightIdx * CHILD_SLOT_HEIGHT };
 
     // Determine component group from section type
     const componentGroup = COMPONENT_GROUP_MAP[sectionType] || 'other';
@@ -340,6 +350,8 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       id,
       type: 'subComponent',
       position: pos,
+      parentId,
+      extent: 'parent',
       data: {
         label,
         sectionType,
@@ -351,43 +363,49 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       },
     };
 
-    // Auto-create edge to parent
-    const edgeId = nextEdgeId();
-    const parentHwType = (parentNode?.data as Record<string, unknown>)?.hardwareType as string || 'mainboard';
-    const edge: Edge = {
-      id: edgeId,
-      source: id,
-      target: parentId,
-      type: 'configuration',
-      data: { edgeType: 'configuration', sourceHardwareType: parentHwType as HardwareType, color: getHardwareColor(parentHwType) },
-    };
+    set((s) => {
+      // Recompute parent container size
+      const leftCount = s.nodes.filter((n) => {
+        if (n.parentId !== parentId) return false;
+        const d = n.data as Record<string, unknown>;
+        return n.type === 'feature' || (n.type === 'group' && d.isFeature);
+      }).length;
+      const newRightCount = rightIdx + 1;
+      const { width, height } = computeHardwareSize(leftCount, newRightCount);
 
-    set((s) => ({
-      nodes: [...s.nodes, node as AppNode],
-      edges: [...s.edges, edge as AppEdge],
-    }));
+      return {
+        nodes: [
+          ...s.nodes.map((n) =>
+            n.id === parentId ? { ...n, style: { ...n.style, width, height } } : n,
+          ),
+          node as AppNode,
+        ],
+        // No edge — parent relationship is established via parentId
+      };
+    });
     return id;
   },
 
   addFeatureNode: (parentId, sectionType, label, sectionHeader) => {
     const id = nextNodeId();
-    const parentNode = get().nodes.find((n) => n.id === parentId);
-    // Count all left-side children (feature + group feature)
+
+    // Count current left-side children (features + feature groups)
     const leftChildren = get().nodes.filter((n) => {
+      if (n.parentId !== parentId) return false;
       const d = n.data as Record<string, unknown>;
-      const pid = d.parentId || d.parentHardwareId;
-      if (pid !== parentId) return false;
       return n.type === 'feature' || (n.type === 'group' && d.isFeature);
     });
-    const childCount = leftChildren.length;
-    const pos = parentNode
-      ? { x: parentNode.position.x - 300, y: parentNode.position.y - 50 + childCount * 70 }
-      : { x: 100, y: 200 };
+    const leftIdx = leftChildren.length;
+
+    // Position is relative to the parent hardware node
+    const pos = { x: CHILD_LEFT_X, y: CONTAINER_HEADER_HEIGHT + leftIdx * CHILD_SLOT_HEIGHT };
 
     const node: Node = {
       id,
       type: 'feature',
       position: pos,
+      parentId,
+      extent: 'parent',
       data: {
         label,
         sectionType,
@@ -398,43 +416,53 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       },
     };
 
-    const edgeId = nextEdgeId();
-    const parentHwType2 = (parentNode?.data as Record<string, unknown>)?.hardwareType as string || 'mainboard';
-    const edge: Edge = {
-      id: edgeId,
-      source: id,
-      target: parentId,
-      type: 'configuration',
-      data: { edgeType: 'configuration', sourceHardwareType: parentHwType2 as HardwareType, color: getHardwareColor(parentHwType2) },
-    };
+    set((s) => {
+      // Recompute parent container size
+      const rightCount = s.nodes.filter((n) => {
+        if (n.parentId !== parentId) return false;
+        const d = n.data as Record<string, unknown>;
+        return n.type === 'subComponent' || (n.type === 'group' && !d.isFeature);
+      }).length;
+      const newLeftCount = leftIdx + 1;
+      const { width, height } = computeHardwareSize(newLeftCount, rightCount);
 
-    set((s) => ({
-      nodes: [...s.nodes, node as AppNode],
-      edges: [...s.edges, edge as AppEdge],
-    }));
+      return {
+        nodes: [
+          ...s.nodes.map((n) =>
+            n.id === parentId ? { ...n, style: { ...n.style, width, height } } : n,
+          ),
+          node as AppNode,
+        ],
+      };
+    });
     return id;
   },
 
   addGroupNode: (parentId, componentGroup, label, children, isFeature) => {
     const id = nextNodeId();
-    const parentNode = get().nodes.find((n) => n.id === parentId);
 
-    // Position: features go LEFT, sub-components go RIGHT
-    const existingChildren = get().nodes.filter((n) => {
+    // Count siblings in the same column
+    const sameColumnChildren = get().nodes.filter((n) => {
+      if (n.parentId !== parentId) return false;
       const d = n.data as Record<string, unknown>;
-      const isChild = d.parentHardwareId === parentId || d.parentId === parentId;
-      return isChild;
+      return isFeature
+        ? n.type === 'feature' || (n.type === 'group' && d.isFeature)
+        : n.type === 'subComponent' || (n.type === 'group' && !d.isFeature);
     });
-    const childCount = existingChildren.length;
-    const xOffset = isFeature ? -300 : 300;
-    const pos = parentNode
-      ? { x: parentNode.position.x + xOffset, y: parentNode.position.y - 50 + childCount * 80 }
-      : { x: isFeature ? 100 : 400, y: 200 };
+    const colIdx = sameColumnChildren.length;
+
+    // Position relative to parent hardware node
+    const pos = {
+      x: isFeature ? CHILD_LEFT_X : CHILD_RIGHT_X,
+      y: CONTAINER_HEADER_HEIGHT + colIdx * CHILD_SLOT_HEIGHT,
+    };
 
     const node: Node = {
       id,
       type: 'group',
       position: pos,
+      parentId,
+      extent: 'parent',
       data: {
         label,
         componentGroup,
@@ -445,20 +473,32 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       },
     };
 
-    const edgeId = nextEdgeId();
-    const parentHwType = (parentNode?.data as Record<string, unknown>)?.hardwareType as string || 'mainboard';
-    const edge: Edge = {
-      id: edgeId,
-      source: id,
-      target: parentId,
-      type: 'configuration',
-      data: { edgeType: 'configuration', sourceHardwareType: parentHwType as HardwareType, color: getHardwareColor(parentHwType) },
-    };
+    set((s) => {
+      // Recompute parent container size
+      const leftCount = s.nodes.filter((n) => {
+        if (n.parentId !== parentId) return false;
+        const d = n.data as Record<string, unknown>;
+        return n.type === 'feature' || (n.type === 'group' && d.isFeature);
+      }).length;
+      const rightCount = s.nodes.filter((n) => {
+        if (n.parentId !== parentId) return false;
+        const d = n.data as Record<string, unknown>;
+        return n.type === 'subComponent' || (n.type === 'group' && !d.isFeature);
+      }).length;
 
-    set((s) => ({
-      nodes: [...s.nodes, node as AppNode],
-      edges: [...s.edges, edge as AppEdge],
-    }));
+      const newLeftCount = isFeature ? leftCount + 1 : leftCount;
+      const newRightCount = isFeature ? rightCount : rightCount + 1;
+      const { width, height } = computeHardwareSize(newLeftCount, newRightCount);
+
+      return {
+        nodes: [
+          ...s.nodes.map((n) =>
+            n.id === parentId ? { ...n, style: { ...n.style, width, height } } : n,
+          ),
+          node as AppNode,
+        ],
+      };
+    });
     return id;
   },
 

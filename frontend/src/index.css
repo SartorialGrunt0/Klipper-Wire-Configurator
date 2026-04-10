@@ -105,3 +105,13 @@ body {
   border-color: var(--color-error) !important;
   box-shadow: 0 0 12px rgba(248, 113, 113, 0.3);
 }
+
+/* Hardware container node — must not clip children rendered inside by ReactFlow */
+.kwc-hardware-container {
+  overflow: visible !important;
+}
+
+/* Ensure child nodes stack above the hardware container */
+.react-flow__node:has(> .kwc-hardware-container) {
+  z-index: 0 !important;
+}
