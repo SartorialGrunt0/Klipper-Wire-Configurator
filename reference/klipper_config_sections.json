@@ -1,0 +1,1877 @@
+{
+  "_meta": {
+    "source": "Config_Reference.md",
+    "description": "Comprehensive extraction of all Klipper config sections, parameters, types, defaults, and requirements",
+    "generated": "2026-04-09"
+  },
+  "sections": [
+    {
+      "name": "[mcu]",
+      "pattern": "mcu",
+      "type": "singleton",
+      "description": "Configuration of the primary micro-controller",
+      "parameters": [
+        {"name": "serial", "type": "string", "required": "conditional", "default": null, "description": "Serial port to connect to MCU. Required when using serial port."},
+        {"name": "baud", "type": "int", "required": false, "default": 250000, "description": "Baud rate to use."},
+        {"name": "canbus_uuid", "type": "string", "required": "conditional", "default": null, "description": "Unique chip identifier for CAN bus. Required when using CAN bus."},
+        {"name": "canbus_interface", "type": "string", "required": false, "default": "can0", "description": "CAN network interface to use."},
+        {"name": "restart_method", "type": "enum", "required": false, "default": "arduino (serial) or command (other)", "enum_values": ["arduino", "cheetah", "rpi_usb", "command"], "description": "Mechanism the host uses to reset the micro-controller."}
+      ]
+    },
+    {
+      "name": "[mcu my_extra_mcu]",
+      "pattern": "mcu <name>",
+      "type": "named_multi",
+      "description": "Additional micro-controllers. Introduces additional pins for heaters, steppers, fans, etc.",
+      "parameters": [
+        {"name": "serial", "type": "string", "required": "conditional", "default": null, "description": "Serial port (same as [mcu])"},
+        {"name": "baud", "type": "int", "required": false, "default": 250000, "description": "Baud rate"},
+        {"name": "canbus_uuid", "type": "string", "required": "conditional", "default": null, "description": "CAN bus UUID"},
+        {"name": "canbus_interface", "type": "string", "required": false, "default": "can0", "description": "CAN network interface"},
+        {"name": "restart_method", "type": "enum", "required": false, "default": "arduino (serial) or command (other)", "enum_values": ["arduino", "cheetah", "rpi_usb", "command"], "description": "Reset mechanism"}
+      ]
+    },
+    {
+      "name": "[printer]",
+      "pattern": "printer",
+      "type": "singleton",
+      "description": "High level printer settings including kinematics",
+      "parameters": [
+        {"name": "kinematics", "type": "enum", "required": true, "default": null, "enum_values": ["cartesian", "corexy", "corexz", "hybrid_corexy", "hybrid_corexz", "generic_cartesian", "rotary_delta", "delta", "deltesian", "polar", "winch", "none"], "description": "Type of printer kinematics in use."},
+        {"name": "max_velocity", "type": "float", "required": true, "default": null, "description": "Maximum velocity (mm/s) of the toolhead."},
+        {"name": "max_accel", "type": "float", "required": true, "default": null, "description": "Maximum acceleration (mm/s^2) of the toolhead."},
+        {"name": "minimum_cruise_ratio", "type": "float", "required": false, "default": 0.5, "description": "Minimum cruising distance ratio to reduce top speed of short zigzag moves."},
+        {"name": "square_corner_velocity", "type": "float", "required": false, "default": 5.0, "description": "Maximum velocity (mm/s) the toolhead may travel a 90 degree corner at."},
+        {"name": "max_z_velocity", "type": "float", "required": false, "default": "max_velocity", "description": "Maximum velocity (mm/s) of Z axis movement. Kinematics-specific."},
+        {"name": "max_z_accel", "type": "float", "required": false, "default": "max_accel", "description": "Maximum acceleration (mm/s^2) of Z axis movement. Kinematics-specific."}
+      ],
+      "kinematic_specific_params": {
+        "delta": [
+          {"name": "minimum_z_position", "type": "float", "required": false, "default": 0, "description": "Minimum Z position user may command."},
+          {"name": "delta_radius", "type": "float", "required": true, "default": null, "description": "Radius (mm) of horizontal circle formed by three linear axis towers."},
+          {"name": "print_radius", "type": "float", "required": false, "default": "delta_radius", "description": "Radius (mm) of valid toolhead XY coordinates."}
+        ],
+        "deltesian": [
+          {"name": "minimum_z_position", "type": "float", "required": false, "default": 0, "description": "Minimum Z position."},
+          {"name": "min_angle", "type": "float", "required": false, "default": 5, "description": "Minimum angle (degrees) relative to horizontal for deltesian arms."},
+          {"name": "print_width", "type": "float", "required": false, "default": null, "description": "Distance (mm) of valid toolhead X coordinates."},
+          {"name": "slow_ratio", "type": "float", "required": false, "default": 3, "description": "Ratio to limit velocity/acceleration near X axis extremes."}
+        ],
+        "polar": [],
+        "rotary_delta": [
+          {"name": "minimum_z_position", "type": "float", "required": false, "default": 0, "description": "Minimum Z position."},
+          {"name": "shoulder_radius", "type": "float", "required": true, "default": null, "description": "Radius (mm) of horizontal circle formed by shoulder joints minus effector joints."},
+          {"name": "shoulder_height", "type": "float", "required": true, "default": null, "description": "Distance (mm) of shoulder joints from bed minus effector toolhead height."}
+        ],
+        "generic_cartesian": []
+      }
+    },
+    {
+      "name": "[stepper_x]",
+      "pattern": "stepper_x / stepper_y / stepper_z / stepper_a / stepper_b / stepper_c",
+      "type": "singleton_per_axis",
+      "description": "Stepper motor definitions. Names depend on kinematics type.",
+      "parameters": [
+        {"name": "step_pin", "type": "pin", "required": true, "default": null, "description": "Step GPIO pin (triggered high)."},
+        {"name": "dir_pin", "type": "pin", "required": true, "default": null, "description": "Direction GPIO pin (high = positive direction)."},
+        {"name": "enable_pin", "type": "pin", "required": false, "default": null, "description": "Enable pin (default enable high; use ! for enable low)."},
+        {"name": "rotation_distance", "type": "float", "required": true, "default": null, "description": "Distance (mm) axis travels with one full rotation of stepper motor."},
+        {"name": "microsteps", "type": "int", "required": true, "default": null, "description": "Number of microsteps the stepper motor driver uses."},
+        {"name": "full_steps_per_rotation", "type": "int", "required": false, "default": 200, "description": "Full steps for one rotation (200 for 1.8°, 400 for 0.9°)."},
+        {"name": "gear_ratio", "type": "string", "required": false, "default": null, "description": "Gear ratio if connected via gearbox. E.g. '5:1' or '57:11, 2:1'."},
+        {"name": "step_pulse_duration", "type": "float", "required": false, "default": "0.000000100 (TMC UART/SPI) or 0.000002 (others)", "description": "Minimum time between step pulse signal edge and unstep signal edge."},
+        {"name": "endstop_pin", "type": "pin", "required": "conditional", "default": null, "description": "Endstop switch detection pin. Required for X, Y, Z on cartesian."},
+        {"name": "position_min", "type": "float", "required": false, "default": 0, "description": "Minimum valid distance (mm) user may command stepper to move to."},
+        {"name": "position_endstop", "type": "float", "required": "conditional", "default": null, "description": "Location of the endstop (mm). Required for X, Y, Z on cartesian."},
+        {"name": "position_max", "type": "float", "required": "conditional", "default": null, "description": "Maximum valid distance (mm) user may command stepper to move to. Required for X, Y, Z on cartesian."},
+        {"name": "homing_speed", "type": "float", "required": false, "default": 5.0, "description": "Maximum velocity (mm/s) of stepper when homing."},
+        {"name": "homing_retract_dist", "type": "float", "required": false, "default": 5.0, "description": "Distance (mm) to backoff before homing a second time. 0 = disable second home."},
+        {"name": "homing_retract_speed", "type": "float", "required": false, "default": "homing_speed", "description": "Speed for retract move after homing."},
+        {"name": "second_homing_speed", "type": "float", "required": false, "default": "homing_speed/2", "description": "Velocity (mm/s) of stepper when performing second home."},
+        {"name": "homing_positive_dir", "type": "boolean", "required": false, "default": "auto (true if position_endstop near position_max)", "description": "If true, home in positive direction."}
+      ]
+    },
+    {
+      "name": "[stepper_z1]",
+      "pattern": "stepper_z<N> (e.g. stepper_z1, stepper_z2, ...)",
+      "type": "numbered_multi",
+      "description": "Additional steppers for multi-stepper axes, stepped in concert with primary stepper.",
+      "parameters": [
+        {"name": "step_pin", "type": "pin", "required": true, "default": null, "description": "Step GPIO pin."},
+        {"name": "dir_pin", "type": "pin", "required": true, "default": null, "description": "Direction GPIO pin."},
+        {"name": "enable_pin", "type": "pin", "required": false, "default": null, "description": "Enable pin."},
+        {"name": "microsteps", "type": "int", "required": true, "default": null, "description": "Microsteps."},
+        {"name": "rotation_distance", "type": "float", "required": true, "default": null, "description": "Rotation distance (mm)."},
+        {"name": "endstop_pin", "type": "pin", "required": false, "default": "primary stepper endstop", "description": "If defined, stepper homes until this endstop triggers."}
+      ]
+    },
+    {
+      "name": "[stepper_a]",
+      "pattern": "stepper_a / stepper_b / stepper_c (delta kinematics)",
+      "type": "singleton_per_tower",
+      "description": "Delta tower stepper definitions. stepper_a=front-left (210°), stepper_b=front-right (330°), stepper_c=rear (90°).",
+      "parameters_additional": [
+        {"name": "arm_length", "type": "float", "required": "conditional", "default": "stepper_a value (for b,c)", "description": "Length (mm) of diagonal rod connecting tower to print head."},
+        {"name": "angle", "type": "float", "required": false, "default": "210 (a), 330 (b), 90 (c)", "description": "Angle (degrees) of the tower."}
+      ]
+    },
+    {
+      "name": "[stepper_left]",
+      "pattern": "stepper_left / stepper_right (deltesian kinematics)",
+      "type": "singleton_per_tower",
+      "description": "Deltesian tower stepper definitions.",
+      "parameters_additional": [
+        {"name": "arm_length", "type": "float", "required": "conditional", "default": "stepper_left value (for right)", "description": "Length (mm) of diagonal rod."},
+        {"name": "arm_x_length", "type": "float", "required": "conditional", "default": "stepper_left value (for right)", "description": "Horizontal distance between print head and tower when homed."}
+      ]
+    },
+    {
+      "name": "[carriage carriage_x]",
+      "pattern": "carriage <name>",
+      "type": "named_multi",
+      "description": "Carriage definition for generic_cartesian kinematics.",
+      "parameters": [
+        {"name": "axis", "type": "enum", "required": "conditional", "default": "inferred from name if x/y/z", "enum_values": ["x", "y", "z"], "description": "Axis of the carriage."},
+        {"name": "endstop_pin", "type": "pin", "required": true, "default": null, "description": "Endstop switch detection pin."},
+        {"name": "position_min", "type": "float", "required": false, "default": 0, "description": "Minimum valid distance (mm)."},
+        {"name": "position_endstop", "type": "float", "required": true, "default": null, "description": "Location of endstop (mm)."},
+        {"name": "position_max", "type": "float", "required": true, "default": null, "description": "Maximum valid distance (mm)."},
+        {"name": "homing_speed", "type": "float", "required": false, "default": 5.0, "description": "Maximum velocity (mm/s) when homing."},
+        {"name": "homing_retract_dist", "type": "float", "required": false, "default": 5.0, "description": "Backoff distance (mm) before second home."},
+        {"name": "homing_retract_speed", "type": "float", "required": false, "default": "homing_speed", "description": "Speed for retract after homing."},
+        {"name": "second_homing_speed", "type": "float", "required": false, "default": "homing_speed/2", "description": "Speed for second home."},
+        {"name": "homing_positive_dir", "type": "boolean", "required": false, "default": "auto", "description": "Home direction."}
+      ]
+    },
+    {
+      "name": "[extra_carriage my_carriage]",
+      "pattern": "extra_carriage <name>",
+      "type": "named_multi",
+      "description": "Additional carriage with independent endstop for generic_cartesian kinematics.",
+      "parameters": [
+        {"name": "primary_carriage", "type": "string", "required": true, "default": null, "description": "Name of the primary carriage this corresponds to."},
+        {"name": "endstop_pin", "type": "pin", "required": true, "default": null, "description": "Endstop switch detection pin."}
+      ]
+    },
+    {
+      "name": "[stepper my_stepper]",
+      "pattern": "stepper <name> (generic_cartesian)",
+      "type": "named_multi",
+      "description": "Stepper for generic_cartesian kinematics referencing carriages.",
+      "parameters": [
+        {"name": "carriages", "type": "string", "required": true, "default": null, "description": "Carriages the stepper moves, e.g. 'carriage_x+carriage_y'."},
+        {"name": "step_pin", "type": "pin", "required": true, "default": null, "description": "Step GPIO pin."},
+        {"name": "dir_pin", "type": "pin", "required": true, "default": null, "description": "Direction GPIO pin."},
+        {"name": "enable_pin", "type": "pin", "required": false, "default": null, "description": "Enable pin."},
+        {"name": "rotation_distance", "type": "float", "required": true, "default": null, "description": "Rotation distance (mm)."},
+        {"name": "microsteps", "type": "int", "required": true, "default": null, "description": "Microsteps."},
+        {"name": "full_steps_per_rotation", "type": "int", "required": false, "default": 200, "description": "Full steps per rotation."},
+        {"name": "gear_ratio", "type": "string", "required": false, "default": null, "description": "Gear ratio."},
+        {"name": "step_pulse_duration", "type": "float", "required": false, "default": null, "description": "Step pulse duration."}
+      ]
+    },
+    {
+      "name": "[delta_calibrate]",
+      "pattern": "delta_calibrate",
+      "type": "singleton",
+      "description": "Enables DELTA_CALIBRATE g-code command for delta/rotary_delta printers.",
+      "parameters": [
+        {"name": "radius", "type": "float", "required": true, "default": null, "description": "Radius (mm) of area that may be probed."},
+        {"name": "speed", "type": "float", "required": false, "default": 50, "description": "Speed (mm/s) of non-probing moves during calibration."},
+        {"name": "horizontal_move_z", "type": "float", "required": false, "default": 5, "description": "Height (mm) to move to before probe operation."}
+      ]
+    },
+    {
+      "name": "[extruder]",
+      "pattern": "extruder",
+      "type": "singleton",
+      "description": "Nozzle hotend heater and extruder stepper parameters.",
+      "parameters": [
+        {"name": "step_pin", "type": "pin", "required": false, "default": null, "description": "Step GPIO pin for extruder stepper."},
+        {"name": "dir_pin", "type": "pin", "required": false, "default": null, "description": "Direction GPIO pin."},
+        {"name": "enable_pin", "type": "pin", "required": false, "default": null, "description": "Enable pin."},
+        {"name": "microsteps", "type": "int", "required": false, "default": null, "description": "Microsteps."},
+        {"name": "rotation_distance", "type": "float", "required": false, "default": null, "description": "Rotation distance for extruder."},
+        {"name": "full_steps_per_rotation", "type": "int", "required": false, "default": 200, "description": "Full steps per rotation."},
+        {"name": "gear_ratio", "type": "string", "required": false, "default": null, "description": "Gear ratio."},
+        {"name": "nozzle_diameter", "type": "float", "required": true, "default": null, "description": "Diameter of nozzle orifice (mm)."},
+        {"name": "filament_diameter", "type": "float", "required": true, "default": null, "description": "Nominal diameter of raw filament (mm)."},
+        {"name": "max_extrude_cross_section", "type": "float", "required": false, "default": "4.0 * nozzle_diameter^2", "description": "Maximum area (mm^2) of extrusion cross section."},
+        {"name": "instantaneous_corner_velocity", "type": "float", "required": false, "default": 1.0, "description": "Maximum instantaneous velocity change (mm/s) of extruder at junction of two moves."},
+        {"name": "max_extrude_only_distance", "type": "float", "required": false, "default": 50.0, "description": "Maximum length (mm) of retraction or extrude-only move."},
+        {"name": "max_extrude_only_velocity", "type": "float", "required": false, "default": "calculated", "description": "Maximum velocity (mm/s) of extruder for retractions/extrude-only moves."},
+        {"name": "max_extrude_only_accel", "type": "float", "required": false, "default": "calculated", "description": "Maximum acceleration (mm/s^2) of extruder for retractions/extrude-only moves."},
+        {"name": "pressure_advance", "type": "float", "required": false, "default": 0.0, "description": "Amount of raw filament to push during extruder acceleration (mm per mm/s)."},
+        {"name": "pressure_advance_smooth_time", "type": "float", "required": false, "default": 0.040, "description": "Time range (seconds) for calculating average extruder velocity for pressure advance."},
+        {"name": "heater_pin", "type": "pin", "required": true, "default": null, "description": "PWM output pin controlling the heater."},
+        {"name": "max_power", "type": "float", "required": false, "default": 1.0, "description": "Maximum power (0.0 to 1.0) that heater_pin may be set to."},
+        {"name": "sensor_type", "type": "enum", "required": true, "default": null, "enum_values": ["EPCOS 100K B57560G104F", "ATC Semitec 104GT-2", "ATC Semitec 104NT-4-R025H42G", "Generic 3950", "Honeywell 100K 135-104LAG-J01", "NTC 100K MGB18-104F39050L32", "SliceEngineering 450", "TDK NTCG104LH104JT1", "PT100 INA826", "AD595", "AD597", "AD8494", "AD8495", "AD8496", "AD8497", "PT1000", "MAX6675", "MAX31855", "MAX31856", "MAX31865", "BME280", "AHT1X", "AHT2X", "AHT3X", "HTU21D", "SI7013", "SI7020", "SI7021", "SHT21", "SHT3X", "LM75", "temperature_mcu", "temperature_host", "DS18B20", "temperature_combined", "<custom_thermistor_name>", "<custom_adc_temperature_name>"], "description": "Type of temperature sensor."},
+        {"name": "sensor_pin", "type": "pin", "required": true, "default": null, "description": "Analog input pin connected to sensor."},
+        {"name": "pullup_resistor", "type": "float", "required": false, "default": 4700, "description": "Resistance (ohms) of pullup attached to thermistor."},
+        {"name": "smooth_time", "type": "float", "required": false, "default": 1.0, "description": "Time (seconds) over which temperature measurements are smoothed."},
+        {"name": "control", "type": "enum", "required": true, "default": null, "enum_values": ["pid", "watermark"], "description": "Control algorithm."},
+        {"name": "pid_Kp", "type": "float", "required": "conditional", "default": null, "description": "PID proportional setting. Required for PID control."},
+        {"name": "pid_Ki", "type": "float", "required": "conditional", "default": null, "description": "PID integral setting. Required for PID control."},
+        {"name": "pid_Kd", "type": "float", "required": "conditional", "default": null, "description": "PID derivative setting. Required for PID control."},
+        {"name": "max_delta", "type": "float", "required": false, "default": 2.0, "description": "For watermark control: degrees above/below target before toggling heater."},
+        {"name": "pwm_cycle_time", "type": "float", "required": false, "default": 0.100, "description": "Time (seconds) for each software PWM cycle of the heater."},
+        {"name": "min_extrude_temp", "type": "float", "required": false, "default": 170, "description": "Minimum temperature (°C) at which extruder move commands may be issued."},
+        {"name": "min_temp", "type": "float", "required": true, "default": null, "description": "Minimum valid temperature (°C) for safety check."},
+        {"name": "max_temp", "type": "float", "required": true, "default": null, "description": "Maximum valid temperature (°C) for safety check."}
+      ]
+    },
+    {
+      "name": "[extruder1]",
+      "pattern": "extruder<N> (extruder1, extruder2, ...)",
+      "type": "numbered_multi",
+      "description": "Additional extruders in multi-extruder printer. Same parameters as [extruder].",
+      "parameters_note": "See [extruder] section for all parameters.",
+      "parameters_additional": [
+        {"name": "shared_heater", "type": "string", "required": false, "default": null, "description": "DEPRECATED. Should no longer be specified."}
+      ]
+    },
+    {
+      "name": "[heater_bed]",
+      "pattern": "heater_bed",
+      "type": "singleton",
+      "description": "Heated bed configuration. Uses same heater settings as extruder (without extruder-specific motor params).",
+      "parameters": [
+        {"name": "heater_pin", "type": "pin", "required": true, "default": null, "description": "PWM output pin controlling the heater."},
+        {"name": "sensor_type", "type": "string", "required": true, "default": null, "description": "Type of temperature sensor."},
+        {"name": "sensor_pin", "type": "pin", "required": true, "default": null, "description": "Analog input pin connected to sensor."},
+        {"name": "control", "type": "enum", "required": true, "default": null, "enum_values": ["pid", "watermark"], "description": "Control algorithm."},
+        {"name": "min_temp", "type": "float", "required": true, "default": null, "description": "Minimum valid temperature (°C)."},
+        {"name": "max_temp", "type": "float", "required": true, "default": null, "description": "Maximum valid temperature (°C)."},
+        {"name": "pid_Kp", "type": "float", "required": "conditional", "default": null, "description": "PID proportional. Required for PID control."},
+        {"name": "pid_Ki", "type": "float", "required": "conditional", "default": null, "description": "PID integral. Required for PID control."},
+        {"name": "pid_Kd", "type": "float", "required": "conditional", "default": null, "description": "PID derivative. Required for PID control."},
+        {"name": "max_power", "type": "float", "required": false, "default": 1.0, "description": "Maximum power (0.0 to 1.0)."},
+        {"name": "pullup_resistor", "type": "float", "required": false, "default": 4700, "description": "Pullup resistance (ohms) for thermistor."},
+        {"name": "smooth_time", "type": "float", "required": false, "default": 1.0, "description": "Temperature smoothing time (seconds)."},
+        {"name": "max_delta", "type": "float", "required": false, "default": 2.0, "description": "Watermark control hysteresis (°C)."},
+        {"name": "pwm_cycle_time", "type": "float", "required": false, "default": 0.100, "description": "PWM cycle time (seconds)."}
+      ]
+    },
+    {
+      "name": "[bed_mesh]",
+      "pattern": "bed_mesh",
+      "type": "singleton",
+      "description": "Mesh bed leveling. Offsets Z axis based on mesh generated from probed points.",
+      "parameters": [
+        {"name": "speed", "type": "float", "required": false, "default": 50, "description": "Speed (mm/s) of non-probing moves during calibration."},
+        {"name": "horizontal_move_z", "type": "float", "required": false, "default": 5, "description": "Height (mm) to move to before probe operation."},
+        {"name": "mesh_radius", "type": "float", "required": "conditional", "default": null, "description": "Radius of mesh for round beds. Required for round beds."},
+        {"name": "mesh_origin", "type": "string", "required": false, "default": "0, 0", "description": "Center X,Y coordinate of mesh for round beds."},
+        {"name": "mesh_min", "type": "string", "required": "conditional", "default": null, "description": "Minimum X,Y coordinate of mesh for rectangular beds. Required for rectangular."},
+        {"name": "mesh_max", "type": "string", "required": "conditional", "default": null, "description": "Maximum X,Y coordinate of mesh for rectangular beds. Required for rectangular."},
+        {"name": "probe_count", "type": "string", "required": false, "default": "3, 3", "description": "Number of points to probe along each axis (X, Y)."},
+        {"name": "round_probe_count", "type": "int", "required": false, "default": 5, "description": "Maximum points along each axis for round beds. Must be odd."},
+        {"name": "fade_start", "type": "float", "required": false, "default": 1.0, "description": "Z position to start phasing out z-adjustment."},
+        {"name": "fade_end", "type": "float", "required": false, "default": 0.0, "description": "Z position where phasing out completes. 0 = disabled."},
+        {"name": "fade_target", "type": "float", "required": false, "default": "average z value of mesh", "description": "Z position fade should converge to."},
+        {"name": "split_delta_z", "type": "float", "required": false, "default": 0.025, "description": "Amount of Z difference (mm) that triggers a move split."},
+        {"name": "move_check_distance", "type": "float", "required": false, "default": 5.0, "description": "Distance (mm) along move to check for split_delta_z."},
+        {"name": "mesh_pps", "type": "string", "required": false, "default": "2, 2", "description": "Points per segment to interpolate in mesh (X, Y)."},
+        {"name": "algorithm", "type": "enum", "required": false, "default": "lagrange", "enum_values": ["lagrange", "bicubic"], "description": "Interpolation algorithm."},
+        {"name": "bicubic_tension", "type": "float", "required": false, "default": 0.2, "description": "Tension parameter for bicubic algorithm."},
+        {"name": "zero_reference_position", "type": "string", "required": false, "default": null, "description": "Optional X,Y coordinate where Z=0."},
+        {"name": "faulty_region_1_min", "type": "string", "required": false, "default": null, "description": "Min point of faulty region 1. Up to 99 regions."},
+        {"name": "faulty_region_1_max", "type": "string", "required": false, "default": null, "description": "Max point of faulty region 1."},
+        {"name": "adaptive_margin", "type": "float", "required": false, "default": null, "description": "Margin (mm) around bed area used by print objects for adaptive mesh."},
+        {"name": "scan_overshoot", "type": "float", "required": false, "default": null, "description": "Maximum travel (mm) available outside mesh for rapid scan. Min 1."}
+      ]
+    },
+    {
+      "name": "[bed_tilt]",
+      "pattern": "bed_tilt",
+      "type": "singleton",
+      "description": "Bed tilt compensation. Incompatible with bed_mesh.",
+      "parameters": [
+        {"name": "x_adjust", "type": "float", "required": false, "default": 0, "description": "Amount to add to Z height per mm on X axis."},
+        {"name": "y_adjust", "type": "float", "required": false, "default": 0, "description": "Amount to add to Z height per mm on Y axis."},
+        {"name": "z_adjust", "type": "float", "required": false, "default": 0, "description": "Amount to add to Z height at 0,0."},
+        {"name": "points", "type": "string_list", "required": false, "default": null, "description": "List of X,Y coordinates for BED_TILT_CALIBRATE command."},
+        {"name": "speed", "type": "float", "required": false, "default": 50, "description": "Speed (mm/s) of non-probing moves."},
+        {"name": "horizontal_move_z", "type": "float", "required": false, "default": 5, "description": "Height (mm) to move to before probe."}
+      ]
+    },
+    {
+      "name": "[bed_screws]",
+      "pattern": "bed_screws",
+      "type": "singleton",
+      "description": "Tool to help adjust bed leveling screws. Enables BED_SCREWS_ADJUST command.",
+      "parameters": [
+        {"name": "screw1", "type": "string", "required": true, "default": null, "description": "X,Y coordinate of first bed leveling screw."},
+        {"name": "screw1_name", "type": "string", "required": false, "default": "auto from XY", "description": "Name for the given screw."},
+        {"name": "screw1_fine_adjust", "type": "string", "required": false, "default": null, "description": "X,Y for fine tune adjustment."},
+        {"name": "screw2", "type": "string", "required": true, "default": null, "description": "Second screw X,Y. At least 3 screws required."},
+        {"name": "screw2_name", "type": "string", "required": false, "default": "auto", "description": "Name for second screw."},
+        {"name": "screw2_fine_adjust", "type": "string", "required": false, "default": null, "description": "Fine adjust for second screw."},
+        {"name": "horizontal_move_z", "type": "float", "required": false, "default": 5, "description": "Height (mm) to move between screw locations."},
+        {"name": "probe_height", "type": "float", "required": false, "default": 0, "description": "Height of probe (mm) after thermal expansion adjustment."},
+        {"name": "speed", "type": "float", "required": false, "default": 50, "description": "Speed (mm/s) of non-probing moves."},
+        {"name": "probe_speed", "type": "float", "required": false, "default": 5, "description": "Speed (mm/s) from horizontal_move_z to probe_height."}
+      ]
+    },
+    {
+      "name": "[screws_tilt_adjust]",
+      "pattern": "screws_tilt_adjust",
+      "type": "singleton",
+      "description": "Tool to adjust bed screws using Z probe. Enables SCREWS_TILT_CALCULATE command.",
+      "parameters": [
+        {"name": "screw1", "type": "string", "required": true, "default": null, "description": "X,Y coordinate of first screw (base screw for calculations)."},
+        {"name": "screw1_name", "type": "string", "required": false, "default": "auto", "description": "Name for first screw."},
+        {"name": "screw2", "type": "string", "required": true, "default": null, "description": "X,Y of second screw. At least 2 required."},
+        {"name": "screw2_name", "type": "string", "required": false, "default": "auto", "description": "Name for second screw."},
+        {"name": "speed", "type": "float", "required": false, "default": 50, "description": "Speed (mm/s) of non-probing moves."},
+        {"name": "horizontal_move_z", "type": "float", "required": false, "default": 5, "description": "Height (mm) to move to before probe."},
+        {"name": "screw_thread", "type": "enum", "required": false, "default": "CW-M3", "enum_values": ["CW-M3", "CCW-M3", "CW-M4", "CCW-M4", "CW-M5", "CCW-M5"], "description": "Type of screw used for bed leveling."}
+      ]
+    },
+    {
+      "name": "[z_tilt]",
+      "pattern": "z_tilt",
+      "type": "singleton",
+      "description": "Multiple Z stepper tilt adjustment. Enables Z_TILT_ADJUST command.",
+      "parameters": [
+        {"name": "z_positions", "type": "string_list", "required": true, "default": null, "description": "List of X,Y coordinates of each bed pivot point."},
+        {"name": "points", "type": "string_list", "required": true, "default": null, "description": "List of X,Y coordinates to probe during Z_TILT_ADJUST."},
+        {"name": "speed", "type": "float", "required": false, "default": 50, "description": "Speed (mm/s) of non-probing moves."},
+        {"name": "horizontal_move_z", "type": "float", "required": false, "default": 5, "description": "Height (mm) to move to before probe."},
+        {"name": "retries", "type": "int", "required": false, "default": 0, "description": "Number of retries if points aren't within tolerance."},
+        {"name": "retry_tolerance", "type": "float", "required": false, "default": 0, "description": "Retry if largest/smallest probed points differ more than this."}
+      ]
+    },
+    {
+      "name": "[quad_gantry_level]",
+      "pattern": "quad_gantry_level",
+      "type": "singleton",
+      "description": "Moving gantry leveling using 4 independently controlled Z motors.",
+      "parameters": [
+        {"name": "gantry_corners", "type": "string_list", "required": true, "default": null, "description": "Two opposing corners X,Y of the gantry (Z and Z2 positions)."},
+        {"name": "points", "type": "string_list", "required": true, "default": null, "description": "Four X,Y points to probe (Z, Z1, Z2, Z3 order)."},
+        {"name": "speed", "type": "float", "required": false, "default": 50, "description": "Speed (mm/s) of non-probing moves."},
+        {"name": "horizontal_move_z", "type": "float", "required": false, "default": 5, "description": "Height (mm) to move to before probe."},
+        {"name": "max_adjust", "type": "float", "required": false, "default": 4, "description": "Safety limit for maximum adjustment."},
+        {"name": "retries", "type": "int", "required": false, "default": 0, "description": "Number of retries."},
+        {"name": "retry_tolerance", "type": "float", "required": false, "default": 0, "description": "Tolerance for retry."}
+      ]
+    },
+    {
+      "name": "[skew_correction]",
+      "pattern": "skew_correction",
+      "type": "singleton",
+      "description": "Printer skew correction across xy, xz, yz planes. No config parameters needed.",
+      "parameters": []
+    },
+    {
+      "name": "[z_thermal_adjust]",
+      "pattern": "z_thermal_adjust",
+      "type": "singleton",
+      "description": "Temperature-dependent toolhead Z position adjustment for thermal expansion.",
+      "parameters": [
+        {"name": "temp_coeff", "type": "float", "required": false, "default": 0.0, "description": "Temperature coefficient of expansion (mm/°C)."},
+        {"name": "smooth_time", "type": "float", "required": false, "default": 2.0, "description": "Smoothing window (seconds) for temperature sensor."},
+        {"name": "z_adjust_off_above", "type": "float", "required": false, "default": 99999999.0, "description": "Disable adjustments above this Z height (mm)."},
+        {"name": "max_z_adjustment", "type": "float", "required": false, "default": 99999999.0, "description": "Maximum absolute Z adjustment (mm)."},
+        {"name": "sensor_type", "type": "string", "required": true, "default": null, "description": "Temperature sensor type."},
+        {"name": "sensor_pin", "type": "pin", "required": true, "default": null, "description": "Sensor pin."},
+        {"name": "min_temp", "type": "float", "required": true, "default": null, "description": "Minimum valid temperature."},
+        {"name": "max_temp", "type": "float", "required": true, "default": null, "description": "Maximum valid temperature."},
+        {"name": "gcode_id", "type": "string", "required": false, "default": null, "description": "ID for M105 temperature reporting."}
+      ]
+    },
+    {
+      "name": "[safe_z_home]",
+      "pattern": "safe_z_home",
+      "type": "singleton",
+      "description": "Home Z axis at a specific X,Y coordinate.",
+      "parameters": [
+        {"name": "home_xy_position", "type": "string", "required": true, "default": null, "description": "X,Y coordinate where Z homing should be performed."},
+        {"name": "speed", "type": "float", "required": false, "default": 50.0, "description": "Speed (mm/s) to move to safe Z home coordinate."},
+        {"name": "z_hop", "type": "float", "required": false, "default": null, "description": "Distance (mm) to lift Z axis prior to homing."},
+        {"name": "z_hop_speed", "type": "float", "required": false, "default": 15.0, "description": "Speed (mm/s) Z axis is lifted prior to homing."},
+        {"name": "move_to_previous", "type": "boolean", "required": false, "default": false, "description": "Reset X,Y to previous positions after Z homing."}
+      ]
+    },
+    {
+      "name": "[homing_override]",
+      "pattern": "homing_override",
+      "type": "singleton",
+      "description": "Run g-code commands in place of G28 homing.",
+      "parameters": [
+        {"name": "gcode", "type": "string", "required": true, "default": null, "description": "G-Code commands to execute instead of G28. Must home all axes."},
+        {"name": "axes", "type": "string", "required": false, "default": "xyz", "description": "Axes to override (e.g. 'z' for Z-only override)."},
+        {"name": "set_position_x", "type": "float", "required": false, "default": null, "description": "Assume X at this position before running gcode."},
+        {"name": "set_position_y", "type": "float", "required": false, "default": null, "description": "Assume Y at this position before running gcode."},
+        {"name": "set_position_z", "type": "float", "required": false, "default": null, "description": "Assume Z at this position before running gcode."}
+      ]
+    },
+    {
+      "name": "[endstop_phase stepper_z]",
+      "pattern": "endstop_phase <stepper_name>",
+      "type": "named_multi",
+      "description": "Stepper phase adjusted endstops for improved accuracy.",
+      "parameters": [
+        {"name": "endstop_accuracy", "type": "float", "required": false, "default": "4*rotation_distance/full_steps_per_rotation", "description": "Expected accuracy (mm) of the endstop."},
+        {"name": "trigger_phase", "type": "string", "required": false, "default": "auto-detected", "description": "Phase of stepper motor driver at endstop (e.g. '7/64')."},
+        {"name": "endstop_align_zero", "type": "boolean", "required": false, "default": false, "description": "Modify position_endstop so zero is at full step."}
+      ]
+    },
+    {
+      "name": "[gcode_macro my_cmd]",
+      "pattern": "gcode_macro <name>",
+      "type": "named_multi",
+      "description": "Define custom G-Code macro commands.",
+      "parameters": [
+        {"name": "gcode", "type": "string", "required": true, "default": null, "description": "G-Code commands to execute in place of the macro name."},
+        {"name": "variable_<name>", "type": "any", "required": false, "default": null, "description": "Define variables available during macro expansion (parsed as Python literal)."},
+        {"name": "rename_existing", "type": "string", "required": false, "default": null, "description": "Override existing G-Code command, providing previous definition under this name."},
+        {"name": "description", "type": "string", "required": false, "default": "G-Code macro", "description": "Short description for HELP command."}
+      ]
+    },
+    {
+      "name": "[delayed_gcode my_delayed_gcode]",
+      "pattern": "delayed_gcode <name>",
+      "type": "named_multi",
+      "description": "Execute gcode on a set delay.",
+      "parameters": [
+        {"name": "gcode", "type": "string", "required": true, "default": null, "description": "G-Code commands to execute when delay elapses."},
+        {"name": "initial_duration", "type": "float", "required": false, "default": 0.0, "description": "Duration (seconds) of initial delay after printer enters ready state. 0 = disabled."}
+      ]
+    },
+    {
+      "name": "[save_variables]",
+      "pattern": "save_variables",
+      "type": "singleton",
+      "description": "Save variables to disk, retained across restarts.",
+      "parameters": [
+        {"name": "filename", "type": "string", "required": true, "default": null, "description": "Filename to save variables to (e.g. ~/variables.cfg)."}
+      ]
+    },
+    {
+      "name": "[idle_timeout]",
+      "pattern": "idle_timeout",
+      "type": "singleton",
+      "description": "Idle timeout configuration.",
+      "parameters": [
+        {"name": "gcode", "type": "string", "required": false, "default": "TURN_OFF_HEATERS and M84", "description": "G-Code commands to execute on idle timeout."},
+        {"name": "timeout", "type": "int", "required": false, "default": 600, "description": "Idle time (seconds) before running gcode."}
+      ]
+    },
+    {
+      "name": "[virtual_sdcard]",
+      "pattern": "virtual_sdcard",
+      "type": "singleton",
+      "description": "Virtual sdcard for printing gcode files from host directory.",
+      "parameters": [
+        {"name": "path", "type": "string", "required": true, "default": null, "description": "Path of local directory on host for g-code files."},
+        {"name": "on_error_gcode", "type": "string", "required": false, "default": "TURN_OFF_HEATERS", "description": "G-Code to execute when error is reported."}
+      ]
+    },
+    {
+      "name": "[sdcard_loop]",
+      "pattern": "sdcard_loop",
+      "type": "singleton",
+      "description": "Support for looping sections of sdcard file. No parameters.",
+      "parameters": []
+    },
+    {
+      "name": "[force_move]",
+      "pattern": "force_move",
+      "type": "singleton",
+      "description": "Support manually moving stepper motors for diagnostics.",
+      "parameters": [
+        {"name": "enable_force_move", "type": "boolean", "required": false, "default": false, "description": "Enable FORCE_MOVE and SET_KINEMATIC_POSITION commands."}
+      ]
+    },
+    {
+      "name": "[pause_resume]",
+      "pattern": "pause_resume",
+      "type": "singleton",
+      "description": "Pause/Resume functionality with position capture and restore.",
+      "parameters": [
+        {"name": "recover_velocity", "type": "float", "required": false, "default": 50.0, "description": "Speed (mm/s) to return to captured position."}
+      ]
+    },
+    {
+      "name": "[firmware_retraction]",
+      "pattern": "firmware_retraction",
+      "type": "singleton",
+      "description": "Firmware filament retraction (G10/G11).",
+      "parameters": [
+        {"name": "retract_length", "type": "float", "required": false, "default": 0, "description": "Length of filament (mm) to retract on G10."},
+        {"name": "retract_speed", "type": "float", "required": false, "default": 20, "description": "Speed of retraction (mm/s)."},
+        {"name": "unretract_extra_length", "type": "float", "required": false, "default": 0, "description": "Additional filament (mm) to add when unretracting."},
+        {"name": "unretract_speed", "type": "float", "required": false, "default": 10, "description": "Speed of unretraction (mm/s)."}
+      ]
+    },
+    {
+      "name": "[gcode_arcs]",
+      "pattern": "gcode_arcs",
+      "type": "singleton",
+      "description": "Support for G2/G3 arc commands.",
+      "parameters": [
+        {"name": "resolution", "type": "float", "required": false, "default": 1.0, "description": "Arc segment length (mm). Lower = finer arc."}
+      ]
+    },
+    {
+      "name": "[respond]",
+      "pattern": "respond",
+      "type": "singleton",
+      "description": "Enable M118 and RESPOND extended commands.",
+      "parameters": [
+        {"name": "default_type", "type": "enum", "required": false, "default": "echo", "enum_values": ["echo", "command", "error"], "description": "Default output prefix type."},
+        {"name": "default_prefix", "type": "string", "required": false, "default": "echo:", "description": "Override default prefix directly."}
+      ]
+    },
+    {
+      "name": "[exclude_object]",
+      "pattern": "exclude_object",
+      "type": "singleton",
+      "description": "Enable support to exclude/cancel individual objects during printing. No parameters.",
+      "parameters": []
+    },
+    {
+      "name": "[input_shaper]",
+      "pattern": "input_shaper",
+      "type": "singleton",
+      "description": "Resonance compensation / input shaping.",
+      "parameters": [
+        {"name": "shaper_freq_x", "type": "float", "required": false, "default": 0, "description": "Frequency (Hz) of input shaper for X axis. 0 = disabled."},
+        {"name": "shaper_freq_y", "type": "float", "required": false, "default": 0, "description": "Frequency (Hz) of input shaper for Y axis. 0 = disabled."},
+        {"name": "shaper_freq_z", "type": "float", "required": false, "default": 0, "description": "Frequency (Hz) of input shaper for Z axis. 0 = disabled."},
+        {"name": "shaper_type", "type": "enum", "required": false, "default": "mzv", "enum_values": ["zv", "mzv", "zvd", "ei", "2hump_ei", "3hump_ei"], "description": "Input shaper type for all axes."},
+        {"name": "shaper_type_x", "type": "enum", "required": false, "default": null, "enum_values": ["zv", "mzv", "zvd", "ei", "2hump_ei", "3hump_ei"], "description": "Input shaper type for X axis (overrides shaper_type)."},
+        {"name": "shaper_type_y", "type": "enum", "required": false, "default": null, "enum_values": ["zv", "mzv", "zvd", "ei", "2hump_ei", "3hump_ei"], "description": "Input shaper type for Y axis (overrides shaper_type)."},
+        {"name": "shaper_type_z", "type": "enum", "required": false, "default": null, "enum_values": ["zv", "mzv", "zvd", "ei", "2hump_ei", "3hump_ei"], "description": "Input shaper type for Z axis (overrides shaper_type)."},
+        {"name": "damping_ratio_x", "type": "float", "required": false, "default": 0.1, "description": "Damping ratio for X axis vibrations."},
+        {"name": "damping_ratio_y", "type": "float", "required": false, "default": 0.1, "description": "Damping ratio for Y axis vibrations."},
+        {"name": "damping_ratio_z", "type": "float", "required": false, "default": 0.1, "description": "Damping ratio for Z axis vibrations."}
+      ]
+    },
+    {
+      "name": "[adxl345]",
+      "pattern": "adxl345 [<name>]",
+      "type": "named_multi_optional",
+      "description": "ADXL345 accelerometer support. Default chip name is 'default'.",
+      "parameters": [
+        {"name": "cs_pin", "type": "pin", "required": true, "default": null, "description": "SPI enable pin for the sensor."},
+        {"name": "spi_speed", "type": "int", "required": false, "default": 5000000, "description": "SPI speed (Hz)."},
+        {"name": "spi_bus", "type": "string", "required": false, "default": null, "description": "SPI bus name."},
+        {"name": "spi_software_sclk_pin", "type": "pin", "required": false, "default": null, "description": "Software SPI clock pin."},
+        {"name": "spi_software_mosi_pin", "type": "pin", "required": false, "default": null, "description": "Software SPI MOSI pin."},
+        {"name": "spi_software_miso_pin", "type": "pin", "required": false, "default": null, "description": "Software SPI MISO pin."},
+        {"name": "axes_map", "type": "string", "required": false, "default": "x, y, z", "description": "Accelerometer axis mapping to printer axes."},
+        {"name": "rate", "type": "enum", "required": false, "default": 3200, "enum_values": [3200, 1600, 800, 400, 200, 100, 50, 25], "description": "Output data rate."}
+      ]
+    },
+    {
+      "name": "[icm20948]",
+      "pattern": "icm20948 [<name>]",
+      "type": "named_multi_optional",
+      "description": "ICM20948 accelerometer (I2C).",
+      "parameters": [
+        {"name": "i2c_address", "type": "int", "required": false, "default": 104, "description": "I2C address (104=0x68, 105=0x69 if AD0 high)."},
+        {"name": "i2c_mcu", "type": "string", "required": false, "default": "mcu", "description": "MCU name."},
+        {"name": "i2c_bus", "type": "string", "required": false, "default": null, "description": "I2C bus."},
+        {"name": "i2c_software_scl_pin", "type": "pin", "required": false, "default": null, "description": "Software I2C SCL pin."},
+        {"name": "i2c_software_sda_pin", "type": "pin", "required": false, "default": null, "description": "Software I2C SDA pin."},
+        {"name": "i2c_speed", "type": "int", "required": false, "default": 400000, "description": "I2C speed (Hz)."},
+        {"name": "axes_map", "type": "string", "required": false, "default": "x, y, z", "description": "Axis mapping."}
+      ]
+    },
+    {
+      "name": "[lis2dw]",
+      "pattern": "lis2dw [<name>]",
+      "type": "named_multi_optional",
+      "description": "LIS2DW accelerometer (SPI or I2C).",
+      "parameters": [
+        {"name": "cs_pin", "type": "pin", "required": "conditional", "default": null, "description": "SPI enable pin. Required if using SPI."},
+        {"name": "spi_speed", "type": "int", "required": false, "default": 5000000, "description": "SPI speed (Hz)."},
+        {"name": "spi_bus", "type": "string", "required": false, "default": null, "description": "SPI bus."},
+        {"name": "spi_software_sclk_pin", "type": "pin", "required": false, "default": null, "description": "Software SPI clock."},
+        {"name": "spi_software_mosi_pin", "type": "pin", "required": false, "default": null, "description": "Software SPI MOSI."},
+        {"name": "spi_software_miso_pin", "type": "pin", "required": false, "default": null, "description": "Software SPI MISO."},
+        {"name": "i2c_address", "type": "int", "required": false, "default": 25, "description": "I2C address (25=0x19, 24=0x18 if SA0 high)."},
+        {"name": "i2c_mcu", "type": "string", "required": false, "default": "mcu", "description": "MCU name."},
+        {"name": "i2c_bus", "type": "string", "required": false, "default": null, "description": "I2C bus."},
+        {"name": "i2c_software_scl_pin", "type": "pin", "required": false, "default": null, "description": "Software I2C SCL."},
+        {"name": "i2c_software_sda_pin", "type": "pin", "required": false, "default": null, "description": "Software I2C SDA."},
+        {"name": "i2c_speed", "type": "int", "required": false, "default": 400000, "description": "I2C speed."},
+        {"name": "axes_map", "type": "string", "required": false, "default": "x, y, z", "description": "Axis mapping."}
+      ]
+    },
+    {
+      "name": "[lis3dh]",
+      "pattern": "lis3dh [<name>]",
+      "type": "named_multi_optional",
+      "description": "LIS3DH accelerometer (SPI or I2C). Same params as lis2dw.",
+      "parameters_note": "Same parameters as [lis2dw]"
+    },
+    {
+      "name": "[bmi160]",
+      "pattern": "bmi160 [<name>]",
+      "type": "named_multi_optional",
+      "description": "BMI160 accelerometer (I2C or SPI).",
+      "parameters": [
+        {"name": "i2c_address", "type": "int", "required": false, "default": 105, "description": "I2C address (105=0x69, 104=0x68 if SA0 tied to GND)."},
+        {"name": "i2c_mcu", "type": "string", "required": false, "default": "mcu", "description": "MCU name."},
+        {"name": "i2c_bus", "type": "string", "required": false, "default": null, "description": "I2C bus."},
+        {"name": "i2c_speed", "type": "int", "required": false, "default": 400000, "description": "I2C speed."},
+        {"name": "cs_pin", "type": "pin", "required": false, "default": null, "description": "SPI chip select (for SPI mode)."},
+        {"name": "spi_speed", "type": "int", "required": false, "default": null, "description": "SPI speed."},
+        {"name": "spi_bus", "type": "string", "required": false, "default": null, "description": "SPI bus."},
+        {"name": "spi_software_sclk_pin", "type": "pin", "required": false, "default": null, "description": "Software SPI clock."},
+        {"name": "spi_software_mosi_pin", "type": "pin", "required": false, "default": null, "description": "Software SPI MOSI."},
+        {"name": "spi_software_miso_pin", "type": "pin", "required": false, "default": null, "description": "Software SPI MISO."},
+        {"name": "axes_map", "type": "string", "required": false, "default": "x, y, z", "description": "Axis mapping."}
+      ]
+    },
+    {
+      "name": "[mpu9250]",
+      "pattern": "mpu9250 [<name>]",
+      "type": "named_multi_optional",
+      "description": "MPU-9250/9255/6515/6050/6500 accelerometer (I2C).",
+      "parameters": [
+        {"name": "i2c_address", "type": "int", "required": false, "default": 104, "description": "I2C address."},
+        {"name": "i2c_mcu", "type": "string", "required": false, "default": "mcu", "description": "MCU name."},
+        {"name": "i2c_bus", "type": "string", "required": false, "default": null, "description": "I2C bus."},
+        {"name": "i2c_software_scl_pin", "type": "pin", "required": false, "default": null, "description": "Software I2C SCL."},
+        {"name": "i2c_software_sda_pin", "type": "pin", "required": false, "default": null, "description": "Software I2C SDA."},
+        {"name": "i2c_speed", "type": "int", "required": false, "default": 400000, "description": "I2C speed."},
+        {"name": "axes_map", "type": "string", "required": false, "default": "x, y, z", "description": "Axis mapping."}
+      ]
+    },
+    {
+      "name": "[resonance_tester]",
+      "pattern": "resonance_tester",
+      "type": "singleton",
+      "description": "Resonance testing and automatic input shaper calibration.",
+      "parameters": [
+        {"name": "probe_points", "type": "string_list", "required": true, "default": null, "description": "List of X,Y,Z coordinates to test resonances at."},
+        {"name": "accel_chip", "type": "string", "required": "conditional", "default": null, "description": "Accelerometer chip name (e.g. 'adxl345' or 'adxl345 my_chip')."},
+        {"name": "accel_chip_x", "type": "string", "required": "conditional", "default": null, "description": "Accelerometer for X axis measurements."},
+        {"name": "accel_chip_y", "type": "string", "required": "conditional", "default": null, "description": "Accelerometer for Y axis measurements."},
+        {"name": "accel_chip_z", "type": "string", "required": false, "default": null, "description": "Accelerometer for Z axis measurements."},
+        {"name": "max_smoothing", "type": "float", "required": false, "default": null, "description": "Maximum input shaper smoothing for auto-calibration."},
+        {"name": "move_speed", "type": "float", "required": false, "default": 50, "description": "Speed (mm/s) to move between test points."},
+        {"name": "min_freq", "type": "float", "required": false, "default": 5, "description": "Minimum test frequency (Hz)."},
+        {"name": "max_freq", "type": "float", "required": false, "default": 135, "description": "Maximum test frequency (Hz)."},
+        {"name": "max_freq_z", "type": "float", "required": false, "default": 100, "description": "Maximum Z axis test frequency (Hz)."},
+        {"name": "accel_per_hz", "type": "float", "required": false, "default": 60, "description": "Acceleration per Hz for test frequency."},
+        {"name": "accel_per_hz_z", "type": "float", "required": false, "default": 15, "description": "Acceleration per Hz for Z axis."},
+        {"name": "hz_per_sec", "type": "float", "required": false, "default": 1.0, "description": "Test speed: frequency increase per second."},
+        {"name": "sweeping_accel", "type": "float", "required": false, "default": 400, "description": "Acceleration of slow sweeping moves (mm/s^2)."},
+        {"name": "sweeping_accel_z", "type": "float", "required": false, "default": 50, "description": "Sweeping acceleration for Z axis."},
+        {"name": "sweeping_period", "type": "float", "required": false, "default": 1.2, "description": "Period of slow sweeping moves (seconds). 0 = disabled."}
+      ]
+    },
+    {
+      "name": "[board_pins my_aliases]",
+      "pattern": "board_pins [<name>]",
+      "type": "named_multi_optional",
+      "description": "Board pin aliases for micro-controller.",
+      "parameters": [
+        {"name": "mcu", "type": "string", "required": false, "default": "mcu", "description": "Comma-separated list of MCUs that may use the aliases."},
+        {"name": "aliases", "type": "string", "required": true, "default": null, "description": "Comma-separated 'name=value' aliases."},
+        {"name": "aliases_<name>", "type": "string", "required": false, "default": null, "description": "Additional alias groups."}
+      ]
+    },
+    {
+      "name": "[include]",
+      "pattern": "include <filename>",
+      "type": "directive",
+      "description": "Include additional config file. Wildcards supported.",
+      "parameters": []
+    },
+    {
+      "name": "[duplicate_pin_override]",
+      "pattern": "duplicate_pin_override",
+      "type": "singleton",
+      "description": "Allow a single pin to be defined multiple times (diagnostics only).",
+      "parameters": [
+        {"name": "pins", "type": "string", "required": true, "default": null, "description": "Comma-separated list of pins that may be used multiple times."}
+      ]
+    },
+    {
+      "name": "[probe]",
+      "pattern": "probe",
+      "type": "singleton",
+      "description": "Z height probe. Creates 'probe:z_virtual_endstop' virtual pin.",
+      "parameters": [
+        {"name": "pin", "type": "pin", "required": true, "default": null, "description": "Probe detection pin."},
+        {"name": "deactivate_on_each_sample", "type": "boolean", "required": false, "default": true, "description": "Execute deactivation gcode between each probe attempt."},
+        {"name": "x_offset", "type": "float", "required": false, "default": 0.0, "description": "Distance (mm) between probe and nozzle on X axis."},
+        {"name": "y_offset", "type": "float", "required": false, "default": 0.0, "description": "Distance (mm) between probe and nozzle on Y axis."},
+        {"name": "z_offset", "type": "float", "required": true, "default": null, "description": "Distance (mm) between bed and nozzle when probe triggers."},
+        {"name": "speed", "type": "float", "required": false, "default": 5.0, "description": "Speed (mm/s) of Z axis when probing."},
+        {"name": "samples", "type": "int", "required": false, "default": 1, "description": "Number of times to probe each point."},
+        {"name": "sample_retract_dist", "type": "float", "required": false, "default": 2.0, "description": "Distance (mm) to lift between samples."},
+        {"name": "lift_speed", "type": "float", "required": false, "default": "speed", "description": "Speed (mm/s) of Z when lifting between samples."},
+        {"name": "samples_result", "type": "enum", "required": false, "default": "average", "enum_values": ["median", "average"], "description": "Calculation method when sampling more than once."},
+        {"name": "samples_tolerance", "type": "float", "required": false, "default": 0.100, "description": "Maximum Z distance (mm) a sample may differ from others."},
+        {"name": "samples_tolerance_retries", "type": "int", "required": false, "default": 0, "description": "Number of retries if tolerance exceeded."},
+        {"name": "activate_gcode", "type": "string", "required": false, "default": null, "description": "G-Code to execute prior to each probe attempt."},
+        {"name": "deactivate_gcode", "type": "string", "required": false, "default": null, "description": "G-Code to execute after each probe attempt."}
+      ]
+    },
+    {
+      "name": "[bltouch]",
+      "pattern": "bltouch",
+      "type": "singleton",
+      "description": "BLTouch probe. Creates 'probe:z_virtual_endstop' virtual pin.",
+      "parameters": [
+        {"name": "sensor_pin", "type": "pin", "required": true, "default": null, "description": "Pin connected to BLTouch sensor pin (usually needs ^ pullup)."},
+        {"name": "control_pin", "type": "pin", "required": true, "default": null, "description": "Pin connected to BLTouch control pin."},
+        {"name": "pin_move_time", "type": "float", "required": false, "default": 0.680, "description": "Time (seconds) to wait for BLTouch pin to move."},
+        {"name": "stow_on_each_sample", "type": "boolean", "required": false, "default": true, "description": "Move pin up between each probe in multi-probe sequence."},
+        {"name": "probe_with_touch_mode", "type": "boolean", "required": false, "default": false, "description": "Probe in touch_mode instead of pin_down mode."},
+        {"name": "pin_up_reports_not_triggered", "type": "boolean", "required": false, "default": true, "description": "BLTouch reports not triggered after pin_up."},
+        {"name": "pin_up_touch_mode_reports_triggered", "type": "boolean", "required": false, "default": true, "description": "BLTouch reports triggered after pin_up + touch_mode."},
+        {"name": "set_output_mode", "type": "enum", "required": false, "default": null, "enum_values": ["5V", "OD"], "description": "Sensor pin output mode for BLTouch V3.0+."},
+        {"name": "x_offset", "type": "float", "required": false, "default": 0.0, "description": "Probe X offset from nozzle."},
+        {"name": "y_offset", "type": "float", "required": false, "default": 0.0, "description": "Probe Y offset from nozzle."},
+        {"name": "z_offset", "type": "float", "required": true, "default": null, "description": "Probe Z offset."},
+        {"name": "speed", "type": "float", "required": false, "default": 5.0, "description": "Probing speed."},
+        {"name": "lift_speed", "type": "float", "required": false, "default": "speed", "description": "Lift speed between samples."},
+        {"name": "samples", "type": "int", "required": false, "default": 1, "description": "Number of probe samples."},
+        {"name": "sample_retract_dist", "type": "float", "required": false, "default": 2.0, "description": "Retract distance between samples."},
+        {"name": "samples_result", "type": "enum", "required": false, "default": "average", "enum_values": ["median", "average"], "description": "Calculation method."},
+        {"name": "samples_tolerance", "type": "float", "required": false, "default": 0.100, "description": "Sample tolerance."},
+        {"name": "samples_tolerance_retries", "type": "int", "required": false, "default": 0, "description": "Tolerance retries."}
+      ]
+    },
+    {
+      "name": "[smart_effector]",
+      "pattern": "smart_effector",
+      "type": "singleton",
+      "description": "Duet3d Smart Effector Z probe using force sensor.",
+      "parameters": [
+        {"name": "pin", "type": "pin", "required": true, "default": null, "description": "Pin connected to Smart Effector Z Probe output (pin 5)."},
+        {"name": "control_pin", "type": "pin", "required": false, "default": null, "description": "Pin connected to Smart Effector control input (pin 7)."},
+        {"name": "probe_accel", "type": "float", "required": false, "default": null, "description": "Limit acceleration of probing moves (mm/s^2)."},
+        {"name": "recovery_time", "type": "float", "required": false, "default": 0.4, "description": "Delay (seconds) between travel and probing moves."},
+        {"name": "z_offset", "type": "float", "required": true, "default": null, "description": "Trigger height of probe."},
+        {"name": "speed", "type": "float", "required": false, "default": null, "description": "Probing speed (mm/s)."},
+        {"name": "samples", "type": "int", "required": false, "default": 1, "description": "Probe samples."},
+        {"name": "sample_retract_dist", "type": "float", "required": false, "default": 2.0, "description": "Retract distance."},
+        {"name": "samples_result", "type": "enum", "required": false, "default": "average", "enum_values": ["median", "average"], "description": "Calculation method."},
+        {"name": "samples_tolerance", "type": "float", "required": false, "default": 0.100, "description": "Tolerance."},
+        {"name": "samples_tolerance_retries", "type": "int", "required": false, "default": 0, "description": "Retries."},
+        {"name": "activate_gcode", "type": "string", "required": false, "default": null, "description": "Activation G-Code."},
+        {"name": "deactivate_gcode", "type": "string", "required": false, "default": null, "description": "Deactivation G-Code."},
+        {"name": "deactivate_on_each_sample", "type": "boolean", "required": false, "default": true, "description": "Deactivate between samples."}
+      ]
+    },
+    {
+      "name": "[probe_eddy_current my_eddy_probe]",
+      "pattern": "probe_eddy_current <name>",
+      "type": "named_multi",
+      "description": "Eddy current inductive probe.",
+      "parameters": [
+        {"name": "sensor_type", "type": "enum", "required": true, "default": null, "enum_values": ["ldc1612"], "description": "Sensor chip type. Must be ldc1612."},
+        {"name": "frequency", "type": "float", "required": false, "default": 12000000, "description": "External crystal frequency (Hz)."},
+        {"name": "intb_pin", "type": "pin", "required": false, "default": null, "description": "MCU pin connected to LDC1612 INTB pin."},
+        {"name": "descend_z", "type": "float", "required": true, "default": null, "description": "Nominal distance (mm) between nozzle and bed for probe stop."},
+        {"name": "i2c_address", "type": "int", "required": false, "default": null, "description": "I2C address."},
+        {"name": "i2c_mcu", "type": "string", "required": false, "default": null, "description": "I2C MCU."},
+        {"name": "i2c_bus", "type": "string", "required": false, "default": null, "description": "I2C bus."},
+        {"name": "i2c_software_scl_pin", "type": "pin", "required": false, "default": null, "description": "Software I2C SCL."},
+        {"name": "i2c_software_sda_pin", "type": "pin", "required": false, "default": null, "description": "Software I2C SDA."},
+        {"name": "i2c_speed", "type": "int", "required": false, "default": null, "description": "I2C speed."},
+        {"name": "x_offset", "type": "float", "required": false, "default": 0, "description": "Probe X offset."},
+        {"name": "y_offset", "type": "float", "required": false, "default": 0, "description": "Probe Y offset."},
+        {"name": "speed", "type": "float", "required": false, "default": 5.0, "description": "Probing speed."},
+        {"name": "lift_speed", "type": "float", "required": false, "default": "speed", "description": "Lift speed."},
+        {"name": "samples", "type": "int", "required": false, "default": 1, "description": "Samples."},
+        {"name": "sample_retract_dist", "type": "float", "required": false, "default": 2.0, "description": "Retract distance."},
+        {"name": "samples_result", "type": "enum", "required": false, "default": "average", "enum_values": ["median", "average"], "description": "Result method."},
+        {"name": "samples_tolerance", "type": "float", "required": false, "default": 0.100, "description": "Tolerance."},
+        {"name": "samples_tolerance_retries", "type": "int", "required": false, "default": 0, "description": "Retries."},
+        {"name": "tap_threshold", "type": "float", "required": false, "default": null, "description": "Noise cutoff/stop trigger threshold (Hz) for tap probing."},
+        {"name": "tap_z_offset", "type": "float", "required": false, "default": 0.0, "description": "Z height of nozzle at contact point during tap probing."}
+      ]
+    },
+    {
+      "name": "[axis_twist_compensation]",
+      "pattern": "axis_twist_compensation",
+      "type": "singleton",
+      "description": "Compensate for inaccurate probe readings due to gantry twist.",
+      "parameters": [
+        {"name": "speed", "type": "float", "required": false, "default": 50, "description": "Speed (mm/s) of non-probing moves."},
+        {"name": "horizontal_move_z", "type": "float", "required": false, "default": 5, "description": "Height (mm) before probe."},
+        {"name": "calibrate_start_x", "type": "float", "required": true, "default": null, "description": "Minimum X coordinate for calibration."},
+        {"name": "calibrate_end_x", "type": "float", "required": true, "default": null, "description": "Maximum X coordinate for calibration."},
+        {"name": "calibrate_y", "type": "float", "required": true, "default": null, "description": "Y coordinate for X-axis twist calibration. Near bed center."},
+        {"name": "calibrate_start_y", "type": "float", "required": "conditional", "default": null, "description": "Min Y for Y-axis twist compensation."},
+        {"name": "calibrate_end_y", "type": "float", "required": "conditional", "default": null, "description": "Max Y for Y-axis twist compensation."},
+        {"name": "calibrate_x", "type": "float", "required": "conditional", "default": null, "description": "X coordinate for Y-axis twist calibration."}
+      ]
+    },
+    {
+      "name": "[dual_carriage]",
+      "pattern": "dual_carriage [<name>]",
+      "type": "singleton_or_named",
+      "description": "Dual carriage support for IDEX printers.",
+      "parameters": [
+        {"name": "axis", "type": "enum", "required": true, "default": null, "enum_values": ["x", "y"], "description": "Axis this extra carriage is on."},
+        {"name": "safe_distance", "type": "float", "required": false, "default": "inferred from positions", "description": "Minimum distance (mm) between dual and primary carriages."},
+        {"name": "step_pin", "type": "pin", "required": true, "default": null, "description": "Step GPIO pin."},
+        {"name": "dir_pin", "type": "pin", "required": true, "default": null, "description": "Direction GPIO pin."},
+        {"name": "enable_pin", "type": "pin", "required": false, "default": null, "description": "Enable pin."},
+        {"name": "microsteps", "type": "int", "required": true, "default": null, "description": "Microsteps."},
+        {"name": "rotation_distance", "type": "float", "required": true, "default": null, "description": "Rotation distance."},
+        {"name": "endstop_pin", "type": "pin", "required": true, "default": null, "description": "Endstop pin."},
+        {"name": "position_endstop", "type": "float", "required": true, "default": null, "description": "Endstop position."},
+        {"name": "position_min", "type": "float", "required": false, "default": 0, "description": "Minimum position."},
+        {"name": "position_max", "type": "float", "required": true, "default": null, "description": "Maximum position."}
+      ]
+    },
+    {
+      "name": "[extruder_stepper my_extra_stepper]",
+      "pattern": "extruder_stepper <name>",
+      "type": "named_multi",
+      "description": "Additional steppers synchronized to extruder movement.",
+      "parameters": [
+        {"name": "extruder", "type": "string", "required": true, "default": null, "description": "Extruder this stepper syncs to. Empty string = not synchronized."},
+        {"name": "step_pin", "type": "pin", "required": true, "default": null, "description": "Step GPIO pin."},
+        {"name": "dir_pin", "type": "pin", "required": true, "default": null, "description": "Direction GPIO pin."},
+        {"name": "enable_pin", "type": "pin", "required": false, "default": null, "description": "Enable pin."},
+        {"name": "microsteps", "type": "int", "required": true, "default": null, "description": "Microsteps."},
+        {"name": "rotation_distance", "type": "float", "required": true, "default": null, "description": "Rotation distance."}
+      ]
+    },
+    {
+      "name": "[manual_stepper my_stepper]",
+      "pattern": "manual_stepper <name>",
+      "type": "named_multi",
+      "description": "Manual steppers controlled via MANUAL_STEPPER command. Not connected to printer kinematics.",
+      "parameters": [
+        {"name": "step_pin", "type": "pin", "required": true, "default": null, "description": "Step GPIO pin."},
+        {"name": "dir_pin", "type": "pin", "required": true, "default": null, "description": "Direction GPIO pin."},
+        {"name": "enable_pin", "type": "pin", "required": false, "default": null, "description": "Enable pin."},
+        {"name": "microsteps", "type": "int", "required": true, "default": null, "description": "Microsteps."},
+        {"name": "rotation_distance", "type": "float", "required": true, "default": null, "description": "Rotation distance."},
+        {"name": "velocity", "type": "float", "required": false, "default": 5, "description": "Default velocity (mm/s)."},
+        {"name": "accel", "type": "float", "required": false, "default": 0, "description": "Default acceleration (mm/s^2). 0 = no acceleration."},
+        {"name": "endstop_pin", "type": "pin", "required": false, "default": null, "description": "Endstop switch detection pin for homing moves."},
+        {"name": "position_min", "type": "float", "required": false, "default": null, "description": "Minimum position limit."},
+        {"name": "position_max", "type": "float", "required": false, "default": null, "description": "Maximum position limit."}
+      ]
+    },
+    {
+      "name": "[verify_heater heater_config_name]",
+      "pattern": "verify_heater <heater_name>",
+      "type": "named_multi",
+      "description": "Heater and temperature sensor verification settings.",
+      "parameters": [
+        {"name": "max_error", "type": "float", "required": false, "default": 120, "description": "Maximum cumulative temperature error before raising error."},
+        {"name": "check_gain_time", "type": "float", "required": false, "default": "20 (extruder) or 60 (heater_bed)", "description": "Time (seconds) for heater to show temperature increase during initial heating."},
+        {"name": "hysteresis", "type": "float", "required": false, "default": 5, "description": "Maximum temperature difference (°C) considered in range."},
+        {"name": "heating_gain", "type": "float", "required": false, "default": 2, "description": "Minimum temperature increase (°C) during check_gain_time."}
+      ]
+    },
+    {
+      "name": "[homing_heaters]",
+      "pattern": "homing_heaters",
+      "type": "singleton",
+      "description": "Disable heaters when homing or probing.",
+      "parameters": [
+        {"name": "steppers", "type": "string", "required": false, "default": "all", "description": "Comma-separated list of steppers that disable heaters."},
+        {"name": "heaters", "type": "string", "required": false, "default": "all", "description": "Comma-separated list of heaters to disable during homing."}
+      ]
+    },
+    {
+      "name": "[thermistor my_thermistor]",
+      "pattern": "thermistor <name>",
+      "type": "named_multi",
+      "description": "Custom thermistor definition. Can be used as sensor_type in heater sections.",
+      "parameters": [
+        {"name": "temperature1", "type": "float", "required": "conditional", "default": null, "description": "First temperature measurement (°C). Required for Steinhart-Hart."},
+        {"name": "resistance1", "type": "float", "required": "conditional", "default": null, "description": "First resistance measurement (Ohms)."},
+        {"name": "temperature2", "type": "float", "required": "conditional", "default": null, "description": "Second temperature measurement (°C)."},
+        {"name": "resistance2", "type": "float", "required": "conditional", "default": null, "description": "Second resistance measurement (Ohms)."},
+        {"name": "temperature3", "type": "float", "required": "conditional", "default": null, "description": "Third temperature measurement (°C)."},
+        {"name": "resistance3", "type": "float", "required": "conditional", "default": null, "description": "Third resistance measurement (Ohms)."},
+        {"name": "beta", "type": "float", "required": "conditional", "default": null, "description": "Beta value. Alternative to 3-point Steinhart-Hart (use with temperature1, resistance1)."}
+      ]
+    },
+    {
+      "name": "[adc_temperature my_sensor]",
+      "pattern": "adc_temperature <name>",
+      "type": "named_multi",
+      "description": "Custom ADC temperature sensor using linear interpolation.",
+      "parameters": [
+        {"name": "temperature1", "type": "float", "required": true, "default": null, "description": "Temperature reference point (°C). At least 2 required."},
+        {"name": "voltage1", "type": "float", "required": "conditional", "default": null, "description": "Voltage reference point (V). Use voltage or resistance."},
+        {"name": "resistance1", "type": "float", "required": "conditional", "default": null, "description": "Resistance reference point (Ohms). Alternative to voltage."}
+      ]
+    },
+    {
+      "name": "[heater_generic my_generic_heater]",
+      "pattern": "heater_generic <name>",
+      "type": "named_multi",
+      "description": "Generic heaters controlled via SET_HEATER_TEMPERATURE.",
+      "parameters": [
+        {"name": "gcode_id", "type": "string", "required": true, "default": null, "description": "ID for M105 temperature reporting."},
+        {"name": "heater_pin", "type": "pin", "required": true, "default": null, "description": "PWM output pin."},
+        {"name": "max_power", "type": "float", "required": false, "default": 1.0, "description": "Maximum power (0.0-1.0)."},
+        {"name": "sensor_type", "type": "string", "required": true, "default": null, "description": "Temperature sensor type."},
+        {"name": "sensor_pin", "type": "pin", "required": true, "default": null, "description": "Sensor pin."},
+        {"name": "smooth_time", "type": "float", "required": false, "default": 1.0, "description": "Smoothing time."},
+        {"name": "control", "type": "enum", "required": true, "default": null, "enum_values": ["pid", "watermark"], "description": "Control algorithm."},
+        {"name": "pid_Kp", "type": "float", "required": "conditional", "default": null, "description": "PID Kp."},
+        {"name": "pid_Ki", "type": "float", "required": "conditional", "default": null, "description": "PID Ki."},
+        {"name": "pid_Kd", "type": "float", "required": "conditional", "default": null, "description": "PID Kd."},
+        {"name": "pwm_cycle_time", "type": "float", "required": false, "default": 0.100, "description": "PWM cycle time."},
+        {"name": "min_temp", "type": "float", "required": true, "default": null, "description": "Minimum temperature."},
+        {"name": "max_temp", "type": "float", "required": true, "default": null, "description": "Maximum temperature."}
+      ]
+    },
+    {
+      "name": "[temperature_sensor my_sensor]",
+      "pattern": "temperature_sensor <name>",
+      "type": "named_multi",
+      "description": "Generic temperature sensor reported via M105.",
+      "parameters": [
+        {"name": "sensor_type", "type": "string", "required": true, "default": null, "description": "Temperature sensor type."},
+        {"name": "sensor_pin", "type": "pin", "required": "conditional", "default": null, "description": "Sensor pin (not needed for all sensor types)."},
+        {"name": "min_temp", "type": "float", "required": false, "default": null, "description": "Minimum valid temperature."},
+        {"name": "max_temp", "type": "float", "required": false, "default": null, "description": "Maximum valid temperature."},
+        {"name": "gcode_id", "type": "string", "required": false, "default": null, "description": "ID for M105 reporting."}
+      ]
+    },
+    {
+      "name": "[temperature_probe my_probe]",
+      "pattern": "temperature_probe <name>",
+      "type": "named_multi",
+      "description": "Probe coil temperature with optional thermal drift calibration.",
+      "parameters": [
+        {"name": "sensor_type", "type": "string", "required": true, "default": null, "description": "Sensor type."},
+        {"name": "sensor_pin", "type": "pin", "required": true, "default": null, "description": "Sensor pin."},
+        {"name": "min_temp", "type": "float", "required": true, "default": null, "description": "Min temp."},
+        {"name": "max_temp", "type": "float", "required": true, "default": null, "description": "Max temp."},
+        {"name": "smooth_time", "type": "float", "required": false, "default": 2.0, "description": "Smoothing time (seconds)."},
+        {"name": "gcode_id", "type": "string", "required": false, "default": null, "description": "M105 reporting ID."},
+        {"name": "speed", "type": "float", "required": false, "default": "probe speed", "description": "Travel speed for xy moves during calibration."},
+        {"name": "horizontal_move_z", "type": "float", "required": false, "default": 2, "description": "Z distance from bed for xy moves during calibration."},
+        {"name": "resting_z", "type": "float", "required": false, "default": 0.4, "description": "Z distance from bed for resting during calibration."},
+        {"name": "calibration_position", "type": "string", "required": false, "default": null, "description": "X,Y,Z for calibration initialization."},
+        {"name": "calibration_bed_temp", "type": "float", "required": false, "default": null, "description": "Max safe bed temp (°C) for probe drift calibration."},
+        {"name": "calibration_extruder_temp", "type": "float", "required": false, "default": null, "description": "Extruder temp (°C) for drift calibration."},
+        {"name": "extruder_heating_z", "type": "float", "required": false, "default": 50.0, "description": "Z location for extruder heating."},
+        {"name": "max_validation_temp", "type": "float", "required": false, "default": 60.0, "description": "Max temperature for calibration validation."}
+      ]
+    },
+    {
+      "name": "[fan]",
+      "pattern": "fan",
+      "type": "singleton",
+      "description": "Print cooling fan.",
+      "parameters": [
+        {"name": "pin", "type": "pin", "required": true, "default": null, "description": "Output pin controlling the fan."},
+        {"name": "max_power", "type": "float", "required": false, "default": 1.0, "description": "Maximum power (0.0 to 1.0)."},
+        {"name": "shutdown_speed", "type": "float", "required": false, "default": 0, "description": "Fan speed on MCU error state (0.0 to 1.0)."},
+        {"name": "cycle_time", "type": "float", "required": false, "default": 0.010, "description": "Time (seconds) for each PWM cycle."},
+        {"name": "hardware_pwm", "type": "boolean", "required": false, "default": false, "description": "Use hardware PWM instead of software PWM."},
+        {"name": "kick_start_time", "type": "float", "required": false, "default": 0.100, "description": "Time (seconds) to run fan at full speed when first enabling or increasing >50%."},
+        {"name": "off_below", "type": "float", "required": false, "default": 0.0, "description": "Minimum input speed (0.0-1.0) that powers the fan. Below this, fan turns off."},
+        {"name": "tachometer_pin", "type": "pin", "required": false, "default": null, "description": "Tachometer input pin for monitoring fan speed."},
+        {"name": "tachometer_ppr", "type": "int", "required": false, "default": 2, "description": "Pulses per revolution of tachometer signal."},
+        {"name": "tachometer_poll_interval", "type": "float", "required": false, "default": 0.0015, "description": "Polling period (seconds) of tachometer pin."},
+        {"name": "enable_pin", "type": "pin", "required": false, "default": null, "description": "Optional pin to enable power to the fan."}
+      ]
+    },
+    {
+      "name": "[heater_fan heatbreak_cooling_fan]",
+      "pattern": "heater_fan <name>",
+      "type": "named_multi",
+      "description": "Fan enabled whenever associated heater is active. Shutdown_speed defaults to max_power.",
+      "parameters": [
+        {"name": "pin", "type": "pin", "required": true, "default": null, "description": "Fan output pin."},
+        {"name": "max_power", "type": "float", "required": false, "default": 1.0, "description": "Maximum power."},
+        {"name": "shutdown_speed", "type": "float", "required": false, "default": "max_power", "description": "Fan speed on MCU error."},
+        {"name": "cycle_time", "type": "float", "required": false, "default": 0.010, "description": "PWM cycle time."},
+        {"name": "hardware_pwm", "type": "boolean", "required": false, "default": false, "description": "Hardware PWM."},
+        {"name": "kick_start_time", "type": "float", "required": false, "default": 0.100, "description": "Kick start time."},
+        {"name": "off_below", "type": "float", "required": false, "default": 0.0, "description": "Off below threshold."},
+        {"name": "tachometer_pin", "type": "pin", "required": false, "default": null, "description": "Tachometer pin."},
+        {"name": "tachometer_ppr", "type": "int", "required": false, "default": 2, "description": "Tachometer PPR."},
+        {"name": "tachometer_poll_interval", "type": "float", "required": false, "default": 0.0015, "description": "Tachometer poll interval."},
+        {"name": "enable_pin", "type": "pin", "required": false, "default": null, "description": "Enable pin."},
+        {"name": "heater", "type": "string", "required": false, "default": "extruder", "description": "Heater name(s) this fan is associated with (comma-separated)."},
+        {"name": "heater_temp", "type": "float", "required": false, "default": 50.0, "description": "Temperature (°C) heater must drop below before fan disables."},
+        {"name": "fan_speed", "type": "float", "required": false, "default": 1.0, "description": "Fan speed (0.0-1.0) when associated heater is enabled."}
+      ]
+    },
+    {
+      "name": "[controller_fan my_controller_fan]",
+      "pattern": "controller_fan <name>",
+      "type": "named_multi",
+      "description": "Fan enabled when associated heater or stepper driver is active.",
+      "parameters": [
+        {"name": "pin", "type": "pin", "required": true, "default": null, "description": "Fan output pin."},
+        {"name": "max_power", "type": "float", "required": false, "default": 1.0, "description": "Maximum power."},
+        {"name": "shutdown_speed", "type": "float", "required": false, "default": 0, "description": "Shutdown speed."},
+        {"name": "cycle_time", "type": "float", "required": false, "default": 0.010, "description": "PWM cycle time."},
+        {"name": "hardware_pwm", "type": "boolean", "required": false, "default": false, "description": "Hardware PWM."},
+        {"name": "kick_start_time", "type": "float", "required": false, "default": 0.100, "description": "Kick start."},
+        {"name": "off_below", "type": "float", "required": false, "default": 0.0, "description": "Off below."},
+        {"name": "tachometer_pin", "type": "pin", "required": false, "default": null, "description": "Tachometer pin."},
+        {"name": "tachometer_ppr", "type": "int", "required": false, "default": 2, "description": "Tachometer PPR."},
+        {"name": "tachometer_poll_interval", "type": "float", "required": false, "default": 0.0015, "description": "Tachometer poll."},
+        {"name": "enable_pin", "type": "pin", "required": false, "default": null, "description": "Enable pin."},
+        {"name": "fan_speed", "type": "float", "required": false, "default": 1.0, "description": "Fan speed when heater/stepper active."},
+        {"name": "idle_timeout", "type": "float", "required": false, "default": 30, "description": "Time (seconds) to keep running after stepper/heater deactivates."},
+        {"name": "idle_speed", "type": "float", "required": false, "default": "fan_speed", "description": "Fan speed during idle countdown."},
+        {"name": "heater", "type": "string", "required": false, "default": "extruder", "description": "Associated heater(s)."},
+        {"name": "stepper", "type": "string", "required": false, "default": "all", "description": "Associated stepper(s)."}
+      ]
+    },
+    {
+      "name": "[temperature_fan my_temp_fan]",
+      "pattern": "temperature_fan <name>",
+      "type": "named_multi",
+      "description": "Temperature-triggered cooling fan. Shutdown_speed defaults to max_power.",
+      "parameters": [
+        {"name": "pin", "type": "pin", "required": true, "default": null, "description": "Fan output pin."},
+        {"name": "max_power", "type": "float", "required": false, "default": 1.0, "description": "Maximum power."},
+        {"name": "shutdown_speed", "type": "float", "required": false, "default": "max_power", "description": "Shutdown speed."},
+        {"name": "cycle_time", "type": "float", "required": false, "default": 0.010, "description": "PWM cycle time."},
+        {"name": "hardware_pwm", "type": "boolean", "required": false, "default": false, "description": "Hardware PWM."},
+        {"name": "kick_start_time", "type": "float", "required": false, "default": 0.100, "description": "Kick start."},
+        {"name": "off_below", "type": "float", "required": false, "default": 0.0, "description": "Off below."},
+        {"name": "tachometer_pin", "type": "pin", "required": false, "default": null, "description": "Tachometer pin."},
+        {"name": "tachometer_ppr", "type": "int", "required": false, "default": 2, "description": "Tachometer PPR."},
+        {"name": "tachometer_poll_interval", "type": "float", "required": false, "default": 0.0015, "description": "Tachometer poll."},
+        {"name": "enable_pin", "type": "pin", "required": false, "default": null, "description": "Enable pin."},
+        {"name": "sensor_type", "type": "string", "required": true, "default": null, "description": "Temperature sensor type."},
+        {"name": "sensor_pin", "type": "pin", "required": true, "default": null, "description": "Sensor pin."},
+        {"name": "control", "type": "enum", "required": true, "default": null, "enum_values": ["pid", "watermark"], "description": "Control algorithm."},
+        {"name": "max_delta", "type": "float", "required": false, "default": 2.0, "description": "Watermark hysteresis."},
+        {"name": "min_temp", "type": "float", "required": true, "default": null, "description": "Min temp."},
+        {"name": "max_temp", "type": "float", "required": true, "default": null, "description": "Max temp."},
+        {"name": "pid_Kp", "type": "float", "required": "conditional", "default": null, "description": "PID Kp."},
+        {"name": "pid_Ki", "type": "float", "required": "conditional", "default": null, "description": "PID Ki."},
+        {"name": "pid_Kd", "type": "float", "required": "conditional", "default": null, "description": "PID Kd."},
+        {"name": "pid_deriv_time", "type": "float", "required": false, "default": 2.0, "description": "PID derivative smoothing time (seconds)."},
+        {"name": "target_temp", "type": "float", "required": false, "default": 40.0, "description": "Target temperature (°C)."},
+        {"name": "max_speed", "type": "float", "required": false, "default": 1.0, "description": "Maximum fan speed over target temp."},
+        {"name": "min_speed", "type": "float", "required": false, "default": 0.3, "description": "Minimum fan speed for PID fans."},
+        {"name": "gcode_id", "type": "string", "required": false, "default": null, "description": "ID for M105 reporting."}
+      ]
+    },
+    {
+      "name": "[fan_generic extruder_partfan]",
+      "pattern": "fan_generic <name>",
+      "type": "named_multi",
+      "description": "Manually controlled fan via SET_FAN_SPEED command.",
+      "parameters": [
+        {"name": "pin", "type": "pin", "required": true, "default": null, "description": "Fan output pin."},
+        {"name": "max_power", "type": "float", "required": false, "default": 1.0, "description": "Maximum power."},
+        {"name": "shutdown_speed", "type": "float", "required": false, "default": 0, "description": "Shutdown speed."},
+        {"name": "cycle_time", "type": "float", "required": false, "default": 0.010, "description": "PWM cycle time."},
+        {"name": "hardware_pwm", "type": "boolean", "required": false, "default": false, "description": "Hardware PWM."},
+        {"name": "kick_start_time", "type": "float", "required": false, "default": 0.100, "description": "Kick start."},
+        {"name": "off_below", "type": "float", "required": false, "default": 0.0, "description": "Off below."},
+        {"name": "tachometer_pin", "type": "pin", "required": false, "default": null, "description": "Tachometer pin."},
+        {"name": "tachometer_ppr", "type": "int", "required": false, "default": 2, "description": "Tachometer PPR."},
+        {"name": "tachometer_poll_interval", "type": "float", "required": false, "default": 0.0015, "description": "Tachometer poll."},
+        {"name": "enable_pin", "type": "pin", "required": false, "default": null, "description": "Enable pin."}
+      ]
+    },
+    {
+      "name": "[led my_led]",
+      "pattern": "led <name>",
+      "type": "named_multi",
+      "description": "LEDs controlled via micro-controller PWM pins.",
+      "parameters": [
+        {"name": "red_pin", "type": "pin", "required": "conditional", "default": null, "description": "Pin for red LED. At least one color pin required."},
+        {"name": "green_pin", "type": "pin", "required": "conditional", "default": null, "description": "Pin for green LED."},
+        {"name": "blue_pin", "type": "pin", "required": "conditional", "default": null, "description": "Pin for blue LED."},
+        {"name": "white_pin", "type": "pin", "required": false, "default": null, "description": "Pin for white LED."},
+        {"name": "cycle_time", "type": "float", "required": false, "default": 0.010, "description": "PWM cycle time (seconds)."},
+        {"name": "hardware_pwm", "type": "boolean", "required": false, "default": false, "description": "Use hardware PWM."},
+        {"name": "initial_RED", "type": "float", "required": false, "default": 0.0, "description": "Initial red value (0.0-1.0)."},
+        {"name": "initial_GREEN", "type": "float", "required": false, "default": 0.0, "description": "Initial green value."},
+        {"name": "initial_BLUE", "type": "float", "required": false, "default": 0.0, "description": "Initial blue value."},
+        {"name": "initial_WHITE", "type": "float", "required": false, "default": 0.0, "description": "Initial white value."}
+      ]
+    },
+    {
+      "name": "[neopixel my_neopixel]",
+      "pattern": "neopixel <name>",
+      "type": "named_multi",
+      "description": "Neopixel (WS2812) LED support.",
+      "parameters": [
+        {"name": "pin", "type": "pin", "required": true, "default": null, "description": "Pin connected to neopixel."},
+        {"name": "chain_count", "type": "int", "required": false, "default": 1, "description": "Number of daisy-chained Neopixel chips."},
+        {"name": "color_order", "type": "string", "required": false, "default": "GRB", "description": "Pixel order (string of R,G,B,W or comma-separated list)."},
+        {"name": "initial_RED", "type": "float", "required": false, "default": 0.0, "description": "Initial red (0.0-1.0)."},
+        {"name": "initial_GREEN", "type": "float", "required": false, "default": 0.0, "description": "Initial green."},
+        {"name": "initial_BLUE", "type": "float", "required": false, "default": 0.0, "description": "Initial blue."},
+        {"name": "initial_WHITE", "type": "float", "required": false, "default": 0.0, "description": "Initial white."}
+      ]
+    },
+    {
+      "name": "[dotstar my_dotstar]",
+      "pattern": "dotstar <name>",
+      "type": "named_multi",
+      "description": "Dotstar (APA102) LED support.",
+      "parameters": [
+        {"name": "data_pin", "type": "pin", "required": true, "default": null, "description": "Pin connected to data line."},
+        {"name": "clock_pin", "type": "pin", "required": true, "default": null, "description": "Pin connected to clock line."},
+        {"name": "chain_count", "type": "int", "required": false, "default": 1, "description": "Number of daisy-chained chips."},
+        {"name": "initial_RED", "type": "float", "required": false, "default": 0.0, "description": "Initial red."},
+        {"name": "initial_GREEN", "type": "float", "required": false, "default": 0.0, "description": "Initial green."},
+        {"name": "initial_BLUE", "type": "float", "required": false, "default": 0.0, "description": "Initial blue."}
+      ]
+    },
+    {
+      "name": "[pca9533 my_pca9533]",
+      "pattern": "pca9533 <name>",
+      "type": "named_multi",
+      "description": "PCA9533 LED support (mightyboard).",
+      "parameters": [
+        {"name": "i2c_address", "type": "int", "required": false, "default": 98, "description": "I2C address (98 for PCA9533/1, 99 for PCA9533/2)."},
+        {"name": "i2c_mcu", "type": "string", "required": false, "default": "mcu", "description": "MCU name."},
+        {"name": "i2c_bus", "type": "string", "required": false, "default": null, "description": "I2C bus."},
+        {"name": "initial_RED", "type": "float", "required": false, "default": 0.0, "description": "Initial red."},
+        {"name": "initial_GREEN", "type": "float", "required": false, "default": 0.0, "description": "Initial green."},
+        {"name": "initial_BLUE", "type": "float", "required": false, "default": 0.0, "description": "Initial blue."},
+        {"name": "initial_WHITE", "type": "float", "required": false, "default": 0.0, "description": "Initial white."}
+      ]
+    },
+    {
+      "name": "[pca9632 my_pca9632]",
+      "pattern": "pca9632 <name>",
+      "type": "named_multi",
+      "description": "PCA9632 LED support (FlashForge Dreamer).",
+      "parameters": [
+        {"name": "i2c_address", "type": "int", "required": false, "default": 98, "description": "I2C address (96-99)."},
+        {"name": "i2c_mcu", "type": "string", "required": false, "default": "mcu", "description": "MCU."},
+        {"name": "i2c_bus", "type": "string", "required": false, "default": null, "description": "I2C bus."},
+        {"name": "color_order", "type": "string", "required": false, "default": "RGBW", "description": "Pixel order."},
+        {"name": "initial_RED", "type": "float", "required": false, "default": 0.0, "description": "Initial red."},
+        {"name": "initial_GREEN", "type": "float", "required": false, "default": 0.0, "description": "Initial green."},
+        {"name": "initial_BLUE", "type": "float", "required": false, "default": 0.0, "description": "Initial blue."},
+        {"name": "initial_WHITE", "type": "float", "required": false, "default": 0.0, "description": "Initial white."}
+      ]
+    },
+    {
+      "name": "[servo my_servo]",
+      "pattern": "servo <name>",
+      "type": "named_multi",
+      "description": "Servo motor control via SET_SERVO command.",
+      "parameters": [
+        {"name": "pin", "type": "pin", "required": true, "default": null, "description": "PWM output pin controlling the servo."},
+        {"name": "maximum_servo_angle", "type": "float", "required": false, "default": 180, "description": "Maximum angle (degrees)."},
+        {"name": "minimum_pulse_width", "type": "float", "required": false, "default": 0.001, "description": "Minimum pulse width (seconds) corresponding to 0°."},
+        {"name": "maximum_pulse_width", "type": "float", "required": false, "default": 0.002, "description": "Maximum pulse width (seconds) corresponding to max angle."},
+        {"name": "initial_angle", "type": "float", "required": false, "default": null, "description": "Initial angle (degrees)."},
+        {"name": "initial_pulse_width", "type": "float", "required": false, "default": null, "description": "Initial pulse width (seconds). Only if initial_angle not set."}
+      ]
+    },
+    {
+      "name": "[gcode_button my_gcode_button]",
+      "pattern": "gcode_button <name>",
+      "type": "named_multi",
+      "description": "Execute gcode on button press/release.",
+      "parameters": [
+        {"name": "pin", "type": "pin", "required": true, "default": null, "description": "Button connection pin."},
+        {"name": "analog_range", "type": "string", "required": false, "default": null, "description": "Two comma-separated resistances (Ohms) for min/max range."},
+        {"name": "analog_pullup_resistor", "type": "float", "required": false, "default": 4700, "description": "Pullup resistance (Ohms) for analog buttons."},
+        {"name": "press_gcode", "type": "string", "required": true, "default": null, "description": "G-Code to execute on button press."},
+        {"name": "release_gcode", "type": "string", "required": false, "default": null, "description": "G-Code to execute on button release."},
+        {"name": "debounce_delay", "type": "float", "required": false, "default": 0, "description": "Debounce delay (seconds)."}
+      ]
+    },
+    {
+      "name": "[output_pin my_pin]",
+      "pattern": "output_pin <name>",
+      "type": "named_multi",
+      "description": "Run-time configurable output pins via SET_PIN command.",
+      "parameters": [
+        {"name": "pin", "type": "pin", "required": true, "default": null, "description": "Output pin."},
+        {"name": "pwm", "type": "boolean", "required": false, "default": false, "description": "Enable pulse-width-modulation."},
+        {"name": "value", "type": "float", "required": false, "default": 0, "description": "Initial value (0-1 for PWM, 0 or 1 for digital)."},
+        {"name": "shutdown_value", "type": "float", "required": false, "default": 0, "description": "Value on MCU shutdown."},
+        {"name": "cycle_time", "type": "float", "required": false, "default": 0.100, "description": "PWM cycle time (seconds)."},
+        {"name": "hardware_pwm", "type": "boolean", "required": false, "default": false, "description": "Use hardware PWM."},
+        {"name": "scale", "type": "float", "required": false, "default": null, "description": "Scale factor for value interpretation."}
+      ]
+    },
+    {
+      "name": "[static_pwm_clock my_pin]",
+      "pattern": "static_pwm_clock <name>",
+      "type": "named_multi",
+      "description": "Static clock output pin for providing clock to other hardware.",
+      "parameters": [
+        {"name": "pin", "type": "pin", "required": true, "default": null, "description": "Output pin."},
+        {"name": "frequency", "type": "float", "required": false, "default": 100, "description": "Target output frequency."}
+      ]
+    },
+    {
+      "name": "[pwm_tool my_tool]",
+      "pattern": "pwm_tool <name>",
+      "type": "named_multi",
+      "description": "High speed PWM digital output pins.",
+      "parameters": [
+        {"name": "pin", "type": "pin", "required": true, "default": null, "description": "Output pin."},
+        {"name": "maximum_mcu_duration", "type": "float", "required": false, "default": 0, "description": "Max duration MCU drives non-shutdown value without host ack. 0=disabled."},
+        {"name": "value", "type": "float", "required": false, "default": 0, "description": "Initial value."},
+        {"name": "shutdown_value", "type": "float", "required": false, "default": 0, "description": "Shutdown value."},
+        {"name": "cycle_time", "type": "float", "required": false, "default": 0.100, "description": "PWM cycle time."},
+        {"name": "hardware_pwm", "type": "boolean", "required": false, "default": false, "description": "Hardware PWM."},
+        {"name": "scale", "type": "float", "required": false, "default": null, "description": "Scale factor."}
+      ]
+    },
+    {
+      "name": "[pwm_cycle_time my_pin]",
+      "pattern": "pwm_cycle_time <name>",
+      "type": "named_multi",
+      "description": "Output pins with dynamic PWM cycle timing via SET_PIN with CYCLE_TIME.",
+      "parameters": [
+        {"name": "pin", "type": "pin", "required": true, "default": null, "description": "Output pin."},
+        {"name": "value", "type": "float", "required": false, "default": 0, "description": "Initial value."},
+        {"name": "shutdown_value", "type": "float", "required": false, "default": 0, "description": "Shutdown value."},
+        {"name": "cycle_time", "type": "float", "required": false, "default": 0.100, "description": "PWM cycle time."},
+        {"name": "scale", "type": "float", "required": false, "default": null, "description": "Scale factor."}
+      ]
+    },
+    {
+      "name": "[static_digital_output my_output_pins]",
+      "pattern": "static_digital_output <name>",
+      "type": "named_multi",
+      "description": "Statically configured GPIO output pins set during MCU config. Cannot change at runtime.",
+      "parameters": [
+        {"name": "pins", "type": "string", "required": true, "default": null, "description": "Comma-separated list of GPIO output pins (prefix with ! for low)."}
+      ]
+    },
+    {
+      "name": "[multi_pin my_multi_pin]",
+      "pattern": "multi_pin <name>",
+      "type": "named_multi",
+      "description": "Internal pin alias that modifies multiple output pins simultaneously.",
+      "parameters": [
+        {"name": "pins", "type": "string", "required": true, "default": null, "description": "Comma-separated list of pins for this alias."}
+      ]
+    },
+    {
+      "name": "[tmc2130 stepper_x]",
+      "pattern": "tmc2130 <stepper_name>",
+      "type": "named_multi",
+      "description": "TMC2130 stepper motor driver via SPI bus.",
+      "parameters": [
+        {"name": "cs_pin", "type": "pin", "required": true, "default": null, "description": "TMC2130 chip select line pin."},
+        {"name": "spi_speed", "type": "int", "required": false, "default": null, "description": "SPI speed (Hz)."},
+        {"name": "spi_bus", "type": "string", "required": false, "default": null, "description": "SPI bus."},
+        {"name": "spi_software_sclk_pin", "type": "pin", "required": false, "default": null, "description": "Software SPI clock."},
+        {"name": "spi_software_mosi_pin", "type": "pin", "required": false, "default": null, "description": "Software SPI MOSI."},
+        {"name": "spi_software_miso_pin", "type": "pin", "required": false, "default": null, "description": "Software SPI MISO."},
+        {"name": "chain_position", "type": "int", "required": false, "default": null, "description": "SPI daisy chain position."},
+        {"name": "chain_length", "type": "int", "required": false, "default": null, "description": "SPI daisy chain total length."},
+        {"name": "interpolate", "type": "boolean", "required": false, "default": true, "description": "Enable 256 micro-step interpolation."},
+        {"name": "run_current", "type": "float", "required": true, "default": null, "description": "Current (amps RMS) during stepper movement."},
+        {"name": "hold_current", "type": "float", "required": false, "default": null, "description": "Current (amps RMS) when not moving. Not recommended."},
+        {"name": "sense_resistor", "type": "float", "required": false, "default": 0.110, "description": "Motor sense resistor (ohms)."},
+        {"name": "stealthchop_threshold", "type": "float", "required": false, "default": 0, "description": "Velocity (mm/s) for stealthChop threshold. 0=disabled."},
+        {"name": "coolstep_threshold", "type": "float", "required": false, "default": null, "description": "Velocity (mm/s) for CoolStep threshold."},
+        {"name": "high_velocity_threshold", "type": "float", "required": false, "default": null, "description": "Velocity (mm/s) for THIGH threshold."},
+        {"name": "driver_IHOLDDELAY", "type": "int", "required": false, "default": 8, "description": "TMC register: IHOLDDELAY."},
+        {"name": "driver_TPOWERDOWN", "type": "int", "required": false, "default": 0, "description": "TMC register: TPOWERDOWN."},
+        {"name": "driver_TBL", "type": "int", "required": false, "default": 1, "description": "TMC register: TBL."},
+        {"name": "driver_TOFF", "type": "int", "required": false, "default": 4, "description": "TMC register: TOFF."},
+        {"name": "driver_HEND", "type": "int", "required": false, "default": 7, "description": "TMC register: HEND."},
+        {"name": "driver_HSTRT", "type": "int", "required": false, "default": 0, "description": "TMC register: HSTRT."},
+        {"name": "driver_PWM_AUTOSCALE", "type": "boolean", "required": false, "default": true, "description": "TMC register: PWM_AUTOSCALE."},
+        {"name": "driver_PWM_FREQ", "type": "int", "required": false, "default": 1, "description": "TMC register: PWM_FREQ."},
+        {"name": "driver_PWM_GRAD", "type": "int", "required": false, "default": 4, "description": "TMC register: PWM_GRAD."},
+        {"name": "driver_PWM_AMPL", "type": "int", "required": false, "default": 128, "description": "TMC register: PWM_AMPL."},
+        {"name": "driver_SGT", "type": "int", "required": false, "default": 0, "description": "TMC register: SGT (sensorless homing sensitivity)."},
+        {"name": "driver_SEMIN", "type": "int", "required": false, "default": 0, "description": "TMC register: SEMIN."},
+        {"name": "driver_SEUP", "type": "int", "required": false, "default": 0, "description": "TMC register: SEUP."},
+        {"name": "driver_SEMAX", "type": "int", "required": false, "default": 0, "description": "TMC register: SEMAX."},
+        {"name": "driver_SEDN", "type": "int", "required": false, "default": 0, "description": "TMC register: SEDN."},
+        {"name": "driver_SEIMIN", "type": "int", "required": false, "default": 0, "description": "TMC register: SEIMIN."},
+        {"name": "diag0_pin", "type": "pin", "required": false, "default": null, "description": "DIAG0 pin for sensorless homing. Creates virtual_endstop."},
+        {"name": "diag1_pin", "type": "pin", "required": false, "default": null, "description": "DIAG1 pin for sensorless homing."}
+      ]
+    },
+    {
+      "name": "[tmc2208 stepper_x]",
+      "pattern": "tmc2208 <stepper_name>",
+      "type": "named_multi",
+      "description": "TMC2208 (or TMC2224) stepper motor driver via single wire UART.",
+      "parameters": [
+        {"name": "uart_pin", "type": "pin", "required": true, "default": null, "description": "Pin connected to TMC2208 PDN_UART line."},
+        {"name": "tx_pin", "type": "pin", "required": false, "default": null, "description": "Separate transmit pin (if using separate RX/TX)."},
+        {"name": "select_pins", "type": "string", "required": false, "default": null, "description": "Comma-separated pins to set before UART access (analog mux)."},
+        {"name": "interpolate", "type": "boolean", "required": false, "default": true, "description": "Enable 256 micro-step interpolation."},
+        {"name": "run_current", "type": "float", "required": true, "default": null, "description": "Current (amps RMS) during movement."},
+        {"name": "hold_current", "type": "float", "required": false, "default": null, "description": "Current when not moving. Not recommended."},
+        {"name": "sense_resistor", "type": "float", "required": false, "default": 0.110, "description": "Sense resistor (ohms)."},
+        {"name": "stealthchop_threshold", "type": "float", "required": false, "default": 0, "description": "StealthChop threshold (mm/s). 0=disabled."},
+        {"name": "driver_MULTISTEP_FILT", "type": "boolean", "required": false, "default": true, "description": "Register: MULTISTEP_FILT."},
+        {"name": "driver_IHOLDDELAY", "type": "int", "required": false, "default": 8, "description": "Register: IHOLDDELAY."},
+        {"name": "driver_TPOWERDOWN", "type": "int", "required": false, "default": 20, "description": "Register: TPOWERDOWN."},
+        {"name": "driver_TBL", "type": "int", "required": false, "default": 2, "description": "Register: TBL."},
+        {"name": "driver_TOFF", "type": "int", "required": false, "default": 3, "description": "Register: TOFF."},
+        {"name": "driver_HEND", "type": "int", "required": false, "default": 0, "description": "Register: HEND."},
+        {"name": "driver_HSTRT", "type": "int", "required": false, "default": 5, "description": "Register: HSTRT."},
+        {"name": "driver_PWM_AUTOGRAD", "type": "boolean", "required": false, "default": true, "description": "Register: PWM_AUTOGRAD."},
+        {"name": "driver_PWM_AUTOSCALE", "type": "boolean", "required": false, "default": true, "description": "Register: PWM_AUTOSCALE."},
+        {"name": "driver_PWM_LIM", "type": "int", "required": false, "default": 12, "description": "Register: PWM_LIM."},
+        {"name": "driver_PWM_REG", "type": "int", "required": false, "default": 8, "description": "Register: PWM_REG."},
+        {"name": "driver_PWM_FREQ", "type": "int", "required": false, "default": 1, "description": "Register: PWM_FREQ."},
+        {"name": "driver_PWM_GRAD", "type": "int", "required": false, "default": 14, "description": "Register: PWM_GRAD."},
+        {"name": "driver_PWM_OFS", "type": "int", "required": false, "default": 36, "description": "Register: PWM_OFS."},
+        {"name": "driver_FREEWHEEL", "type": "int", "required": false, "default": 0, "description": "Register: FREEWHEEL."}
+      ]
+    },
+    {
+      "name": "[tmc2209 stepper_x]",
+      "pattern": "tmc2209 <stepper_name>",
+      "type": "named_multi",
+      "description": "TMC2209 stepper motor driver via single wire UART.",
+      "parameters": [
+        {"name": "uart_pin", "type": "pin", "required": true, "default": null, "description": "UART pin."},
+        {"name": "tx_pin", "type": "pin", "required": false, "default": null, "description": "Separate TX pin."},
+        {"name": "select_pins", "type": "string", "required": false, "default": null, "description": "Pins to set before UART access."},
+        {"name": "interpolate", "type": "boolean", "required": false, "default": true, "description": "256 micro-step interpolation."},
+        {"name": "run_current", "type": "float", "required": true, "default": null, "description": "Run current (amps RMS)."},
+        {"name": "hold_current", "type": "float", "required": false, "default": null, "description": "Hold current (not recommended)."},
+        {"name": "sense_resistor", "type": "float", "required": false, "default": 0.110, "description": "Sense resistor (ohms)."},
+        {"name": "stealthchop_threshold", "type": "float", "required": false, "default": 0, "description": "StealthChop threshold (mm/s)."},
+        {"name": "coolstep_threshold", "type": "float", "required": false, "default": null, "description": "CoolStep threshold (mm/s)."},
+        {"name": "uart_address", "type": "int", "required": false, "default": 0, "description": "UART address (0-3) for multiple TMC2209 on same UART."},
+        {"name": "driver_MULTISTEP_FILT", "type": "boolean", "required": false, "default": true, "description": "Register."},
+        {"name": "driver_IHOLDDELAY", "type": "int", "required": false, "default": 8, "description": "Register."},
+        {"name": "driver_TPOWERDOWN", "type": "int", "required": false, "default": 20, "description": "Register."},
+        {"name": "driver_TBL", "type": "int", "required": false, "default": 2, "description": "Register."},
+        {"name": "driver_TOFF", "type": "int", "required": false, "default": 3, "description": "Register."},
+        {"name": "driver_HEND", "type": "int", "required": false, "default": 0, "description": "Register."},
+        {"name": "driver_HSTRT", "type": "int", "required": false, "default": 5, "description": "Register."},
+        {"name": "driver_PWM_AUTOGRAD", "type": "boolean", "required": false, "default": true, "description": "Register."},
+        {"name": "driver_PWM_AUTOSCALE", "type": "boolean", "required": false, "default": true, "description": "Register."},
+        {"name": "driver_PWM_LIM", "type": "int", "required": false, "default": 12, "description": "Register."},
+        {"name": "driver_PWM_REG", "type": "int", "required": false, "default": 8, "description": "Register."},
+        {"name": "driver_PWM_FREQ", "type": "int", "required": false, "default": 1, "description": "Register."},
+        {"name": "driver_PWM_GRAD", "type": "int", "required": false, "default": 14, "description": "Register."},
+        {"name": "driver_PWM_OFS", "type": "int", "required": false, "default": 36, "description": "Register."},
+        {"name": "driver_FREEWHEEL", "type": "int", "required": false, "default": 0, "description": "Register."},
+        {"name": "driver_SGTHRS", "type": "int", "required": false, "default": 0, "description": "Register: Sensorless homing threshold."},
+        {"name": "driver_SEMIN", "type": "int", "required": false, "default": 0, "description": "Register."},
+        {"name": "driver_SEUP", "type": "int", "required": false, "default": 0, "description": "Register."},
+        {"name": "driver_SEMAX", "type": "int", "required": false, "default": 0, "description": "Register."},
+        {"name": "driver_SEDN", "type": "int", "required": false, "default": 0, "description": "Register."},
+        {"name": "driver_SEIMIN", "type": "int", "required": false, "default": 0, "description": "Register."},
+        {"name": "diag_pin", "type": "pin", "required": false, "default": null, "description": "DIAG pin for sensorless homing. Creates virtual_endstop."}
+      ]
+    },
+    {
+      "name": "[tmc2660 stepper_x]",
+      "pattern": "tmc2660 <stepper_name>",
+      "type": "named_multi",
+      "description": "TMC2660 stepper motor driver via SPI bus.",
+      "parameters": [
+        {"name": "cs_pin", "type": "pin", "required": true, "default": null, "description": "Chip select pin."},
+        {"name": "spi_speed", "type": "int", "required": false, "default": 4000000, "description": "SPI speed (Hz)."},
+        {"name": "spi_bus", "type": "string", "required": false, "default": null, "description": "SPI bus."},
+        {"name": "spi_software_sclk_pin", "type": "pin", "required": false, "default": null, "description": "Software SPI clock."},
+        {"name": "spi_software_mosi_pin", "type": "pin", "required": false, "default": null, "description": "Software SPI MOSI."},
+        {"name": "spi_software_miso_pin", "type": "pin", "required": false, "default": null, "description": "Software SPI MISO."},
+        {"name": "interpolate", "type": "boolean", "required": false, "default": true, "description": "256 micro-step interpolation (only works with microsteps=16)."},
+        {"name": "run_current", "type": "float", "required": true, "default": null, "description": "Run current (amps RMS)."},
+        {"name": "sense_resistor", "type": "float", "required": true, "default": null, "description": "Sense resistor (ohms). REQUIRED."},
+        {"name": "idle_current_percent", "type": "int", "required": false, "default": 100, "description": "Percentage of run_current when idle."},
+        {"name": "driver_TBL", "type": "int", "required": false, "default": 2, "description": "Register."},
+        {"name": "driver_HEND", "type": "int", "required": false, "default": 3, "description": "Register."},
+        {"name": "driver_HSTRT", "type": "int", "required": false, "default": 3, "description": "Register."},
+        {"name": "driver_TOFF", "type": "int", "required": false, "default": 4, "description": "Register."},
+        {"name": "driver_SEMIN", "type": "int", "required": false, "default": 0, "description": "Register."},
+        {"name": "driver_SEUP", "type": "int", "required": false, "default": 0, "description": "Register."},
+        {"name": "driver_SEMAX", "type": "int", "required": false, "default": 0, "description": "Register."},
+        {"name": "driver_SEDN", "type": "int", "required": false, "default": 0, "description": "Register."},
+        {"name": "driver_SGT", "type": "int", "required": false, "default": 0, "description": "Register."},
+        {"name": "driver_SFILT", "type": "int", "required": false, "default": 0, "description": "Register."},
+        {"name": "driver_CHM", "type": "int", "required": false, "default": 0, "description": "Register: Chopper mode."}
+      ]
+    },
+    {
+      "name": "[tmc2240 stepper_x]",
+      "pattern": "tmc2240 <stepper_name>",
+      "type": "named_multi",
+      "description": "TMC2240 stepper motor driver via SPI or UART.",
+      "parameters": [
+        {"name": "cs_pin", "type": "pin", "required": "conditional", "default": null, "description": "SPI chip select pin."},
+        {"name": "uart_pin", "type": "pin", "required": false, "default": null, "description": "UART pin (if provided, uses UART instead of SPI)."},
+        {"name": "spi_speed", "type": "int", "required": false, "default": null, "description": "SPI speed."},
+        {"name": "spi_bus", "type": "string", "required": false, "default": null, "description": "SPI bus."},
+        {"name": "spi_software_sclk_pin", "type": "pin", "required": false, "default": null, "description": "Software SPI clock."},
+        {"name": "spi_software_mosi_pin", "type": "pin", "required": false, "default": null, "description": "Software SPI MOSI."},
+        {"name": "spi_software_miso_pin", "type": "pin", "required": false, "default": null, "description": "Software SPI MISO."},
+        {"name": "chain_position", "type": "int", "required": false, "default": null, "description": "SPI daisy chain position."},
+        {"name": "chain_length", "type": "int", "required": false, "default": null, "description": "SPI daisy chain length."},
+        {"name": "interpolate", "type": "boolean", "required": false, "default": true, "description": "256 micro-step interpolation."},
+        {"name": "run_current", "type": "float", "required": true, "default": null, "description": "Run current (amps RMS)."},
+        {"name": "hold_current", "type": "float", "required": false, "default": null, "description": "Hold current."},
+        {"name": "rref", "type": "int", "required": false, "default": 12000, "description": "Resistance (ohms) of IREF to GND resistor."},
+        {"name": "stealthchop_threshold", "type": "float", "required": false, "default": 0, "description": "StealthChop threshold (mm/s)."},
+        {"name": "coolstep_threshold", "type": "float", "required": false, "default": null, "description": "CoolStep threshold (mm/s)."},
+        {"name": "high_velocity_threshold", "type": "float", "required": false, "default": null, "description": "THIGH threshold (mm/s)."},
+        {"name": "driver_SGT", "type": "int", "required": false, "default": 0, "description": "Sensorless homing sensitivity."},
+        {"name": "driver_SG4_THRS", "type": "int", "required": false, "default": 0, "description": "SG4 threshold."},
+        {"name": "driver_SLOPE_CONTROL", "type": "int", "required": false, "default": 0, "description": "Slope control."},
+        {"name": "diag0_pin", "type": "pin", "required": false, "default": null, "description": "DIAG0 pin for sensorless homing."},
+        {"name": "diag1_pin", "type": "pin", "required": false, "default": null, "description": "DIAG1 pin for sensorless homing."}
+      ],
+      "note": "Also supports many driver_* register parameters (MSLUT0-7, W0-3, X1-3, etc.)"
+    },
+    {
+      "name": "[tmc5160 stepper_x]",
+      "pattern": "tmc5160 <stepper_name>",
+      "type": "named_multi",
+      "description": "TMC5160 stepper motor driver via SPI bus.",
+      "parameters": [
+        {"name": "cs_pin", "type": "pin", "required": true, "default": null, "description": "SPI chip select pin."},
+        {"name": "spi_speed", "type": "int", "required": false, "default": null, "description": "SPI speed."},
+        {"name": "spi_bus", "type": "string", "required": false, "default": null, "description": "SPI bus."},
+        {"name": "spi_software_sclk_pin", "type": "pin", "required": false, "default": null, "description": "Software SPI clock."},
+        {"name": "spi_software_mosi_pin", "type": "pin", "required": false, "default": null, "description": "Software SPI MOSI."},
+        {"name": "spi_software_miso_pin", "type": "pin", "required": false, "default": null, "description": "Software SPI MISO."},
+        {"name": "chain_position", "type": "int", "required": false, "default": null, "description": "SPI daisy chain position."},
+        {"name": "chain_length", "type": "int", "required": false, "default": null, "description": "SPI daisy chain length."},
+        {"name": "interpolate", "type": "boolean", "required": false, "default": true, "description": "256 micro-step interpolation."},
+        {"name": "run_current", "type": "float", "required": true, "default": null, "description": "Run current (amps RMS)."},
+        {"name": "hold_current", "type": "float", "required": false, "default": null, "description": "Hold current."},
+        {"name": "sense_resistor", "type": "float", "required": false, "default": 0.075, "description": "Sense resistor (ohms)."},
+        {"name": "stealthchop_threshold", "type": "float", "required": false, "default": 0, "description": "StealthChop threshold (mm/s)."},
+        {"name": "coolstep_threshold", "type": "float", "required": false, "default": null, "description": "CoolStep threshold (mm/s)."},
+        {"name": "high_velocity_threshold", "type": "float", "required": false, "default": null, "description": "THIGH threshold (mm/s)."},
+        {"name": "driver_SGT", "type": "int", "required": false, "default": 0, "description": "Sensorless homing sensitivity."},
+        {"name": "driver_DRVSTRENGTH", "type": "int", "required": false, "default": 0, "description": "Driver strength."},
+        {"name": "driver_BBMCLKS", "type": "int", "required": false, "default": 4, "description": "Break before make clocks."},
+        {"name": "driver_FILT_ISENSE", "type": "int", "required": false, "default": 0, "description": "Filter ISENSE."},
+        {"name": "diag0_pin", "type": "pin", "required": false, "default": null, "description": "DIAG0 pin for sensorless homing."},
+        {"name": "diag1_pin", "type": "pin", "required": false, "default": null, "description": "DIAG1 pin for sensorless homing."}
+      ],
+      "note": "Also supports many driver_* register parameters (MSLUT0-7, chopconf, PWM, etc.)"
+    },
+    {
+      "name": "[ad5206 my_digipot]",
+      "pattern": "ad5206 <name>",
+      "type": "named_multi",
+      "description": "AD5206 digipot via SPI for stepper current control.",
+      "parameters": [
+        {"name": "enable_pin", "type": "pin", "required": true, "default": null, "description": "Chip select pin."},
+        {"name": "spi_speed", "type": "int", "required": false, "default": null, "description": "SPI speed."},
+        {"name": "spi_bus", "type": "string", "required": false, "default": null, "description": "SPI bus."},
+        {"name": "channel_1", "type": "float", "required": false, "default": null, "description": "Channel 1 value (0.0-1.0)."},
+        {"name": "channel_2", "type": "float", "required": false, "default": null, "description": "Channel 2 value."},
+        {"name": "channel_3", "type": "float", "required": false, "default": null, "description": "Channel 3 value."},
+        {"name": "channel_4", "type": "float", "required": false, "default": null, "description": "Channel 4 value."},
+        {"name": "channel_5", "type": "float", "required": false, "default": null, "description": "Channel 5 value."},
+        {"name": "channel_6", "type": "float", "required": false, "default": null, "description": "Channel 6 value."},
+        {"name": "scale", "type": "float", "required": false, "default": null, "description": "Scale for channel values (e.g. stepper amperage at max resistance)."}
+      ]
+    },
+    {
+      "name": "[mcp4451 my_digipot]",
+      "pattern": "mcp4451 <name>",
+      "type": "named_multi",
+      "description": "MCP4451 digipot via I2C.",
+      "parameters": [
+        {"name": "i2c_address", "type": "int", "required": true, "default": null, "description": "I2C address."},
+        {"name": "i2c_mcu", "type": "string", "required": false, "default": "mcu", "description": "MCU."},
+        {"name": "i2c_bus", "type": "string", "required": false, "default": null, "description": "I2C bus."},
+        {"name": "wiper_0", "type": "float", "required": false, "default": null, "description": "Wiper 0 value (0.0-1.0)."},
+        {"name": "wiper_1", "type": "float", "required": false, "default": null, "description": "Wiper 1 value."},
+        {"name": "wiper_2", "type": "float", "required": false, "default": null, "description": "Wiper 2 value."},
+        {"name": "wiper_3", "type": "float", "required": false, "default": null, "description": "Wiper 3 value."},
+        {"name": "scale", "type": "float", "required": false, "default": null, "description": "Scale for wiper values."}
+      ]
+    },
+    {
+      "name": "[mcp4728 my_dac]",
+      "pattern": "mcp4728 <name>",
+      "type": "named_multi",
+      "description": "MCP4728 DAC via I2C.",
+      "parameters": [
+        {"name": "i2c_address", "type": "int", "required": false, "default": 96, "description": "I2C address."},
+        {"name": "channel_a", "type": "float", "required": false, "default": null, "description": "Channel A value (0.0-1.0 = 0-2.048V)."},
+        {"name": "channel_b", "type": "float", "required": false, "default": null, "description": "Channel B value."},
+        {"name": "channel_c", "type": "float", "required": false, "default": null, "description": "Channel C value."},
+        {"name": "channel_d", "type": "float", "required": false, "default": null, "description": "Channel D value."},
+        {"name": "scale", "type": "float", "required": false, "default": null, "description": "Scale for channel values."}
+      ]
+    },
+    {
+      "name": "[mcp4018 my_digipot]",
+      "pattern": "mcp4018 <name>",
+      "type": "named_multi",
+      "description": "MCP4018 digipot via I2C.",
+      "parameters": [
+        {"name": "i2c_address", "type": "int", "required": false, "default": 47, "description": "I2C address."},
+        {"name": "wiper", "type": "float", "required": true, "default": null, "description": "Wiper value (0.0=lowest, 1.0=highest resistance)."},
+        {"name": "scale", "type": "float", "required": false, "default": null, "description": "Scale for wiper value."}
+      ]
+    },
+    {
+      "name": "[display]",
+      "pattern": "display",
+      "type": "singleton",
+      "description": "LCD display attached to micro-controller.",
+      "parameters": [
+        {"name": "lcd_type", "type": "enum", "required": true, "default": null, "enum_values": ["hd44780", "hd44780_spi", "aip31068_spi", "st7920", "emulated_st7920", "uc1701", "ssd1306", "sh1106"], "description": "Type of LCD chip."},
+        {"name": "display_group", "type": "string", "required": false, "default": "_default_20x4 or _default_16x4", "description": "Display data group name."},
+        {"name": "menu_timeout", "type": "int", "required": false, "default": 0, "description": "Menu timeout (seconds). 0=disabled."},
+        {"name": "menu_root", "type": "string", "required": false, "default": "__main", "description": "Name of main menu section."},
+        {"name": "menu_reverse_navigation", "type": "boolean", "required": false, "default": false, "description": "Reverse up/down for list navigation."},
+        {"name": "encoder_pins", "type": "string", "required": "conditional", "default": null, "description": "Encoder pins (2 required). Required when using menu."},
+        {"name": "encoder_steps_per_detent", "type": "enum", "required": false, "default": 4, "enum_values": [2, 4], "description": "Steps per encoder detent."},
+        {"name": "click_pin", "type": "pin", "required": "conditional", "default": null, "description": "Enter/click button pin. Required when using menu."},
+        {"name": "back_pin", "type": "pin", "required": false, "default": null, "description": "Back button pin."},
+        {"name": "up_pin", "type": "pin", "required": "conditional", "default": null, "description": "Up button pin. Required without encoder."},
+        {"name": "down_pin", "type": "pin", "required": "conditional", "default": null, "description": "Down button pin. Required without encoder."},
+        {"name": "kill_pin", "type": "pin", "required": false, "default": null, "description": "Kill/emergency stop button pin."},
+        {"name": "analog_pullup_resistor", "type": "float", "required": false, "default": 4700, "description": "Pullup resistance (ohms) for analog buttons."},
+        {"name": "analog_range_click_pin", "type": "string", "required": false, "default": null, "description": "Resistance range for enter button (analog mode)."},
+        {"name": "analog_range_back_pin", "type": "string", "required": false, "default": null, "description": "Resistance range for back button."},
+        {"name": "analog_range_up_pin", "type": "string", "required": false, "default": null, "description": "Resistance range for up button."},
+        {"name": "analog_range_down_pin", "type": "string", "required": false, "default": null, "description": "Resistance range for down button."},
+        {"name": "analog_range_kill_pin", "type": "string", "required": false, "default": null, "description": "Resistance range for kill button."}
+      ],
+      "lcd_type_specific_params": {
+        "hd44780": ["rs_pin", "e_pin", "d4_pin", "d5_pin", "d6_pin", "d7_pin", "hd44780_protocol_init", "line_length"],
+        "hd44780_spi": ["latch_pin", "spi_software_sclk_pin", "spi_software_mosi_pin", "spi_software_miso_pin", "hd44780_protocol_init", "line_length"],
+        "aip31068_spi": ["latch_pin", "spi_software_sclk_pin", "spi_software_mosi_pin", "spi_software_miso_pin", "line_length"],
+        "st7920": ["cs_pin", "sclk_pin", "sid_pin"],
+        "emulated_st7920": ["en_pin", "spi_software_sclk_pin", "spi_software_mosi_pin", "spi_software_miso_pin"],
+        "uc1701": ["cs_pin", "a0_pin", "rst_pin", "contrast"],
+        "ssd1306": ["i2c or spi settings", "reset_pin", "contrast", "vcomh", "invert", "x_offset"],
+        "sh1106": ["i2c or spi settings", "reset_pin", "contrast", "vcomh", "invert", "x_offset"]
+      }
+    },
+    {
+      "name": "[display_data my_group_name my_data_name]",
+      "pattern": "display_data <group> <name>",
+      "type": "named_multi",
+      "description": "Custom data display on LCD screen.",
+      "parameters": [
+        {"name": "position", "type": "string", "required": true, "default": null, "description": "Row, column position on display."},
+        {"name": "text", "type": "string", "required": true, "default": null, "description": "Text to show (evaluated as command template)."}
+      ]
+    },
+    {
+      "name": "[display_template my_template_name]",
+      "pattern": "display_template <name>",
+      "type": "named_multi",
+      "description": "Display data text macros/templates.",
+      "parameters": [
+        {"name": "param_<name>", "type": "any", "required": false, "default": null, "description": "Template parameter (parsed as Python literal)."},
+        {"name": "text", "type": "string", "required": true, "default": null, "description": "Text to return when template is rendered."}
+      ]
+    },
+    {
+      "name": "[display_glyph my_display_glyph]",
+      "pattern": "display_glyph <name>",
+      "type": "named_multi",
+      "description": "Custom glyph for displays.",
+      "parameters": [
+        {"name": "data", "type": "string", "required": false, "default": null, "description": "16x16 pixel glyph data ('.' blank, '*' on)."},
+        {"name": "hd44780_data", "type": "string", "required": false, "default": null, "description": "5x8 glyph for hd44780 displays."},
+        {"name": "hd44780_slot", "type": "int", "required": "conditional", "default": null, "description": "Hardware index (0-7) for hd44780. Required if hd44780_data specified."}
+      ]
+    },
+    {
+      "name": "[display my_extra_display]",
+      "pattern": "display <name>",
+      "type": "named_multi",
+      "description": "Auxiliary displays (no menu support).",
+      "parameters_note": "See [display] section for available parameters."
+    },
+    {
+      "name": "[filament_switch_sensor my_sensor]",
+      "pattern": "filament_switch_sensor <name>",
+      "type": "named_multi",
+      "description": "Filament insert and runout detection using switch sensor.",
+      "parameters": [
+        {"name": "pause_on_runout", "type": "boolean", "required": false, "default": true, "description": "Execute PAUSE on runout detection. If false and no runout_gcode, detection disabled."},
+        {"name": "runout_gcode", "type": "string", "required": false, "default": null, "description": "G-Code to execute after runout (runs after PAUSE if pause_on_runout=true)."},
+        {"name": "insert_gcode", "type": "string", "required": false, "default": null, "description": "G-Code after filament insert."},
+        {"name": "event_delay", "type": "float", "required": false, "default": 3.0, "description": "Minimum delay (seconds) between events."},
+        {"name": "pause_delay", "type": "float", "required": false, "default": 0.5, "description": "Delay (seconds) between pause dispatch and runout_gcode execution."},
+        {"name": "debounce_delay", "type": "float", "required": false, "default": 0, "description": "Debounce delay (seconds)."},
+        {"name": "switch_pin", "type": "pin", "required": true, "default": null, "description": "Switch connection pin."}
+      ]
+    },
+    {
+      "name": "[filament_motion_sensor my_sensor]",
+      "pattern": "filament_motion_sensor <name>",
+      "type": "named_multi",
+      "description": "Filament motion sensor using encoder for insert/runout detection.",
+      "parameters": [
+        {"name": "detection_length", "type": "float", "required": false, "default": 7.0, "description": "Minimum filament length (mm) to trigger state change."},
+        {"name": "extruder", "type": "string", "required": true, "default": null, "description": "Extruder section this sensor is associated with."},
+        {"name": "switch_pin", "type": "pin", "required": true, "default": null, "description": "Switch pin."},
+        {"name": "pause_on_runout", "type": "boolean", "required": false, "default": true, "description": "Pause on runout."},
+        {"name": "runout_gcode", "type": "string", "required": false, "default": null, "description": "Runout G-Code."},
+        {"name": "insert_gcode", "type": "string", "required": false, "default": null, "description": "Insert G-Code."},
+        {"name": "event_delay", "type": "float", "required": false, "default": 3.0, "description": "Event delay."},
+        {"name": "pause_delay", "type": "float", "required": false, "default": 0.5, "description": "Pause delay."}
+      ]
+    },
+    {
+      "name": "[tsl1401cl_filament_width_sensor]",
+      "pattern": "tsl1401cl_filament_width_sensor",
+      "type": "singleton",
+      "description": "TSL1401CL based filament width sensor.",
+      "parameters": [
+        {"name": "pin", "type": "pin", "required": true, "default": null, "description": "Sensor pin."},
+        {"name": "default_nominal_filament_diameter", "type": "float", "required": false, "default": 1.75, "description": "Nominal filament diameter (mm)."},
+        {"name": "max_difference", "type": "float", "required": false, "default": 0.2, "description": "Max allowed diameter difference (mm)."},
+        {"name": "measurement_delay", "type": "float", "required": false, "default": 100, "description": "Distance from sensor to melt chamber (mm)."}
+      ]
+    },
+    {
+      "name": "[hall_filament_width_sensor]",
+      "pattern": "hall_filament_width_sensor",
+      "type": "singleton",
+      "description": "Hall effect filament width sensor.",
+      "parameters": [
+        {"name": "adc1", "type": "pin", "required": true, "default": null, "description": "First analog input pin."},
+        {"name": "adc2", "type": "pin", "required": true, "default": null, "description": "Second analog input pin."},
+        {"name": "cal_dia1", "type": "float", "required": false, "default": 1.50, "description": "Calibration diameter 1 (mm)."},
+        {"name": "cal_dia2", "type": "float", "required": false, "default": 2.00, "description": "Calibration diameter 2 (mm)."},
+        {"name": "raw_dia1", "type": "int", "required": false, "default": 9500, "description": "Raw calibration value 1."},
+        {"name": "raw_dia2", "type": "int", "required": false, "default": 10500, "description": "Raw calibration value 2."},
+        {"name": "default_nominal_filament_diameter", "type": "float", "required": true, "default": null, "description": "Nominal filament diameter (mm)."},
+        {"name": "max_difference", "type": "float", "required": false, "default": 0.200, "description": "Max diameter difference (mm)."},
+        {"name": "measurement_delay", "type": "float", "required": true, "default": null, "description": "Distance from sensor to hot-end (mm)."},
+        {"name": "enable", "type": "boolean", "required": false, "default": false, "description": "Enable/disable on power-on."},
+        {"name": "enable_flow_compensation", "type": "boolean", "required": false, "default": true, "description": "Enable flow compensation. If false, only triggers runout."},
+        {"name": "measurement_interval", "type": "float", "required": false, "default": 10, "description": "Approximate distance (mm) between readings."},
+        {"name": "logging", "type": "boolean", "required": false, "default": false, "description": "Log diameter to terminal."},
+        {"name": "min_diameter", "type": "float", "required": false, "default": 1.0, "description": "Min diameter to trigger virtual sensor."},
+        {"name": "max_diameter", "type": "float", "required": false, "default": "nominal + max_difference", "description": "Max diameter to trigger virtual sensor."},
+        {"name": "use_current_dia_while_delay", "type": "boolean", "required": false, "default": false, "description": "Use current diameter during measurement delay."}
+      ]
+    },
+    {
+      "name": "[load_cell]",
+      "pattern": "load_cell",
+      "type": "singleton",
+      "description": "Load cell using ADC sensor for digital scale.",
+      "parameters": [
+        {"name": "sensor_type", "type": "enum", "required": true, "default": null, "enum_values": ["hx711", "hx717", "ads1220"], "description": "Supported bulk ADC sensor type."},
+        {"name": "counts_per_gram", "type": "float", "required": false, "default": null, "description": "Sensor counts per gram (from LOAD_CELL_CALIBRATE)."},
+        {"name": "reference_tare_counts", "type": "int", "required": false, "default": null, "description": "Integer tare value in raw sensor counts."},
+        {"name": "sensor_orientation", "type": "enum", "required": false, "default": "normal", "enum_values": ["normal", "inverted"], "description": "Sensor orientation."}
+      ],
+      "sensor_specific_params": {
+        "hx711": [
+          {"name": "sclk_pin", "type": "pin", "required": true, "description": "Clock pin."},
+          {"name": "dout_pin", "type": "pin", "required": true, "description": "Data output pin."},
+          {"name": "gain", "type": "enum", "required": false, "default": "A-128", "enum_values": ["A-128", "A-64", "B-32"], "description": "Gain setting."},
+          {"name": "sample_rate", "type": "enum", "required": false, "default": 80, "enum_values": [80, 10], "description": "Sample rate (must match hardware wiring)."}
+        ],
+        "hx717": [
+          {"name": "sclk_pin", "type": "pin", "required": true, "description": "Clock pin."},
+          {"name": "dout_pin", "type": "pin", "required": true, "description": "Data output pin."},
+          {"name": "gain", "type": "enum", "required": false, "default": "A-128", "enum_values": ["A-128", "B-64", "A-64", "B-8"], "description": "Gain."},
+          {"name": "sample_rate", "type": "enum", "required": false, "default": 320, "enum_values": [10, 20, 80, 320], "description": "Sample rate."}
+        ],
+        "ads1220": [
+          {"name": "cs_pin", "type": "pin", "required": true, "description": "SPI chip select."},
+          {"name": "data_ready_pin", "type": "pin", "required": true, "description": "Data ready pin."},
+          {"name": "gain", "type": "enum", "required": false, "default": 128, "enum_values": [1, 2, 4, 8, 16, 32, 64, 128], "description": "Gain."},
+          {"name": "pga_bypass", "type": "boolean", "required": false, "default": false, "description": "Disable PGA for gains 1,2,4."},
+          {"name": "sample_rate", "type": "enum", "required": false, "default": 660, "enum_values": [20, 40, 45, 90, 175, 180, 330, 350, 600, 660, 1000, 1200, 2000], "description": "Sample rate."},
+          {"name": "input_mux", "type": "enum", "required": false, "default": "AIN0_AIN1", "enum_values": ["AIN0_AIN1", "AIN0_AIN2", "AIN0_AIN3", "AIN1_AIN2", "AIN1_AIN3", "AIN2_AIN3", "AIN1_AIN0", "AIN3_AIN2", "AIN0_AVSS", "AIN1_AVSS", "AIN2_AVSS", "AIN3_AVSS"], "description": "Input multiplexer."},
+          {"name": "vref", "type": "enum", "required": false, "default": "internal", "enum_values": ["internal", "REF0", "REF1", "analog_supply"], "description": "Voltage reference."}
+        ]
+      }
+    },
+    {
+      "name": "[load_cell_probe]",
+      "pattern": "load_cell_probe",
+      "type": "singleton",
+      "description": "Combined load cell and probe functionality.",
+      "parameters": [
+        {"name": "sensor_type", "type": "string", "required": true, "default": null, "description": "Bulk ADC sensor type."},
+        {"name": "counts_per_gram", "type": "float", "required": true, "default": null, "description": "Counts per gram."},
+        {"name": "reference_tare_counts", "type": "int", "required": true, "default": null, "description": "Tare counts."},
+        {"name": "sensor_orientation", "type": "enum", "required": false, "default": "normal", "enum_values": ["normal", "inverted"], "description": "Orientation."},
+        {"name": "force_safety_limit", "type": "float", "required": false, "default": 2000, "description": "Safe probing force limit (+/- grams)."},
+        {"name": "trigger_force", "type": "float", "required": false, "default": 75.0, "description": "Force (grams) at which probe triggers."},
+        {"name": "drift_filter_cutoff_frequency", "type": "float", "required": false, "default": null, "description": "Frequency (Hz) below which drift is ignored."},
+        {"name": "drift_filter_delay", "type": "int", "required": false, "default": 2, "description": "Drift filter order (1 or 2)."},
+        {"name": "buzz_filter_cutoff_frequency", "type": "float", "required": false, "default": null, "description": "High frequency noise filter cutoff (Hz)."},
+        {"name": "buzz_filter_delay", "type": "int", "required": false, "default": 2, "description": "Buzz filter order (1 or 2)."},
+        {"name": "notch_filter_frequencies", "type": "string", "required": false, "default": null, "description": "1 or 2 power line frequencies to filter (Hz)."},
+        {"name": "notch_filter_quality", "type": "float", "required": false, "default": 2.0, "description": "Notch filter quality (0.5-3.0)."},
+        {"name": "tare_time", "type": "float", "required": false, "default": 0.066, "description": "Time (seconds) for taring before each probe."},
+        {"name": "z_offset", "type": "float", "required": false, "default": null, "description": "Z offset."},
+        {"name": "speed", "type": "float", "required": false, "default": 5.0, "description": "Probe speed."},
+        {"name": "samples", "type": "int", "required": false, "default": 1, "description": "Samples."},
+        {"name": "sample_retract_dist", "type": "float", "required": false, "default": 2.0, "description": "Retract distance."},
+        {"name": "lift_speed", "type": "float", "required": false, "default": "speed", "description": "Lift speed."},
+        {"name": "samples_result", "type": "enum", "required": false, "default": "average", "enum_values": ["median", "average"], "description": "Result method."},
+        {"name": "samples_tolerance", "type": "float", "required": false, "default": 0.100, "description": "Tolerance."},
+        {"name": "samples_tolerance_retries", "type": "int", "required": false, "default": 0, "description": "Retries."},
+        {"name": "activate_gcode", "type": "string", "required": false, "default": null, "description": "Activation gcode."},
+        {"name": "deactivate_gcode", "type": "string", "required": false, "default": null, "description": "Deactivation gcode."}
+      ]
+    },
+    {
+      "name": "[sx1509 my_sx1509]",
+      "pattern": "sx1509 <name>",
+      "type": "named_multi",
+      "description": "SX1509 I2C to GPIO expander. Provides 16 pins (PIN_0 to PIN_15).",
+      "parameters": [
+        {"name": "i2c_address", "type": "int", "required": true, "default": null, "description": "I2C address (62, 63, 112, or 113)."},
+        {"name": "i2c_mcu", "type": "string", "required": false, "default": "mcu", "description": "MCU."},
+        {"name": "i2c_bus", "type": "string", "required": false, "default": null, "description": "I2C bus."}
+      ]
+    },
+    {
+      "name": "[samd_sercom my_sercom]",
+      "pattern": "samd_sercom <name>",
+      "type": "named_multi",
+      "description": "SAMD SERCOM configuration for SPI/I2C peripherals.",
+      "parameters": [
+        {"name": "sercom", "type": "string", "required": true, "default": null, "description": "SERCOM bus name (sercom0, sercom1, etc.)."},
+        {"name": "tx_pin", "type": "pin", "required": true, "default": null, "description": "MOSI (SPI) or SDA (I2C) pin."},
+        {"name": "rx_pin", "type": "pin", "required": false, "default": null, "description": "MISO pin (SPI only)."},
+        {"name": "clk_pin", "type": "pin", "required": true, "default": null, "description": "CLK (SPI) or SCL (I2C) pin."}
+      ]
+    },
+    {
+      "name": "[adc_scaled my_name]",
+      "pattern": "adc_scaled <name>",
+      "type": "named_multi",
+      "description": "Duet2 Maestro analog scaling by vref/vssa readings.",
+      "parameters": [
+        {"name": "vref_pin", "type": "pin", "required": true, "default": null, "description": "ADC pin for VREF monitoring."},
+        {"name": "vssa_pin", "type": "pin", "required": true, "default": null, "description": "ADC pin for VSSA monitoring."},
+        {"name": "smooth_time", "type": "float", "required": false, "default": 2.0, "description": "Smoothing time (seconds)."}
+      ]
+    },
+    {
+      "name": "[ads1x1x my_ads1x1x]",
+      "pattern": "ads1x1x <name>",
+      "type": "named_multi",
+      "description": "ADS1013/1014/1015/1113/1114/1115 I2C ADC for temperature sensors.",
+      "parameters": [
+        {"name": "chip", "type": "enum", "required": true, "default": null, "enum_values": ["ADS1013", "ADS1014", "ADS1015", "ADS1113", "ADS1114", "ADS1115"], "description": "ADC chip type."},
+        {"name": "pga", "type": "enum", "required": false, "default": "4.096V", "enum_values": ["6.144V", "4.096V", "2.048V", "1.024V", "0.512V", "0.256V"], "description": "Max voltage range."},
+        {"name": "adc_voltage", "type": "float", "required": false, "default": 3.3, "description": "Supply voltage for additional scaling."},
+        {"name": "i2c_mcu", "type": "string", "required": true, "default": null, "description": "MCU."},
+        {"name": "i2c_bus", "type": "string", "required": true, "default": null, "description": "I2C bus."},
+        {"name": "address_pin", "type": "enum", "required": false, "default": "GND", "enum_values": ["GND", "VDD", "SDA", "SCL"], "description": "Address pin wiring."}
+      ]
+    },
+    {
+      "name": "[replicape]",
+      "pattern": "replicape",
+      "type": "singleton",
+      "description": "Replicape support (Beaglebone).",
+      "parameters": [
+        {"name": "revision", "type": "string", "required": true, "default": null, "description": "Hardware revision (only 'B3' supported)."},
+        {"name": "enable_pin", "type": "pin", "required": false, "default": "!gpio0_20", "description": "Global enable pin."},
+        {"name": "host_mcu", "type": "string", "required": true, "default": null, "description": "MCU config section for Linux process MCU."},
+        {"name": "standstill_power_down", "type": "boolean", "required": false, "default": false, "description": "Set CFG6_ENN to open."},
+        {"name": "stepper_x_microstep_mode", "type": "enum", "required": false, "default": "disable", "enum_values": ["disable", "1", "2", "spread2", "4", "16", "spread4", "spread16", "stealth4", "stealth16"], "description": "Stepper X microstep mode."},
+        {"name": "stepper_x_current", "type": "float", "required": "conditional", "default": null, "description": "Stepper X max current (Amps). Required if not disabled."}
+      ]
+    },
+    {
+      "name": "[palette2]",
+      "pattern": "palette2",
+      "type": "singleton",
+      "description": "Palette 2 multimaterial support.",
+      "parameters": [
+        {"name": "serial", "type": "string", "required": true, "default": null, "description": "Serial port to connect to Palette 2."},
+        {"name": "baud", "type": "int", "required": false, "default": 115200, "description": "Baud rate."},
+        {"name": "feedrate_splice", "type": "float", "required": false, "default": 0.8, "description": "Feedrate when splicing."},
+        {"name": "feedrate_normal", "type": "float", "required": false, "default": 1.0, "description": "Feedrate after splicing."},
+        {"name": "auto_load_speed", "type": "float", "required": false, "default": 2, "description": "Auto-load extrude feedrate (mm/s)."},
+        {"name": "auto_cancel_variation", "type": "float", "required": false, "default": 0.1, "description": "Auto cancel threshold for ping variation."}
+      ]
+    },
+    {
+      "name": "[angle my_angle_sensor]",
+      "pattern": "angle <name>",
+      "type": "named_multi",
+      "description": "Magnetic hall angle sensor for stepper motor angle measurement.",
+      "parameters": [
+        {"name": "sensor_type", "type": "enum", "required": true, "default": null, "enum_values": ["a1333", "as5047d", "mt6816", "mt6826s", "tle5012b"], "description": "Magnetic hall sensor chip type."},
+        {"name": "sample_period", "type": "float", "required": false, "default": 0.000400, "description": "Query period (seconds) during measurements."},
+        {"name": "stepper", "type": "string", "required": false, "default": null, "description": "Stepper name for angle calibration."},
+        {"name": "cs_pin", "type": "pin", "required": true, "default": null, "description": "SPI enable pin."},
+        {"name": "spi_speed", "type": "int", "required": false, "default": null, "description": "SPI speed."},
+        {"name": "spi_bus", "type": "string", "required": false, "default": null, "description": "SPI bus."},
+        {"name": "spi_software_sclk_pin", "type": "pin", "required": false, "default": null, "description": "Software SPI clock."},
+        {"name": "spi_software_mosi_pin", "type": "pin", "required": false, "default": null, "description": "Software SPI MOSI."},
+        {"name": "spi_software_miso_pin", "type": "pin", "required": false, "default": null, "description": "Software SPI MISO."}
+      ]
+    },
+    {
+      "name": "[menu]",
+      "pattern": "menu <path>",
+      "type": "named_multi",
+      "description": "Customizable LCD display menus.",
+      "parameters": [
+        {"name": "type", "type": "enum", "required": true, "default": null, "enum_values": ["disabled", "command", "input", "list", "vsdlist"], "description": "Menu element type."},
+        {"name": "name", "type": "string", "required": true, "default": null, "description": "Name (evaluated as template)."},
+        {"name": "enable", "type": "string", "required": false, "default": null, "description": "Template evaluating to True/False."},
+        {"name": "index", "type": "int", "required": false, "default": null, "description": "Position in list to insert."},
+        {"name": "gcode", "type": "string", "required": false, "default": null, "description": "Script on button click (for command/input types)."},
+        {"name": "input", "type": "string", "required": false, "default": null, "description": "Initial value for input type (template, must be float)."},
+        {"name": "input_min", "type": "float", "required": false, "default": -99999, "description": "Minimum input value."},
+        {"name": "input_max", "type": "float", "required": false, "default": 99999, "description": "Maximum input value."},
+        {"name": "input_step", "type": "float", "required": false, "default": null, "description": "Editing step value."},
+        {"name": "realtime", "type": "boolean", "required": false, "default": false, "description": "Run gcode after each value change."}
+      ]
+    }
+  ],
+  "sensor_types_builtin": {
+    "common_thermistors": [
+      "EPCOS 100K B57560G104F",
+      "ATC Semitec 104GT-2",
+      "ATC Semitec 104NT-4-R025H42G",
+      "Generic 3950",
+      "Honeywell 100K 135-104LAG-J01",
+      "NTC 100K MGB18-104F39050L32",
+      "SliceEngineering 450",
+      "TDK NTCG104LH104JT1"
+    ],
+    "common_amplifiers": [
+      "PT100 INA826", "AD595", "AD597", "AD8494", "AD8495", "AD8496", "AD8497"
+    ],
+    "direct_sensors": ["PT1000"],
+    "max_sensors": ["MAX6675", "MAX31855", "MAX31856", "MAX31865"],
+    "environmental_i2c": ["BME280", "AHT1X", "AHT2X", "AHT3X", "HTU21D", "SI7013", "SI7020", "SI7021", "SHT21", "SHT3X", "LM75"],
+    "mcu_internal": ["temperature_mcu"],
+    "host": ["temperature_host"],
+    "onewire": ["DS18B20"],
+    "virtual": ["temperature_combined"]
+  },
+  "common_spi_params": [
+    {"name": "spi_speed", "type": "int", "description": "SPI speed (Hz). Default depends on device."},
+    {"name": "spi_bus", "type": "string", "description": "MCU SPI bus name."},
+    {"name": "spi_software_sclk_pin", "type": "pin", "description": "Software SPI clock pin."},
+    {"name": "spi_software_mosi_pin", "type": "pin", "description": "Software SPI MOSI pin."},
+    {"name": "spi_software_miso_pin", "type": "pin", "description": "Software SPI MISO pin."}
+  ],
+  "common_i2c_params": [
+    {"name": "i2c_address", "type": "int", "description": "I2C address (decimal)."},
+    {"name": "i2c_mcu", "type": "string", "default": "mcu", "description": "MCU name."},
+    {"name": "i2c_bus", "type": "string", "description": "MCU I2C bus name."},
+    {"name": "i2c_software_scl_pin", "type": "pin", "description": "Software I2C SCL pin."},
+    {"name": "i2c_software_sda_pin", "type": "pin", "description": "Software I2C SDA pin."},
+    {"name": "i2c_speed", "type": "int", "default": 100000, "description": "I2C speed (Hz). 400000 for Linux/RP2040/ATmega."}
+  ]
+}
