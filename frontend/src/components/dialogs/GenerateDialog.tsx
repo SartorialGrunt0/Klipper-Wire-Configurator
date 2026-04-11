@@ -32,8 +32,9 @@ export default function GenerateDialog({ onClose }: GenerateDialogProps) {
   const [selectedExample, setSelectedExample] = useState<string | null>(null);
   const [status, setStatus] = useState<'idle' | 'loading' | 'error'>('idle');
   const [message, setMessage] = useState('');
+  const [showConfirm, setShowConfirm] = useState(false);
 
-  const { setConfigFile, setValidation } = useConfigStore();
+  const { setConfigFile, setValidation, clearAll, configFiles } = useConfigStore();
   const { clearGraph } = useGraphStore();
 
   // Load examples on mount
@@ -53,9 +54,12 @@ export default function GenerateDialog({ onClose }: GenerateDialogProps) {
     return () => clearTimeout(timer);
   }, [searchQuery]);
 
-  const handleGenerate = useCallback(async () => {
+  const doGenerate = useCallback(async () => {
     setStatus('loading');
+    setShowConfirm(false);
     try {
+      // Clear ALL existing data before generating
+      clearAll();
       clearGraph();
 
       const opts = mode === 'blank'
@@ -76,7 +80,17 @@ export default function GenerateDialog({ onClose }: GenerateDialogProps) {
       setStatus('error');
       setMessage(err instanceof Error ? err.message : 'Generation failed');
     }
-  }, [mode, kinematics, selectedExample, clearGraph, setConfigFile, setValidation, onClose]);
+  }, [mode, kinematics, selectedExample, clearAll, clearGraph, setConfigFile, setValidation, onClose]);
+
+  const handleGenerate = useCallback(() => {
+    // If there's existing data, show confirmation first
+    const hasData = Object.keys(configFiles).length > 0;
+    if (hasData) {
+      setShowConfirm(true);
+    } else {
+      doGenerate();
+    }
+  }, [configFiles, doGenerate]);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
@@ -209,6 +223,38 @@ export default function GenerateDialog({ onClose }: GenerateDialogProps) {
           </button>
         </div>
       </div>
+
+      {/* Confirmation overlay */}
+      {showConfirm && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60"
+          onClick={() => setShowConfirm(false)}
+        >
+          <div
+            className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[380px] p-5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-sm font-semibold text-[var(--color-text-primary)] mb-2">Replace existing configuration?</h3>
+            <p className="text-xs text-[var(--color-text-secondary)] mb-4">
+              You have an existing configuration loaded. Generating a new one will discard all current data including imported files, nodes, and edges.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setShowConfirm(false)}
+                className="px-4 py-2 rounded-lg text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)]"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={doGenerate}
+                className="px-4 py-2 rounded-lg text-xs font-medium bg-[var(--color-error)] text-white hover:opacity-90"
+              >
+                Replace & Generate
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

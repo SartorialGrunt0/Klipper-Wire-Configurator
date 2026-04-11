@@ -116,6 +116,14 @@ body {
   z-index: 0 !important;
 }
 
+/* Remove ReactFlow's default 'group' node background box */
+.react-flow__node-group {
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  box-shadow: none !important;
+}
+
 /* Enlarge handle hit area for easier connections */
 .react-flow__handle {
   position: relative;

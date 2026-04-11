@@ -4,6 +4,7 @@ import { useGraphStore } from '../stores/graphStore';
 import * as api from '../services/api';
 import { buildGraphFromConfig } from '../utils/graphBuilder';
 import type { HardwareType, CommunicationType, SectionSchema, ExampleConfig } from '../types/config';
+import McuNameDialog from './dialogs/McuNameDialog';
 
 interface AddMenuProps {
   onClose: () => void;
@@ -64,6 +65,13 @@ export default function AddMenu({ onClose }: AddMenuProps) {
   const [customGroupColor, setCustomGroupColor] = useState('#64748b');
   const [customGroupParent, setCustomGroupParent] = useState<string>('');
 
+  // MCU name prompt state
+  const [mcuNamePrompt, setMcuNamePrompt] = useState<{
+    hwType: HardwareType;
+    label: string;
+    templateFilename?: string;
+  } | null>(null);
+
   const { schemas } = useConfigStore();
   const { addHardwareNode, addSubComponentNode, addFeatureNode, addCommunicationEdge, addCustomGroupNode, nodes } = useGraphStore();
   const { configFiles, activeFile, addSection } = useConfigStore();
@@ -84,7 +92,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
           const filtered = (res as { examples?: ExampleConfig[]; results?: ExampleConfig[] }).results
             || (res as { examples: ExampleConfig[] }).examples || [];
           setTemplates(filtered.filter((e) =>
-            e.category === 'generic' || e.category === 'example' || e.filename.startsWith('generic-')
+            e.category === 'generic' || e.category === 'example' || e.category === 'sample' || e.category === 'kit'
           ));
         })
         .catch(() => setTemplates([]));
@@ -109,10 +117,28 @@ export default function AddMenu({ onClose }: AddMenuProps) {
     finishAddHardware(hwType, label);
   };
 
-  const finishAddHardware = (hwType: HardwareType, label: string, templateFilename?: string) => {
-    const configFile = hwType === 'mainboard' && !configFiles['printer.cfg']
+  const finishAddHardware = (hwType: HardwareType, label: string, templateFilename?: string, mcuName?: string) => {
+    // Determine if this will be the primary MCU
+    const hasPrimary = nodes.some(
+      (n) => n.type === 'hardware' && !!(n.data as Record<string, unknown>).isPrimary,
+    );
+    const isPrimary = hwType === 'mainboard' && !hasPrimary;
+
+    // Non-primary non-SBC boards need an MCU name
+    if (!isPrimary && hwType !== 'sbc' && !mcuName) {
+      // Check if template already provides an MCU name (will be resolved after load)
+      // For blank (no template), prompt now
+      if (!templateFilename) {
+        setMcuNamePrompt({ hwType, label });
+        return;
+      }
+      // For templates, we'll check after loading — proceed for now and extract MCU name from template
+    }
+
+    const effectiveLabel = mcuName || label;
+    const configFile = isPrimary && !configFiles['printer.cfg']
       ? 'printer.cfg'
-      : `${label.toLowerCase().replace(/\s+/g, '_')}.cfg`;
+      : `${effectiveLabel.toLowerCase().replace(/\s+/g, '_')}.cfg`;
 
     // Ensure the config file exists in configStore
     const { setConfigFile } = useConfigStore.getState();
@@ -125,13 +151,58 @@ export default function AddMenu({ onClose }: AddMenuProps) {
       });
     }
 
-    const nodeId = addHardwareNode(hwType, label, configFile, { x: 100 + Math.random() * 400, y: 100 + Math.random() * 300 });
+    const nodeId = addHardwareNode(hwType, effectiveLabel, configFile, { x: 100 + Math.random() * 400, y: 100 + Math.random() * 300 }, mcuName || '');
+
+    // Set primary flag
+    if (isPrimary) {
+      useGraphStore.getState().updateNodeData(nodeId, { isPrimary: true });
+    }
+
+    // Create [mcu] or [mcu name] section for the board
+    if (hwType !== 'sbc') {
+      const mcuHeader = mcuName ? `mcu ${mcuName}` : 'mcu';
+      const cs = useConfigStore.getState();
+      const existingMcu = cs.configFiles[configFile]?.sections.some(
+        (s) => s.section_type === 'mcu',
+      );
+      if (!existingMcu) {
+        cs.addSection(configFile, {
+          section_type: 'mcu',
+          section_name: mcuName || '',
+          full_header: mcuHeader,
+          line_number: 0,
+          params: [],
+          header_comments: [],
+        });
+      }
+    }
 
     // If a template was selected, load it and populate sections/graph
     if (templateFilename) {
       setTemplateLoading(true);
       api.getExample(templateFilename).then((res) => {
         const config = res.config;
+
+        // Check if template has an MCU name and use it
+        const mcuSection = config.sections.find((s: { section_type: string }) => s.section_type === 'mcu');
+        const templateMcuName = mcuSection?.section_name || '';
+
+        // If the board should be non-primary and we don't have an MCU name yet, prompt
+        if (!isPrimary && hwType !== 'sbc' && !mcuName && !templateMcuName) {
+          // Remove the node we just created — will recreate after naming
+          useGraphStore.getState().removeNode(nodeId);
+          useConfigStore.getState().removeConfigFile(configFile);
+          setTemplateLoading(false);
+          setMcuNamePrompt({ hwType, label, templateFilename });
+          return;
+        }
+
+        const finalMcuName = mcuName || templateMcuName;
+        // Update node with resolved MCU name
+        if (finalMcuName) {
+          useGraphStore.getState().updateNodeData(nodeId, { mcuName: finalMcuName, label: finalMcuName });
+        }
+
         // Set config file with the parsed sections
         setConfigFile(configFile, {
           filename: configFile,
@@ -243,6 +314,18 @@ export default function AddMenu({ onClose }: AddMenuProps) {
 
   return (
     <div className="absolute inset-0 z-50 flex items-start justify-center pt-16 bg-black/40" onClick={onClose}>
+      {mcuNamePrompt && (
+        <McuNameDialog
+          title="Name this MCU"
+          message="Non-primary boards need an MCU name for section headers (e.g., [mcu EBBCan]) and pin prefixes (e.g., EBBCan:gpio13)."
+          onConfirm={(name) => {
+            const { hwType, label, templateFilename } = mcuNamePrompt;
+            setMcuNamePrompt(null);
+            finishAddHardware(hwType, label, templateFilename, name);
+          }}
+          onCancel={() => setMcuNamePrompt(null)}
+        />
+      )}
       <div
         className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[600px] max-h-[70vh] overflow-hidden"
         onClick={(e) => e.stopPropagation()}

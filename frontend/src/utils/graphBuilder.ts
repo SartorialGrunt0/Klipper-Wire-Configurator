@@ -7,8 +7,8 @@
  *   detects MCUs across files, resolves includes, and builds a unified graph.
  */
 
-import type { ConfigFile, ConfigSection, ConfigParam, SectionSchema } from '../types/config';
-import type { HardwareType } from '../types/config';
+import type { ConfigFile, ConfigSection, ConfigParam, SectionSchema, ValidationResult } from '../types/config';
+import type { HardwareType, CommunicationType } from '../types/config';
 
 // Section types that are sub-components (attached to hardware)
 const SUB_COMPONENT_TYPES = new Set([
@@ -35,7 +35,7 @@ const FEATURE_TYPES = new Set([
   'input_shaper', 'resonance_tester',
   'virtual_sdcard', 'pause_resume', 'firmware_retraction', 'force_move',
   'idle_timeout', 'gcode_macro', 'delayed_gcode', 'gcode_arcs',
-  'respond', 'exclude_object', 'save_variables',
+  'respond', 'exclude_object', 'save_variables', 'display_status',
 ]);
 
 // Map section types to component groups (for grouping)
@@ -95,16 +95,19 @@ interface GroupChildData {
   sectionHeader: string;
   isFeature: boolean;
   params: ConfigParam[];
+  configFile: string;
 }
 
 interface GraphStore {
-  addHardwareNode: (type: HardwareType, label: string, configFile: string, position?: { x: number; y: number }) => string;
-  addSubComponentNode: (parentId: string, sectionType: string, label: string, sectionHeader: string) => string;
-  addFeatureNode: (parentId: string, sectionType: string, label: string, sectionHeader: string) => string;
-  addGroupNode: (parentId: string, componentGroup: string, label: string, children: GroupChildData[], isFeature: boolean) => string;
-  addConfigurationEdge: (sourceId: string, targetId: string, hwType: HardwareType) => string;
-  addCommunicationEdge: (sourceId: string, targetId: string, commType: 'usb' | 'canbus' | 'uart') => string;
+  addHardwareNode: (type: HardwareType, label: string, configFile: string, position?: { x: number; y: number }, mcuName?: string) => string;
+  addSubComponentNode: (parentId: string, sectionType: string, label: string, sectionHeader: string, configFile?: string) => string;
+  addFeatureNode: (parentId: string, sectionType: string, label: string, sectionHeader: string, configFile?: string) => string;
+  addGroupNode: (parentId: string, componentGroup: string, label: string, children: GroupChildData[], isFeature: boolean, configFile?: string) => string;
+  addConfigurationEdge: (sourceId: string, targetId: string, hwType: HardwareType, sourceHandle?: string, targetHandle?: string) => string;
+  addCommunicationEdge: (sourceId: string, targetId: string, commType: CommunicationType, sourceHandle?: string, targetHandle?: string, isNotIncluded?: boolean) => string;
   updateNodeData: (id: string, data: Record<string, unknown>) => void;
+  toggleHardwareCollapse: (id: string) => void;
+  autoArrange: () => void;
 }
 
 /** Info about a discovered MCU across the project */
@@ -117,6 +120,10 @@ interface McuInfo {
   sourceFile: string;
   /** The graph node ID once created */
   nodeId: string;
+  /** Communication type detected from serial/canbus params */
+  commType: CommunicationType;
+  /** Whether this MCU section was fully commented out */
+  isSuppressed: boolean;
 }
 
 /**
@@ -131,12 +138,48 @@ function classifyMcuName(name: string): HardwareType {
 }
 
 /**
- * Check if a section references a named MCU via pin prefixes (e.g. "EBBCan:gpio18").
+ * Detect the communication type from MCU section parameters.
+ */
+function detectCommType(section: ConfigSection): CommunicationType {
+  for (const param of section.params) {
+    if (param.is_commented_out) continue;
+    if (param.key === 'canbus_uuid' || param.key === 'canbus_interface') return 'canbus';
+    if (param.key === 'serial') {
+      const val = param.value;
+      if (val.includes('/dev/serial/by-id/usb-')) return 'usb';
+      if (val.match(/\/dev\/tty(S|AMA|ACM|USB)/)) return 'uart';
+      if (val.includes('/tmp/klipper_host_mcu')) return 'usb'; // SBC host MCU, virtual
+    }
+  }
+  return 'usb'; // default
+}
+
+/**
+ * Check if a section is fully commented out (suppressed).
+ * The backend parser marks these with a _commented_section param.
+ */
+function isSectionSuppressed(section: ConfigSection): boolean {
+  return section.params.some(
+    (p) => p.key === '_commented_section' && p.is_commented_out && p.value === 'true',
+  );
+}
+
+/**
+ * Check if a section references a named MCU via pin prefixes (e.g. "EBBCan:gpio18")
+ * or sensor_mcu parameter (e.g. sensor_mcu: host_mcu).
  * Returns the MCU name if found, or empty string for primary MCU / no match.
  */
 function detectMcuReference(section: ConfigSection, mcuNames: string[]): string {
   for (const param of section.params) {
     if (param.is_commented_out) continue;
+
+    // Check sensor_mcu / mcu parameter directly
+    if ((param.key === 'sensor_mcu' || param.key === 'mcu') && param.value) {
+      const refMcu = mcuNames.find((n) => n && param.value.trim() === n);
+      if (refMcu) return refMcu;
+    }
+
+    // Check pin prefixes: "MCUName:pin"
     const val = param.value;
     for (const name of mcuNames) {
       if (name && val.includes(`${name}:`)) {
@@ -151,10 +194,16 @@ function detectMcuReference(section: ConfigSection, mcuNames: string[]): string 
  * Determine the main config file from a set of files.
  * Priority: printer.cfg > file with most [include] directives > file with unnamed [mcu] > first file.
  */
+/** Strip any leading path components and return just the basename. */
+function basename(filename: string): string {
+  return filename.replace(/^.*[\\/]/, '');
+}
+
 function findMainFile(configs: Record<string, ConfigFile>): string {
   const filenames = Object.keys(configs);
-  // 1. printer.cfg always wins
-  if (configs['printer.cfg']) return 'printer.cfg';
+  // 1. printer.cfg always wins (match by basename in case browser adds a path prefix)
+  const printerKey = filenames.find((fn) => basename(fn) === 'printer.cfg');
+  if (printerKey) return printerKey;
   // 2. File with the most includes (it's the root)
   let maxIncludes = -1;
   let maxFile = filenames[0];
@@ -179,38 +228,84 @@ function findMainFile(configs: Record<string, ConfigFile>): string {
  *
  * This is the primary builder for multi-file imports. It:
  * 1. Discovers all MCU definitions across ALL files
- * 2. Creates one hardware node per MCU (not per file)
- * 3. Assigns each config file to its "owner" hardware node
- * 4. Creates include-based edges between hardware nodes
- * 5. Creates sub-component/feature nodes, assigning each to the correct
- *    hardware via pin prefix detection
+ * 2. Always creates an SBC node (host)
+ * 3. Creates one hardware node per MCU (not per file)
+ * 4. Assigns each config file to its "owner" hardware node
+ * 5. Creates include-based edges between hardware nodes
+ * 6. Creates sub-component/feature nodes, assigning each to the correct
+ *    hardware via pin prefix / sensor_mcu detection
+ * 7. Marks suppressed (commented-out) sections
+ * 8. Starts all hardware nodes collapsed
  */
 export function buildProjectGraph(
   configs: Record<string, ConfigFile>,
   graphStore: GraphStore,
   schemas: Record<string, SectionSchema>,
+  validations?: Record<string, ValidationResult>,
 ): void {
   const filenames = Object.keys(configs);
   if (filenames.length === 0) return;
 
-  const mainFile = findMainFile(configs);
+  // Filter out files that have no recognized Klipper sections (e.g. moonraker, crowsnest)
+  const RECOGNIZED_TYPES = new Set([...SUB_COMPONENT_TYPES, ...FEATURE_TYPES, 'mcu', 'include']);
+  const recognizedConfigs: Record<string, ConfigFile> = {};
+  for (const [fn, cfg] of Object.entries(configs)) {
+    const hasRecognized = cfg.sections.some((s) => RECOGNIZED_TYPES.has(s.section_type));
+    if (hasRecognized) {
+      recognizedConfigs[fn] = cfg;
+    }
+  }
+  // Replace configs with filtered set; use original if nothing passed the filter
+  const activeConfigs = Object.keys(recognizedConfigs).length > 0 ? recognizedConfigs : configs;
+  const activeFilenames = Object.keys(activeConfigs);
+
+  // Build a set of section headers that have validation errors
+  const sectionsWithErrors = new Set<string>();
+  if (validations) {
+    for (const v of Object.values(validations)) {
+      for (const err of v.errors) {
+        if (err.severity === 'error' && err.section) {
+          sectionsWithErrors.add(err.section);
+        }
+      }
+    }
+  }
+
+  const mainFile = findMainFile(activeConfigs);
+
+  // Pre-compute included files set (files reachable from main config via active includes).
+  // We store BASENAMES only so that path-prefixed filenames (from webkitdirectory uploads)
+  // still match correctly.
+  const mainConfig = activeConfigs[mainFile];
+  const includedBasenames = new Set<string>([basename(mainFile)]);
+  if (mainConfig) {
+    for (const inc of mainConfig.includes) {
+      includedBasenames.add(basename(inc));
+    }
+  }
+  /** Returns true if the given filename is reachable from the main config. */
+  const isIncluded = (filename: string): boolean => includedBasenames.has(basename(filename));
 
   // ── Phase 1: Discover all MCU sections across all files ──────────
   const mcuInfos: McuInfo[] = [];
   const mcuByName = new Map<string, McuInfo>(); // MCU name → info
 
-  for (const [filename, config] of Object.entries(configs)) {
+  for (const [filename, config] of Object.entries(activeConfigs)) {
     for (const sec of config.sections) {
       if (sec.section_type !== 'mcu') continue;
       const name = sec.section_name || '';
       // Skip duplicates (same MCU defined in multiple files)
       if (mcuByName.has(name)) continue;
       const hwType = classifyMcuName(name);
+      const commType = detectCommType(sec);
+      const suppressed = isSectionSuppressed(sec);
       const info: McuInfo = {
         name,
         hwType,
         sourceFile: filename,
         nodeId: '', // filled in Phase 2
+        commType,
+        isSuppressed: suppressed,
       };
       mcuInfos.push(info);
       mcuByName.set(name, info);
@@ -224,86 +319,134 @@ export function buildProjectGraph(
       hwType: 'mainboard',
       sourceFile: mainFile,
       nodeId: '',
+      commType: 'usb',
+      isSuppressed: false,
     });
     mcuByName.set('', mcuInfos[0]);
   }
 
-  // ── Phase 2: Create hardware nodes ───────────────────────────────
-  // Count total sections for positioning
-  let totalSections = 0;
-  for (const cf of Object.values(configs)) {
-    totalSections += cf.sections.filter((s) => s.section_type !== 'mcu').length;
+  // Always ensure an SBC node exists
+  const hasSbc = mcuInfos.some((m) => m.hwType === 'sbc');
+  if (!hasSbc) {
+    // Check if there's a host_mcu section that was classified as SBC
+    const hostMcu = mcuByName.get('host_mcu');
+    if (!hostMcu) {
+      // Create a virtual SBC entry — it's always present as the Klipper host
+      mcuInfos.push({
+        name: 'host_mcu',
+        hwType: 'sbc',
+        sourceFile: mainFile,
+        nodeId: '',
+        commType: 'usb',
+        isSuppressed: false,
+      });
+      mcuByName.set('host_mcu', mcuInfos[mcuInfos.length - 1]);
+    }
   }
-  const centerY = Math.max(totalSections * 20, 300);
-  const mcuSpacing = 400;
 
-  for (let i = 0; i < mcuInfos.length; i++) {
-    const mcu = mcuInfos[i];
-    const label = mcu.name || 'Mainboard';
-    // Assign config file: MCU file if it has one, otherwise main file
+  // ── Phase 2: Create hardware nodes ───────────────────────────────
+  // Place hardware nodes in a row with enough spacing to avoid overlap
+  const HW_SPACING = 700; // wider than CONTAINER_WIDTH (600) + gap
+
+  // Place SBC node to the left
+  const sbcInfos = mcuInfos.filter((m) => m.hwType === 'sbc');
+  const nonSbcInfos = mcuInfos.filter((m) => m.hwType !== 'sbc');
+
+  for (let i = 0; i < sbcInfos.length; i++) {
+    const mcu = sbcInfos[i];
+    const label = mcu.name || 'Host (SBC)';
     const configFile = mcu.sourceFile;
-    const x = 500 + i * mcuSpacing;
-    mcu.nodeId = graphStore.addHardwareNode(mcu.hwType, label, configFile, { x, y: centerY });
+    const x = 50 + i * HW_SPACING;
+    mcu.nodeId = graphStore.addHardwareNode(mcu.hwType, label, configFile, { x, y: 100 }, mcu.name);
+    // Mark as suppressed if the source file isn't reachable from printer.cfg
+    if (!isIncluded(mcu.sourceFile) || mcu.isSuppressed) {
+      graphStore.updateNodeData(mcu.nodeId, { isSuppressed: true });
+    }
+    // If this SBC has a real [mcu] section in its config, mark MCU-enabled
+    const hasMcuSection = activeConfigs[mcu.sourceFile]?.sections.some(
+      (s) => s.section_type === 'mcu' && s.section_name === mcu.name,
+    );
+    if (hasMcuSection) {
+      graphStore.updateNodeData(mcu.nodeId, { isMcu: true });
+    }
+  }
+
+  for (let i = 0; i < nonSbcInfos.length; i++) {
+    const mcu = nonSbcInfos[i];
+    const label = mcu.name || 'Mainboard';
+    const configFile = mcu.sourceFile;
+    const x = (sbcInfos.length > 0 ? 50 + sbcInfos.length * HW_SPACING : 50) + i * HW_SPACING;
+    mcu.nodeId = graphStore.addHardwareNode(mcu.hwType, label, configFile, { x, y: 100 }, mcu.name);
     if (mcu.hwType === 'mainboard' && !mcu.name) {
       graphStore.updateNodeData(mcu.nodeId, { isPrimary: true });
+    }
+    // Mark as suppressed if the source file isn't reachable from printer.cfg
+    if (!isIncluded(mcu.sourceFile) || mcu.isSuppressed) {
+      graphStore.updateNodeData(mcu.nodeId, { isSuppressed: true });
     }
   }
 
   // ── Phase 3: Map files to owner hardware & create include edges ──
-  // A file "belongs to" the hardware whose [mcu] section it contains.
-  // Files without an [mcu] are include-only files owned by whoever includes them.
   const fileOwner = new Map<string, string>(); // filename → hardware nodeId
+
+  // Primary MCU is the unnamed [mcu] or first non-SBC
+  const primaryMcu = mcuByName.get('') || nonSbcInfos[0] || mcuInfos[0];
+  const sbcMcu = sbcInfos[0];
 
   // First pass: files with MCU sections own themselves
   for (const mcu of mcuInfos) {
-    // The MCU's source file is owned by this hardware
-    if (!fileOwner.has(mcu.sourceFile)) {
+    if (mcu.hwType !== 'sbc' && !fileOwner.has(mcu.sourceFile)) {
       fileOwner.set(mcu.sourceFile, mcu.nodeId);
     }
   }
 
-  // Second pass: resolve include-only files via the include tree
-  // The main file includes other files → those belong to mainboard (unless they have their own MCU)
-  const primaryMcu = mcuByName.get('') || mcuInfos[0];
-  const mainConfig = configs[mainFile];
-
+  // Second pass: resolve include-only files
   if (mainConfig) {
     for (const inc of mainConfig.includes) {
-      const incFilename = inc.replace(/^.*[\\/]/, ''); // strip path, keep filename
-      // Check if this is one of our imported files
-      const matchedFile = filenames.find(
+      const incFilename = inc.replace(/^.*[\\/]/, '');
+      const matchedFile = activeFilenames.find(
         (fn) => fn === incFilename || fn === inc || fn.endsWith(`/${incFilename}`) || fn.endsWith(`\\${incFilename}`),
       );
       if (matchedFile && !fileOwner.has(matchedFile)) {
-        // Include-only file → assign to primary mainboard
         fileOwner.set(matchedFile, primaryMcu.nodeId);
       }
     }
   }
 
-  // Any remaining unassigned files → attach to primary
-  for (const fn of filenames) {
+  // Remaining unassigned files → primary MCU (not SBC)
+  for (const fn of activeFilenames) {
     if (!fileOwner.has(fn)) {
       fileOwner.set(fn, primaryMcu.nodeId);
     }
   }
 
-  // Create configuration edges between hardware that have [include] relationships
-  // e.g., printer.cfg includes EBB.cfg → edge from EBB hardware to mainboard
+  // Create communication edges from SBC to each non-SBC hardware
+  // Only show comm edges for MCUs that have actual config data imported
+  if (sbcMcu) {
+    for (const mcu of nonSbcInfos) {
+      if (mcu.nodeId !== sbcMcu.nodeId) {
+        // Only add comm edge if this MCU's source file was actually imported
+        const hasConfigData = !!activeConfigs[mcu.sourceFile];
+        if (hasConfigData) {
+          // Mark as broken/not-included if the file isn't in printer.cfg's include chain
+          // SBC is to the left of MCUs in initial layout → right-out / left-in
+          graphStore.addCommunicationEdge(sbcMcu.nodeId, mcu.nodeId, mcu.commType, 'right-out', 'left-in', !isIncluded(mcu.sourceFile));
+        }
+      }
+    }
+  }
+
+  // Create configuration edges between non-SBC hardware that have [include] relationships
   const allMcuNames = mcuInfos.map((m) => m.name);
   if (mainConfig) {
     for (const inc of mainConfig.includes) {
       const incFilename = inc.replace(/^.*[\\/]/, '');
-      // Find which MCU node owns the included file
       for (const mcu of mcuInfos) {
+        if (mcu.hwType === 'sbc') continue; // SBC edges already handled above
         if (mcu.sourceFile === incFilename || mcu.sourceFile.endsWith(`/${incFilename}`)) {
           if (mcu.nodeId !== primaryMcu.nodeId) {
-            // Create edge: included hardware → main hardware
-            if (mcu.hwType === 'sbc') {
-              graphStore.addCommunicationEdge(mcu.nodeId, primaryMcu.nodeId, 'usb');
-            } else {
-              graphStore.addConfigurationEdge(mcu.nodeId, primaryMcu.nodeId, mcu.hwType);
-            }
+            // Secondary MCU is to the right of primary in initial layout → left-out / right-in
+            graphStore.addConfigurationEdge(mcu.nodeId, primaryMcu.nodeId, mcu.hwType, 'left-out', 'right-in');
           }
           break;
         }
@@ -320,13 +463,32 @@ export function buildProjectGraph(
     parentId: string;
     isFeature: boolean;
     componentGroup: string;
+    isSuppressed: boolean;
+    filename: string;
   }>> = new Map();
 
-  for (const [filename, config] of Object.entries(configs)) {
+  for (const [filename, config] of Object.entries(activeConfigs)) {
     for (const sec of config.sections) {
       if (sec.section_type === 'mcu') continue;
 
       const sType = sec.section_type;
+      const suppressed = isSectionSuppressed(sec);
+
+      // Handle include sections: show commented includes but skip active includes (they're edges)
+      if (sType === 'include') {
+        // Active includes are already handled as edges, skip them
+        if (!suppressed) continue;
+        // Commented includes: show as suppressed feature node, no trace
+        const label = `Include: ${sec.section_name}`;
+        const parentId = fileOwner.get(filename) || primaryMcu.nodeId;
+        const gKey = `${parentId}::include::feat`;
+        if (!groupedSections.has(gKey)) groupedSections.set(gKey, []);
+        groupedSections.get(gKey)!.push({
+          sec, sType: 'include', label, parentId, isFeature: true,
+          componentGroup: 'other', isSuppressed: true, filename,
+        });
+        continue;
+      }
 
       // Build descriptive label: "Display Name: section_name"
       const displayName = schemas[sType]?.display_name || sType;
@@ -334,13 +496,21 @@ export function buildProjectGraph(
         ? `${displayName}: ${sec.section_name}`
         : displayName;
 
-      // Determine parent: check pin references to named MCUs first
+      // Determine parent: check pin/sensor_mcu references to named MCUs first
       const referencedMcu = detectMcuReference(sec, allMcuNames);
       let parentId: string;
       if (referencedMcu) {
         const mcuInfo = mcuByName.get(referencedMcu);
-        parentId = mcuInfo ? mcuInfo.nodeId : (fileOwner.get(filename) || primaryMcu.nodeId);
+        // If it references a SBC MCU (host_mcu), assign to the SBC node
+        if (mcuInfo && mcuInfo.hwType === 'sbc') {
+          parentId = mcuInfo.nodeId;
+        } else if (mcuInfo) {
+          parentId = mcuInfo.nodeId;
+        } else {
+          parentId = fileOwner.get(filename) || primaryMcu.nodeId;
+        }
       } else {
+        // No explicit MCU reference: use the file's owner (primary MCU for main file)
         parentId = fileOwner.get(filename) || primaryMcu.nodeId;
       }
 
@@ -354,7 +524,7 @@ export function buildProjectGraph(
         groupedSections.set(groupKey, []);
       }
       groupedSections.get(groupKey)!.push({
-        sec, sType, label, parentId, isFeature, componentGroup,
+        sec, sType, label, parentId, isFeature, componentGroup, isSuppressed: suppressed, filename,
       });
     }
   }
@@ -371,27 +541,52 @@ export function buildProjectGraph(
         sectionHeader: item.sec.full_header,
         isFeature: item.isFeature,
         params: item.sec.params.filter((p) => !p.is_commented_out),
+        configFile: item.filename,
       }));
-      graphStore.addGroupNode(
+      const hasGroupErrors = items.some((item) => sectionsWithErrors.has(item.sec.full_header));
+      const groupId = graphStore.addGroupNode(
         first.parentId,
         first.componentGroup,
         groupLabel,
         childData,
         first.isFeature,
+        first.filename,
       );
+      if (hasGroupErrors) {
+        graphStore.updateNodeData(groupId, { hasErrors: true });
+      }
     } else {
       // Create individual nodes
       for (const item of items) {
+        let nodeId: string;
         if (item.isFeature) {
-          graphStore.addFeatureNode(item.parentId, item.sType, item.label, item.sec.full_header);
+          nodeId = graphStore.addFeatureNode(item.parentId, item.sType, item.label, item.sec.full_header, item.filename);
         } else if (SUB_COMPONENT_TYPES.has(item.sType)) {
-          graphStore.addSubComponentNode(item.parentId, item.sType, item.label, item.sec.full_header);
+          nodeId = graphStore.addSubComponentNode(item.parentId, item.sType, item.label, item.sec.full_header, item.filename);
         } else {
-          graphStore.addSubComponentNode(item.parentId, item.sType, item.label, item.sec.full_header);
+          nodeId = graphStore.addSubComponentNode(item.parentId, item.sType, item.label, item.sec.full_header, item.filename);
+        }
+        // Mark suppressed sections
+        if (item.isSuppressed) {
+          graphStore.updateNodeData(nodeId, { isSuppressed: true });
+        }
+        // Mark sections with validation errors
+        if (sectionsWithErrors.has(item.sec.full_header)) {
+          graphStore.updateNodeData(nodeId, { hasErrors: true });
         }
       }
     }
   }
+
+  // ── Phase 5: Collapse all hardware nodes by default ──────────────
+  for (const mcu of mcuInfos) {
+    if (mcu.nodeId) {
+      graphStore.toggleHardwareCollapse(mcu.nodeId);
+    }
+  }
+
+  // ── Phase 6: Auto-arrange into radial layout ─────────────────────
+  graphStore.autoArrange();
 }
 
 /**

@@ -7,6 +7,7 @@ export interface HardwareNodeData {
   label: string;
   hardwareType: HardwareType;
   configFile: string;
+  mcuName: string;
   sections: ConfigSection[];
   customImage?: string;
   hasErrors: boolean;
@@ -21,6 +22,7 @@ export interface SubComponentNodeData {
   componentGroup: string;
   section: ConfigSection;
   parentHardwareId: string;
+  configFile: string;
   customImage?: string;
   hasErrors: boolean;
   [key: string]: unknown;
@@ -32,6 +34,7 @@ export interface FeatureNodeData {
   sectionHeader: string;
   section: ConfigSection;
   parentId: string;
+  configFile: string;
   customImage?: string;
   hasErrors: boolean;
   [key: string]: unknown;
@@ -43,6 +46,7 @@ export interface GroupChildItem {
   sectionHeader: string;
   isFeature: boolean;
   params: ConfigParam[];
+  configFile: string;
 }
 
 export interface GroupNodeData {
@@ -51,6 +55,7 @@ export interface GroupNodeData {
   isFeature: boolean;
   children: GroupChildItem[];
   parentHardwareId: string;
+  configFile: string;
   hasErrors: boolean;
   [key: string]: unknown;
 }

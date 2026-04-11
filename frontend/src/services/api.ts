@@ -137,12 +137,60 @@ export async function generateConfig(opts: {
 
 /* ── Examples ────────────────────────────────────────── */
 
+/** Client-side fuzzy match — mirrors backend logic, used when API unavailable. */
+function _fuzzyMatchStatic(query: string, examples: ExampleConfig[]): ExampleConfig[] {
+  const qLower = query.toLowerCase();
+  const parts = qLower.split(/\s+/).filter(Boolean);
+  const scored: [number, ExampleConfig][] = [];
+  for (const ex of examples) {
+    let score = 0;
+    const n = ex.name.toLowerCase();
+    const tags = ex.tags.map((t) => t.toLowerCase());
+    if (qLower === n) {
+      score += 100;
+    } else if (n.includes(qLower)) {
+      score += 50;
+    } else {
+      const all = n + ' ' + tags.join(' ');
+      const hits = parts.filter((p) => all.includes(p)).length;
+      if (hits > 0) score += (hits / parts.length) * 30;
+    }
+    for (const p of parts) for (const t of tags) {
+      if (t.includes(p)) score += 5;
+      if (t === p) score += 10;
+    }
+    if (score > 0) scored.push([score, ex]);
+  }
+  scored.sort((a, b) => b[0] - a[0]);
+  return scored.slice(0, 100).map(([, ex]) => ex);
+}
+
+let _staticExamples: ExampleConfig[] | null = null;
+async function _loadStaticExamples(): Promise<ExampleConfig[]> {
+  if (_staticExamples) return _staticExamples;
+  const res = await fetch('/reference/examples.json');
+  if (!res.ok) throw new Error('Static examples unavailable');
+  const data = await res.json() as { examples: ExampleConfig[] };
+  _staticExamples = data.examples;
+  return _staticExamples;
+}
+
 export async function listExamples(): Promise<{ examples: ExampleConfig[] }> {
-  return request('/examples');
+  try {
+    return await request('/examples');
+  } catch {
+    const examples = await _loadStaticExamples();
+    return { examples };
+  }
 }
 
 export async function searchExamples(q: string): Promise<{ results: ExampleConfig[] }> {
-  return request(`/examples/search?q=${encodeURIComponent(q)}`);
+  try {
+    return await request(`/examples/search?q=${encodeURIComponent(q)}`);
+  } catch {
+    const examples = await _loadStaticExamples();
+    return { results: q.trim() ? _fuzzyMatchStatic(q, examples) : examples };
+  }
 }
 
 export async function getExample(filename: string): Promise<{
@@ -155,7 +203,13 @@ export async function getExample(filename: string): Promise<{
 /* ── Schema ──────────────────────────────────────────── */
 
 export async function getSchema(): Promise<{ schemas: Record<string, SectionSchema> }> {
-  return request('/schema');
+  try {
+    return await request('/schema');
+  } catch {
+    const res = await fetch('/reference/schema.json');
+    if (!res.ok) throw new Error('Static schema unavailable');
+    return res.json() as Promise<{ schemas: Record<string, SectionSchema> }>;
+  }
 }
 
 export async function getSectionSchema(sectionType: string): Promise<SectionSchema> {

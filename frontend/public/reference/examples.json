@@ -1,0 +1,2280 @@
+{
+  "examples": [
+    {
+      "filename": "example-cartesian.cfg",
+      "name": "example-cartesian",
+      "category": "example",
+      "tags": [
+        "cartesian"
+      ]
+    },
+    {
+      "filename": "example-corexy.cfg",
+      "name": "example-corexy",
+      "category": "example",
+      "tags": [
+        "corexy"
+      ]
+    },
+    {
+      "filename": "example-corexz.cfg",
+      "name": "example-corexz",
+      "category": "example",
+      "tags": [
+        "corexz"
+      ]
+    },
+    {
+      "filename": "example-delta.cfg",
+      "name": "example-delta",
+      "category": "example",
+      "tags": [
+        "delta"
+      ]
+    },
+    {
+      "filename": "example-deltesian.cfg",
+      "name": "example-deltesian",
+      "category": "example",
+      "tags": [
+        "deltesian"
+      ]
+    },
+    {
+      "filename": "example-extras.cfg",
+      "name": "example-extras",
+      "category": "example",
+      "tags": [
+        "extras"
+      ]
+    },
+    {
+      "filename": "example-generic-caretesian.cfg",
+      "name": "example-generic-caretesian",
+      "category": "example",
+      "tags": [
+        "generic",
+        "caretesian"
+      ]
+    },
+    {
+      "filename": "example-hybrid-corexy.cfg",
+      "name": "example-hybrid-corexy",
+      "category": "example",
+      "tags": [
+        "hybrid",
+        "corexy"
+      ]
+    },
+    {
+      "filename": "example-hybrid-corexz.cfg",
+      "name": "example-hybrid-corexz",
+      "category": "example",
+      "tags": [
+        "hybrid",
+        "corexz"
+      ]
+    },
+    {
+      "filename": "example-polar.cfg",
+      "name": "example-polar",
+      "category": "example",
+      "tags": [
+        "polar"
+      ]
+    },
+    {
+      "filename": "example-rotary-delta.cfg",
+      "name": "example-rotary-delta",
+      "category": "example",
+      "tags": [
+        "rotary",
+        "delta"
+      ]
+    },
+    {
+      "filename": "example-winch.cfg",
+      "name": "example-winch",
+      "category": "example",
+      "tags": [
+        "winch"
+      ]
+    },
+    {
+      "filename": "example.cfg",
+      "name": "example",
+      "category": "other",
+      "tags": [
+        "example"
+      ]
+    },
+    {
+      "filename": "generic-I3DBEEZ9.cfg",
+      "name": "generic-I3DBEEZ9",
+      "category": "generic",
+      "tags": [
+        "I3DBEEZ9"
+      ]
+    },
+    {
+      "filename": "generic-alligator-r2.cfg",
+      "name": "generic-alligator-r2",
+      "category": "generic",
+      "tags": [
+        "alligator",
+        "r2"
+      ]
+    },
+    {
+      "filename": "generic-alligator-r3.cfg",
+      "name": "generic-alligator-r3",
+      "category": "generic",
+      "tags": [
+        "alligator",
+        "r3"
+      ]
+    },
+    {
+      "filename": "generic-archim2.cfg",
+      "name": "generic-archim2",
+      "category": "generic",
+      "tags": [
+        "archim2"
+      ]
+    },
+    {
+      "filename": "generic-azteeg-x5-mini-v3.cfg",
+      "name": "generic-azteeg-x5-mini-v3",
+      "category": "generic",
+      "tags": [
+        "azteeg",
+        "x5",
+        "mini",
+        "v3"
+      ]
+    },
+    {
+      "filename": "generic-bigtreetech-e3-rrf-v1.1.cfg",
+      "name": "generic-bigtreetech-e3-rrf-v1.1",
+      "category": "generic",
+      "tags": [
+        "bigtreetech",
+        "e3",
+        "rrf",
+        "v1"
+      ]
+    },
+    {
+      "filename": "generic-bigtreetech-gtr.cfg",
+      "name": "generic-bigtreetech-gtr",
+      "category": "generic",
+      "tags": [
+        "bigtreetech",
+        "gtr"
+      ]
+    },
+    {
+      "filename": "generic-bigtreetech-manta-e3ez.cfg",
+      "name": "generic-bigtreetech-manta-e3ez",
+      "category": "generic",
+      "tags": [
+        "bigtreetech",
+        "manta",
+        "e3ez"
+      ]
+    },
+    {
+      "filename": "generic-bigtreetech-manta-m4p.cfg",
+      "name": "generic-bigtreetech-manta-m4p",
+      "category": "generic",
+      "tags": [
+        "bigtreetech",
+        "manta",
+        "m4p"
+      ]
+    },
+    {
+      "filename": "generic-bigtreetech-manta-m5p.cfg",
+      "name": "generic-bigtreetech-manta-m5p",
+      "category": "generic",
+      "tags": [
+        "bigtreetech",
+        "manta",
+        "m5p"
+      ]
+    },
+    {
+      "filename": "generic-bigtreetech-manta-m8p-v1.0.cfg",
+      "name": "generic-bigtreetech-manta-m8p-v1.0",
+      "category": "generic",
+      "tags": [
+        "bigtreetech",
+        "manta",
+        "m8p",
+        "v1"
+      ]
+    },
+    {
+      "filename": "generic-bigtreetech-manta-m8p-v1.1.cfg",
+      "name": "generic-bigtreetech-manta-m8p-v1.1",
+      "category": "generic",
+      "tags": [
+        "bigtreetech",
+        "manta",
+        "m8p",
+        "v1"
+      ]
+    },
+    {
+      "filename": "generic-bigtreetech-octopus-max-ez.cfg",
+      "name": "generic-bigtreetech-octopus-max-ez",
+      "category": "generic",
+      "tags": [
+        "bigtreetech",
+        "octopus",
+        "max",
+        "ez"
+      ]
+    },
+    {
+      "filename": "generic-bigtreetech-octopus-pro-v1.0.cfg",
+      "name": "generic-bigtreetech-octopus-pro-v1.0",
+      "category": "generic",
+      "tags": [
+        "bigtreetech",
+        "octopus",
+        "pro",
+        "v1"
+      ]
+    },
+    {
+      "filename": "generic-bigtreetech-octopus-pro-v1.1.cfg",
+      "name": "generic-bigtreetech-octopus-pro-v1.1",
+      "category": "generic",
+      "tags": [
+        "bigtreetech",
+        "octopus",
+        "pro",
+        "v1"
+      ]
+    },
+    {
+      "filename": "generic-bigtreetech-octopus-v1.1.cfg",
+      "name": "generic-bigtreetech-octopus-v1.1",
+      "category": "generic",
+      "tags": [
+        "bigtreetech",
+        "octopus",
+        "v1"
+      ]
+    },
+    {
+      "filename": "generic-bigtreetech-skr-2.cfg",
+      "name": "generic-bigtreetech-skr-2",
+      "category": "generic",
+      "tags": [
+        "bigtreetech",
+        "skr"
+      ]
+    },
+    {
+      "filename": "generic-bigtreetech-skr-3.cfg",
+      "name": "generic-bigtreetech-skr-3",
+      "category": "generic",
+      "tags": [
+        "bigtreetech",
+        "skr"
+      ]
+    },
+    {
+      "filename": "generic-bigtreetech-skr-cr6-v1.0.cfg",
+      "name": "generic-bigtreetech-skr-cr6-v1.0",
+      "category": "generic",
+      "tags": [
+        "bigtreetech",
+        "skr",
+        "cr6",
+        "v1"
+      ]
+    },
+    {
+      "filename": "generic-bigtreetech-skr-e3-dip.cfg",
+      "name": "generic-bigtreetech-skr-e3-dip",
+      "category": "generic",
+      "tags": [
+        "bigtreetech",
+        "skr",
+        "e3",
+        "dip"
+      ]
+    },
+    {
+      "filename": "generic-bigtreetech-skr-e3-turbo.cfg",
+      "name": "generic-bigtreetech-skr-e3-turbo",
+      "category": "generic",
+      "tags": [
+        "bigtreetech",
+        "skr",
+        "e3",
+        "turbo"
+      ]
+    },
+    {
+      "filename": "generic-bigtreetech-skr-mini-e3-v1.0.cfg",
+      "name": "generic-bigtreetech-skr-mini-e3-v1.0",
+      "category": "generic",
+      "tags": [
+        "bigtreetech",
+        "skr",
+        "mini",
+        "e3",
+        "v1"
+      ]
+    },
+    {
+      "filename": "generic-bigtreetech-skr-mini-e3-v1.2.cfg",
+      "name": "generic-bigtreetech-skr-mini-e3-v1.2",
+      "category": "generic",
+      "tags": [
+        "bigtreetech",
+        "skr",
+        "mini",
+        "e3",
+        "v1"
+      ]
+    },
+    {
+      "filename": "generic-bigtreetech-skr-mini-e3-v2.0.cfg",
+      "name": "generic-bigtreetech-skr-mini-e3-v2.0",
+      "category": "generic",
+      "tags": [
+        "bigtreetech",
+        "skr",
+        "mini",
+        "e3",
+        "v2"
+      ]
+    },
+    {
+      "filename": "generic-bigtreetech-skr-mini-e3-v3.0.cfg",
+      "name": "generic-bigtreetech-skr-mini-e3-v3.0",
+      "category": "generic",
+      "tags": [
+        "bigtreetech",
+        "skr",
+        "mini",
+        "e3",
+        "v3"
+      ]
+    },
+    {
+      "filename": "generic-bigtreetech-skr-mini-mz.cfg",
+      "name": "generic-bigtreetech-skr-mini-mz",
+      "category": "generic",
+      "tags": [
+        "bigtreetech",
+        "skr",
+        "mini",
+        "mz"
+      ]
+    },
+    {
+      "filename": "generic-bigtreetech-skr-mini.cfg",
+      "name": "generic-bigtreetech-skr-mini",
+      "category": "generic",
+      "tags": [
+        "bigtreetech",
+        "skr",
+        "mini"
+      ]
+    },
+    {
+      "filename": "generic-bigtreetech-skr-pico-v1.0.cfg",
+      "name": "generic-bigtreetech-skr-pico-v1.0",
+      "category": "generic",
+      "tags": [
+        "bigtreetech",
+        "skr",
+        "pico",
+        "v1"
+      ]
+    },
+    {
+      "filename": "generic-bigtreetech-skr-pro.cfg",
+      "name": "generic-bigtreetech-skr-pro",
+      "category": "generic",
+      "tags": [
+        "bigtreetech",
+        "skr",
+        "pro"
+      ]
+    },
+    {
+      "filename": "generic-bigtreetech-skr-v1.1.cfg",
+      "name": "generic-bigtreetech-skr-v1.1",
+      "category": "generic",
+      "tags": [
+        "bigtreetech",
+        "skr",
+        "v1"
+      ]
+    },
+    {
+      "filename": "generic-bigtreetech-skr-v1.3.cfg",
+      "name": "generic-bigtreetech-skr-v1.3",
+      "category": "generic",
+      "tags": [
+        "bigtreetech",
+        "skr",
+        "v1"
+      ]
+    },
+    {
+      "filename": "generic-bigtreetech-skr-v1.4.cfg",
+      "name": "generic-bigtreetech-skr-v1.4",
+      "category": "generic",
+      "tags": [
+        "bigtreetech",
+        "skr",
+        "v1"
+      ]
+    },
+    {
+      "filename": "generic-cramps.cfg",
+      "name": "generic-cramps",
+      "category": "generic",
+      "tags": [
+        "cramps"
+      ]
+    },
+    {
+      "filename": "generic-creality-v4.2.10.cfg",
+      "name": "generic-creality-v4.2.10",
+      "category": "generic",
+      "tags": [
+        "creality",
+        "v4",
+        "10"
+      ]
+    },
+    {
+      "filename": "generic-creality-v4.2.7.cfg",
+      "name": "generic-creality-v4.2.7",
+      "category": "generic",
+      "tags": [
+        "creality",
+        "v4"
+      ]
+    },
+    {
+      "filename": "generic-duet2-duex.cfg",
+      "name": "generic-duet2-duex",
+      "category": "generic",
+      "tags": [
+        "duet2",
+        "duex"
+      ]
+    },
+    {
+      "filename": "generic-duet2-maestro.cfg",
+      "name": "generic-duet2-maestro",
+      "category": "generic",
+      "tags": [
+        "duet2",
+        "maestro"
+      ]
+    },
+    {
+      "filename": "generic-duet2.cfg",
+      "name": "generic-duet2",
+      "category": "generic",
+      "tags": [
+        "duet2"
+      ]
+    },
+    {
+      "filename": "generic-duet3-6hc.cfg",
+      "name": "generic-duet3-6hc",
+      "category": "generic",
+      "tags": [
+        "duet3",
+        "6hc"
+      ]
+    },
+    {
+      "filename": "generic-duet3-6xd.cfg",
+      "name": "generic-duet3-6xd",
+      "category": "generic",
+      "tags": [
+        "duet3",
+        "6xd"
+      ]
+    },
+    {
+      "filename": "generic-duet3-mini.cfg",
+      "name": "generic-duet3-mini",
+      "category": "generic",
+      "tags": [
+        "duet3",
+        "mini"
+      ]
+    },
+    {
+      "filename": "generic-einsy-rambo.cfg",
+      "name": "generic-einsy-rambo",
+      "category": "generic",
+      "tags": [
+        "einsy",
+        "rambo"
+      ]
+    },
+    {
+      "filename": "generic-flyboard.cfg",
+      "name": "generic-flyboard",
+      "category": "generic",
+      "tags": [
+        "flyboard"
+      ]
+    },
+    {
+      "filename": "generic-fysetc-cheetah-v1.1.cfg",
+      "name": "generic-fysetc-cheetah-v1.1",
+      "category": "generic",
+      "tags": [
+        "fysetc",
+        "cheetah",
+        "v1"
+      ]
+    },
+    {
+      "filename": "generic-fysetc-cheetah-v1.2.cfg",
+      "name": "generic-fysetc-cheetah-v1.2",
+      "category": "generic",
+      "tags": [
+        "fysetc",
+        "cheetah",
+        "v1"
+      ]
+    },
+    {
+      "filename": "generic-fysetc-cheetah-v2.0.cfg",
+      "name": "generic-fysetc-cheetah-v2.0",
+      "category": "generic",
+      "tags": [
+        "fysetc",
+        "cheetah",
+        "v2"
+      ]
+    },
+    {
+      "filename": "generic-fysetc-f6.cfg",
+      "name": "generic-fysetc-f6",
+      "category": "generic",
+      "tags": [
+        "fysetc",
+        "f6"
+      ]
+    },
+    {
+      "filename": "generic-fysetc-s6-v2.cfg",
+      "name": "generic-fysetc-s6-v2",
+      "category": "generic",
+      "tags": [
+        "fysetc",
+        "s6",
+        "v2"
+      ]
+    },
+    {
+      "filename": "generic-fysetc-s6.cfg",
+      "name": "generic-fysetc-s6",
+      "category": "generic",
+      "tags": [
+        "fysetc",
+        "s6"
+      ]
+    },
+    {
+      "filename": "generic-fysetc-spider.cfg",
+      "name": "generic-fysetc-spider",
+      "category": "generic",
+      "tags": [
+        "fysetc",
+        "spider"
+      ]
+    },
+    {
+      "filename": "generic-gt2560.cfg",
+      "name": "generic-gt2560",
+      "category": "generic",
+      "tags": [
+        "gt2560"
+      ]
+    },
+    {
+      "filename": "generic-ldo-leviathan-v1.2.cfg",
+      "name": "generic-ldo-leviathan-v1.2",
+      "category": "generic",
+      "tags": [
+        "ldo",
+        "leviathan",
+        "v1"
+      ]
+    },
+    {
+      "filename": "generic-mellow-fly-cdy-v3.cfg",
+      "name": "generic-mellow-fly-cdy-v3",
+      "category": "generic",
+      "tags": [
+        "mellow",
+        "fly",
+        "cdy",
+        "v3"
+      ]
+    },
+    {
+      "filename": "generic-mellow-fly-e3-v2.cfg",
+      "name": "generic-mellow-fly-e3-v2",
+      "category": "generic",
+      "tags": [
+        "mellow",
+        "fly",
+        "e3",
+        "v2"
+      ]
+    },
+    {
+      "filename": "generic-mellow-fly-gemini-v1.cfg",
+      "name": "generic-mellow-fly-gemini-v1",
+      "category": "generic",
+      "tags": [
+        "mellow",
+        "fly",
+        "gemini",
+        "v1"
+      ]
+    },
+    {
+      "filename": "generic-mellow-fly-gemini-v2.cfg",
+      "name": "generic-mellow-fly-gemini-v2",
+      "category": "generic",
+      "tags": [
+        "mellow",
+        "fly",
+        "gemini",
+        "v2"
+      ]
+    },
+    {
+      "filename": "generic-mellow-super-infinty-hv.cfg",
+      "name": "generic-mellow-super-infinty-hv",
+      "category": "generic",
+      "tags": [
+        "mellow",
+        "super",
+        "infinty",
+        "hv"
+      ]
+    },
+    {
+      "filename": "generic-melzi.cfg",
+      "name": "generic-melzi",
+      "category": "generic",
+      "tags": [
+        "melzi"
+      ]
+    },
+    {
+      "filename": "generic-mightyboard.cfg",
+      "name": "generic-mightyboard",
+      "category": "generic",
+      "tags": [
+        "mightyboard"
+      ]
+    },
+    {
+      "filename": "generic-mini-rambo.cfg",
+      "name": "generic-mini-rambo",
+      "category": "generic",
+      "tags": [
+        "mini",
+        "rambo"
+      ]
+    },
+    {
+      "filename": "generic-minitronics1.cfg",
+      "name": "generic-minitronics1",
+      "category": "generic",
+      "tags": [
+        "minitronics1"
+      ]
+    },
+    {
+      "filename": "generic-mks-monster8.cfg",
+      "name": "generic-mks-monster8",
+      "category": "generic",
+      "tags": [
+        "mks",
+        "monster8"
+      ]
+    },
+    {
+      "filename": "generic-mks-robin-e3.cfg",
+      "name": "generic-mks-robin-e3",
+      "category": "generic",
+      "tags": [
+        "mks",
+        "robin",
+        "e3"
+      ]
+    },
+    {
+      "filename": "generic-mks-robin-nano-v1.cfg",
+      "name": "generic-mks-robin-nano-v1",
+      "category": "generic",
+      "tags": [
+        "mks",
+        "robin",
+        "nano",
+        "v1"
+      ]
+    },
+    {
+      "filename": "generic-mks-robin-nano-v2.cfg",
+      "name": "generic-mks-robin-nano-v2",
+      "category": "generic",
+      "tags": [
+        "mks",
+        "robin",
+        "nano",
+        "v2"
+      ]
+    },
+    {
+      "filename": "generic-mks-robin-nano-v3.cfg",
+      "name": "generic-mks-robin-nano-v3",
+      "category": "generic",
+      "tags": [
+        "mks",
+        "robin",
+        "nano",
+        "v3"
+      ]
+    },
+    {
+      "filename": "generic-mks-rumba32-v1.0.cfg",
+      "name": "generic-mks-rumba32-v1.0",
+      "category": "generic",
+      "tags": [
+        "mks",
+        "rumba32",
+        "v1"
+      ]
+    },
+    {
+      "filename": "generic-mks-sgenl.cfg",
+      "name": "generic-mks-sgenl",
+      "category": "generic",
+      "tags": [
+        "mks",
+        "sgenl"
+      ]
+    },
+    {
+      "filename": "generic-printrboard-g2.cfg",
+      "name": "generic-printrboard-g2",
+      "category": "generic",
+      "tags": [
+        "printrboard",
+        "g2"
+      ]
+    },
+    {
+      "filename": "generic-printrboard.cfg",
+      "name": "generic-printrboard",
+      "category": "generic",
+      "tags": [
+        "printrboard"
+      ]
+    },
+    {
+      "filename": "generic-prusa-buddy.cfg",
+      "name": "generic-prusa-buddy",
+      "category": "generic",
+      "tags": [
+        "prusa",
+        "buddy"
+      ]
+    },
+    {
+      "filename": "generic-radds.cfg",
+      "name": "generic-radds",
+      "category": "generic",
+      "tags": [
+        "radds"
+      ]
+    },
+    {
+      "filename": "generic-rambo.cfg",
+      "name": "generic-rambo",
+      "category": "generic",
+      "tags": [
+        "rambo"
+      ]
+    },
+    {
+      "filename": "generic-ramps.cfg",
+      "name": "generic-ramps",
+      "category": "generic",
+      "tags": [
+        "ramps"
+      ]
+    },
+    {
+      "filename": "generic-re-arm.cfg",
+      "name": "generic-re-arm",
+      "category": "generic",
+      "tags": [
+        "re",
+        "arm"
+      ]
+    },
+    {
+      "filename": "generic-remram.cfg",
+      "name": "generic-remram",
+      "category": "generic",
+      "tags": [
+        "remram"
+      ]
+    },
+    {
+      "filename": "generic-replicape.cfg",
+      "name": "generic-replicape",
+      "category": "generic",
+      "tags": [
+        "replicape"
+      ]
+    },
+    {
+      "filename": "generic-rumba.cfg",
+      "name": "generic-rumba",
+      "category": "generic",
+      "tags": [
+        "rumba"
+      ]
+    },
+    {
+      "filename": "generic-ruramps-v1.3.cfg",
+      "name": "generic-ruramps-v1.3",
+      "category": "generic",
+      "tags": [
+        "ruramps",
+        "v1"
+      ]
+    },
+    {
+      "filename": "generic-simulavr.cfg",
+      "name": "generic-simulavr",
+      "category": "generic",
+      "tags": [
+        "simulavr"
+      ]
+    },
+    {
+      "filename": "generic-smoothieboard.cfg",
+      "name": "generic-smoothieboard",
+      "category": "generic",
+      "tags": [
+        "smoothieboard"
+      ]
+    },
+    {
+      "filename": "generic-th3d-ezboard-lite-v1.2.cfg",
+      "name": "generic-th3d-ezboard-lite-v1.2",
+      "category": "generic",
+      "tags": [
+        "th3d",
+        "ezboard",
+        "lite",
+        "v1"
+      ]
+    },
+    {
+      "filename": "generic-th3d-ezboard-v2.0.cfg",
+      "name": "generic-th3d-ezboard-v2.0",
+      "category": "generic",
+      "tags": [
+        "th3d",
+        "ezboard",
+        "v2"
+      ]
+    },
+    {
+      "filename": "generic-ultimaker-ultimainboard-v2.cfg",
+      "name": "generic-ultimaker-ultimainboard-v2",
+      "category": "generic",
+      "tags": [
+        "ultimaker",
+        "ultimainboard",
+        "v2"
+      ]
+    },
+    {
+      "filename": "kit-voron2-250mm.cfg",
+      "name": "kit-voron2-250mm",
+      "category": "kit",
+      "tags": [
+        "voron2",
+        "250mm"
+      ]
+    },
+    {
+      "filename": "kit-zav3d-2019.cfg",
+      "name": "kit-zav3d-2019",
+      "category": "kit",
+      "tags": [
+        "zav3d",
+        "2019"
+      ]
+    },
+    {
+      "filename": "printer-adimlab-2018.cfg",
+      "name": "printer-adimlab-2018",
+      "category": "printer",
+      "tags": [
+        "adimlab",
+        "2018"
+      ]
+    },
+    {
+      "filename": "printer-alfawise-u30-2018.cfg",
+      "name": "printer-alfawise-u30-2018",
+      "category": "printer",
+      "tags": [
+        "alfawise",
+        "u30",
+        "2018"
+      ]
+    },
+    {
+      "filename": "printer-anet-a4-2018.cfg",
+      "name": "printer-anet-a4-2018",
+      "category": "printer",
+      "tags": [
+        "anet",
+        "a4",
+        "2018"
+      ]
+    },
+    {
+      "filename": "printer-anet-a8-2017.cfg",
+      "name": "printer-anet-a8-2017",
+      "category": "printer",
+      "tags": [
+        "anet",
+        "a8",
+        "2017"
+      ]
+    },
+    {
+      "filename": "printer-anet-a8-2019.cfg",
+      "name": "printer-anet-a8-2019",
+      "category": "printer",
+      "tags": [
+        "anet",
+        "a8",
+        "2019"
+      ]
+    },
+    {
+      "filename": "printer-anet-e10-2018.cfg",
+      "name": "printer-anet-e10-2018",
+      "category": "printer",
+      "tags": [
+        "anet",
+        "e10",
+        "2018"
+      ]
+    },
+    {
+      "filename": "printer-anet-e16-2019.cfg",
+      "name": "printer-anet-e16-2019",
+      "category": "printer",
+      "tags": [
+        "anet",
+        "e16",
+        "2019"
+      ]
+    },
+    {
+      "filename": "printer-anycubic-4max-2018.cfg",
+      "name": "printer-anycubic-4max-2018",
+      "category": "printer",
+      "tags": [
+        "anycubic",
+        "4max",
+        "2018"
+      ]
+    },
+    {
+      "filename": "printer-anycubic-4maxpro-2.0-2021.cfg",
+      "name": "printer-anycubic-4maxpro-2.0-2021",
+      "category": "printer",
+      "tags": [
+        "anycubic",
+        "4maxpro",
+        "2021"
+      ]
+    },
+    {
+      "filename": "printer-anycubic-i3-mega-2017.cfg",
+      "name": "printer-anycubic-i3-mega-2017",
+      "category": "printer",
+      "tags": [
+        "anycubic",
+        "i3",
+        "mega",
+        "2017"
+      ]
+    },
+    {
+      "filename": "printer-anycubic-kobra-go-2022.cfg",
+      "name": "printer-anycubic-kobra-go-2022",
+      "category": "printer",
+      "tags": [
+        "anycubic",
+        "kobra",
+        "go",
+        "2022"
+      ]
+    },
+    {
+      "filename": "printer-anycubic-kobra-plus-2022.cfg",
+      "name": "printer-anycubic-kobra-plus-2022",
+      "category": "printer",
+      "tags": [
+        "anycubic",
+        "kobra",
+        "plus",
+        "2022"
+      ]
+    },
+    {
+      "filename": "printer-anycubic-kossel-2016.cfg",
+      "name": "printer-anycubic-kossel-2016",
+      "category": "printer",
+      "tags": [
+        "anycubic",
+        "kossel",
+        "2016"
+      ]
+    },
+    {
+      "filename": "printer-anycubic-kossel-plus-2017.cfg",
+      "name": "printer-anycubic-kossel-plus-2017",
+      "category": "printer",
+      "tags": [
+        "anycubic",
+        "kossel",
+        "plus",
+        "2017"
+      ]
+    },
+    {
+      "filename": "printer-anycubic-vyper-2021.cfg",
+      "name": "printer-anycubic-vyper-2021",
+      "category": "printer",
+      "tags": [
+        "anycubic",
+        "vyper",
+        "2021"
+      ]
+    },
+    {
+      "filename": "printer-artillery-genius-pro-2022.cfg",
+      "name": "printer-artillery-genius-pro-2022",
+      "category": "printer",
+      "tags": [
+        "artillery",
+        "genius",
+        "pro",
+        "2022"
+      ]
+    },
+    {
+      "filename": "printer-artillery-sidewinder-x2-2022.cfg",
+      "name": "printer-artillery-sidewinder-x2-2022",
+      "category": "printer",
+      "tags": [
+        "artillery",
+        "sidewinder",
+        "x2",
+        "2022"
+      ]
+    },
+    {
+      "filename": "printer-artillery-sidewinder-x3-plus-2024.cfg",
+      "name": "printer-artillery-sidewinder-x3-plus-2024",
+      "category": "printer",
+      "tags": [
+        "artillery",
+        "sidewinder",
+        "x3",
+        "plus",
+        "2024"
+      ]
+    },
+    {
+      "filename": "printer-biqu-b1-se-plus-2022.cfg",
+      "name": "printer-biqu-b1-se-plus-2022",
+      "category": "printer",
+      "tags": [
+        "biqu",
+        "b1",
+        "se",
+        "plus",
+        "2022"
+      ]
+    },
+    {
+      "filename": "printer-biqu-bx-2021.cfg",
+      "name": "printer-biqu-bx-2021",
+      "category": "printer",
+      "tags": [
+        "biqu",
+        "bx",
+        "2021"
+      ]
+    },
+    {
+      "filename": "printer-bq-hephestos-2014.cfg",
+      "name": "printer-bq-hephestos-2014",
+      "category": "printer",
+      "tags": [
+        "bq",
+        "hephestos",
+        "2014"
+      ]
+    },
+    {
+      "filename": "printer-creality-cr10-2017.cfg",
+      "name": "printer-creality-cr10-2017",
+      "category": "printer",
+      "tags": [
+        "creality",
+        "cr10",
+        "2017"
+      ]
+    },
+    {
+      "filename": "printer-creality-cr10-smart-pro-2022.cfg",
+      "name": "printer-creality-cr10-smart-pro-2022",
+      "category": "printer",
+      "tags": [
+        "creality",
+        "cr10",
+        "smart",
+        "pro",
+        "2022"
+      ]
+    },
+    {
+      "filename": "printer-creality-cr10-v3-2020.cfg",
+      "name": "printer-creality-cr10-v3-2020",
+      "category": "printer",
+      "tags": [
+        "creality",
+        "cr10",
+        "v3",
+        "2020"
+      ]
+    },
+    {
+      "filename": "printer-creality-cr10mini-2017.cfg",
+      "name": "printer-creality-cr10mini-2017",
+      "category": "printer",
+      "tags": [
+        "creality",
+        "cr10mini",
+        "2017"
+      ]
+    },
+    {
+      "filename": "printer-creality-cr10s-2017.cfg",
+      "name": "printer-creality-cr10s-2017",
+      "category": "printer",
+      "tags": [
+        "creality",
+        "cr10s",
+        "2017"
+      ]
+    },
+    {
+      "filename": "printer-creality-cr10s-pro-v2-2020.cfg",
+      "name": "printer-creality-cr10s-pro-v2-2020",
+      "category": "printer",
+      "tags": [
+        "creality",
+        "cr10s",
+        "pro",
+        "v2",
+        "2020"
+      ]
+    },
+    {
+      "filename": "printer-creality-cr20-2018.cfg",
+      "name": "printer-creality-cr20-2018",
+      "category": "printer",
+      "tags": [
+        "creality",
+        "cr20",
+        "2018"
+      ]
+    },
+    {
+      "filename": "printer-creality-cr20-pro-2019.cfg",
+      "name": "printer-creality-cr20-pro-2019",
+      "category": "printer",
+      "tags": [
+        "creality",
+        "cr20",
+        "pro",
+        "2019"
+      ]
+    },
+    {
+      "filename": "printer-creality-cr30-2021.cfg",
+      "name": "printer-creality-cr30-2021",
+      "category": "printer",
+      "tags": [
+        "creality",
+        "cr30",
+        "2021"
+      ]
+    },
+    {
+      "filename": "printer-creality-cr5pro-ht-2022.cfg",
+      "name": "printer-creality-cr5pro-ht-2022",
+      "category": "printer",
+      "tags": [
+        "creality",
+        "cr5pro",
+        "ht",
+        "2022"
+      ]
+    },
+    {
+      "filename": "printer-creality-cr6se-2020.cfg",
+      "name": "printer-creality-cr6se-2020",
+      "category": "printer",
+      "tags": [
+        "creality",
+        "cr6se",
+        "2020"
+      ]
+    },
+    {
+      "filename": "printer-creality-cr6se-2021.cfg",
+      "name": "printer-creality-cr6se-2021",
+      "category": "printer",
+      "tags": [
+        "creality",
+        "cr6se",
+        "2021"
+      ]
+    },
+    {
+      "filename": "printer-creality-ender2-2017.cfg",
+      "name": "printer-creality-ender2-2017",
+      "category": "printer",
+      "tags": [
+        "creality",
+        "ender2",
+        "2017"
+      ]
+    },
+    {
+      "filename": "printer-creality-ender2pro-2021.cfg",
+      "name": "printer-creality-ender2pro-2021",
+      "category": "printer",
+      "tags": [
+        "creality",
+        "ender2pro",
+        "2021"
+      ]
+    },
+    {
+      "filename": "printer-creality-ender2pro-hc32-2022.cfg",
+      "name": "printer-creality-ender2pro-hc32-2022",
+      "category": "printer",
+      "tags": [
+        "creality",
+        "ender2pro",
+        "hc32",
+        "2022"
+      ]
+    },
+    {
+      "filename": "printer-creality-ender3-2018.cfg",
+      "name": "printer-creality-ender3-2018",
+      "category": "printer",
+      "tags": [
+        "creality",
+        "ender3",
+        "2018"
+      ]
+    },
+    {
+      "filename": "printer-creality-ender3-s1-2021.cfg",
+      "name": "printer-creality-ender3-s1-2021",
+      "category": "printer",
+      "tags": [
+        "creality",
+        "ender3",
+        "s1",
+        "2021"
+      ]
+    },
+    {
+      "filename": "printer-creality-ender3-s1plus-2022.cfg",
+      "name": "printer-creality-ender3-s1plus-2022",
+      "category": "printer",
+      "tags": [
+        "creality",
+        "ender3",
+        "s1plus",
+        "2022"
+      ]
+    },
+    {
+      "filename": "printer-creality-ender3-v2-2020.cfg",
+      "name": "printer-creality-ender3-v2-2020",
+      "category": "printer",
+      "tags": [
+        "creality",
+        "ender3",
+        "v2",
+        "2020"
+      ]
+    },
+    {
+      "filename": "printer-creality-ender3-v2-neo-2022.cfg",
+      "name": "printer-creality-ender3-v2-neo-2022",
+      "category": "printer",
+      "tags": [
+        "creality",
+        "ender3",
+        "v2",
+        "neo",
+        "2022"
+      ]
+    },
+    {
+      "filename": "printer-creality-ender3max-2021.cfg",
+      "name": "printer-creality-ender3max-2021",
+      "category": "printer",
+      "tags": [
+        "creality",
+        "ender3max",
+        "2021"
+      ]
+    },
+    {
+      "filename": "printer-creality-ender3pro-2020.cfg",
+      "name": "printer-creality-ender3pro-2020",
+      "category": "printer",
+      "tags": [
+        "creality",
+        "ender3pro",
+        "2020"
+      ]
+    },
+    {
+      "filename": "printer-creality-ender5-2019.cfg",
+      "name": "printer-creality-ender5-2019",
+      "category": "printer",
+      "tags": [
+        "creality",
+        "ender5",
+        "2019"
+      ]
+    },
+    {
+      "filename": "printer-creality-ender5-s1-2023.cfg",
+      "name": "printer-creality-ender5-s1-2023",
+      "category": "printer",
+      "tags": [
+        "creality",
+        "ender5",
+        "s1",
+        "2023"
+      ]
+    },
+    {
+      "filename": "printer-creality-ender5plus-2019.cfg",
+      "name": "printer-creality-ender5plus-2019",
+      "category": "printer",
+      "tags": [
+        "creality",
+        "ender5plus",
+        "2019"
+      ]
+    },
+    {
+      "filename": "printer-creality-ender5pro-2020.cfg",
+      "name": "printer-creality-ender5pro-2020",
+      "category": "printer",
+      "tags": [
+        "creality",
+        "ender5pro",
+        "2020"
+      ]
+    },
+    {
+      "filename": "printer-creality-ender6-2020.cfg",
+      "name": "printer-creality-ender6-2020",
+      "category": "printer",
+      "tags": [
+        "creality",
+        "ender6",
+        "2020"
+      ]
+    },
+    {
+      "filename": "printer-creality-sermoonD1-2021.cfg",
+      "name": "printer-creality-sermoonD1-2021",
+      "category": "printer",
+      "tags": [
+        "creality",
+        "sermoonD1",
+        "2021"
+      ]
+    },
+    {
+      "filename": "printer-creality-sermoonV1-2022.cfg",
+      "name": "printer-creality-sermoonV1-2022",
+      "category": "printer",
+      "tags": [
+        "creality",
+        "sermoonV1",
+        "2022"
+      ]
+    },
+    {
+      "filename": "printer-elegoo-neptune2-2021.cfg",
+      "name": "printer-elegoo-neptune2-2021",
+      "category": "printer",
+      "tags": [
+        "elegoo",
+        "neptune2",
+        "2021"
+      ]
+    },
+    {
+      "filename": "printer-elegoo-neptune3-pro-2023.cfg",
+      "name": "printer-elegoo-neptune3-pro-2023",
+      "category": "printer",
+      "tags": [
+        "elegoo",
+        "neptune3",
+        "pro",
+        "2023"
+      ]
+    },
+    {
+      "filename": "printer-eryone-er20-2021.cfg",
+      "name": "printer-eryone-er20-2021",
+      "category": "printer",
+      "tags": [
+        "eryone",
+        "er20",
+        "2021"
+      ]
+    },
+    {
+      "filename": "printer-eryone-thinker-series-v2-2020.cfg",
+      "name": "printer-eryone-thinker-series-v2-2020",
+      "category": "printer",
+      "tags": [
+        "eryone",
+        "thinker",
+        "series",
+        "v2",
+        "2020"
+      ]
+    },
+    {
+      "filename": "printer-flashforge-creator-pro-2018.cfg",
+      "name": "printer-flashforge-creator-pro-2018",
+      "category": "printer",
+      "tags": [
+        "flashforge",
+        "creator",
+        "pro",
+        "2018"
+      ]
+    },
+    {
+      "filename": "printer-flsun-q5-2020.cfg",
+      "name": "printer-flsun-q5-2020",
+      "category": "printer",
+      "tags": [
+        "flsun",
+        "q5",
+        "2020"
+      ]
+    },
+    {
+      "filename": "printer-flsun-qqs-2020.cfg",
+      "name": "printer-flsun-qqs-2020",
+      "category": "printer",
+      "tags": [
+        "flsun",
+        "qqs",
+        "2020"
+      ]
+    },
+    {
+      "filename": "printer-fokoos-odin5-f3-2021.cfg",
+      "name": "printer-fokoos-odin5-f3-2021",
+      "category": "printer",
+      "tags": [
+        "fokoos",
+        "odin5",
+        "f3",
+        "2021"
+      ]
+    },
+    {
+      "filename": "printer-geeetech-301-2019.cfg",
+      "name": "printer-geeetech-301-2019",
+      "category": "printer",
+      "tags": [
+        "geeetech",
+        "301",
+        "2019"
+      ]
+    },
+    {
+      "filename": "printer-geeetech-A10T-A20T-2021.cfg",
+      "name": "printer-geeetech-A10T-A20T-2021",
+      "category": "printer",
+      "tags": [
+        "geeetech",
+        "A10T",
+        "A20T",
+        "2021"
+      ]
+    },
+    {
+      "filename": "printer-hiprecy-leo-2019.cfg",
+      "name": "printer-hiprecy-leo-2019",
+      "category": "printer",
+      "tags": [
+        "hiprecy",
+        "leo",
+        "2019"
+      ]
+    },
+    {
+      "filename": "printer-kingroon-kp3s-2020.cfg",
+      "name": "printer-kingroon-kp3s-2020",
+      "category": "printer",
+      "tags": [
+        "kingroon",
+        "kp3s",
+        "2020"
+      ]
+    },
+    {
+      "filename": "printer-longer-lk4-pro-2019.cfg",
+      "name": "printer-longer-lk4-pro-2019",
+      "category": "printer",
+      "tags": [
+        "longer",
+        "lk4",
+        "pro",
+        "2019"
+      ]
+    },
+    {
+      "filename": "printer-longer-lk4x-2022.cfg",
+      "name": "printer-longer-lk4x-2022",
+      "category": "printer",
+      "tags": [
+        "longer",
+        "lk4x",
+        "2022"
+      ]
+    },
+    {
+      "filename": "printer-lulzbot-mini1-2016.cfg",
+      "name": "printer-lulzbot-mini1-2016",
+      "category": "printer",
+      "tags": [
+        "lulzbot",
+        "mini1",
+        "2016"
+      ]
+    },
+    {
+      "filename": "printer-lulzbot-mini2-2018.cfg",
+      "name": "printer-lulzbot-mini2-2018",
+      "category": "printer",
+      "tags": [
+        "lulzbot",
+        "mini2",
+        "2018"
+      ]
+    },
+    {
+      "filename": "printer-lulzbot-taz6-2017.cfg",
+      "name": "printer-lulzbot-taz6-2017",
+      "category": "printer",
+      "tags": [
+        "lulzbot",
+        "taz6",
+        "2017"
+      ]
+    },
+    {
+      "filename": "printer-lulzbot-taz6-dual-v3-2017.cfg",
+      "name": "printer-lulzbot-taz6-dual-v3-2017",
+      "category": "printer",
+      "tags": [
+        "lulzbot",
+        "taz6",
+        "dual",
+        "v3",
+        "2017"
+      ]
+    },
+    {
+      "filename": "printer-makergear-m2-2012.cfg",
+      "name": "printer-makergear-m2-2012",
+      "category": "printer",
+      "tags": [
+        "makergear",
+        "m2",
+        "2012"
+      ]
+    },
+    {
+      "filename": "printer-makergear-m2-2016.cfg",
+      "name": "printer-makergear-m2-2016",
+      "category": "printer",
+      "tags": [
+        "makergear",
+        "m2",
+        "2016"
+      ]
+    },
+    {
+      "filename": "printer-micromake-d1-2016.cfg",
+      "name": "printer-micromake-d1-2016",
+      "category": "printer",
+      "tags": [
+        "micromake",
+        "d1",
+        "2016"
+      ]
+    },
+    {
+      "filename": "printer-modix-big60-2020.cfg",
+      "name": "printer-modix-big60-2020",
+      "category": "printer",
+      "tags": [
+        "modix",
+        "big60",
+        "2020"
+      ]
+    },
+    {
+      "filename": "printer-monoprice-mini-delta-2017.cfg",
+      "name": "printer-monoprice-mini-delta-2017",
+      "category": "printer",
+      "tags": [
+        "monoprice",
+        "mini",
+        "delta",
+        "2017"
+      ]
+    },
+    {
+      "filename": "printer-monoprice-select-mini-v1-2016.cfg",
+      "name": "printer-monoprice-select-mini-v1-2016",
+      "category": "printer",
+      "tags": [
+        "monoprice",
+        "select",
+        "mini",
+        "v1",
+        "2016"
+      ]
+    },
+    {
+      "filename": "printer-monoprice-select-mini-v2-2018.cfg",
+      "name": "printer-monoprice-select-mini-v2-2018",
+      "category": "printer",
+      "tags": [
+        "monoprice",
+        "select",
+        "mini",
+        "v2",
+        "2018"
+      ]
+    },
+    {
+      "filename": "printer-mtw-create-2015.cfg",
+      "name": "printer-mtw-create-2015",
+      "category": "printer",
+      "tags": [
+        "mtw",
+        "create",
+        "2015"
+      ]
+    },
+    {
+      "filename": "printer-prusa-mini-plus-2020.cfg",
+      "name": "printer-prusa-mini-plus-2020",
+      "category": "printer",
+      "tags": [
+        "prusa",
+        "mini",
+        "plus",
+        "2020"
+      ]
+    },
+    {
+      "filename": "printer-ratrig-v-minion-2021.cfg",
+      "name": "printer-ratrig-v-minion-2021",
+      "category": "printer",
+      "tags": [
+        "ratrig",
+        "minion",
+        "2021"
+      ]
+    },
+    {
+      "filename": "printer-robo3d-r2-2017.cfg",
+      "name": "printer-robo3d-r2-2017",
+      "category": "printer",
+      "tags": [
+        "robo3d",
+        "r2",
+        "2017"
+      ]
+    },
+    {
+      "filename": "printer-seemecnc-rostock-max-v2-2015.cfg",
+      "name": "printer-seemecnc-rostock-max-v2-2015",
+      "category": "printer",
+      "tags": [
+        "seemecnc",
+        "rostock",
+        "max",
+        "v2",
+        "2015"
+      ]
+    },
+    {
+      "filename": "printer-sovol-sv01-2020.cfg",
+      "name": "printer-sovol-sv01-2020",
+      "category": "printer",
+      "tags": [
+        "sovol",
+        "sv01",
+        "2020"
+      ]
+    },
+    {
+      "filename": "printer-sovol-sv05-2022.cfg",
+      "name": "printer-sovol-sv05-2022",
+      "category": "printer",
+      "tags": [
+        "sovol",
+        "sv05",
+        "2022"
+      ]
+    },
+    {
+      "filename": "printer-sovol-sv06-2022.cfg",
+      "name": "printer-sovol-sv06-2022",
+      "category": "printer",
+      "tags": [
+        "sovol",
+        "sv06",
+        "2022"
+      ]
+    },
+    {
+      "filename": "printer-sovol-sv06-plus-2023.cfg",
+      "name": "printer-sovol-sv06-plus-2023",
+      "category": "printer",
+      "tags": [
+        "sovol",
+        "sv06",
+        "plus",
+        "2023"
+      ]
+    },
+    {
+      "filename": "printer-sunlu-s8-2020.cfg",
+      "name": "printer-sunlu-s8-2020",
+      "category": "printer",
+      "tags": [
+        "sunlu",
+        "s8",
+        "2020"
+      ]
+    },
+    {
+      "filename": "printer-sunlu-t3-2022.cfg",
+      "name": "printer-sunlu-t3-2022",
+      "category": "printer",
+      "tags": [
+        "sunlu",
+        "t3",
+        "2022"
+      ]
+    },
+    {
+      "filename": "printer-tevo-flash-2018.cfg",
+      "name": "printer-tevo-flash-2018",
+      "category": "printer",
+      "tags": [
+        "tevo",
+        "flash",
+        "2018"
+      ]
+    },
+    {
+      "filename": "printer-tevo-tarantula-pro-2020.cfg",
+      "name": "printer-tevo-tarantula-pro-2020",
+      "category": "printer",
+      "tags": [
+        "tevo",
+        "tarantula",
+        "pro",
+        "2020"
+      ]
+    },
+    {
+      "filename": "printer-tronxy-crux1-2022.cfg",
+      "name": "printer-tronxy-crux1-2022",
+      "category": "printer",
+      "tags": [
+        "tronxy",
+        "crux1",
+        "2022"
+      ]
+    },
+    {
+      "filename": "printer-tronxy-p802e-2020.cfg",
+      "name": "printer-tronxy-p802e-2020",
+      "category": "printer",
+      "tags": [
+        "tronxy",
+        "p802e",
+        "2020"
+      ]
+    },
+    {
+      "filename": "printer-tronxy-p802m-2020.cfg",
+      "name": "printer-tronxy-p802m-2020",
+      "category": "printer",
+      "tags": [
+        "tronxy",
+        "p802m",
+        "2020"
+      ]
+    },
+    {
+      "filename": "printer-tronxy-x5s-2018.cfg",
+      "name": "printer-tronxy-x5s-2018",
+      "category": "printer",
+      "tags": [
+        "tronxy",
+        "x5s",
+        "2018"
+      ]
+    },
+    {
+      "filename": "printer-tronxy-x5sa-pro-2020.cfg",
+      "name": "printer-tronxy-x5sa-pro-2020",
+      "category": "printer",
+      "tags": [
+        "tronxy",
+        "x5sa",
+        "pro",
+        "2020"
+      ]
+    },
+    {
+      "filename": "printer-tronxy-x5sa-v6-2019.cfg",
+      "name": "printer-tronxy-x5sa-v6-2019",
+      "category": "printer",
+      "tags": [
+        "tronxy",
+        "x5sa",
+        "v6",
+        "2019"
+      ]
+    },
+    {
+      "filename": "printer-tronxy-x8-2018.cfg",
+      "name": "printer-tronxy-x8-2018",
+      "category": "printer",
+      "tags": [
+        "tronxy",
+        "x8",
+        "2018"
+      ]
+    },
+    {
+      "filename": "printer-tronxy-xy-2-Pro-2020.cfg",
+      "name": "printer-tronxy-xy-2-Pro-2020",
+      "category": "printer",
+      "tags": [
+        "tronxy",
+        "xy",
+        "Pro",
+        "2020"
+      ]
+    },
+    {
+      "filename": "printer-twotrees-sapphire-plus-sp-5-v1-2020.cfg",
+      "name": "printer-twotrees-sapphire-plus-sp-5-v1-2020",
+      "category": "printer",
+      "tags": [
+        "twotrees",
+        "sapphire",
+        "plus",
+        "sp",
+        "v1",
+        "2020"
+      ]
+    },
+    {
+      "filename": "printer-twotrees-sapphire-plus-sp-5-v1.1-2021.cfg",
+      "name": "printer-twotrees-sapphire-plus-sp-5-v1.1-2021",
+      "category": "printer",
+      "tags": [
+        "twotrees",
+        "sapphire",
+        "plus",
+        "sp",
+        "v1",
+        "2021"
+      ]
+    },
+    {
+      "filename": "printer-twotrees-sapphire-pro-sp-3-2020.cfg",
+      "name": "printer-twotrees-sapphire-pro-sp-3-2020",
+      "category": "printer",
+      "tags": [
+        "twotrees",
+        "sapphire",
+        "pro",
+        "sp",
+        "2020"
+      ]
+    },
+    {
+      "filename": "printer-velleman-k8200-2013.cfg",
+      "name": "printer-velleman-k8200-2013",
+      "category": "printer",
+      "tags": [
+        "velleman",
+        "k8200",
+        "2013"
+      ]
+    },
+    {
+      "filename": "printer-velleman-k8800-2017.cfg",
+      "name": "printer-velleman-k8800-2017",
+      "category": "printer",
+      "tags": [
+        "velleman",
+        "k8800",
+        "2017"
+      ]
+    },
+    {
+      "filename": "printer-voxelab-aquila-2021.cfg",
+      "name": "printer-voxelab-aquila-2021",
+      "category": "printer",
+      "tags": [
+        "voxelab",
+        "aquila",
+        "2021"
+      ]
+    },
+    {
+      "filename": "printer-wanhao-duplicator-6-2016.cfg",
+      "name": "printer-wanhao-duplicator-6-2016",
+      "category": "printer",
+      "tags": [
+        "wanhao",
+        "duplicator",
+        "2016"
+      ]
+    },
+    {
+      "filename": "printer-wanhao-duplicator-9-2018.cfg",
+      "name": "printer-wanhao-duplicator-9-2018",
+      "category": "printer",
+      "tags": [
+        "wanhao",
+        "duplicator",
+        "2018"
+      ]
+    },
+    {
+      "filename": "printer-wanhao-duplicator-i3-mini-2017.cfg",
+      "name": "printer-wanhao-duplicator-i3-mini-2017",
+      "category": "printer",
+      "tags": [
+        "wanhao",
+        "duplicator",
+        "i3",
+        "mini",
+        "2017"
+      ]
+    },
+    {
+      "filename": "printer-wanhao-duplicator-i3-plus-2017.cfg",
+      "name": "printer-wanhao-duplicator-i3-plus-2017",
+      "category": "printer",
+      "tags": [
+        "wanhao",
+        "duplicator",
+        "i3",
+        "plus",
+        "2017"
+      ]
+    },
+    {
+      "filename": "printer-wanhao-duplicator-i3-plus-mark2-2019.cfg",
+      "name": "printer-wanhao-duplicator-i3-plus-mark2-2019",
+      "category": "printer",
+      "tags": [
+        "wanhao",
+        "duplicator",
+        "i3",
+        "plus",
+        "mark2",
+        "2019"
+      ]
+    },
+    {
+      "filename": "printer-wanhao-duplicator-i3-v2.1-2017.cfg",
+      "name": "printer-wanhao-duplicator-i3-v2.1-2017",
+      "category": "printer",
+      "tags": [
+        "wanhao",
+        "duplicator",
+        "i3",
+        "v2",
+        "2017"
+      ]
+    },
+    {
+      "filename": "sample-aliases.cfg",
+      "name": "sample-aliases",
+      "category": "sample",
+      "tags": [
+        "aliases"
+      ]
+    },
+    {
+      "filename": "sample-bigtreetech-ebb-canbus-v1.0.cfg",
+      "name": "sample-bigtreetech-ebb-canbus-v1.0",
+      "category": "sample",
+      "tags": [
+        "bigtreetech",
+        "ebb",
+        "canbus",
+        "v1"
+      ]
+    },
+    {
+      "filename": "sample-bigtreetech-ebb-canbus-v1.1.cfg",
+      "name": "sample-bigtreetech-ebb-canbus-v1.1",
+      "category": "sample",
+      "tags": [
+        "bigtreetech",
+        "ebb",
+        "canbus",
+        "v1"
+      ]
+    },
+    {
+      "filename": "sample-bigtreetech-ebb-canbus-v1.2.cfg",
+      "name": "sample-bigtreetech-ebb-canbus-v1.2",
+      "category": "sample",
+      "tags": [
+        "bigtreetech",
+        "ebb",
+        "canbus",
+        "v1"
+      ]
+    },
+    {
+      "filename": "sample-bigtreetech-ebb-sb-canbus-v1.0.cfg",
+      "name": "sample-bigtreetech-ebb-sb-canbus-v1.0",
+      "category": "sample",
+      "tags": [
+        "bigtreetech",
+        "ebb",
+        "sb",
+        "canbus",
+        "v1"
+      ]
+    },
+    {
+      "filename": "sample-bigtreetech-exp-mot.cfg",
+      "name": "sample-bigtreetech-exp-mot",
+      "category": "sample",
+      "tags": [
+        "bigtreetech",
+        "exp",
+        "mot"
+      ]
+    },
+    {
+      "filename": "sample-bigtreetech-hermit-crab-canbus.cfg",
+      "name": "sample-bigtreetech-hermit-crab-canbus",
+      "category": "sample",
+      "tags": [
+        "bigtreetech",
+        "hermit",
+        "crab",
+        "canbus"
+      ]
+    },
+    {
+      "filename": "sample-cartographer-v3.cfg",
+      "name": "sample-cartographer-v3",
+      "category": "sample",
+      "tags": [
+        "cartographer",
+        "v3"
+      ]
+    },
+    {
+      "filename": "sample-corexyuv.cfg",
+      "name": "sample-corexyuv",
+      "category": "sample",
+      "tags": [
+        "corexyuv"
+      ]
+    },
+    {
+      "filename": "sample-duet3-1lc.cfg",
+      "name": "sample-duet3-1lc",
+      "category": "sample",
+      "tags": [
+        "duet3",
+        "1lc"
+      ]
+    },
+    {
+      "filename": "sample-glyphs.cfg",
+      "name": "sample-glyphs",
+      "category": "sample",
+      "tags": [
+        "glyphs"
+      ]
+    },
+    {
+      "filename": "sample-huvud-v0.61.cfg",
+      "name": "sample-huvud-v0.61",
+      "category": "sample",
+      "tags": [
+        "huvud",
+        "v0",
+        "61"
+      ]
+    },
+    {
+      "filename": "sample-idex.cfg",
+      "name": "sample-idex",
+      "category": "sample",
+      "tags": [
+        "idex"
+      ]
+    },
+    {
+      "filename": "sample-lcd.cfg",
+      "name": "sample-lcd",
+      "category": "sample",
+      "tags": [
+        "lcd"
+      ]
+    },
+    {
+      "filename": "sample-macros.cfg",
+      "name": "sample-macros",
+      "category": "sample",
+      "tags": [
+        "macros"
+      ]
+    },
+    {
+      "filename": "sample-mmu2s-diy.cfg",
+      "name": "sample-mmu2s-diy",
+      "category": "sample",
+      "tags": [
+        "mmu2s",
+        "diy"
+      ]
+    },
+    {
+      "filename": "sample-multi-extruder.cfg",
+      "name": "sample-multi-extruder",
+      "category": "sample",
+      "tags": [
+        "multi",
+        "extruder"
+      ]
+    },
+    {
+      "filename": "sample-multi-mcu.cfg",
+      "name": "sample-multi-mcu",
+      "category": "sample",
+      "tags": [
+        "multi",
+        "mcu"
+      ]
+    },
+    {
+      "filename": "sample-probe-as-z-endstop.cfg",
+      "name": "sample-probe-as-z-endstop",
+      "category": "sample",
+      "tags": [
+        "probe",
+        "as",
+        "endstop"
+      ]
+    },
+    {
+      "filename": "sample-pwm-tool.cfg",
+      "name": "sample-pwm-tool",
+      "category": "sample",
+      "tags": [
+        "pwm",
+        "tool"
+      ]
+    },
+    {
+      "filename": "sample-raspberry-pi.cfg",
+      "name": "sample-raspberry-pi",
+      "category": "sample",
+      "tags": [
+        "raspberry",
+        "pi"
+      ]
+    }
+  ]
+}

@@ -11,6 +11,7 @@ import {
 import type { AppNode, AppEdge } from '../types/graph';
 import type { HardwareType, CommunicationType } from '../types/config';
 import { useConfigStore } from './configStore';
+import { updateSectionPins } from '../utils/pinUtils';
 
 // Map section types to component groups for coloring
 const COMPONENT_GROUP_MAP: Record<string, string> = {
@@ -63,7 +64,9 @@ const CHILD_LEFT_X = 12;
 /** X position (relative to parent) for right-column children (sub-components) */
 const CHILD_RIGHT_X = 312;
 /** Height of a hardware node when collapsed (just the header) */
-const COLLAPSED_HEIGHT = 72;
+const COLLAPSED_HEIGHT = 56;
+/** Width of a hardware node when collapsed */
+const COLLAPSED_WIDTH = 260;
 
 function computeHardwareSize(leftCount: number, rightCount: number) {
   const rows = Math.max(leftCount, rightCount, 0);
@@ -101,6 +104,7 @@ interface GraphState {
     label: string,
     configFile: string,
     position?: { x: number; y: number },
+    mcuName?: string,
   ) => string;
 
   toggleHardwareCollapse: (id: string) => void;
@@ -123,6 +127,7 @@ interface GraphState {
     sectionType: string,
     label: string,
     sectionHeader: string,
+    configFile?: string,
   ) => string;
 
   addFeatureNode: (
@@ -130,6 +135,7 @@ interface GraphState {
     sectionType: string,
     label: string,
     sectionHeader: string,
+    configFile?: string,
   ) => string;
 
   addGroupNode: (
@@ -142,17 +148,23 @@ interface GraphState {
       sectionHeader: string;
       isFeature: boolean;
       params: Array<{ key: string; value: string }>;
+      configFile?: string;
     }>,
     isFeature: boolean,
+    configFile?: string,
   ) => string;
 
-  addCommunicationEdge: (sourceId: string, targetId: string, commType: CommunicationType) => string;
-  addConfigurationEdge: (sourceId: string, targetId: string, hwType: HardwareType) => string;
+  addCommunicationEdge: (sourceId: string, targetId: string, commType: CommunicationType, sourceHandle?: string, targetHandle?: string, isNotIncluded?: boolean) => string;
+  addConfigurationEdge: (sourceId: string, targetId: string, hwType: HardwareType, sourceHandle?: string, targetHandle?: string) => string;
 
   /* Bulk */
   setNodes: (nodes: AppNode[]) => void;
   setEdges: (edges: AppEdge[]) => void;
   clearGraph: () => void;
+
+  /* Auto-arrange */
+  autoArrange: () => void;
+  fitViewTrigger: number;
 
   /* Undo / Redo */
   undo: () => void;
@@ -216,6 +228,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   edges: [],
   selectedNodeId: null,
   selectedEdgeId: null,
+  fitViewTrigger: 0,
 
   onNodesChange: (changes) =>
     set((s) => ({
@@ -391,7 +404,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       ) as AppEdge[],
     })),
 
-  addHardwareNode: (hwType, label, configFile, position) => {
+  addHardwareNode: (hwType, label, configFile, position, mcuName) => {
     const id = nextNodeId();
     const pos = position || { x: Math.random() * 600, y: Math.random() * 400 };
     const { width, height } = computeHardwareSize(0, 0);
@@ -404,6 +417,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         label,
         hardwareType: hwType,
         configFile,
+        mcuName: mcuName ?? '',
         sections: [],
         hasErrors: false,
       },
@@ -412,8 +426,14 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     return id;
   },
 
-  addSubComponentNode: (parentId, sectionType, label, sectionHeader) => {
+  addSubComponentNode: (parentId, sectionType, label, sectionHeader, configFile) => {
     const id = nextNodeId();
+
+    // Resolve config file from parent hardware node if not provided
+    const resolvedFile = configFile || (() => {
+      const parent = get().nodes.find((n) => n.id === parentId);
+      return (parent?.data as Record<string, unknown>)?.configFile as string || '';
+    })();
 
     // Count current right-side children (sub-components + non-feature groups)
     const rightChildren = get().nodes.filter((n) => {
@@ -441,6 +461,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         componentGroup,
         section: { section_type: sectionType, section_name: '', full_header: sectionHeader, line_number: 0, params: [], header_comments: [] },
         parentHardwareId: parentId,
+        configFile: resolvedFile,
         hasErrors: false,
       },
     };
@@ -468,8 +489,14 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     return id;
   },
 
-  addFeatureNode: (parentId, sectionType, label, sectionHeader) => {
+  addFeatureNode: (parentId, sectionType, label, sectionHeader, configFile) => {
     const id = nextNodeId();
+
+    // Resolve config file from parent hardware node if not provided
+    const resolvedFile = configFile || (() => {
+      const parent = get().nodes.find((n) => n.id === parentId);
+      return (parent?.data as Record<string, unknown>)?.configFile as string || '';
+    })();
 
     // Count current left-side children (features + feature groups)
     const leftChildren = get().nodes.filter((n) => {
@@ -493,6 +520,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         sectionHeader,
         section: { section_type: sectionType, section_name: '', full_header: sectionHeader, line_number: 0, params: [], header_comments: [] },
         parentId,
+        configFile: resolvedFile,
         hasErrors: false,
       },
     };
@@ -519,8 +547,14 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     return id;
   },
 
-  addGroupNode: (parentId, componentGroup, label, children, isFeature) => {
+  addGroupNode: (parentId, componentGroup, label, children, isFeature, configFile) => {
     const id = nextNodeId();
+
+    // Resolve config file from parent hardware node if not provided
+    const resolvedFile = configFile || (() => {
+      const parent = get().nodes.find((n) => n.id === parentId);
+      return (parent?.data as Record<string, unknown>)?.configFile as string || '';
+    })();
 
     // Count siblings in the same column
     const sameColumnChildren = get().nodes.filter((n) => {
@@ -549,6 +583,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         isFeature,
         children,
         parentHardwareId: parentId,
+        configFile: resolvedFile,
         hasErrors: false,
       },
     };
@@ -609,7 +644,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
               data: { ...n.data, collapsed: isCollapsed },
               style: {
                 ...n.style,
-                width: expandedSize.width,
+                width: isCollapsed ? COLLAPSED_WIDTH : expandedSize.width,
                 height: isCollapsed ? COLLAPSED_HEIGHT : expandedSize.height,
               },
             };
@@ -683,14 +718,36 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     // Gather config info before state update
     const nodeData = node.data as Record<string, unknown>;
     const sectionHeader = nodeData.sectionHeader as string | undefined;
+
+    // Resolve old config file: from old parent, or from node's own configFile (standalone case)
     const oldConfigFile = oldParentNode
       ? ((oldParentNode.data as Record<string, unknown>).configFile as string | undefined)
-      : undefined;
+      : (nodeData.configFile as string | undefined);
+
+    // Resolve new config file: from new parent, or generate standalone file from section header
     const newConfigFile = newParentNode
       ? ((newParentNode.data as Record<string, unknown>).configFile as string | undefined)
       : sectionHeader
-      ? `${sectionHeader.split(' ')[0]}.cfg`
+      ? `${sectionHeader.replace(/\s+/g, '_')}.cfg`
       : undefined;
+
+    // Determine MCU context change for pin prefix updates
+    const oldMcuName = oldParentNode
+      ? ((oldParentNode.data as Record<string, unknown>).mcuName as string || '')
+      : '';
+    const newMcuName = newParentNode
+      ? ((newParentNode.data as Record<string, unknown>).mcuName as string || '')
+      : '';
+
+    // Collect all section headers to move (single node or group with children)
+    const sectionHeaders: string[] = [];
+    if (node.type === 'group' && Array.isArray(nodeData.children)) {
+      for (const child of nodeData.children as Array<{ sectionHeader: string }>) {
+        if (child.sectionHeader) sectionHeaders.push(child.sectionHeader);
+      }
+    } else if (sectionHeader) {
+      sectionHeaders.push(sectionHeader);
+    }
 
     set((s) => {
       const updatedNode: AppNode = {
@@ -726,14 +783,14 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         if (pIdx >= 0) {
           const pData = newNodes[pIdx].data as Record<string, unknown>;
           const isCollapsed = !!pData.collapsed;
-          newNodes[pIdx] = { ...newNodes[pIdx], style: { ...newNodes[pIdx].style, ...sz, height: isCollapsed ? COLLAPSED_HEIGHT : sz.height } };
+          newNodes[pIdx] = { ...newNodes[pIdx], style: { ...newNodes[pIdx].style, width: isCollapsed ? COLLAPSED_WIDTH : sz.width, height: isCollapsed ? COLLAPSED_HEIGHT : sz.height } };
         }
       };
 
       if (oldParentId) repositionChildren(oldParentId);
       if (newParentId) repositionChildren(newParentId);
 
-      // Update data to reflect new parent
+      // Update data to reflect new parent + configFile
       const movedIdx = newNodes.findIndex((n) => n.id === nodeId);
       if (movedIdx >= 0) {
         const movedData = { ...newNodes[movedIdx].data } as Record<string, unknown>;
@@ -743,52 +800,85 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         if (newNodes[movedIdx].type === 'feature') {
           movedData.parentId = newParentId ?? '';
         }
+        // Update configFile on the node
+        if (newConfigFile) {
+          movedData.configFile = newConfigFile;
+        }
         newNodes[movedIdx] = { ...newNodes[movedIdx], data: movedData } as AppNode;
       }
 
       return { nodes: sortNodesParentsFirst(newNodes) };
     });
 
-    // Move section between config files
-    if (sectionHeader && oldConfigFile && newConfigFile && oldConfigFile !== newConfigFile) {
+    // Move sections between config files and update pin prefixes
+    if (sectionHeaders.length > 0 && oldConfigFile && newConfigFile && oldConfigFile !== newConfigFile) {
       const configState = useConfigStore.getState();
-      const section = configState.getSection(oldConfigFile, sectionHeader);
-      if (section) {
-        if (!configState.configFiles[newConfigFile]) {
-          configState.setConfigFile(newConfigFile, {
-            filename: newConfigFile,
-            sections: [],
-            includes: [],
-            header_comments: [],
-          });
+      const schemas = configState.schemas;
+
+      // Ensure target config file exists
+      if (!configState.configFiles[newConfigFile]) {
+        configState.setConfigFile(newConfigFile, {
+          filename: newConfigFile,
+          sections: [],
+          includes: [],
+          header_comments: [],
+        });
+      }
+
+      // Move each section
+      for (const header of sectionHeaders) {
+        const section = configState.getSection(oldConfigFile, header);
+        if (section) {
+          // Update pin prefixes if MCU context changed
+          let updatedSection = section;
+          if (oldMcuName !== newMcuName) {
+            updatedSection = updateSectionPins(section, oldMcuName, newMcuName, schemas);
+          }
+          configState.addSection(newConfigFile, updatedSection);
+          configState.removeSection(oldConfigFile, header);
         }
-        configState.addSection(newConfigFile, section);
-        configState.removeSection(oldConfigFile, sectionHeader);
+      }
+
+      // Clean up old config file if it's now empty and not a standard file
+      const oldFile = configState.configFiles[oldConfigFile];
+      if (oldFile && oldFile.sections.length === 0 && oldConfigFile !== 'printer.cfg') {
+        // Check no hardware nodes still reference this file
+        const stillReferenced = get().nodes.some(
+          (n) => n.type === 'hardware' && (n.data as Record<string, unknown>).configFile === oldConfigFile,
+        );
+        if (!stillReferenced) {
+          configState.removeConfigFile(oldConfigFile);
+        }
       }
     }
   },
 
-  addCommunicationEdge: (sourceId, targetId, commType) => {
+  addCommunicationEdge: (sourceId, targetId, commType, sourceHandle?, targetHandle?, isNotIncluded?) => {
     const id = nextEdgeId();
     const edge: Edge = {
       id,
       source: sourceId,
       target: targetId,
+      ...(sourceHandle ? { sourceHandle } : {}),
+      ...(targetHandle ? { targetHandle } : {}),
       type: 'communication',
-      data: { commType, edgeType: 'communication' },
+      data: { commType, edgeType: 'communication', isNotIncluded: !!isNotIncluded },
     };
     set((s) => ({ edges: [...s.edges, edge as AppEdge] }));
     return id;
   },
 
-  addConfigurationEdge: (sourceId, targetId, hwType) => {
+  addConfigurationEdge: (sourceId, targetId, hwType, sourceHandle?, targetHandle?) => {
     const id = nextEdgeId();
+    const color = getHardwareColor(hwType);
     const edge: Edge = {
       id,
       source: sourceId,
       target: targetId,
+      ...(sourceHandle ? { sourceHandle } : {}),
+      ...(targetHandle ? { targetHandle } : {}),
       type: 'configuration',
-      data: { edgeType: 'configuration', sourceHardwareType: hwType },
+      data: { edgeType: 'configuration', sourceHardwareType: hwType, color },
     };
     set((s) => ({ edges: [...s.edges, edge as AppEdge] }));
     return id;
@@ -797,6 +887,127 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   setNodes: (nodes) => set({ nodes: sortNodesParentsFirst(nodes) }),
   setEdges: (edges) => set({ edges }),
   clearGraph: () => set({ nodes: [], edges: [], selectedNodeId: null }),
+
+  autoArrange: () => {
+    get().pushHistory();
+    set((s) => {
+      const newNodes = [...s.nodes] as AppNode[];
+      const newEdges = [...s.edges];
+
+      // Find all top-level hardware nodes
+      const hwNodes = newNodes.filter((n) => n.type === 'hardware' && !n.parentId);
+      if (hwNodes.length === 0) return { nodes: newNodes, edges: newEdges };
+
+      // Identify the central node: SBC if present, otherwise primary MCU
+      const sbcNodes = hwNodes.filter((n) => (n.data as Record<string, unknown>).hardwareType === 'sbc');
+      const nonSbcNodes = hwNodes.filter((n) => (n.data as Record<string, unknown>).hardwareType !== 'sbc');
+      const primaryNode = hwNodes.find((n) => (n.data as Record<string, unknown>).isPrimary);
+
+      // Central node is SBC, or primary MCU, or first node
+      const centerNode = sbcNodes[0] || primaryNode || hwNodes[0];
+      const satellites = hwNodes.filter((n) => n.id !== centerNode.id);
+
+      // Get node dimensions helper
+      const nodeW = (n: AppNode) => (n.style?.width as number) || COLLAPSED_WIDTH;
+      const nodeH = (n: AppNode) => (n.style?.height as number) || COLLAPSED_HEIGHT;
+
+      if (satellites.length === 0) {
+        // Single node — just center it
+        const idx = newNodes.findIndex((n) => n.id === centerNode.id);
+        if (idx >= 0) {
+          newNodes[idx] = { ...newNodes[idx], position: { x: 200, y: 200 } };
+        }
+        return { nodes: sortNodesParentsFirst(newNodes), edges: newEdges };
+      }
+
+      // Calculate radius based on the number and size of satellites
+      const maxNodeDim = Math.max(...satellites.map((n) => Math.max(nodeW(n), nodeH(n))));
+      const minRadius = maxNodeDim * 1.2 + Math.max(nodeW(centerNode), nodeH(centerNode)) / 2;
+      // Ensure enough space between satellites along the arc
+      const circumNeeded = satellites.length * (maxNodeDim + 60);
+      const radiusFromCircum = circumNeeded / (2 * Math.PI);
+      const radius = Math.max(minRadius, radiusFromCircum, 300);
+
+      // Place center node
+      const cx = radius + maxNodeDim;
+      const cy = radius + maxNodeDim;
+      const centerIdx = newNodes.findIndex((n) => n.id === centerNode.id);
+      if (centerIdx >= 0) {
+        newNodes[centerIdx] = {
+          ...newNodes[centerIdx],
+          position: { x: cx - nodeW(centerNode) / 2, y: cy - nodeH(centerNode) / 2 },
+        };
+      }
+
+      // Distribute satellites radially — start from top (-π/2) going clockwise
+      const startAngle = -Math.PI / 2;
+      const angleStep = (2 * Math.PI) / satellites.length;
+
+      for (let i = 0; i < satellites.length; i++) {
+        const sat = satellites[i];
+        const angle = startAngle + i * angleStep;
+        const sx = cx + radius * Math.cos(angle) - nodeW(sat) / 2;
+        const sy = cy + radius * Math.sin(angle) - nodeH(sat) / 2;
+
+        const idx = newNodes.findIndex((n) => n.id === sat.id);
+        if (idx >= 0) {
+          newNodes[idx] = { ...newNodes[idx], position: { x: sx, y: sy } };
+        }
+      }
+
+      // Assign handles on edges based on relative positions of connected nodes
+      const nodeById = new Map(newNodes.map((n) => [n.id, n]));
+
+      const pickHandles = (srcNode: AppNode, tgtNode: AppNode) => {
+        const srcCx = srcNode.position.x + nodeW(srcNode) / 2;
+        const srcCy = srcNode.position.y + nodeH(srcNode) / 2;
+        const tgtCx = tgtNode.position.x + nodeW(tgtNode) / 2;
+        const tgtCy = tgtNode.position.y + nodeH(tgtNode) / 2;
+        const dx = tgtCx - srcCx;
+        const dy = tgtCy - srcCy;
+
+        let srcHandle: string;
+        let tgtHandle: string;
+
+        if (Math.abs(dx) > Math.abs(dy)) {
+          // Predominantly horizontal
+          if (dx > 0) {
+            srcHandle = 'right-out';
+            tgtHandle = 'left-in';
+          } else {
+            srcHandle = 'left-out';
+            tgtHandle = 'right-in';
+          }
+        } else {
+          // Predominantly vertical
+          if (dy > 0) {
+            srcHandle = 'bottom-out';
+            tgtHandle = 'top-in';
+          } else {
+            srcHandle = 'top-out';
+            tgtHandle = 'bottom-in';
+          }
+        }
+        return { srcHandle, tgtHandle };
+      };
+
+      for (let i = 0; i < newEdges.length; i++) {
+        const edge = newEdges[i];
+        const srcNode = nodeById.get(edge.source);
+        const tgtNode = nodeById.get(edge.target);
+        if (!srcNode || !tgtNode) continue;
+        // Only update handles for hardware-to-hardware edges
+        if (srcNode.type !== 'hardware' || tgtNode.type !== 'hardware') continue;
+
+        const { srcHandle, tgtHandle } = pickHandles(srcNode, tgtNode);
+        newEdges[i] = { ...edge, sourceHandle: srcHandle, targetHandle: tgtHandle };
+      }
+
+      return { nodes: sortNodesParentsFirst(newNodes), edges: newEdges };
+    });
+    // Increment to signal that a fitView should be triggered
+    set((s) => ({ fitViewTrigger: s.fitViewTrigger + 1 }));
+  },
 
   canUndo: false,
   canRedo: false,

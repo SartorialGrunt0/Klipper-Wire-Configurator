@@ -27,7 +27,7 @@ interface ProjectSummary {
 
 export default function ImportDialog({ onClose }: ImportDialogProps) {
   const [isDragging, setIsDragging] = useState(false);
-  const [status, setStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
+  const [status, setStatus] = useState<'idle' | 'loading' | 'selecting' | 'success' | 'error'>('idle');
   const [message, setMessage] = useState('');
   const [results, setResults] = useState<ImportResult[]>([]);
   const [projectSummary, setProjectSummary] = useState<ProjectSummary | null>(null);
@@ -35,21 +35,17 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
 
+  // File selection state — for folder imports, let user deselect files
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const [fileSelection, setFileSelection] = useState<Record<string, boolean>>({});
+
   const { setConfigFile, setValidation } = useConfigStore();
 
-  const handleFiles = useCallback(async (files: File[]) => {
-    // Filter to only .cfg files
-    const cfgFiles = files.filter((f) => f.name.endsWith('.cfg'));
-    if (cfgFiles.length === 0) {
-      setStatus('error');
-      setMessage('No .cfg files found. Only Klipper .cfg files can be imported.');
-      return;
-    }
-
+  const doImport = useCallback(async (files: File[]) => {
     setStatus('loading');
     setResults([]);
     setProjectSummary(null);
-    setMessage(`Importing ${cfgFiles.length} config file${cfgFiles.length > 1 ? 's' : ''}...`);
+    setMessage(`Importing ${files.length} config file${files.length > 1 ? 's' : ''}...`);
 
     try {
       // Ensure schemas are loaded
@@ -69,7 +65,7 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
       }
 
       // Use project-level import for all cases (single or multi-file)
-      const projectResult = await api.importProject(cfgFiles);
+      const projectResult = await api.importProject(files);
 
       // Store all parsed configs in configStore
       const allConfigs: Record<string, ConfigFile> = {};
@@ -97,7 +93,11 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
 
       // Build unified project graph from all configs at once
       const graphStore = useGraphStore.getState();
-      buildProjectGraph(allConfigs, graphStore, schemas);
+      const allValidations: Record<string, import('../../types/config').ValidationResult> = {};
+      for (const [filename, fileResult] of Object.entries(projectResult.files)) {
+        allValidations[filename] = fileResult.validation;
+      }
+      buildProjectGraph(allConfigs, graphStore, schemas, allValidations);
 
       // Sort results: main file first, then alphabetical
       importResults.sort((a, b) => {
@@ -133,6 +133,67 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
     }
   }, [setConfigFile, setValidation, clearExisting]);
 
+  const handleFiles = useCallback(async (files: File[], isFolder: boolean) => {
+    // Filter to only .cfg files
+    const cfgFiles = files.filter((f) => f.name.endsWith('.cfg'));
+    if (cfgFiles.length === 0) {
+      setStatus('error');
+      setMessage('No .cfg files found. Only Klipper .cfg files can be imported.');
+      return;
+    }
+
+    // For folder imports with multiple files, show selection UI first
+    if (isFolder && cfgFiles.length > 1) {
+      setPendingFiles(cfgFiles);
+      const sel: Record<string, boolean> = {};
+      for (const f of cfgFiles) {
+        // Auto-deselect known non-klipper config files
+        const name = f.name.toLowerCase();
+        const skip = name === 'moonraker.conf' || name === 'crowsnest.conf' ||
+                     name === 'klipperscreen.conf' || name === 'sonar.conf' ||
+                     name === 'webcam.txt' || name.endsWith('.bak') ||
+                     name.endsWith('.old');
+        sel[f.name] = !skip;
+      }
+      setFileSelection(sel);
+      setStatus('selecting');
+      setMessage(`Found ${cfgFiles.length} .cfg files. Deselect any you don't want to import.`);
+      return;
+    }
+
+    doImport(cfgFiles);
+  }, [doImport]);
+
+  const handleConfirmSelection = useCallback(() => {
+    const selectedFiles = pendingFiles.filter((f) => fileSelection[f.name] !== false);
+    if (selectedFiles.length === 0) {
+      setStatus('error');
+      setMessage('No files selected for import.');
+      return;
+    }
+    doImport(selectedFiles);
+  }, [pendingFiles, fileSelection, doImport]);
+
+  const toggleFile = useCallback((filename: string) => {
+    setFileSelection((prev) => ({ ...prev, [filename]: !prev[filename] }));
+  }, []);
+
+  const selectAll = useCallback(() => {
+    setFileSelection((prev) => {
+      const next = { ...prev };
+      for (const k of Object.keys(next)) next[k] = true;
+      return next;
+    });
+  }, []);
+
+  const selectNone = useCallback(() => {
+    setFileSelection((prev) => {
+      const next = { ...prev };
+      for (const k of Object.keys(next)) next[k] = false;
+      return next;
+    });
+  }, []);
+
   const handleDrop = useCallback(
     async (e: React.DragEvent) => {
       e.preventDefault();
@@ -141,6 +202,7 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
       // Try to get files from items (supports folder drops in some browsers)
       const items = Array.from(e.dataTransfer.items);
       const allFiles: File[] = [];
+      let isFolder = false;
 
       // Check if any entries are directories
       const hasDirectorySupport = items.some(
@@ -148,6 +210,7 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
       );
 
       if (hasDirectorySupport) {
+        isFolder = true;
         // Read directory entries recursively
         for (const item of items) {
           const entry = item.webkitGetAsEntry?.();
@@ -162,7 +225,7 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
       }
 
       if (allFiles.length > 0) {
-        handleFiles(allFiles);
+        handleFiles(allFiles, isFolder);
       } else {
         setStatus('error');
         setMessage('No files found. Drop .cfg files or a config folder.');
@@ -246,7 +309,7 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
             className="hidden"
             onChange={(e) => {
               const files = Array.from(e.target.files || []);
-              if (files.length > 0) handleFiles(files);
+              if (files.length > 0) handleFiles(files, false);
               e.target.value = '';
             }}
           />
@@ -258,10 +321,56 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
             className="hidden"
             onChange={(e) => {
               const files = Array.from(e.target.files || []);
-              if (files.length > 0) handleFiles(files);
+              if (files.length > 0) handleFiles(files, true);
               e.target.value = '';
             }}
           />
+
+          {/* File selection UI — shown when importing a folder */}
+          {status === 'selecting' && pendingFiles.length > 0 && (
+            <div className="mt-4">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">
+                  Select files to import
+                </span>
+                <div className="flex gap-2">
+                  <button onClick={selectAll} className="text-[10px] text-[var(--color-accent)] hover:underline">All</button>
+                  <button onClick={selectNone} className="text-[10px] text-[var(--color-accent)] hover:underline">None</button>
+                </div>
+              </div>
+              <div className="max-h-52 overflow-y-auto space-y-0.5 border border-[var(--color-bg-tertiary)] rounded-lg p-2">
+                {pendingFiles.map((f) => {
+                  const checked = fileSelection[f.name] !== false;
+                  return (
+                    <label
+                      key={f.name}
+                      className={`flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer text-xs transition-colors ${
+                        checked ? 'hover:bg-[var(--color-bg-primary)]' : 'opacity-50 hover:bg-[var(--color-bg-primary)]'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleFile(f.name)}
+                        className="rounded border-[var(--color-bg-tertiary)]"
+                      />
+                      <span className={`font-mono ${checked ? 'text-[var(--color-text-primary)]' : 'text-[var(--color-text-secondary)] line-through'}`}>
+                        {f.name}
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+              <div className="flex justify-end mt-3">
+                <button
+                  onClick={handleConfirmSelection}
+                  className="px-4 py-2 rounded-lg text-xs font-medium bg-[var(--color-accent)] text-white hover:opacity-90 transition-opacity"
+                >
+                  Import {Object.values(fileSelection).filter(Boolean).length} Files
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Status */}
           {status !== 'idle' && (
@@ -283,7 +392,7 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
               <div className="space-y-1 text-xs">
                 <div className="flex items-center gap-2">
                   <span className="text-[var(--color-text-secondary)]">Main file:</span>
-                  <span className="font-mono text-[var(--color-text-primary)]">{projectSummary.mainFile}</span>
+                  <span className="font-mono text-[var(--color-text-primary)]">{projectSummary.mainFile.replace(/^.*[\\/]/, '')}</span>
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="text-[var(--color-text-secondary)]">MCUs:</span>

@@ -79,7 +79,7 @@ export interface ExampleConfig {
   name: string;
   category: 'example' | 'generic' | 'printer' | 'sample' | 'kit' | 'other';
   tags: string[];
-  path: string;
+  path?: string;
 }
 
 /* ── Hardware Component Types ────────────────────────── */

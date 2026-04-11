@@ -1,6 +1,43 @@
 import { create } from 'zustand';
 import type { ConfigFile, ConfigSection, ConfigParam, ValidationResult, SectionSchema } from '../types/config';
 
+/** Debounced revalidation timer — shared across all mutation methods. */
+let _revalidateTimer: ReturnType<typeof setTimeout> | null = null;
+
+async function _revalidateAll(get: () => ConfigState, set: (partial: Partial<ConfigState> | ((s: ConfigState) => Partial<ConfigState>)) => void) {
+  const { configFiles } = get();
+  // Dynamically import api to avoid circular deps
+  const api = await import('../services/api');
+  for (const [filename, cf] of Object.entries(configFiles)) {
+    try {
+      const result = await api.validateConfig({
+        filename,
+        sections: cf.sections.map((s) => ({
+          full_header: s.full_header,
+          section_type: s.section_type,
+          section_name: s.section_name,
+          params: s.params.map((p) => ({
+            key: p.key,
+            value: p.value,
+            is_commented_out: p.is_commented_out,
+          })),
+        })),
+        includes: cf.includes,
+      });
+      set((state) => ({
+        validation: { ...state.validation, [filename]: result },
+      }));
+    } catch {
+      // Validation API unavailable — skip silently
+    }
+  }
+}
+
+function scheduleRevalidation(get: () => ConfigState, set: (partial: Partial<ConfigState> | ((s: ConfigState) => Partial<ConfigState>)) => void) {
+  if (_revalidateTimer) clearTimeout(_revalidateTimer);
+  _revalidateTimer = setTimeout(() => _revalidateAll(get, set), 500);
+}
+
 interface ConfigState {
   /* ── Data ─────────────────────────────────────────── */
   configFiles: Record<string, ConfigFile>;
@@ -111,7 +148,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       };
     }),
 
-  updateSectionParam: (filename, fullHeader, key, value) =>
+  updateSectionParam: (filename, fullHeader, key, value) => {
     set((s) => {
       const cf = s.configFiles[filename];
       if (!cf) return s;
@@ -132,9 +169,11 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           },
         },
       };
-    }),
+    });
+    scheduleRevalidation(get, set);
+  },
 
-  addParam: (filename, fullHeader, param) =>
+  addParam: (filename, fullHeader, param) => {
     set((s) => {
       const cf = s.configFiles[filename];
       if (!cf) return s;
@@ -150,9 +189,11 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           },
         },
       };
-    }),
+    });
+    scheduleRevalidation(get, set);
+  },
 
-  removeParam: (filename, fullHeader, key) =>
+  removeParam: (filename, fullHeader, key) => {
     set((s) => {
       const cf = s.configFiles[filename];
       if (!cf) return s;
@@ -171,9 +212,11 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           },
         },
       };
-    }),
+    });
+    scheduleRevalidation(get, set);
+  },
 
-  toggleParamCommented: (filename, fullHeader, key) =>
+  toggleParamCommented: (filename, fullHeader, key) => {
     set((s) => {
       const cf = s.configFiles[filename];
       if (!cf) return s;
@@ -196,7 +239,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           },
         },
       };
-    }),
+    });
+    scheduleRevalidation(get, set);
+  },
 
   clearAll: () =>
     set({

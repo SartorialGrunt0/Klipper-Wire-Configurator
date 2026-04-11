@@ -4,12 +4,23 @@ import type { CustomGroupNodeData } from '../../types/graph';
 import { useGraphStore } from '../../stores/graphStore';
 import NodeActions from './NodeActions';
 
+const selectNodes = (s: { nodes: ReturnType<typeof useGraphStore.getState>['nodes'] }) => s.nodes;
+const selectToggle = (s: ReturnType<typeof useGraphStore.getState>) => s.toggleHardwareCollapse;
+
 function CustomGroupNode({ data, selected, id }: NodeProps) {
   const nodeData = data as unknown as CustomGroupNodeData;
   const color = nodeData.color || '#64748b';
   const collapsed = !!nodeData.collapsed;
 
-  const { toggleHardwareCollapse } = useGraphStore();
+  const nodes = useGraphStore(selectNodes);
+  const toggleHardwareCollapse = useGraphStore(selectToggle);
+
+  // Compute derived values from the stable nodes array
+  const children = nodes.filter((n) => n.parentId === id);
+  const childCount = children.length;
+  const self = nodes.find((n) => n.id === id);
+  const isEmbedded = !!self?.parentId;
+
   const handleCollapseToggle = useCallback(
     (e: React.MouseEvent) => {
       e.stopPropagation();
@@ -24,66 +35,78 @@ function CustomGroupNode({ data, selected, id }: NodeProps) {
       style={{
         borderColor: color,
         borderWidth: 2,
-        borderStyle: 'dashed',
-        backgroundColor: `${color}0a`,
+        borderStyle: 'solid',
+        backgroundColor: 'var(--color-bg-secondary)',
         width: '100%',
         height: '100%',
         boxSizing: 'border-box',
       }}
     >
-      {/* Connection handles — always visible for custom group (top-level container) */}
-      <Handle type="target" position={Position.Left} id="left-in"
-        style={{ background: color, width: 14, height: 14, top: '20%' }} />
-      <Handle type="source" position={Position.Left} id="left-out"
-        style={{ background: color, width: 14, height: 14, top: '35%' }} />
-      <Handle type="target" position={Position.Right} id="right-in"
-        style={{ background: color, width: 14, height: 14, top: '20%' }} />
-      <Handle type="source" position={Position.Right} id="right-out"
-        style={{ background: color, width: 14, height: 14, top: '35%' }} />
-      <Handle type="target" position={Position.Top} id="top-in"
-        style={{ background: color, width: 14, height: 14, left: '40%' }} />
-      <Handle type="source" position={Position.Bottom} id="bottom-out"
-        style={{ background: color, width: 14, height: 14, left: '60%' }} />
+      {/* Connection handles — hidden when embedded inside a hardware node */}
+      {!isEmbedded && (
+        <>
+          <Handle type="target" position={Position.Left} id="left-in"
+            style={{ background: color, width: 14, height: 14 }} />
+          <Handle type="source" position={Position.Right} id="right-out"
+            style={{ background: color, width: 14, height: 14 }} />
+          <Handle type="target" position={Position.Top} id="top-in"
+            style={{ background: color, width: 14, height: 14 }} />
+          <Handle type="source" position={Position.Bottom} id="bottom-out"
+            style={{ background: color, width: 14, height: 14 }} />
+        </>
+      )}
 
       {/* Header */}
       <div
-        className="kwc-node-header"
-        style={{ backgroundColor: `${color}22`, borderBottom: `1px dashed ${color}44` }}
+        className="kwc-node-header cursor-pointer select-none"
+        style={{ backgroundColor: `${color}22`, borderBottom: `1px solid ${color}44` }}
+        onClick={(e) => { e.stopPropagation(); toggleHardwareCollapse(id); }}
       >
-        <span className="text-base">📦</span>
-        <span className="text-sm font-semibold" style={{ color }}>
+        <span className="text-sm">📦</span>
+        <span className="text-xs font-semibold" style={{ color }}>
           {nodeData.label}
         </span>
-        <span className="ml-1 text-[9px] px-1.5 py-0.5 rounded-full text-[var(--color-text-secondary)] bg-[var(--color-bg-tertiary)]">
-          group
-        </span>
-        <div className="ml-auto flex items-center gap-0.5 shrink-0">
-          <button
-            onClick={handleCollapseToggle}
-            title={collapsed ? 'Expand' : 'Collapse'}
-            className="flex items-center justify-center w-5 h-5 rounded hover:bg-white/10 transition-colors"
-            style={{ color }}
+        <span className="ml-auto flex items-center gap-1">
+          <span
+            className="text-[10px] px-1.5 py-0.5 rounded-full font-bold"
+            style={{ backgroundColor: `${color}33`, color }}
           >
-            <span
-              className="text-[10px] transition-transform inline-block"
-              style={{ transform: collapsed ? 'rotate(-90deg)' : 'rotate(0deg)' }}
-            >
-              ▼
-            </span>
-          </button>
+            {childCount}
+          </span>
+          <span
+            className="text-[10px] text-[var(--color-text-secondary)] transition-transform inline-block"
+            style={{ transform: collapsed ? 'rotate(-90deg)' : 'rotate(0deg)' }}
+          >
+            ▼
+          </span>
           <NodeActions nodeId={id} color={color} />
-        </div>
+        </span>
       </div>
 
-      {/* Body — hint text, hidden when collapsed */}
+      {/* Body — list child node labels */}
       {!collapsed && (
         <div className="kwc-node-body">
-          <div
-            className="text-[10px] opacity-40 text-center italic"
-            style={{ color }}
-          >
-            Drag components here
-          </div>
+          {childCount === 0 ? (
+            <div className="text-[10px] opacity-40 text-center italic" style={{ color }}>
+              Drag components here
+            </div>
+          ) : (
+            <div className="space-y-0.5">
+              {children.slice(0, 4).map((child) => {
+                const label = (child.data as Record<string, unknown>).label as string || child.id;
+                return (
+                  <div key={child.id} className="text-[10px] text-[var(--color-text-secondary)] truncate max-w-[240px]">
+                    {label}
+                  </div>
+                );
+              })}
+              {childCount > 4 && (
+                <div className="text-[10px] text-[var(--color-text-secondary)] opacity-50">
+                  +{childCount - 4} more
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>

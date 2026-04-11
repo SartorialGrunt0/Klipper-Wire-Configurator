@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ReactFlow,
   Background,
@@ -9,6 +9,7 @@ import {
   type EdgeTypes,
   type Node,
   Panel,
+  useReactFlow,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { useGraphStore } from './stores/graphStore';
@@ -41,6 +42,21 @@ const edgeTypes: EdgeTypes = {
   configuration: ConfigurationEdge,
 };
 
+/** Sits inside <ReactFlow> and calls fitView whenever trigger increments. */
+function AutoFitController({ trigger }: { trigger: number }) {
+  const { fitView } = useReactFlow();
+  const prevTrigger = useRef(trigger);
+  useEffect(() => {
+    if (trigger !== prevTrigger.current) {
+      prevTrigger.current = trigger;
+      // Small timeout to let ReactFlow finish positioning nodes before fitting
+      const id = setTimeout(() => fitView({ padding: 0.12, duration: 400 }), 80);
+      return () => clearTimeout(id);
+    }
+  }, [trigger, fitView]);
+  return null;
+}
+
 export default function App() {
   const {
     nodes,
@@ -54,11 +70,12 @@ export default function App() {
     setSelectedEdge,
     updateEdgeData,
     reparentNode,
-    addCustomGroupNode,
+    autoArrange,
     undo,
     redo,
     canUndo,
     canRedo,
+    fitViewTrigger,
   } = useGraphStore();
 
   const { selectedSection, setSelectedSection } = useConfigStore();
@@ -119,16 +136,84 @@ export default function App() {
   }, [setSelectedNode, setSelectedEdge, setSelectedSection]);
 
   /**
-   * When a child node (sub-component, feature, group, customGroup) stops being
-   * dragged, detect whether it landed inside a different container node and
-   * reparent it accordingly. If dropped onto empty canvas, make it standalone.
+   * Find the nearest non-overlapping position by nudging rightward, then
+   * wrapping to the next row, until no peers are overlapped.
+   */
+  const resolveOverlap = (
+    nodeId: string,
+    pos: { x: number; y: number },
+    nodeW: number,
+    nodeH: number,
+    peers: Node[],
+    getSize: (n: Node) => { w: number; h: number },
+  ): { x: number; y: number } => {
+    const GAP = 20;
+    const result = { ...pos };
+    let iterations = 0;
+    while (iterations++ < 50) {
+      let collided = false;
+      for (const peer of peers) {
+        if (peer.id === nodeId) continue;
+        const ps = getSize(peer);
+        if (
+          result.x < peer.position.x + ps.w &&
+          result.x + nodeW > peer.position.x &&
+          result.y < peer.position.y + ps.h &&
+          result.y + nodeH > peer.position.y
+        ) {
+          // Nudge to the right of this peer
+          result.x = peer.position.x + ps.w + GAP;
+          collided = true;
+          break;
+        }
+      }
+      if (!collided) break;
+    }
+    return result;
+  };
+
+  /**
+   * After any node drag-stop:
+   * - Hardware nodes: prevent overlap with other top-level hardware.
+   * - Child nodes: group same-componentGroup siblings on overlap;
+   *   nudge apart for different types; reparent into containers.
    */
   const onNodeDragStop = useCallback(
     (_event: React.MouseEvent, draggedNode: Node) => {
+      const currentNodes = useGraphStore.getState().nodes;
       const CHILD_TYPES = new Set(['subComponent', 'feature', 'group', 'customGroup']);
+
+      /* ── Hardware node overlap prevention ───────────────── */
+      if (draggedNode.type === 'hardware') {
+        const otherHardware = currentNodes.filter(
+          (n) => n.type === 'hardware' && n.id !== draggedNode.id && !n.parentId,
+        );
+        const dragW = (draggedNode.style?.width as number) || 600;
+        const dragH = (draggedNode.style?.height as number) || 400;
+        const newPos = resolveOverlap(
+          draggedNode.id,
+          draggedNode.position,
+          dragW,
+          dragH,
+          otherHardware,
+          (n) => ({
+            w: (n.style?.width as number) || 600,
+            h: (n.style?.height as number) || 400,
+          }),
+        );
+        if (newPos.x !== draggedNode.position.x || newPos.y !== draggedNode.position.y) {
+          useGraphStore.setState((s) => ({
+            nodes: s.nodes.map((n) =>
+              n.id === draggedNode.id ? { ...n, position: newPos } as AppNode : n,
+            ),
+          }));
+        }
+        return;
+      }
+
+      /* ── Child nodes ───────────────────────────────────── */
       if (!CHILD_TYPES.has(draggedNode.type || '')) return;
 
-      const currentNodes = useGraphStore.getState().nodes;
       const oldParentId = draggedNode.parentId ?? null;
 
       // Compute absolute position (position is relative to current parent)
@@ -142,7 +227,7 @@ export default function App() {
         }
       }
 
-      // Check for drop-on-sibling: create a custom group when a child lands on another child in the same parent
+      // Check for drop-on-sibling: group only if same componentGroup
       if (oldParentId) {
         const siblings = currentNodes.filter(
           (n) => n.parentId === oldParentId && n.id !== draggedNode.id && CHILD_TYPES.has(n.type || ''),
@@ -158,15 +243,76 @@ export default function App() {
             dragCenterY >= sib.position.y &&
             dragCenterY <= sib.position.y + sibH
           ) {
-            // Create a custom group and reparent both nodes into it
-            const parentNode = currentNodes.find((n) => n.id === oldParentId);
-            const groupAbsX = (parentNode ? parentNode.position.x : 0) + Math.min(draggedNode.position.x, sib.position.x) - 20;
-            const groupAbsY = (parentNode ? parentNode.position.y : 0) + Math.min(draggedNode.position.y, sib.position.y) - 40;
-            const groupId = addCustomGroupNode('Group', '#64748b', { x: groupAbsX, y: groupAbsY });
-            reparentNode(draggedNode.id, groupId, { x: absX, y: absY });
-            const sibAbsX = (parentNode ? parentNode.position.x : 0) + sib.position.x;
-            const sibAbsY = (parentNode ? parentNode.position.y : 0) + sib.position.y;
-            reparentNode(sib.id, groupId, { x: sibAbsX, y: sibAbsY });
+            // Only group when both nodes share the same componentGroup
+            const dragGroup = (draggedNode.data as Record<string, unknown>)?.componentGroup as string | undefined;
+            const sibGroup = (sib.data as Record<string, unknown>)?.componentGroup as string | undefined;
+
+            if (dragGroup && sibGroup && dragGroup === sibGroup) {
+              // Collect section data from both nodes to create a proper GroupNode
+              const dragData = draggedNode.data as Record<string, unknown>;
+              const sibData = sib.data as Record<string, unknown>;
+              const isFeature = draggedNode.type === 'feature' || sib.type === 'feature';
+
+              // Build children array from both nodes' section data
+              const children: Array<{
+                sectionType: string;
+                label: string;
+                sectionHeader: string;
+                isFeature: boolean;
+                params: Array<{ key: string; value: string }>;
+              }> = [];
+
+              // Helper to extract child data from a node (handles group nodes with existing children)
+              const extractChildren = (nd: Node) => {
+                const d = nd.data as Record<string, unknown>;
+                if (nd.type === 'group' && Array.isArray(d.children)) {
+                  // Already a group — merge its children
+                  for (const c of d.children as Array<{ sectionType: string; label: string; sectionHeader: string; isFeature: boolean; params: Array<{ key: string; value: string }> }>) {
+                    children.push(c);
+                  }
+                } else {
+                  // Single sub-component or feature node
+                  const section = d.section as { params?: Array<{ key: string; value: string; is_commented_out?: boolean }> } | undefined;
+                  children.push({
+                    sectionType: (d.sectionType as string) || '',
+                    label: (d.label as string) || '',
+                    sectionHeader: (d.sectionHeader as string) || '',
+                    isFeature: nd.type === 'feature',
+                    params: section?.params?.filter((p) => !p.is_commented_out).map((p) => ({ key: p.key, value: p.value })) || [],
+                  });
+                }
+              };
+
+              extractChildren(draggedNode);
+              extractChildren(sib);
+
+              if (children.length > 0) {
+                const { addGroupNode, removeNode } = useGraphStore.getState();
+                const groupLabel = dragGroup.charAt(0).toUpperCase() + dragGroup.slice(1).replace(/_/g, ' ');
+                addGroupNode(oldParentId, dragGroup, groupLabel + 's', children, isFeature);
+                // Remove the two original nodes
+                removeNode(draggedNode.id);
+                removeNode(sib.id);
+              }
+              return;
+            }
+
+            // Different types overlapping → nudge the dragged node away
+            const nudged = resolveOverlap(
+              draggedNode.id,
+              draggedNode.position,
+              268,
+              100,
+              siblings,
+              () => ({ w: 268, h: 100 }),
+            );
+            if (nudged.x !== draggedNode.position.x || nudged.y !== draggedNode.position.y) {
+              useGraphStore.setState((s) => ({
+                nodes: s.nodes.map((n) =>
+                  n.id === draggedNode.id ? { ...n, position: nudged } as AppNode : n,
+                ),
+              }));
+            }
             return;
           }
         }
@@ -198,12 +344,36 @@ export default function App() {
         }
       }
 
-      // Only reparent if the parent actually changed
+      // Reparent if the parent changed (reparent already snaps to grid)
       if (newParentId !== oldParentId) {
         reparentNode(draggedNode.id, newParentId, { x: absX, y: absY });
+        return;
+      }
+
+      // Node stayed in same parent with no center-overlap grouping.
+      // Still check for any AABB overlap with siblings and nudge if needed.
+      if (oldParentId) {
+        const siblings = currentNodes.filter(
+          (n) => n.parentId === oldParentId && n.id !== draggedNode.id && CHILD_TYPES.has(n.type || ''),
+        );
+        const nudged = resolveOverlap(
+          draggedNode.id,
+          draggedNode.position,
+          268,
+          100,
+          siblings,
+          () => ({ w: 268, h: 100 }),
+        );
+        if (nudged.x !== draggedNode.position.x || nudged.y !== draggedNode.position.y) {
+          useGraphStore.setState((s) => ({
+            nodes: s.nodes.map((n) =>
+              n.id === draggedNode.id ? { ...n, position: nudged } as AppNode : n,
+            ),
+          }));
+        }
       }
     },
-    [reparentNode, addCustomGroupNode],
+    [reparentNode],
   );
 
   return (
@@ -252,10 +422,12 @@ export default function App() {
               snapToGrid
               snapGrid={[20, 20]}
               connectionRadius={30}
+              connectionMode="loose"
               deleteKeyCode="Delete"
               className="bg-[var(--color-bg-primary)]"
               elevateNodesOnSelect={false}
             >
+              <AutoFitController trigger={fitViewTrigger} />
               <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="#334155" />
               <Controls />
               <MiniMap
@@ -294,6 +466,19 @@ export default function App() {
                     <path d="M13 6H6a3 3 0 000 6h2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
                     <path d="M10 3l3 3-3 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
                   </svg>
+                </button>
+                <button
+                  onClick={autoArrange}
+                  title="Auto-arrange layout"
+                  className="flex items-center gap-1.5 px-3 h-9 rounded-lg bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-tertiary)] transition-colors text-xs font-medium"
+                >
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                    <rect x="1" y="1" width="5" height="4" rx="1" stroke="currentColor" strokeWidth="1.2" />
+                    <rect x="10" y="1" width="5" height="4" rx="1" stroke="currentColor" strokeWidth="1.2" />
+                    <rect x="5.5" y="11" width="5" height="4" rx="1" stroke="currentColor" strokeWidth="1.2" />
+                    <path d="M3.5 5v3h5v-3M8 8v3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+                  </svg>
+                  Arrange
                 </button>
               </Panel>
             </ReactFlow>

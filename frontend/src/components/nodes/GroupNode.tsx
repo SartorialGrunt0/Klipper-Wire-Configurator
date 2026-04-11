@@ -54,6 +54,8 @@ function GroupNode({ data, selected, id }: NodeProps) {
   const icon = GROUP_ICONS[nodeData.componentGroup] || GROUP_ICONS.other;
   const isFeature = nodeData.isFeature;
   const children: GroupChildItem[] = nodeData.children || [];
+  // Hide handles when this group lives inside a hardware container
+  const isEmbedded = !!nodeData.parentHardwareId;
 
   const { setSelectedNode } = useGraphStore();
   const { setSelectedSection } = useConfigStore();
@@ -66,7 +68,7 @@ function GroupNode({ data, selected, id }: NodeProps) {
 
   return (
     <div
-      className={`kwc-node rounded-xl ${selected ? 'selected' : ''}`}
+      className={`kwc-node rounded-xl ${selected ? 'selected' : ''} ${nodeData.hasErrors ? 'kwc-error' : ''}`}
       style={{
         borderColor: color,
         borderStyle: isFeature ? 'dashed' : 'solid',
@@ -75,13 +77,13 @@ function GroupNode({ data, selected, id }: NodeProps) {
       }}
     >
       <Handle type="target" position={Position.Left} id="left-in"
-        style={{ background: color, width: 12, height: 12 }} />
+        style={{ background: color, width: 12, height: 12, top: '50%', display: isEmbedded ? 'none' : undefined }} />
       <Handle type="source" position={Position.Right} id="right-out"
-        style={{ background: color, width: 12, height: 12 }} />
+        style={{ background: color, width: 12, height: 12, top: '50%', display: isEmbedded ? 'none' : undefined }} />
       <Handle type="target" position={Position.Top} id="top-in"
-        style={{ background: color, width: 12, height: 12 }} />
+        style={{ background: color, width: 12, height: 12, left: '50%', display: isEmbedded ? 'none' : undefined }} />
       <Handle type="source" position={Position.Bottom} id="bottom-out"
-        style={{ background: color, width: 12, height: 12 }} />
+        style={{ background: color, width: 12, height: 12, left: '50%', display: isEmbedded ? 'none' : undefined }} />
 
       {/* Header - clickable to expand/collapse */}
       <div
