@@ -100,6 +100,46 @@ body {
   color: var(--color-text-secondary);
 }
 
+/* Compact tile styles for sub-components and features */
+.kwc-compact-tile {
+  border-radius: 8px;
+  border: 1.5px solid;
+  transition: box-shadow 0.2s;
+  min-width: 120px;
+}
+.kwc-compact-tile:hover {
+  box-shadow: 0 0 12px rgba(56, 189, 248, 0.2);
+}
+.kwc-compact-tile.selected {
+  box-shadow: 0 0 0 2px var(--color-accent), 0 0 12px rgba(56, 189, 248, 0.3);
+}
+.kwc-tile-header {
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-weight: 600;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Actions overlay — floats above the card when selected */
+.kwc-actions-overlay {
+  position: absolute;
+  top: -28px;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 4px;
+  border-radius: 6px;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-bg-tertiary);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+  z-index: 10;
+}
+}
+
 /* Error highlight */
 .kwc-error {
   border-color: var(--color-error) !important;

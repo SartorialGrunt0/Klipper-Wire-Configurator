@@ -346,7 +346,7 @@ export function buildProjectGraph(
 
   // ── Phase 2: Create hardware nodes ───────────────────────────────
   // Place hardware nodes in a row with enough spacing to avoid overlap
-  const HW_SPACING = 700; // wider than CONTAINER_WIDTH (600) + gap
+  const HW_SPACING = 480; // wider than CONTAINER_WIDTH (400) + gap
 
   // Place SBC node to the left
   const sbcInfos = mcuInfos.filter((m) => m.hwType === 'sbc');
@@ -354,7 +354,14 @@ export function buildProjectGraph(
 
   for (let i = 0; i < sbcInfos.length; i++) {
     const mcu = sbcInfos[i];
-    const label = mcu.name || 'Host (SBC)';
+    // Only label as the MCU name when [mcu host_mcu] with serial: /tmp/klipper_host_mcu is present
+    const sbcMcuSection = activeConfigs[mcu.sourceFile]?.sections.find(
+      (s) => s.section_type === 'mcu' && s.section_name === mcu.name,
+    );
+    const isActiveHostMcu = !!sbcMcuSection?.params.some(
+      (p) => !p.is_commented_out && p.key === 'serial' && p.value.trim() === '/tmp/klipper_host_mcu',
+    );
+    const label = isActiveHostMcu ? mcu.name : 'SBC';
     const configFile = mcu.sourceFile;
     const x = 50 + i * HW_SPACING;
     mcu.nodeId = graphStore.addHardwareNode(mcu.hwType, label, configFile, { x, y: 100 }, mcu.name);
@@ -363,10 +370,7 @@ export function buildProjectGraph(
       graphStore.updateNodeData(mcu.nodeId, { isSuppressed: true });
     }
     // If this SBC has a real [mcu] section in its config, mark MCU-enabled
-    const hasMcuSection = activeConfigs[mcu.sourceFile]?.sections.some(
-      (s) => s.section_type === 'mcu' && s.section_name === mcu.name,
-    );
-    if (hasMcuSection) {
+    if (sbcMcuSection) {
       graphStore.updateNodeData(mcu.nodeId, { isMcu: true });
     }
   }

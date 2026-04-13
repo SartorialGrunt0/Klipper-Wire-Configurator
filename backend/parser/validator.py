@@ -121,6 +121,27 @@ def validate_config(config: ConfigFile) -> ValidationResult:
                     line_number=section.line_number,
                 ))
 
+        # MCU-specific: validate communication method (serial XOR canbus_uuid)
+        if sec_type == "mcu":
+            has_serial = "serial" in active_params
+            has_canbus = "canbus_uuid" in active_params
+            if has_serial and has_canbus:
+                result.errors.append(ValidationError(
+                    severity="error",
+                    section=section.full_header,
+                    param="serial",
+                    message="Cannot specify both 'serial' and 'canbus_uuid'. Use one communication method.",
+                    line_number=section.line_number,
+                ))
+            elif not has_serial and not has_canbus:
+                result.errors.append(ValidationError(
+                    severity="error",
+                    section=section.full_header,
+                    param="serial",
+                    message="MCU requires either 'serial' (USB/UART) or 'canbus_uuid' (CAN bus) to be set.",
+                    line_number=section.line_number,
+                ))
+
         # Validate individual parameters
         for param in section.params:
             if param.is_commented_out:

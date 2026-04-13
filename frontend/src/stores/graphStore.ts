@@ -50,23 +50,69 @@ function getHardwareColor(hwType: string): string {
   return HW_COLORS[hwType] || HW_COLORS.other;
 }
 
+/**
+ * Detect the communication type for a hardware node by inspecting its MCU section
+ * in the config store. Returns the comm type if determinable, or 'usb' as fallback.
+ */
+function detectNodeCommType(nodeData: Record<string, unknown>): CommunicationType {
+  const configFile = nodeData.configFile as string;
+  const mcuName = (nodeData.mcuName as string) ?? '';
+  if (!configFile) return 'usb';
+  const config = useConfigStore.getState().configFiles[configFile];
+  if (!config) return 'usb';
+  const mcuSection = config.sections.find(
+    (s) => s.section_type === 'mcu' && s.section_name === mcuName,
+  );
+  if (!mcuSection) return 'usb';
+  for (const param of mcuSection.params) {
+    if (param.is_commented_out) continue;
+    if (param.key === 'canbus_uuid' || param.key === 'canbus_interface') return 'canbus';
+    if (param.key === 'serial') {
+      const val = param.value;
+      if (val.includes('/dev/serial/by-id/usb-')) return 'usb';
+      if (/\/dev\/tty(S|AMA|ACM|USB)/.test(val)) return 'uart';
+      if (val.includes('/tmp/klipper_host_mcu')) return 'usb';
+    }
+  }
+  return 'usb';
+}
+
 // ── Container layout constants ────────────────────────────────
 /** Total width of a hardware container node */
-const CONTAINER_WIDTH = 600;
+const CONTAINER_WIDTH = 400;
 /** Height reserved for the hardware node header/info area */
-const CONTAINER_HEADER_HEIGHT = 130;
-/** Vertical slot size per child node (collapsed) */
-const CHILD_SLOT_HEIGHT = 130;
+const CONTAINER_HEADER_HEIGHT = 110;
+/** Vertical slot size per child node (compact tiles) */
+const CHILD_SLOT_HEIGHT = 40;
 /** Padding below last child row */
-const CONTAINER_PADDING_BOTTOM = 20;
+const CONTAINER_PADDING_BOTTOM = 16;
 /** X position (relative to parent) for left-column children (features) */
 const CHILD_LEFT_X = 12;
 /** X position (relative to parent) for right-column children (sub-components) */
-const CHILD_RIGHT_X = 312;
+const CHILD_RIGHT_X = 208;
 /** Height of a hardware node when collapsed (just the header) */
 const COLLAPSED_HEIGHT = 56;
 /** Width of a hardware node when collapsed */
-const COLLAPSED_WIDTH = 260;
+const COLLAPSED_WIDTH = 200;
+
+/** Height of a compact tile's header row */
+const TILE_HEADER_HEIGHT = 36;
+/** Height per item row in an expanded GroupNode body */
+const GROUP_ITEM_HEIGHT = 22;
+/** Vertical padding inside the expanded GroupNode body (top + bottom) */
+const GROUP_BODY_PADDING = 12;
+/** Gap between tiles in a column */
+const TILE_GAP = 4;
+
+function getNodeSlotHeight(node: AppNode, selectedId: string | null): number {
+  if (node.type === 'group' && node.id === selectedId) {
+    const ch = (node.data as Record<string, unknown>).children as unknown[];
+    const cnt = Array.isArray(ch) ? ch.length : 0;
+    const bodyH = cnt * GROUP_ITEM_HEIGHT + GROUP_BODY_PADDING;
+    return TILE_HEADER_HEIGHT + bodyH + TILE_GAP;
+  }
+  return CHILD_SLOT_HEIGHT;
+}
 
 function computeHardwareSize(leftCount: number, rightCount: number) {
   const rows = Math.max(leftCount, rightCount, 0);
@@ -121,6 +167,14 @@ interface GraphState {
     newParentId: string | null,
     absolutePos?: { x: number; y: number },
   ) => void;
+
+  snapChildrenToColumns: (
+    parentId: string,
+    draggedNodeId: string,
+    draggedY: number,
+  ) => void;
+
+  reflowParentChildren: (parentId: string) => void;
 
   addSubComponentNode: (
     parentId: string,
@@ -290,14 +344,17 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       const id = nextEdgeId();
 
       if (involvesSbc) {
-        // Communication edge (USB/CAN/UART) between SBC and hardware
+        // Communication edge (USB/CAN/UART) between SBC and hardware.
+        // Default to the comm type already defined in the non-SBC node's MCU config.
+        const hwNodeData = srcHwType === 'sbc' ? tgtData : srcData;
+        const detectedCommType = detectNodeCommType(hwNodeData);
         const newEdge: AppEdge = {
           id,
           source: connection.source,
           target: connection.target,
           sourceHandle: connection.sourceHandle ?? undefined,
           targetHandle: connection.targetHandle ?? undefined,
-          data: { edgeType: 'communication', commType: 'usb' as CommunicationType },
+          data: { edgeType: 'communication', commType: detectedCommType },
           type: 'communication',
         };
         set((s) => ({
@@ -391,7 +448,20 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       ) as AppNode[],
     })),
 
-  setSelectedNode: (id) => set({ selectedNodeId: id }),
+  setSelectedNode: (id) => {
+    const prevId = get().selectedNodeId;
+    set({ selectedNodeId: id });
+    // Reflow the parent of the old selection
+    if (prevId && prevId !== id) {
+      const prevNode = get().nodes.find((n) => n.id === prevId);
+      if (prevNode?.parentId) get().reflowParentChildren(prevNode.parentId);
+    }
+    // Reflow the parent of the new selection
+    if (id) {
+      const newNode = get().nodes.find((n) => n.id === id);
+      if (newNode?.parentId) get().reflowParentChildren(newNode.parentId);
+    }
+  },
 
   addEdge: (edge) => set((s) => ({ edges: [...s.edges, edge] })),
   removeEdge: (id) => set((s) => ({ edges: s.edges.filter((e) => e.id !== id) })),
@@ -618,11 +688,13 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   },
 
   toggleHardwareCollapse: (id) => {
+    let isExpanding = false;
     set((s) => {
       const hwNode = s.nodes.find((n) => n.id === id);
       if (!hwNode) return s;
       const currentData = hwNode.data as Record<string, unknown>;
       const isCollapsed = !(currentData.collapsed as boolean);
+      if (!isCollapsed) isExpanding = true; // isCollapsed=false means result is expanded
 
       // Compute expanded size based on current children
       const children = s.nodes.filter((n) => n.parentId === id);
@@ -636,6 +708,40 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       }).length;
       const expandedSize = computeHardwareSize(leftCount, rightCount);
 
+      const newW = isCollapsed ? COLLAPSED_WIDTH : expandedSize.width;
+      const newH = isCollapsed ? COLLAPSED_HEIGHT : expandedSize.height;
+
+      // After changing this node's size, push other hardware nodes away to prevent overlap
+      const GAP = 20;
+      const otherHardware = s.nodes.filter(
+        (n) => n.type === 'hardware' && n.id !== id && !n.parentId,
+      );
+      const newHwPos = { ...hwNode.position };
+
+      // Build updated peer list with their current sizes so we can nudge them
+      const peerPositions = new Map<string, { x: number; y: number }>();
+      for (const peer of otherHardware) {
+        const pw = (peer.style?.width as number) || COLLAPSED_WIDTH;
+        const ph = (peer.style?.height as number) || COLLAPSED_HEIGHT;
+        let px = peer.position.x;
+        let py = peer.position.y;
+
+        // Simple axis-aligned push: find if this peer overlaps the expanded node
+        let iterations = 0;
+        while (iterations++ < 50) {
+          const overlapX =
+            px < newHwPos.x + newW + GAP &&
+            px + pw > newHwPos.x - GAP &&
+            py < newHwPos.y + newH + GAP &&
+            py + ph > newHwPos.y - GAP;
+
+          if (!overlapX) break;
+          // Push rightward (same strategy as drag-stop resolveOverlap)
+          px = newHwPos.x + newW + GAP;
+        }
+        peerPositions.set(peer.id, { x: px, y: py });
+      }
+
       return {
         nodes: s.nodes.map((n) => {
           if (n.id === id) {
@@ -644,17 +750,147 @@ export const useGraphStore = create<GraphState>((set, get) => ({
               data: { ...n.data, collapsed: isCollapsed },
               style: {
                 ...n.style,
-                width: isCollapsed ? COLLAPSED_WIDTH : expandedSize.width,
-                height: isCollapsed ? COLLAPSED_HEIGHT : expandedSize.height,
+                width: newW,
+                height: newH,
               },
             };
           }
           if (n.parentId === id) {
             return { ...n, hidden: isCollapsed };
           }
+          const newPos = peerPositions.get(n.id);
+          if (newPos) {
+            return { ...n, position: newPos };
+          }
           return n;
         }) as AppNode[],
       };
+    });
+    // When expanding, reflow children back to their canonical column positions
+    if (isExpanding) {
+      get().reflowParentChildren(id);
+    }
+  },
+
+  snapChildrenToColumns: (parentId, draggedNodeId, draggedY) => {
+    set((s) => {
+      const newNodes = [...s.nodes] as AppNode[];
+
+      // Classify children into left (features) and right (components) columns
+      const leftChildren: AppNode[] = [];
+      const rightChildren: AppNode[] = [];
+      for (const n of newNodes) {
+        if (n.parentId !== parentId) continue;
+        const d = n.data as Record<string, unknown>;
+        const isFeatureCol = n.type === 'feature' || (n.type === 'group' && !!d.isFeature);
+        if (isFeatureCol) {
+          leftChildren.push(n);
+        } else if (n.type === 'subComponent' || (n.type === 'group' && !d.isFeature)) {
+          rightChildren.push(n);
+        }
+      }
+
+      // For the column containing the dragged node, sort by Y but use the
+      // dragged node's new Y to determine its insertion position
+      const sortColumn = (col: AppNode[]) => {
+        col.sort((a, b) => {
+          const ay = a.id === draggedNodeId ? draggedY : a.position.y;
+          const by = b.id === draggedNodeId ? draggedY : b.position.y;
+          return ay - by;
+        });
+        col.forEach((child, i) => {
+          const idx = newNodes.findIndex((n) => n.id === child.id);
+          if (idx >= 0) {
+            const isLeft = leftChildren.includes(child);
+            newNodes[idx] = {
+              ...newNodes[idx],
+              position: {
+                x: isLeft ? CHILD_LEFT_X : CHILD_RIGHT_X,
+                y: CONTAINER_HEADER_HEIGHT + i * CHILD_SLOT_HEIGHT,
+              },
+            };
+          }
+        });
+      };
+
+      sortColumn(leftChildren);
+      sortColumn(rightChildren);
+
+      // Resize parent
+      const sz = computeHardwareSize(leftChildren.length, rightChildren.length);
+      const pIdx = newNodes.findIndex((n) => n.id === parentId);
+      if (pIdx >= 0) {
+        const pData = newNodes[pIdx].data as Record<string, unknown>;
+        const isCollapsed = !!pData.collapsed;
+        if (!isCollapsed) {
+          newNodes[pIdx] = {
+            ...newNodes[pIdx],
+            style: { ...newNodes[pIdx].style, width: sz.width, height: sz.height },
+          };
+        }
+      }
+
+      return { nodes: newNodes };
+    });
+  },
+
+  reflowParentChildren: (parentId) => {
+    set((s) => {
+      const selectedId = s.selectedNodeId;
+      const newNodes = [...s.nodes] as AppNode[];
+
+      const children = newNodes.filter((n) => n.parentId === parentId);
+      const leftChildren = children
+        .filter((n) => {
+          const d = n.data as Record<string, unknown>;
+          return n.type === 'feature' || (n.type === 'group' && !!d.isFeature);
+        })
+        .sort((a, b) => a.position.y - b.position.y);
+      const rightChildren = children
+        .filter((n) => {
+          const d = n.data as Record<string, unknown>;
+          return n.type === 'subComponent' || (n.type === 'group' && !d.isFeature);
+        })
+        .sort((a, b) => a.position.y - b.position.y);
+
+      const getSlotH = (node: AppNode) => getNodeSlotHeight(node, selectedId);
+
+      // Reposition left column with variable heights
+      let yOffset = CONTAINER_HEADER_HEIGHT;
+      for (const child of leftChildren) {
+        const idx = newNodes.findIndex((n) => n.id === child.id);
+        if (idx >= 0) {
+          newNodes[idx] = { ...newNodes[idx], position: { x: CHILD_LEFT_X, y: yOffset } };
+          yOffset += getSlotH(newNodes[idx]);
+        }
+      }
+      const leftTotal = yOffset - CONTAINER_HEADER_HEIGHT;
+
+      // Reposition right column with variable heights
+      yOffset = CONTAINER_HEADER_HEIGHT;
+      for (const child of rightChildren) {
+        const idx = newNodes.findIndex((n) => n.id === child.id);
+        if (idx >= 0) {
+          newNodes[idx] = { ...newNodes[idx], position: { x: CHILD_RIGHT_X, y: yOffset } };
+          yOffset += getSlotH(newNodes[idx]);
+        }
+      }
+      const rightTotal = yOffset - CONTAINER_HEADER_HEIGHT;
+
+      // Resize parent to fit the taller column
+      const pIdx = newNodes.findIndex((n) => n.id === parentId);
+      if (pIdx >= 0) {
+        const pData = newNodes[pIdx].data as Record<string, unknown>;
+        if (!pData.collapsed) {
+          const newHeight = CONTAINER_HEADER_HEIGHT + Math.max(leftTotal, rightTotal, 0) + CONTAINER_PADDING_BOTTOM;
+          newNodes[pIdx] = {
+            ...newNodes[pIdx],
+            style: { ...newNodes[pIdx].style, height: Math.max(newHeight, 160) },
+          };
+        }
+      }
+
+      return { nodes: newNodes };
     });
   },
 

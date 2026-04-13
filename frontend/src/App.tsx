@@ -106,6 +106,8 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [undo, redo]);
 
+  const { toggleHardwareCollapse } = useGraphStore();
+
   const onNodeClick = useCallback(
     (_: React.MouseEvent, node: AppNode) => {
       setSelectedNode(node.id);
@@ -116,8 +118,12 @@ export default function App() {
       } else {
         setSelectedSection(null);
       }
+      // Expand collapsed hardware / customGroup nodes on click
+      if ((node.type === 'hardware' || node.type === 'customGroup') && data?.collapsed) {
+        toggleHardwareCollapse(node.id);
+      }
     },
-    [setSelectedNode, setSelectedEdge, setSelectedSection],
+    [setSelectedNode, setSelectedEdge, setSelectedSection, toggleHardwareCollapse],
   );
 
   const onEdgeClick = useCallback(
@@ -175,8 +181,9 @@ export default function App() {
   /**
    * After any node drag-stop:
    * - Hardware nodes: prevent overlap with other top-level hardware.
-   * - Child nodes: group same-componentGroup siblings on overlap;
-   *   nudge apart for different types; reparent into containers.
+   * - Child nodes: snap into correct column (features left, components right),
+   *   reorder by Y position, group same-componentGroup siblings on overlap,
+   *   reparent into containers when dragged outside.
    */
   const onNodeDragStop = useCallback(
     (_event: React.MouseEvent, draggedNode: Node) => {
@@ -188,7 +195,7 @@ export default function App() {
         const otherHardware = currentNodes.filter(
           (n) => n.type === 'hardware' && n.id !== draggedNode.id && !n.parentId,
         );
-        const dragW = (draggedNode.style?.width as number) || 600;
+        const dragW = (draggedNode.style?.width as number) || 400;
         const dragH = (draggedNode.style?.height as number) || 400;
         const newPos = resolveOverlap(
           draggedNode.id,
@@ -197,7 +204,7 @@ export default function App() {
           dragH,
           otherHardware,
           (n) => ({
-            w: (n.style?.width as number) || 600,
+            w: (n.style?.width as number) || 400,
             h: (n.style?.height as number) || 400,
           }),
         );
@@ -232,28 +239,23 @@ export default function App() {
         const siblings = currentNodes.filter(
           (n) => n.parentId === oldParentId && n.id !== draggedNode.id && CHILD_TYPES.has(n.type || ''),
         );
-        const dragCenterX = draggedNode.position.x + 134;
-        const dragCenterY = draggedNode.position.y + 50;
+        const dragCenterX = draggedNode.position.x + 90;
+        const dragCenterY = draggedNode.position.y + 18;
         for (const sib of siblings) {
-          const sibW = 268;
-          const sibH = 100;
+          const sibW = 180;
+          const sibH = 36;
           if (
             dragCenterX >= sib.position.x &&
             dragCenterX <= sib.position.x + sibW &&
             dragCenterY >= sib.position.y &&
             dragCenterY <= sib.position.y + sibH
           ) {
-            // Only group when both nodes share the same componentGroup
             const dragGroup = (draggedNode.data as Record<string, unknown>)?.componentGroup as string | undefined;
             const sibGroup = (sib.data as Record<string, unknown>)?.componentGroup as string | undefined;
 
             if (dragGroup && sibGroup && dragGroup === sibGroup) {
-              // Collect section data from both nodes to create a proper GroupNode
-              const dragData = draggedNode.data as Record<string, unknown>;
-              const sibData = sib.data as Record<string, unknown>;
               const isFeature = draggedNode.type === 'feature' || sib.type === 'feature';
 
-              // Build children array from both nodes' section data
               const children: Array<{
                 sectionType: string;
                 label: string;
@@ -262,16 +264,13 @@ export default function App() {
                 params: Array<{ key: string; value: string }>;
               }> = [];
 
-              // Helper to extract child data from a node (handles group nodes with existing children)
               const extractChildren = (nd: Node) => {
                 const d = nd.data as Record<string, unknown>;
                 if (nd.type === 'group' && Array.isArray(d.children)) {
-                  // Already a group — merge its children
                   for (const c of d.children as Array<{ sectionType: string; label: string; sectionHeader: string; isFeature: boolean; params: Array<{ key: string; value: string }> }>) {
                     children.push(c);
                   }
                 } else {
-                  // Single sub-component or feature node
                   const section = d.section as { params?: Array<{ key: string; value: string; is_commented_out?: boolean }> } | undefined;
                   children.push({
                     sectionType: (d.sectionType as string) || '',
@@ -290,30 +289,13 @@ export default function App() {
                 const { addGroupNode, removeNode } = useGraphStore.getState();
                 const groupLabel = dragGroup.charAt(0).toUpperCase() + dragGroup.slice(1).replace(/_/g, ' ');
                 addGroupNode(oldParentId, dragGroup, groupLabel + 's', children, isFeature);
-                // Remove the two original nodes
                 removeNode(draggedNode.id);
                 removeNode(sib.id);
               }
               return;
             }
-
-            // Different types overlapping → nudge the dragged node away
-            const nudged = resolveOverlap(
-              draggedNode.id,
-              draggedNode.position,
-              268,
-              100,
-              siblings,
-              () => ({ w: 268, h: 100 }),
-            );
-            if (nudged.x !== draggedNode.position.x || nudged.y !== draggedNode.position.y) {
-              useGraphStore.setState((s) => ({
-                nodes: s.nodes.map((n) =>
-                  n.id === draggedNode.id ? { ...n, position: nudged } as AppNode : n,
-                ),
-              }));
-            }
-            return;
+            // Different types — will be snapped into column below
+            break;
           }
         }
       }
@@ -326,11 +308,11 @@ export default function App() {
       );
 
       let newParentId: string | null = null;
-      const nodeCenterX = absX + 134;
-      const nodeCenterY = absY + 50;
+      const nodeCenterX = absX + 90;
+      const nodeCenterY = absY + 18;
 
       for (const container of containerNodes) {
-        const w = (container.style?.width as number) || 600;
+const w = (container.style?.width as number) || 400;
         const h = (container.style?.height as number) || 400;
 
         if (
@@ -350,27 +332,10 @@ export default function App() {
         return;
       }
 
-      // Node stayed in same parent with no center-overlap grouping.
-      // Still check for any AABB overlap with siblings and nudge if needed.
+      // Node stayed in same parent — snap into column and reorder by Y position
       if (oldParentId) {
-        const siblings = currentNodes.filter(
-          (n) => n.parentId === oldParentId && n.id !== draggedNode.id && CHILD_TYPES.has(n.type || ''),
-        );
-        const nudged = resolveOverlap(
-          draggedNode.id,
-          draggedNode.position,
-          268,
-          100,
-          siblings,
-          () => ({ w: 268, h: 100 }),
-        );
-        if (nudged.x !== draggedNode.position.x || nudged.y !== draggedNode.position.y) {
-          useGraphStore.setState((s) => ({
-            nodes: s.nodes.map((n) =>
-              n.id === draggedNode.id ? { ...n, position: nudged } as AppNode : n,
-            ),
-          }));
-        }
+        const { snapChildrenToColumns } = useGraphStore.getState();
+        snapChildrenToColumns(oldParentId, draggedNode.id, draggedNode.position.y);
       }
     },
     [reparentNode],

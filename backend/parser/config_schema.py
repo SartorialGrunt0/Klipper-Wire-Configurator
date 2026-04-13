@@ -169,11 +169,11 @@ _register(SectionDef(
     is_named=True,
     description="Micro-controller configuration",
     params=[
-        _str("serial", "Serial port device path", required=True),
+        _str("serial", "Serial port device path"),  # required only when not using canbus
         _int("baud", "Baud rate", default="250000"),
-        _str("canbus_uuid", "CAN bus UUID"),
+        _str("canbus_uuid", "CAN bus UUID"),  # required only when not using serial
         _str("canbus_interface", "CAN bus interface", default="can0"),
-        _int("restart_method", "Restart method", default=""),
+        _enum("restart_method", ["arduino", "cheetah", "rpi_usb", "command"], "Restart method"),
     ],
 ))
 

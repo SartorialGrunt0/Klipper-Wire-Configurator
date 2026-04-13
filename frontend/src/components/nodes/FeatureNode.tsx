@@ -26,90 +26,55 @@ const FEATURE_COLORS: Record<string, string> = {
   default: '#6b7280',
 };
 
-const FEATURE_ICONS: Record<string, string> = {
-  bed_mesh: '🗺️',
-  z_tilt: '📐',
-  quad_gantry_level: '📐',
-  skew_correction: '🔀',
-  input_shaper: '〰️',
-  resonance_tester: '📊',
-  firmware_retraction: '↩️',
-  gcode_macro: '📝',
-  idle_timeout: '⏱️',
-  save_variables: '💾',
-  virtual_sdcard: '💿',
-  pause_resume: '⏸️',
-  respond: '💬',
-  exclude_object: '🚫',
-  force_move: '💪',
-  homing_override: '🏠',
-  safe_z_home: '🏠',
-  endstop_phase: '🔚',
-  default: '✨',
-};
-
 function FeatureNode({ data, selected, id }: NodeProps) {
   const nodeData = data as unknown as FeatureNodeData;
   const color = FEATURE_COLORS[nodeData.sectionType] || FEATURE_COLORS.default;
-  const icon = FEATURE_ICONS[nodeData.sectionType] || FEATURE_ICONS.default;
   const isSuppressed = !!(nodeData as Record<string, unknown>).isSuppressed;
-  // Hide connection handles when node lives inside a container
   const isEmbedded = !!(nodeData.parentId);
 
   return (
     <div
-      className={`kwc-node rounded-xl ${selected ? 'selected' : ''} ${nodeData.hasErrors ? 'kwc-error' : ''}`}
+      className={`kwc-compact-tile rounded-lg ${selected ? 'selected' : ''} ${nodeData.hasErrors ? 'kwc-error' : ''}`}
       style={{
         borderColor: color,
         borderStyle: 'dashed',
         backgroundColor: 'var(--color-bg-secondary)',
-        width: 268,
+        width: 180,
         opacity: isSuppressed ? 0.45 : 1,
+        position: 'relative',
       }}
     >
       {!isEmbedded && (
         <>
           <Handle type="target" position={Position.Left} id="left-in"
-            style={{ background: color, width: 12, height: 12 }} />
+            style={{ background: color, width: 10, height: 10 }} isConnectableStart={false} />
           <Handle type="source" position={Position.Right} id="right-out"
-            style={{ background: color, width: 12, height: 12 }} />
+            style={{ background: color, width: 10, height: 10 }} />
           <Handle type="target" position={Position.Top} id="top-in"
-            style={{ background: color, width: 12, height: 12 }} />
+            style={{ background: color, width: 10, height: 10 }} isConnectableStart={false} />
           <Handle type="source" position={Position.Bottom} id="bottom-out"
-            style={{ background: color, width: 12, height: 12 }} />
+            style={{ background: color, width: 10, height: 10 }} />
         </>
       )}
 
+      {/* Actions overlay — shown above the card when selected */}
+      {selected && (
+        <div className="kwc-actions-overlay" style={{ borderColor: color }}>
+          <NodeActions nodeId={id} color={color} />
+        </div>
+      )}
+
       <div
-        className="kwc-node-header"
-        style={{ backgroundColor: `${color}15`, borderBottom: `1px dashed ${color}44` }}
+        className="kwc-tile-header"
+        style={{ backgroundColor: `${color}15`, borderLeft: `3px solid ${color}` }}
       >
-        {nodeData.customImage ? (
-          <img src={nodeData.customImage} alt="" className="w-4 h-4 object-contain" />
-        ) : (
-          <span className="text-sm">{icon}</span>
-        )}
-        <span className="text-xs" style={{ color }}>
+        <span className="text-xs truncate" style={{ color }}>
           {nodeData.label}
         </span>
         {isSuppressed && (
-          <span className="text-[9px] px-1 py-0.5 rounded bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">
+          <span className="text-[9px] px-1 py-0.5 rounded bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] ml-auto shrink-0">
             OFF
           </span>
-        )}
-        <div className="ml-auto shrink-0">
-          <NodeActions nodeId={id} color={color} />
-        </div>
-      </div>
-
-      <div className="kwc-node-body">
-        <div className="text-[10px] opacity-50 uppercase tracking-wider">
-          {nodeData.sectionType}
-        </div>
-        {nodeData.section.params.filter((p) => !p.is_commented_out).length > 0 && (
-          <div className="text-[10px] mt-0.5 text-[var(--color-text-secondary)]">
-            {nodeData.section.params.filter((p) => !p.is_commented_out).length} params
-          </div>
         )}
       </div>
     </div>

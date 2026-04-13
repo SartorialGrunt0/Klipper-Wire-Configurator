@@ -1,9 +1,10 @@
-import { memo } from 'react';
+import { memo, useMemo } from 'react';
 import {
   BaseEdge,
-  getSmoothStepPath,
+  useNodes,
   type EdgeProps,
 } from '@xyflow/react';
+import { getAvoidancePath, type NodeRect, type AvoidanceResult } from '../../utils/edgeRouting';
 
 const COMM_COLORS: Record<string, string> = {
   usb: 'var(--color-usb)',
@@ -24,32 +25,43 @@ const COMM_DESCRIPTIONS: Record<string, string> = {
 };
 
 function CommunicationEdge(props: EdgeProps) {
-  const { sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, data } = props;
+  const { sourceX, sourceY, targetX, targetY, data, source, target, sourcePosition, targetPosition } = props;
   const edgeData = data as { commType?: string; isNotIncluded?: boolean } | undefined;
   const commType = edgeData?.commType || 'usb';
   const isNotIncluded = !!edgeData?.isNotIncluded;
 
   const activeColor = COMM_COLORS[commType] || COMM_COLORS.usb;
-  // Broken/disconnected: gray with heavier dashes to look "dead"
   const color = isNotIncluded ? '#475569' : activeColor;
   const label = COMM_LABELS[commType] || 'USB';
   const description = COMM_DESCRIPTIONS[commType] || '';
 
-  const [edgePath, labelX, labelY] = getSmoothStepPath({
-    sourceX,
-    sourceY,
-    targetX,
-    targetY,
-    sourcePosition,
-    targetPosition,
-    borderRadius: 8,
-  });
+  // Build obstacle list from all hardware nodes except source/target
+  const allNodes = useNodes();
+  const obstacles = useMemo<NodeRect[]>(() => {
+    return allNodes
+      .filter((n) => n.type === 'hardware' && n.id !== source && n.id !== target && !n.parentId)
+      .map((n) => ({
+        x: n.position.x,
+        y: n.position.y,
+        w: (n.style?.width as number) ?? 400,
+        h: (n.style?.height as number) ?? 160,
+      }));
+  }, [allNodes, source, target]);
+
+  const edgeResult = useMemo<AvoidanceResult>(
+    () => getAvoidancePath(sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, obstacles),
+    [sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, obstacles],
+  );
+
+  // Label position: midpoint of the actual path (not the raw geometric midpoint)
+  const labelX = edgeResult.labelX;
+  const labelY = edgeResult.labelY;
 
   return (
     <>
       <BaseEdge
         id={props.id}
-        path={edgePath}
+        path={edgeResult.path}
         style={{
           stroke: color,
           strokeWidth: isNotIncluded ? 1.5 : 2.5,
