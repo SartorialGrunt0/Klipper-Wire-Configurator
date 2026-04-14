@@ -938,6 +938,186 @@
       ]
     },
     {
+      "filename": "printer-Voron-Switchwire-einsy_config.cfg",
+      "name": "printer-Voron-Switchwire-einsy_config",
+      "category": "printer",
+      "tags": [
+        "Voron",
+        "Switchwire",
+        "einsy",
+        "config"
+      ]
+    },
+    {
+      "filename": "printer-Voron-Switchwire-skr_mini_e3_v2_config.cfg",
+      "name": "printer-Voron-Switchwire-skr_mini_e3_v2_config",
+      "category": "printer",
+      "tags": [
+        "Voron",
+        "Switchwire",
+        "skr",
+        "mini",
+        "e3",
+        "v2",
+        "config"
+      ]
+    },
+    {
+      "filename": "printer-Voron-Switchwire-skr_mini_e3_v3_config.cfg",
+      "name": "printer-Voron-Switchwire-skr_mini_e3_v3_config",
+      "category": "printer",
+      "tags": [
+        "Voron",
+        "Switchwire",
+        "skr",
+        "mini",
+        "e3",
+        "v3",
+        "config"
+      ]
+    },
+    {
+      "filename": "printer-Voron-Trident-M8P_v1.0_config.cfg",
+      "name": "printer-Voron-Trident-M8P_v1.0_config",
+      "category": "printer",
+      "tags": [
+        "Voron",
+        "Trident",
+        "M8P",
+        "v1",
+        "config"
+      ]
+    },
+    {
+      "filename": "printer-Voron-Trident-M8P_v2.0_config.cfg",
+      "name": "printer-Voron-Trident-M8P_v2.0_config",
+      "category": "printer",
+      "tags": [
+        "Voron",
+        "Trident",
+        "M8P",
+        "v2",
+        "config"
+      ]
+    },
+    {
+      "filename": "printer-Voron-Trident-Octopus_Config.cfg",
+      "name": "printer-Voron-Trident-Octopus_Config",
+      "category": "printer",
+      "tags": [
+        "Voron",
+        "Trident",
+        "Octopus",
+        "Config"
+      ]
+    },
+    {
+      "filename": "printer-Voron-Trident_Kraken_Config.cfg",
+      "name": "printer-Voron-Trident_Kraken_Config",
+      "category": "printer",
+      "tags": [
+        "Voron",
+        "Trident",
+        "Kraken",
+        "Config"
+      ]
+    },
+    {
+      "filename": "printer-Voron-Trident_SKR_1.3.cfg",
+      "name": "printer-Voron-Trident_SKR_1.3",
+      "category": "printer",
+      "tags": [
+        "Voron",
+        "Trident",
+        "SKR"
+      ]
+    },
+    {
+      "filename": "printer-Voron2.4-Kraken_Config.cfg",
+      "name": "printer-Voron2.4-Kraken_Config",
+      "category": "printer",
+      "tags": [
+        "Voron2",
+        "Kraken",
+        "Config"
+      ]
+    },
+    {
+      "filename": "printer-Voron2.4-M8P-v1.0_config.cfg",
+      "name": "printer-Voron2.4-M8P-v1.0_config",
+      "category": "printer",
+      "tags": [
+        "Voron2",
+        "M8P",
+        "v1",
+        "config"
+      ]
+    },
+    {
+      "filename": "printer-Voron2.4-M8P-v1.1_config.cfg",
+      "name": "printer-Voron2.4-M8P-v1.1_config",
+      "category": "printer",
+      "tags": [
+        "Voron2",
+        "M8P",
+        "v1",
+        "config"
+      ]
+    },
+    {
+      "filename": "printer-Voron2.4-M8P-v2.0_config.cfg",
+      "name": "printer-Voron2.4-M8P-v2.0_config",
+      "category": "printer",
+      "tags": [
+        "Voron2",
+        "M8P",
+        "v2",
+        "config"
+      ]
+    },
+    {
+      "filename": "printer-Voron2.4-Octopus_Config.cfg",
+      "name": "printer-Voron2.4-Octopus_Config",
+      "category": "printer",
+      "tags": [
+        "Voron2",
+        "Octopus",
+        "Config"
+      ]
+    },
+    {
+      "filename": "printer-Voron2.4-SKR_13_Config.cfg",
+      "name": "printer-Voron2.4-SKR_13_Config",
+      "category": "printer",
+      "tags": [
+        "Voron2",
+        "SKR",
+        "13",
+        "Config"
+      ]
+    },
+    {
+      "filename": "printer-Voron2.4-SKR_14_Config.cfg",
+      "name": "printer-Voron2.4-SKR_14_Config",
+      "category": "printer",
+      "tags": [
+        "Voron2",
+        "SKR",
+        "14",
+        "Config"
+      ]
+    },
+    {
+      "filename": "printer-Voron2.4-Spider_Config.cfg",
+      "name": "printer-Voron2.4-Spider_Config",
+      "category": "printer",
+      "tags": [
+        "Voron2",
+        "Spider",
+        "Config"
+      ]
+    },
+    {
       "filename": "printer-adimlab-2018.cfg",
       "name": "printer-adimlab-2018",
       "category": "printer",
@@ -1998,6 +2178,121 @@
         "velleman",
         "k8800",
         "2017"
+      ]
+    },
+    {
+      "filename": "printer-voron-v0-bigtreetech-manta-m4p.cfg",
+      "name": "printer-voron-v0-bigtreetech-manta-m4p",
+      "category": "printer",
+      "tags": [
+        "voron",
+        "v0",
+        "bigtreetech",
+        "manta",
+        "m4p"
+      ]
+    },
+    {
+      "filename": "printer-voron-v0-bigtreetech-skr-3-ez.cfg",
+      "name": "printer-voron-v0-bigtreetech-skr-3-ez",
+      "category": "printer",
+      "tags": [
+        "voron",
+        "v0",
+        "bigtreetech",
+        "skr",
+        "ez"
+      ]
+    },
+    {
+      "filename": "printer-voron-v0-bigtreetech-skr-mini-e3-v2.0.cfg",
+      "name": "printer-voron-v0-bigtreetech-skr-mini-e3-v2.0",
+      "category": "printer",
+      "tags": [
+        "voron",
+        "v0",
+        "bigtreetech",
+        "skr",
+        "mini",
+        "e3",
+        "v2"
+      ]
+    },
+    {
+      "filename": "printer-voron-v0-bigtreetech-skr-mini-e3-v3.0.cfg",
+      "name": "printer-voron-v0-bigtreetech-skr-mini-e3-v3.0",
+      "category": "printer",
+      "tags": [
+        "voron",
+        "v0",
+        "bigtreetech",
+        "skr",
+        "mini",
+        "e3",
+        "v3"
+      ]
+    },
+    {
+      "filename": "printer-voron-v0-bigtreetech-skr-pico-v1.0.cfg",
+      "name": "printer-voron-v0-bigtreetech-skr-pico-v1.0",
+      "category": "printer",
+      "tags": [
+        "voron",
+        "v0",
+        "bigtreetech",
+        "skr",
+        "pico",
+        "v1"
+      ]
+    },
+    {
+      "filename": "printer-voron-v0-fysetc-cheetah-v2.0.cfg",
+      "name": "printer-voron-v0-fysetc-cheetah-v2.0",
+      "category": "printer",
+      "tags": [
+        "voron",
+        "v0",
+        "fysetc",
+        "cheetah",
+        "v2"
+      ]
+    },
+    {
+      "filename": "printer-voron-v0-fysetc-cheetah-v3.0.cfg",
+      "name": "printer-voron-v0-fysetc-cheetah-v3.0",
+      "category": "printer",
+      "tags": [
+        "voron",
+        "v0",
+        "fysetc",
+        "cheetah",
+        "v3"
+      ]
+    },
+    {
+      "filename": "printer-voron-v0-mellow-fly-gemini-v2.cfg",
+      "name": "printer-voron-v0-mellow-fly-gemini-v2",
+      "category": "printer",
+      "tags": [
+        "voron",
+        "v0",
+        "mellow",
+        "fly",
+        "gemini",
+        "v2"
+      ]
+    },
+    {
+      "filename": "printer-voron-v0-mellow-fly-gemini-v3.cfg",
+      "name": "printer-voron-v0-mellow-fly-gemini-v3",
+      "category": "printer",
+      "tags": [
+        "voron",
+        "v0",
+        "mellow",
+        "fly",
+        "gemini",
+        "v3"
       ]
     },
     {

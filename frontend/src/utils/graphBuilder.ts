@@ -24,7 +24,7 @@ const SUB_COMPONENT_TYPES = new Set([
   'display', 'servo', 'output_pin', 'gcode_button', 'pwm_tool',
   'filament_switch_sensor', 'filament_motion_sensor',
   'adxl345', 'lis2dw', 'lis3dh', 'bmi160', 'mpu9250', 'icm20948',
-  'printer',
+  'printer', 'mcu',
 ]);
 
 // Section types that are features
@@ -58,6 +58,7 @@ const COMPONENT_GROUP_MAP: Record<string, string> = {
   adxl345: 'accelerometer', lis2dw: 'accelerometer', lis3dh: 'accelerometer',
   bmi160: 'accelerometer', mpu9250: 'accelerometer', icm20948: 'accelerometer',
   printer: 'printer',
+  mcu: 'mcu',
   // Feature types
   gcode_macro: 'gcode_macro', delayed_gcode: 'gcode_macro',
   bed_mesh: 'bed_leveling', z_tilt: 'bed_leveling', quad_gantry_level: 'bed_leveling',
@@ -86,6 +87,7 @@ const GROUP_DISPLAY_NAMES: Record<string, string> = {
   bed_leveling: 'Bed Leveling',
   homing: 'Homing',
   resonance: 'Resonance',
+  mcu: 'MCU',
   other: 'Other',
 };
 
@@ -165,26 +167,19 @@ function isSectionSuppressed(section: ConfigSection): boolean {
 }
 
 /**
- * Check if a section references a named MCU via pin prefixes (e.g. "EBBCan:gpio18")
- * or sensor_mcu parameter (e.g. sensor_mcu: host_mcu).
+ * Check if a section explicitly declares its parent MCU via sensor_mcu or mcu parameter.
+ * Pin prefixes (e.g. "EBBCan:gpio18") indicate which MCU's GPIO pins are used but do NOT
+ * determine ownership — the section belongs to the config file it's defined in.
  * Returns the MCU name if found, or empty string for primary MCU / no match.
  */
 function detectMcuReference(section: ConfigSection, mcuNames: string[]): string {
   for (const param of section.params) {
     if (param.is_commented_out) continue;
 
-    // Check sensor_mcu / mcu parameter directly
+    // Only explicit MCU ownership params determine parent assignment
     if ((param.key === 'sensor_mcu' || param.key === 'mcu') && param.value) {
       const refMcu = mcuNames.find((n) => n && param.value.trim() === n);
       if (refMcu) return refMcu;
-    }
-
-    // Check pin prefixes: "MCUName:pin"
-    const val = param.value;
-    for (const name of mcuNames) {
-      if (name && val.includes(`${name}:`)) {
-        return name;
-      }
     }
   }
   return '';
@@ -433,8 +428,8 @@ export function buildProjectGraph(
         const hasConfigData = !!activeConfigs[mcu.sourceFile];
         if (hasConfigData) {
           // Mark as broken/not-included if the file isn't in printer.cfg's include chain
-          // SBC is to the left of MCUs in initial layout → right-out / left-in
-          graphStore.addCommunicationEdge(sbcMcu.nodeId, mcu.nodeId, mcu.commType, 'right-out', 'left-in', !isIncluded(mcu.sourceFile));
+          // SBC is to the left of MCUs in initial layout → right / left
+          graphStore.addCommunicationEdge(sbcMcu.nodeId, mcu.nodeId, mcu.commType, 'right', 'left', !isIncluded(mcu.sourceFile));
         }
       }
     }
@@ -449,8 +444,8 @@ export function buildProjectGraph(
         if (mcu.hwType === 'sbc') continue; // SBC edges already handled above
         if (mcu.sourceFile === incFilename || mcu.sourceFile.endsWith(`/${incFilename}`)) {
           if (mcu.nodeId !== primaryMcu.nodeId) {
-            // Secondary MCU is to the right of primary in initial layout → left-out / right-in
-            graphStore.addConfigurationEdge(mcu.nodeId, primaryMcu.nodeId, mcu.hwType, 'left-out', 'right-in');
+            // Secondary MCU is to the right of primary in initial layout → left / right
+            graphStore.addConfigurationEdge(mcu.nodeId, primaryMcu.nodeId, mcu.hwType, 'left', 'right');
           }
           break;
         }
@@ -473,7 +468,24 @@ export function buildProjectGraph(
 
   for (const [filename, config] of Object.entries(activeConfigs)) {
     for (const sec of config.sections) {
-      if (sec.section_type === 'mcu') continue;
+      // MCU sections already created hardware nodes in Phase 2;
+      // also create a sub-component node so they appear in the sidebar
+      if (sec.section_type === 'mcu') {
+        const mcuName = sec.section_name || '';
+        const mcuInfo = mcuByName.get(mcuName);
+        if (mcuInfo) {
+          const displayName = schemas['mcu']?.display_name || 'MCU';
+          const label = mcuName ? `${displayName}: ${mcuName}` : displayName;
+          const suppressed = isSectionSuppressed(sec);
+          const gKey = `${mcuInfo.nodeId}::mcu::sub`;
+          if (!groupedSections.has(gKey)) groupedSections.set(gKey, []);
+          groupedSections.get(gKey)!.push({
+            sec, sType: 'mcu', label, parentId: mcuInfo.nodeId, isFeature: false,
+            componentGroup: 'mcu', isSuppressed: suppressed, filename,
+          });
+        }
+        continue;
+      }
 
       const sType = sec.section_type;
       const suppressed = isSectionSuppressed(sec);

@@ -3,6 +3,7 @@ import { Handle, Position, type NodeProps, useConnection } from '@xyflow/react';
 import type { HardwareNodeData } from '../../types/graph';
 import { useGraphStore } from '../../stores/graphStore';
 import NodeActions from './NodeActions';
+import WarningBadge from './WarningBadge';
 
 const HARDWARE_COLORS: Record<string, string> = {
   sbc: 'var(--color-sbc)',
@@ -68,50 +69,65 @@ function HardwareNode({ data, selected, id }: NodeProps) {
       onMouseLeave={() => setIsHovered(false)}
     >
       {/* Handles on all sides for hardware-to-hardware connections */}
-      {/* Fixed pixel top/left values so handle positions don't jump when node height/width changes */}
+      {/* ConnectionMode.Loose lets a single handle on each side serve both roles. */}
+      <Handle type="source" position={Position.Left} id="left"
+        style={{ background: color, width: 14, height: 14, top: '50%', opacity: showHandles ? 1 : 0, transition: 'opacity 0.15s' }} />
       <Handle type="target" position={Position.Left} id="left-in"
-        style={{ background: color, width: 14, height: 14, top: 28, opacity: showHandles ? 1 : 0, transition: 'opacity 0.15s' }}
+        style={{ background: color, width: 14, height: 14, top: '50%', opacity: 0, pointerEvents: 'none' }}
         isConnectableStart={false} />
       <Handle type="source" position={Position.Left} id="left-out"
-        style={{ background: color, width: 14, height: 14, top: 48, opacity: showHandles ? 1 : 0, transition: 'opacity 0.15s' }} />
+        style={{ background: color, width: 14, height: 14, top: '50%', opacity: 0, pointerEvents: 'none' }} />
 
+      <Handle type="source" position={Position.Right} id="right"
+        style={{ background: color, width: 14, height: 14, top: '50%', opacity: showHandles ? 1 : 0, transition: 'opacity 0.15s' }} />
       <Handle type="target" position={Position.Right} id="right-in"
-        style={{ background: color, width: 14, height: 14, top: 28, opacity: showHandles ? 1 : 0, transition: 'opacity 0.15s' }}
+        style={{ background: color, width: 14, height: 14, top: '50%', opacity: 0, pointerEvents: 'none' }}
         isConnectableStart={false} />
       <Handle type="source" position={Position.Right} id="right-out"
-        style={{ background: color, width: 14, height: 14, top: 48, opacity: showHandles ? 1 : 0, transition: 'opacity 0.15s' }} />
+        style={{ background: color, width: 14, height: 14, top: '50%', opacity: 0, pointerEvents: 'none' }} />
 
+      <Handle type="source" position={Position.Top} id="top"
+        style={{ background: color, width: 14, height: 14, left: '50%', opacity: showHandles ? 1 : 0, transition: 'opacity 0.15s' }} />
       <Handle type="target" position={Position.Top} id="top-in"
-        style={{ background: color, width: 14, height: 14, left: 80, opacity: showHandles ? 1 : 0, transition: 'opacity 0.15s' }}
+        style={{ background: color, width: 14, height: 14, left: '50%', opacity: 0, pointerEvents: 'none' }}
         isConnectableStart={false} />
       <Handle type="source" position={Position.Top} id="top-out"
-        style={{ background: color, width: 14, height: 14, left: 120, opacity: showHandles ? 1 : 0, transition: 'opacity 0.15s' }} />
+        style={{ background: color, width: 14, height: 14, left: '50%', opacity: 0, pointerEvents: 'none' }} />
 
+      <Handle type="source" position={Position.Bottom} id="bottom"
+        style={{ background: color, width: 14, height: 14, left: '50%', opacity: showHandles ? 1 : 0, transition: 'opacity 0.15s' }} />
       <Handle type="target" position={Position.Bottom} id="bottom-in"
-        style={{ background: color, width: 14, height: 14, left: 80, opacity: showHandles ? 1 : 0, transition: 'opacity 0.15s' }}
+        style={{ background: color, width: 14, height: 14, left: '50%', opacity: 0, pointerEvents: 'none' }}
         isConnectableStart={false} />
       <Handle type="source" position={Position.Bottom} id="bottom-out"
-        style={{ background: color, width: 14, height: 14, left: 120, opacity: showHandles ? 1 : 0, transition: 'opacity 0.15s' }} />
+        style={{ background: color, width: 14, height: 14, left: '50%', opacity: 0, pointerEvents: 'none' }} />
 
       {/* Header */}
       <div
         className="kwc-node-header"
         style={{ backgroundColor: `${color}22`, borderBottom: `1px solid ${color}44` }}
       >
-        {nodeData.customImage ? (
-          <img src={nodeData.customImage} alt="" className="w-5 h-5 object-contain" />
-        ) : (
-          <span style={{ color, fontSize: 13, fontWeight: 700 }}>{nodeData.hardwareType.toUpperCase()}</span>
-        )}
-        <span style={{ color }}>{nodeData.label}</span>
-        {isPrimary && (
-          <span className="text-[9px] px-1.5 py-0.5 rounded bg-[var(--color-accent)] text-[var(--color-bg-primary)] font-bold">
-            PRIMARY
-          </span>
-        )}
-        {/* Actions — inline right side, visible on hover */}
+        <div className="flex items-start gap-2 min-w-0 flex-1">
+          {nodeData.hasErrors && <WarningBadge />}
+          {nodeData.customImage ? (
+            <img src={nodeData.customImage} alt="" className="w-5 h-5 object-contain shrink-0" />
+          ) : (
+            <span className="shrink-0" style={{ color, fontSize: 13, fontWeight: 700 }}>
+              {nodeData.hardwareType.toUpperCase()}
+            </span>
+          )}
+          <div className="min-w-0 flex flex-col leading-tight">
+            <span className="truncate" style={{ color }}>{nodeData.label}</span>
+            {isPrimary && (
+              <span className="kwc-primary-label">
+                PRIMARY
+              </span>
+            )}
+          </div>
+        </div>
+        {/* Actions — visible on hover */}
         {isHovered && (
-          <div className="ml-auto shrink-0">
+          <div className="shrink-0">
             <NodeActions nodeId={id} color={color} />
           </div>
         )}

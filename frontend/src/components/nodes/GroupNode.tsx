@@ -4,6 +4,7 @@ import type { GroupNodeData, GroupChildItem } from '../../types/graph';
 import { useGraphStore } from '../../stores/graphStore';
 import { useConfigStore } from '../../stores/configStore';
 import NodeActions from './NodeActions';
+import WarningBadge from './WarningBadge';
 
 const GROUP_COLORS: Record<string, string> = {
   stepper: '#3b82f6',
@@ -80,6 +81,7 @@ function GroupNode({ data, selected, id }: NodeProps) {
         className="kwc-tile-header"
         style={{ backgroundColor: `${color}22`, borderLeft: `3px solid ${color}` }}
       >
+        {nodeData.hasErrors && <WarningBadge />}
         <span className="text-xs font-semibold truncate" style={{ color }}>
           {nodeData.label}
         </span>
@@ -94,9 +96,9 @@ function GroupNode({ data, selected, id }: NodeProps) {
       {/* Expanded when selected: show child titles only */}
       {selected && children.length > 0 && (
         <div className="px-2 py-1.5 space-y-0.5">
-          {children.map((child) => (
+          {children.map((child, idx) => (
             <div
-              key={child.sectionHeader}
+              key={`${child.configFile || 'cfg'}::${child.sectionHeader}::${idx}`}
               className="text-[10px] text-[var(--color-text-secondary)] truncate px-1 py-0.5 rounded cursor-pointer hover:bg-[var(--color-bg-primary)]"
               onClick={(e) => handleChildClick(e, child)}
             >

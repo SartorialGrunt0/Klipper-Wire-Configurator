@@ -2,6 +2,7 @@ import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
 import type { FeatureNodeData } from '../../types/graph';
 import NodeActions from './NodeActions';
+import WarningBadge from './WarningBadge';
 
 const FEATURE_COLORS: Record<string, string> = {
   bed_mesh: '#8b5cf6',
@@ -68,6 +69,7 @@ function FeatureNode({ data, selected, id }: NodeProps) {
         className="kwc-tile-header"
         style={{ backgroundColor: `${color}15`, borderLeft: `3px solid ${color}` }}
       >
+        {nodeData.hasErrors && <WarningBadge />}
         <span className="text-xs truncate" style={{ color }}>
           {nodeData.label}
         </span>

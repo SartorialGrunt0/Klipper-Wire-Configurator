@@ -1086,6 +1086,41 @@ export const useGraphStore = create<GraphState>((set, get) => ({
           configState.removeConfigFile(oldConfigFile);
         }
       }
+    } else if (sectionHeaders.length > 0 && oldConfigFile && oldMcuName !== newMcuName) {
+      // Same config file but MCU context changed — update pin prefixes in place
+      const configState = useConfigStore.getState();
+      const schemas = configState.schemas;
+      for (const header of sectionHeaders) {
+        const section = configState.getSection(oldConfigFile, header);
+        if (section) {
+          const updatedSection = updateSectionPins(section, oldMcuName, newMcuName, schemas);
+          const cf = configState.configFiles[oldConfigFile];
+          if (cf) {
+            configState.setConfigFile(oldConfigFile, {
+              ...cf,
+              sections: cf.sections.map((s) => s.full_header === header ? updatedSection : s),
+            });
+          }
+        }
+      }
+    }
+
+    // Sync group children's params with updated config store data
+    if (node.type === 'group' && Array.isArray(nodeData.children) && oldMcuName !== newMcuName) {
+      const freshConfigs = useConfigStore.getState().configFiles;
+      const targetFile = newConfigFile || oldConfigFile || '';
+      const updatedChildren = (nodeData.children as Array<{ sectionHeader: string; configFile?: string; [key: string]: unknown }>).map((child) => {
+        const childFile = (child.configFile as string) || targetFile;
+        const cfData = freshConfigs[childFile];
+        const matchedSection = cfData?.sections.find((s: { full_header: string }) => s.full_header === child.sectionHeader);
+        if (!matchedSection) return child;
+        return {
+          ...child,
+          configFile: newConfigFile || child.configFile,
+          params: matchedSection.params.filter((p: { is_commented_out?: boolean }) => !p.is_commented_out),
+        };
+      });
+      get().updateNodeData(nodeId, { children: updatedChildren });
     }
   },
 
@@ -1208,20 +1243,20 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         if (Math.abs(dx) > Math.abs(dy)) {
           // Predominantly horizontal
           if (dx > 0) {
-            srcHandle = 'right-out';
-            tgtHandle = 'left-in';
+            srcHandle = 'right';
+            tgtHandle = 'left';
           } else {
-            srcHandle = 'left-out';
-            tgtHandle = 'right-in';
+            srcHandle = 'left';
+            tgtHandle = 'right';
           }
         } else {
           // Predominantly vertical
           if (dy > 0) {
-            srcHandle = 'bottom-out';
-            tgtHandle = 'top-in';
+            srcHandle = 'bottom';
+            tgtHandle = 'top';
           } else {
-            srcHandle = 'top-out';
-            tgtHandle = 'bottom-in';
+            srcHandle = 'top';
+            tgtHandle = 'bottom';
           }
         }
         return { srcHandle, tgtHandle };

@@ -5,6 +5,7 @@ import {
   Controls,
   MiniMap,
   BackgroundVariant,
+  ConnectionMode,
   type NodeTypes,
   type EdgeTypes,
   type Node,
@@ -28,6 +29,24 @@ import Toolbar from './components/Toolbar';
 import AddMenu from './components/AddMenu';
 
 import type { AppNode } from './types/graph';
+
+function getDirectNodeError(node: AppNode, errorSections: Set<string>): boolean {
+  const nodeData = node.data as Record<string, unknown>;
+
+  if (node.type === 'subComponent' || node.type === 'feature') {
+    const sectionHeader = nodeData.sectionHeader;
+    return typeof sectionHeader === 'string' && errorSections.has(sectionHeader);
+  }
+
+  if (node.type === 'group') {
+    const children = Array.isArray(nodeData.children)
+      ? nodeData.children as Array<{ sectionHeader?: string }>
+      : [];
+    return children.some((child) => typeof child.sectionHeader === 'string' && errorSections.has(child.sectionHeader));
+  }
+
+  return false;
+}
 
 const nodeTypes: NodeTypes = {
   hardware: HardwareNode,
@@ -76,9 +95,10 @@ export default function App() {
     canUndo,
     canRedo,
     fitViewTrigger,
+    setNodes,
   } = useGraphStore();
 
-  const { selectedSection, setSelectedSection } = useConfigStore();
+  const { selectedSection, setSelectedSection, validation } = useConfigStore();
   const [showTextView, setShowTextView] = useState(false);
   const [showAddMenu, setShowAddMenu] = useState(false);
 
@@ -90,6 +110,72 @@ export default function App() {
       console.error('Failed to load schemas:', err);
     });
   }, []);
+
+  useEffect(() => {
+    const errorSections = new Set<string>();
+    for (const result of Object.values(validation)) {
+      for (const err of result.errors) {
+        if (err.severity === 'error' && err.section) {
+          errorSections.add(err.section);
+        }
+      }
+    }
+
+    const nodesById = new Map(nodes.map((node) => [node.id, node]));
+    const childrenByParent = new Map<string, AppNode[]>();
+
+    for (const node of nodes) {
+      if (!node.parentId) continue;
+      const siblings = childrenByParent.get(node.parentId) || [];
+      siblings.push(node);
+      childrenByParent.set(node.parentId, siblings);
+    }
+
+    const errorByNodeId = new Map<string, boolean>();
+    const stack = new Set<string>();
+
+    const computeNodeError = (nodeId: string): boolean => {
+      const cached = errorByNodeId.get(nodeId);
+      if (cached !== undefined) return cached;
+      if (stack.has(nodeId)) return false;
+
+      stack.add(nodeId);
+      const node = nodesById.get(nodeId);
+      if (!node) {
+        stack.delete(nodeId);
+        return false;
+      }
+
+      let hasErrors = getDirectNodeError(node, errorSections);
+      const childNodes = childrenByParent.get(nodeId) || [];
+      if (!hasErrors) {
+        hasErrors = childNodes.some((child) => computeNodeError(child.id));
+      }
+
+      stack.delete(nodeId);
+      errorByNodeId.set(nodeId, hasErrors);
+      return hasErrors;
+    };
+
+    let changed = false;
+    const nextNodes = nodes.map((node) => {
+      const nextHasErrors = computeNodeError(node.id);
+      const currentHasErrors = !!(node.data as Record<string, unknown>).hasErrors;
+      if (currentHasErrors === nextHasErrors) return node;
+      changed = true;
+      return {
+        ...node,
+        data: {
+          ...node.data,
+          hasErrors: nextHasErrors,
+        },
+      } as AppNode;
+    });
+
+    if (changed) {
+      setNodes(nextNodes);
+    }
+  }, [nodes, setNodes, validation]);
 
   // Keyboard shortcuts for undo/redo
   useEffect(() => {
@@ -387,7 +473,7 @@ const w = (container.style?.width as number) || 400;
               snapToGrid
               snapGrid={[20, 20]}
               connectionRadius={30}
-              connectionMode="loose"
+              connectionMode={ConnectionMode.Loose}
               deleteKeyCode="Delete"
               className="bg-[var(--color-bg-primary)]"
               elevateNodesOnSelect={false}

@@ -2,6 +2,7 @@ import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
 import type { SubComponentNodeData } from '../../types/graph';
 import NodeActions from './NodeActions';
+import WarningBadge from './WarningBadge';
 
 const GROUP_COLORS: Record<string, string> = {
   stepper: '#3b82f6',
@@ -63,6 +64,7 @@ function SubComponentNode({ data, selected, id }: NodeProps) {
         className="kwc-tile-header"
         style={{ backgroundColor: `${color}22`, borderLeft: `3px solid ${color}` }}
       >
+        {nodeData.hasErrors && <WarningBadge />}
         <span className="text-xs font-semibold truncate" style={{ color }}>
           {nodeData.label}
         </span>

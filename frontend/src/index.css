@@ -100,6 +100,19 @@ body {
   color: var(--color-text-secondary);
 }
 
+.kwc-primary-label {
+  margin-top: 2px;
+  width: fit-content;
+  padding: 1px 5px;
+  border-radius: 9999px;
+  background: color-mix(in srgb, var(--color-accent) 70%, transparent);
+  color: var(--color-bg-primary);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 1.1;
+}
+
 /* Compact tile styles for sub-components and features */
 .kwc-compact-tile {
   border-radius: 8px;
@@ -138,12 +151,27 @@ body {
   box-shadow: 0 2px 8px rgba(0,0,0,0.3);
   z-index: 10;
 }
-}
 
 /* Error highlight */
 .kwc-error {
   border-color: var(--color-error) !important;
   box-shadow: 0 0 12px rgba(248, 113, 113, 0.3);
+}
+
+.kwc-warning-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  color: var(--color-error);
+  flex: 0 0 auto;
+}
+
+.kwc-warning-badge-icon {
+  width: 14px;
+  height: 14px;
+  display: block;
 }
 
 /* Hardware container node — must not clip children rendered inside by ReactFlow */

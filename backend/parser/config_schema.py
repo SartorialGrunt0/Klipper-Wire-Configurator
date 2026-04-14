@@ -102,10 +102,10 @@ TMC_UART_PARAMS = [
     _pin("uart_pin", "UART pin for TMC communication", required=True),
     _pin("tx_pin", "UART TX pin (if separate)"),
     _int("uart_address", "UART address (0-3)", default="0"),
-    _int("interpolate", "Enable 256 microstep interpolation", default="True"),
+    _bool("interpolate", "Enable 256 microstep interpolation", default="True"),
     _float("run_current", "Motor run current in amps", required=True),
     _float("hold_current", "Motor hold current"),
-    _int("sense_resistor", "Sense resistor value", default="0.110"),
+    _float("sense_resistor", "Sense resistor value", default="0.110"),
     _int("stealthchop_threshold", "StealthChop threshold velocity", default="0"),
     _int("coolstep_threshold", "CoolStep threshold velocity"),
     _int("high_velocity_threshold", "High velocity threshold"),
@@ -132,10 +132,10 @@ TMC_SPI_PARAMS = [
     _pin("spi_software_sclk_pin", "Software SPI clock pin"),
     _pin("spi_software_mosi_pin", "Software SPI MOSI pin"),
     _pin("spi_software_miso_pin", "Software SPI MISO pin"),
-    _int("interpolate", "Enable 256 microstep interpolation", default="True"),
+    _bool("interpolate", "Enable 256 microstep interpolation", default="True"),
     _float("run_current", "Motor run current in amps", required=True),
     _float("hold_current", "Motor hold current"),
-    _int("sense_resistor", "Sense resistor value", default="0.110"),
+    _float("sense_resistor", "Sense resistor value", default="0.110"),
     _int("stealthchop_threshold", "StealthChop threshold velocity", default="0"),
     _int("coolstep_threshold", "CoolStep threshold velocity"),
     _int("high_velocity_threshold", "High velocity threshold"),
@@ -148,7 +148,7 @@ SENSOR_TYPE_ENUM = [
     "PT100 INA826", "PT1000", "AD595", "AD597", "AD8494", "AD8495", "AD8496", "AD8497",
     "MAX6675", "MAX31855", "MAX31856", "MAX31865",
     "BME280", "AHT10", "HTU21D", "SHT21", "lm75", "temperature_mcu", "temperature_host",
-    "DS18B20",
+    "DS18B20", "temperature_combined",
 ]
 
 # ─── Section Definitions ────────────────────────────────────────
@@ -387,9 +387,9 @@ _register(SectionDef(
         _pin("spi_software_sclk_pin", "Software SPI clock"),
         _pin("spi_software_mosi_pin", "Software SPI MOSI"),
         _pin("spi_software_miso_pin", "Software SPI MISO"),
-        _int("interpolate", "Enable 256 microstep interpolation", default="True"),
+        _bool("interpolate", "Enable 256 microstep interpolation", default="True"),
         _float("run_current", "Motor run current in amps", required=True),
-        _int("sense_resistor", "Sense resistor value", required=True),
+        _float("sense_resistor", "Sense resistor value", required=True),
         _int("idle_current_percent", "Idle current percent", default="100"),
     ],
 ))
@@ -407,7 +407,7 @@ _register(SectionDef(
         _float("max_power", "Maximum power", default="1.0"),
         _float("shutdown_speed", "Shutdown speed", default="0"),
         _float("cycle_time", "PWM cycle time", default="0.010", unit="s"),
-        _float("hardware_pwm", "Use hardware PWM", default="False"),
+        _bool("hardware_pwm", "Use hardware PWM", default="False"),
         _float("kick_start_time", "Kick start time", default="0.100", unit="s"),
         _float("off_below", "Off below this speed", default="0.0"),
         _pin("tachometer_pin", "Tachometer input pin"),
@@ -485,7 +485,7 @@ _register(SectionDef(
         _float("pid_Ki", "PID integral"),
         _float("pid_Kd", "PID derivative"),
         _float("pid_deriv_time", "PID derivative time", default="2.0"),
-        _float("gcode_id", "G-code temperature report ID"),
+        _str("gcode_id", "G-code temperature report ID"),
     ],
 ))
 
@@ -551,10 +551,10 @@ _register(SectionDef(
         _int("samples_tolerance_retries", "Max retries", default="0"),
         _enum("samples_result", ["median", "average"], "Calculation method", default="average"),
         _float("pin_move_time", "Pin deploy/retract time", default="0.680"),
-        _float("stow_on_each_sample", "Stow pin between samples", default="True"),
-        _float("probe_with_touch_mode", "Touch mode probing", default="False"),
-        _float("pin_up_reports_not_triggered", "Pin up reports not triggered", default="True"),
-        _float("pin_up_touch_mode_reports_triggered", "Touch mode triggered report", default="True"),
+        _bool("stow_on_each_sample", "Stow pin between samples", default="True"),
+        _bool("probe_with_touch_mode", "Touch mode probing", default="False"),
+        _bool("pin_up_reports_not_triggered", "Pin up reports not triggered", default="True"),
+        _bool("pin_up_touch_mode_reports_triggered", "Touch mode triggered report", default="True"),
         _int("set_output_mode", "Output mode"),
     ],
 ))
@@ -571,9 +571,9 @@ _register(SectionDef(
     params=[
         _float("speed", "Travel speed", default="50", unit="mm/s"),
         _float("horizontal_move_z", "Z height for travel moves", default="5", unit="mm"),
-        _int("mesh_min", "Minimum mesh X,Y coordinate (e.g. 35,6)", required=True),
-        _int("mesh_max", "Maximum mesh X,Y coordinate (e.g. 240,198)", required=True),
-        _int("probe_count", "Probe count X,Y (e.g. 3,3 or 5,5)", default="3,3"),
+        _str("mesh_min", "Minimum mesh X,Y coordinate (e.g. 35,6)", required=True),
+        _str("mesh_max", "Maximum mesh X,Y coordinate (e.g. 240,198)", required=True),
+        _str("probe_count", "Probe count X,Y (e.g. 3,3 or 5,5)", default="3,3"),
         _str("mesh_pps", "Mesh points per segment", default="2,2"),
         _enum("algorithm", ["lagrange", "bicubic"], "Interpolation algorithm", default="lagrange"),
         _float("bicubic_tension", "Bicubic tension", default="0.2"),
@@ -615,7 +615,7 @@ _register(SectionDef(
         _ml("points", "Probe points", required=True),
         _float("speed", "Travel speed", default="50", unit="mm/s"),
         _float("horizontal_move_z", "Z height for moves", default="5", unit="mm"),
-        _int("max_adjust", "Maximum adjustment", default="4"),
+        _float("max_adjust", "Maximum adjustment", default="4"),
         _int("retries", "Number of retries", default="0"),
         _float("retry_tolerance", "Retry tolerance", default="0"),
     ],
@@ -715,9 +715,9 @@ _register(SectionDef(
     params=[
         _ml("gcode", "G-code to run instead of normal homing", required=True),
         _str("axes", "Axes to override (e.g. xyz)"),
-        _bool("set_position_x", "Override reported X position"),
-        _bool("set_position_y", "Override reported Y position"),
-        _bool("set_position_z", "Override reported Z position"),
+        _float("set_position_x", "Override reported X position"),
+        _float("set_position_y", "Override reported Y position"),
+        _float("set_position_z", "Override reported Z position"),
     ],
 ))
 
@@ -730,7 +730,7 @@ _register(SectionDef(
     params=[
         _int("endstop_accuracy", "Endstop accuracy"),
         _str("trigger_phase", "Trigger phase"),
-        _int("endstop_align_zero", "Align endstop to zero"),
+        _bool("endstop_align_zero", "Align endstop to zero"),
     ],
 ))
 
@@ -764,7 +764,7 @@ _register(SectionDef(
         _pin("spi_software_sclk_pin", "Software SPI clock"),
         _pin("spi_software_mosi_pin", "Software SPI MOSI"),
         _pin("spi_software_miso_pin", "Software SPI MISO"),
-        _int("axes_map", "Axes mapping", default="x,y,z"),
+        _str("axes_map", "Axes mapping", default="x,y,z"),
         _float("rate", "Sample rate", default="3200"),
     ],
 ))
@@ -781,7 +781,7 @@ for accel in ["lis2dw", "lis3dh", "bmi160", "mpu9250", "icm20948"]:
             _str("spi_bus", "SPI bus"),
             _str("i2c_bus", "I2C bus"),
             _str("i2c_address", "I2C address"),
-            _int("axes_map", "Axes mapping", default="x,y,z"),
+            _str("axes_map", "Axes mapping", default="x,y,z"),
         ],
     ))
 
@@ -848,7 +848,7 @@ _register(SectionDef(
     params=[
         _pin("pin", "Data pin", required=True),
         _int("chain_count", "Number of LEDs in chain", default="1"),
-        _enum("color_order", ["GRB", "RGB", "GRBW", "RGBW", "BRG", "BRGW"], "Color order", default="GRB"),
+        _str("color_order", "Color order (can be comma-separated list for per-LED ordering)", default="GRB"),
         _float("initial_RED", "Initial red value", default="0.0"),
         _float("initial_GREEN", "Initial green value", default="0.0"),
         _float("initial_BLUE", "Initial blue value", default="0.0"),
@@ -936,8 +936,8 @@ _register(SectionDef(
     is_named=True,
     params=[
         _pin("pin", "Button pin", required=True),
-        _bool("analog_pullup_resistor", "Analog pullup resistor"),
-        _float("analog_range", "Analog range"),
+        _float("analog_pullup_resistor", "Analog pullup resistor"),
+        _str("analog_range", "Analog range"),
         _ml("press_gcode", "G-code on press"),
         _ml("release_gcode", "G-code on release"),
     ],
@@ -953,10 +953,10 @@ _register(SectionDef(
     params=[
         _pin("switch_pin", "Switch pin", required=True),
         _float("pause_delay", "Pause delay", default="0.5", unit="s"),
-        _str("pause_on_runout", "Pause on runout", default="True"),
+        _bool("pause_on_runout", "Pause on runout", default="True"),
         _ml("runout_gcode", "Runout G-code"),
         _ml("insert_gcode", "Insert G-code"),
-        _str("event_delay", "Event delay", default="3"),
+        _float("event_delay", "Event delay", default="3"),
     ],
 ))
 
@@ -969,11 +969,11 @@ _register(SectionDef(
     params=[
         _pin("switch_pin", "Encoder pin", required=True),
         _float("detection_length", "Detection length", default="7.0", unit="mm"),
-        _float("extruder", "Associated extruder", default="extruder"),
-        _str("pause_on_runout", "Pause on runout", default="True"),
+        _str("extruder", "Associated extruder", default="extruder"),
+        _bool("pause_on_runout", "Pause on runout", default="True"),
         _ml("runout_gcode", "Runout G-code"),
         _ml("insert_gcode", "Insert G-code"),
-        _str("event_delay", "Event delay", default="3"),
+        _float("event_delay", "Event delay", default="3"),
     ],
 ))
 
@@ -1006,7 +1006,7 @@ _register(SectionDef(
         _pin("up_pin", "Up button pin"),
         _pin("down_pin", "Down button pin"),
         _pin("kill_pin", "Kill button pin"),
-        _pin("analog_pullup_resistor", "Analog pullup"),
+        _float("analog_pullup_resistor", "Analog pullup"),
         _int("encoder_steps_per_detent", "Encoder steps per detent"),
         _str("menu_root", "Root menu"),
         _int("contrast", "LCD contrast"),
@@ -1023,7 +1023,7 @@ _register(SectionDef(
     max_instances=1,
     params=[
         _str("path", "Path to virtual SD card directory", required=True),
-        _bool("on_error_gcode", "G-code on error"),
+        _ml("on_error_gcode", "G-code on error"),
     ],
 ))
 
@@ -1356,8 +1356,8 @@ _register(SectionDef(
         _int("baud", "Baud rate", default="115200"),
         _float("feedrate_splice", "Splice feedrate", default="0.8"),
         _float("feedrate_normal", "Normal feedrate", default="1.0"),
-        _bool("auto_load_speed", "Auto load speed", default="2"),
-        _bool("auto_cancel_variation", "Auto cancel variation", default="0.1"),
+        _float("auto_load_speed", "Auto load speed", default="2"),
+        _float("auto_cancel_variation", "Auto cancel variation", default="0.1"),
     ],
 ))
 

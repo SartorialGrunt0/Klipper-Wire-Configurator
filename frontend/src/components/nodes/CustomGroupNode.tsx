@@ -3,6 +3,7 @@ import { Handle, Position, type NodeProps, useConnection } from '@xyflow/react';
 import type { CustomGroupNodeData } from '../../types/graph';
 import { useGraphStore } from '../../stores/graphStore';
 import NodeActions from './NodeActions';
+import WarningBadge from './WarningBadge';
 
 const selectNodes = (s: { nodes: ReturnType<typeof useGraphStore.getState>['nodes'] }) => s.nodes;
 const selectToggle = (s: ReturnType<typeof useGraphStore.getState>) => s.toggleHardwareCollapse;
@@ -39,7 +40,7 @@ function CustomGroupNode({ data, selected, id }: NodeProps) {
 
   return (
     <div
-      className={`kwc-node rounded-xl ${selected ? 'selected' : ''}`}
+      className={`kwc-node rounded-xl ${selected ? 'selected' : ''} ${nodeData.hasErrors ? 'kwc-error' : ''}`}
       style={{
         borderColor: color,
         borderWidth: 2,
@@ -73,6 +74,7 @@ function CustomGroupNode({ data, selected, id }: NodeProps) {
         className="kwc-node-header"
         style={{ backgroundColor: `${color}22`, borderBottom: `1px solid ${color}44` }}
       >
+        {nodeData.hasErrors && <WarningBadge />}
         <span className="text-xs font-semibold" style={{ color }}>
           {nodeData.label}
         </span>

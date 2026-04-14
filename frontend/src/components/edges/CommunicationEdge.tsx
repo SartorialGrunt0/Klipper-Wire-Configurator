@@ -4,7 +4,8 @@ import {
   useNodes,
   type EdgeProps,
 } from '@xyflow/react';
-import { getAvoidancePath, type NodeRect, type AvoidanceResult } from '../../utils/edgeRouting';
+import { type NodeRect } from '../../utils/edgeRouting';
+import { useBendPath, type SegHandle } from '../../utils/edgeBend';
 
 const COMM_COLORS: Record<string, string> = {
   usb: 'var(--color-usb)',
@@ -25,8 +26,8 @@ const COMM_DESCRIPTIONS: Record<string, string> = {
 };
 
 function CommunicationEdge(props: EdgeProps) {
-  const { sourceX, sourceY, targetX, targetY, data, source, target, sourcePosition, targetPosition } = props;
-  const edgeData = data as { commType?: string; isNotIncluded?: boolean } | undefined;
+  const { id, sourceX, sourceY, targetX, targetY, data, source, target, sourcePosition, targetPosition } = props;
+  const edgeData = data as { commType?: string; isNotIncluded?: boolean; customMiddlePoints?: Array<{ x: number; y: number }> } | undefined;
   const commType = edgeData?.commType || 'usb';
   const isNotIncluded = !!edgeData?.isNotIncluded;
 
@@ -48,27 +49,52 @@ function CommunicationEdge(props: EdgeProps) {
       }));
   }, [allNodes, source, target]);
 
-  const edgeResult = useMemo<AvoidanceResult>(
-    () => getAvoidancePath(sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, obstacles),
-    [sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, obstacles],
+  const {
+    path,
+    labelX,
+    labelY,
+    handles,
+    onHandlePointerDown,
+    onHandlePointerMove,
+    onHandlePointerUp,
+    onEdgeDoubleClick,
+  } = useBendPath(
+    id,
+    sourceX, sourceY, targetX, targetY,
+    sourcePosition, targetPosition,
+    obstacles,
+    edgeData?.customMiddlePoints,
   );
-
-  // Label position: midpoint of the actual path (not the raw geometric midpoint)
-  const labelX = edgeResult.labelX;
-  const labelY = edgeResult.labelY;
 
   return (
     <>
       <BaseEdge
         id={props.id}
-        path={edgeResult.path}
+        path={path}
         style={{
           stroke: color,
           strokeWidth: isNotIncluded ? 1.5 : 2.5,
           strokeDasharray: isNotIncluded ? '4 8' : '8 4',
           opacity: isNotIncluded ? 0.5 : 1,
         }}
+        onDoubleClick={onEdgeDoubleClick}
       />
+      {/* Segment drag handles */}
+      {handles.map((h: SegHandle) => (
+        <circle
+          key={h.segIndex}
+          cx={h.x}
+          cy={h.y}
+          r={5}
+          fill="var(--color-bg-secondary)"
+          stroke={color}
+          strokeWidth={1.5}
+          style={{ cursor: h.isHorizontal ? 'ns-resize' : 'ew-resize' }}
+          onPointerDown={(e) => onHandlePointerDown(h.segIndex, h.isHorizontal, e)}
+          onPointerMove={onHandlePointerMove}
+          onPointerUp={onHandlePointerUp}
+        />
+      ))}
       {/* Label badge */}
       <foreignObject
         x={labelX - 32}

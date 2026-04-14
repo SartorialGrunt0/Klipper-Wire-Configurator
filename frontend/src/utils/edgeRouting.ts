@@ -80,7 +80,7 @@ function isHorizontalSide(side: string): boolean {
 }
 
 /** Remove collinear intermediate points and near-duplicates */
-function simplifyWaypoints(pts: Point[]): Point[] {
+export function simplifyWaypoints(pts: Point[]): Point[] {
   if (pts.length <= 2) return pts;
   const result: Point[] = [pts[0]];
   for (let i = 1; i < pts.length - 1; i++) {
@@ -116,7 +116,7 @@ function pathIntersectsRect(pts: Point[], rect: NodeRect): boolean {
 
 // ── Orthogonal path builder with rounded corners ───────────────────────────
 
-function buildOrthogonalPath(pts: Point[]): string {
+export function buildOrthogonalPath(pts: Point[]): string {
   if (pts.length < 2) return '';
   let d = `M ${pts[0][0]} ${pts[0][1]}`;
   for (let i = 1; i < pts.length; i++) {
@@ -153,6 +153,8 @@ export interface AvoidanceResult {
   labelX: number;
   /** Y coordinate for placing an edge label */
   labelY: number;
+  /** Waypoints used to build the path (including source and target positions) */
+  waypoints: [number, number][];
 }
 
 /**
@@ -205,6 +207,7 @@ export function getAvoidancePath(
       path: buildOrthogonalPath(waypoints),
       labelX: (sx + tx) / 2,
       labelY: (sy + ty) / 2,
+      waypoints: waypoints as [number, number][],
     };
   }
 
@@ -244,5 +247,6 @@ export function getAvoidancePath(
     path: buildOrthogonalPath(chosen),
     labelX: mx,
     labelY: bypassY,
+    waypoints: chosen as [number, number][],
   };
 }

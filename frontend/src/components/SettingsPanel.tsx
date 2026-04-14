@@ -189,13 +189,6 @@ export default function SettingsPanel() {
     });
   }, [selectedNodeId, nodes]);
 
-  // Get sections belonging to this hardware node's config file
-  const hwSections = useMemo(() => {
-    if (!hwData) return [];
-    const cf = configFiles[hwData.configFile];
-    return cf?.sections || [];
-  }, [hwData, configFiles]);
-
   /** Generate a unique section name by appending a number suffix if the name already exists. */
   const makeUniqueName = useCallback((sectionType: string, baseName: string): string => {
     const allHeaders = new Set<string>();
@@ -308,11 +301,45 @@ export default function SettingsPanel() {
     const finalSections = updateAllSectionPins(updatedSections, oldMcuName, newMcuName, allSchemas);
     configState.setConfigFile(cfName, { ...cf, sections: finalSections });
 
+    // Also update pins in any other config files referenced by child nodes
+    const childConfigFiles = new Set<string>();
+    for (const child of nodes) {
+      if (child.parentId !== nodeId) continue;
+      const childData = child.data as Record<string, unknown>;
+      const childCf = childData.configFile as string;
+      if (childCf && childCf !== cfName) childConfigFiles.add(childCf);
+      if (child.type === 'group' && Array.isArray(childData.children)) {
+        for (const gc of childData.children as Array<{ configFile?: string }>) {
+          if (gc.configFile && gc.configFile !== cfName) childConfigFiles.add(gc.configFile);
+        }
+      }
+    }
+    for (const otherCfName of childConfigFiles) {
+      const otherCf = configState.configFiles[otherCfName];
+      if (!otherCf) continue;
+      const updatedOther = updateAllSectionPins(otherCf.sections, oldMcuName, newMcuName, allSchemas);
+      configState.setConfigFile(otherCfName, { ...otherCf, sections: updatedOther });
+    }
+
     // Update node data
     updateNodeData(nodeId, { mcuName: newMcuName } as Partial<AppNode['data']>);
 
-    // Also update configFile on child nodes that reference the old MCU prefix
-    // (their pin values are already updated in the config store)
+    // Sync group node children's params with updated config store data
+    const freshConfigs = useConfigStore.getState().configFiles;
+    for (const child of nodes) {
+      if (child.parentId !== nodeId || child.type !== 'group') continue;
+      const gData = child.data as Record<string, unknown>;
+      const gChildren = gData.children as Array<{ sectionHeader: string; configFile?: string; [key: string]: unknown }>;
+      if (!Array.isArray(gChildren)) continue;
+      const updatedChildren = gChildren.map((gc) => {
+        const gcFile = (gc.configFile as string) || cfName;
+        const gcConfig = freshConfigs[gcFile];
+        const matchedSection = gcConfig?.sections.find((s: { full_header: string }) => s.full_header === gc.sectionHeader);
+        if (!matchedSection) return gc;
+        return { ...gc, params: matchedSection.params.filter((p: { is_commented_out?: boolean }) => !p.is_commented_out) };
+      });
+      updateNodeData(child.id, { children: updatedChildren } as Partial<AppNode['data']>);
+    }
   }, [nodes, updateNodeData]);
 
   // Toggle primary MCU - handles pin prefix updates and MCU section renaming
@@ -458,37 +485,74 @@ export default function SettingsPanel() {
     const edgeData = edge?.data as Record<string, unknown> | undefined;
     if (edge && edgeData?.edgeType === 'communication') {
       const commType = (edgeData.commType as string) || 'usb';
+      // Find the target hardware node's MCU section for editing
+      const targetNode = nodes.find((n) => n.id === edge.target);
+      const targetData = targetNode?.data as Record<string, unknown> | undefined;
+      const targetConfigFile = targetData?.configFile as string | undefined;
+      const targetMcuName = (targetData?.mcuName as string) ?? '';
+      const targetConfig = targetConfigFile ? configFiles[targetConfigFile] : undefined;
+      const mcuSection = targetConfig?.sections.find(
+        (s) => s.section_type === 'mcu' && s.section_name === targetMcuName,
+      );
+      const mcuSchema = schemas['mcu'] || null;
       return (
-        <div className="w-72 border-l border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] flex flex-col">
+        <div className="w-96 border-l border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] flex flex-col overflow-hidden">
           <div className="p-3 border-b border-[var(--color-bg-tertiary)]">
             <h2 className="text-sm font-semibold text-[var(--color-text-primary)]">Communication Link</h2>
-            <p className="text-xs text-[var(--color-text-secondary)] mt-0.5">Select connection type</p>
+            <p className="text-xs text-[var(--color-text-secondary)] mt-0.5">
+              {targetData?.label ? `${targetData.label as string} · ` : ''}Select connection type
+            </p>
           </div>
-          <div className="p-3 space-y-2">
-            {(['usb', 'canbus', 'uart'] as const).map((type) => {
-              const COLORS = { usb: 'var(--color-usb)', canbus: 'var(--color-canbus)', uart: 'var(--color-uart)' };
-              const LABELS = { usb: 'USB', canbus: 'CAN Bus', uart: 'UART' };
-              const DESCS = { usb: 'Universal Serial Bus', canbus: 'Controller Area Network', uart: 'Universal Async Receiver-Transmitter' };
-              return (
-                <button
-                  key={type}
-                  onClick={() => updateEdgeData(selectedEdgeId, { commType: type } as Partial<AppEdge['data']>)}
-                  className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-all ${
-                    commType === type
-                      ? 'border-transparent text-[var(--color-bg-primary)]'
-                      : 'border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:border-[var(--color-accent)]'
-                  }`}
-                  style={commType === type ? { backgroundColor: COLORS[type] } : {}}
-                >
-                  <span className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: COLORS[type] }} />
-                  <div className="text-left">
-                    <div className="text-xs font-semibold">{LABELS[type]}</div>
-                    <div className="text-[10px] opacity-70">{DESCS[type]}</div>
-                  </div>
-                  {commType === type && <span className="ml-auto text-xs">✓</span>}
-                </button>
-              );
-            })}
+          <div className="flex-1 overflow-y-auto">
+            <div className="p-3 space-y-2">
+              {(['usb', 'canbus', 'uart'] as const).map((type) => {
+                const COLORS = { usb: 'var(--color-usb)', canbus: 'var(--color-canbus)', uart: 'var(--color-uart)' };
+                const LABELS = { usb: 'USB', canbus: 'CAN Bus', uart: 'UART' };
+                const DESCS = { usb: 'Universal Serial Bus', canbus: 'Controller Area Network', uart: 'Universal Async Receiver-Transmitter' };
+                return (
+                  <button
+                    key={type}
+                    onClick={() => updateEdgeData(selectedEdgeId, { commType: type } as Partial<AppEdge['data']>)}
+                    className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-all ${
+                      commType === type
+                        ? 'border-transparent text-[var(--color-bg-primary)]'
+                        : 'border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:border-[var(--color-accent)]'
+                    }`}
+                    style={commType === type ? { backgroundColor: COLORS[type] } : {}}
+                  >
+                    <span className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: COLORS[type] }} />
+                    <div className="text-left">
+                      <div className="text-xs font-semibold">{LABELS[type]}</div>
+                      <div className="text-[10px] opacity-70">{DESCS[type]}</div>
+                    </div>
+                    {commType === type && <span className="ml-auto text-xs">✓</span>}
+                  </button>
+                );
+              })}
+            </div>
+            {/* MCU section params */}
+            {mcuSection && targetConfigFile && (
+              <div className="border-t border-[var(--color-bg-tertiary)] p-3 space-y-3">
+                <h3 className="text-xs font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">
+                  MCU Settings — [{mcuSection.full_header}]
+                </h3>
+                {mcuSection.params.filter((p) => !p.is_commented_out).map((param) => {
+                  const paramSchema = mcuSchema?.params.find((p) => p.name === param.key);
+                  return (
+                    <ParamField
+                      key={param.key}
+                      param={param}
+                      schema={paramSchema}
+                      onChange={(value) => updateSectionParam(targetConfigFile, mcuSection.full_header, param.key, value)}
+                      onRemove={() => removeParam(targetConfigFile, mcuSection.full_header, param.key)}
+                    />
+                  );
+                })}
+                {mcuSection.params.filter((p) => !p.is_commented_out).length === 0 && (
+                  <p className="text-xs text-[var(--color-text-secondary)] italic">No active MCU parameters</p>
+                )}
+              </div>
+            )}
           </div>
         </div>
       );
@@ -505,13 +569,13 @@ export default function SettingsPanel() {
         hwData={hwData!}
         nodeId={selectedNodeId!}
         childNodes={childNodes}
-        hwSections={hwSections}
         schemas={schemas}
         addingType={addingType}
         setAddingType={setAddingType}
         onAddSubComponent={handleAddSubComponent}
         onAddFeature={handleAddFeature}
         onSelectSection={(header: string) => setSelectedSection(header)}
+        onSelectNode={(nodeId: string) => { setSelectedNode(nodeId); setSelectedSection(null); }}
         onTogglePrimary={handleTogglePrimary}
         onToggleMcu={handleToggleMcu}
         onRename={handleRename}
@@ -949,7 +1013,17 @@ const SIDEBAR_GROUP_NAMES: Record<string, string> = {
   other: 'Other',
 };
 
-function ChildNodesList({ childNodes, onSelectSection }: { childNodes: AppNode[]; onSelectSection: (header: string) => void }) {
+function ChildNodesList({
+  childNodes,
+  onSelectSection,
+  onSelectNode,
+  title,
+}: {
+  childNodes: AppNode[];
+  onSelectSection: (header: string) => void;
+  onSelectNode: (nodeId: string) => void;
+  title?: string;
+}) {
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
 
   // Group child nodes by componentGroup
@@ -971,10 +1045,30 @@ function ChildNodesList({ childNodes, onSelectSection }: { childNodes: AppNode[]
   return (
     <div>
       <h3 className="text-xs font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-2">
-        Attached Components ({childNodes.length})
+        {title || 'Attached Components'} ({childNodes.length})
       </h3>
       <div className="space-y-1">
         {Array.from(groups.entries()).map(([group, nodes]) => {
+          // "other" group — render items flat with no foldout wrapper
+          if (group === 'other') {
+            return nodes.map((n) => {
+              const d = n.data as Record<string, unknown>;
+              return (
+                <button
+                  key={n.id}
+                  onClick={() => {
+                    if (n.type === 'group') { onSelectNode(n.id); return; }
+                    if (d.sectionHeader) onSelectSection(d.sectionHeader as string);
+                  }}
+                  className="flex items-center gap-2 w-full px-2 py-1.5 rounded-lg text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors"
+                >
+                  <span className="w-2 h-2 rounded-full bg-[var(--color-accent)]" />
+                  <span className="text-[var(--color-text-primary)]">{d.label as string}</span>
+                </button>
+              );
+            });
+          }
+
           if (nodes.length === 1) {
             // Single node — show directly (no foldout wrapper)
             const n = nodes[0];
@@ -983,6 +1077,10 @@ function ChildNodesList({ childNodes, onSelectSection }: { childNodes: AppNode[]
               <button
                 key={n.id}
                 onClick={() => {
+                  if (n.type === 'group') {
+                    onSelectNode(n.id);
+                    return;
+                  }
                   if (d.sectionHeader) onSelectSection(d.sectionHeader as string);
                 }}
                 className="flex items-center gap-2 w-full px-2 py-1.5 rounded-lg text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors"
@@ -1020,16 +1118,30 @@ function ChildNodesList({ childNodes, onSelectSection }: { childNodes: AppNode[]
                     const d = n.data as Record<string, unknown>;
                     // For group nodes, show each child item within
                     if (n.type === 'group' && Array.isArray(d.children)) {
-                      return (d.children as Array<{ label: string; sectionHeader: string }>).map((child, ci) => (
-                        <button
-                          key={`${n.id}_${ci}`}
-                          onClick={() => onSelectSection(child.sectionHeader)}
-                          className="flex items-center gap-2 w-full px-2 py-1 rounded text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors"
-                        >
-                          <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)] opacity-60" />
-                          <span className="text-[var(--color-text-primary)] truncate">{child.label}</span>
-                        </button>
-                      ));
+                      return (
+                        <div key={n.id} className="space-y-0.5">
+                          <button
+                            onClick={() => onSelectNode(n.id)}
+                            className="flex items-center gap-2 w-full px-2 py-1 rounded text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors"
+                          >
+                            <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)]" />
+                            <span className="text-[var(--color-text-primary)] truncate font-medium">{d.label as string}</span>
+                            <span className="text-[10px] text-[var(--color-text-secondary)] ml-auto">open</span>
+                          </button>
+                          <div className="ml-3 space-y-0.5">
+                            {(d.children as Array<{ label: string; sectionHeader: string; configFile?: string }>).map((child, ci) => (
+                              <button
+                                key={`${n.id}_${child.configFile || 'cfg'}_${child.sectionHeader}_${ci}`}
+                                onClick={() => onSelectSection(child.sectionHeader)}
+                                className="flex items-center gap-2 w-full px-2 py-1 rounded text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors"
+                              >
+                                <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)] opacity-60" />
+                                <span className="text-[var(--color-text-primary)] truncate">{child.label}</span>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      );
                     }
                     return (
                       <button
@@ -1058,13 +1170,13 @@ function HardwareOverviewPanel({
   hwData,
   nodeId,
   childNodes,
-  hwSections,
   schemas,
   addingType,
   setAddingType,
   onAddSubComponent,
   onAddFeature,
   onSelectSection,
+  onSelectNode,
   onTogglePrimary,
   onToggleMcu,
   onRename,
@@ -1073,13 +1185,13 @@ function HardwareOverviewPanel({
   hwData: HardwareNodeData;
   nodeId: string;
   childNodes: AppNode[];
-  hwSections: ConfigSection[];
   schemas: Record<string, SectionSchema>;
   addingType: 'sub' | 'feature' | null;
   setAddingType: (t: 'sub' | 'feature' | null) => void;
   onAddSubComponent: (type: string) => void;
   onAddFeature: (type: string) => void;
   onSelectSection: (header: string) => void;
+  onSelectNode: (nodeId: string) => void;
   onTogglePrimary: () => void;
   onToggleMcu: () => void;
   onRename: (newLabel: string) => void;
@@ -1157,6 +1269,16 @@ function HardwareOverviewPanel({
           >
             {(hwData as Record<string, unknown>).isPrimary ? '★ Primary (printer.cfg)' : 'Set as Primary'}
           </button>
+          <button
+            onClick={() => {
+              const mcuHeader = hwData.mcuName ? `mcu ${hwData.mcuName}` : 'mcu';
+              onSelectSection(mcuHeader);
+            }}
+            className="text-xs px-3 py-1 rounded transition-colors bg-[var(--color-bg-tertiary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] text-[var(--color-text-secondary)]"
+            title="View and edit MCU communication settings"
+          >
+            Communications
+          </button>
           {isSbc && (
             <button
               onClick={onToggleMcu}
@@ -1174,32 +1296,44 @@ function HardwareOverviewPanel({
       </div>
 
       <div className="flex-1 overflow-y-auto p-3 space-y-4">
-        {/* Child sections list */}
-        {hwSections.length > 0 && (
-          <div>
-            <h3 className="text-xs font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-2">
-              Config Sections ({hwSections.length})
-            </h3>
-            <div className="space-y-1">
-              {hwSections.map((sec, idx) => (
-                <button
-                  key={`${sec.full_header}__${idx}`}
-                  onClick={() => onSelectSection(sec.full_header)}
-                  className="flex items-center justify-between w-full px-2 py-1.5 rounded-lg text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors group"
-                >
-                  <span className="text-[var(--color-text-primary)] font-mono">[{sec.full_header}]</span>
-                  <span className="text-[10px] text-[var(--color-text-secondary)] opacity-0 group-hover:opacity-100">
-                    Edit &rarr;
-                  </span>
-                </button>
-              ))}
-            </div>
-          </div>
+        {/* Attached Components — sub-components and non-feature groups, excluding "other" group */}
+        {childNodes.filter((n) => {
+          const d = n.data as Record<string, unknown>;
+          const group = (d.componentGroup as string) || 'other';
+          if (group === 'other') return false;
+          return n.type === 'subComponent' || (n.type === 'group' && !d.isFeature);
+        }).length > 0 && (
+          <ChildNodesList
+            childNodes={childNodes.filter((n) => {
+              const d = n.data as Record<string, unknown>;
+              const group = (d.componentGroup as string) || 'other';
+              if (group === 'other') return false;
+              return n.type === 'subComponent' || (n.type === 'group' && !d.isFeature);
+            })}
+            onSelectSection={onSelectSection}
+            onSelectNode={onSelectNode}
+            title="Attached Components"
+          />
         )}
 
-        {/* Child nodes list — grouped by componentGroup with foldable sections */}
-        {childNodes.length > 0 && (
-          <ChildNodesList childNodes={childNodes} onSelectSection={onSelectSection} />
+        {/* Features list — features, feature groups, and anything in "other" group */}
+        {childNodes.filter((n) => {
+          const d = n.data as Record<string, unknown>;
+          const group = (d.componentGroup as string) || 'other';
+          if (group === 'other') return true;
+          return n.type === 'feature' || (n.type === 'group' && !!d.isFeature);
+        }).length > 0 && (
+          <ChildNodesList
+            childNodes={childNodes.filter((n) => {
+              const d = n.data as Record<string, unknown>;
+              const group = (d.componentGroup as string) || 'other';
+              if (group === 'other') return true;
+              return n.type === 'feature' || (n.type === 'group' && !!d.isFeature);
+            })}
+            onSelectSection={onSelectSection}
+            onSelectNode={onSelectNode}
+            title="Features"
+          />
         )}
 
         {/* Add buttons */}

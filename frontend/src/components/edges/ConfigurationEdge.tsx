@@ -4,7 +4,8 @@ import {
   useNodes,
   type EdgeProps,
 } from '@xyflow/react';
-import { getAvoidancePath, type NodeRect } from '../../utils/edgeRouting';
+import { type NodeRect } from '../../utils/edgeRouting';
+import { useBendPath, type SegHandle } from '../../utils/edgeBend';
 
 const HARDWARE_COLORS: Record<string, string> = {
   sbc: 'var(--color-sbc)',
@@ -17,8 +18,8 @@ const HARDWARE_COLORS: Record<string, string> = {
 };
 
 function ConfigurationEdge(props: EdgeProps) {
-  const { sourceX, sourceY, targetX, targetY, data, source, target, sourcePosition, targetPosition } = props;
-  const edgeData = data as Record<string, unknown> | undefined;
+  const { id, sourceX, sourceY, targetX, targetY, data, source, target, sourcePosition, targetPosition } = props;
+  const edgeData = data as Record<string, unknown> & { customMiddlePoints?: Array<{ x: number; y: number }> } | undefined;
 
   const allNodes = useNodes();
 
@@ -50,20 +51,49 @@ function ConfigurationEdge(props: EdgeProps) {
       }));
   }, [allNodes, source, target]);
 
-  const edgeResult = useMemo(
-    () => getAvoidancePath(sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, obstacles),
-    [sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, obstacles],
+  const {
+    path,
+    handles,
+    onHandlePointerDown,
+    onHandlePointerMove,
+    onHandlePointerUp,
+    onEdgeDoubleClick,
+  } = useBendPath(
+    id,
+    sourceX, sourceY, targetX, targetY,
+    sourcePosition, targetPosition,
+    obstacles,
+    edgeData?.customMiddlePoints,
   );
 
   return (
-    <BaseEdge
-      id={props.id}
-      path={edgeResult.path}
-      style={{
-        stroke: color,
-        strokeWidth: 2,
-      }}
-    />
+    <>
+      <BaseEdge
+        id={props.id}
+        path={path}
+        style={{
+          stroke: color,
+          strokeWidth: 2,
+        }}
+        onDoubleClick={onEdgeDoubleClick}
+      />
+      {/* Segment drag handles */}
+      {handles.map((h: SegHandle) => (
+        <circle
+          key={h.segIndex}
+          cx={h.x}
+          cy={h.y}
+          r={5}
+          fill="var(--color-bg-secondary)"
+          stroke={color}
+          strokeWidth={1.5}
+          style={{ cursor: h.isHorizontal ? 'ns-resize' : 'ew-resize' }}
+          onPointerDown={(e) => onHandlePointerDown(h.segIndex, h.isHorizontal, e)}
+          onPointerMove={onHandlePointerMove}
+          onPointerUp={onHandlePointerUp}
+        />
+      ))}
+    </>
   );
 }
 
