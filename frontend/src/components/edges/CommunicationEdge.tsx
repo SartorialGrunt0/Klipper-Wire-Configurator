@@ -89,7 +89,7 @@ function CommunicationEdge(props: EdgeProps) {
           fill="var(--color-bg-secondary)"
           stroke={color}
           strokeWidth={1.5}
-          style={{ cursor: h.isHorizontal ? 'ns-resize' : 'ew-resize' }}
+          style={{ cursor: h.isHorizontal ? 'ns-resize' : 'ew-resize', pointerEvents: 'all' }}
           onPointerDown={(e) => onHandlePointerDown(h.segIndex, h.isHorizontal, e)}
           onPointerMove={onHandlePointerMove}
           onPointerUp={onHandlePointerUp}

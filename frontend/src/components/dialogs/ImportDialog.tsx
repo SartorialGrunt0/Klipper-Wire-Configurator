@@ -13,6 +13,8 @@ interface ImportResult {
   filename: string;
   sections: number;
   errors: number;
+  warnings: number;
+  errorDetails: Array<{ severity: string; section: string; param: string; message: string }>;
   boardName: string;
   isMainFile: boolean;
   mcuNames: string[];
@@ -39,6 +41,7 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [fileSelection, setFileSelection] = useState<Record<string, boolean>>({});
 
+  const [expandedFile, setExpandedFile] = useState<string | null>(null);
   const { setConfigFile, setValidation } = useConfigStore();
 
   const doImport = useCallback(async (files: File[]) => {
@@ -81,10 +84,19 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
           .filter((m) => m.file === filename)
           .map((m) => m.name || '(primary)');
 
+        const fileErrors = fileResult.validation.errors.filter((e) => e.severity === 'error');
+        const fileWarnings = fileResult.validation.errors.filter((e) => e.severity === 'warning');
         importResults.push({
           filename,
           sections: fileResult.config.sections.length,
-          errors: fileResult.validation.errors.filter((e) => e.severity === 'error').length,
+          errors: fileErrors.length,
+          warnings: fileWarnings.length,
+          errorDetails: fileResult.validation.errors.map((e) => ({
+            severity: e.severity,
+            section: e.section,
+            param: e.param,
+            message: e.message,
+          })),
           boardName: fileResult.board_info?.board_name || '',
           isMainFile: filename === projectResult.project.main_file,
           mcuNames,
@@ -408,10 +420,15 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
                 )}
                 {projectSummary.unresolvedIncludes.length > 0 && (
                   <div>
-                    <span className="text-[var(--color-text-secondary)]">Missing includes: </span>
-                    <span className="text-[var(--color-error)] font-mono">
-                      {projectSummary.unresolvedIncludes.join(', ')}
-                    </span>
+                    <div className="flex items-start gap-1">
+                      <span className="text-[var(--color-text-secondary)] shrink-0">Non-MCU files: </span>
+                      <span className="text-[var(--color-text-secondary)] font-mono">
+                        {projectSummary.unresolvedIncludes.join(', ')}
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-[var(--color-text-secondary)] mt-1 opacity-70">
+                      These files are referenced by [include] directives in your config but were not found in the imported files. They may be macros or extras stored elsewhere on your printer.
+                    </p>
                   </div>
                 )}
               </div>
@@ -420,37 +437,71 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
 
           {/* Import results list */}
           {results.length > 0 && (
-            <div className="mt-3 space-y-1 max-h-48 overflow-y-auto">
+            <div className="mt-3 space-y-1 max-h-60 overflow-y-auto">
               {results.map((r) => (
-                <div key={r.filename} className="flex items-center justify-between p-2 rounded-lg bg-[var(--color-bg-primary)] text-xs">
-                  <div className="flex items-center gap-2 min-w-0">
-                    {r.isMainFile && (
-                      <span className="text-[9px] px-1 py-0.5 rounded bg-[var(--color-accent)]/20 text-[var(--color-accent)] font-semibold shrink-0">
-                        MAIN
+                <div key={r.filename}>
+                  <div
+                    className={`flex items-center justify-between p-2 rounded-lg bg-[var(--color-bg-primary)] text-xs ${
+                      r.errorDetails.length > 0 ? 'cursor-pointer hover:bg-[var(--color-bg-tertiary)]/50' : ''
+                    }`}
+                    onClick={() => r.errorDetails.length > 0 && setExpandedFile(expandedFile === r.filename ? null : r.filename)}
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      {r.isMainFile && (
+                        <span className="text-[9px] px-1 py-0.5 rounded bg-[var(--color-accent)]/20 text-[var(--color-accent)] font-semibold shrink-0">
+                          MAIN
+                        </span>
+                      )}
+                      <span className="text-[var(--color-text-primary)] font-mono truncate">{r.filename}</span>
+                      <span className="text-[var(--color-text-secondary)] shrink-0">
+                        {r.sections} sections
                       </span>
-                    )}
-                    <span className="text-[var(--color-text-primary)] font-mono truncate">{r.filename}</span>
-                    <span className="text-[var(--color-text-secondary)] shrink-0">
-                      {r.sections} sections
-                    </span>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {r.mcuNames.length > 0 && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">
+                          MCU: {r.mcuNames.join(', ')}
+                        </span>
+                      )}
+                      {r.boardName && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">
+                          {r.boardName}
+                        </span>
+                      )}
+                      {r.errors > 0 && (
+                        <span className="text-[10px] px-1 py-0.5 rounded bg-[var(--color-error)]/20 text-[var(--color-error)] font-medium">
+                          {r.errors} error{r.errors > 1 ? 's' : ''}
+                        </span>
+                      )}
+                      {r.warnings > 0 && (
+                        <span className="text-[10px] px-1 py-0.5 rounded bg-[var(--color-warning)]/20 text-[var(--color-warning)] font-medium">
+                          {r.warnings} warning{r.warnings > 1 ? 's' : ''}
+                        </span>
+                      )}
+                    </div>
                   </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    {r.mcuNames.length > 0 && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">
-                        MCU: {r.mcuNames.join(', ')}
-                      </span>
-                    )}
-                    {r.boardName && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">
-                        {r.boardName}
-                      </span>
-                    )}
-                    {r.errors > 0 && (
-                      <span className="text-[10px] text-[var(--color-error)]">
-                        {r.errors} errors
-                      </span>
-                    )}
-                  </div>
+                  {/* Expanded error details */}
+                  {expandedFile === r.filename && r.errorDetails.length > 0 && (
+                    <div className="ml-2 mr-2 mb-1 p-2 rounded-b-lg bg-[var(--color-bg-primary)] border border-t-0 border-[var(--color-bg-tertiary)] space-y-1">
+                      {r.errorDetails.map((err, i) => (
+                        <div key={i} className="flex items-start gap-2 text-[10px]">
+                          <span className={`shrink-0 px-1 py-0.5 rounded font-semibold uppercase ${
+                            err.severity === 'error'
+                              ? 'bg-[var(--color-error)]/20 text-[var(--color-error)]'
+                              : err.severity === 'warning'
+                              ? 'bg-[var(--color-warning)]/20 text-[var(--color-warning)]'
+                              : 'bg-[var(--color-accent)]/20 text-[var(--color-accent)]'
+                          }`}>
+                            {err.severity}
+                          </span>
+                          <span className="text-[var(--color-text-secondary)] font-mono shrink-0">
+                            [{err.section}]{err.param ? ` ${err.param}` : ''}
+                          </span>
+                          <span className="text-[var(--color-text-primary)]">{err.message}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

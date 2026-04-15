@@ -61,10 +61,15 @@ class ValidationResult:
         }
 
 
-PIN_RE = re.compile(r"^[!^~]*(?:[\w]+:)?(?:P[A-Z]\d+|ar\d+|gpio\d+|[A-Z_]+\d*|<\w+>)$", re.IGNORECASE)
+PIN_RE = re.compile(
+    r"^[!^~]*(?:[\w]+:)?"
+    r"(?:P[A-Z]\d+|ar\d+|gpio\d+|[A-Z_]+\d*|<\w+>|"
+    r"z_virtual_endstop|virtual_endstop)$",
+    re.IGNORECASE,
+)
 
 
-def validate_config(config: ConfigFile) -> ValidationResult:
+def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> ValidationResult:
     """Validate a full configuration file."""
     result = ValidationResult()
 
@@ -147,10 +152,11 @@ def validate_config(config: ConfigFile) -> ValidationResult:
             if param.is_commented_out:
                 continue
 
-            # Find param definition
+            # Find param definition (case-insensitive match)
             param_def = None
+            param_key_lower = param.key.lower()
             for pd in sec_def.params:
-                if pd.name == param.key or ("*" in pd.name and param.key.startswith(pd.name.replace("*", ""))):
+                if pd.name == param.key or pd.name.lower() == param_key_lower or ("*" in pd.name and param.key.startswith(pd.name.replace("*", ""))):
                     param_def = pd
                     break
 
@@ -181,24 +187,25 @@ def validate_config(config: ConfigFile) -> ValidationResult:
     # Check for pin conflicts
     _check_pin_conflicts(used_pins, result)
 
-    # Check printer section exists
-    if "printer" not in {s.section_type for s in config.sections if s.section_type != "include"}:
-        result.errors.append(ValidationError(
-            severity="error",
-            section="",
-            param="",
-            message="Missing required [printer] section.",
-        ))
+    # Check printer section exists (only for single-file or main file validation)
+    if not is_multi_file:
+        if "printer" not in {s.section_type for s in config.sections if s.section_type != "include"}:
+            result.errors.append(ValidationError(
+                severity="error",
+                section="",
+                param="",
+                message="Missing required [printer] section.",
+            ))
 
-    # Check MCU section exists
-    has_mcu = any(s.section_type == "mcu" and not s.section_name for s in config.sections)
-    if not has_mcu:
-        result.errors.append(ValidationError(
-            severity="error",
-            section="",
-            param="",
-            message="Missing required [mcu] section.",
-        ))
+        # Check MCU section exists
+        has_mcu = any(s.section_type == "mcu" and not s.section_name for s in config.sections)
+        if not has_mcu:
+            result.errors.append(ValidationError(
+                severity="error",
+                section="",
+                param="",
+                message="Missing required [mcu] section.",
+            ))
 
     return result
 

@@ -81,7 +81,7 @@ async def import_project(files: List[UploadFile] = File(...)):
             continue
 
         config = parse_config(text, filename)
-        validation = validate_config(config)
+        validation = validate_config(config, is_multi_file=len(files) > 1)
         board_info = detect_board_from_config(config)
 
         configs[filename] = config
