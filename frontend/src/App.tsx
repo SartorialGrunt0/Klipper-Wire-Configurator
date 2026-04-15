@@ -204,8 +204,10 @@ export default function App() {
       } else {
         setSelectedSection(null);
       }
-      // Expand collapsed hardware / customGroup nodes on click
-      if ((node.type === 'hardware' || node.type === 'customGroup') && data?.collapsed) {
+      // Expand collapsed hardware / customGroup nodes on click,
+      // but skip SBC nodes that are not enabled as an MCU (they have no sub-components)
+      const isSbcWithoutMcu = node.type === 'hardware' && data?.hardwareType === 'sbc' && !data?.isMcu;
+      if (!isSbcWithoutMcu && (node.type === 'hardware' || node.type === 'customGroup') && data?.collapsed) {
         toggleHardwareCollapse(node.id);
       }
     },

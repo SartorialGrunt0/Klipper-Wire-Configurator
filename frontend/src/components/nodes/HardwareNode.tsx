@@ -30,7 +30,14 @@ function HardwareNode({ data, selected, id }: NodeProps) {
   const color = HARDWARE_COLORS[nodeData.hardwareType] || HARDWARE_COLORS.other;
   const shape = HARDWARE_SHAPES[nodeData.hardwareType] || HARDWARE_SHAPES.other;
   const isPrimary = !!(nodeData as Record<string, unknown>).isPrimary;
+  const isMcu = !!(nodeData as Record<string, unknown>).isMcu;
   const collapsed = !!nodeData.collapsed;
+
+  // Hide the label when it duplicates the type badge:
+  // - SBC not enabled as MCU (label is always "SBC")
+  // - Primary mainboard (label is "Mainboard", type badge + PRIMARY badge already describe it)
+  const isSbc = nodeData.hardwareType === 'sbc';
+  const showLabel = !(isSbc && !isMcu) && !(nodeData.hardwareType === 'mainboard' && isPrimary);
 
   const { toggleHardwareCollapse, nodes, selectedNodeId } = useGraphStore();
 
@@ -117,7 +124,7 @@ function HardwareNode({ data, selected, id }: NodeProps) {
             </span>
           )}
           <div className="min-w-0 flex flex-col leading-tight">
-            <span className="truncate" style={{ color }}>{nodeData.label}</span>
+            {showLabel && <span className="truncate" style={{ color }}>{nodeData.label}</span>}
             {isPrimary && (
               <span className="kwc-primary-label">
                 PRIMARY

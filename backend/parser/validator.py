@@ -62,7 +62,7 @@ class ValidationResult:
 
 
 PIN_RE = re.compile(
-    r"^[!^~]*(?:[\w]+:)?"
+    r"^[!^~]*(?:[\w]+:\s*)?"
     r"(?:P[A-Z]\d+|ar\d+|gpio\d+|[A-Z_]+\d*|<\w+>|"
     r"z_virtual_endstop|virtual_endstop)$",
     re.IGNORECASE,
@@ -175,7 +175,7 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
 
             # Track pin usage
             if param_def.param_type == ParamType.PIN and param.value:
-                clean_pin = param.value.lstrip("!^~").strip()
+                clean_pin = re.sub(r"\s*:\s*", ":", param.value.lstrip("!^~").strip())
                 if clean_pin and not clean_pin.startswith("<"):
                     if clean_pin not in used_pins:
                         used_pins[clean_pin] = []
