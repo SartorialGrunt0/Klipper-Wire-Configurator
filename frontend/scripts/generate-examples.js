@@ -26,6 +26,16 @@ const CATEGORY_PREFIXES = [
   ['kit-', 'kit'],
 ];
 
+// Board-type subdirectories → board_type value
+const BOARD_TYPE_DIRS = {
+  Mainboard: 'mainboard',
+  Toolhead: 'toolhead',
+  Probe: 'probe',
+  Expander: 'expander',
+  Accelerometer: 'accelerometer',
+  Other: 'other',
+};
+
 function extractTags(name) {
   let clean = name;
   for (const [prefix] of CATEGORY_PREFIXES) {
@@ -37,25 +47,44 @@ function extractTags(name) {
   return clean.split(/[-_.]/).filter((p) => p.length > 1);
 }
 
-const files = readdirSync(CONFIG_SRC).filter((f) => f.endsWith('.cfg')).sort();
+function categoryFromPrefix(name) {
+  for (const [prefix, cat] of CATEGORY_PREFIXES) {
+    if (name.startsWith(prefix)) return cat;
+  }
+  return 'other';
+}
+
 const examples = [];
 
-for (const filename of files) {
-  copyFileSync(join(CONFIG_SRC, filename), join(CONFIG_DEST, filename));
+// Scan typed subdirectories
+for (const [subdirName, boardType] of Object.entries(BOARD_TYPE_DIRS)) {
+  const subdirPath = join(CONFIG_SRC, subdirName);
+  if (!existsSync(subdirPath)) continue;
 
-  const name = filename.replace(/\.cfg$/, '');
-  let category = 'other';
-  for (const [prefix, cat] of CATEGORY_PREFIXES) {
-    if (name.startsWith(prefix)) {
-      category = cat;
-      break;
-    }
+  const files = readdirSync(subdirPath).filter((f) => f.endsWith('.cfg')).sort();
+  for (const filename of files) {
+    copyFileSync(join(subdirPath, filename), join(CONFIG_DEST, filename));
+    const name = filename.replace(/\.cfg$/, '');
+    examples.push({
+      filename,
+      name,
+      category: categoryFromPrefix(name),
+      board_type: boardType,
+      tags: extractTags(name),
+    });
   }
+}
 
+// Also pick up any .cfg files remaining in the config root (compat)
+const rootFiles = readdirSync(CONFIG_SRC).filter((f) => f.endsWith('.cfg')).sort();
+for (const filename of rootFiles) {
+  copyFileSync(join(CONFIG_SRC, filename), join(CONFIG_DEST, filename));
+  const name = filename.replace(/\.cfg$/, '');
   examples.push({
     filename,
     name,
-    category,
+    category: categoryFromPrefix(name),
+    board_type: 'other',
     tags: extractTags(name),
   });
 }

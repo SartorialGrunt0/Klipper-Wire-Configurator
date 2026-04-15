@@ -374,11 +374,12 @@ export default function App() {
               extractChildren(sib);
 
               if (children.length > 0) {
-                const { addGroupNode, removeNode } = useGraphStore.getState();
+                const { addGroupNode, removeNode, reflowParentChildren } = useGraphStore.getState();
                 const groupLabel = dragGroup.charAt(0).toUpperCase() + dragGroup.slice(1).replace(/_/g, ' ');
                 addGroupNode(oldParentId, dragGroup, groupLabel + 's', children, isFeature);
                 removeNode(draggedNode.id);
                 removeNode(sib.id);
+                if (oldParentId) reflowParentChildren(oldParentId);
               }
               return;
             }

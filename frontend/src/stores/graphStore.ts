@@ -8,7 +8,7 @@ import {
   type Node,
   type Edge,
 } from '@xyflow/react';
-import type { AppNode, AppEdge } from '../types/graph';
+import type { AppNode, AppEdge, GroupNodeData } from '../types/graph';
 import type { HardwareType, CommunicationType } from '../types/config';
 import { useConfigStore } from './configStore';
 import { updateSectionPins } from '../utils/pinUtils';
@@ -208,6 +208,8 @@ interface GraphState {
     configFile?: string,
   ) => string;
 
+  removeFromGroup: (groupNodeId: string, childIndex: number) => void;
+
   addCommunicationEdge: (sourceId: string, targetId: string, commType: CommunicationType, sourceHandle?: string, targetHandle?: string, isNotIncluded?: boolean) => string;
   addConfigurationEdge: (sourceId: string, targetId: string, hwType: HardwareType, sourceHandle?: string, targetHandle?: string) => string;
 
@@ -293,6 +295,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     // Clean up includes for removed configuration edges between hardware nodes
     const removes = changes.filter((c) => c.type === 'remove');
     if (removes.length > 0) {
+      get().pushHistory();
       const { nodes, edges } = get();
       removes.forEach((c) => {
         const edge = edges.find((e) => e.id === (c as { id: string }).id);
@@ -451,20 +454,38 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   setSelectedNode: (id) => {
     const prevId = get().selectedNodeId;
     set({ selectedNodeId: id });
+
+    const prevNode = get().nodes.find((n) => n.id === prevId);
+    const newNode = id ? get().nodes.find((n) => n.id === id) : null;
+    const prevParentId = prevNode?.parentId;
+    const newParentId = newNode?.parentId;
+
+    // Elevate the parent hardware node so the action overlay renders above sibling hardware nodes
+    if (prevParentId !== newParentId) {
+      set((s) => ({
+        nodes: s.nodes.map((n) => {
+          if (n.id === prevParentId && n.id !== newParentId) return { ...n, zIndex: 0 };
+          if (n.id === newParentId) return { ...n, zIndex: 100 };
+          return n;
+        }) as AppNode[],
+      }));
+    }
+
     // Reflow the parent of the old selection
     if (prevId && prevId !== id) {
-      const prevNode = get().nodes.find((n) => n.id === prevId);
-      if (prevNode?.parentId) get().reflowParentChildren(prevNode.parentId);
+      if (prevParentId) get().reflowParentChildren(prevParentId);
     }
     // Reflow the parent of the new selection
     if (id) {
-      const newNode = get().nodes.find((n) => n.id === id);
-      if (newNode?.parentId) get().reflowParentChildren(newNode.parentId);
+      if (newParentId) get().reflowParentChildren(newParentId);
     }
   },
 
   addEdge: (edge) => set((s) => ({ edges: [...s.edges, edge] })),
-  removeEdge: (id) => set((s) => ({ edges: s.edges.filter((e) => e.id !== id) })),
+  removeEdge: (id) => {
+    get().pushHistory();
+    set((s) => ({ edges: s.edges.filter((e) => e.id !== id) }));
+  },
   setSelectedEdge: (id) => set({ selectedEdgeId: id }),
 
   updateEdgeData: (id, data) =>
@@ -685,6 +706,53 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       };
     });
     return id;
+  },
+
+  removeFromGroup: (groupNodeId, childIndex) => {
+    get().pushHistory();
+    const groupNode = get().nodes.find((n) => n.id === groupNodeId);
+    if (!groupNode || groupNode.type !== 'group') return;
+    const groupData = groupNode.data as GroupNodeData;
+    const parentId = groupNode.parentId as string | undefined;
+    const children = [...(groupData.children || [])];
+    const [removedChild] = children.splice(childIndex, 1);
+    if (!removedChild) return;
+
+    if (children.length <= 1) {
+      // Dissolve the group: remove it, add remaining + removed as standalone nodes
+      set((s) => ({ nodes: s.nodes.filter((n) => n.id !== groupNodeId) as AppNode[] }));
+      if (parentId) {
+        if (children.length === 1) {
+          const remaining = children[0];
+          if (remaining.isFeature) {
+            get().addFeatureNode(parentId, remaining.sectionType, remaining.label, remaining.sectionHeader, remaining.configFile);
+          } else {
+            get().addSubComponentNode(parentId, remaining.sectionType, remaining.label, remaining.sectionHeader, remaining.configFile);
+          }
+        }
+        if (removedChild.isFeature) {
+          get().addFeatureNode(parentId, removedChild.sectionType, removedChild.label, removedChild.sectionHeader, removedChild.configFile);
+        } else {
+          get().addSubComponentNode(parentId, removedChild.sectionType, removedChild.label, removedChild.sectionHeader, removedChild.configFile);
+        }
+        get().reflowParentChildren(parentId);
+      }
+    } else {
+      // Remove child from group and add as standalone node
+      set((s) => ({
+        nodes: s.nodes.map((n) =>
+          n.id === groupNodeId ? { ...n, data: { ...n.data, children } } : n
+        ) as AppNode[],
+      }));
+      if (parentId) {
+        if (removedChild.isFeature) {
+          get().addFeatureNode(parentId, removedChild.sectionType, removedChild.label, removedChild.sectionHeader, removedChild.configFile);
+        } else {
+          get().addSubComponentNode(parentId, removedChild.sectionType, removedChild.label, removedChild.sectionHeader, removedChild.configFile);
+        }
+        get().reflowParentChildren(parentId);
+      }
+    }
   },
 
   toggleHardwareCollapse: (id) => {

@@ -47,6 +47,7 @@ export interface GroupChildItem {
   isFeature: boolean;
   params: ConfigParam[];
   configFile: string;
+  isSuppressed?: boolean;
 }
 
 export interface GroupNodeData {

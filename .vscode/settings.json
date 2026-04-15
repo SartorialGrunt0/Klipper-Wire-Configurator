@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^cd C:\\\\git\\\\Klipper-Wire-Configurator; git mv reference/config/generic-\\*\\.cfg reference/config/Mainboard/; git mv reference/config/printer-\\*\\.cfg reference/config/Mainboard/; git mv reference/config/kit-\\*\\.cfg reference/config/Mainboard/$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

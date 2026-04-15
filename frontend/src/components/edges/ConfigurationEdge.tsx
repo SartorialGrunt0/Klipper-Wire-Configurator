@@ -1,4 +1,4 @@
-import { memo, useMemo } from 'react';
+import { memo, useMemo, useState } from 'react';
 import {
   BaseEdge,
   useNodes,
@@ -19,6 +19,9 @@ const HARDWARE_COLORS: Record<string, string> = {
 
 function ConfigurationEdge(props: EdgeProps) {
   const { id, sourceX, sourceY, targetX, targetY, data, source, target, sourcePosition, targetPosition } = props;
+  const [isHovered, setIsHovered] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+  const showHandles = isHovered || isDragging;
   const edgeData = data as Record<string, unknown> & { customMiddlePoints?: Array<{ x: number; y: number }> } | undefined;
 
   const allNodes = useNodes();
@@ -67,7 +70,18 @@ function ConfigurationEdge(props: EdgeProps) {
   );
 
   return (
-    <>
+    <g
+      onMouseEnter={() => setIsHovered(true)}
+      onMouseLeave={() => { if (!isDragging) setIsHovered(false); }}
+    >
+      {/* Wide invisible path for easier hover detection */}
+      <path
+        d={path}
+        stroke="transparent"
+        strokeWidth={20}
+        fill="none"
+        style={{ pointerEvents: 'stroke' }}
+      />
       <BaseEdge
         id={props.id}
         path={path}
@@ -87,13 +101,18 @@ function ConfigurationEdge(props: EdgeProps) {
           fill="var(--color-bg-secondary)"
           stroke={color}
           strokeWidth={1.5}
-          style={{ cursor: h.isHorizontal ? 'ns-resize' : 'ew-resize', pointerEvents: 'all' }}
-          onPointerDown={(e) => onHandlePointerDown(h.segIndex, h.isHorizontal, e)}
+          style={{
+            cursor: h.isHorizontal ? 'ns-resize' : 'ew-resize',
+            pointerEvents: showHandles ? 'all' : 'none',
+            opacity: showHandles ? 1 : 0,
+            transition: 'opacity 0.15s ease',
+          }}
+          onPointerDown={(e) => { setIsDragging(true); onHandlePointerDown(h.segIndex, h.isHorizontal, e); }}
           onPointerMove={onHandlePointerMove}
-          onPointerUp={onHandlePointerUp}
+          onPointerUp={(e) => { setIsDragging(false); onHandlePointerUp(e); }}
         />
       ))}
-    </>
+    </g>
   );
 }
 

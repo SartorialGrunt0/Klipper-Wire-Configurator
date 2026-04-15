@@ -66,7 +66,7 @@ function HardwareNode({ data, selected, id }: NodeProps) {
       style={{
         borderColor: color,
         borderWidth: isPrimary ? 3 : 2,
-        backgroundColor: `${color}0d`,
+        backgroundColor: 'var(--color-bg-secondary)',
         width: '100%',
         height: '100%',
         boxSizing: 'border-box',

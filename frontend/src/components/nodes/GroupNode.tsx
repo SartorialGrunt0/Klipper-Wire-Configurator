@@ -5,7 +5,6 @@ import { useGraphStore } from '../../stores/graphStore';
 import { useConfigStore } from '../../stores/configStore';
 import NodeActions from './NodeActions';
 import WarningBadge from './WarningBadge';
-
 const GROUP_COLORS: Record<string, string> = {
   stepper: '#3b82f6',
   stepper_driver: '#6366f1',
@@ -34,7 +33,7 @@ function GroupNode({ data, selected, id }: NodeProps) {
   const children: GroupChildItem[] = nodeData.children || [];
   const isEmbedded = !!nodeData.parentHardwareId;
 
-  const { setSelectedNode } = useGraphStore();
+  const { setSelectedNode, removeFromGroup } = useGraphStore();
   const { setSelectedSection } = useConfigStore();
 
   const handleChildClick = useCallback((e: React.MouseEvent, child: GroupChildItem) => {
@@ -42,6 +41,11 @@ function GroupNode({ data, selected, id }: NodeProps) {
     setSelectedNode(id);
     setSelectedSection(child.sectionHeader);
   }, [id, setSelectedNode, setSelectedSection]);
+
+  const handleRemoveChild = useCallback((e: React.MouseEvent, idx: number) => {
+    e.stopPropagation();
+    removeFromGroup(id, idx);
+  }, [id, removeFromGroup]);
 
   return (
     <div
@@ -99,10 +103,29 @@ function GroupNode({ data, selected, id }: NodeProps) {
           {children.map((child, idx) => (
             <div
               key={`${child.configFile || 'cfg'}::${child.sectionHeader}::${idx}`}
-              className="text-[10px] text-[var(--color-text-secondary)] truncate px-1 py-0.5 rounded cursor-pointer hover:bg-[var(--color-bg-primary)]"
-              onClick={(e) => handleChildClick(e, child)}
+              className="flex items-center gap-1 group/child"
             >
-              {child.label}
+              <div
+                className="text-[10px] truncate px-1 py-0.5 rounded cursor-pointer hover:bg-[var(--color-bg-primary)] flex-1 min-w-0"
+                style={{ color: child.isSuppressed ? 'var(--color-text-secondary)' : undefined, opacity: child.isSuppressed ? 0.5 : 1 }}
+                onClick={(e) => handleChildClick(e, child)}
+              >
+                {child.label}
+              </div>
+              {child.isSuppressed && (
+                <span className="text-[9px] px-1 py-0.5 rounded bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] shrink-0">
+                  OFF
+                </span>
+              )}
+              <button
+                title="Remove from group"
+                className="shrink-0 w-4 h-4 flex items-center justify-center rounded opacity-0 group-hover/child:opacity-100 hover:bg-red-500/20 text-red-400 transition-opacity"
+                onClick={(e) => handleRemoveChild(e, idx)}
+              >
+                <svg width="8" height="8" viewBox="0 0 10 10" fill="none">
+                  <path d="M2 2l6 6M8 2l-6 6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                </svg>
+              </button>
             </div>
           ))}
         </div>

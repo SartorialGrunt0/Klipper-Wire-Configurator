@@ -28,6 +28,7 @@ from parser.config_schema import (
 from parser.config_writer import write_config
 from parser.validator import validate_config
 from services.board_detector import (
+    BOARD_TYPE_DIRS,
     detect_board_from_config,
     fuzzy_match_examples,
     get_available_examples,
@@ -37,6 +38,21 @@ router = APIRouter()
 
 REFERENCE_DIR = Path(__file__).parent.parent.parent / "reference"
 PROJECTS_DIR = Path(__file__).parent.parent / "projects"
+
+
+def _resolve_config_path(filename: str) -> Path | None:
+    """Find a config file by name, searching type subdirectories first."""
+    config_dir = REFERENCE_DIR / "config"
+    # Check subdirectories
+    for subdir in BOARD_TYPE_DIRS:
+        candidate = config_dir / subdir / filename
+        if candidate.exists():
+            return candidate
+    # Fall back to flat root
+    candidate = config_dir / filename
+    if candidate.exists():
+        return candidate
+    return None
 
 
 # ── Import / Parse ──────────────────────────────────────────────
@@ -187,8 +203,8 @@ async def generate_config(data: GenerateRequest):
     """Generate a new config from a template or blank."""
     if data.template:
         # Load from example
-        config_path = REFERENCE_DIR / "config" / data.template
-        if not config_path.exists():
+        config_path = _resolve_config_path(data.template)
+        if not config_path:
             raise HTTPException(status_code=404, detail=f"Template '{data.template}' not found")
         text = config_path.read_text(encoding="utf-8", errors="replace")
         config = parse_config(text, "printer.cfg")
@@ -230,8 +246,8 @@ async def get_example(filename: str):
     # Validate filename to prevent path traversal
     if "/" in filename or "\\" in filename or ".." in filename:
         raise HTTPException(status_code=400, detail="Invalid filename")
-    config_path = REFERENCE_DIR / "config" / filename
-    if not config_path.exists():
+    config_path = _resolve_config_path(filename)
+    if not config_path:
         raise HTTPException(status_code=404, detail="Example not found")
     text = config_path.read_text(encoding="utf-8", errors="replace")
     config = parse_config(text, filename)

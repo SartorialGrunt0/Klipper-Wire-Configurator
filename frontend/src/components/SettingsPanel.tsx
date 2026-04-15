@@ -440,13 +440,36 @@ export default function SettingsPanel() {
     updateNodeData(selectedNodeId, { label: newLabel } as Partial<AppNode['data']>);
   }, [selectedNodeId, updateNodeData]);
 
-  // Toggle suppress for sub-component / feature nodes
-  const isSuppressable = selectedNode?.type === 'subComponent' || selectedNode?.type === 'feature';
-  const nodeIsSuppressed = isSuppressable && !!(selectedNode?.data as Record<string, unknown>)?.isSuppressed;
+  // Toggle suppress for sub-component / feature nodes (standalone or inside a group)
+  const isSuppressable = selectedNode?.type === 'subComponent' || selectedNode?.type === 'feature' ||
+    (selectedNode?.type === 'group' && !!selectedSection);
+  const nodeIsSuppressed = useMemo(() => {
+    if (!isSuppressable) return false;
+    if (selectedNode?.type === 'subComponent' || selectedNode?.type === 'feature') {
+      return !!(selectedNode.data as Record<string, unknown>)?.isSuppressed;
+    }
+    // Group child: find the child matching selectedSection
+    if (selectedNode?.type === 'group' && selectedSection) {
+      const children = (selectedNode.data as Record<string, unknown>)?.children as Array<{ sectionHeader: string; isSuppressed?: boolean }> | undefined;
+      const child = children?.find((c) => c.sectionHeader === selectedSection);
+      return !!child?.isSuppressed;
+    }
+    return false;
+  }, [isSuppressable, selectedNode, selectedSection]);
   const handleToggleSuppress = useCallback(() => {
     if (!selectedNodeId || !isSuppressable) return;
-    updateNodeData(selectedNodeId, { isSuppressed: !nodeIsSuppressed } as Partial<AppNode['data']>);
-  }, [selectedNodeId, isSuppressable, nodeIsSuppressed, updateNodeData]);
+    if (selectedNode?.type === 'subComponent' || selectedNode?.type === 'feature') {
+      updateNodeData(selectedNodeId, { isSuppressed: !nodeIsSuppressed } as Partial<AppNode['data']>);
+    } else if (selectedNode?.type === 'group' && selectedSection) {
+      // Update the matching child inside the group's children array
+      const children = [...((selectedNode.data as Record<string, unknown>)?.children as Array<Record<string, unknown>> || [])];
+      const idx = children.findIndex((c) => c.sectionHeader === selectedSection);
+      if (idx !== -1) {
+        children[idx] = { ...children[idx], isSuppressed: !nodeIsSuppressed };
+        updateNodeData(selectedNodeId, { children } as Partial<AppNode['data']>);
+      }
+    }
+  }, [selectedNodeId, isSuppressable, selectedNode, selectedSection, nodeIsSuppressed, updateNodeData]);
 
   // Apply section text edits back to config
   const handleApplySectionText = useCallback(async () => {
@@ -579,6 +602,9 @@ export default function SettingsPanel() {
         onTogglePrimary={handleTogglePrimary}
         onToggleMcu={handleToggleMcu}
         onRename={handleRename}
+        onChangeHardwareType={(newType) => {
+          if (selectedNodeId) updateNodeData(selectedNodeId, { hardwareType: newType } as Partial<AppNode['data']>);
+        }}
         allNodes={nodes}
       />
       </>
@@ -1180,6 +1206,7 @@ function HardwareOverviewPanel({
   onTogglePrimary,
   onToggleMcu,
   onRename,
+  onChangeHardwareType,
   allNodes,
 }: {
   hwData: HardwareNodeData;
@@ -1195,6 +1222,7 @@ function HardwareOverviewPanel({
   onTogglePrimary: () => void;
   onToggleMcu: () => void;
   onRename: (newLabel: string) => void;
+  onChangeHardwareType: (newType: HardwareType) => void;
   allNodes: AppNode[];
 }) {
   const [renaming, setRenaming] = useState(false);
@@ -1255,8 +1283,22 @@ function HardwareOverviewPanel({
             </span>
           )}
         </div>
-        <p className="text-xs text-[var(--color-text-secondary)] mt-1">
-          {hwData.hardwareType.toUpperCase()} &middot; {hwData.configFile}
+        <p className="text-xs text-[var(--color-text-secondary)] mt-1 flex items-center gap-1">
+          <select
+            value={hwData.hardwareType}
+            onChange={(e) => onChangeHardwareType(e.target.value as HardwareType)}
+            className="text-xs bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] rounded px-1 py-0.5 text-[var(--color-text-secondary)] focus:outline-none focus:border-[var(--color-accent)] uppercase cursor-pointer"
+            title="Change board type"
+          >
+            <option value="mainboard">MAINBOARD</option>
+            <option value="toolhead">TOOLHEAD</option>
+            <option value="expander">EXPANDER</option>
+            <option value="sbc">SBC</option>
+            <option value="probe">PROBE</option>
+            <option value="accelerometer">ACCELEROMETER</option>
+            <option value="other">OTHER</option>
+          </select>
+          &middot; {hwData.configFile}
         </p>
         <div className="flex flex-wrap gap-2 mt-2">
           <button

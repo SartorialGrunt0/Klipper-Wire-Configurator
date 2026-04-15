@@ -179,9 +179,19 @@ body {
   overflow: visible !important;
 }
 
+/* Force edges behind all nodes */
+.react-flow__edges {
+  z-index: 0 !important;
+}
+
+/* Ensure nodes render above edges */
+.react-flow__nodes {
+  z-index: 1 !important;
+}
+
 /* Ensure child nodes stack above the hardware container */
 .react-flow__node:has(> .kwc-hardware-container) {
-  z-index: 0 !important;
+  z-index: 0;
 }
 
 /* Remove ReactFlow's default 'group' node background box */
