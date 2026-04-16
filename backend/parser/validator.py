@@ -112,7 +112,11 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
             ))
 
         # Check required parameters
-        active_params = {p.key for p in section.params if not p.is_commented_out}
+        active_params = {
+            p.key
+            for p in section.params
+            if not p.is_commented_out and p.key != "_comment_"
+        }
         for param_def in sec_def.params:
             if param_def.required and param_def.name not in active_params:
                 # Skip wildcard params
@@ -149,7 +153,7 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
 
         # Validate individual parameters
         for param in section.params:
-            if param.is_commented_out:
+            if param.is_commented_out or param.key == "_comment_":
                 continue
 
             # Find param definition (case-insensitive match)
