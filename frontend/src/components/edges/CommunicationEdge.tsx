@@ -129,27 +129,6 @@ function CommunicationEdge(props: EdgeProps) {
         }}
         onDoubleClick={onEdgeDoubleClick}
       />
-      {/* Segment drag handles */}
-      {handles.map((h: SegHandle) => (
-        <circle
-          key={h.segIndex}
-          cx={h.x}
-          cy={h.y}
-          r={5}
-          fill="var(--color-bg-secondary)"
-          stroke={color}
-          strokeWidth={1.5}
-          style={{
-            cursor: h.isHorizontal ? 'ns-resize' : 'ew-resize',
-            pointerEvents: showHandles ? 'all' : 'none',
-            opacity: showHandles ? 1 : 0,
-            transition: 'opacity 0.15s ease',
-          }}
-          onPointerDown={(e) => { setIsDragging(true); onHandlePointerDown(h.segIndex, h.isHorizontal, e); }}
-          onPointerMove={onHandlePointerMove}
-          onPointerUp={(e) => { setIsDragging(false); onHandlePointerUp(e); }}
-        />
-      ))}
       {/* Label badge */}
       <foreignObject
         x={labelX - 32}
@@ -212,6 +191,27 @@ function CommunicationEdge(props: EdgeProps) {
           </div>
         </foreignObject>
       )}
+      {/* Segment drag handles — rendered last so they sit on top of the label badge */}
+      {handles.map((h: SegHandle) => (
+        <circle
+          key={h.segIndex}
+          cx={h.x}
+          cy={h.y}
+          r={5}
+          fill="var(--color-bg-secondary)"
+          stroke={color}
+          strokeWidth={1.5}
+          style={{
+            cursor: h.isHorizontal ? 'ns-resize' : 'ew-resize',
+            pointerEvents: showHandles ? 'all' : 'none',
+            opacity: showHandles ? 1 : 0,
+            transition: 'opacity 0.15s ease',
+          }}
+          onPointerDown={(e) => { setIsDragging(true); onHandlePointerDown(h.segIndex, h.isHorizontal, e); }}
+          onPointerMove={onHandlePointerMove}
+          onPointerUp={(e) => { setIsDragging(false); onHandlePointerUp(e); }}
+        />
+      ))}
     </g>
   );
 }

@@ -9,6 +9,8 @@ class ParamUpdate(BaseModel):
     key: str
     value: str
     is_commented_out: bool = False
+    comment: str = ""
+    separator: str = ":"
 
 
 class SectionUpdate(BaseModel):
@@ -16,6 +18,8 @@ class SectionUpdate(BaseModel):
     section_type: str
     section_name: str = ""
     params: list[ParamUpdate]
+    header_comments: list[str] = []
+    trailing_comments: list[str] = []
 
 
 class ConfigUpdate(BaseModel):
@@ -23,6 +27,7 @@ class ConfigUpdate(BaseModel):
     sections: list[SectionUpdate]
     includes: list[str] = []
     header_comments: list[str] = []
+    raw_text: Optional[str] = None
 
 
 class ProjectFile(BaseModel):

@@ -187,26 +187,6 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
     # Check for pin conflicts
     _check_pin_conflicts(used_pins, result)
 
-    # Check printer section exists (only for single-file or main file validation)
-    if not is_multi_file:
-        if "printer" not in {s.section_type for s in config.sections if s.section_type != "include"}:
-            result.errors.append(ValidationError(
-                severity="error",
-                section="",
-                param="",
-                message="Missing required [printer] section.",
-            ))
-
-        # Check MCU section exists
-        has_mcu = any(s.section_type == "mcu" and not s.section_name for s in config.sections)
-        if not has_mcu:
-            result.errors.append(ValidationError(
-                severity="error",
-                section="",
-                param="",
-                message="Missing required [mcu] section.",
-            ))
-
     return result
 
 

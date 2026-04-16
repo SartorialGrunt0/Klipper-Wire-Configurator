@@ -19,6 +19,9 @@ class ConfigParam:
     comment: str = ""
     is_commented_out: bool = False
     line_number: int = 0
+    separator: str = ":"  # original separator used (: or =)
+    raw_comment_suffix: str = ""  # e.g. "\t\t\t#Max 15 for ..." — full original suffix
+    raw_line: str = ""  # full original line text for perfect reproduction
 
 
 @dataclass
@@ -29,6 +32,8 @@ class ConfigSection:
     params: list[ConfigParam] = field(default_factory=list)
     header_comments: list[str] = field(default_factory=list)
     line_number: int = 0
+    trailing_comments: list[str] = field(default_factory=list)  # comments after last param
+    trailing_blank_lines: int = 0  # number of blank lines after section
 
     @property
     def display_name(self) -> str:
@@ -59,10 +64,12 @@ class ConfigSection:
                     "value": p.value,
                     "comment": p.comment,
                     "is_commented_out": p.is_commented_out,
+                    "separator": p.separator,
                 }
                 for p in self.params
             ],
             "header_comments": self.header_comments,
+            "trailing_comments": self.trailing_comments,
         }
 
 
@@ -89,14 +96,15 @@ class ConfigFile:
             "sections": [s.to_dict() for s in self.sections],
             "includes": self.includes,
             "header_comments": self.header_comments,
+            "raw_text": self.raw_text,
         }
 
 
 # Regex patterns
 SECTION_RE = re.compile(r"^\[([^\]]+)\]\s*(?:#.*)?$")
 INCLUDE_RE = re.compile(r"^\[include\s+([^\]]+)\]\s*(?:#.*)?$")
-PARAM_RE = re.compile(r"^(\w[\w]*)\s*[:=]\s*(.*?)(?:\s*#(.*))?$")
-COMMENTED_PARAM_RE = re.compile(r"^#\s*(\w[\w]*)\s*[:=]\s*(.*?)(?:\s*#(.*))?$")
+PARAM_RE = re.compile(r"^(\w[\w]*)\s*([:=])\s*(.*?)(?:\s*#(.*))?$")
+COMMENTED_PARAM_RE = re.compile(r"^#\s*(\w[\w]*)\s*([:=])\s*(.*?)(?:\s*#(.*))?$")
 CONTINUATION_RE = re.compile(r"^[ \t]+(\S.*)$")
 
 # Section types that take a name parameter
@@ -147,102 +155,207 @@ def parse_section_header(header: str) -> tuple[str, str]:
 
 
 def parse_config(text: str, filename: str = "printer.cfg") -> ConfigFile:
-    """Parse a Klipper config file from text content."""
+    """Parse a Klipper config file from text content.
+
+    Handles multi-line values (gcode blocks, activate_gcode, etc.) that may
+    contain blank lines, Jinja2 template lines, and arbitrary indented content.
+    A multi-line value continues until:
+      - A new section header ``[...]`` is encountered
+      - A new top-level parameter ``key: value`` or ``key= value`` at column 0
+      - A commented-out parameter ``#key: value`` at column 0
+      - End of file
+    """
     config = ConfigFile(filename=filename, raw_text=text)
     lines = text.splitlines()
 
     current_section: Optional[ConfigSection] = None
     pending_comments: list[str] = []
     last_param: Optional[ConfigParam] = None
+    # For tracking multi-line: we peek ahead to decide if blank/comment lines
+    # are part of a multi-line value or between sections.
+    i = 0
+    n = len(lines)
 
-    for line_num, line in enumerate(lines, 1):
+    def _is_continuation_context(from_idx: int) -> bool:
+        """Check if lines following a blank/comment are still within a
+        multi-line value.  Walk forward from *from_idx* and return True if we
+        hit an indented continuation line before we hit a section header, a
+        top-level parameter, or end-of-file."""
+        j = from_idx
+        while j < n:
+            l = lines[j]
+            ls = l.strip()
+            if not ls:
+                # another blank line — keep looking
+                j += 1
+                continue
+            if ls.startswith("#"):
+                # comment line — could be inside gcode; keep looking
+                j += 1
+                continue
+            if SECTION_RE.match(ls) or INCLUDE_RE.match(ls):
+                return False
+            if PARAM_RE.match(ls) or COMMENTED_PARAM_RE.match(ls):
+                return False
+            # indented non-empty line → still in continuation
+            if l[0] in (" ", "\t"):
+                return True
+            # Non-indented, non-param, non-section (e.g. bare Jinja line at col 0)
+            # This is ambiguous; treat as continuation if preceded by a multi-line param
+            return True
+        return False
+
+    while i < n:
+        line = lines[i]
         stripped = line.strip()
 
-        # Empty line
+        # ── Empty line ──────────────────────────────────────────
         if not stripped:
-            if current_section is None:
-                if pending_comments:
-                    config.header_comments.extend(pending_comments)
-                    pending_comments = []
+            # Could be inside a multi-line value (gcode blocks have blank lines)
+            if last_param is not None and current_section is not None:
+                if _is_continuation_context(i + 1):
+                    last_param.value += "\n"
+                    i += 1
+                    continue
+            # Otherwise it's a section/block boundary
+            if current_section is None and pending_comments:
+                config.header_comments.extend(pending_comments)
+                pending_comments = []
             last_param = None
+            i += 1
             continue
 
-        # Include directive
+        # ── Include directive ───────────────────────────────────
         inc_match = INCLUDE_RE.match(stripped)
         if inc_match:
+            last_param = None
             config.includes.append(inc_match.group(1).strip())
-            # Also add as a section for completeness
             sec = ConfigSection(
                 section_type="include",
                 section_name=inc_match.group(1).strip(),
                 full_header=f"include {inc_match.group(1).strip()}",
-                line_number=line_num,
+                line_number=i + 1,
                 header_comments=pending_comments[:],
             )
             config.sections.append(sec)
+            current_section = None  # includes don't own params
             pending_comments = []
-            last_param = None
+            i += 1
             continue
 
-        # Section header
+        # ── Section header ──────────────────────────────────────
         sec_match = SECTION_RE.match(stripped)
         if sec_match:
+            last_param = None
             header = sec_match.group(1).strip()
             sec_type, sec_name = parse_section_header(header)
             current_section = ConfigSection(
                 section_type=sec_type,
                 section_name=sec_name,
                 full_header=header,
-                line_number=line_num,
+                line_number=i + 1,
                 header_comments=pending_comments[:],
             )
             config.sections.append(current_section)
             pending_comments = []
-            last_param = None
+            i += 1
             continue
 
-        # Continuation line (indented, belongs to previous param)
-        cont_match = CONTINUATION_RE.match(line)
-        if cont_match and last_param is not None and current_section is not None:
-            last_param.value += "\n" + cont_match.group(1)
-            continue
+        # ── Continuation line (indented → multi-line value) ─────
+        if last_param is not None and current_section is not None:
+            cont_match = CONTINUATION_RE.match(line)
+            if cont_match:
+                last_param.value += "\n" + cont_match.group(1)
+                i += 1
+                continue
 
-        # Parameter line
+        # ── Parameter line ──────────────────────────────────────
         param_match = PARAM_RE.match(stripped)
         if param_match and current_section is not None:
+            # Attach any pending comments as trailing on this section
+            # (they appeared between params in the same section)
+            if pending_comments:
+                # Store as special comment-params so they round-trip in order
+                for c in pending_comments:
+                    current_section.params.append(ConfigParam(
+                        key="_comment_",
+                        value=c,
+                        is_commented_out=False,
+                        line_number=0,
+                        separator=":",
+                    ))
+                pending_comments = []
             p = ConfigParam(
                 key=param_match.group(1),
-                value=param_match.group(2).strip(),
-                comment=param_match.group(3).strip() if param_match.group(3) else "",
-                line_number=line_num,
+                value=param_match.group(3).strip(),
+                comment=param_match.group(4).strip() if param_match.group(4) else "",
+                line_number=i + 1,
+                separator=param_match.group(2),
+                raw_line=line,
             )
             current_section.params.append(p)
             last_param = p
+            i += 1
             continue
 
-        # Commented-out parameter
+        # ── Commented-out parameter ─────────────────────────────
         commented_match = COMMENTED_PARAM_RE.match(stripped)
         if commented_match and current_section is not None:
+            if pending_comments:
+                for c in pending_comments:
+                    current_section.params.append(ConfigParam(
+                        key="_comment_",
+                        value=c,
+                        is_commented_out=False,
+                        line_number=0,
+                        separator=":",
+                    ))
+                pending_comments = []
             p = ConfigParam(
                 key=commented_match.group(1),
-                value=commented_match.group(2).strip(),
-                comment=commented_match.group(3).strip() if commented_match.group(3) else "",
+                value=commented_match.group(3).strip(),
+                comment=commented_match.group(4).strip() if commented_match.group(4) else "",
                 is_commented_out=True,
-                line_number=line_num,
+                line_number=i + 1,
+                separator=commented_match.group(2),
+                raw_line=line,
             )
             current_section.params.append(p)
             last_param = p
+            i += 1
             continue
 
-        # Pure comment line
+        # ── Pure comment line ───────────────────────────────────
         if stripped.startswith("#"):
+            # If inside a multi-line value, treat as continuation
+            if last_param is not None and current_section is not None:
+                if _is_continuation_context(i + 1) or (line[0] in (" ", "\t")):
+                    last_param.value += "\n" + stripped
+                    i += 1
+                    continue
             pending_comments.append(stripped)
             last_param = None
+            i += 1
             continue
 
-    # Remaining top-level comments
-    if pending_comments and current_section is None:
-        config.header_comments.extend(pending_comments)
+        # ── Unrecognised non-empty line (bare Jinja, etc.) ──────
+        # If we have a multi-line param in progress, append as continuation
+        if last_param is not None and current_section is not None:
+            last_param.value += "\n" + stripped
+            i += 1
+            continue
+
+        # Truly unknown line — store as comment to avoid data loss
+        pending_comments.append(stripped)
+        last_param = None
+        i += 1
+
+    # Remaining trailing comments attach to the last section
+    if pending_comments:
+        if current_section is not None:
+            current_section.trailing_comments = pending_comments
+        else:
+            config.header_comments.extend(pending_comments)
 
     return config
 

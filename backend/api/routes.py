@@ -25,7 +25,7 @@ from parser.config_schema import (
     get_sections_by_category,
     get_sections_by_group,
 )
-from parser.config_writer import write_config
+from parser.config_writer import write_config, smart_export
 from parser.validator import validate_config
 from services.board_detector import (
     BOARD_TYPE_DIRS,
@@ -63,7 +63,8 @@ async def import_config(file: UploadFile = File(...)):
     """Import and parse a .cfg file."""
     content = await file.read()
     text = content.decode("utf-8", errors="replace")
-    filename = file.filename or "printer.cfg"
+    # Strip any path prefix the browser may include (e.g. "config/printer.cfg" → "printer.cfg")
+    filename = Path(file.filename or "printer.cfg").name or "printer.cfg"
 
     config = parse_config(text, filename)
     validation = validate_config(config)
@@ -90,7 +91,8 @@ async def import_project(files: List[UploadFile] = File(...)):
     for f in files:
         content = await f.read()
         text = content.decode("utf-8", errors="replace")
-        filename = f.filename or "unknown.cfg"
+        # Strip any path prefix the browser may include (e.g. "config/printer.cfg" → "printer.cfg")
+        filename = Path(f.filename or "unknown.cfg").name or "unknown.cfg"
 
         # Only process .cfg files
         if not filename.endswith(".cfg"):
@@ -181,7 +183,9 @@ async def validate_config_api(data: ConfigUpdate):
 async def export_config(data: ConfigUpdate):
     """Export configuration to .cfg text."""
     config = _config_update_to_config_file(data)
-    text = write_config(config)
+    if data.raw_text:
+        config.raw_text = data.raw_text
+    text = smart_export(config)
     return PlainTextResponse(content=text, media_type="text/plain")
 
 
@@ -191,7 +195,9 @@ async def export_project(data: ExportRequest):
     files = {}
     for cfg_data in data.project.config_files:
         config = _config_update_to_config_file(cfg_data)
-        files[cfg_data.filename] = write_config(config)
+        if cfg_data.raw_text:
+            config.raw_text = cfg_data.raw_text
+        files[cfg_data.filename] = smart_export(config)
     return {"files": files}
 
 
@@ -400,6 +406,8 @@ def _config_update_to_config_file(data: ConfigUpdate) -> ConfigFile:
                 key=p.key,
                 value=p.value,
                 is_commented_out=p.is_commented_out,
+                comment=p.comment,
+                separator=p.separator,
             )
             for p in sec_data.params
         ]
@@ -408,6 +416,8 @@ def _config_update_to_config_file(data: ConfigUpdate) -> ConfigFile:
             section_name=sec_data.section_name,
             full_header=sec_data.full_header,
             params=params,
+            header_comments=sec_data.header_comments,
+            trailing_comments=sec_data.trailing_comments,
         )
         sections.append(section)
 

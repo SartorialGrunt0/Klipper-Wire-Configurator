@@ -79,6 +79,11 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
         setValidation(filename, fileResult.validation);
         allConfigs[filename] = fileResult.config;
 
+        // Capture original text for diff comparison (use raw_text from parser)
+        if (fileResult.config.raw_text) {
+          useConfigStore.getState().setOriginalText(filename, fileResult.config.raw_text);
+        }
+
         // Find MCU names in this file
         const mcuNames = projectResult.project.mcus
           .filter((m) => m.file === filename)

@@ -76,17 +76,7 @@ export async function parseConfigText(
 
 /* ── Validate ────────────────────────────────────────── */
 
-export async function validateConfig(config: {
-  filename: string;
-  sections: Array<{
-    full_header: string;
-    section_type: string;
-    section_name?: string;
-    params: Array<{ key: string; value: string; is_commented_out?: boolean }>;
-  }>;
-  includes?: string[];
-  header_comments?: string[];
-}): Promise<ValidationResult> {
+export async function validateConfig(config: ConfigFile): Promise<ValidationResult> {
   return request('/validate', {
     method: 'POST',
     body: JSON.stringify(config),
@@ -95,17 +85,7 @@ export async function validateConfig(config: {
 
 /* ── Export ───────────────────────────────────────────── */
 
-export async function exportConfig(config: {
-  filename: string;
-  sections: Array<{
-    full_header: string;
-    section_type: string;
-    section_name?: string;
-    params: Array<{ key: string; value: string; is_commented_out?: boolean }>;
-  }>;
-  includes?: string[];
-  header_comments?: string[];
-}): Promise<string> {
+export async function exportConfig(config: ConfigFile): Promise<string> {
   const res = await fetch(`${BASE_URL}/export`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

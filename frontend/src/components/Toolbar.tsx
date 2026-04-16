@@ -5,6 +5,7 @@ import * as api from '../services/api';
 import ImportDialog from './dialogs/ImportDialog';
 import ExportDialog from './dialogs/ExportDialog';
 import GenerateDialog from './dialogs/GenerateDialog';
+import DiffDialog from './dialogs/DiffDialog';
 
 interface ToolbarProps {
   showTextView: boolean;
@@ -15,6 +16,8 @@ export default function Toolbar({ showTextView, onToggleTextView }: ToolbarProps
   const [showImport, setShowImport] = useState(false);
   const [showExport, setShowExport] = useState(false);
   const [showGenerate, setShowGenerate] = useState(false);
+  const [showDiff, setShowDiff] = useState(false);
+  const hasOriginals = Object.keys(useConfigStore((s) => s.originalTexts)).length > 0;
 
   return (
     <div className="flex items-center gap-2">
@@ -51,6 +54,19 @@ export default function Toolbar({ showTextView, onToggleTextView }: ToolbarProps
         Export
       </button>
 
+      {/* Diff */}
+      {hasOriginals && (
+        <button
+          onClick={() => setShowDiff(true)}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] transition-colors"
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <path d="M4 3v10M8 3v10M12 6l-4 4M12 10l-4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+          Diff
+        </button>
+      )}
+
       {/* Divider */}
       <div className="w-px h-5 bg-[var(--color-bg-tertiary)]" />
 
@@ -86,6 +102,7 @@ export default function Toolbar({ showTextView, onToggleTextView }: ToolbarProps
       {showImport && <ImportDialog onClose={() => setShowImport(false)} />}
       {showExport && <ExportDialog onClose={() => setShowExport(false)} />}
       {showGenerate && <GenerateDialog onClose={() => setShowGenerate(false)} />}
+      {showDiff && <DiffDialog onClose={() => setShowDiff(false)} />}
     </div>
   );
 }

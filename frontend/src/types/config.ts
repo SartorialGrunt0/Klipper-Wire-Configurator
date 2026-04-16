@@ -5,6 +5,7 @@ export interface ConfigParam {
   value: string;
   comment: string;
   is_commented_out: boolean;
+  separator?: string;
 }
 
 export interface ConfigSection {
@@ -14,6 +15,7 @@ export interface ConfigSection {
   line_number: number;
   params: ConfigParam[];
   header_comments: string[];
+  trailing_comments?: string[];
 }
 
 export interface ConfigFile {
@@ -21,6 +23,7 @@ export interface ConfigFile {
   sections: ConfigSection[];
   includes: string[];
   header_comments: string[];
+  raw_text?: string;
 }
 
 /* ── Validation Types ────────────────────────────────── */

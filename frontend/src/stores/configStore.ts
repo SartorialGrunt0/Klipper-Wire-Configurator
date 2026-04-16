@@ -10,20 +10,7 @@ async function _revalidateAll(get: () => ConfigState, set: (partial: Partial<Con
   const api = await import('../services/api');
   for (const [filename, cf] of Object.entries(configFiles)) {
     try {
-      const result = await api.validateConfig({
-        filename,
-        sections: cf.sections.map((s) => ({
-          full_header: s.full_header,
-          section_type: s.section_type,
-          section_name: s.section_name,
-          params: s.params.map((p) => ({
-            key: p.key,
-            value: p.value,
-            is_commented_out: p.is_commented_out,
-          })),
-        })),
-        includes: cf.includes,
-      });
+      const result = await api.validateConfig(cf);
       set((state) => ({
         validation: { ...state.validation, [filename]: result },
       }));
@@ -45,6 +32,7 @@ interface ConfigState {
   validation: Record<string, ValidationResult>;
   schemas: Record<string, SectionSchema>;
   selectedSection: string | null; // full_header of selected section
+  originalTexts: Record<string, string>; // original exported text at import time
 
   /* ── Actions ──────────────────────────────────────── */
   setConfigFile: (filename: string, config: ConfigFile) => void;
@@ -79,6 +67,9 @@ interface ConfigState {
   clearAll: () => void;
   loadConfigs: (configs: Record<string, ConfigFile>) => void;
 
+  /* Original text tracking */
+  setOriginalText: (filename: string, text: string) => void;
+
   /* Include directives */
   addInclude: (filename: string, includePath: string) => void;
   removeInclude: (filename: string, includePath: string) => void;
@@ -94,6 +85,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   validation: {},
   schemas: {},
   selectedSection: null,
+  originalTexts: {},
 
   setConfigFile: (filename, config) =>
     set((s) => ({
@@ -249,6 +241,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       activeFile: 'printer.cfg',
       validation: {},
       selectedSection: null,
+      originalTexts: {},
     }),
 
   loadConfigs: (configs) =>
@@ -256,6 +249,11 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       configFiles: configs,
       activeFile: Object.keys(configs)[0] || 'printer.cfg',
     }),
+
+  setOriginalText: (filename, text) =>
+    set((s) => ({
+      originalTexts: { ...s.originalTexts, [filename]: text },
+    })),
 
   addInclude: (filename, includePath) =>
     set((s) => {

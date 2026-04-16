@@ -70,6 +70,12 @@ export default function GenerateDialog({ onClose }: GenerateDialogProps) {
       setConfigFile(result.config.filename, result.config);
       setValidation(result.config.filename, result.validation);
 
+      // Capture original text for diff comparison
+      try {
+        const originalText = await api.exportConfig(result.config);
+        useConfigStore.getState().setOriginalText(result.config.filename, originalText);
+      } catch { /* non-critical */ }
+
       // Build full graph from parsed sections
       const graphStore = useGraphStore.getState();
       buildGraphFromConfig(result.config, graphStore, useConfigStore.getState().schemas);

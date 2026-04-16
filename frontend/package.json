@@ -10,12 +10,14 @@
   },
   "dependencies": {
     "@xyflow/react": "^12.6.0",
+    "diff": "^9.0.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "zustand": "^5.0.5"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.4",
+    "@types/diff": "^7.0.2",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.2",
     "@vitejs/plugin-react": "^4.4.1",
