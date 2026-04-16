@@ -161,9 +161,9 @@ function detectCommType(section: ConfigSection): CommunicationType {
  * The backend parser marks these with a _commented_section param.
  */
 function isSectionSuppressed(section: ConfigSection): boolean {
-  return section.params.some(
-    (p) => p.key === '_commented_section' && p.is_commented_out && p.value === 'true',
-  );
+  if (section.is_commented_out) return true;
+  const realParams = section.params.filter((p) => p.key !== '_comment_');
+  return realParams.length > 0 && realParams.every((p) => p.is_commented_out);
 }
 
 /**
@@ -556,6 +556,7 @@ export function buildProjectGraph(
         label: item.label,
         sectionHeader: item.sec.full_header,
         isFeature: item.isFeature,
+        isSuppressed: item.isSuppressed,
         params: item.sec.params.filter((p) => !p.is_commented_out),
         configFile: item.filename,
       }));

@@ -1,7 +1,7 @@
 import { useState, useCallback, useMemo } from 'react';
 import { useConfigStore } from '../stores/configStore';
 import { useGraphStore } from '../stores/graphStore';
-import type { ParamSchema, ConfigParam, ConfigSection } from '../types/config';
+import type { ParamSchema, ConfigParam, ConfigSection, HardwareType, SectionSchema } from '../types/config';
 import type { HardwareNodeData, SubComponentNodeData, FeatureNodeData, AppNode, AppEdge } from '../types/graph';
 import { updateAllSectionPins } from '../utils/pinUtils';
 import McuNameDialog from './dialogs/McuNameDialog';
@@ -11,6 +11,10 @@ const PIN_PARAM_NAMES = new Set(['pin', 'sensor_pin', 'heater_pin', 'step_pin', 
 
 function isPinParam(paramName: string): boolean {
   return PIN_PARAM_NAMES.has(paramName) || paramName.endsWith('_pin');
+}
+
+function basename(filename: string): string {
+  return filename.replace(/^.*[\\/]/, '');
 }
 
 /** Build a map of pin value → list of sections using it (excluding inversion prefix) */
@@ -89,23 +93,46 @@ export default function SettingsPanel() {
     return null;
   }, [selectedNode, nodes]);
 
-  const section = useMemo(() => {
+  const resolvedSectionInfo = useMemo(() => {
     if (!sectionHeader) return null;
     // If we know the config file, look there first
     if (nodeConfigFile) {
       const cf = configFiles[nodeConfigFile];
       if (cf) {
         const found = cf.sections.find((s) => s.full_header === sectionHeader);
-        if (found) return found;
+        if (found) return { section: found, filename: nodeConfigFile };
       }
     }
     // Fallback: search across all config files
-    for (const cf of Object.values(configFiles)) {
+    for (const [filename, cf] of Object.entries(configFiles)) {
       const found = cf.sections.find((s) => s.full_header === sectionHeader);
-      if (found) return found;
+      if (found) return { section: found, filename };
     }
     return null;
   }, [sectionHeader, nodeConfigFile, configFiles]);
+
+  const section = resolvedSectionInfo?.section || null;
+  const sectionConfigFile = resolvedSectionInfo?.filename || null;
+
+  const includeParents = useMemo(() => {
+    if (!sectionConfigFile) return [] as string[];
+    const targetBasename = basename(sectionConfigFile);
+    return Object.entries(configFiles)
+      .filter(([filename, cf]) => (
+        filename !== sectionConfigFile
+        && cf.includes.some((includePath) => basename(includePath) === targetBasename)
+      ))
+      .map(([filename]) => filename);
+  }, [sectionConfigFile, configFiles]);
+
+  const sourceFileNote = useMemo(() => {
+    if (!sectionConfigFile) return null;
+    if (includeParents.length === 0) return `Defined in ${sectionConfigFile}`;
+    if (includeParents.length === 1) {
+      return `Defined in ${sectionConfigFile} via [include ${basename(sectionConfigFile)}] from ${includeParents[0]}`;
+    }
+    return `Defined in ${sectionConfigFile} via [include ${basename(sectionConfigFile)}] from ${includeParents.join(', ')}`;
+  }, [sectionConfigFile, includeParents]);
 
   // Pin conflict detection
   const pinUsageMap = useMemo(() => buildPinUsageMap(configFiles), [configFiles]);
@@ -342,13 +369,50 @@ export default function SettingsPanel() {
     }
   }, [nodes, updateNodeData]);
 
-  // Toggle primary MCU - handles pin prefix updates and MCU section renaming
+  // Toggle primary MCU - handles pin prefix updates, MCU section renaming, and config file renaming
   const handleTogglePrimary = useCallback(() => {
     if (!selectedNodeId) return;
     const currentIsPrimary = (hwData as Record<string, unknown>)?.isPrimary as boolean;
+    const { renameConfigFile } = useConfigStore.getState();
+
+    // Helper to swap config files: old primary's printer.cfg → {mcuName}.cfg, new primary's file → printer.cfg
+    const swapConfigFiles = (oldPrimaryNodeId: string | null, oldMcuName: string, newPrimaryNodeId: string, newConfigFile: string) => {
+      // Rename old primary's printer.cfg to {oldMcuName}.cfg
+      if (oldPrimaryNodeId && oldMcuName) {
+        const demotedFileName = `${oldMcuName.toLowerCase().replace(/\s+/g, '_')}.cfg`;
+        renameConfigFile('printer.cfg', demotedFileName);
+        updateNodeData(oldPrimaryNodeId, { configFile: demotedFileName } as Partial<AppNode['data']>);
+        // Update child nodes referencing printer.cfg
+        for (const child of nodes) {
+          if (child.parentId === oldPrimaryNodeId) {
+            const cd = child.data as Record<string, unknown>;
+            if (cd.configFile === 'printer.cfg') {
+              updateNodeData(child.id, { configFile: demotedFileName } as Partial<AppNode['data']>);
+            }
+          }
+        }
+      }
+      // Rename new primary's config file to printer.cfg
+      if (newConfigFile && newConfigFile !== 'printer.cfg') {
+        renameConfigFile(newConfigFile, 'printer.cfg');
+        updateNodeData(newPrimaryNodeId, { configFile: 'printer.cfg' } as Partial<AppNode['data']>);
+        // Update child nodes referencing the old file
+        for (const child of nodes) {
+          if (child.parentId === newPrimaryNodeId) {
+            const cd = child.data as Record<string, unknown>;
+            if (cd.configFile === newConfigFile) {
+              updateNodeData(child.id, { configFile: 'printer.cfg' } as Partial<AppNode['data']>);
+            }
+          }
+        }
+      }
+    };
 
     if (!currentIsPrimary) {
       // PROMOTING this node to primary
+      const newNodeData = hwData as Record<string, unknown>;
+      const newConfigFile = (newNodeData?.configFile as string) || '';
+
       // 1. Find the old primary and demote it
       const oldPrimary = nodes.find(
         (n) => n.type === 'hardware' && n.id !== selectedNodeId &&
@@ -361,25 +425,38 @@ export default function SettingsPanel() {
 
         if (!oldMcuName) {
           // Old primary has no MCU name — need to prompt for one before proceeding
-          // Store this node's ID so we can complete the swap after the dialog
           updateNodeData(selectedNodeId, { isPrimary: true } as Partial<AppNode['data']>);
           updateNodeData(oldPrimary.id, { isPrimary: false } as Partial<AppNode['data']>);
           setMcuNamePrompt({ nodeId: oldPrimary.id, purpose: 'demote' });
 
           // Promote the new primary: strip its MCU prefix
-          const newMcuName = (hwData as Record<string, unknown>)?.mcuName as string || '';
+          const newMcuName = (newNodeData?.mcuName as string) || '';
           if (newMcuName) {
             applyMcuNameChange(selectedNodeId, newMcuName, '');
           }
+          // File rename will happen when MCU name is confirmed
           return;
         }
 
-        // Old primary already has a name — just demote it
+        // Old primary already has a name — demote it and swap files
         updateNodeData(oldPrimary.id, { isPrimary: false } as Partial<AppNode['data']>);
+        swapConfigFiles(oldPrimary.id, oldMcuName, selectedNodeId, newConfigFile);
+      } else if (newConfigFile && newConfigFile !== 'printer.cfg') {
+        // No old primary — just rename new primary's file to printer.cfg
+        renameConfigFile(newConfigFile, 'printer.cfg');
+        updateNodeData(selectedNodeId, { configFile: 'printer.cfg' } as Partial<AppNode['data']>);
+        for (const child of nodes) {
+          if (child.parentId === selectedNodeId) {
+            const cd = child.data as Record<string, unknown>;
+            if (cd.configFile === newConfigFile) {
+              updateNodeData(child.id, { configFile: 'printer.cfg' } as Partial<AppNode['data']>);
+            }
+          }
+        }
       }
 
       // Promote the new primary: strip MCU prefix, rename [mcu name] → [mcu]
-      const newMcuName = (hwData as Record<string, unknown>)?.mcuName as string || '';
+      const newMcuName = (newNodeData?.mcuName as string) || '';
       if (newMcuName) {
         applyMcuNameChange(selectedNodeId, newMcuName, '');
       }
@@ -400,6 +477,50 @@ export default function SettingsPanel() {
     const nd = nodes.find((n) => n.id === mcuNamePrompt.nodeId);
     if (nd) {
       updateNodeData(mcuNamePrompt.nodeId, { label: mcuName } as Partial<AppNode['data']>);
+    }
+
+    // Handle file rename when demoting: printer.cfg → {mcuName}.cfg
+    if (mcuNamePrompt.purpose === 'demote') {
+      const { renameConfigFile } = useConfigStore.getState();
+      const demotedFileName = `${mcuName.toLowerCase().replace(/\s+/g, '_')}.cfg`;
+      const ndData = nd?.data as Record<string, unknown>;
+      const currentFile = (ndData?.configFile as string) || 'printer.cfg';
+
+      if (currentFile === 'printer.cfg') {
+        renameConfigFile('printer.cfg', demotedFileName);
+        updateNodeData(mcuNamePrompt.nodeId, { configFile: demotedFileName } as Partial<AppNode['data']>);
+        // Update child nodes
+        for (const child of nodes) {
+          if (child.parentId === mcuNamePrompt.nodeId) {
+            const cd = child.data as Record<string, unknown>;
+            if (cd.configFile === 'printer.cfg') {
+              updateNodeData(child.id, { configFile: demotedFileName } as Partial<AppNode['data']>);
+            }
+          }
+        }
+      }
+
+      // Now rename the new primary's file to printer.cfg
+      const newPrimary = nodes.find(
+        (n) => n.type === 'hardware' && n.id !== mcuNamePrompt.nodeId &&
+          !!(n.data as Record<string, unknown>).isPrimary,
+      );
+      if (newPrimary) {
+        const newPData = newPrimary.data as Record<string, unknown>;
+        const newPFile = (newPData.configFile as string) || '';
+        if (newPFile && newPFile !== 'printer.cfg') {
+          renameConfigFile(newPFile, 'printer.cfg');
+          updateNodeData(newPrimary.id, { configFile: 'printer.cfg' } as Partial<AppNode['data']>);
+          for (const child of nodes) {
+            if (child.parentId === newPrimary.id) {
+              const cd = child.data as Record<string, unknown>;
+              if (cd.configFile === newPFile) {
+                updateNodeData(child.id, { configFile: 'printer.cfg' } as Partial<AppNode['data']>);
+              }
+            }
+          }
+        }
+      }
     }
 
     setMcuNamePrompt(null);
@@ -458,15 +579,65 @@ export default function SettingsPanel() {
   }, [isSuppressable, selectedNode, selectedSection]);
   const handleToggleSuppress = useCallback(() => {
     if (!selectedNodeId || !isSuppressable) return;
+    const newSuppressed = !nodeIsSuppressed;
+
     if (selectedNode?.type === 'subComponent' || selectedNode?.type === 'feature') {
-      updateNodeData(selectedNodeId, { isSuppressed: !nodeIsSuppressed } as Partial<AppNode['data']>);
+      updateNodeData(selectedNodeId, { isSuppressed: newSuppressed } as Partial<AppNode['data']>);
+
+      // Sync config store: comment/uncomment all params in the section
+      const d = selectedNode.data as Record<string, unknown>;
+      const cfName = d.configFile as string | undefined;
+      const secHeader = d.sectionHeader as string | undefined;
+      if (cfName && secHeader) {
+        const cs = useConfigStore.getState();
+        const cf = cs.configFiles[cfName];
+        if (cf) {
+          cs.setConfigFile(cfName, {
+            ...cf,
+            sections: cf.sections.map((s) => {
+              if (s.full_header !== secHeader) return s;
+              return {
+                ...s,
+                is_commented_out: newSuppressed,
+                params: s.params.map((p) =>
+                  p.key === '_comment_' ? p : { ...p, is_commented_out: newSuppressed },
+                ),
+              };
+            }),
+          });
+        }
+      }
     } else if (selectedNode?.type === 'group' && selectedSection) {
       // Update the matching child inside the group's children array
       const children = [...((selectedNode.data as Record<string, unknown>)?.children as Array<Record<string, unknown>> || [])];
       const idx = children.findIndex((c) => c.sectionHeader === selectedSection);
       if (idx !== -1) {
-        children[idx] = { ...children[idx], isSuppressed: !nodeIsSuppressed };
+        children[idx] = { ...children[idx], isSuppressed: newSuppressed };
         updateNodeData(selectedNodeId, { children } as Partial<AppNode['data']>);
+
+        // Sync config store: comment/uncomment all params in the group child's section
+        const childData = children[idx];
+        const cfName = (childData.configFile as string) || (selectedNode.data as Record<string, unknown>).configFile as string;
+        const secHeader = childData.sectionHeader as string;
+        if (cfName && secHeader) {
+          const cs = useConfigStore.getState();
+          const cf = cs.configFiles[cfName];
+          if (cf) {
+            cs.setConfigFile(cfName, {
+              ...cf,
+              sections: cf.sections.map((s) => {
+                if (s.full_header !== secHeader) return s;
+                return {
+                  ...s,
+                  is_commented_out: newSuppressed,
+                  params: s.params.map((p) =>
+                    p.key === '_comment_' ? p : { ...p, is_commented_out: newSuppressed },
+                  ),
+                };
+              }),
+            });
+          }
+        }
       }
     }
   }, [selectedNodeId, isSuppressable, selectedNode, selectedSection, nodeIsSuppressed, updateNodeData]);
@@ -734,6 +905,11 @@ export default function SettingsPanel() {
               {schema.display_name}
             </p>
           )}
+          {sourceFileNote && (
+            <p className="text-[11px] text-[var(--color-text-secondary)] mt-1">
+              {sourceFileNote}
+            </p>
+          )}
           {/* Rename for sub-component / feature nodes */}
           {isSuppressable && (
             <div className="flex items-center gap-1 mt-1.5">
@@ -974,8 +1150,16 @@ function ParamField({
 /* ── Helpers ─────────────────────────────────────────── */
 
 function sectionToText(section: { full_header: string; params: ConfigParam[] }): string {
-  let text = `[${section.full_header}]\n`;
+  // Detect suppressed sections: all non-comment params are commented out
+  const realParams = section.params.filter((p) => p.key !== '_comment_');
+  const isSuppressed = realParams.length > 0 && realParams.every((p) => p.is_commented_out);
+  let text = isSuppressed ? `#[${section.full_header}]\n` : `[${section.full_header}]\n`;
   for (const param of section.params) {
+    // _comment_ pseudo-params are standalone comment lines — emit as-is
+    if (param.key === '_comment_') {
+      text += param.value + '\n';
+      continue;
+    }
     const prefix = param.is_commented_out ? '#' : '';
     if (param.value.includes('\n')) {
       text += `${prefix}${param.key}:\n`;
@@ -993,8 +1177,12 @@ function sectionToText(section: { full_header: string; params: ConfigParam[] }):
 
 /* ── Hardware Overview Panel ─────────────────────────── */
 
-const SUB_COMPONENT_QUICK: Array<{ group: string; label: string; types: string[] }> = [
-  { group: 'stepper', label: 'Steppers', types: ['stepper_x', 'stepper_y', 'stepper_z', 'extruder'] },
+const CARTESIAN_STEPPERS_QUICK = ['stepper_x', 'stepper_y', 'stepper_z', 'extruder'];
+const DELTA_STEPPERS_QUICK = ['stepper_a', 'stepper_b', 'stepper_c', 'extruder'];
+const DELTA_KINEMATICS_QUICK = new Set(['delta', 'rotary_delta']);
+
+const BASE_SUB_COMPONENT_QUICK: Array<{ group: string; label: string; types: string[] }> = [
+  { group: 'stepper', label: 'Steppers', types: CARTESIAN_STEPPERS_QUICK },
   { group: 'stepper_driver', label: 'Stepper Drivers', types: ['tmc2209', 'tmc2208', 'tmc5160', 'tmc2240', 'tmc2130'] },
   { group: 'heater', label: 'Heaters', types: ['heater_bed', 'heater_generic'] },
   { group: 'fan', label: 'Fans', types: ['fan', 'heater_fan', 'controller_fan', 'temperature_fan', 'fan_generic'] },
@@ -1012,8 +1200,6 @@ const FEATURE_QUICK: Array<{ group: string; label: string; types: string[] }> = 
   { group: 'resonance', label: 'Resonance', types: ['input_shaper', 'resonance_tester'] },
   { group: 'gcode', label: 'G-Code', types: ['virtual_sdcard', 'pause_resume', 'firmware_retraction', 'gcode_macro', 'idle_timeout', 'exclude_object'] },
 ];
-
-import type { SectionSchema } from '../types/config';
 
 // Component group display names for the sidebar
 const SIDEBAR_GROUP_NAMES: Record<string, string> = {
@@ -1228,6 +1414,27 @@ function HardwareOverviewPanel({
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(hwData.label);
 
+  const { configFiles: allConfigFiles } = useConfigStore();
+
+  // Derive kinematics from this node's config file
+  const kinematics = (() => {
+    const cf = allConfigFiles[hwData.configFile];
+    if (cf) {
+      const printerSection = cf.sections.find((s) => s.section_type === 'printer');
+      if (printerSection) {
+        const kinParam = printerSection.params.find((p) => p.key === 'kinematics' && !p.is_commented_out);
+        if (kinParam) return kinParam.value.trim().toLowerCase();
+      }
+    }
+    return 'cartesian';
+  })();
+
+  const subComponentQuick = BASE_SUB_COMPONENT_QUICK.map((g) =>
+    g.group === 'stepper'
+      ? { ...g, types: DELTA_KINEMATICS_QUICK.has(kinematics) ? DELTA_STEPPERS_QUICK : CARTESIAN_STEPPERS_QUICK }
+      : g,
+  );
+
   const isSbc = hwData.hardwareType === 'sbc';
   const isMcu = !!(hwData as Record<string, unknown>).isMcu;
   // SBC without MCU mode can only receive comm lines — no sub-components
@@ -1420,7 +1627,7 @@ function HardwareOverviewPanel({
           {/* Sub-Component picker */}
           {addingType === 'sub' && (
             <div className="border border-[var(--color-bg-tertiary)] rounded-lg p-3 space-y-3">
-              {SUB_COMPONENT_QUICK.map((group) => (
+              {subComponentQuick.map((group) => (
                 <div key={group.group}>
                   <h4 className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-1">
                     {group.label}

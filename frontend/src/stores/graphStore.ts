@@ -218,6 +218,9 @@ interface GraphState {
   setEdges: (edges: AppEdge[]) => void;
   clearGraph: () => void;
 
+  /* Sync graph with config store after text edits */
+  syncGraphWithConfig: (filename: string) => void;
+
   /* Auto-arrange */
   autoArrange: () => void;
   fitViewTrigger: number;
@@ -417,10 +420,49 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   addNode: (node) => { get().pushHistory(); set((s) => ({ nodes: sortNodesParentsFirst([...s.nodes, node]) })); },
   removeNode: (id) => {
     get().pushHistory();
+    const state = get();
+    const node = state.nodes.find((n) => n.id === id);
+
+    // Collect all nodes being removed (the target + its children)
+    const childNodes = state.nodes.filter((n) => n.parentId === id);
+    const removedNodes = node ? [node, ...childNodes] : childNodes;
+
+    // Remove corresponding config sections for each removed node
+    const configStore = useConfigStore.getState();
+    for (const rn of removedNodes) {
+      const d = rn.data as Record<string, unknown>;
+      const configFile = d.configFile as string | undefined;
+      if (!configFile) continue;
+
+      if (rn.type === 'subComponent' || rn.type === 'feature') {
+        const sectionHeader = d.sectionHeader as string | undefined;
+        if (sectionHeader) {
+          configStore.removeSection(configFile, sectionHeader);
+        }
+      } else if (rn.type === 'group') {
+        const children = d.children as Array<{ sectionHeader: string; configFile?: string }> | undefined;
+        if (children) {
+          for (const child of children) {
+            const childFile = child.configFile || configFile;
+            if (child.sectionHeader) {
+              configStore.removeSection(childFile, child.sectionHeader);
+            }
+          }
+        }
+      }
+    }
+
+    // If removing a hardware node, delete its entire config file
+    if (node?.type === 'hardware') {
+      const d = node.data as Record<string, unknown>;
+      const configFile = d.configFile as string | undefined;
+      if (configFile) {
+        configStore.removeConfigFile(configFile);
+      }
+    }
+
     set((s) => {
-      // Collect the node and all its children (parentId-based)
-      const childIds = new Set(s.nodes.filter((n) => n.parentId === id).map((n) => n.id));
-      const removedIds = new Set([id, ...childIds]);
+      const removedIds = new Set(removedNodes.map((n) => n.id));
       return {
         nodes: s.nodes.filter((n) => !removedIds.has(n.id)),
         edges: s.edges.filter((e) => !removedIds.has(e.source) && !removedIds.has(e.target)),
@@ -434,11 +476,84 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     const node = state.nodes.find((n) => n.id === id);
     if (!node) return;
     const newId = nextNodeId();
+
+    // For sub-components, features, and groups: duplicate config sections too
+    const configStore = useConfigStore.getState();
+    const d = node.data as Record<string, unknown>;
+    let cloneData = { ...node.data };
+
+    if (node.type === 'subComponent' || node.type === 'feature') {
+      const configFile = d.configFile as string | undefined;
+      const sectionHeader = d.sectionHeader as string | undefined;
+      if (configFile && sectionHeader) {
+        const cf = configStore.configFiles[configFile];
+        const originalSection = cf?.sections.find((s) => s.full_header === sectionHeader);
+        if (originalSection) {
+          // Create a unique section header for the duplicate
+          const baseName = originalSection.section_name || originalSection.section_type;
+          let counter = 2;
+          let newName = `${baseName}_${counter}`;
+          let newHeader = `${originalSection.section_type} ${newName}`;
+          const allHeaders = new Set<string>();
+          for (const cfx of Object.values(configStore.configFiles)) {
+            for (const s of cfx.sections) allHeaders.add(s.full_header);
+          }
+          while (allHeaders.has(newHeader)) {
+            counter++;
+            newName = `${baseName}_${counter}`;
+            newHeader = `${originalSection.section_type} ${newName}`;
+          }
+          // Add the duplicated section to the config store
+          configStore.addSection(configFile, {
+            ...originalSection,
+            section_name: newName,
+            full_header: newHeader,
+            params: originalSection.params.map((p) => ({ ...p })),
+          });
+          (cloneData as Record<string, unknown>).sectionHeader = newHeader;
+          (cloneData as Record<string, unknown>).label = `${d.label || originalSection.section_type}: ${newName}`;
+        }
+      }
+    } else if (node.type === 'group') {
+      const children = d.children as Array<{ sectionType: string; label: string; sectionHeader: string; configFile?: string }> | undefined;
+      if (children) {
+        const newChildren = children.map((child) => {
+          const childFile = child.configFile || (d.configFile as string);
+          const cf = configStore.configFiles[childFile];
+          const originalSection = cf?.sections.find((s) => s.full_header === child.sectionHeader);
+          if (originalSection) {
+            const baseName = originalSection.section_name || originalSection.section_type;
+            let counter = 2;
+            let newName = `${baseName}_${counter}`;
+            let newHeader = `${originalSection.section_type} ${newName}`;
+            const allHeaders = new Set<string>();
+            for (const cfx of Object.values(configStore.configFiles)) {
+              for (const s of cfx.sections) allHeaders.add(s.full_header);
+            }
+            while (allHeaders.has(newHeader)) {
+              counter++;
+              newName = `${baseName}_${counter}`;
+              newHeader = `${originalSection.section_type} ${newName}`;
+            }
+            configStore.addSection(childFile, {
+              ...originalSection,
+              section_name: newName,
+              full_header: newHeader,
+              params: originalSection.params.map((p) => ({ ...p })),
+            });
+            return { ...child, sectionHeader: newHeader, label: `${child.sectionType}: ${newName}` };
+          }
+          return child;
+        });
+        (cloneData as Record<string, unknown>).children = newChildren;
+      }
+    }
+
     const clone: AppNode = {
       ...node,
       id: newId,
       position: { x: node.position.x + 40, y: node.position.y + 40 },
-      data: { ...node.data },
+      data: cloneData,
       selected: false,
     } as AppNode;
     set((s) => ({ nodes: sortNodesParentsFirst([...s.nodes, clone]) }));
@@ -522,9 +637,34 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 
     // Resolve config file from parent hardware node if not provided
     const resolvedFile = configFile || (() => {
+      if (!parentId) return '';
       const parent = get().nodes.find((n) => n.id === parentId);
       return (parent?.data as Record<string, unknown>)?.configFile as string || '';
     })();
+
+    // Determine component group from section type
+    const componentGroup = COMPONENT_GROUP_MAP[sectionType] || 'other';
+
+    // If no parent, place as standalone top-level node
+    if (!parentId) {
+      const node: Node = {
+        id,
+        type: 'subComponent',
+        position: { x: 100 + Math.random() * 400, y: 100 + Math.random() * 300 },
+        data: {
+          label,
+          sectionType,
+          sectionHeader,
+          componentGroup,
+          section: { section_type: sectionType, section_name: '', full_header: sectionHeader, line_number: 0, params: [], header_comments: [] },
+          parentHardwareId: null,
+          configFile: resolvedFile,
+          hasErrors: false,
+        },
+      };
+      set((s) => ({ nodes: [...s.nodes, node as AppNode] }));
+      return id;
+    }
 
     // Count current right-side children (sub-components + non-feature groups)
     const rightChildren = get().nodes.filter((n) => {
@@ -536,9 +676,6 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 
     // Position is relative to the parent hardware node
     const pos = { x: CHILD_RIGHT_X, y: CONTAINER_HEADER_HEIGHT + rightIdx * CHILD_SLOT_HEIGHT };
-
-    // Determine component group from section type
-    const componentGroup = COMPONENT_GROUP_MAP[sectionType] || 'other';
 
     const node: Node = {
       id,
@@ -585,9 +722,30 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 
     // Resolve config file from parent hardware node if not provided
     const resolvedFile = configFile || (() => {
+      if (!parentId) return '';
       const parent = get().nodes.find((n) => n.id === parentId);
       return (parent?.data as Record<string, unknown>)?.configFile as string || '';
     })();
+
+    // If no parent, place as standalone top-level node
+    if (!parentId) {
+      const node: Node = {
+        id,
+        type: 'feature',
+        position: { x: 100 + Math.random() * 400, y: 100 + Math.random() * 300 },
+        data: {
+          label,
+          sectionType,
+          sectionHeader,
+          section: { section_type: sectionType, section_name: '', full_header: sectionHeader, line_number: 0, params: [], header_comments: [] },
+          parentId: null,
+          configFile: resolvedFile,
+          hasErrors: false,
+        },
+      };
+      set((s) => ({ nodes: [...s.nodes, node as AppNode] }));
+      return id;
+    }
 
     // Count current left-side children (features + feature groups)
     const leftChildren = get().nodes.filter((n) => {
@@ -1226,6 +1384,338 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   setNodes: (nodes) => set({ nodes: sortNodesParentsFirst(nodes) }),
   setEdges: (edges) => set({ edges }),
   clearGraph: () => set({ nodes: [], edges: [], selectedNodeId: null }),
+
+  syncGraphWithConfig: (filename) => {
+    const configStore = useConfigStore.getState();
+    const cf = configStore.configFiles[filename];
+    if (!cf) return;
+
+    const state = get();
+    let updatedNodes = [...state.nodes] as AppNode[];
+    let changed = false;
+
+    // Build a set of all section headers in this config file
+    const configSectionHeaders = new Set(cf.sections.map((s) => s.full_header));
+
+    // Find all nodes that belong to this config file
+    const fileNodes = updatedNodes.filter((n) => {
+      const d = n.data as Record<string, unknown>;
+      return d.configFile === filename && (n.type === 'subComponent' || n.type === 'feature');
+    });
+    const fileGroups = updatedNodes.filter((n) => {
+      const d = n.data as Record<string, unknown>;
+      return d.configFile === filename && n.type === 'group';
+    });
+
+    // Track which section headers have graph nodes
+    const graphSectionHeaders = new Set<string>();
+    for (const n of fileNodes) {
+      const d = n.data as Record<string, unknown>;
+      graphSectionHeaders.add(d.sectionHeader as string);
+    }
+    for (const n of fileGroups) {
+      const d = n.data as Record<string, unknown>;
+      const children = d.children as Array<{ sectionHeader: string }> | undefined;
+      if (children) {
+        for (const c of children) {
+          graphSectionHeaders.add(c.sectionHeader);
+        }
+      }
+    }
+
+    // 1. Remove nodes for sections that no longer exist in config
+    const removedIds = new Set<string>();
+    for (const n of fileNodes) {
+      const d = n.data as Record<string, unknown>;
+      const sectionHeader = d.sectionHeader as string;
+      if (!configSectionHeaders.has(sectionHeader)) {
+        removedIds.add(n.id);
+        changed = true;
+      }
+    }
+    // Update groups: remove children whose sections no longer exist
+    for (const n of fileGroups) {
+      const d = n.data as Record<string, unknown>;
+      const children = d.children as Array<{ sectionHeader: string; configFile?: string }> | undefined;
+      if (children) {
+        const filtered = children.filter((c) => {
+          const childFile = c.configFile || filename;
+          if (childFile !== filename) return true;
+          return configSectionHeaders.has(c.sectionHeader);
+        });
+        if (filtered.length !== children.length) {
+          changed = true;
+          if (filtered.length === 0) {
+            removedIds.add(n.id);
+          } else {
+            updatedNodes = updatedNodes.map((un) =>
+              un.id === n.id ? { ...un, data: { ...un.data, children: filtered } } as AppNode : un,
+            );
+          }
+        }
+      }
+    }
+
+    if (removedIds.size > 0) {
+      updatedNodes = updatedNodes.filter((n) => !removedIds.has(n.id));
+    }
+
+    // 2. Update suppressed state: check if all non-comment params are commented out
+    for (let i = 0; i < updatedNodes.length; i++) {
+      const n = updatedNodes[i];
+      const d = n.data as Record<string, unknown>;
+      if (d.configFile !== filename) continue;
+
+      if (n.type === 'subComponent' || n.type === 'feature') {
+        const sectionHeader = d.sectionHeader as string;
+        const section = cf.sections.find((s) => s.full_header === sectionHeader);
+        if (section) {
+          const realParams = section.params.filter((p) => p.key !== '_comment_');
+          const allCommented = realParams.length > 0 && realParams.every((p) => p.is_commented_out);
+          const wasSuppressed = !!d.isSuppressed;
+          if (allCommented !== wasSuppressed) {
+            updatedNodes[i] = { ...n, data: { ...n.data, isSuppressed: allCommented } } as AppNode;
+            changed = true;
+          }
+        }
+      } else if (n.type === 'group') {
+        const children = d.children as Array<{ sectionHeader: string; configFile?: string; isSuppressed?: boolean }> | undefined;
+        if (children) {
+          const updatedChildren = children.map((c) => {
+            const childFile = c.configFile || filename;
+            if (childFile !== filename) return c;
+            const section = cf.sections.find((s) => s.full_header === c.sectionHeader);
+            if (section) {
+              const realParams = section.params.filter((p) => p.key !== '_comment_');
+              const allCommented = realParams.length > 0 && realParams.every((p) => p.is_commented_out);
+              if (allCommented !== !!c.isSuppressed) {
+                changed = true;
+                return { ...c, isSuppressed: allCommented };
+              }
+            }
+            return c;
+          });
+          if (changed) {
+            updatedNodes[i] = { ...n, data: { ...n.data, children: updatedChildren } } as AppNode;
+          }
+        }
+      }
+    }
+
+    // 3. Add nodes for new sections that don't have graph nodes
+    // Find the parent hardware node for this file
+    let parentNode = updatedNodes.find(
+      (n) => n.type === 'hardware' && (n.data as Record<string, unknown>).configFile === filename,
+    );
+    // Fallback: match by basename in case the path format differs
+    if (!parentNode) {
+      const bn = filename.replace(/^.*[\\/]/, '');
+      parentNode = updatedNodes.find(
+        (n) => n.type === 'hardware' && ((n.data as Record<string, unknown>).configFile as string || '').replace(/^.*[\\/]/, '') === bn,
+      );
+    }
+    const parentId = parentNode?.id;
+
+    if (parentId) {
+      // Rebuild set of current graph headers after removals
+      const currentGraphHeaders = new Set<string>();
+      for (const n of updatedNodes) {
+        const nd = n.data as Record<string, unknown>;
+        if (n.type === 'subComponent' || n.type === 'feature') {
+          currentGraphHeaders.add(nd.sectionHeader as string);
+        } else if (n.type === 'group') {
+          const ch = nd.children as Array<{ sectionHeader: string }> | undefined;
+          if (ch) for (const c of ch) currentGraphHeaders.add(c.sectionHeader);
+        }
+      }
+
+      const SUB_TYPES = new Set([
+        'stepper_x', 'stepper_y', 'stepper_z', 'stepper_z1', 'stepper_z2', 'stepper_z3',
+        'stepper_a', 'stepper_b', 'stepper_c', 'manual_stepper', 'extruder_stepper',
+        'dual_carriage', 'extruder', 'extruder1', 'extruder2',
+        'tmc2209', 'tmc2208', 'tmc2130', 'tmc2240', 'tmc5160', 'tmc2660',
+        'heater_bed', 'heater_generic',
+        'fan', 'heater_fan', 'controller_fan', 'temperature_fan', 'fan_generic',
+        'temperature_sensor',
+        'probe', 'bltouch', 'smart_effector', 'probe_eddy_current',
+        'neopixel', 'dotstar', 'led', 'pca9533', 'pca9632',
+        'display', 'servo', 'output_pin', 'gcode_button', 'pwm_tool',
+        'filament_switch_sensor', 'filament_motion_sensor',
+        'adxl345', 'lis2dw', 'lis3dh', 'bmi160', 'mpu9250', 'icm20948',
+        'printer', 'mcu',
+      ]);
+      const FEAT_TYPES = new Set([
+        'bed_mesh', 'z_tilt', 'quad_gantry_level', 'screws_tilt_adjust',
+        'bed_screws', 'bed_tilt', 'skew_correction', 'axis_twist_compensation',
+        'safe_z_home', 'homing_override', 'endstop_phase',
+        'input_shaper', 'resonance_tester',
+        'virtual_sdcard', 'pause_resume', 'firmware_retraction', 'force_move',
+        'idle_timeout', 'gcode_macro', 'delayed_gcode', 'gcode_arcs',
+        'respond', 'exclude_object', 'save_variables', 'display_status',
+      ]);
+
+      for (const sec of cf.sections) {
+        if (sec.section_type === 'include') continue;
+        if (currentGraphHeaders.has(sec.full_header)) continue;
+
+        const isFeature = FEAT_TYPES.has(sec.section_type);
+        const isSub = SUB_TYPES.has(sec.section_type);
+        if (!isFeature && !isSub) continue;
+
+        const label = sec.section_name
+          ? `${sec.section_type}: ${sec.section_name}`
+          : sec.section_type;
+
+        const componentGroup = COMPONENT_GROUP_MAP[sec.section_type] || (isFeature ? sec.section_type : 'other');
+
+        const suppressed = sec.params.filter((p) => p.key !== '_comment_').every((p) => p.is_commented_out) &&
+          sec.params.filter((p) => p.key !== '_comment_').length > 0;
+
+        const newNode: AppNode = {
+          id: nextNodeId(),
+          type: isFeature ? 'feature' : 'subComponent',
+          position: { x: isFeature ? 12 : 208, y: 0 },
+          parentId,
+          data: {
+            sectionType: sec.section_type,
+            sectionHeader: sec.full_header,
+            label,
+            componentGroup,
+            section: sec,
+            configFile: filename,
+            hasErrors: false,
+            isSuppressed: suppressed,
+            ...(isFeature
+              ? { parentId }
+              : { parentHardwareId: parentId }),
+          },
+        } as unknown as AppNode;
+
+        updatedNodes.push(newNode);
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      set({ nodes: sortNodesParentsFirst(updatedNodes) });
+      // Reflow parent's children to fix positions
+      if (parentId) {
+        // Expand the parent hardware node if it's collapsed so new children are visible
+        const parentNow = get().nodes.find((n) => n.id === parentId);
+        if (parentNow && (parentNow.data as Record<string, unknown>).collapsed) {
+          get().toggleHardwareCollapse(parentId);
+        }
+        get().reflowParentChildren(parentId);
+      }
+    }
+
+    // 4. Sync include directives → configuration edges
+    // Find the hardware node for this config file
+    const thisHwNode = get().nodes.find((n) => {
+      if (n.type !== 'hardware') return false;
+      const nodeFile = (n.data as Record<string, unknown>).configFile as string || '';
+      const nodeBasename = nodeFile.replace(/^.*[\\/]/, '');
+      const filenameBasename = filename.replace(/^.*[\\/]/, '');
+      return nodeFile === filename || nodeBasename === filenameBasename;
+    });
+
+    if (thisHwNode) {
+      const includes = cf.includes || [];
+
+      // Remove configuration edges no longer backed by an include directive
+      const existingIncomingEdges = get().edges.filter(
+        (e) =>
+          (e.data as Record<string, unknown>)?.edgeType === 'configuration' &&
+          e.target === thisHwNode.id,
+      );
+      for (const edge of existingIncomingEdges) {
+        const srcNode = get().nodes.find((n) => n.id === edge.source);
+        if (!srcNode) continue;
+        const srcFile = (srcNode.data as Record<string, unknown>).configFile as string || '';
+        const srcBasename = srcFile.replace(/^.*[\\/]/, '');
+        const stillIncluded = includes.some((inc) => {
+          const incBasename = inc.replace(/^.*[\\/]/, '');
+          return incBasename === srcBasename || inc === srcFile;
+        });
+        if (!stillIncluded) {
+          set((s) => ({ edges: s.edges.filter((e2) => e2.id !== edge.id) }));
+        }
+      }
+
+      // Add configuration edges for newly-added include directives
+      for (const inc of includes) {
+        const incBasename = inc.replace(/^.*[\\/]/, '');
+        const includedHwNode = get().nodes.find((n) => {
+          if (n.type !== 'hardware') return false;
+          const nodeFile = (n.data as Record<string, unknown>).configFile as string || '';
+          const nodeBasename = nodeFile.replace(/^.*[\\/]/, '');
+          return nodeBasename === incBasename || nodeFile === inc;
+        });
+        if (!includedHwNode || includedHwNode.id === thisHwNode.id) continue;
+        const edgeExists = get().edges.some(
+          (e) =>
+            (e.data as Record<string, unknown>)?.edgeType === 'configuration' &&
+            e.source === includedHwNode.id &&
+            e.target === thisHwNode.id,
+        );
+        if (!edgeExists) {
+          const hwType = (includedHwNode.data as Record<string, unknown>).hardwareType as HardwareType;
+          get().addConfigurationEdge(includedHwNode.id, thisHwNode.id, hwType);
+        }
+      }
+
+      // 5. Update isNotIncluded on all communication edges based on current graph state
+      const sbcNode = get().nodes.find(
+        (n) => n.type === 'hardware' && (n.data as Record<string, unknown>).hardwareType === 'sbc',
+      );
+      const printerHwNode = get().nodes.find(
+        (n) => n.type === 'hardware' && (n.data as Record<string, unknown>).configFile === 'printer.cfg',
+      );
+      if (sbcNode) {
+        const allCommEdges = get().edges.filter(
+          (e) => (e.data as Record<string, unknown>)?.edgeType === 'communication',
+        );
+        for (const commEdge of allCommEdges) {
+          const nonSbcId = commEdge.source === sbcNode.id ? commEdge.target : commEdge.source;
+          const hwNode = get().nodes.find((n) => n.id === nonSbcId);
+          if (!hwNode) continue;
+          const hwConfigFile = (hwNode.data as Record<string, unknown>).configFile as string || '';
+          let isNotIncluded = true;
+          if (hwConfigFile === 'printer.cfg' || hwNode.id === sbcNode.id) {
+            isNotIncluded = false;
+          } else if (printerHwNode) {
+            isNotIncluded = !get().edges.some(
+              (e) =>
+                (e.data as Record<string, unknown>)?.edgeType === 'configuration' &&
+                e.source === hwNode.id &&
+                e.target === printerHwNode.id,
+            );
+          }
+          const prevData = commEdge.data as Record<string, unknown>;
+          if (!!prevData.isNotIncluded !== isNotIncluded) {
+            get().updateEdgeData(commEdge.id, { isNotIncluded });
+          }
+        }
+
+        // Update commType for this file's communication edge if MCU params changed
+        if ((thisHwNode.data as Record<string, unknown>).hardwareType !== 'sbc') {
+          const commEdge = get().edges.find(
+            (e) =>
+              (e.data as Record<string, unknown>)?.edgeType === 'communication' &&
+              ((e.source === sbcNode.id && e.target === thisHwNode.id) ||
+                (e.source === thisHwNode.id && e.target === sbcNode.id)),
+          );
+          if (commEdge) {
+            const newCommType = detectNodeCommType(thisHwNode.data as Record<string, unknown>);
+            const prevCommType = (commEdge.data as Record<string, unknown>).commType as string;
+            if (prevCommType !== newCommType) {
+              get().updateEdgeData(commEdge.id, { commType: newCommType });
+            }
+          }
+        }
+      }
+    }
+  },
 
   autoArrange: () => {
     get().pushHistory();

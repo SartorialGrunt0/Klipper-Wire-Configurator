@@ -34,6 +34,7 @@ class ConfigSection:
     line_number: int = 0
     trailing_comments: list[str] = field(default_factory=list)  # comments after last param
     trailing_blank_lines: int = 0  # number of blank lines after section
+    is_commented_out: bool = False  # True when header was #[header] (suppressed)
 
     @property
     def display_name(self) -> str:
@@ -70,6 +71,7 @@ class ConfigSection:
             ],
             "header_comments": self.header_comments,
             "trailing_comments": self.trailing_comments,
+            "is_commented_out": self.is_commented_out,
         }
 
 
@@ -102,6 +104,7 @@ class ConfigFile:
 
 # Regex patterns
 SECTION_RE = re.compile(r"^\[([^\]]+)\]\s*(?:#.*)?$")
+COMMENTED_SECTION_RE = re.compile(r"^#\[([^\]]+)\]\s*(?:#.*)?$")
 INCLUDE_RE = re.compile(r"^\[include\s+([^\]]+)\]\s*(?:#.*)?$")
 PARAM_RE = re.compile(r"^(\w[\w]*)\s*([:=])\s*(.*?)(?:\s*#(.*))?$")
 COMMENTED_PARAM_RE = re.compile(r"^#\s*(\w[\w]*)\s*([:=])\s*(.*?)(?:\s*#(.*))?$")
@@ -165,6 +168,9 @@ def parse_config(text: str, filename: str = "printer.cfg") -> ConfigFile:
       - A commented-out parameter ``#key: value`` at column 0
       - End of file
     """
+    # Normalize line endings to \n so that round-trip export is consistent
+    # regardless of the platform the file was created on.
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
     config = ConfigFile(filename=filename, raw_text=text)
     lines = text.splitlines()
 
@@ -190,6 +196,9 @@ def parse_config(text: str, filename: str = "printer.cfg") -> ConfigFile:
                 j += 1
                 continue
             if ls.startswith("#"):
+                # commented-out section header is a boundary
+                if COMMENTED_SECTION_RE.match(ls):
+                    return False
                 # comment line — could be inside gcode; keep looking
                 j += 1
                 continue
@@ -322,6 +331,25 @@ def parse_config(text: str, filename: str = "printer.cfg") -> ConfigFile:
             )
             current_section.params.append(p)
             last_param = p
+            i += 1
+            continue
+
+        # ── Commented-out section header (#[header]) ────────────
+        commented_sec_match = COMMENTED_SECTION_RE.match(stripped)
+        if commented_sec_match:
+            last_param = None
+            header = commented_sec_match.group(1).strip()
+            sec_type, sec_name = parse_section_header(header)
+            current_section = ConfigSection(
+                section_type=sec_type,
+                section_name=sec_name,
+                full_header=header,
+                line_number=i + 1,
+                header_comments=pending_comments[:],
+                is_commented_out=True,
+            )
+            config.sections.append(current_section)
+            pending_comments = []
             i += 1
             continue
 

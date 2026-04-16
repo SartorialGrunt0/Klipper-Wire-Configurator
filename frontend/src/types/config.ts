@@ -16,6 +16,7 @@ export interface ConfigSection {
   params: ConfigParam[];
   header_comments: string[];
   trailing_comments?: string[];
+  is_commented_out?: boolean;
 }
 
 export interface ConfigFile {

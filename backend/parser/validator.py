@@ -77,18 +77,30 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
     used_pins: dict[str, list[str]] = {}  # pin -> list of sections using it
     defined_sections: set[str] = set()
 
+    def _is_suppressed_for_validation(section: ConfigSection, category: str | None) -> bool:
+        # Suppressed sub-components/features should not participate in validation.
+        if category not in ("sub_component", "feature"):
+            return False
+        if section.is_commented_out:
+            return True
+        real_params = [p for p in section.params if p.key != "_comment_"]
+        return bool(real_params) and all(p.is_commented_out for p in real_params)
+
     for section in config.sections:
         if section.section_type == "include":
             continue
-
-        defined_sections.add(section.full_header)
         sec_type = section.section_type
-
-        # Track section counts
-        section_counts[sec_type] = section_counts.get(sec_type, 0) + 1
 
         # Get schema definition
         sec_def = get_section_def(sec_type)
+
+        if _is_suppressed_for_validation(section, sec_def.category if sec_def else None):
+            continue
+
+        defined_sections.add(section.full_header)
+
+        # Track section counts
+        section_counts[sec_type] = section_counts.get(sec_type, 0) + 1
 
         if sec_def is None:
             # Unknown section - just a warning
@@ -252,9 +264,23 @@ def _validate_param_value(param, param_def, section, result):
 
 def _check_dependencies(config: ConfigFile, defined_sections: set[str], result: ValidationResult):
     """Check that required dependencies are present."""
-    section_types = {s.section_type for s in config.sections}
+    active_sections: list[ConfigSection] = []
+    for s in config.sections:
+        sec_def = get_section_def(s.section_type)
+        if sec_def is None:
+            active_sections.append(s)
+            continue
+        if sec_def.category in ("sub_component", "feature"):
+            if s.is_commented_out:
+                continue
+            real_params = [p for p in s.params if p.key != "_comment_"]
+            if real_params and all(p.is_commented_out for p in real_params):
+                continue
+        active_sections.append(s)
 
-    for section in config.sections:
+    section_types = {s.section_type for s in active_sections}
+
+    for section in active_sections:
         sec_def = get_section_def(section.section_type)
         if sec_def and sec_def.requires:
             for req in sec_def.requires:

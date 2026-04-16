@@ -70,6 +70,10 @@ interface ConfigState {
   /* Original text tracking */
   setOriginalText: (filename: string, text: string) => void;
 
+  /* File operations */
+  renameConfigFile: (oldName: string, newName: string) => void;
+  copyConfigFile: (sourceName: string, newName: string) => void;
+
   /* Include directives */
   addInclude: (filename: string, includePath: string) => void;
   removeInclude: (filename: string, includePath: string) => void;
@@ -254,6 +258,55 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     set((s) => ({
       originalTexts: { ...s.originalTexts, [filename]: text },
     })),
+
+  renameConfigFile: (oldName, newName) =>
+    set((s) => {
+      if (!s.configFiles[oldName] || oldName === newName) return s;
+      if (s.configFiles[newName]) return s; // target already exists
+      const next = { ...s.configFiles };
+      next[newName] = { ...next[oldName], filename: newName };
+      delete next[oldName];
+      const nextValidation = { ...s.validation };
+      if (nextValidation[oldName]) {
+        nextValidation[newName] = nextValidation[oldName];
+        delete nextValidation[oldName];
+      }
+      const nextOriginals = { ...s.originalTexts };
+      if (nextOriginals[oldName]) {
+        nextOriginals[newName] = nextOriginals[oldName];
+        delete nextOriginals[oldName];
+      }
+      // Update include directives in other files that reference the old name
+      for (const [fn, cf] of Object.entries(next)) {
+        if (cf.includes.includes(oldName)) {
+          next[fn] = { ...cf, includes: cf.includes.map((i) => i === oldName ? newName : i) };
+        }
+      }
+      return {
+        configFiles: next,
+        activeFile: s.activeFile === oldName ? newName : s.activeFile,
+        validation: nextValidation,
+        originalTexts: nextOriginals,
+      };
+    }),
+
+  copyConfigFile: (sourceName, newName) =>
+    set((s) => {
+      const source = s.configFiles[sourceName];
+      if (!source || s.configFiles[newName]) return s;
+      return {
+        configFiles: {
+          ...s.configFiles,
+          [newName]: {
+            ...source,
+            filename: newName,
+            sections: source.sections.map((sec) => ({ ...sec })),
+            includes: [...source.includes],
+            header_comments: [...source.header_comments],
+          },
+        },
+      };
+    }),
 
   addInclude: (filename, includePath) =>
     set((s) => {

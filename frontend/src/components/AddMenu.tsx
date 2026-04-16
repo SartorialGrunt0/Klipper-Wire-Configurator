@@ -28,8 +28,13 @@ const COMM_OPTIONS: Array<{ type: CommunicationType; label: string; color: strin
   { type: 'uart', label: 'UART', color: 'var(--color-uart)' },
 ];
 
-const SUB_COMPONENT_GROUPS = [
-  { group: 'stepper', label: 'Steppers', types: ['stepper_x', 'stepper_y', 'stepper_z', 'stepper_z1', 'stepper_z2', 'stepper_z3', 'stepper_a', 'stepper_b', 'stepper_c', 'manual_stepper', 'extruder_stepper', 'dual_carriage'] },
+const CARTESIAN_STEPPERS = ['stepper_x', 'stepper_y', 'stepper_z', 'stepper_z1', 'stepper_z2', 'stepper_z3', 'manual_stepper', 'extruder_stepper', 'dual_carriage'];
+const DELTA_STEPPERS = ['stepper_a', 'stepper_b', 'stepper_c', 'manual_stepper', 'extruder_stepper'];
+
+const DELTA_KINEMATICS = new Set(['delta', 'rotary_delta']);
+
+const BASE_SUB_COMPONENT_GROUPS: Array<{ group: string; label: string; types: string[] }> = [
+  { group: 'stepper', label: 'Steppers', types: CARTESIAN_STEPPERS },
   { group: 'stepper_driver', label: 'Stepper Drivers', types: ['tmc2209', 'tmc2208', 'tmc2130', 'tmc2240', 'tmc5160', 'tmc2660'] },
   { group: 'extruder', label: 'Extruders', types: ['extruder', 'extruder1', 'extruder2'] },
   { group: 'heater', label: 'Heaters', types: ['heater_bed', 'heater_generic'] },
@@ -77,6 +82,33 @@ export default function AddMenu({ onClose }: AddMenuProps) {
   const { configFiles, activeFile, addSection } = useConfigStore();
 
   const hardwareNodes = nodes.filter((n) => n.type === 'hardware');
+
+  // Derive kinematics from the selected parent's config file (fall back to all files)
+  const kinematics = (() => {
+    const parentNode = selectedParent ? nodes.find((n) => n.id === selectedParent) : null;
+    const parentConfigFile = parentNode
+      ? (parentNode.data as Record<string, unknown>).configFile as string
+      : null;
+
+    const filesToSearch = parentConfigFile
+      ? [configFiles[parentConfigFile]].filter(Boolean)
+      : Object.values(configFiles);
+
+    for (const cf of filesToSearch) {
+      const printerSection = cf.sections.find((s) => s.section_type === 'printer');
+      if (printerSection) {
+        const kinParam = printerSection.params.find((p) => p.key === 'kinematics' && !p.is_commented_out);
+        if (kinParam) return kinParam.value.trim().toLowerCase();
+      }
+    }
+    return 'cartesian';
+  })();
+
+  const subComponentGroups = BASE_SUB_COMPONENT_GROUPS.map((g) =>
+    g.group === 'stepper'
+      ? { ...g, types: DELTA_KINEMATICS.has(kinematics) ? DELTA_STEPPERS : CARTESIAN_STEPPERS }
+      : g,
+  );
 
   // Board types that support template selection
   const TEMPLATE_TYPES = new Set<HardwareType>(['mainboard', 'toolhead', 'expander']);
@@ -214,7 +246,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
         const schemas = useConfigStore.getState().schemas;
         const graphStore = useGraphStore.getState();
         for (const sec of config.sections) {
-          if (sec.section_type === 'mcu' || sec.section_type === 'include') continue;
+          if (sec.section_type === 'include') continue;
           const displayName = schemas[sec.section_type]?.display_name || sec.section_type;
           const sLabel = sec.section_name ? `${displayName}: ${sec.section_name}` : displayName;
           const isFeature = FEATURE_TYPES.some((g) => g.types.includes(sec.section_type));
@@ -222,6 +254,28 @@ export default function AddMenu({ onClose }: AddMenuProps) {
             graphStore.addFeatureNode(nodeId, sec.section_type, sLabel, sec.full_header);
           } else {
             graphStore.addSubComponentNode(nodeId, sec.section_type, sLabel, sec.full_header);
+          }
+        }
+        // Add communication edge from SBC to this hardware node
+        if (hwType !== 'sbc') {
+          const gStore = useGraphStore.getState();
+          const sbcNode = gStore.nodes.find(
+            (n) => n.type === 'hardware' && (n.data as Record<string, unknown>).hardwareType === 'sbc',
+          );
+          if (sbcNode) {
+            let commType: CommunicationType = 'usb';
+            if (mcuSection) {
+              for (const param of (mcuSection.params || [])) {
+                if (param.is_commented_out) continue;
+                if (param.key === 'canbus_uuid' || param.key === 'canbus_interface') { commType = 'canbus'; break; }
+                if (param.key === 'serial') {
+                  const val = param.value || '';
+                  if (val.includes('/dev/serial/by-id/usb-')) { commType = 'usb'; break; }
+                  if (/\/dev\/tty(S|AMA|ACM|USB)/.test(val)) { commType = 'uart'; break; }
+                }
+              }
+            }
+            gStore.addCommunicationEdge(sbcNode.id, nodeId, commType);
           }
         }
         setTemplateLoading(false);
@@ -232,6 +286,16 @@ export default function AddMenu({ onClose }: AddMenuProps) {
         onClose();
       });
     } else {
+      // Add communication edge from SBC to this hardware node (blank config)
+      if (hwType !== 'sbc') {
+        const gStore = useGraphStore.getState();
+        const sbcNode = gStore.nodes.find(
+          (n) => n.type === 'hardware' && (n.data as Record<string, unknown>).hardwareType === 'sbc',
+        );
+        if (sbcNode) {
+          gStore.addCommunicationEdge(sbcNode.id, nodeId, 'usb');
+        }
+      }
       onClose();
     }
   };
@@ -246,6 +310,10 @@ export default function AddMenu({ onClose }: AddMenuProps) {
 
     if (selectedParent) {
       addSubComponentNode(selectedParent, sectionType, label, header);
+    } else {
+      // No parent selected — add as standalone node in empty space
+      const { addSubComponentNode: addSub } = useGraphStore.getState();
+      addSub(null as unknown as string, sectionType, label, header);
     }
 
     // Add to the parent's config file (not just activeFile)
@@ -281,10 +349,14 @@ export default function AddMenu({ onClose }: AddMenuProps) {
     const defaultName = `${sectionType}_default`;
     const label = isNamed ? `${displayName}: ${defaultName}` : displayName;
     const header = isNamed ? `${sectionType} ${defaultName}` : sectionType;
-    const pId = selectedParent || hardwareNodes[0]?.id;
+    const pId = selectedParent || hardwareNodes[0]?.id || null;
 
     if (pId) {
       addFeatureNode(pId, sectionType, label, header);
+    } else {
+      // No parent selected — add as standalone feature node
+      const { addFeatureNode: addFeat } = useGraphStore.getState();
+      addFeat(null as unknown as string, sectionType, label, header);
     }
 
     // Add to the parent's config file
@@ -342,7 +414,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
                   : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
               }`}
             >
-              {t === 'hardware' ? 'Hardware' : t === 'sub_component' ? 'Sub-Components' : t === 'feature' ? 'Features' : t === 'group' ? 'Groups' : 'Connections'}
+              {t === 'hardware' ? 'Major Components' : t === 'sub_component' ? 'Sub-Components' : t === 'feature' ? 'Features' : t === 'group' ? 'Groups' : 'Connections'}
             </button>
           ))}
         </div>
@@ -473,14 +545,14 @@ export default function AddMenu({ onClose }: AddMenuProps) {
               {hardwareNodes.length > 0 && (
                 <div className="mb-4">
                   <label className="text-xs text-[var(--color-text-secondary)] mb-1 block">
-                    Attach to hardware component:
+                    Attach to hardware component (optional):
                   </label>
                   <select
                     value={selectedParent || ''}
                     onChange={(e) => setSelectedParent(e.target.value || null)}
                     className="w-full px-3 py-2 rounded-lg text-sm bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)]"
                   >
-                    <option value="">-- Select parent --</option>
+                    <option value="">-- None (standalone) --</option>
                     {hardwareNodes.map((n) => (
                       <option key={n.id} value={n.id}>
                         {(n.data as Record<string, unknown>).label as string}
@@ -490,7 +562,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
                 </div>
               )}
 
-              {SUB_COMPONENT_GROUPS.map((group) => (
+              {subComponentGroups.map((group) => (
                 <div key={group.group} className="mb-4">
                   <h3 className="text-xs font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-2">
                     {group.label}
@@ -500,8 +572,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
                       <button
                         key={t}
                         onClick={() => handleAddSubComponent(t)}
-                        disabled={!selectedParent && hardwareNodes.length > 0}
-                        className="px-3 py-2 rounded-lg text-xs text-left border border-[var(--color-bg-tertiary)] hover:border-[var(--color-accent)] hover:bg-[var(--color-bg-primary)] transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+                        className="px-3 py-2 rounded-lg text-xs text-left border border-[var(--color-bg-tertiary)] hover:border-[var(--color-accent)] hover:bg-[var(--color-bg-primary)] transition-all"
                       >
                         {schemas[t]?.display_name || t}
                       </button>
@@ -518,14 +589,14 @@ export default function AddMenu({ onClose }: AddMenuProps) {
               {hardwareNodes.length > 0 && (
                 <div className="mb-4">
                   <label className="text-xs text-[var(--color-text-secondary)] mb-1 block">
-                    Attach to component:
+                    Attach to component (optional):
                   </label>
                   <select
                     value={selectedParent || ''}
                     onChange={(e) => setSelectedParent(e.target.value || null)}
                     className="w-full px-3 py-2 rounded-lg text-sm bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)]"
                   >
-                    <option value="">-- Select parent --</option>
+                    <option value="">-- None (standalone) --</option>
                     {nodes.map((n) => (
                       <option key={n.id} value={n.id}>
                         {(n.data as Record<string, unknown>).label as string}

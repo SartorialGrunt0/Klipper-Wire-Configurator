@@ -1,6 +1,8 @@
 """Generate Klipper .cfg files from structured data."""
 from __future__ import annotations
 
+from collections import defaultdict, deque
+
 from parser.config_parser import ConfigFile, ConfigSection, ConfigParam, parse_config
 
 
@@ -8,7 +10,7 @@ def smart_export(config: ConfigFile) -> str:
     """Export config text, using raw_text as the base when available.
 
     If raw_text is present, parses it to find each section's line range,
-    compares submitted sections with the parsed originals *by position*,
+    matches submitted sections with parsed originals *by header name*,
     and only re-generates sections that have changed.  Unchanged sections
     keep their exact original text (comments, whitespace, formatting, and all).
 
@@ -65,6 +67,13 @@ def smart_export(config: ConfigFile) -> str:
 
         section_ranges.append((start, end))
 
+    # Build lookup of original sections by header for matching.
+    # Use a deque per header to handle duplicate section names correctly
+    # (each submitted section consumes the next matching original in order).
+    orig_by_header: dict[str, deque[tuple[int, ConfigSection]]] = defaultdict(deque)
+    for idx, sec in enumerate(original.sections):
+        orig_by_header[sec.full_header].append((idx, sec))
+
     # Build output
     result_parts: list[str] = []
 
@@ -73,22 +82,20 @@ def smart_export(config: ConfigFile) -> str:
     if pre_start > 0:
         result_parts.append("\n".join(raw_lines[:pre_start]))
 
-    # Match sections by position
-    orig_count = len(original.sections)
-    sub_count = len(config.sections)
+    # Match submitted sections by header name against originals
+    for sub_sec in config.sections:
+        entries = orig_by_header.get(sub_sec.full_header)
+        orig_entry = entries.popleft() if entries else None
 
-    for i in range(max(orig_count, sub_count)):
-        if i < orig_count and i < sub_count:
-            # Both exist — check if changed
-            orig_sec = original.sections[i]
-            sub_sec = config.sections[i]
-            start, end = section_ranges[i]
+        if orig_entry is not None:
+            orig_idx, orig_sec = orig_entry
+            start, end = section_ranges[orig_idx]
 
             if _sections_match(orig_sec, sub_sec):
                 # Unchanged — use original raw lines
                 result_parts.append("\n".join(raw_lines[start:end]))
             else:
-                # Changed — regenerate
+                # Changed — regenerate using original as reference
                 regenerated = write_section(sub_sec, orig_sec)
                 result_parts.append(regenerated)
                 # Preserve trailing blank lines from original
@@ -100,11 +107,10 @@ def smart_export(config: ConfigFile) -> str:
                         j -= 1
                     if trailing_blanks:
                         result_parts.append("\n".join(trailing_blanks))
-        elif i < sub_count:
+        else:
             # New section added by user
             result_parts.append("")
-            result_parts.append(write_section(config.sections[i]))
-        # else: section removed — skip
+            result_parts.append(write_section(sub_sec))
 
     text = "\n".join(result_parts)
     if not text.endswith("\n"):
@@ -115,6 +121,8 @@ def smart_export(config: ConfigFile) -> str:
 def _sections_match(original: ConfigSection, submitted: ConfigSection) -> bool:
     """Check if two sections have the same content (ignoring line numbers)."""
     if original.full_header != submitted.full_header:
+        return False
+    if original.is_commented_out != submitted.is_commented_out:
         return False
 
     # Filter out _comment_ pseudo-params for comparison — they represent
@@ -151,7 +159,11 @@ def write_config(config: ConfigFile) -> str:
         if section.section_type == "include":
             lines.append(f"[{section.full_header}]")
         else:
-            lines.append(f"[{section.full_header}]")
+            # Comment out header if section is suppressed
+            if section.is_commented_out:
+                lines.append(f"#[{section.full_header}]")
+            else:
+                lines.append(f"[{section.full_header}]")
 
             # Parameters (including _comment_ pseudo-params for inline comments)
             for param in section.params:
@@ -218,7 +230,10 @@ def write_section(section: ConfigSection, original_section: ConfigSection | None
     lines = []
     for comment in section.header_comments:
         lines.append(comment)
-    lines.append(f"[{section.full_header}]")
+    if section.is_commented_out:
+        lines.append(f"#[{section.full_header}]")
+    else:
+        lines.append(f"[{section.full_header}]")
 
     param_idx = 0
     for param in section.params:

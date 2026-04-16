@@ -10,9 +10,10 @@ import DiffDialog from './dialogs/DiffDialog';
 interface ToolbarProps {
   showTextView: boolean;
   onToggleTextView: () => void;
+  onToggleAddMenu?: () => void;
 }
 
-export default function Toolbar({ showTextView, onToggleTextView }: ToolbarProps) {
+export default function Toolbar({ showTextView, onToggleTextView, onToggleAddMenu }: ToolbarProps) {
   const [showImport, setShowImport] = useState(false);
   const [showExport, setShowExport] = useState(false);
   const [showGenerate, setShowGenerate] = useState(false);
@@ -42,6 +43,19 @@ export default function Toolbar({ showTextView, onToggleTextView }: ToolbarProps
         </svg>
         Generate
       </button>
+
+      {/* + Component */}
+      {onToggleAddMenu && (
+        <button
+          onClick={onToggleAddMenu}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] transition-colors"
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+          </svg>
+          Component
+        </button>
+      )}
 
       {/* Export */}
       <button

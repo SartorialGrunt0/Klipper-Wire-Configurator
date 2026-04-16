@@ -25,8 +25,10 @@ import CommunicationEdge from './components/edges/CommunicationEdge';
 import ConfigurationEdge from './components/edges/ConfigurationEdge';
 import SettingsPanel from './components/SettingsPanel';
 import TextEditor from './components/TextEditor';
+import type { TextEditorHandle } from './components/TextEditor';
 import Toolbar from './components/Toolbar';
 import AddMenu from './components/AddMenu';
+import UnsavedChangesDialog from './components/dialogs/UnsavedChangesDialog';
 
 import type { AppNode } from './types/graph';
 
@@ -101,6 +103,8 @@ export default function App() {
   const { selectedSection, setSelectedSection, validation } = useConfigStore();
   const [showTextView, setShowTextView] = useState(false);
   const [showAddMenu, setShowAddMenu] = useState(false);
+  const [showUnsavedDialog, setShowUnsavedDialog] = useState(false);
+  const textEditorRef = useRef<TextEditorHandle>(null);
 
   // Load section schemas on mount
   useEffect(() => {
@@ -177,9 +181,11 @@ export default function App() {
     }
   }, [nodes, setNodes, validation]);
 
-  // Keyboard shortcuts for undo/redo
+  // Keyboard shortcuts for undo/redo (graph only — let textarea handle its own undo)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // When the text view is active, let the textarea handle undo/redo natively
+      if (showTextView) return;
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 'z') {
         e.preventDefault();
         undo();
@@ -190,7 +196,7 @@ export default function App() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [undo, redo]);
+  }, [undo, redo, showTextView]);
 
   const { toggleHardwareCollapse } = useGraphStore();
 
@@ -449,7 +455,23 @@ const w = (container.style?.width as number) || 400;
         </div>
         <Toolbar
           showTextView={showTextView}
-          onToggleTextView={() => setShowTextView(!showTextView)}
+          onToggleAddMenu={() => setShowAddMenu(!showAddMenu)}
+          onToggleTextView={() => {
+            if (showTextView) {
+              // Switching FROM text TO graph — check for unsaved changes
+              if (textEditorRef.current?.isDirty()) {
+                setShowUnsavedDialog(true);
+                return;
+              }
+              setShowTextView(false);
+            } else {
+              // Switching TO text view — close the settings panel
+              setSelectedNode(null);
+              setSelectedEdge(null);
+              setSelectedSection(null);
+              setShowTextView(true);
+            }
+          }}
         />
       </header>
 
@@ -458,7 +480,7 @@ const w = (container.style?.width as number) || 400;
         {/* Graph or Text view */}
         <div className="flex-1 relative">
           {showTextView ? (
-            <TextEditor />
+            <TextEditor ref={textEditorRef} />
           ) : (
             <ReactFlow
               nodes={nodes}
@@ -490,15 +512,6 @@ const w = (container.style?.width as number) || 400;
                 zoomable
               />
               <Panel position="top-left" className="flex gap-2">
-                <button
-                  onClick={() => setShowAddMenu(!showAddMenu)}
-                  className="flex items-center gap-2 px-3 py-2 rounded-lg bg-[var(--color-accent)] text-[var(--color-bg-primary)] font-medium text-sm hover:bg-[var(--color-accent-hover)] transition-colors"
-                >
-                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                    <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-                  </svg>
-                  Add Component
-                </button>
                 <button
                   onClick={undo}
                   disabled={!canUndo}
@@ -544,11 +557,27 @@ const w = (container.style?.width as number) || 400;
           )}
         </div>
 
-        {/* Settings Panel (right sidebar) */}
-        {(selectedNodeId || selectedEdgeId) && (
+        {/* Settings Panel (right sidebar) — hidden when text view is active */}
+        {!showTextView && (selectedNodeId || selectedEdgeId) && (
           <SettingsPanel />
         )}
       </div>
+
+      {/* Unsaved changes dialog */}
+      {showUnsavedDialog && (
+        <UnsavedChangesDialog
+          onApply={async () => {
+            await textEditorRef.current?.applyChanges();
+            setShowUnsavedDialog(false);
+            setShowTextView(false);
+          }}
+          onDiscard={() => {
+            setShowUnsavedDialog(false);
+            setShowTextView(false);
+          }}
+          onCancel={() => setShowUnsavedDialog(false)}
+        />
+      )}
     </div>
   );
 }

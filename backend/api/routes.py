@@ -418,6 +418,7 @@ def _config_update_to_config_file(data: ConfigUpdate) -> ConfigFile:
             params=params,
             header_comments=sec_data.header_comments,
             trailing_comments=sec_data.trailing_comments,
+            is_commented_out=sec_data.is_commented_out,
         )
         sections.append(section)
 

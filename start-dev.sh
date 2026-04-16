@@ -29,12 +29,9 @@ sleep 2
 
 # Start Frontend (Vite on port 5173)
 echo "Starting frontend (Vite on port 5173)..."
-if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
-    echo "Installing frontend dependencies..."
-    cd "$FRONTEND_DIR"
-    npm install
-fi
+echo "Installing frontend dependencies..."
 cd "$FRONTEND_DIR"
+npm install
 npm run dev &
 FRONTEND_PID=$!
 

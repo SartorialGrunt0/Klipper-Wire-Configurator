@@ -1,6 +1,9 @@
-import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
+import { useState, useCallback, useMemo, useRef, useEffect, useImperativeHandle, forwardRef } from 'react';
 import { useConfigStore } from '../stores/configStore';
+import { useGraphStore } from '../stores/graphStore';
 import * as api from '../services/api';
+import ApplyWarningDialog from './dialogs/ApplyWarningDialog';
+import type { ExampleConfig, HardwareType, CommunicationType } from '../types/config';
 
 interface SearchResult {
   file: string;
@@ -10,8 +13,19 @@ interface SearchResult {
   matchEnd: number;
 }
 
-export default function TextEditor() {
-  const { configFiles, activeFile, setActiveFile, setConfigFile, setValidation } = useConfigStore();
+export interface TextEditorHandle {
+  isDirty: () => boolean;
+  applyChanges: () => Promise<void>;
+}
+
+interface TextIssue {
+  line: number;
+  text: string;
+  severity: 'error' | 'warning';
+}
+
+const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref) {
+  const { configFiles, activeFile, setActiveFile, setConfigFile, setValidation, renameConfigFile, copyConfigFile, removeConfigFile } = useConfigStore();
 
   const config = configFiles[activeFile];
   const filenames = Object.keys(configFiles);
@@ -26,8 +40,97 @@ export default function TextEditor() {
   const [isDirty, setIsDirty] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [showApplyWarning, setShowApplyWarning] = useState(false);
+  const [liveValidation, setLiveValidation] = useState<Array<{ severity: string; section: string; param: string; message: string }>>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const lineNumbersRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const editorScrollRef = useRef<HTMLDivElement>(null);
+  const liveValidateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // File management state
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; file: string } | null>(null);
+  const [renameDialog, setRenameDialog] = useState<{ file: string; value: string } | null>(null);
+  const [showAddConfig, setShowAddConfig] = useState(false);
+  const [addConfigStep, setAddConfigStep] = useState<'choose' | 'blank-name' | 'reference-pick'>('choose');
+  const [newFileName, setNewFileName] = useState('');
+  const [referenceSearch, setReferenceSearch] = useState('');
+  const [referenceResults, setReferenceResults] = useState<ExampleConfig[]>([]);
+  const [fileError, setFileError] = useState('');
+
+  const syncLineNumbersScroll = useCallback(() => {
+    if (!textareaRef.current || !lineNumbersRef.current) return;
+    lineNumbersRef.current.scrollTop = textareaRef.current.scrollTop;
+  }, []);
+
+  // Debounced live validation: parse the current text and validate it as the user types
+  useEffect(() => {
+    if (liveValidateTimerRef.current) clearTimeout(liveValidateTimerRef.current);
+    liveValidateTimerRef.current = setTimeout(async () => {
+      try {
+        const result = await api.parseConfigText(editText, activeFile);
+        setLiveValidation(result.validation.errors || []);
+      } catch {
+        // Parse failed — don't update validation
+      }
+    }, 800);
+    return () => {
+      if (liveValidateTimerRef.current) clearTimeout(liveValidateTimerRef.current);
+    };
+  }, [editText, activeFile]);
+
+  // Collect inline issues from live validation of the current text
+  const inlineIssues = useMemo((): TextIssue[] => {
+    const errors = liveValidation;
+    if (!errors || errors.length === 0) return [];
+    const issues: TextIssue[] = [];
+    for (const err of errors) {
+      if (err.severity === 'error' || err.severity === 'warning') {
+        // Find the line in the text that corresponds to this error
+        const lines = editText.split('\n');
+        let lineNum = 0;
+        if (err.section) {
+          // Find the section header line (may be commented out with #)
+          const sectionIdx = lines.findIndex((l) => {
+            const trimmed = l.trim();
+            return trimmed === `[${err.section}]` || trimmed === `#[${err.section}]`;
+          });
+          if (sectionIdx !== -1) {
+            if (err.param) {
+              // Find the param within the section
+              for (let i = sectionIdx + 1; i < lines.length; i++) {
+                if (lines[i].trim().startsWith('[') && lines[i].trim().endsWith(']')) break;
+                const trimmed = lines[i].replace(/^#/, '').trim();
+                if (trimmed.startsWith(err.param + ':') || trimmed.startsWith(err.param + ' ') || trimmed.startsWith(err.param + '=')) {
+                  lineNum = i + 1;
+                  break;
+                }
+              }
+            }
+            if (!lineNum) lineNum = sectionIdx + 1;
+          }
+        }
+        issues.push({
+          line: lineNum,
+          text: err.message,
+          severity: err.severity as 'error' | 'warning',
+        });
+      }
+    }
+    return issues;
+  }, [liveValidation, editText]);
+
+  // Map line numbers to issues for rendering
+  const issuesByLine = useMemo(() => {
+    const map = new Map<number, TextIssue[]>();
+    for (const issue of inlineIssues) {
+      if (issue.line === 0) continue;
+      const existing = map.get(issue.line) || [];
+      existing.push(issue);
+      map.set(issue.line, existing);
+    }
+    return map;
+  }, [inlineIssues]);
 
   // All files as text for search
   const allFilesText = useMemo(() => {
@@ -84,16 +187,54 @@ export default function TextEditor() {
     setIsDirty(true);
   };
 
-  const handleApply = useCallback(async () => {
+  const doApply = useCallback(async () => {
     try {
       const result = await api.parseConfigText(editText, activeFile);
       setConfigFile(activeFile, result.config);
       setValidation(activeFile, result.validation);
       setIsDirty(false);
+      // Sync the graph with the updated config
+      useGraphStore.getState().syncGraphWithConfig(activeFile);
     } catch (err) {
       console.error('Parse error:', err);
     }
   }, [editText, activeFile, setConfigFile, setValidation]);
+
+  const handleApply = useCallback(async () => {
+    // Check for active issues
+    if (inlineIssues.length > 0) {
+      setShowApplyWarning(true);
+      return;
+    }
+    await doApply();
+  }, [inlineIssues, doApply]);
+
+  const handleApplyAnyway = useCallback(async () => {
+    setShowApplyWarning(false);
+    await doApply();
+  }, [doApply]);
+
+  // Expose isDirty and applyChanges to parent
+  useImperativeHandle(ref, () => ({
+    isDirty: () => isDirty,
+    applyChanges: doApply,
+  }), [isDirty, doApply]);
+
+  const jumpToLine = useCallback((line: number) => {
+    if (!textareaRef.current || line < 1) return;
+    const lines = textareaRef.current.value.split('\n');
+    let charPos = 0;
+    for (let i = 0; i < line - 1 && i < lines.length; i++) {
+      charPos += lines[i].length + 1;
+    }
+    const lineLen = lines[line - 1]?.length ?? 0;
+    textareaRef.current.focus();
+    textareaRef.current.setSelectionRange(charPos, charPos + lineLen);
+    // Approximate scroll to bring line into view
+    const approxLineHeight = 21;
+    textareaRef.current.scrollTop = Math.max(0, (line - 5) * approxLineHeight);
+    syncLineNumbersScroll();
+  }, [syncLineNumbersScroll]);
 
   const handleSearchResultClick = (file: string, line: number) => {
     const cf = configFiles[file];
@@ -106,18 +247,7 @@ export default function TextEditor() {
     }
     // Select the matching line after state settles
     setTimeout(() => {
-      if (!textareaRef.current) return;
-      const lines = textareaRef.current.value.split('\n');
-      let charPos = 0;
-      for (let i = 0; i < line - 1 && i < lines.length; i++) {
-        charPos += lines[i].length + 1;
-      }
-      const lineLen = lines[line - 1]?.length ?? 0;
-      textareaRef.current.focus();
-      textareaRef.current.setSelectionRange(charPos, charPos + lineLen);
-      // Approximate scroll to bring line into view
-      const approxLineHeight = 21;
-      textareaRef.current.scrollTop = Math.max(0, (line - 5) * approxLineHeight);
+      jumpToLine(line);
     }, 0);
   };
 
@@ -128,18 +258,318 @@ export default function TextEditor() {
     });
   };
 
+  // Close context menu on outside click
+  useEffect(() => {
+    if (!contextMenu) return;
+    const handler = () => setContextMenu(null);
+    window.addEventListener('click', handler);
+    return () => window.removeEventListener('click', handler);
+  }, [contextMenu]);
+
+  // Ensure filename ends with .cfg
+  const ensureCfgExtension = (name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) return '';
+    return trimmed.endsWith('.cfg') ? trimmed : `${trimmed}.cfg`;
+  };
+
+  // Check for duplicate file name
+  const isDuplicateFileName = (name: string, excludeOriginal?: string) => {
+    const target = name.toLowerCase();
+    return Object.keys(configFiles).some((fn) => fn.toLowerCase() === target && fn !== excludeOriginal);
+  };
+
+  // File context menu handlers
+  const handleFileContextMenu = (e: React.MouseEvent, file: string) => {
+    e.preventDefault();
+    setContextMenu({ x: e.clientX, y: e.clientY, file });
+  };
+
+  const handleRenameFile = () => {
+    if (!contextMenu) return;
+    if (contextMenu.file === 'printer.cfg') return; // Cannot rename printer.cfg
+    setRenameDialog({ file: contextMenu.file, value: contextMenu.file.replace(/\.cfg$/, '') });
+    setFileError('');
+    setContextMenu(null);
+  };
+
+  const handleRenameConfirm = () => {
+    if (!renameDialog) return;
+    const newName = ensureCfgExtension(renameDialog.value);
+    if (!newName) return;
+    if (newName === renameDialog.file) {
+      setRenameDialog(null);
+      return;
+    }
+    if (isDuplicateFileName(newName, renameDialog.file)) {
+      setFileError(`"${newName}" already exists. Choose a different name.`);
+      return;
+    }
+    renameConfigFile(renameDialog.file, newName);
+    // Update graph nodes referencing this file
+    const graphState = useGraphStore.getState();
+    for (const node of graphState.nodes) {
+      const d = node.data as Record<string, unknown>;
+      if (d.configFile === renameDialog.file) {
+        graphState.updateNodeData(node.id, { configFile: newName } as Partial<typeof node.data>);
+      }
+    }
+    if (activeFile === renameDialog.file) {
+      const cf = useConfigStore.getState().configFiles[newName];
+      if (cf) setEditText(configToText(cf));
+    }
+    setRenameDialog(null);
+    setFileError('');
+  };
+
+  const handleCopyFile = () => {
+    if (!contextMenu) return;
+    const base = contextMenu.file.replace(/\.cfg$/, '');
+    let copyName = `${base}_copy.cfg`;
+    let counter = 1;
+    while (isDuplicateFileName(copyName)) {
+      counter++;
+      copyName = `${base}_copy${counter}.cfg`;
+    }
+    copyConfigFile(contextMenu.file, copyName);
+    setActiveFile(copyName);
+    const cf = useConfigStore.getState().configFiles[copyName];
+    if (cf) setEditText(configToText(cf));
+    setIsDirty(false);
+    setContextMenu(null);
+  };
+
+  const handleDeleteFile = () => {
+    if (!contextMenu) return;
+    if (contextMenu.file === 'printer.cfg') return; // Cannot delete printer.cfg
+    const fileToDelete = contextMenu.file;
+    setContextMenu(null);
+    // Remove graph nodes associated with this file
+    const graphState = useGraphStore.getState();
+    const nodesToRemove = graphState.nodes.filter(
+      (n) => (n.data as Record<string, unknown>).configFile === fileToDelete,
+    );
+    for (const n of nodesToRemove) {
+      graphState.removeNode(n.id);
+    }
+    removeConfigFile(fileToDelete);
+    // Switch to another file
+    const remaining = Object.keys(useConfigStore.getState().configFiles);
+    if (remaining.length > 0) {
+      const next = remaining[0];
+      setActiveFile(next);
+      const cf = useConfigStore.getState().configFiles[next];
+      if (cf) setEditText(configToText(cf));
+      setIsDirty(false);
+    }
+  };
+
+  // Add Configuration handlers
+  const handleAddConfigBlank = () => {
+    const name = ensureCfgExtension(newFileName);
+    if (!name) return;
+    if (isDuplicateFileName(name)) {
+      setFileError(`"${name}" already exists. Choose a different name.`);
+      return;
+    }
+    setConfigFile(name, {
+      filename: name,
+      sections: [],
+      includes: [],
+      header_comments: [],
+    });
+    setActiveFile(name);
+    setEditText('');
+    setIsDirty(false);
+    setShowAddConfig(false);
+    setAddConfigStep('choose');
+    setNewFileName('');
+    setFileError('');
+  };
+
+  // Load reference list for Add Configuration
+  useEffect(() => {
+    if (addConfigStep !== 'reference-pick') return;
+    const timer = setTimeout(() => {
+      const query = referenceSearch.trim();
+      (query ? api.searchExamples(query) : api.listExamples())
+        .then((res) => {
+          const list = (res as { results?: ExampleConfig[] }).results
+            || (res as { examples: ExampleConfig[] }).examples || [];
+          setReferenceResults(list);
+        })
+        .catch(() => setReferenceResults([]));
+    }, 200);
+    return () => clearTimeout(timer);
+  }, [referenceSearch, addConfigStep]);
+
+  // Feature section types (same as graphBuilder/graphStore)
+  const FEAT_TYPES = new Set([
+    'bed_mesh', 'z_tilt', 'quad_gantry_level', 'screws_tilt_adjust',
+    'bed_screws', 'bed_tilt', 'skew_correction', 'axis_twist_compensation',
+    'safe_z_home', 'homing_override', 'endstop_phase',
+    'input_shaper', 'resonance_tester',
+    'virtual_sdcard', 'pause_resume', 'firmware_retraction', 'force_move',
+    'idle_timeout', 'gcode_macro', 'delayed_gcode', 'gcode_arcs',
+    'respond', 'exclude_object', 'save_variables', 'display_status',
+  ]);
+
+  /**
+   * Create graph nodes (hardware + children + edges) for a newly-added config file.
+   * Detects MCU sections to classify the hardware type and creates communication
+   * edges back to the SBC node.
+   */
+  const buildGraphForNewFile = (filename: string, sections: Array<{ section_type: string; section_name: string; full_header: string; params: Array<{ key: string; value: string; is_commented_out: boolean }> }>) => {
+    const graphStore = useGraphStore.getState();
+    const schemas = useConfigStore.getState().schemas;
+
+    // Detect MCU sections
+    const mcuSections = sections.filter((s) => s.section_type === 'mcu');
+    const hasMcu = mcuSections.length > 0;
+
+    // If no MCU section, this file doesn't define a hardware node
+    if (!hasMcu) return;
+
+    // Classify hardware type from MCU name
+    const primaryMcu = mcuSections[0];
+    const mcuName = primaryMcu.section_name || '';
+    let hwType: HardwareType = 'mainboard';
+    if (mcuName) {
+      const lower = mcuName.toLowerCase();
+      if (lower.includes('host') || lower.includes('rpi') || lower.includes('cb1') || lower.includes('linux')) {
+        hwType = 'sbc';
+      } else if (lower.includes('ebb') || lower.includes('toolhead') || lower.includes('th')) {
+        hwType = 'toolhead';
+      } else {
+        hwType = 'expander';
+      }
+    }
+
+    // Detect communication type from MCU params
+    let commType: CommunicationType = 'usb';
+    for (const param of primaryMcu.params) {
+      if (param.is_commented_out) continue;
+      if (param.key === 'canbus_uuid' || param.key === 'canbus_interface') { commType = 'canbus'; break; }
+      if (param.key === 'serial') {
+        const val = param.value || '';
+        if (val.includes('/dev/serial/by-id/usb-')) { commType = 'usb'; break; }
+        if (/\/dev\/tty(S|AMA|ACM|USB)/.test(val)) { commType = 'uart'; break; }
+      }
+    }
+
+    // Check if a hardware node already exists for this file
+    const existingHwNode = graphStore.nodes.find(
+      (n) => n.type === 'hardware' && (n.data as Record<string, unknown>).configFile === filename,
+    );
+    if (existingHwNode) return;
+
+    // Determine label
+    const label = mcuName || filename.replace(/\.cfg$/, '');
+
+    // Check if this should be primary (no existing primary mainboard)
+    const hasPrimary = graphStore.nodes.some(
+      (n) => n.type === 'hardware' && !!(n.data as Record<string, unknown>).isPrimary,
+    );
+    const isPrimary = hwType === 'mainboard' && !hasPrimary;
+
+    // Create hardware node
+    const nodeId = graphStore.addHardwareNode(hwType, label, filename, undefined, mcuName);
+    if (isPrimary) {
+      graphStore.updateNodeData(nodeId, { isPrimary: true });
+    }
+
+    // Create sub-component/feature child nodes
+    for (const sec of sections) {
+      if (sec.section_type === 'include') continue;
+      const schema = schemas[sec.section_type];
+      const displayName = schema?.display_name || sec.section_type;
+      const sLabel = sec.section_name ? `${displayName}: ${sec.section_name}` : displayName;
+      if (FEAT_TYPES.has(sec.section_type)) {
+        graphStore.addFeatureNode(nodeId, sec.section_type, sLabel, sec.full_header);
+      } else {
+        graphStore.addSubComponentNode(nodeId, sec.section_type, sLabel, sec.full_header);
+      }
+    }
+
+    // Ensure SBC node exists
+    let sbcNode = graphStore.nodes.find(
+      (n) => n.type === 'hardware' && (n.data as Record<string, unknown>).hardwareType === 'sbc',
+    );
+    if (!sbcNode && hwType !== 'sbc') {
+      const sbcId = graphStore.addHardwareNode('sbc', 'SBC', '', undefined, 'host_mcu');
+      sbcNode = graphStore.nodes.find((n) => n.id === sbcId)!;
+    }
+
+    // Add communication edge from SBC to hardware
+    if (sbcNode && hwType !== 'sbc') {
+      graphStore.addCommunicationEdge(sbcNode.id, nodeId, commType);
+    }
+
+    // Collapse the hardware node by default (matches import behavior)
+    graphStore.toggleHardwareCollapse(nodeId);
+
+    // Auto-arrange so everything is visible
+    graphStore.autoArrange();
+  };
+
+  const handleAddConfigFromReference = async (example: ExampleConfig) => {
+    try {
+      const res = await api.getExample(example.filename);
+      let name = example.filename;
+      // Ensure unique filename
+      if (isDuplicateFileName(name)) {
+        const base = name.replace(/\.cfg$/, '');
+        let counter = 1;
+        name = `${base}_${counter}.cfg`;
+        while (isDuplicateFileName(name)) {
+          counter++;
+          name = `${base}_${counter}.cfg`;
+        }
+      }
+      setConfigFile(name, {
+        filename: name,
+        sections: res.config.sections,
+        includes: res.config.includes || [],
+        header_comments: res.config.header_comments || [],
+      });
+      setActiveFile(name);
+      const cf = useConfigStore.getState().configFiles[name];
+      if (cf) setEditText(configToText(cf));
+      setIsDirty(false);
+
+      // Build graph nodes for the newly added config file
+      buildGraphForNewFile(name, res.config.sections);
+    } catch (err) {
+      console.error('Failed to load reference config:', err);
+    }
+    setShowAddConfig(false);
+    setAddConfigStep('choose');
+    setReferenceSearch('');
+    setReferenceResults([]);
+  };
+
   return (
     <div className="flex h-full bg-[var(--color-bg-primary)]">
       {/* File list sidebar */}
       <div className="w-48 shrink-0 flex flex-col bg-[var(--color-bg-secondary)] border-r border-[var(--color-bg-tertiary)]">
-        <div className="px-3 py-2 shrink-0 border-b border-[var(--color-bg-tertiary)]">
+        <div className="px-3 py-2 shrink-0 border-b border-[var(--color-bg-tertiary)] flex items-center justify-between">
           <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-secondary)]">Files</span>
+          <button
+            onClick={() => { setShowAddConfig(true); setAddConfigStep('choose'); setFileError(''); }}
+            title="Add Configuration"
+            className="text-[var(--color-text-secondary)] hover:text-[var(--color-accent)] transition-colors"
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+              <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+            </svg>
+          </button>
         </div>
         <div className="flex-1 overflow-y-auto py-1">
           {filenames.map((fn) => (
             <button
               key={fn}
               onClick={() => handleFileSwitch(fn)}
+              onContextMenu={(e) => handleFileContextMenu(e, fn)}
               title={fn}
               className={`w-full text-left px-3 py-1.5 text-xs font-medium transition-colors truncate ${
                 fn === activeFile
@@ -152,6 +582,176 @@ export default function TextEditor() {
           ))}
         </div>
       </div>
+
+      {/* File context menu */}
+      {contextMenu && (
+        <div
+          className="fixed z-50 bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] rounded-lg shadow-xl py-1 min-w-[140px]"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            onClick={handleRenameFile}
+            disabled={contextMenu.file === 'printer.cfg'}
+            className="w-full text-left px-3 py-1.5 text-xs hover:bg-[var(--color-bg-tertiary)] transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+          >
+            Rename
+          </button>
+          <button
+            onClick={handleCopyFile}
+            className="w-full text-left px-3 py-1.5 text-xs hover:bg-[var(--color-bg-tertiary)] transition-colors"
+          >
+            Duplicate
+          </button>
+          <div className="h-px bg-[var(--color-bg-tertiary)] my-1" />
+          <button
+            onClick={handleDeleteFile}
+            disabled={contextMenu.file === 'printer.cfg'}
+            className="w-full text-left px-3 py-1.5 text-xs text-[var(--color-error)] hover:bg-[var(--color-bg-tertiary)] transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+          >
+            Delete
+          </button>
+        </div>
+      )}
+
+      {/* Rename dialog */}
+      {renameDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => { setRenameDialog(null); setFileError(''); }}>
+          <div className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl p-5 w-80" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-sm font-semibold text-[var(--color-text-primary)] mb-3">Rename File</h3>
+            <div className="flex items-center gap-1">
+              <input
+                type="text"
+                value={renameDialog.value}
+                onChange={(e) => { setRenameDialog({ ...renameDialog, value: e.target.value }); setFileError(''); }}
+                onKeyDown={(e) => { if (e.key === 'Enter') handleRenameConfirm(); if (e.key === 'Escape') { setRenameDialog(null); setFileError(''); } }}
+                className="flex-1 px-2 py-1.5 rounded text-sm bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:outline-none focus:border-[var(--color-accent)]"
+                autoFocus
+              />
+              <span className="text-xs text-[var(--color-text-secondary)]">.cfg</span>
+            </div>
+            {fileError && <p className="text-xs text-[var(--color-error)] mt-2">{fileError}</p>}
+            <div className="flex justify-end gap-2 mt-4">
+              <button onClick={() => { setRenameDialog(null); setFileError(''); }} className="px-3 py-1.5 rounded text-xs bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)]">Cancel</button>
+              <button onClick={handleRenameConfirm} className="px-3 py-1.5 rounded text-xs bg-[var(--color-accent)] text-[var(--color-bg-primary)]">Rename</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add Configuration dialog */}
+      {showAddConfig && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => { setShowAddConfig(false); setAddConfigStep('choose'); setNewFileName(''); setFileError(''); setReferenceSearch(''); }}>
+          <div className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[480px] max-h-[70vh] overflow-hidden" onClick={(e) => e.stopPropagation()}>
+            <div className="px-5 py-4 border-b border-[var(--color-bg-tertiary)]">
+              <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">Add Configuration</h3>
+            </div>
+
+            <div className="p-5 overflow-y-auto max-h-[calc(70vh-60px)]">
+              {addConfigStep === 'choose' && (
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    onClick={() => { setAddConfigStep('blank-name'); setFileError(''); }}
+                    className="flex flex-col items-center gap-2 p-5 rounded-lg border border-[var(--color-bg-tertiary)] hover:border-[var(--color-accent)] hover:bg-[var(--color-bg-primary)] transition-all"
+                  >
+                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" className="text-[var(--color-text-secondary)]">
+                      <rect x="4" y="4" width="16" height="16" rx="2" stroke="currentColor" strokeWidth="1.5"/>
+                      <path d="M12 8v8M8 12h8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+                    </svg>
+                    <span className="text-xs font-medium text-[var(--color-text-primary)]">Blank</span>
+                    <span className="text-[10px] text-[var(--color-text-secondary)]">Empty config file</span>
+                  </button>
+                  <button
+                    onClick={() => { setAddConfigStep('reference-pick'); setReferenceSearch(''); }}
+                    className="flex flex-col items-center gap-2 p-5 rounded-lg border border-[var(--color-bg-tertiary)] hover:border-[var(--color-accent)] hover:bg-[var(--color-bg-primary)] transition-all"
+                  >
+                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" className="text-[var(--color-accent)]">
+                      <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/>
+                      <path d="M14 2v6h6" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/>
+                    </svg>
+                    <span className="text-xs font-medium text-[var(--color-text-primary)]">From Reference</span>
+                    <span className="text-[10px] text-[var(--color-text-secondary)]">Pick from templates</span>
+                  </button>
+                </div>
+              )}
+
+              {addConfigStep === 'blank-name' && (
+                <div>
+                  <button
+                    onClick={() => setAddConfigStep('choose')}
+                    className="text-xs text-[var(--color-accent)] hover:text-[var(--color-accent-hover)] mb-3"
+                  >
+                    &larr; Back
+                  </button>
+                  <label className="text-xs text-[var(--color-text-secondary)] mb-2 block">File name</label>
+                  <div className="flex items-center gap-1">
+                    <input
+                      type="text"
+                      value={newFileName}
+                      onChange={(e) => { setNewFileName(e.target.value); setFileError(''); }}
+                      onKeyDown={(e) => { if (e.key === 'Enter') handleAddConfigBlank(); }}
+                      placeholder="e.g. macros"
+                      className="flex-1 px-3 py-2 rounded-lg text-sm bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)]"
+                      autoFocus
+                    />
+                    <span className="text-xs text-[var(--color-text-secondary)]">.cfg</span>
+                  </div>
+                  {fileError && <p className="text-xs text-[var(--color-error)] mt-2">{fileError}</p>}
+                  <button
+                    onClick={handleAddConfigBlank}
+                    disabled={!newFileName.trim()}
+                    className="mt-4 w-full py-2 rounded-lg text-sm font-semibold bg-[var(--color-accent)] text-[var(--color-bg-primary)] hover:bg-[var(--color-accent-hover)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Create
+                  </button>
+                </div>
+              )}
+
+              {addConfigStep === 'reference-pick' && (
+                <div>
+                  <button
+                    onClick={() => setAddConfigStep('choose')}
+                    className="text-xs text-[var(--color-accent)] hover:text-[var(--color-accent-hover)] mb-3"
+                  >
+                    &larr; Back
+                  </button>
+                  <input
+                    type="text"
+                    placeholder="Search reference configs..."
+                    value={referenceSearch}
+                    onChange={(e) => setReferenceSearch(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg text-sm bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)] mb-3"
+                    autoFocus
+                  />
+                  <div className="space-y-1 max-h-60 overflow-y-auto">
+                    {referenceResults.map((ex) => (
+                      <button
+                        key={ex.filename}
+                        onClick={() => handleAddConfigFromReference(ex)}
+                        className="flex items-center justify-between w-full p-2.5 rounded-lg text-left transition-all border border-transparent hover:border-[var(--color-accent)] hover:bg-[var(--color-bg-primary)]"
+                      >
+                        <div className="min-w-0">
+                          <div className="text-xs font-medium text-[var(--color-text-primary)] truncate">{ex.name}</div>
+                          <div className="text-[10px] text-[var(--color-text-secondary)] truncate">{ex.filename}</div>
+                        </div>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 shrink-0 ml-2">
+                          {ex.category}
+                        </span>
+                      </button>
+                    ))}
+                    {referenceResults.length === 0 && referenceSearch && (
+                      <p className="text-xs text-[var(--color-text-secondary)] text-center py-4">No matching configs found</p>
+                    )}
+                    {referenceResults.length === 0 && !referenceSearch && (
+                      <p className="text-xs text-[var(--color-text-secondary)] text-center py-4">Type to search reference configs...</p>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Editor area */}
       <div className="flex flex-col flex-1 min-w-0">
@@ -241,22 +841,84 @@ export default function TextEditor() {
           </div>
         )}
 
-        {/* Text area */}
-        <textarea
-          ref={textareaRef}
-          value={editText}
-          onChange={(e) => handleTextChange(e.target.value)}
-          spellCheck={false}
-          wrap="off"
-          className="flex-1 w-full p-4 resize-none bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] font-mono text-sm leading-relaxed focus:outline-none overflow-auto"
-          style={{ tabSize: 4 }}
-        />
+        {/* Editor with line numbers and inline issues */}
+        <div className="flex-1 flex overflow-hidden">
+          <div className="flex flex-col flex-1 min-w-0 relative">
+            <div className="flex-1 flex overflow-hidden" ref={editorScrollRef}>
+              {/* Line numbers + issue indicators */}
+              <div
+                ref={lineNumbersRef}
+                className="shrink-0 overflow-hidden bg-[var(--color-bg-secondary)] text-right select-none pr-2 pl-2 pt-4 font-mono text-sm leading-relaxed text-[var(--color-text-secondary)] border-r border-[var(--color-bg-tertiary)]"
+                style={{ minWidth: '3rem' }}
+              >
+                {editText.split('\n').map((_line, idx) => {
+                  const lineNum = idx + 1;
+                  const lineIssues = issuesByLine.get(lineNum);
+                  const hasError = lineIssues?.some((i) => i.severity === 'error');
+                  const hasWarning = lineIssues?.some((i) => i.severity === 'warning');
+                  return (
+                    <div
+                      key={lineNum}
+                      className="h-[1.625em] flex items-center justify-end"
+                      title={lineIssues?.map((i) => i.text).join('\n')}
+                    >
+                      {hasError && <span className="w-2 h-2 rounded-full bg-[var(--color-error)] mr-1 shrink-0" />}
+                      {!hasError && hasWarning && <span className="w-2 h-2 rounded-full bg-[var(--color-warning)] mr-1 shrink-0" />}
+                      <span>{lineNum}</span>
+                    </div>
+                  );
+                })}
+              </div>
+              {/* Text area */}
+              <textarea
+                ref={textareaRef}
+                value={editText}
+                onChange={(e) => handleTextChange(e.target.value)}
+                onScroll={syncLineNumbersScroll}
+                spellCheck={false}
+                wrap="off"
+                className="flex-1 w-full p-4 resize-none bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] font-mono text-sm leading-relaxed focus:outline-none overflow-auto"
+                style={{ tabSize: 4 }}
+              />
+            </div>
+            {/* Inline issue messages below editor lines */}
+            {inlineIssues.filter((i) => i.line > 0).length > 0 && (
+              <div className="shrink-0 border-t border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] max-h-32 overflow-y-auto">
+                {inlineIssues.filter((i) => i.line > 0).map((issue, idx) => (
+                  <div
+                    key={idx}
+                    className={`flex items-center gap-2 px-3 py-1 text-xs cursor-pointer hover:bg-[var(--color-bg-tertiary)] ${
+                      issue.severity === 'error' ? 'text-[var(--color-error)]' : 'text-[var(--color-warning)]'
+                    }`}
+                    onClick={() => {
+                      jumpToLine(issue.line);
+                    }}
+                  >
+                    <span>{issue.severity === 'error' ? '●' : '▲'}</span>
+                    <span>Line {issue.line}: {issue.text}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Apply warning dialog */}
+        {showApplyWarning && (
+          <ApplyWarningDialog
+            issues={inlineIssues}
+            onProceed={handleApplyAnyway}
+            onCancel={() => setShowApplyWarning(false)}
+          />
+        )}
       </div>
     </div>
   );
-}
+});
 
-function configToText(config: { header_comments: string[]; includes: string[]; sections: Array<{ section_type: string; full_header: string; params: Array<{ key: string; value: string; comment: string; is_commented_out: boolean }> }> }): string {
+export default TextEditor;
+
+function configToText(config: { header_comments: string[]; includes: string[]; sections: Array<{ section_type: string; full_header: string; is_commented_out?: boolean; params: Array<{ key: string; value: string; comment: string; is_commented_out: boolean }> }> }): string {
   let lines: string[] = [];
 
   for (const c of config.header_comments) {
@@ -271,8 +933,16 @@ function configToText(config: { header_comments: string[]; includes: string[]; s
 
   for (const sec of config.sections) {
     if (sec.section_type === 'include') continue;
-    lines.push(`[${sec.full_header}]`);
+    // Detect suppressed sections: section-level flag or all non-comment params commented out
+    const realParams = sec.params.filter((p: { key: string }) => p.key !== '_comment_');
+    const isSuppressed = sec.is_commented_out || (realParams.length > 0 && realParams.every((p: { is_commented_out: boolean }) => p.is_commented_out));
+    lines.push(isSuppressed ? `#[${sec.full_header}]` : `[${sec.full_header}]`);
     for (const p of sec.params) {
+      // _comment_ pseudo-params are standalone comment lines — emit as-is
+      if (p.key === '_comment_') {
+        lines.push(p.value);
+        continue;
+      }
       const prefix = p.is_commented_out ? '#' : '';
       const comment = p.comment ? `   # ${p.comment}` : '';
       if (p.value.includes('\n')) {

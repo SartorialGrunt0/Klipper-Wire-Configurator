@@ -20,6 +20,7 @@ class SectionUpdate(BaseModel):
     params: list[ParamUpdate]
     header_comments: list[str] = []
     trailing_comments: list[str] = []
+    is_commented_out: bool = False
 
 
 class ConfigUpdate(BaseModel):
