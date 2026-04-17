@@ -11,7 +11,7 @@ Klipper Wire Configurator is a web app that helps you inspect, create, and modif
 
 ## Installing
 
-### Raspberry Pi installer (copy/paste)
+### Install on Raspberry Pi
 
 On your Raspberry Pi (Raspberry Pi OS / Debian-based):
 
@@ -22,11 +22,15 @@ cd Klipper-Wire-Configurator
 bash scripts/install.sh
 ```
 
+On 32-bit Raspberry Pi OS (`armv7` / `armhf`), the installer uses the distro `nodejs` package instead of NodeSource because NodeSource does not publish that architecture.
+
 After install, open from another device on your network:
 
 ```bash
 hostname -I | awk '{print "http://" $1 ":8099"}'
 ```
+
+A successful install now ends with a terminal confirmation that the service passed its health check and prints the installer log path under `/tmp/klipper-wire-configurator-install-*.log`.
 
 Service management on Raspberry Pi:
 

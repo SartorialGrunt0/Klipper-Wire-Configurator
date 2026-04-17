@@ -10,7 +10,7 @@
 # Uninstall:
 #   bash scripts/install.sh --uninstall
 
-set -e
+set -Eeuo pipefail
 
 # --- Configuration ---
 REPO_URL="https://github.com/SartorialGrunt0/Klipper-Wire-Configurator.git"
@@ -19,6 +19,8 @@ SERVICE_NAME="klipper-wire-configurator"
 KWC_PORT="${KWC_PORT:-8099}"
 PYTHON_MIN_VERSION="3.9"
 NODE_MIN_VERSION="18"
+LOG_DIR="${TMPDIR:-/tmp}"
+LOG_FILE="${LOG_DIR}/klipper-wire-configurator-install-$(date +%Y%m%d-%H%M%S).log"
 
 # --- Colors ---
 RED='\033[0;31m'
@@ -32,8 +34,30 @@ ok()    { echo -e "${GREEN}[OK]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 
+on_error() {
+    local line_no="$1"
+    local exit_code="$2"
+
+    echo ""
+    echo -e "${RED}Installer failed at line ${line_no} with exit code ${exit_code}.${NC}"
+    echo -e "${YELLOW}Log file:${NC} ${LOG_FILE}"
+
+    if [ -f "$HOME/.config/systemd/user/${SERVICE_NAME}.service" ]; then
+        echo ""
+        info "systemd status snapshot:"
+        systemctl --user status "$SERVICE_NAME" --no-pager || true
+        echo ""
+        info "Recent service logs:"
+        journalctl --user -u "$SERVICE_NAME" -n 50 --no-pager || true
+    fi
+}
+
+mkdir -p "$LOG_DIR"
+exec > >(tee -a "$LOG_FILE") 2>&1
+trap 'on_error "$LINENO" "$?"' ERR
+
 # --- Uninstall ---
-if [ "${1}" = "--uninstall" ]; then
+if [ "${1:-}" = "--uninstall" ]; then
     echo ""
     echo -e "${YELLOW}Uninstalling Klipper Wire Configurator...${NC}"
     echo ""
@@ -68,6 +92,7 @@ echo -e "${GREEN}╔════════════════════
 echo -e "${GREEN}║     Klipper Wire Configurator - Installer        ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════════╝${NC}"
 echo ""
+info "Installer log: $LOG_FILE"
 
 # --- Check architecture ---
 ARCH="$(uname -m)"
@@ -86,7 +111,7 @@ fi
 
 # --- Install system dependencies ---
 info "Updating package lists..."
-sudo apt-get update -qq
+sudo apt-get update
 
 info "Installing system dependencies..."
 sudo apt-get install -y -qq \
@@ -95,20 +120,44 @@ sudo apt-get install -y -qq \
     python3-pip \
     git \
     curl \
-    > /dev/null 2>&1
+    ca-certificates
 ok "System dependencies installed."
 
 # --- Install Node.js if not present or too old ---
-install_node() {
+get_node_major_version() {
+    node --version | sed 's/v//' | cut -d. -f1
+}
+
+install_node_from_apt() {
+    info "Installing Node.js from Raspberry Pi OS / Debian repositories..."
+    sudo apt-get install -y nodejs npm
+    ok "Node.js $(node --version) installed from apt."
+}
+
+install_node_from_nodesource() {
     info "Installing Node.js via NodeSource..."
-    # Use NodeSource for a recent Node.js LTS
-    curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - > /dev/null 2>&1
-    sudo apt-get install -y -qq nodejs > /dev/null 2>&1
+    # Use NodeSource for a recent Node.js LTS on supported architectures.
+    curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+    sudo apt-get install -y nodejs
     ok "Node.js $(node --version) installed."
 }
 
+install_node() {
+    if [[ "$ARCH" = "armv7l" ]]; then
+        warn "NodeSource does not support armv7/armhf. Falling back to Raspberry Pi OS packages."
+        install_node_from_apt
+    else
+        install_node_from_nodesource
+    fi
+
+    NODE_VER="$(get_node_major_version)"
+    if [ "$NODE_VER" -lt "$NODE_MIN_VERSION" ]; then
+        error "Installed Node.js version $(node --version) is too old. Need >= $NODE_MIN_VERSION. On Raspberry Pi OS 32-bit, use Bookworm or newer."
+    fi
+}
+
 if command -v node &>/dev/null; then
-    NODE_VER="$(node --version | sed 's/v//' | cut -d. -f1)"
+    NODE_VER="$(get_node_major_version)"
     if [ "$NODE_VER" -lt "$NODE_MIN_VERSION" ]; then
         warn "Node.js version $(node --version) is too old (need >= $NODE_MIN_VERSION)."
         install_node
@@ -160,8 +209,8 @@ fi
 source venv/bin/activate
 
 info "Installing Python dependencies..."
-pip install --quiet --upgrade pip
-pip install --quiet -r backend/requirements.txt
+pip install --upgrade pip
+pip install -r backend/requirements.txt
 ok "Python dependencies installed."
 
 deactivate
@@ -169,7 +218,10 @@ deactivate
 # --- Build frontend ---
 info "Installing frontend dependencies..."
 cd "$INSTALL_DIR/frontend"
-npm ci --silent 2>/dev/null || npm install --silent
+if ! npm ci; then
+    warn "npm ci failed, falling back to npm install"
+    npm install
+fi
 ok "Frontend dependencies installed."
 
 info "Building frontend (this may take a few minutes on Raspberry Pi)..."
@@ -211,11 +263,15 @@ systemctl --user restart "$SERVICE_NAME"
 # Enable lingering so the user service starts at boot without login
 sudo loginctl enable-linger "$USER" 2>/dev/null || true
 
-ok "Service installed and started."
+if [ ! -f "$HOME/.config/systemd/user/${SERVICE_NAME}.service" ]; then
+    error "Service file was not created at $HOME/.config/systemd/user/${SERVICE_NAME}.service"
+fi
+
+ok "Service installed and start requested."
 
 # --- Wait for service to come up ---
 info "Waiting for service to start..."
-for i in $(seq 1 15); do
+for i in $(seq 1 30); do
     if curl -sf "http://localhost:${KWC_PORT}/health" > /dev/null 2>&1; then
         break
     fi
@@ -225,7 +281,9 @@ done
 if curl -sf "http://localhost:${KWC_PORT}/health" > /dev/null 2>&1; then
     ok "Service is running!"
 else
-    warn "Service may still be starting. Check with: systemctl --user status $SERVICE_NAME"
+    systemctl --user status "$SERVICE_NAME" --no-pager || true
+    journalctl --user -u "$SERVICE_NAME" -n 50 --no-pager || true
+    error "Service did not become healthy on http://localhost:${KWC_PORT}/health"
 fi
 
 # --- Get IP address ---
@@ -239,6 +297,9 @@ echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║     Installation Complete!                        ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════════╝${NC}"
+echo ""
+echo -e "  ${GREEN}Installer completed successfully and the service passed the health check.${NC}"
+echo -e "  Log file: ${YELLOW}${LOG_FILE}${NC}"
 echo ""
 echo -e "  Open in your browser:"
 echo -e "    ${BLUE}http://${IP_ADDR}:${KWC_PORT}${NC}"
