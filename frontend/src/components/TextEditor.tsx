@@ -30,14 +30,30 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
   const config = configFiles[activeFile];
   const filenames = Object.keys(configFiles);
 
-  // Build text from config
-  const text = useMemo(() => {
-    if (!config) return '';
-    return configToText(config);
-  }, [config]);
-
-  const [editText, setEditText] = useState(text);
+  const [editText, setEditText] = useState('');
   const [isDirty, setIsDirty] = useState(false);
+
+  // Helper: export config text via backend (preserves comments, whitespace, #*# markers)
+  const exportTextRef = useRef<number>(0);
+  const exportConfigText = useCallback(async (cf: typeof config): Promise<string> => {
+    if (!cf) return '';
+    try {
+      return await api.exportConfig(cf);
+    } catch {
+      return configToText(cf);
+    }
+  }, []);
+
+  // When config changes and text is not dirty, re-export via backend
+  useEffect(() => {
+    if (!config || isDirty) return;
+    const requestId = ++exportTextRef.current;
+    exportConfigText(config).then((text) => {
+      if (requestId === exportTextRef.current) {
+        setEditText(text);
+      }
+    });
+  }, [config, isDirty, exportConfigText]);
   const [showSearch, setShowSearch] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [showApplyWarning, setShowApplyWarning] = useState(false);
@@ -132,13 +148,24 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
     return map;
   }, [inlineIssues]);
 
-  // All files as text for search
-  const allFilesText = useMemo(() => {
-    const result: Record<string, string> = {};
-    for (const [fn, cf] of Object.entries(configFiles)) {
-      result[fn] = configToText(cf);
+  // All files as text for search — exported via backend for accuracy
+  const [allFilesText, setAllFilesText] = useState<Record<string, string>>({});
+  useEffect(() => {
+    let cancelled = false;
+    async function exportAll() {
+      const result: Record<string, string> = {};
+      for (const [fn, cf] of Object.entries(configFiles)) {
+        try {
+          result[fn] = await api.exportConfig(cf);
+        } catch {
+          result[fn] = configToText(cf);
+        }
+        if (cancelled) return;
+      }
+      if (!cancelled) setAllFilesText(result);
     }
-    return result;
+    exportAll();
+    return () => { cancelled = true; };
   }, [configFiles]);
 
   // Search results across all files
@@ -173,14 +200,15 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
   }, [showSearch]);
 
   // Sync when switching files
-  const handleFileSwitch = (filename: string) => {
+  const handleFileSwitch = useCallback(async (filename: string) => {
     setActiveFile(filename);
     const cf = configFiles[filename];
     if (cf) {
-      setEditText(configToText(cf));
+      const text = await exportConfigText(cf);
+      setEditText(text);
       setIsDirty(false);
     }
-  };
+  }, [configFiles, setActiveFile, exportConfigText]);
 
   const handleTextChange = (newText: string) => {
     setEditText(newText);
@@ -236,11 +264,11 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
     syncLineNumbersScroll();
   }, [syncLineNumbersScroll]);
 
-  const handleSearchResultClick = (file: string, line: number) => {
+  const handleSearchResultClick = async (file: string, line: number) => {
     const cf = configFiles[file];
     if (!cf) return;
-    const fileText = configToText(cf);
     if (file !== activeFile) {
+      const fileText = await exportConfigText(cf);
       setActiveFile(file);
       setEditText(fileText);
       setIsDirty(false);
@@ -293,7 +321,7 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
     setContextMenu(null);
   };
 
-  const handleRenameConfirm = () => {
+  const handleRenameConfirm = async () => {
     if (!renameDialog) return;
     const newName = ensureCfgExtension(renameDialog.value);
     if (!newName) return;
@@ -316,13 +344,13 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
     }
     if (activeFile === renameDialog.file) {
       const cf = useConfigStore.getState().configFiles[newName];
-      if (cf) setEditText(configToText(cf));
+      if (cf) setEditText(await exportConfigText(cf));
     }
     setRenameDialog(null);
     setFileError('');
   };
 
-  const handleCopyFile = () => {
+  const handleCopyFile = async () => {
     if (!contextMenu) return;
     const base = contextMenu.file.replace(/\.cfg$/, '');
     let copyName = `${base}_copy.cfg`;
@@ -334,12 +362,12 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
     copyConfigFile(contextMenu.file, copyName);
     setActiveFile(copyName);
     const cf = useConfigStore.getState().configFiles[copyName];
-    if (cf) setEditText(configToText(cf));
+    if (cf) setEditText(await exportConfigText(cf));
     setIsDirty(false);
     setContextMenu(null);
   };
 
-  const handleDeleteFile = () => {
+  const handleDeleteFile = async () => {
     if (!contextMenu) return;
     if (contextMenu.file === 'printer.cfg') return; // Cannot delete printer.cfg
     const fileToDelete = contextMenu.file;
@@ -359,7 +387,7 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
       const next = remaining[0];
       setActiveFile(next);
       const cf = useConfigStore.getState().configFiles[next];
-      if (cf) setEditText(configToText(cf));
+      if (cf) setEditText(await exportConfigText(cf));
       setIsDirty(false);
     }
   };
@@ -534,7 +562,7 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
       });
       setActiveFile(name);
       const cf = useConfigStore.getState().configFiles[name];
-      if (cf) setEditText(configToText(cf));
+      if (cf) setEditText(await exportConfigText(cf));
       setIsDirty(false);
 
       // Build graph nodes for the newly added config file
