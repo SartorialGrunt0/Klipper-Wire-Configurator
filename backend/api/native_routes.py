@@ -188,15 +188,27 @@ async def apply_config(data: ApplyRequest):
         raise HTTPException(status_code=400, detail=f"Config directory does not exist: {config_path}")
 
     written = []
+    errors = []
     for filename, content in data.files.items():
         # Validate path is safe (no traversal)
         resolved = (base / filename).resolve()
         if not str(resolved).startswith(str(base.resolve())):
             raise HTTPException(status_code=400, detail=f"Invalid filename: {filename}")
-        write_config_file(str(resolved), content)
-        written.append(filename)
+        try:
+            write_config_file(str(resolved), content)
+            written.append(filename)
+        except PermissionError:
+            errors.append(f"Permission denied: {filename}")
+        except OSError as e:
+            errors.append(f"{filename}: {e}")
 
-    return {"status": "applied", "files": written, "config_path": config_path}
+    if errors and not written:
+        raise HTTPException(status_code=500, detail="Failed to write files: " + "; ".join(errors))
+
+    result = {"status": "applied", "files": written, "config_path": config_path}
+    if errors:
+        result["warnings"] = errors
+    return result
 
 
 # ── Klipper control ───────────────────────────────────────────
