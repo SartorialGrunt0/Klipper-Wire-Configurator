@@ -229,11 +229,29 @@ FRONTEND_BUILD_LOG="$(mktemp "${TMPDIR:-/tmp}/kwc-frontend-build.XXXXXX.log")"
 if npm run build 2>&1 | tee "$FRONTEND_BUILD_LOG"; then
     rm -f "$FRONTEND_BUILD_LOG"
 else
-    if grep -qi "cannot find native binding" "$FRONTEND_BUILD_LOG"; then
+    if grep -Eqi "cannot find native binding|could not find native binding|failed to load native binding|native binding not found|native binding missing" "$FRONTEND_BUILD_LOG"; then
         warn "Detected npm optional dependency bug during build. Retrying after a clean npm install..."
-        rm -rf node_modules package-lock.json
-        npm install
-        npm run build
+        if [[ -z "${INSTALL_DIR:-}" || "$INSTALL_DIR" == "/" || "$INSTALL_DIR" != /* ]]; then
+            echo -e "${RED}[ERROR]${NC} Safety check failed: invalid INSTALL_DIR value '$INSTALL_DIR'."
+            exit 1
+        fi
+        FRONTEND_PATH="${INSTALL_DIR}/frontend"
+        if [ ! -d "$FRONTEND_PATH" ]; then
+            echo -e "${RED}[ERROR]${NC} Safety check failed: frontend directory not found at '$FRONTEND_PATH'."
+            exit 1
+        fi
+        if ! rm -rf "$FRONTEND_PATH/node_modules" "$FRONTEND_PATH/package-lock.json"; then
+            echo -e "${RED}[ERROR]${NC} Failed to remove frontend dependencies for native-binding recovery."
+            exit 1
+        fi
+        if ! npm install; then
+            echo -e "${RED}[ERROR]${NC} Frontend dependency reinstall failed during native-binding recovery."
+            exit 1
+        fi
+        if ! npm run build; then
+            echo -e "${RED}[ERROR]${NC} Frontend build retry failed after native-binding recovery."
+            exit 1
+        fi
         rm -f "$FRONTEND_BUILD_LOG"
     else
         error "Frontend build failed. See build log: $FRONTEND_BUILD_LOG"
