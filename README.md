@@ -1,30 +1,65 @@
 # Klipper Wire Configurator
 
-Visually wire Klipper components in a graphical interface to inspect, create, and modify `printer.cfg` files.
+## Introduction
+
+Klipper Wire Configurator is a web app that helps you inspect, create, and modify Klipper `printer.cfg` files in a visual wiring interface.
 
 ## Prerequisites
 
 - Python 3.10+
 - Node.js 18+ and npm
 
-## Quick start (recommended)
+## Installing
+
+### Raspberry Pi installer (copy/paste)
+
+On your Raspberry Pi (Raspberry Pi OS / Debian-based):
+
+```bash
+cd ~
+git clone https://github.com/SartorialGrunt0/Klipper-Wire-Configurator.git
+cd Klipper-Wire-Configurator
+bash scripts/install.sh
+```
+
+After install, open from another device on your network:
+
+```bash
+hostname -I | awk '{print "http://" $1 ":8099"}'
+```
+
+Service management on Raspberry Pi:
+
+```bash
+systemctl --user status klipper-wire-configurator
+systemctl --user restart klipper-wire-configurator
+journalctl --user -u klipper-wire-configurator -f
+```
+
+Uninstall on Raspberry Pi:
+
+```bash
+bash ~/klipper-wire-configurator/scripts/install.sh --uninstall
+```
+
+### Local install for development (copy/paste)
 
 From the repository root:
 
-### Linux / macOS
+#### Linux / macOS
 
 ```bash
 chmod +x ./start-dev.sh
 ./start-dev.sh
 ```
 
-### Windows (PowerShell)
+#### Windows (PowerShell)
 
 ```powershell
 ./start-dev.ps1
 ```
 
-### Windows (Command Prompt)
+#### Windows (Command Prompt)
 
 ```bat
 start-dev.bat
@@ -35,9 +70,9 @@ After startup:
 - Frontend: http://localhost:5173
 - Backend: http://localhost:8099
 
-## Manual setup and run
+## Development Setup
 
-Use this if you prefer running backend and frontend in separate terminals.
+Use this if you want backend and frontend in separate terminals.
 
 ### 1) Backend (FastAPI)
 
@@ -69,9 +104,9 @@ npm install
 npm run dev
 ```
 
-## Build for production
+## Deploying
 
-From the repository root:
+### Build frontend bundle
 
 ```bash
 cd frontend
@@ -79,7 +114,9 @@ npm install
 npm run build
 ```
 
-Then run backend from the repository root (it serves `frontend/dist` when present):
+### Run backend to serve built frontend
+
+From the repository root, backend serves `frontend/dist` when present:
 
 ```bash
 cd backend
