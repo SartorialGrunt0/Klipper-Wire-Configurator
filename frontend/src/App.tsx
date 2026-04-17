@@ -30,7 +30,6 @@ import type { TextEditorHandle } from './components/TextEditor';
 import Toolbar from './components/Toolbar';
 import AddMenu from './components/AddMenu';
 import UnsavedChangesDialog from './components/dialogs/UnsavedChangesDialog';
-import OpenFromPiDialog from './components/dialogs/OpenFromPiDialog';
 
 import type { AppNode } from './types/graph';
 
@@ -106,7 +105,6 @@ export default function App() {
   const [showTextView, setShowTextView] = useState(false);
   const [showAddMenu, setShowAddMenu] = useState(false);
   const [showUnsavedDialog, setShowUnsavedDialog] = useState(false);
-  const [showFirstTimePathDialog, setShowFirstTimePathDialog] = useState(false);
   const textEditorRef = useRef<TextEditorHandle>(null);
 
   // Load section schemas on mount
@@ -138,8 +136,7 @@ export default function App() {
             const listing = await api.listNativeConfigFiles(state.configPath);
             const cfgFiles = listing.files;
             if (cfgFiles.length === 0) {
-              // No files found at default path — ask user to set path
-              setShowFirstTimePathDialog(true);
+              // No files found at default path. Skip auto-open behavior for now.
               unsub();
               return;
             }
@@ -157,7 +154,7 @@ export default function App() {
               .map((f) => f.name);
 
             if (filenames.length === 0) {
-              setShowFirstTimePathDialog(true);
+              // No usable Klipper config files found. Skip auto-open behavior for now.
               unsub();
               return;
             }
@@ -223,8 +220,7 @@ export default function App() {
 
             configStore.markClean();
           } catch {
-            // Auto-read failed — ask user to set path
-            setShowFirstTimePathDialog(true);
+            // Auto-read failed. Skip auto-open behavior for now.
           }
         })();
         unsub();
@@ -717,11 +713,6 @@ const w = (container.style?.width as number) || 400;
           }}
           onCancel={() => setShowUnsavedDialog(false)}
         />
-      )}
-
-      {/* First-time path selection dialog (native mode, when auto-read fails) */}
-      {showFirstTimePathDialog && (
-        <OpenFromPiDialog onClose={() => setShowFirstTimePathDialog(false)} />
       )}
     </div>
   );
