@@ -219,7 +219,8 @@ deactivate
 info "Installing frontend dependencies..."
 cd "$INSTALL_DIR/frontend"
 if [[ "$ARCH" = "armv7l" || "$ARCH" = "aarch64" ]]; then
-    warn "Using npm install --include=optional on ARM to avoid npm optional dependency issues with native bindings."
+    warn "Using clean npm install --include=optional on ARM to avoid npm optional dependency issues with native bindings."
+    rm -rf node_modules package-lock.json
     npm install --include=optional
 else
     if ! npm ci; then
