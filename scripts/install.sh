@@ -13,7 +13,7 @@
 set -e
 
 # --- Configuration ---
-REPO_URL="https://github.com/YOUR_USER/Klipper-Wire-Configurator.git"
+REPO_URL="https://github.com/SartorialGrunt0/Klipper-Wire-Configurator.git"
 INSTALL_DIR="$HOME/klipper-wire-configurator"
 SERVICE_NAME="klipper-wire-configurator"
 KWC_PORT="${KWC_PORT:-8099}"
