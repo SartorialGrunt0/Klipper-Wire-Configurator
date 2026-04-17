@@ -254,7 +254,7 @@ else
             echo -e "${RED}[ERROR]${NC} Frontend dependency reinstall failed during native-binding recovery."
             exit 1
         fi
-        if ! npm run build; then
+        if ! TAILWIND_DISABLE_OXIDE=1 npm run build; then
             echo -e "${RED}[ERROR]${NC} Frontend build retry failed after native-binding recovery."
             exit 1
         fi
