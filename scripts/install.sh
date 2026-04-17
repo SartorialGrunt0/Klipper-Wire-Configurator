@@ -224,7 +224,7 @@ if [[ "$ARCH" = "armv7l" || "$ARCH" = "aarch64" ]]; then
 else
     if ! npm ci; then
         warn "npm ci failed, falling back to npm install"
-        npm install
+        npm install --include=optional
     fi
 fi
 ok "Frontend dependencies installed."
