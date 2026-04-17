@@ -225,7 +225,20 @@ fi
 ok "Frontend dependencies installed."
 
 info "Building frontend (this may take a few minutes on Raspberry Pi)..."
-npm run build
+FRONTEND_BUILD_LOG="$(mktemp "${TMPDIR:-/tmp}/kwc-frontend-build.XXXXXX.log")"
+if npm run build 2>&1 | tee "$FRONTEND_BUILD_LOG"; then
+    rm -f "$FRONTEND_BUILD_LOG"
+else
+    if grep -qi "cannot find native binding" "$FRONTEND_BUILD_LOG"; then
+        warn "Detected npm optional dependency bug during build. Retrying after a clean npm install..."
+        rm -rf node_modules package-lock.json
+        npm install
+        npm run build
+        rm -f "$FRONTEND_BUILD_LOG"
+    else
+        error "Frontend build failed. See build log: $FRONTEND_BUILD_LOG"
+    fi
+fi
 ok "Frontend built successfully."
 
 cd "$INSTALL_DIR"
