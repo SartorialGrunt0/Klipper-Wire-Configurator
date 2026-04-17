@@ -30,6 +30,7 @@ import type { TextEditorHandle } from './components/TextEditor';
 import Toolbar from './components/Toolbar';
 import AddMenu from './components/AddMenu';
 import UnsavedChangesDialog from './components/dialogs/UnsavedChangesDialog';
+import OpenFromPiDialog from './components/dialogs/OpenFromPiDialog';
 
 import type { AppNode } from './types/graph';
 
@@ -105,6 +106,7 @@ export default function App() {
   const [showTextView, setShowTextView] = useState(false);
   const [showAddMenu, setShowAddMenu] = useState(false);
   const [showUnsavedDialog, setShowUnsavedDialog] = useState(false);
+  const [showFirstTimePathDialog, setShowFirstTimePathDialog] = useState(false);
   const textEditorRef = useRef<TextEditorHandle>(null);
 
   // Load section schemas on mount
@@ -121,37 +123,110 @@ export default function App() {
     useNativeStore.getState().checkNativeStatus();
   }, []);
 
-  // Auto-restore layout from Pi on mount (native mode only)
+  // Auto-read config from Pi on startup (native mode only).
+  // On every page refresh, re-read from disk so unapplied changes are cleared.
+  // Then restore graph positions from saved layout.
   const layoutRestored = useRef(false);
   useEffect(() => {
     if (layoutRestored.current) return;
     const unsub = useNativeStore.subscribe((state) => {
       if (state.isNative && !layoutRestored.current) {
         layoutRestored.current = true;
-        api.loadNativeLayout().then((result) => {
-          if (result.layout) {
-            const layout = result.layout as {
-              nodes?: Array<{ id: string; position: { x: number; y: number }; data?: Record<string, unknown> }>;
-              edges?: Array<{ id: string; data?: Record<string, unknown> }>;
-              configFiles?: Record<string, unknown>;
-              graphNodes?: unknown[];
-              graphEdges?: unknown[];
-            };
-            // Restore config files if they were saved with the layout
-            if (layout.configFiles) {
-              const configStore = useConfigStore.getState();
-              for (const [filename, cf] of Object.entries(layout.configFiles)) {
-                configStore.setConfigFile(filename, cf as import('./types/config').ConfigFile);
+        (async () => {
+          try {
+            // List config files from the default path
+            const listing = await api.listNativeConfigFiles(state.configPath);
+            const cfgFiles = listing.files;
+            if (cfgFiles.length === 0) {
+              // No files found at default path — ask user to set path
+              setShowFirstTimePathDialog(true);
+              unsub();
+              return;
+            }
+
+            // Auto-select .cfg files, skip non-klipper ones
+            const filenames = cfgFiles
+              .filter((f) => {
+                const name = f.name.toLowerCase();
+                return !(
+                  name === 'moonraker.conf' || name === 'crowsnest.conf' ||
+                  name === 'klipperscreen.conf' || name === 'sonar.conf' ||
+                  name.endsWith('.bak') || name.endsWith('.old')
+                );
+              })
+              .map((f) => f.name);
+
+            if (filenames.length === 0) {
+              setShowFirstTimePathDialog(true);
+              unsub();
+              return;
+            }
+
+            // Ensure schemas are loaded
+            let schemas = useConfigStore.getState().schemas;
+            if (Object.keys(schemas).length === 0) {
+              try {
+                const schemaResult = await api.getSchema();
+                useConfigStore.getState().setSchemas(schemaResult.schemas);
+                schemas = schemaResult.schemas;
+              } catch { /* proceed without */ }
+            }
+
+            // Read config files from Pi
+            const result = await api.readNativeConfigFiles(filenames, state.configPath);
+
+            const allConfigs: Record<string, import('./types/config').ConfigFile> = {};
+            const allValidations: Record<string, import('./types/config').ValidationResult> = {};
+            const configStore = useConfigStore.getState();
+
+            for (const [filename, fileResult] of Object.entries(result.files)) {
+              configStore.setConfigFile(filename, fileResult.config);
+              configStore.setValidation(filename, fileResult.validation);
+              allConfigs[filename] = fileResult.config;
+              allValidations[filename] = fileResult.validation;
+
+              if (fileResult.raw_text) {
+                configStore.setOriginalText(filename, fileResult.raw_text);
               }
             }
-            // Restore graph node positions
-            if (layout.graphNodes && layout.graphEdges) {
-              const graphStore = useGraphStore.getState();
-              graphStore.setNodes(layout.graphNodes as import('./types/graph').AppNode[]);
-              graphStore.setEdges(layout.graphEdges as import('./types/graph').AppEdge[]);
-            }
+
+            // Build graph from config
+            const graphStore = useGraphStore.getState();
+            const { buildProjectGraph } = await import('./utils/graphBuilder');
+            buildProjectGraph(allConfigs, graphStore, schemas, allValidations);
+
+            // Now try to restore graph positions from saved layout
+            try {
+              const layoutResult = await api.loadNativeLayout();
+              if (layoutResult.layout) {
+                const layout = layoutResult.layout as {
+                  graphNodes?: Array<{ id: string; position: { x: number; y: number } }>;
+                  graphEdges?: Array<{ id: string; data?: Record<string, unknown> }>;
+                };
+                // Overlay saved positions onto the newly built graph nodes
+                if (layout.graphNodes) {
+                  const positionMap = new Map(
+                    layout.graphNodes.map((n) => [n.id, n.position]),
+                  );
+                  const currentNodes = useGraphStore.getState().nodes;
+                  const updatedNodes = currentNodes.map((node) => {
+                    const savedPos = positionMap.get(node.id);
+                    if (savedPos) {
+                      return { ...node, position: savedPos } as import('./types/graph').AppNode;
+                    }
+                    return node;
+                  });
+                  graphStore.setNodes(updatedNodes);
+                }
+              }
+            } catch { /* no saved layout — use auto-arranged positions */ }
+
+            configStore.markClean();
+          } catch {
+            // Auto-read failed — ask user to set path
+            setShowFirstTimePathDialog(true);
           }
-        }).catch(() => { /* no saved layout */ });
+        })();
         unsub();
       } else if (state.isNative === false) {
         unsub();
@@ -169,11 +244,9 @@ export default function App() {
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(() => {
       if (nodes.length === 0) return;
-      const configFiles = useConfigStore.getState().configFiles;
       api.saveNativeLayout({
         graphNodes: nodes,
         graphEdges: edges,
-        configFiles,
       }).catch(() => { /* ignore save errors */ });
     }, 3000);
 
@@ -644,6 +717,11 @@ const w = (container.style?.width as number) || 400;
           }}
           onCancel={() => setShowUnsavedDialog(false)}
         />
+      )}
+
+      {/* First-time path selection dialog (native mode, when auto-read fails) */}
+      {showFirstTimePathDialog && (
+        <OpenFromPiDialog onClose={() => setShowFirstTimePathDialog(false)} />
       )}
     </div>
   );

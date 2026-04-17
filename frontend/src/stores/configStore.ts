@@ -33,6 +33,7 @@ interface ConfigState {
   schemas: Record<string, SectionSchema>;
   selectedSection: string | null; // full_header of selected section
   originalTexts: Record<string, string>; // original exported text at import time
+  isDirty: boolean; // true when config has unsaved changes
 
   /* ── Actions ──────────────────────────────────────── */
   setConfigFile: (filename: string, config: ConfigFile) => void;
@@ -78,6 +79,9 @@ interface ConfigState {
   addInclude: (filename: string, includePath: string) => void;
   removeInclude: (filename: string, includePath: string) => void;
 
+  /* Dirty tracking */
+  markClean: () => void;
+
   /* Helpers */
   getSection: (filename: string, fullHeader: string) => ConfigSection | undefined;
   getSectionErrors: (fullHeader: string) => string[];
@@ -90,6 +94,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   schemas: {},
   selectedSection: null,
   originalTexts: {},
+  isDirty: false,
 
   setConfigFile: (filename, config) =>
     set((s) => ({
@@ -119,6 +124,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const cf = s.configFiles[filename];
       if (!cf) return s;
       return {
+        isDirty: true,
         configFiles: {
           ...s.configFiles,
           [filename]: {
@@ -134,6 +140,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const cf = s.configFiles[filename];
       if (!cf) return s;
       return {
+        isDirty: true,
         configFiles: {
           ...s.configFiles,
           [filename]: {
@@ -149,6 +156,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const cf = s.configFiles[filename];
       if (!cf) return s;
       return {
+        isDirty: true,
         configFiles: {
           ...s.configFiles,
           [filename]: {
@@ -174,6 +182,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const cf = s.configFiles[filename];
       if (!cf) return s;
       return {
+        isDirty: true,
         configFiles: {
           ...s.configFiles,
           [filename]: {
@@ -194,6 +203,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const cf = s.configFiles[filename];
       if (!cf) return s;
       return {
+        isDirty: true,
         configFiles: {
           ...s.configFiles,
           [filename]: {
@@ -217,6 +227,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const cf = s.configFiles[filename];
       if (!cf) return s;
       return {
+        isDirty: true,
         configFiles: {
           ...s.configFiles,
           [filename]: {
@@ -246,12 +257,14 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       validation: {},
       selectedSection: null,
       originalTexts: {},
+      isDirty: false,
     }),
 
   loadConfigs: (configs) =>
     set({
       configFiles: configs,
       activeFile: Object.keys(configs)[0] || 'printer.cfg',
+      isDirty: false,
     }),
 
   setOriginalText: (filename, text) =>
@@ -263,6 +276,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     set((s) => {
       if (!s.configFiles[oldName] || oldName === newName) return s;
       if (s.configFiles[newName]) return s; // target already exists
+      const isDirty = true;
       const next = { ...s.configFiles };
       next[newName] = { ...next[oldName], filename: newName };
       delete next[oldName];
@@ -283,6 +297,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         }
       }
       return {
+        isDirty,
         configFiles: next,
         activeFile: s.activeFile === oldName ? newName : s.activeFile,
         validation: nextValidation,
@@ -295,6 +310,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const source = s.configFiles[sourceName];
       if (!source || s.configFiles[newName]) return s;
       return {
+        isDirty: true,
         configFiles: {
           ...s.configFiles,
           [newName]: {
@@ -314,6 +330,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       if (!cf) return s;
       if (cf.includes.includes(includePath)) return s;
       return {
+        isDirty: true,
         configFiles: {
           ...s.configFiles,
           [filename]: { ...cf, includes: [...cf.includes, includePath] },
@@ -326,6 +343,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const cf = s.configFiles[filename];
       if (!cf) return s;
       return {
+        isDirty: true,
         configFiles: {
           ...s.configFiles,
           [filename]: {
@@ -340,6 +358,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     const cf = get().configFiles[filename];
     return cf?.sections.find((s) => s.full_header === fullHeader);
   },
+
+  markClean: () => set({ isDirty: false }),
 
   getSectionErrors: (fullHeader) => {
     const state = get();

@@ -1,14 +1,13 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState } from 'react';
 import { useConfigStore } from '../stores/configStore';
-import { useGraphStore } from '../stores/graphStore';
 import { useNativeStore } from '../stores/nativeStore';
-import * as api from '../services/api';
 import ImportDialog from './dialogs/ImportDialog';
 import ExportDialog from './dialogs/ExportDialog';
 import GenerateDialog from './dialogs/GenerateDialog';
 import DiffDialog from './dialogs/DiffDialog';
 import OpenFromPiDialog from './dialogs/OpenFromPiDialog';
 import ApplyDialog from './dialogs/ApplyDialog';
+import RevertDialog from './dialogs/RevertDialog';
 
 interface ToolbarProps {
   showTextView: boolean;
@@ -23,9 +22,34 @@ export default function Toolbar({ showTextView, onToggleTextView, onToggleAddMen
   const [showDiff, setShowDiff] = useState(false);
   const [showOpenFromPi, setShowOpenFromPi] = useState(false);
   const [showApply, setShowApply] = useState(false);
+  const [showRevert, setShowRevert] = useState(false);
   const hasOriginals = Object.keys(useConfigStore((s) => s.originalTexts)).length > 0;
   const isNative = useNativeStore((s) => s.isNative);
   const hasConfig = Object.keys(useConfigStore((s) => s.configFiles)).length > 0;
+  const isDirty = useConfigStore((s) => s.isDirty);
+  const validation = useConfigStore((s) => s.validation);
+
+  // Compute Save button color based on dirty state and validation
+  const getSaveButtonClass = () => {
+    if (!isDirty) {
+      // No changes — normal grey
+      return 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)]';
+    }
+    const hasErrors = Object.values(validation).some((v) =>
+      v.errors.some((e) => e.severity === 'error'),
+    );
+    const hasWarnings = Object.values(validation).some((v) =>
+      v.errors.some((e) => e.severity === 'warning'),
+    );
+    if (hasErrors) {
+      return 'bg-red-600 text-white hover:bg-red-700';
+    }
+    if (hasWarnings) {
+      return 'bg-orange-500 text-white hover:bg-orange-600';
+    }
+    // Valid changes
+    return 'bg-green-600 text-white hover:bg-green-700';
+  };
 
   return (
     <div className="flex items-center gap-2">
@@ -88,16 +112,30 @@ export default function Toolbar({ showTextView, onToggleTextView, onToggleAddMen
         Export
       </button>
 
-      {/* Apply to Pi (native only) */}
+      {/* Save to Pi (native only) */}
       {isNative && hasConfig && (
         <button
           onClick={() => setShowApply(true)}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-green-600 text-white hover:bg-green-700 transition-colors"
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${getSaveButtonClass()}`}
         >
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
             <path d="M3 8l3.5 3.5L13 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
-          Apply
+          Save
+        </button>
+      )}
+
+      {/* Revert Changes (native or when originals exist) */}
+      {isDirty && hasConfig && hasOriginals && (
+        <button
+          onClick={() => setShowRevert(true)}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] transition-colors"
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <path d="M3 6h7a3 3 0 010 6H8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+            <path d="M6 3L3 6l3 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+          Revert
         </button>
       )}
 
@@ -152,6 +190,7 @@ export default function Toolbar({ showTextView, onToggleTextView, onToggleAddMen
       {showDiff && <DiffDialog onClose={() => setShowDiff(false)} />}
       {showOpenFromPi && <OpenFromPiDialog onClose={() => setShowOpenFromPi(false)} />}
       {showApply && <ApplyDialog onClose={() => setShowApply(false)} />}
+      {showRevert && <RevertDialog onClose={() => setShowRevert(false)} />}
     </div>
   );
 }
