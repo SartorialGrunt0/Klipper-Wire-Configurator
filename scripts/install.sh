@@ -218,9 +218,14 @@ deactivate
 # --- Build frontend ---
 info "Installing frontend dependencies..."
 cd "$INSTALL_DIR/frontend"
-if ! npm ci; then
-    warn "npm ci failed, falling back to npm install"
-    npm install
+if [[ "$ARCH" = "armv7l" || "$ARCH" = "aarch64" ]]; then
+    warn "Using npm install --include=optional on ARM to avoid npm optional dependency issues with native bindings."
+    npm install --include=optional
+else
+    if ! npm ci; then
+        warn "npm ci failed, falling back to npm install"
+        npm install
+    fi
 fi
 ok "Frontend dependencies installed."
 
@@ -244,7 +249,7 @@ else
             echo -e "${RED}[ERROR]${NC} Failed to remove frontend dependencies for native-binding recovery."
             exit 1
         fi
-        if ! npm install; then
+        if ! npm install --include=optional; then
             echo -e "${RED}[ERROR]${NC} Frontend dependency reinstall failed during native-binding recovery."
             exit 1
         fi
