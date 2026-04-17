@@ -15,6 +15,7 @@ import {
 import '@xyflow/react/dist/style.css';
 import { useGraphStore } from './stores/graphStore';
 import { useConfigStore } from './stores/configStore';
+import { useNativeStore } from './stores/nativeStore';
 import * as api from './services/api';
 import HardwareNode from './components/nodes/HardwareNode';
 import SubComponentNode from './components/nodes/SubComponentNode';
@@ -114,6 +115,72 @@ export default function App() {
       console.error('Failed to load schemas:', err);
     });
   }, []);
+
+  // Check native mode on mount
+  useEffect(() => {
+    useNativeStore.getState().checkNativeStatus();
+  }, []);
+
+  // Auto-restore layout from Pi on mount (native mode only)
+  const layoutRestored = useRef(false);
+  useEffect(() => {
+    if (layoutRestored.current) return;
+    const unsub = useNativeStore.subscribe((state) => {
+      if (state.isNative && !layoutRestored.current) {
+        layoutRestored.current = true;
+        api.loadNativeLayout().then((result) => {
+          if (result.layout) {
+            const layout = result.layout as {
+              nodes?: Array<{ id: string; position: { x: number; y: number }; data?: Record<string, unknown> }>;
+              edges?: Array<{ id: string; data?: Record<string, unknown> }>;
+              configFiles?: Record<string, unknown>;
+              graphNodes?: unknown[];
+              graphEdges?: unknown[];
+            };
+            // Restore config files if they were saved with the layout
+            if (layout.configFiles) {
+              const configStore = useConfigStore.getState();
+              for (const [filename, cf] of Object.entries(layout.configFiles)) {
+                configStore.setConfigFile(filename, cf as import('./types/config').ConfigFile);
+              }
+            }
+            // Restore graph node positions
+            if (layout.graphNodes && layout.graphEdges) {
+              const graphStore = useGraphStore.getState();
+              graphStore.setNodes(layout.graphNodes as import('./types/graph').AppNode[]);
+              graphStore.setEdges(layout.graphEdges as import('./types/graph').AppEdge[]);
+            }
+          }
+        }).catch(() => { /* no saved layout */ });
+        unsub();
+      } else if (state.isNative === false) {
+        unsub();
+      }
+    });
+    return unsub;
+  }, []);
+
+  // Auto-save layout (debounced) in native mode
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    const isNative = useNativeStore.getState().isNative;
+    if (!isNative) return;
+
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(() => {
+      if (nodes.length === 0) return;
+      const configFiles = useConfigStore.getState().configFiles;
+      api.saveNativeLayout({
+        graphNodes: nodes,
+        graphEdges: edges,
+        configFiles,
+      }).catch(() => { /* ignore save errors */ });
+    }, 3000);
+
+    return () => {
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    };
+  }, [nodes, edges]);
 
   useEffect(() => {
     const errorSections = new Set<string>();

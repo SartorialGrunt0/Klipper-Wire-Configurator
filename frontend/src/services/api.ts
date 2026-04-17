@@ -218,3 +218,110 @@ export async function loadProject(name: string): Promise<{
 }> {
   return request(`/projects/${encodeURIComponent(name)}`);
 }
+
+/* ── Native (Pi) API ─────────────────────────────────── */
+
+export interface NativeStatus {
+  native: boolean;
+  config_path: string;
+}
+
+export interface DeviceList {
+  usb_serial: Array<{ path: string; description: string; by_id: string }>;
+  can: Array<{ name: string; state: string; bitrate: number | null }>;
+  uart: Array<{ path: string; description: string; by_id: string }>;
+}
+
+export interface NativeConfigFile {
+  name: string;
+  path: string;
+  size: number;
+  modified: number;
+}
+
+export async function getNativeStatus(): Promise<NativeStatus> {
+  return request('/native/status');
+}
+
+export async function listNativeDevices(): Promise<DeviceList> {
+  return request('/native/devices');
+}
+
+export async function getNativeSettings(): Promise<{ config_path: string }> {
+  return request('/native/settings');
+}
+
+export async function updateNativeSettings(configPath: string): Promise<{ config_path: string }> {
+  return request('/native/settings', {
+    method: 'PUT',
+    body: JSON.stringify({ config_path: configPath }),
+  });
+}
+
+export async function listNativeConfigFiles(path?: string): Promise<{
+  config_path: string;
+  files: NativeConfigFile[];
+}> {
+  const q = path ? `?path=${encodeURIComponent(path)}` : '';
+  return request(`/native/config-files${q}`);
+}
+
+export async function readNativeConfigFiles(
+  filenames: string[],
+  configPath?: string,
+): Promise<{
+  files: Record<string, {
+    config: ConfigFile;
+    validation: ValidationResult;
+    board_info: BoardInfo;
+    raw_text: string;
+  }>;
+  project: {
+    main_file: string;
+    mcus: Array<{ name: string; file: string; params: Record<string, string> }>;
+    includes: Array<{ path: string; resolved: boolean; filename: string | null }>;
+    file_count: number;
+  };
+}> {
+  return request('/native/config-files/read', {
+    method: 'POST',
+    body: JSON.stringify({ filenames, config_path: configPath }),
+  });
+}
+
+export async function applyNativeConfig(
+  files: Record<string, string>,
+  configPath?: string,
+): Promise<{ status: string; files: string[]; config_path: string }> {
+  return request('/native/apply', {
+    method: 'POST',
+    body: JSON.stringify({ files, config_path: configPath }),
+  });
+}
+
+export async function firmwareRestartKlipper(): Promise<{
+  status: string;
+  method: string;
+  socket_path: string;
+}> {
+  return request('/native/klipper/firmware-restart', {
+    method: 'POST',
+  });
+}
+
+export async function loadNativeLayout(): Promise<{ layout: unknown | null }> {
+  return request('/native/layout');
+}
+
+export async function saveNativeLayout(layout: unknown): Promise<{ status: string }> {
+  return request('/native/layout', {
+    method: 'POST',
+    body: JSON.stringify({ layout }),
+  });
+}
+
+export async function deleteNativeLayout(): Promise<{ status: string }> {
+  return request('/native/layout', {
+    method: 'DELETE',
+  });
+}

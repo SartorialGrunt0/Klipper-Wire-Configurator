@@ -1,11 +1,14 @@
 import { useState, useRef, useCallback } from 'react';
 import { useConfigStore } from '../stores/configStore';
 import { useGraphStore } from '../stores/graphStore';
+import { useNativeStore } from '../stores/nativeStore';
 import * as api from '../services/api';
 import ImportDialog from './dialogs/ImportDialog';
 import ExportDialog from './dialogs/ExportDialog';
 import GenerateDialog from './dialogs/GenerateDialog';
 import DiffDialog from './dialogs/DiffDialog';
+import OpenFromPiDialog from './dialogs/OpenFromPiDialog';
+import ApplyDialog from './dialogs/ApplyDialog';
 
 interface ToolbarProps {
   showTextView: boolean;
@@ -18,7 +21,11 @@ export default function Toolbar({ showTextView, onToggleTextView, onToggleAddMen
   const [showExport, setShowExport] = useState(false);
   const [showGenerate, setShowGenerate] = useState(false);
   const [showDiff, setShowDiff] = useState(false);
+  const [showOpenFromPi, setShowOpenFromPi] = useState(false);
+  const [showApply, setShowApply] = useState(false);
   const hasOriginals = Object.keys(useConfigStore((s) => s.originalTexts)).length > 0;
+  const isNative = useNativeStore((s) => s.isNative);
+  const hasConfig = Object.keys(useConfigStore((s) => s.configFiles)).length > 0;
 
   return (
     <div className="flex items-center gap-2">
@@ -32,6 +39,19 @@ export default function Toolbar({ showTextView, onToggleTextView, onToggleAddMen
         </svg>
         Import
       </button>
+
+      {/* Open from Pi (native only) */}
+      {isNative && (
+        <button
+          onClick={() => setShowOpenFromPi(true)}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] transition-colors"
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <path d="M2 3h12v8H2zM5 14h6M8 11v3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+          Open from Pi
+        </button>
+      )}
 
       {/* Generate */}
       <button
@@ -67,6 +87,19 @@ export default function Toolbar({ showTextView, onToggleTextView, onToggleAddMen
         </svg>
         Export
       </button>
+
+      {/* Apply to Pi (native only) */}
+      {isNative && hasConfig && (
+        <button
+          onClick={() => setShowApply(true)}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-green-600 text-white hover:bg-green-700 transition-colors"
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <path d="M3 8l3.5 3.5L13 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+          Apply
+        </button>
+      )}
 
       {/* Diff */}
       {hasOriginals && (
@@ -117,6 +150,8 @@ export default function Toolbar({ showTextView, onToggleTextView, onToggleAddMen
       {showExport && <ExportDialog onClose={() => setShowExport(false)} />}
       {showGenerate && <GenerateDialog onClose={() => setShowGenerate(false)} />}
       {showDiff && <DiffDialog onClose={() => setShowDiff(false)} />}
+      {showOpenFromPi && <OpenFromPiDialog onClose={() => setShowOpenFromPi(false)} />}
+      {showApply && <ApplyDialog onClose={() => setShowApply(false)} />}
     </div>
   );
 }

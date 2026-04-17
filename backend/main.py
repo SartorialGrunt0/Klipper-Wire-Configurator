@@ -7,6 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
 from api.routes import router
+from api.native_routes import router as native_router
 
 app = FastAPI(title="Klipper Wire Configurator", version="1.0.0")
 
@@ -19,6 +20,7 @@ app.add_middleware(
 )
 
 app.include_router(router, prefix="/api")
+app.include_router(native_router, prefix="/api/native")
 
 PROJECTS_DIR = Path(os.environ.get("KWC_PROJECTS_DIR", "./projects"))
 PROJECTS_DIR.mkdir(parents=True, exist_ok=True)

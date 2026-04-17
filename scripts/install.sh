@@ -225,7 +225,12 @@ fi
 ok "Frontend dependencies installed."
 
 info "Building frontend (this may take a few minutes on Raspberry Pi)..."
-npm run build
+if ! npm run build; then
+    warn "Frontend build failed. Attempting recovery for npm optional dependency/native binding issues..."
+    rm -rf node_modules package-lock.json
+    npm install
+    npm run build
+fi
 ok "Frontend built successfully."
 
 cd "$INSTALL_DIR"

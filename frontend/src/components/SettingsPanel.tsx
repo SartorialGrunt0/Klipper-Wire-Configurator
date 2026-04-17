@@ -1,6 +1,7 @@
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useEffect } from 'react';
 import { useConfigStore } from '../stores/configStore';
 import { useGraphStore } from '../stores/graphStore';
+import { useNativeStore } from '../stores/nativeStore';
 import type { ParamSchema, ConfigParam, ConfigSection, HardwareType, SectionSchema } from '../types/config';
 import type { HardwareNodeData, SubComponentNodeData, FeatureNodeData, AppNode, AppEdge } from '../types/graph';
 import { updateAllSectionPins } from '../utils/pinUtils';
@@ -737,6 +738,7 @@ export default function SettingsPanel() {
                       key={param.key}
                       param={param}
                       schema={paramSchema}
+                      isMcuParam
                       onChange={(value) => updateSectionParam(targetConfigFile, mcuSection.full_header, param.key, value)}
                       onRemove={() => removeParam(targetConfigFile, mcuSection.full_header, param.key)}
                     />
@@ -1045,6 +1047,104 @@ export default function SettingsPanel() {
   );
 }
 
+/* ── Device Picker for MCU params ────────────────────── */
+
+/** Param names that should show a device picker when in native mode */
+const DEVICE_PARAM_MAP: Record<string, 'usb_serial' | 'can' | 'uart'> = {
+  serial: 'usb_serial',
+  canbus_uuid: 'can',
+  canbus_interface: 'can',
+};
+
+function DevicePicker({
+  paramKey,
+  currentValue,
+  onSelect,
+}: {
+  paramKey: string;
+  currentValue: string;
+  onSelect: (value: string) => void;
+}) {
+  const { isNative, devices, devicesLoading, refreshDevices } = useNativeStore();
+
+  useEffect(() => {
+    if (isNative && !devices && !devicesLoading) {
+      refreshDevices();
+    }
+  }, [isNative, devices, devicesLoading, refreshDevices]);
+
+  if (!isNative || !devices) return null;
+
+  const deviceType = DEVICE_PARAM_MAP[paramKey];
+  if (!deviceType) return null;
+
+  if (deviceType === 'usb_serial') {
+    if (devices.usb_serial.length === 0) return null;
+    return (
+      <div className="mt-1">
+        <select
+          value=""
+          onChange={(e) => { if (e.target.value) onSelect(e.target.value); }}
+          className="w-full px-2 py-1 rounded text-[10px] bg-[var(--color-bg-tertiary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)]"
+        >
+          <option value="">Select detected device...</option>
+          {devices.usb_serial.map((d) => (
+            <option key={d.by_id} value={d.by_id}>
+              {d.description}
+            </option>
+          ))}
+        </select>
+      </div>
+    );
+  }
+
+  if (deviceType === 'can') {
+    if (paramKey === 'canbus_interface') {
+      if (devices.can.length === 0) return null;
+      return (
+        <div className="mt-1">
+          <select
+            value=""
+            onChange={(e) => { if (e.target.value) onSelect(e.target.value); }}
+            className="w-full px-2 py-1 rounded text-[10px] bg-[var(--color-bg-tertiary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)]"
+          >
+            <option value="">Select CAN interface...</option>
+            {devices.can.map((d) => (
+              <option key={d.name} value={d.name}>
+                {d.name} ({d.state}{d.bitrate ? `, ${d.bitrate / 1000}kbps` : ''})
+              </option>
+            ))}
+          </select>
+        </div>
+      );
+    }
+    // canbus_uuid — no auto-detection of UUIDs, but show info
+    return null;
+  }
+
+  if (deviceType === 'uart') {
+    if (devices.uart.length === 0) return null;
+    return (
+      <div className="mt-1">
+        <select
+          value=""
+          onChange={(e) => { if (e.target.value) onSelect(e.target.value); }}
+          className="w-full px-2 py-1 rounded text-[10px] bg-[var(--color-bg-tertiary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)]"
+        >
+          <option value="">Select UART device...</option>
+          {devices.uart.map((d) => (
+            <option key={d.path} value={d.path}>
+              {d.description} ({d.path})
+            </option>
+          ))}
+        </select>
+      </div>
+    );
+  }
+
+  return null;
+}
+
 /* ── Individual Parameter Field ──────────────────────── */
 
 function ParamField({
@@ -1053,12 +1153,14 @@ function ParamField({
   pinConflict,
   onChange,
   onRemove,
+  isMcuParam,
 }: {
   param: ConfigParam;
   schema?: ParamSchema;
   pinConflict?: string | null;
   onChange: (value: string) => void;
   onRemove: () => void;
+  isMcuParam?: boolean;
 }) {
   const isRequired = schema?.required ?? false;
   const hasError = (isRequired && !param.value.trim()) || !!pinConflict;
@@ -1142,6 +1244,11 @@ function ParamField({
         <p className="text-[10px] text-[var(--color-warning)] mt-0.5">
           ⚠ {pinConflict}
         </p>
+      )}
+
+      {/* Device picker for MCU serial/CAN/UART params */}
+      {isMcuParam && param.key in DEVICE_PARAM_MAP && (
+        <DevicePicker paramKey={param.key} currentValue={param.value} onSelect={onChange} />
       )}
     </div>
   );
