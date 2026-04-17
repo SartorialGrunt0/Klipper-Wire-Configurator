@@ -141,10 +141,11 @@ export default function App() {
               return;
             }
 
-            // Auto-select .cfg files, skip non-klipper ones
+            // Auto-select .cfg files, skip non-klipper and backup files
             const filenames = cfgFiles
               .filter((f) => {
                 const name = f.name.toLowerCase();
+                if (/^printer-\d{8}_\d+\.cfg$/i.test(name)) return false;
                 return !(
                   name === 'moonraker.conf' || name === 'crowsnest.conf' ||
                   name === 'klipperscreen.conf' || name === 'sonar.conf' ||

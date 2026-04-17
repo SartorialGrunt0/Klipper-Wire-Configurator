@@ -46,6 +46,8 @@ export default function ApplyDialog({ onClose }: ApplyDialogProps) {
   const [appliedFiles, setAppliedFiles] = useState<string[]>([]);
   const [restartStatus, setRestartStatus] = useState<'idle' | 'restarting' | 'success' | 'error'>('idle');
   const [restartMessage, setRestartMessage] = useState('');
+  const [restartErrors, setRestartErrors] = useState<string[]>([]);
+  const [restartLogPath, setRestartLogPath] = useState<string | null>(null);
 
   // Diff state
   const [currentTexts, setCurrentTexts] = useState<Record<string, string>>({});
@@ -95,6 +97,8 @@ export default function ApplyDialog({ onClose }: ApplyDialogProps) {
     setStatus('exporting');
     setRestartStatus('idle');
     setRestartMessage('');
+    setRestartErrors([]);
+    setRestartLogPath(null);
     setMessage('Exporting config files...');
 
     try {
@@ -127,18 +131,68 @@ export default function ApplyDialog({ onClose }: ApplyDialogProps) {
     }
   }, [selectedFiles, configFiles, configPath, currentTexts]);
 
+  const pollKlipperStatusAfterRestart = useCallback(async () => {
+    const maxAttempts = 24;
+    const delayMs = 1500;
+    let lastErrorMessage = '';
+
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      try {
+        const statusResult = await api.getKlipperStatus();
+        const state = statusResult.state.toLowerCase();
+
+        if (state === 'ready') {
+          setRestartErrors([]);
+          setRestartLogPath(statusResult.log_path);
+          return {
+            ok: true,
+            statusResult,
+          };
+        }
+
+        if (state === 'shutdown' || state === 'error') {
+          setRestartErrors(statusResult.recent_errors ?? []);
+          setRestartLogPath(statusResult.log_path);
+          return {
+            ok: false,
+            statusResult,
+          };
+        }
+      } catch (err) {
+        lastErrorMessage = err instanceof Error ? err.message : 'Unable to query Klipper status';
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+
+    throw new Error(lastErrorMessage || 'Timed out waiting for Klipper to report status after restart');
+  }, []);
+
   const handleFirmwareRestart = useCallback(async () => {
+    setRestartErrors([]);
+    setRestartLogPath(null);
     setRestartStatus('restarting');
     setRestartMessage('Sending FIRMWARE_RESTART to Klipper...');
     try {
       const result = await api.firmwareRestartKlipper();
-      setRestartStatus('success');
-      setRestartMessage(`Klipper restart requested via ${result.socket_path}`);
+      setRestartMessage(`Klipper restart requested via ${result.socket_path}. Waiting for status...`);
+
+      const polled = await pollKlipperStatusAfterRestart();
+      if (polled.ok) {
+        setRestartStatus('success');
+        const readyMessage = polled.statusResult.state_message || 'Printer is ready';
+        setRestartMessage(`Klipper restarted successfully: ${readyMessage}`);
+        return;
+      }
+
+      setRestartStatus('error');
+      const errorMessage = polled.statusResult.state_message || 'Klipper reported an error state after restart';
+      setRestartMessage(`Restart failed: ${errorMessage}`);
     } catch (err) {
       setRestartStatus('error');
       setRestartMessage(err instanceof Error ? err.message : 'Firmware restart failed');
     }
-  }, []);
+  }, [pollKlipperStatusAfterRestart]);
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
@@ -299,6 +353,19 @@ export default function ApplyDialog({ onClose }: ApplyDialogProps) {
             'text-[var(--color-text-secondary)]'
           }`}>
             {restartMessage}
+          </div>
+        )}
+
+        {restartErrors.length > 0 && (
+          <div className="mx-4 mb-3 p-3 rounded-lg border border-red-500/30 bg-red-500/10">
+            <p className="text-xs text-red-300 mb-2">
+              Recent Klipper errors{restartLogPath ? ` from ${restartLogPath}` : ''}:
+            </p>
+            <div className="max-h-40 overflow-y-auto rounded bg-black/30 p-2">
+              <pre className="text-[11px] leading-5 text-red-200 whitespace-pre-wrap break-words font-mono">
+                {restartErrors.join('\n')}
+              </pre>
+            </div>
           </div>
         )}
 

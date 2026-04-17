@@ -22,6 +22,7 @@ from services.native_services import (
     load_layout,
     delete_layout,
     load_settings,
+    query_klipper_status,
     save_settings,
 )
 
@@ -104,17 +105,22 @@ async def read_config_files(data: dict):
         raise HTTPException(status_code=400, detail="No filenames provided")
 
     base = Path(config_path)
-    # Validate all paths are under the config directory
+    # Validate all paths are under the config directory (don't resolve symlinks)
     for fn in filenames:
-        resolved = (base / fn).resolve()
-        if not str(resolved).startswith(str(base.resolve())):
+        if '..' in fn or fn.startswith('/'):
+            raise HTTPException(status_code=400, detail=f"Invalid filename: {fn}")
+        candidate = base / fn
+        # Check the un-resolved path is under base
+        try:
+            candidate.relative_to(base)
+        except ValueError:
             raise HTTPException(status_code=400, detail=f"Invalid filename: {fn}")
 
     results = {}
     configs = {}
     for fn in filenames:
         file_path = base / fn
-        if not file_path.is_file():
+        if not file_path.exists():
             continue
         text = read_config_file(str(file_path))
         config = parse_config(text, fn)
@@ -190,12 +196,11 @@ async def apply_config(data: ApplyRequest):
     written = []
     errors = []
     for filename, content in data.files.items():
-        # Validate path is safe (no traversal)
-        resolved = (base / filename).resolve()
-        if not str(resolved).startswith(str(base.resolve())):
+        # Validate path is safe (no traversal, don't resolve symlinks)
+        if '..' in filename or filename.startswith('/'):
             raise HTTPException(status_code=400, detail=f"Invalid filename: {filename}")
         try:
-            write_config_file(str(resolved), content)
+            write_config_file(str(base / filename), content)
             written.append(filename)
         except PermissionError:
             errors.append(f"Permission denied: {filename}")
@@ -221,6 +226,19 @@ async def klipper_firmware_restart():
         raise HTTPException(status_code=501, detail="Only available on Pi")
     try:
         return firmware_restart_klipper()
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/klipper/status")
+async def klipper_status():
+    """Get current Klipper state and recent log errors when not ready."""
+    if not is_native_platform():
+        raise HTTPException(status_code=501, detail="Only available on Pi")
+    try:
+        return query_klipper_status()
     except FileNotFoundError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except RuntimeError as exc:

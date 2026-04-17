@@ -309,6 +309,19 @@ export async function firmwareRestartKlipper(): Promise<{
   });
 }
 
+export interface KlipperStatusResponse {
+  status: string;
+  socket_path: string;
+  state: string;
+  state_message: string;
+  recent_errors: string[];
+  log_path: string | null;
+}
+
+export async function getKlipperStatus(): Promise<KlipperStatusResponse> {
+  return request('/native/klipper/status');
+}
+
 export async function loadNativeLayout(): Promise<{ layout: unknown | null }> {
   return request('/native/layout');
 }

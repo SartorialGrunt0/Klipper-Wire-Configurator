@@ -26,10 +26,13 @@ export default function OpenFromPiDialog({ onClose }: OpenFromPiDialogProps) {
     setMessage('');
     try {
       const result = await api.listNativeConfigFiles(path);
-      setFiles(result.files);
+      // Filter out backup files like printer-20251130_014641.cfg
+      const isBackup = (name: string) => /^printer-\d{8}_\d+\.cfg$/i.test(name);
+      const visible = result.files.filter((f) => !isBackup(f.name));
+      setFiles(visible);
       // Auto-select all .cfg files, deselect known non-klipper ones
       const sel: Record<string, boolean> = {};
-      for (const f of result.files) {
+      for (const f of visible) {
         const name = f.name.toLowerCase();
         const skip = name === 'moonraker.conf' || name === 'crowsnest.conf' ||
           name === 'klipperscreen.conf' || name === 'sonar.conf' ||
@@ -38,7 +41,7 @@ export default function OpenFromPiDialog({ onClose }: OpenFromPiDialogProps) {
       }
       setSelected(sel);
       setStatus('idle');
-      if (result.files.length === 0) {
+      if (visible.length === 0) {
         setMessage('No .cfg files found in this directory.');
       }
     } catch (err) {

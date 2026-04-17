@@ -5,6 +5,7 @@ import getpass
 import glob
 import os
 import json
+import re
 import platform
 import socket
 import subprocess
@@ -303,3 +304,102 @@ def firmware_restart_klipper() -> dict:
         "method": "gcode/firmware_restart",
         "socket_path": response["socket_path"],
     }
+
+
+def _klippy_log_candidates() -> list[Path]:
+    """Return likely klippy.log file locations."""
+    env_log = os.environ.get("KWC_KLIPPY_LOG")
+    user = getpass.getuser()
+    candidates = [
+        env_log,
+        f"/home/{user}/printer_data/logs/klippy.log",
+        "/home/pi/printer_data/logs/klippy.log",
+        "/tmp/klippy.log",
+    ]
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for value in candidates:
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        paths.append(Path(value))
+    return paths
+
+
+def _read_log_tail(path: Path, max_bytes: int = 240_000) -> str:
+    """Read the tail of a log file without loading the entire file into memory."""
+    with path.open("rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        size = fh.tell()
+        start = max(0, size - max_bytes)
+        fh.seek(start)
+        raw = fh.read()
+    return raw.decode("utf-8", errors="replace")
+
+
+def _extract_recent_klippy_errors(log_text: str, max_entries: int = 12) -> list[str]:
+    """Extract likely error lines from klippy.log tail."""
+    patterns = [
+        r"\berror\b",
+        r"\bshutdown\b",
+        r"\btraceback\b",
+        r"\bconfig\s+error\b",
+        r"\bunable\s+to\b",
+        r"\bunknown\s+option\b",
+        r"\bunknown\s+command\b",
+    ]
+    matcher = re.compile("|".join(patterns), re.IGNORECASE)
+
+    picked: list[str] = []
+    seen: set[str] = set()
+    for raw_line in reversed(log_text.splitlines()):
+        line = raw_line.strip()
+        if not line or line in seen:
+            continue
+        if matcher.search(line):
+            picked.append(line)
+            seen.add(line)
+            if len(picked) >= max_entries:
+                break
+    picked.reverse()
+    return picked
+
+
+def _get_recent_klippy_errors(max_entries: int = 12) -> tuple[list[str], str | None]:
+    """Return recent log error lines and the log path used."""
+    for path in _klippy_log_candidates():
+        if not path.is_file():
+            continue
+        try:
+            tail = _read_log_tail(path)
+            return _extract_recent_klippy_errors(tail, max_entries=max_entries), str(path)
+        except OSError:
+            continue
+    return [], None
+
+
+def query_klipper_status() -> dict:
+    """Query Klipper status via webhooks object and include recent log errors when not ready."""
+    response = _send_klipper_request("objects/query", {"objects": {"webhooks": None}})
+    result = response.get("result", {})
+    status_data = result.get("status", {})
+    webhooks = status_data.get("webhooks", {}) if isinstance(status_data, dict) else {}
+
+    state = str(webhooks.get("state", "unknown")) if isinstance(webhooks, dict) else "unknown"
+    state_message = str(webhooks.get("state_message", "")) if isinstance(webhooks, dict) else ""
+
+    payload: dict[str, Any] = {
+        "status": "ok",
+        "socket_path": response["socket_path"],
+        "state": state,
+        "state_message": state_message,
+        "recent_errors": [],
+        "log_path": None,
+    }
+
+    if state != "ready":
+        recent_errors, log_path = _get_recent_klippy_errors()
+        payload["recent_errors"] = recent_errors
+        payload["log_path"] = log_path
+
+    return payload
