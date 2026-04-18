@@ -329,11 +329,42 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const cf = s.configFiles[filename];
       if (!cf) return s;
       if (cf.includes.includes(includePath)) return s;
+      const includeHeader = `include ${includePath}`;
+      // Check if a commented-out include section already exists for this path
+      const existingIdx = cf.sections.findIndex(
+        (sec) => sec.section_type === 'include' && sec.section_name === includePath,
+      );
+      let updatedSections = [...cf.sections];
+      if (existingIdx !== -1) {
+        // Uncomment the existing include section
+        updatedSections = updatedSections.map((sec, i) =>
+          i === existingIdx ? { ...sec, is_commented_out: false } : sec,
+        );
+      } else {
+        // Add a new include section
+        updatedSections = [
+          ...updatedSections,
+          {
+            section_type: 'include',
+            section_name: includePath,
+            full_header: includeHeader,
+            line_number: 0,
+            params: [],
+            header_comments: [],
+            trailing_comments: [],
+            is_commented_out: false,
+          } as ConfigSection,
+        ];
+      }
       return {
         isDirty: true,
         configFiles: {
           ...s.configFiles,
-          [filename]: { ...cf, includes: [...cf.includes, includePath] },
+          [filename]: {
+            ...cf,
+            includes: [...cf.includes, includePath],
+            sections: updatedSections,
+          },
         },
       };
     }),
@@ -342,6 +373,13 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     set((s) => {
       const cf = s.configFiles[filename];
       if (!cf) return s;
+      // Comment out the include section instead of removing it
+      const updatedSections = cf.sections.map((sec) => {
+        if (sec.section_type === 'include' && sec.section_name === includePath) {
+          return { ...sec, is_commented_out: true };
+        }
+        return sec;
+      });
       return {
         isDirty: true,
         configFiles: {
@@ -349,6 +387,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           [filename]: {
             ...cf,
             includes: cf.includes.filter((i) => i !== includePath),
+            sections: updatedSections,
           },
         },
       };

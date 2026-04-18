@@ -157,7 +157,11 @@ def write_config(config: ConfigFile) -> str:
             lines.append(comment)
 
         if section.section_type == "include":
-            lines.append(f"[{section.full_header}]")
+            # Respect commented-out state for include directives
+            if section.is_commented_out:
+                lines.append(f"#[{section.full_header}]")
+            else:
+                lines.append(f"[{section.full_header}]")
         else:
             # Comment out header if section is suppressed
             if section.is_commented_out:
