@@ -1197,7 +1197,7 @@ function DevicePicker({
       return (
         <div className="mt-1 space-y-1">
           <button
-            onClick={() => queryCanbusUuids(currentValue ? undefined : 'can0')}
+            onClick={() => queryCanbusUuids('can0')}
             disabled={canbusQueryLoading}
             className="w-full px-2 py-1 rounded text-[10px] bg-[var(--color-bg-tertiary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)] transition-colors"
           >

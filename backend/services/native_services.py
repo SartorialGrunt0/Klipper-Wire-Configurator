@@ -12,6 +12,9 @@ import subprocess
 from pathlib import Path
 from typing import Any, TypedDict
 
+# Regex for extracting CAN bus UUIDs from canbus_query.py output
+_CANBUS_UUID_RE = re.compile(r"canbus_uuid=([0-9a-fA-F]+)")
+
 
 # ── Platform detection ──────────────────────────────────────────
 
@@ -180,9 +183,8 @@ def query_canbus_uuids(interface: str = "can0") -> dict:
             capture_output=True, text=True, timeout=10,
         )
         # Parse output for UUIDs — format: "Found canbus_uuid=XXXXXXXXXXXX, Application: Klipper"
-        uuid_pattern = re.compile(r"canbus_uuid=([0-9a-fA-F]+)")
         for line in query.stdout.splitlines():
-            match = uuid_pattern.search(line)
+            match = _CANBUS_UUID_RE.search(line)
             if match:
                 result["uuids"].append(match.group(1))
         if query.returncode != 0 and not result["uuids"]:
