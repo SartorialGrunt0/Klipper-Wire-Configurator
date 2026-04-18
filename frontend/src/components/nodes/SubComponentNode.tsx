@@ -3,6 +3,7 @@ import { Handle, Position, type NodeProps } from '@xyflow/react';
 import type { SubComponentNodeData } from '../../types/graph';
 import NodeActions from './NodeActions';
 import WarningBadge from './WarningBadge';
+import type { ValidationStatus } from '../../types/graph';
 
 const GROUP_COLORS: Record<string, string> = {
   stepper: '#3b82f6',
@@ -28,10 +29,11 @@ function SubComponentNode({ data, selected, id }: NodeProps) {
   const color = GROUP_COLORS[nodeData.componentGroup] || GROUP_COLORS.other;
   const isSuppressed = !!(nodeData as Record<string, unknown>).isSuppressed;
   const isEmbedded = !!nodeData.parentHardwareId;
+  const validationStatus = (nodeData.validationStatus || 'valid') as ValidationStatus;
 
   return (
     <div
-      className={`kwc-compact-tile rounded-lg ${selected ? 'selected' : ''} ${nodeData.hasErrors ? 'kwc-error' : ''}`}
+      className={`kwc-compact-tile rounded-lg ${selected ? 'selected' : ''} ${nodeData.hasErrors ? 'kwc-error' : ''} ${validationStatus === 'warning' ? 'kwc-warning' : ''}`}
       style={{
         borderColor: color,
         backgroundColor: 'var(--color-bg-secondary)',
@@ -64,7 +66,7 @@ function SubComponentNode({ data, selected, id }: NodeProps) {
         className="kwc-tile-header"
         style={{ backgroundColor: `${color}22`, borderLeft: `3px solid ${color}` }}
       >
-        {nodeData.hasErrors && <WarningBadge />}
+        <WarningBadge status={validationStatus} />
         <span className="text-xs font-semibold truncate" style={{ color }}>
           {nodeData.label}
         </span>

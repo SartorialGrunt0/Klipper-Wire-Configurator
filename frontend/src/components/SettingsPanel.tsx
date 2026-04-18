@@ -3,8 +3,11 @@ import { useConfigStore } from '../stores/configStore';
 import { useGraphStore } from '../stores/graphStore';
 import { useNativeStore } from '../stores/nativeStore';
 import type { ParamSchema, ConfigParam, ConfigSection, HardwareType, SectionSchema } from '../types/config';
-import type { HardwareNodeData, SubComponentNodeData, FeatureNodeData, AppNode, AppEdge } from '../types/graph';
+import type { HardwareNodeData, SubComponentNodeData, FeatureNodeData, AppNode, AppEdge, ValidationStatus } from '../types/graph';
+import { applyBoardTypeMarkerToMcuSections } from '../utils/boardTypeMarker';
 import { updateAllSectionPins } from '../utils/pinUtils';
+import { getValidationStatusColor } from '../utils/validationStatus';
+import WarningBadge from './nodes/WarningBadge';
 import McuNameDialog from './dialogs/McuNameDialog';
 
 // Pin param names that should be unique
@@ -44,11 +47,13 @@ export default function SettingsPanel() {
     configFiles,
     activeFile,
     schemas,
+    validation,
     updateSectionParam,
     addParam,
     removeParam,
     toggleParamCommented,
     addSection,
+    revalidateFile,
   } = useConfigStore();
   const { selectedNodeId, nodes, addSubComponentNode, addFeatureNode, updateNodeData, selectedEdgeId, edges, updateEdgeData, setSelectedNode } = useGraphStore();
 
@@ -144,11 +149,20 @@ export default function SettingsPanel() {
     return schemas[section.section_type] || null;
   }, [section, schemas]);
 
-  // Get validation errors for this section
-  const errors = useMemo(() => {
-    if (!sectionHeader) return [];
-    return useConfigStore.getState().getSectionErrors(sectionHeader);
-  }, [sectionHeader]);
+  // Get validation issues for this section
+  const sectionIssues = useMemo(() => {
+    if (!sectionHeader) return [] as Array<{ severity: 'error' | 'warning'; message: string }>;
+    const issues: Array<{ severity: 'error' | 'warning'; message: string }> = [];
+    for (const result of Object.values(validation)) {
+      for (const issue of result.errors) {
+        if (issue.section !== sectionHeader) continue;
+        if (issue.severity === 'error' || issue.severity === 'warning') {
+          issues.push({ severity: issue.severity, message: issue.message });
+        }
+      }
+    }
+    return issues;
+  }, [sectionHeader, validation]);
 
   // Active params (not commented out)
   const activeParams = useMemo(
@@ -182,6 +196,11 @@ export default function SettingsPanel() {
     },
     [sectionHeader, resolveFilename, updateSectionParam],
   );
+
+  const handleParamCommit = useCallback(() => {
+    const filename = resolveFilename();
+    void revalidateFile(filename);
+  }, [resolveFilename, revalidateFile]);
 
   const handleAddParam = useCallback(
     (paramSchema: ParamSchema) => {
@@ -328,6 +347,7 @@ export default function SettingsPanel() {
     // Update pin prefixes on non-MCU sections
     const finalSections = updateAllSectionPins(updatedSections, oldMcuName, newMcuName, allSchemas);
     configState.setConfigFile(cfName, { ...cf, sections: finalSections });
+    void configState.revalidateFile(cfName);
 
     // Also update pins in any other config files referenced by child nodes
     const childConfigFiles = new Set<string>();
@@ -347,6 +367,7 @@ export default function SettingsPanel() {
       if (!otherCf) continue;
       const updatedOther = updateAllSectionPins(otherCf.sections, oldMcuName, newMcuName, allSchemas);
       configState.setConfigFile(otherCfName, { ...otherCf, sections: updatedOther });
+      void configState.revalidateFile(otherCfName);
     }
 
     // Update node data
@@ -606,6 +627,7 @@ export default function SettingsPanel() {
               };
             }),
           });
+          void cs.revalidateFile(cfName);
         }
       }
     } else if (selectedNode?.type === 'group' && selectedSection) {
@@ -637,6 +659,7 @@ export default function SettingsPanel() {
                 };
               }),
             });
+            void cs.revalidateFile(cfName);
           }
         }
       }
@@ -790,6 +813,7 @@ export default function SettingsPanel() {
                       isMcuParam
                       commType={commType}
                       onChange={(value) => updateSectionParam(targetConfigFile, mcuSection.full_header, param.key, value)}
+                      onCommit={() => { void revalidateFile(targetConfigFile); }}
                       onRemove={() => removeParam(targetConfigFile, mcuSection.full_header, param.key)}
                     />
                   );
@@ -826,7 +850,21 @@ export default function SettingsPanel() {
         onToggleMcu={handleToggleMcu}
         onRename={handleRename}
         onChangeHardwareType={(newType) => {
-          if (selectedNodeId) updateNodeData(selectedNodeId, { hardwareType: newType } as Partial<AppNode['data']>);
+          if (!selectedNodeId) return;
+          updateNodeData(selectedNodeId, { hardwareType: newType } as Partial<AppNode['data']>);
+          if (!hwData?.configFile) return;
+          const configState = useConfigStore.getState();
+          const configFileData = configState.configFiles[hwData.configFile];
+          if (!configFileData) return;
+          configState.setConfigFile(hwData.configFile, {
+            ...configFileData,
+            sections: applyBoardTypeMarkerToMcuSections(
+              configFileData.sections,
+              newType,
+              hwData.mcuName || '',
+            ),
+          });
+          void configState.revalidateFile(hwData.configFile);
         }}
         allNodes={nodes}
       />
@@ -838,7 +876,7 @@ export default function SettingsPanel() {
     // GroupNode selected — show its children for editing
     if (selectedNode?.type === 'group') {
       const groupData = selectedNode.data as Record<string, unknown>;
-      const children = (groupData.children as Array<{ label: string; sectionHeader: string; params?: Array<{ key: string; value: string }> }>) || [];
+      const children = (groupData.children as Array<{ label: string; sectionHeader: string; params?: Array<{ key: string; value: string }>; validationStatus?: ValidationStatus }>) || [];
       const groupLabel = groupData.label as string;
       const parentId = groupData.parentHardwareId as string | undefined;
       const parentNode = parentId ? nodes.find((n) => n.id === parentId) : null;
@@ -867,7 +905,13 @@ export default function SettingsPanel() {
                 onClick={() => setSelectedSection(child.sectionHeader)}
                 className="flex items-center justify-between w-full px-2 py-1.5 rounded-lg text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors group"
               >
-                <span className="text-[var(--color-text-primary)] font-mono truncate">{child.label}</span>
+                <span className="flex items-center gap-2 min-w-0">
+                  <span
+                    className="w-2 h-2 rounded-full shrink-0"
+                    style={{ backgroundColor: getValidationStatusColor(child.validationStatus || 'valid') }}
+                  />
+                  <span className="text-[var(--color-text-primary)] font-mono truncate">{child.label}</span>
+                </span>
                 <span className="text-[10px] text-[var(--color-text-secondary)] opacity-0 group-hover:opacity-100 shrink-0 ml-2">Edit →</span>
               </button>
             ))}
@@ -1009,14 +1053,26 @@ export default function SettingsPanel() {
         </div>
       </div>
 
-      {/* Errors */}
-      {errors.length > 0 && (
-        <div className="px-3 py-2 bg-[#f8717122] border-b border-[var(--color-error)]">
-          {errors.map((err, i) => (
-            <p key={i} className="text-xs text-[var(--color-error)]">
-              ⚠ {err}
-            </p>
-          ))}
+      {/* Issues */}
+      {sectionIssues.length > 0 && (
+        <div className="border-b border-[var(--color-bg-tertiary)]">
+          {sectionIssues.map((issue, i) => {
+            const color = issue.severity === 'error' ? 'var(--color-error)' : 'var(--color-warning)';
+            return (
+              <div
+                key={`${issue.severity}_${i}`}
+                className="px-3 py-2"
+                style={{
+                  backgroundColor: `${color}22`,
+                  borderTop: i === 0 ? 'none' : `1px solid ${color}33`,
+                }}
+              >
+                <p className="text-xs" style={{ color }}>
+                  ⚠ {issue.message}
+                </p>
+              </div>
+            );
+          })}
         </div>
       )}
 
@@ -1043,6 +1099,7 @@ export default function SettingsPanel() {
               schema={paramSchema}
               pinConflict={pinConflict}
               onChange={(value) => handleParamChange(param.key, value)}
+              onCommit={handleParamCommit}
               onRemove={() => handleRemoveParam(param.key)}
             />
           );
@@ -1263,6 +1320,7 @@ function ParamField({
   schema,
   pinConflict,
   onChange,
+  onCommit,
   onRemove,
   isMcuParam,
   commType,
@@ -1271,6 +1329,7 @@ function ParamField({
   schema?: ParamSchema;
   pinConflict?: string | null;
   onChange: (value: string) => void;
+  onCommit?: () => void;
   onRemove: () => void;
   isMcuParam?: boolean;
   commType?: string;
@@ -1303,6 +1362,7 @@ function ParamField({
         <select
           value={param.value}
           onChange={(e) => onChange(e.target.value)}
+          onBlur={onCommit}
           className={`w-full px-2 py-1.5 rounded text-xs bg-[var(--color-bg-primary)] border text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)] ${
             hasError ? 'border-[var(--color-error)]' : 'border-[var(--color-bg-tertiary)]'
           }`}
@@ -1318,6 +1378,7 @@ function ParamField({
         <select
           value={param.value.toLowerCase()}
           onChange={(e) => onChange(e.target.value)}
+          onBlur={onCommit}
           className="w-full px-2 py-1.5 rounded text-xs bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)]"
         >
           <option value="true">True</option>
@@ -1327,6 +1388,7 @@ function ParamField({
         <textarea
           value={param.value}
           onChange={(e) => onChange(e.target.value)}
+          onBlur={onCommit}
           rows={4}
           className={`w-full px-2 py-1.5 rounded text-xs font-mono bg-[var(--color-bg-primary)] border text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)] resize-y ${
             hasError ? 'border-[var(--color-error)]' : 'border-[var(--color-bg-tertiary)]'
@@ -1337,6 +1399,7 @@ function ParamField({
           type="text"
           value={param.value}
           onChange={(e) => onChange(e.target.value)}
+          onBlur={onCommit}
           placeholder={schema?.default || ''}
           className={`w-full px-2 py-1.5 rounded text-xs bg-[var(--color-bg-primary)] border text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)] ${
             hasError ? 'border-[var(--color-error)]' : 'border-[var(--color-bg-tertiary)]'
@@ -1485,6 +1548,7 @@ function ChildNodesList({
           if (group === 'other') {
             return nodes.map((n) => {
               const d = n.data as Record<string, unknown>;
+              const nodeStatus = (d.validationStatus as ValidationStatus | undefined) || 'valid';
               return (
                 <button
                   key={n.id}
@@ -1494,7 +1558,7 @@ function ChildNodesList({
                   }}
                   className="flex items-center gap-2 w-full px-2 py-1.5 rounded-lg text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors"
                 >
-                  <span className="w-2 h-2 rounded-full bg-[var(--color-accent)]" />
+                  <span className="w-2 h-2 rounded-full" style={{ backgroundColor: getValidationStatusColor(nodeStatus) }} />
                   <span className="text-[var(--color-text-primary)]">{d.label as string}</span>
                 </button>
               );
@@ -1505,6 +1569,7 @@ function ChildNodesList({
             // Single node — show directly (no foldout wrapper)
             const n = nodes[0];
             const d = n.data as Record<string, unknown>;
+            const nodeStatus = (d.validationStatus as ValidationStatus | undefined) || 'valid';
             return (
               <button
                 key={n.id}
@@ -1517,7 +1582,7 @@ function ChildNodesList({
                 }}
                 className="flex items-center gap-2 w-full px-2 py-1.5 rounded-lg text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors"
               >
-                <span className="w-2 h-2 rounded-full bg-[var(--color-accent)]" />
+                <span className="w-2 h-2 rounded-full" style={{ backgroundColor: getValidationStatusColor(nodeStatus) }} />
                 <span className="text-[var(--color-text-primary)]">{d.label as string}</span>
                 <span className="text-[10px] text-[var(--color-text-secondary)] ml-auto">{n.type}</span>
               </button>
@@ -1527,6 +1592,11 @@ function ChildNodesList({
           // Multiple nodes in same group — foldable section
           const isExpanded = !!expandedGroups[group];
           const groupLabel = SIDEBAR_GROUP_NAMES[group] || group;
+          const groupStatus = nodes.some((n) => (n.data as Record<string, unknown>).validationStatus === 'error')
+            ? 'error'
+            : nodes.some((n) => (n.data as Record<string, unknown>).validationStatus === 'warning')
+              ? 'warning'
+              : 'valid';
           return (
             <div key={group}>
               <button
@@ -1539,6 +1609,7 @@ function ChildNodesList({
                 >
                   <path d="M3 1l4 4-4 4" stroke="currentColor" strokeWidth="1.5" />
                 </svg>
+                <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: getValidationStatusColor(groupStatus) }} />
                 <span className="text-[var(--color-text-primary)] font-medium">{groupLabel}</span>
                 <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] ml-auto">
                   {nodes.length}
@@ -1548,6 +1619,7 @@ function ChildNodesList({
                 <div className="ml-4 space-y-0.5 mt-0.5">
                   {nodes.map((n) => {
                     const d = n.data as Record<string, unknown>;
+                    const nodeStatus = (d.validationStatus as ValidationStatus | undefined) || 'valid';
                     // For group nodes, show each child item within
                     if (n.type === 'group' && Array.isArray(d.children)) {
                       return (
@@ -1556,18 +1628,18 @@ function ChildNodesList({
                             onClick={() => onSelectNode(n.id)}
                             className="flex items-center gap-2 w-full px-2 py-1 rounded text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors"
                           >
-                            <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)]" />
+                            <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: getValidationStatusColor(nodeStatus) }} />
                             <span className="text-[var(--color-text-primary)] truncate font-medium">{d.label as string}</span>
                             <span className="text-[10px] text-[var(--color-text-secondary)] ml-auto">open</span>
                           </button>
                           <div className="ml-3 space-y-0.5">
-                            {(d.children as Array<{ label: string; sectionHeader: string; configFile?: string }>).map((child, ci) => (
+                            {(d.children as Array<{ label: string; sectionHeader: string; configFile?: string; validationStatus?: ValidationStatus }>).map((child, ci) => (
                               <button
                                 key={`${n.id}_${child.configFile || 'cfg'}_${child.sectionHeader}_${ci}`}
                                 onClick={() => onSelectSection(child.sectionHeader)}
                                 className="flex items-center gap-2 w-full px-2 py-1 rounded text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors"
                               >
-                                <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)] opacity-60" />
+                                <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: getValidationStatusColor(child.validationStatus || 'valid') }} />
                                 <span className="text-[var(--color-text-primary)] truncate">{child.label}</span>
                               </button>
                             ))}
@@ -1583,7 +1655,7 @@ function ChildNodesList({
                         }}
                         className="flex items-center gap-2 w-full px-2 py-1 rounded text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors"
                       >
-                        <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)] opacity-60" />
+                        <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: getValidationStatusColor(nodeStatus) }} />
                         <span className="text-[var(--color-text-primary)] truncate">{d.label as string}</span>
                       </button>
                     );
@@ -1633,6 +1705,7 @@ function HardwareOverviewPanel({
 }) {
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(hwData.label);
+  const validationStatus = (hwData.validationStatus || 'valid') as ValidationStatus;
 
   const { configFiles: allConfigFiles } = useConfigStore();
 
@@ -1683,6 +1756,7 @@ function HardwareOverviewPanel({
       <div className="p-3 border-b border-[var(--color-bg-tertiary)] shrink-0">
         <div className="flex items-center gap-2">
           <div className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: color }} />
+          <WarningBadge status={validationStatus} size={10} />
           {renaming ? (
             <input
               autoFocus

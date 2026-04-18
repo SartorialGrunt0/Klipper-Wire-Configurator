@@ -3,6 +3,7 @@ import { useConfigStore } from '../stores/configStore';
 import { useGraphStore } from '../stores/graphStore';
 import * as api from '../services/api';
 import { buildGraphFromConfig } from '../utils/graphBuilder';
+import { applyBoardTypeMarkerToMcuSections, buildBoardTypeMarker } from '../utils/boardTypeMarker';
 import type { HardwareType, CommunicationType, SectionSchema, ExampleConfig } from '../types/config';
 import McuNameDialog from './dialogs/McuNameDialog';
 
@@ -204,7 +205,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
           full_header: mcuHeader,
           line_number: 0,
           params: [],
-          header_comments: [],
+          header_comments: [buildBoardTypeMarker(hwType)],
         });
       }
     }
@@ -238,7 +239,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
         // Set config file with the parsed sections
         setConfigFile(configFile, {
           filename: configFile,
-          sections: config.sections,
+          sections: applyBoardTypeMarkerToMcuSections(config.sections, hwType, finalMcuName),
           includes: config.includes || [],
           header_comments: config.header_comments || [],
         });

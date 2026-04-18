@@ -3,6 +3,8 @@ import type { HardwareType, CommunicationType, ConfigSection, ConfigParam } from
 
 /* ── Custom Node Data ────────────────────────────────── */
 
+export type ValidationStatus = 'valid' | 'warning' | 'error';
+
 export interface HardwareNodeData {
   label: string;
   hardwareType: HardwareType;
@@ -11,6 +13,7 @@ export interface HardwareNodeData {
   sections: ConfigSection[];
   customImage?: string;
   hasErrors: boolean;
+  validationStatus?: ValidationStatus;
   collapsed?: boolean;
   [key: string]: unknown;
 }
@@ -25,6 +28,7 @@ export interface SubComponentNodeData {
   configFile: string;
   customImage?: string;
   hasErrors: boolean;
+  validationStatus?: ValidationStatus;
   [key: string]: unknown;
 }
 
@@ -37,6 +41,7 @@ export interface FeatureNodeData {
   configFile: string;
   customImage?: string;
   hasErrors: boolean;
+  validationStatus?: ValidationStatus;
   [key: string]: unknown;
 }
 
@@ -48,6 +53,8 @@ export interface GroupChildItem {
   params: ConfigParam[];
   configFile: string;
   isSuppressed?: boolean;
+  hasErrors?: boolean;
+  validationStatus?: ValidationStatus;
 }
 
 export interface GroupNodeData {
@@ -58,6 +65,7 @@ export interface GroupNodeData {
   parentHardwareId: string;
   configFile: string;
   hasErrors: boolean;
+  validationStatus?: ValidationStatus;
   [key: string]: unknown;
 }
 
@@ -66,6 +74,7 @@ export interface CustomGroupNodeData {
   color: string;
   collapsed?: boolean;
   hasErrors: boolean;
+  validationStatus?: ValidationStatus;
   [key: string]: unknown;
 }
 

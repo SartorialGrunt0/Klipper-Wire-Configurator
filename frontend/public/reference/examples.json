@@ -2745,6 +2745,17 @@
       ]
     },
     {
+      "filename": "bigtreetech-mmb-ercf.cfg",
+      "name": "bigtreetech-mmb-ercf",
+      "category": "other",
+      "board_type": "expander",
+      "tags": [
+        "bigtreetech",
+        "mmb",
+        "ercf"
+      ]
+    },
+    {
       "filename": "sample-bigtreetech-exp-mot.cfg",
       "name": "sample-bigtreetech-exp-mot",
       "category": "sample",
@@ -2753,6 +2764,62 @@
         "bigtreetech",
         "exp",
         "mot"
+      ]
+    },
+    {
+      "filename": "sample-bigtreetech-mmb-canbus-v1.x.cfg",
+      "name": "sample-bigtreetech-mmb-canbus-v1.x",
+      "category": "sample",
+      "board_type": "expander",
+      "tags": [
+        "bigtreetech",
+        "mmb",
+        "canbus",
+        "v1"
+      ]
+    },
+    {
+      "filename": "sample-bigtreetech-mmb-canbus-v2.0.cfg",
+      "name": "sample-bigtreetech-mmb-canbus-v2.0",
+      "category": "sample",
+      "board_type": "expander",
+      "tags": [
+        "bigtreetech",
+        "mmb",
+        "canbus",
+        "v2"
+      ]
+    },
+    {
+      "filename": "sample-bigtreetech-mmb-cubic.cfg",
+      "name": "sample-bigtreetech-mmb-cubic",
+      "category": "sample",
+      "board_type": "expander",
+      "tags": [
+        "bigtreetech",
+        "mmb",
+        "cubic"
+      ]
+    },
+    {
+      "filename": "sample-fysetc-ercf-hardware.cfg",
+      "name": "sample-fysetc-ercf-hardware",
+      "category": "sample",
+      "board_type": "expander",
+      "tags": [
+        "fysetc",
+        "ercf",
+        "hardware"
+      ]
+    },
+    {
+      "filename": "sample-klipper-expander.cfg",
+      "name": "sample-klipper-expander",
+      "category": "sample",
+      "board_type": "expander",
+      "tags": [
+        "klipper",
+        "expander"
       ]
     },
     {

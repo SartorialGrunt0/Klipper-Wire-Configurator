@@ -3,6 +3,7 @@ import { Handle, Position, type NodeProps } from '@xyflow/react';
 import type { FeatureNodeData } from '../../types/graph';
 import NodeActions from './NodeActions';
 import WarningBadge from './WarningBadge';
+import type { ValidationStatus } from '../../types/graph';
 
 const FEATURE_COLORS: Record<string, string> = {
   bed_mesh: '#8b5cf6',
@@ -32,10 +33,11 @@ function FeatureNode({ data, selected, id }: NodeProps) {
   const color = FEATURE_COLORS[nodeData.sectionType] || FEATURE_COLORS.default;
   const isSuppressed = !!(nodeData as Record<string, unknown>).isSuppressed;
   const isEmbedded = !!(nodeData.parentId);
+  const validationStatus = (nodeData.validationStatus || 'valid') as ValidationStatus;
 
   return (
     <div
-      className={`kwc-compact-tile rounded-lg ${selected ? 'selected' : ''} ${nodeData.hasErrors ? 'kwc-error' : ''}`}
+      className={`kwc-compact-tile rounded-lg ${selected ? 'selected' : ''} ${nodeData.hasErrors ? 'kwc-error' : ''} ${validationStatus === 'warning' ? 'kwc-warning' : ''}`}
       style={{
         borderColor: color,
         borderStyle: 'dashed',
@@ -69,7 +71,7 @@ function FeatureNode({ data, selected, id }: NodeProps) {
         className="kwc-tile-header"
         style={{ backgroundColor: `${color}15`, borderLeft: `3px solid ${color}` }}
       >
-        {nodeData.hasErrors && <WarningBadge />}
+        <WarningBadge status={validationStatus} />
         <span className="text-xs truncate" style={{ color }}>
           {nodeData.label}
         </span>

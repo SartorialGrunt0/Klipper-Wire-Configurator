@@ -4,6 +4,7 @@ import type { HardwareNodeData } from '../../types/graph';
 import { useGraphStore } from '../../stores/graphStore';
 import NodeActions from './NodeActions';
 import WarningBadge from './WarningBadge';
+import type { ValidationStatus } from '../../types/graph';
 
 const HARDWARE_COLORS: Record<string, string> = {
   sbc: 'var(--color-sbc)',
@@ -32,6 +33,7 @@ function HardwareNode({ data, selected, id }: NodeProps) {
   const isPrimary = !!(nodeData as Record<string, unknown>).isPrimary;
   const isMcu = !!(nodeData as Record<string, unknown>).isMcu;
   const collapsed = !!nodeData.collapsed;
+  const validationStatus = (nodeData.validationStatus || 'valid') as ValidationStatus;
 
   // Hide the label when it duplicates the type badge:
   // - SBC not enabled as MCU (label is always "SBC")
@@ -62,7 +64,7 @@ function HardwareNode({ data, selected, id }: NodeProps) {
 
   return (
     <div
-      className={`kwc-node kwc-hardware-container ${shape} ${selected ? 'selected' : ''} ${nodeData.hasErrors ? 'kwc-error' : ''}`}
+      className={`kwc-node kwc-hardware-container ${shape} ${selected ? 'selected' : ''} ${nodeData.hasErrors ? 'kwc-error' : ''} ${validationStatus === 'warning' ? 'kwc-warning' : ''}`}
       style={{
         borderColor: color,
         borderWidth: isPrimary ? 3 : 2,
@@ -115,7 +117,7 @@ function HardwareNode({ data, selected, id }: NodeProps) {
         style={{ backgroundColor: `${color}22`, borderBottom: `1px solid ${color}44` }}
       >
         <div className="flex items-start gap-2 min-w-0 flex-1">
-          {nodeData.hasErrors && <WarningBadge />}
+          <WarningBadge status={validationStatus} />
           {nodeData.customImage ? (
             <img src={nodeData.customImage} alt="" className="w-5 h-5 object-contain shrink-0" />
           ) : (

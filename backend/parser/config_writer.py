@@ -124,6 +124,10 @@ def _sections_match(original: ConfigSection, submitted: ConfigSection) -> bool:
         return False
     if original.is_commented_out != submitted.is_commented_out:
         return False
+    if original.header_comments != submitted.header_comments:
+        return False
+    if original.trailing_comments != submitted.trailing_comments:
+        return False
 
     # Filter out _comment_ pseudo-params for comparison — they represent
     # original inline comments that the frontend doesn't modify.

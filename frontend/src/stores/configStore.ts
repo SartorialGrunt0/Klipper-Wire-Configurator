@@ -4,19 +4,28 @@ import type { ConfigFile, ConfigSection, ConfigParam, ValidationResult, SectionS
 /** Debounced revalidation timer — shared across all mutation methods. */
 let _revalidateTimer: ReturnType<typeof setTimeout> | null = null;
 
+async function _revalidateFile(
+  filename: string,
+  get: () => ConfigState,
+  set: (partial: Partial<ConfigState> | ((s: ConfigState) => Partial<ConfigState>)) => void,
+) {
+  const cf = get().configFiles[filename];
+  if (!cf) return;
+  const api = await import('../services/api');
+  try {
+    const result = await api.validateConfig(cf);
+    set((state) => ({
+      validation: { ...state.validation, [filename]: result },
+    }));
+  } catch {
+    // Validation API unavailable — skip silently
+  }
+}
+
 async function _revalidateAll(get: () => ConfigState, set: (partial: Partial<ConfigState> | ((s: ConfigState) => Partial<ConfigState>)) => void) {
   const { configFiles } = get();
-  // Dynamically import api to avoid circular deps
-  const api = await import('../services/api');
-  for (const [filename, cf] of Object.entries(configFiles)) {
-    try {
-      const result = await api.validateConfig(cf);
-      set((state) => ({
-        validation: { ...state.validation, [filename]: result },
-      }));
-    } catch {
-      // Validation API unavailable — skip silently
-    }
+  for (const filename of Object.keys(configFiles)) {
+    await _revalidateFile(filename, get, set);
   }
 }
 
@@ -85,6 +94,7 @@ interface ConfigState {
   /* Helpers */
   getSection: (filename: string, fullHeader: string) => ConfigSection | undefined;
   getSectionErrors: (fullHeader: string) => string[];
+  revalidateFile: (filename: string) => Promise<void>;
 }
 
 export const useConfigStore = create<ConfigState>((set, get) => ({
@@ -119,7 +129,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
   setSelectedSection: (header) => set({ selectedSection: header }),
 
-  addSection: (filename, section) =>
+  addSection: (filename, section) => {
     set((s) => {
       const cf = s.configFiles[filename];
       if (!cf) return s;
@@ -133,9 +143,11 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           },
         },
       };
-    }),
+    });
+    scheduleRevalidation(get, set);
+  },
 
-  removeSection: (filename, fullHeader) =>
+  removeSection: (filename, fullHeader) => {
     set((s) => {
       const cf = s.configFiles[filename];
       if (!cf) return s;
@@ -149,7 +161,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           },
         },
       };
-    }),
+    });
+    scheduleRevalidation(get, set);
+  },
 
   updateSectionParam: (filename, fullHeader, key, value) => {
     set((s) => {
@@ -411,5 +425,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       }
     }
     return errors;
+  },
+
+  revalidateFile: async (filename) => {
+    await _revalidateFile(filename, get, set);
   },
 }));

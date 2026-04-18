@@ -158,20 +158,28 @@ body {
   box-shadow: 0 0 12px rgba(248, 113, 113, 0.3);
 }
 
+.kwc-warning {
+  border-color: var(--color-warning) !important;
+  box-shadow: 0 0 12px rgba(251, 191, 36, 0.22);
+}
+
 .kwc-warning-badge {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 14px;
   height: 14px;
-  color: var(--color-error);
   flex: 0 0 auto;
+  border-radius: 9999px;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.14);
 }
 
 .kwc-warning-badge-icon {
-  width: 14px;
-  height: 14px;
+  width: 4px;
+  height: 4px;
   display: block;
+  border-radius: 9999px;
+  background: rgba(255,255,255,0.85);
 }
 
 /* Hardware container node — must not clip children rendered inside by ReactFlow */

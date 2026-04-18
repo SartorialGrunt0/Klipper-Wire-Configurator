@@ -9,6 +9,7 @@
 
 import type { ConfigFile, ConfigSection, ConfigParam, SectionSchema, ValidationResult } from '../types/config';
 import type { HardwareType, CommunicationType } from '../types/config';
+import { getBoardTypeMarker } from './boardTypeMarker';
 
 // Section types that are sub-components (attached to hardware)
 const SUB_COMPONENT_TYPES = new Set([
@@ -291,7 +292,7 @@ export function buildProjectGraph(
       const name = sec.section_name || '';
       // Skip duplicates (same MCU defined in multiple files)
       if (mcuByName.has(name)) continue;
-      const hwType = classifyMcuName(name);
+      const hwType = getBoardTypeMarker(sec.header_comments) || classifyMcuName(name);
       const commType = detectCommType(sec);
       const suppressed = isSectionSuppressed(sec);
       const info: McuInfo = {

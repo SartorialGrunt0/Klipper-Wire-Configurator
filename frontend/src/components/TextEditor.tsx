@@ -4,6 +4,7 @@ import { useGraphStore } from '../stores/graphStore';
 import * as api from '../services/api';
 import ApplyWarningDialog from './dialogs/ApplyWarningDialog';
 import type { ExampleConfig, HardwareType, CommunicationType } from '../types/config';
+import { getBoardTypeMarker } from '../utils/boardTypeMarker';
 
 interface SearchResult {
   file: string;
@@ -447,7 +448,7 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
    * Detects MCU sections to classify the hardware type and creates communication
    * edges back to the SBC node.
    */
-  const buildGraphForNewFile = (filename: string, sections: Array<{ section_type: string; section_name: string; full_header: string; params: Array<{ key: string; value: string; is_commented_out: boolean }> }>) => {
+  const buildGraphForNewFile = (filename: string, sections: Array<{ section_type: string; section_name: string; full_header: string; header_comments?: string[]; params: Array<{ key: string; value: string; is_commented_out: boolean }> }>) => {
     const graphStore = useGraphStore.getState();
     const schemas = useConfigStore.getState().schemas;
 
@@ -461,8 +462,8 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
     // Classify hardware type from MCU name
     const primaryMcu = mcuSections[0];
     const mcuName = primaryMcu.section_name || '';
-    let hwType: HardwareType = 'mainboard';
-    if (mcuName) {
+    let hwType: HardwareType = getBoardTypeMarker(primaryMcu.header_comments) || 'mainboard';
+    if (hwType === 'mainboard' && mcuName) {
       const lower = mcuName.toLowerCase();
       if (lower.includes('host') || lower.includes('rpi') || lower.includes('cb1') || lower.includes('linux')) {
         hwType = 'sbc';

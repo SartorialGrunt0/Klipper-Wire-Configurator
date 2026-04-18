@@ -31,24 +31,34 @@ import Toolbar from './components/Toolbar';
 import AddMenu from './components/AddMenu';
 import UnsavedChangesDialog from './components/dialogs/UnsavedChangesDialog';
 
-import type { AppNode } from './types/graph';
+import type { AppNode, ValidationStatus } from './types/graph';
+import { combineValidationStatuses } from './utils/validationStatus';
 
-function getDirectNodeError(node: AppNode, errorSections: Set<string>): boolean {
+function getDirectNodeStatus(
+  node: AppNode,
+  sectionStatuses: Map<string, ValidationStatus>,
+): ValidationStatus {
   const nodeData = node.data as Record<string, unknown>;
 
   if (node.type === 'subComponent' || node.type === 'feature') {
     const sectionHeader = nodeData.sectionHeader;
-    return typeof sectionHeader === 'string' && errorSections.has(sectionHeader);
+    return typeof sectionHeader === 'string'
+      ? (sectionStatuses.get(sectionHeader) || 'valid')
+      : 'valid';
   }
 
   if (node.type === 'group') {
     const children = Array.isArray(nodeData.children)
       ? nodeData.children as Array<{ sectionHeader?: string }>
       : [];
-    return children.some((child) => typeof child.sectionHeader === 'string' && errorSections.has(child.sectionHeader));
+    return combineValidationStatuses(children.map((child) => (
+      typeof child.sectionHeader === 'string'
+        ? (sectionStatuses.get(child.sectionHeader) || 'valid')
+        : 'valid'
+    )));
   }
 
-  return false;
+  return 'valid';
 }
 
 const nodeTypes: NodeTypes = {
@@ -253,11 +263,15 @@ export default function App() {
   }, [nodes, edges]);
 
   useEffect(() => {
-    const errorSections = new Set<string>();
+    const sectionStatuses = new Map<string, ValidationStatus>();
     for (const result of Object.values(validation)) {
-      for (const err of result.errors) {
-        if (err.severity === 'error' && err.section) {
-          errorSections.add(err.section);
+      for (const issue of result.errors) {
+        if (!issue.section) continue;
+        const currentStatus = sectionStatuses.get(issue.section) || 'valid';
+        if (issue.severity === 'error') {
+          sectionStatuses.set(issue.section, 'error');
+        } else if (issue.severity === 'warning' && currentStatus !== 'error') {
+          sectionStatuses.set(issue.section, 'warning');
         }
       }
     }
@@ -272,43 +286,76 @@ export default function App() {
       childrenByParent.set(node.parentId, siblings);
     }
 
-    const errorByNodeId = new Map<string, boolean>();
+    const statusByNodeId = new Map<string, ValidationStatus>();
     const stack = new Set<string>();
 
-    const computeNodeError = (nodeId: string): boolean => {
-      const cached = errorByNodeId.get(nodeId);
+    const computeNodeStatus = (nodeId: string): ValidationStatus => {
+      const cached = statusByNodeId.get(nodeId);
       if (cached !== undefined) return cached;
-      if (stack.has(nodeId)) return false;
+      if (stack.has(nodeId)) return 'valid';
 
       stack.add(nodeId);
       const node = nodesById.get(nodeId);
       if (!node) {
         stack.delete(nodeId);
-        return false;
+        return 'valid';
       }
 
-      let hasErrors = getDirectNodeError(node, errorSections);
+      const directStatus = getDirectNodeStatus(node, sectionStatuses);
       const childNodes = childrenByParent.get(nodeId) || [];
-      if (!hasErrors) {
-        hasErrors = childNodes.some((child) => computeNodeError(child.id));
-      }
+      const childStatuses = childNodes.map((child) => computeNodeStatus(child.id));
+      const nextStatus = combineValidationStatuses([directStatus, ...childStatuses]);
 
       stack.delete(nodeId);
-      errorByNodeId.set(nodeId, hasErrors);
-      return hasErrors;
+      statusByNodeId.set(nodeId, nextStatus);
+      return nextStatus;
     };
 
     let changed = false;
     const nextNodes = nodes.map((node) => {
-      const nextHasErrors = computeNodeError(node.id);
-      const currentHasErrors = !!(node.data as Record<string, unknown>).hasErrors;
-      if (currentHasErrors === nextHasErrors) return node;
+      const nextStatus = computeNodeStatus(node.id);
+      const currentData = node.data as Record<string, unknown>;
+      const currentHasErrors = !!currentData.hasErrors;
+      const currentStatus = (currentData.validationStatus as ValidationStatus | undefined) || 'valid';
+      let nextChildren = currentData.children;
+
+      if (node.type === 'group' && Array.isArray(currentData.children)) {
+        const currentChildren = currentData.children as Array<Record<string, unknown>>;
+        const updatedChildren = currentChildren.map((child) => {
+          const sectionHeader = child.sectionHeader;
+          const childStatus = typeof sectionHeader === 'string'
+            ? (sectionStatuses.get(sectionHeader) || 'valid')
+            : 'valid';
+          const childHasErrors = childStatus === 'error';
+          if (child.validationStatus === childStatus && !!child.hasErrors === childHasErrors) {
+            return child;
+          }
+          return {
+            ...child,
+            validationStatus: childStatus,
+            hasErrors: childHasErrors,
+          };
+        });
+        if (updatedChildren.some((child, index) => child !== currentChildren[index])) {
+          nextChildren = updatedChildren;
+        }
+      }
+
+      if (
+        currentHasErrors === (nextStatus === 'error')
+        && currentStatus === nextStatus
+        && nextChildren === currentData.children
+      ) {
+        return node;
+      }
       changed = true;
       return {
         ...node,
         data: {
           ...node.data,
-          hasErrors: nextHasErrors,
+          hasErrors: nextStatus === 'error',
+          validationStatus: nextStatus,
+          ...(nextChildren !== currentData.children ? { children: nextChildren } : {}),
         },
       } as AppNode;
     });

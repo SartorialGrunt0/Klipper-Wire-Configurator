@@ -739,6 +739,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         mcuName: mcuName ?? '',
         sections: [],
         hasErrors: false,
+        validationStatus: 'valid',
       },
     };
     set((s) => ({ nodes: [...s.nodes, node as AppNode] }));
@@ -773,6 +774,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
           parentHardwareId: null,
           configFile: resolvedFile,
           hasErrors: false,
+          validationStatus: 'valid',
         },
       };
       set((s) => ({ nodes: [...s.nodes, node as AppNode] }));
@@ -804,6 +806,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         parentHardwareId: parentId,
         configFile: resolvedFile,
         hasErrors: false,
+          validationStatus: 'valid',
       },
     };
 
@@ -854,6 +857,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
           parentId: null,
           configFile: resolvedFile,
           hasErrors: false,
+          validationStatus: 'valid',
         },
       };
       set((s) => ({ nodes: [...s.nodes, node as AppNode] }));
@@ -884,6 +888,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         parentId,
         configFile: resolvedFile,
         hasErrors: false,
+          validationStatus: 'valid',
       },
     };
 
@@ -947,6 +952,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         parentHardwareId: parentId,
         configFile: resolvedFile,
         hasErrors: false,
+        validationStatus: 'valid',
       },
     };
 
@@ -1248,6 +1254,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         color,
         collapsed: false,
         hasErrors: false,
+        validationStatus: 'valid',
       },
     };
     set((s) => ({ nodes: [...s.nodes, node as AppNode] }));

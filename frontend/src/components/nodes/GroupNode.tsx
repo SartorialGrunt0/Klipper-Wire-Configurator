@@ -5,6 +5,8 @@ import { useGraphStore } from '../../stores/graphStore';
 import { useConfigStore } from '../../stores/configStore';
 import NodeActions from './NodeActions';
 import WarningBadge from './WarningBadge';
+import type { ValidationStatus } from '../../types/graph';
+import { getValidationStatusColor } from '../../utils/validationStatus';
 const GROUP_COLORS: Record<string, string> = {
   stepper: '#3b82f6',
   stepper_driver: '#6366f1',
@@ -32,6 +34,7 @@ function GroupNode({ data, selected, id }: NodeProps) {
   const isFeature = nodeData.isFeature;
   const children: GroupChildItem[] = nodeData.children || [];
   const isEmbedded = !!nodeData.parentHardwareId;
+  const validationStatus = (nodeData.validationStatus || 'valid') as ValidationStatus;
 
   const { setSelectedNode, removeFromGroup } = useGraphStore();
   const { setSelectedSection } = useConfigStore();
@@ -49,7 +52,7 @@ function GroupNode({ data, selected, id }: NodeProps) {
 
   return (
     <div
-      className={`kwc-compact-tile rounded-lg ${selected ? 'selected' : ''} ${nodeData.hasErrors ? 'kwc-error' : ''}`}
+      className={`kwc-compact-tile rounded-lg ${selected ? 'selected' : ''} ${nodeData.hasErrors ? 'kwc-error' : ''} ${validationStatus === 'warning' ? 'kwc-warning' : ''}`}
       style={{
         borderColor: color,
         borderStyle: isFeature ? 'dashed' : 'solid',
@@ -85,7 +88,7 @@ function GroupNode({ data, selected, id }: NodeProps) {
         className="kwc-tile-header"
         style={{ backgroundColor: `${color}22`, borderLeft: `3px solid ${color}` }}
       >
-        {nodeData.hasErrors && <WarningBadge />}
+        <WarningBadge status={validationStatus} />
         <span className="text-xs font-semibold truncate" style={{ color }}>
           {nodeData.label}
         </span>
@@ -105,6 +108,10 @@ function GroupNode({ data, selected, id }: NodeProps) {
               key={`${child.configFile || 'cfg'}::${child.sectionHeader}::${idx}`}
               className="flex items-center gap-1 group/child"
             >
+              <span
+                className="w-1.5 h-1.5 rounded-full shrink-0"
+                style={{ backgroundColor: getValidationStatusColor(child.validationStatus || 'valid') }}
+              />
               <div
                 className="text-[10px] truncate px-1 py-0.5 rounded cursor-pointer hover:bg-[var(--color-bg-primary)] flex-1 min-w-0"
                 style={{ color: child.isSuppressed ? 'var(--color-text-secondary)' : undefined, opacity: child.isSuppressed ? 0.5 : 1 }}
