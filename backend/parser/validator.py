@@ -210,6 +210,16 @@ def _validate_param_value(param, param_def, section, result):
     """Validate a parameter value against its definition."""
     value = param.value.strip()
     if not value:
+        # Empty values are invalid for enum params — they must be one of the allowed options
+        if param_def.param_type == ParamType.ENUM and param_def.enum_values:
+            result.errors.append(ValidationError(
+                severity="error",
+                section=section.full_header,
+                param=param.key,
+                message=f"Empty value for '{param.key}'. "
+                        f"Expected one of: {', '.join(param_def.enum_values)}",
+                line_number=param.line_number,
+            ))
         return
 
     if param_def.param_type == ParamType.INT:
