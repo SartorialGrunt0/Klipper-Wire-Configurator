@@ -232,6 +232,12 @@ export interface DeviceList {
   uart: Array<{ path: string; description: string; by_id: string }>;
 }
 
+export interface CanbusQueryResult {
+  uuids: string[];
+  interface: string;
+  error: string | null;
+}
+
 export interface NativeConfigFile {
   name: string;
   path: string;
@@ -245,6 +251,10 @@ export async function getNativeStatus(): Promise<NativeStatus> {
 
 export async function listNativeDevices(): Promise<DeviceList> {
   return request('/native/devices');
+}
+
+export async function queryCanbusUuids(iface = 'can0'): Promise<CanbusQueryResult> {
+  return request(`/native/canbus-uuids?interface=${encodeURIComponent(iface)}`);
 }
 
 export async function getNativeSettings(): Promise<{ config_path: string }> {

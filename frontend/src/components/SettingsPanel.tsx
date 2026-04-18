@@ -704,10 +704,59 @@ export default function SettingsPanel() {
                 const COLORS = { usb: 'var(--color-usb)', canbus: 'var(--color-canbus)', uart: 'var(--color-uart)' };
                 const LABELS = { usb: 'USB', canbus: 'CAN Bus', uart: 'UART' };
                 const DESCS = { usb: 'Universal Serial Bus', canbus: 'Controller Area Network', uart: 'Universal Async Receiver-Transmitter' };
+                // Params that should be active for each comm type
+                const SERIAL_PARAMS = ['serial', 'baud'];
+                const CANBUS_PARAMS = ['canbus_uuid', 'canbus_interface'];
                 return (
                   <button
                     key={type}
-                    onClick={() => updateEdgeData(selectedEdgeId, { commType: type } as Partial<AppEdge['data']>)}
+                    onClick={() => {
+                      updateEdgeData(selectedEdgeId, { commType: type } as Partial<AppEdge['data']>);
+                      // Toggle MCU params: comment/uncomment based on selected comm type
+                      if (mcuSection && targetConfigFile) {
+                        const wantSerial = type === 'usb' || type === 'uart';
+                        const wantCanbus = type === 'canbus';
+                        for (const param of mcuSection.params) {
+                          if (param.key === '_comment_') continue;
+                          if (SERIAL_PARAMS.includes(param.key)) {
+                            // Ensure serial/baud params exist and are uncommented for USB/UART
+                            if (wantSerial && param.is_commented_out) {
+                              toggleParamCommented(targetConfigFile, mcuSection.full_header, param.key);
+                            } else if (!wantSerial && !param.is_commented_out) {
+                              toggleParamCommented(targetConfigFile, mcuSection.full_header, param.key);
+                            }
+                          } else if (CANBUS_PARAMS.includes(param.key)) {
+                            // Ensure canbus params exist and are uncommented for CAN
+                            if (wantCanbus && param.is_commented_out) {
+                              toggleParamCommented(targetConfigFile, mcuSection.full_header, param.key);
+                            } else if (!wantCanbus && !param.is_commented_out) {
+                              toggleParamCommented(targetConfigFile, mcuSection.full_header, param.key);
+                            }
+                          }
+                        }
+                        // Add missing params for the selected comm type
+                        const existingKeys = new Set(mcuSection.params.map((p) => p.key));
+                        if (wantSerial) {
+                          if (!existingKeys.has('serial')) {
+                            addParam(targetConfigFile, mcuSection.full_header, {
+                              key: 'serial', value: '', is_commented_out: false, comment: '',
+                            });
+                          }
+                        }
+                        if (wantCanbus) {
+                          if (!existingKeys.has('canbus_uuid')) {
+                            addParam(targetConfigFile, mcuSection.full_header, {
+                              key: 'canbus_uuid', value: '', is_commented_out: false, comment: '',
+                            });
+                          }
+                          if (!existingKeys.has('canbus_interface')) {
+                            addParam(targetConfigFile, mcuSection.full_header, {
+                              key: 'canbus_interface', value: 'can0', is_commented_out: false, comment: '',
+                            });
+                          }
+                        }
+                      }
+                    }}
                     className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-all ${
                       commType === type
                         ? 'border-transparent text-[var(--color-bg-primary)]'
@@ -739,6 +788,7 @@ export default function SettingsPanel() {
                       param={param}
                       schema={paramSchema}
                       isMcuParam
+                      commType={commType}
                       onChange={(value) => updateSectionParam(targetConfigFile, mcuSection.full_header, param.key, value)}
                       onRemove={() => removeParam(targetConfigFile, mcuSection.full_header, param.key)}
                     />
@@ -1060,12 +1110,14 @@ function DevicePicker({
   paramKey,
   currentValue,
   onSelect,
+  commType,
 }: {
   paramKey: string;
   currentValue: string;
   onSelect: (value: string) => void;
+  commType?: string;
 }) {
-  const { isNative, devices, devicesLoading, refreshDevices } = useNativeStore();
+  const { isNative, devices, devicesLoading, refreshDevices, canbusQuery, canbusQueryLoading, queryCanbusUuids } = useNativeStore();
 
   useEffect(() => {
     if (isNative && !devices && !devicesLoading) {
@@ -1078,7 +1130,29 @@ function DevicePicker({
   const deviceType = DEVICE_PARAM_MAP[paramKey];
   if (!deviceType) return null;
 
-  if (deviceType === 'usb_serial') {
+  // For serial param: show USB or UART devices depending on comm type
+  if (paramKey === 'serial') {
+    if (commType === 'uart') {
+      // Show UART devices when comm type is UART
+      if (devices.uart.length === 0) return null;
+      return (
+        <div className="mt-1">
+          <select
+            value=""
+            onChange={(e) => { if (e.target.value) onSelect(e.target.value); }}
+            className="w-full px-2 py-1 rounded text-[10px] bg-[var(--color-bg-tertiary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)]"
+          >
+            <option value="">Select UART device...</option>
+            {devices.uart.map((d) => (
+              <option key={d.path} value={d.path}>
+                {d.description} ({d.path})
+              </option>
+            ))}
+          </select>
+        </div>
+      );
+    }
+    // Default: show USB serial devices
     if (devices.usb_serial.length === 0) return null;
     return (
       <div className="mt-1">
@@ -1118,7 +1192,44 @@ function DevicePicker({
         </div>
       );
     }
-    // canbus_uuid — no auto-detection of UUIDs, but show info
+    // canbus_uuid — show auto-detected UUIDs
+    if (paramKey === 'canbus_uuid') {
+      return (
+        <div className="mt-1 space-y-1">
+          <button
+            onClick={() => queryCanbusUuids('can0')}
+            disabled={canbusQueryLoading}
+            className="w-full px-2 py-1 rounded text-[10px] bg-[var(--color-bg-tertiary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)] transition-colors"
+          >
+            {canbusQueryLoading ? 'Scanning CAN bus...' : 'Detect CAN bus UUIDs'}
+          </button>
+          {canbusQuery?.error && (
+            <p className="text-[10px] text-[var(--color-error)]">
+              ⚠ {canbusQuery.error}
+            </p>
+          )}
+          {canbusQuery && canbusQuery.uuids.length > 0 && (
+            <select
+              value=""
+              onChange={(e) => { if (e.target.value) onSelect(e.target.value); }}
+              className="w-full px-2 py-1 rounded text-[10px] bg-[var(--color-bg-tertiary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)]"
+            >
+              <option value="">Select detected UUID...</option>
+              {canbusQuery.uuids.map((uuid) => (
+                <option key={uuid} value={uuid}>
+                  {uuid}
+                </option>
+              ))}
+            </select>
+          )}
+          {canbusQuery && canbusQuery.uuids.length === 0 && !canbusQuery.error && (
+            <p className="text-[10px] text-[var(--color-text-secondary)] italic">
+              No CAN bus devices found on {canbusQuery.interface}
+            </p>
+          )}
+        </div>
+      );
+    }
     return null;
   }
 
@@ -1154,6 +1265,7 @@ function ParamField({
   onChange,
   onRemove,
   isMcuParam,
+  commType,
 }: {
   param: ConfigParam;
   schema?: ParamSchema;
@@ -1161,6 +1273,7 @@ function ParamField({
   onChange: (value: string) => void;
   onRemove: () => void;
   isMcuParam?: boolean;
+  commType?: string;
 }) {
   const isRequired = schema?.required ?? false;
   const hasError = (isRequired && !param.value.trim()) || !!pinConflict;
@@ -1248,7 +1361,7 @@ function ParamField({
 
       {/* Device picker for MCU serial/CAN/UART params */}
       {isMcuParam && param.key in DEVICE_PARAM_MAP && (
-        <DevicePicker paramKey={param.key} currentValue={param.value} onSelect={onChange} />
+        <DevicePicker paramKey={param.key} currentValue={param.value} onSelect={onChange} commType={commType} />
       )}
     </div>
   );

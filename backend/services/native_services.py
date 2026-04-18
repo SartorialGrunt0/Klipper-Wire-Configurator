@@ -12,6 +12,9 @@ import subprocess
 from pathlib import Path
 from typing import Any, TypedDict
 
+# Regex for extracting CAN bus UUIDs from canbus_query.py output
+_CANBUS_UUID_RE = re.compile(r"canbus_uuid=([0-9a-fA-F]+)")
+
 
 # ── Platform detection ──────────────────────────────────────────
 
@@ -117,6 +120,85 @@ def get_all_devices() -> dict:
         "can": list_can_interfaces(),
         "uart": list_uart_devices(),
     }
+
+
+def query_canbus_uuids(interface: str = "can0") -> dict:
+    """Query CAN bus for device UUIDs using Klipper's canbus_query.py.
+
+    First checks if the CAN interface exists and is up, then runs the query script.
+    Returns a dict with 'uuids' list and optional 'error' message.
+    """
+    result: dict = {"uuids": [], "interface": interface, "error": None}
+
+    # Check if interface exists using ip command
+    try:
+        check = subprocess.run(
+            ["ip", "-s", "-d", "link", "show", interface],
+            capture_output=True, text=True, timeout=5,
+        )
+        if check.returncode != 0 or "does not exist" in check.stderr:
+            result["error"] = f"CAN interface '{interface}' does not exist. " \
+                              f"Ensure the CAN interface is configured and up."
+            return result
+    except (subprocess.SubprocessError, OSError) as exc:
+        result["error"] = f"Failed to check CAN interface: {exc}"
+        return result
+
+    # Find the canbus_query.py script
+    user = getpass.getuser()
+    script_candidates = [
+        Path(f"/home/{user}/klipper/scripts/canbus_query.py"),
+        Path("/home/pi/klipper/scripts/canbus_query.py"),
+    ]
+    klippy_env_candidates = [
+        Path(f"/home/{user}/klippy-env/bin/python"),
+        Path("/home/pi/klippy-env/bin/python"),
+    ]
+
+    script_path = None
+    for candidate in script_candidates:
+        if candidate.is_file():
+            script_path = candidate
+            break
+
+    python_path = None
+    for candidate in klippy_env_candidates:
+        if candidate.is_file():
+            python_path = candidate
+            break
+
+    if not script_path:
+        result["error"] = "Klipper canbus_query.py script not found. " \
+                          "Ensure Klipper is installed."
+        return result
+
+    if not python_path:
+        # Fall back to system python
+        python_path = Path("python3")
+
+    # Run the canbus query
+    try:
+        query = subprocess.run(
+            [str(python_path), str(script_path), interface],
+            capture_output=True, text=True, timeout=10,
+        )
+        # Parse output for UUIDs — format: "Found canbus_uuid=XXXXXXXXXXXX, Application: Klipper"
+        for line in query.stdout.splitlines():
+            match = _CANBUS_UUID_RE.search(line)
+            if match:
+                result["uuids"].append(match.group(1))
+        if query.returncode != 0 and not result["uuids"]:
+            stderr_msg = query.stderr.strip()
+            if stderr_msg:
+                result["error"] = f"CAN bus query failed: {stderr_msg}"
+            else:
+                result["error"] = "CAN bus query returned no devices."
+    except subprocess.TimeoutExpired:
+        result["error"] = "CAN bus query timed out. Check that the CAN interface is active."
+    except (subprocess.SubprocessError, OSError) as exc:
+        result["error"] = f"Failed to run CAN bus query: {exc}"
+
+    return result
 
 
 # ── Config file I/O ────────────────────────────────────────────

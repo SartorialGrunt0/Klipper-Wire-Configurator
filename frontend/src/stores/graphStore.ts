@@ -482,27 +482,151 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     const d = node.data as Record<string, unknown>;
     let cloneData = { ...node.data };
 
-    if (node.type === 'subComponent' || node.type === 'feature') {
+    // Helper: build set of all existing section headers across all config files
+    const buildAllHeaders = () => {
+      const allHeaders = new Set<string>();
+      for (const cfx of Object.values(configStore.configFiles)) {
+        for (const s of cfx.sections) allHeaders.add(s.full_header);
+      }
+      return allHeaders;
+    };
+
+    // Helper: generate a unique section name by incrementing a counter suffix
+    const incrementSectionName = (originalSection: { section_type: string; section_name: string; full_header: string }, allHeaders: Set<string>) => {
+      const baseName = originalSection.section_name || originalSection.section_type;
+      let counter = 2;
+      let newName = `${baseName}_${counter}`;
+      let newHeader = `${originalSection.section_type} ${newName}`;
+      while (allHeaders.has(newHeader)) {
+        counter++;
+        newName = `${baseName}_${counter}`;
+        newHeader = `${originalSection.section_type} ${newName}`;
+      }
+      // Add to set so subsequent calls within same batch don't collide
+      allHeaders.add(newHeader);
+      return { newName, newHeader };
+    };
+
+    if (node.type === 'hardware') {
+      // Duplicate hardware node: create a new config file, copy all sections with incremented names
+      const srcConfigFile = d.configFile as string | undefined;
+      const srcLabel = (d.label as string) || '';
+      const srcMcuName = (d.mcuName as string) || '';
+      const hwType = (d.hardwareType as string) || 'other';
+
+      if (srcConfigFile) {
+        // Generate a unique MCU name
+        const allMcuNames = new Set<string>();
+        for (const cfx of Object.values(configStore.configFiles)) {
+          for (const s of cfx.sections) {
+            if (s.section_type === 'mcu') allMcuNames.add(s.section_name);
+          }
+        }
+        const baseMcuName = srcMcuName || srcLabel.toLowerCase().replace(/\s+/g, '_') || 'mcu';
+        let mcuCounter = 2;
+        let newMcuName = `${baseMcuName}_${mcuCounter}`;
+        while (allMcuNames.has(newMcuName)) {
+          mcuCounter++;
+          newMcuName = `${baseMcuName}_${mcuCounter}`;
+        }
+
+        // Generate a unique config filename
+        const existingFiles = new Set(Object.keys(configStore.configFiles));
+        const baseFilename = newMcuName.toLowerCase().replace(/\s+/g, '_');
+        let newConfigFile = `${baseFilename}.cfg`;
+        let fileCounter = 2;
+        while (existingFiles.has(newConfigFile)) {
+          newConfigFile = `${baseFilename}_${fileCounter}.cfg`;
+          fileCounter++;
+        }
+
+        // Copy sections from source config, renaming MCU section
+        const srcCf = configStore.configFiles[srcConfigFile];
+        if (srcCf) {
+          const newSections = srcCf.sections
+            .filter((s) => s.section_type !== 'include')
+            .map((s) => {
+              if (s.section_type === 'mcu') {
+                return {
+                  ...s,
+                  section_name: newMcuName,
+                  full_header: `mcu ${newMcuName}`,
+                  params: s.params.map((p) => ({ ...p })),
+                };
+              }
+              return {
+                ...s,
+                params: s.params.map((p) => ({ ...p })),
+              };
+            });
+
+          // Create the new config file
+          configStore.setConfigFile(newConfigFile, {
+            filename: newConfigFile,
+            sections: newSections,
+            includes: [],
+            header_comments: [...srcCf.header_comments],
+          });
+
+          // Update clone data
+          (cloneData as Record<string, unknown>).configFile = newConfigFile;
+          (cloneData as Record<string, unknown>).mcuName = newMcuName;
+          (cloneData as Record<string, unknown>).label = newMcuName;
+          (cloneData as Record<string, unknown>).isPrimary = false;
+
+          // Clone the hardware node first
+          const clone: AppNode = {
+            ...node,
+            id: newId,
+            position: { x: node.position.x + 40, y: node.position.y + 40 },
+            data: cloneData,
+            selected: false,
+          } as AppNode;
+          set((s) => ({ nodes: sortNodesParentsFirst([...s.nodes, clone]) }));
+
+          // Copy child nodes (sub-components, features, groups) from the original hardware node
+          const childNodes = state.nodes.filter((n) => n.parentId === id);
+          for (const child of childNodes) {
+            const childId = nextNodeId();
+            const childData = { ...child.data } as Record<string, unknown>;
+            childData.configFile = newConfigFile;
+            if (child.type === 'subComponent' || child.type === 'feature') {
+              childData.parentHardwareId = newId;
+            } else if (child.type === 'group') {
+              childData.parentHardwareId = newId;
+            }
+            const childClone: AppNode = {
+              ...child,
+              id: childId,
+              parentId: newId,
+              position: { ...child.position },
+              data: childData,
+              selected: false,
+            } as AppNode;
+            set((s) => ({ nodes: sortNodesParentsFirst([...s.nodes, childClone]) }));
+          }
+
+          // Add communication edge from SBC if one exists for the original
+          const sbcNode = state.nodes.find(
+            (n) => n.type === 'hardware' && (n.data as Record<string, unknown>).hardwareType === 'sbc',
+          );
+          if (sbcNode && hwType !== 'sbc') {
+            const commType = detectNodeCommType(cloneData as Record<string, unknown>);
+            get().addCommunicationEdge(sbcNode.id, newId, commType);
+          }
+
+          return;
+        }
+      }
+    } else if (node.type === 'subComponent' || node.type === 'feature') {
       const configFile = d.configFile as string | undefined;
       const sectionHeader = d.sectionHeader as string | undefined;
       if (configFile && sectionHeader) {
         const cf = configStore.configFiles[configFile];
         const originalSection = cf?.sections.find((s) => s.full_header === sectionHeader);
         if (originalSection) {
-          // Create a unique section header for the duplicate
-          const baseName = originalSection.section_name || originalSection.section_type;
-          let counter = 2;
-          let newName = `${baseName}_${counter}`;
-          let newHeader = `${originalSection.section_type} ${newName}`;
-          const allHeaders = new Set<string>();
-          for (const cfx of Object.values(configStore.configFiles)) {
-            for (const s of cfx.sections) allHeaders.add(s.full_header);
-          }
-          while (allHeaders.has(newHeader)) {
-            counter++;
-            newName = `${baseName}_${counter}`;
-            newHeader = `${originalSection.section_type} ${newName}`;
-          }
+          const allHeaders = buildAllHeaders();
+          const { newName, newHeader } = incrementSectionName(originalSection, allHeaders);
           // Add the duplicated section to the config store
           configStore.addSection(configFile, {
             ...originalSection,
@@ -517,24 +641,13 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     } else if (node.type === 'group') {
       const children = d.children as Array<{ sectionType: string; label: string; sectionHeader: string; configFile?: string }> | undefined;
       if (children) {
+        const allHeaders = buildAllHeaders();
         const newChildren = children.map((child) => {
           const childFile = child.configFile || (d.configFile as string);
           const cf = configStore.configFiles[childFile];
           const originalSection = cf?.sections.find((s) => s.full_header === child.sectionHeader);
           if (originalSection) {
-            const baseName = originalSection.section_name || originalSection.section_type;
-            let counter = 2;
-            let newName = `${baseName}_${counter}`;
-            let newHeader = `${originalSection.section_type} ${newName}`;
-            const allHeaders = new Set<string>();
-            for (const cfx of Object.values(configStore.configFiles)) {
-              for (const s of cfx.sections) allHeaders.add(s.full_header);
-            }
-            while (allHeaders.has(newHeader)) {
-              counter++;
-              newName = `${baseName}_${counter}`;
-              newHeader = `${originalSection.section_type} ${newName}`;
-            }
+            const { newName, newHeader } = incrementSectionName(originalSection, allHeaders);
             configStore.addSection(childFile, {
               ...originalSection,
               section_name: newName,

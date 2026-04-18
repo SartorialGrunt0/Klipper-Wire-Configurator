@@ -16,6 +16,7 @@ from services.native_services import (
     get_default_config_path,
     is_native_platform,
     list_config_files,
+    query_canbus_uuids,
     read_config_file,
     write_config_file,
     save_layout,
@@ -51,6 +52,14 @@ async def list_devices():
     if not is_native_platform():
         raise HTTPException(status_code=501, detail="Device detection is only available on the Raspberry Pi")
     return get_all_devices()
+
+
+@router.get("/canbus-uuids")
+async def get_canbus_uuids(interface: str = "can0"):
+    """Query CAN bus UUIDs on a given interface."""
+    if not is_native_platform():
+        raise HTTPException(status_code=501, detail="CAN bus query is only available on the Raspberry Pi")
+    return query_canbus_uuids(interface)
 
 
 # ── Config path settings ───────────────────────────────────────
