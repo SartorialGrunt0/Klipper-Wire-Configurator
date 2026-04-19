@@ -3,7 +3,6 @@ import { useConfigStore } from '../stores/configStore';
 import { useNativeStore } from '../stores/nativeStore';
 import ImportDialog from './dialogs/ImportDialog';
 import ExportDialog from './dialogs/ExportDialog';
-import GenerateDialog from './dialogs/GenerateDialog';
 import DiffDialog from './dialogs/DiffDialog';
 import OpenFromPiDialog from './dialogs/OpenFromPiDialog';
 import ApplyDialog from './dialogs/ApplyDialog';
@@ -18,7 +17,6 @@ interface ToolbarProps {
 export default function Toolbar({ showTextView, onToggleTextView, onToggleAddMenu }: ToolbarProps) {
   const [showImport, setShowImport] = useState(false);
   const [showExport, setShowExport] = useState(false);
-  const [showGenerate, setShowGenerate] = useState(false);
   const [showDiff, setShowDiff] = useState(false);
   const [showOpenFromPi, setShowOpenFromPi] = useState(false);
   const [showApply, setShowApply] = useState(false);
@@ -76,17 +74,6 @@ export default function Toolbar({ showTextView, onToggleTextView, onToggleAddMen
           Open from Pi
         </button>
       )}
-
-      {/* Generate */}
-      <button
-        onClick={() => setShowGenerate(true)}
-        className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] transition-colors"
-      >
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-          <path d="M8 2v12M2 8h12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
-        </svg>
-        Generate
-      </button>
 
       {/* + Component */}
       {onToggleAddMenu && (
@@ -186,7 +173,6 @@ export default function Toolbar({ showTextView, onToggleTextView, onToggleAddMen
       {/* Dialogs */}
       {showImport && <ImportDialog onClose={() => setShowImport(false)} />}
       {showExport && <ExportDialog onClose={() => setShowExport(false)} />}
-      {showGenerate && <GenerateDialog onClose={() => setShowGenerate(false)} />}
       {showDiff && <DiffDialog onClose={() => setShowDiff(false)} />}
       {showOpenFromPi && <OpenFromPiDialog onClose={() => setShowOpenFromPi(false)} />}
       {showApply && <ApplyDialog onClose={() => setShowApply(false)} />}

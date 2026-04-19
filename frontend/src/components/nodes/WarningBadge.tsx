@@ -18,8 +18,6 @@ export default function WarningBadge({
         height: size,
         backgroundColor: getValidationStatusColor(status),
       }}
-    >
-      <span className="kwc-warning-badge-icon" aria-hidden="true" />
-    </span>
+    />
   );
 }

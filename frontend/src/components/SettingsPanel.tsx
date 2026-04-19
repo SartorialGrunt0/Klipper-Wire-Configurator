@@ -819,7 +819,7 @@ export default function SettingsPanel() {
                   const paramSchema = mcuSchema?.params.find((p) => p.name === param.key);
                   return (
                     <ParamField
-                      key={param.key}
+                      key={`${param.key}_${param.value}_${mcuSection.full_header}`}
                       param={param}
                       schema={paramSchema}
                       isMcuParam
@@ -1099,7 +1099,7 @@ export default function SettingsPanel() {
 
       {/* Active Parameters */}
       <div className="flex-1 overflow-y-auto p-3 space-y-3">
-        {activeParams.map((param) => {
+        {activeParams.map((param, index) => {
           const paramSchema = schema?.params.find((p) => p.name === param.key);
           // Pin conflict check
           let pinConflict: string | null = null;
@@ -1115,7 +1115,7 @@ export default function SettingsPanel() {
           }
           return (
             <ParamField
-              key={param.key}
+              key={`${param.key}_${index}_${param.value}`}
               param={param}
               schema={paramSchema}
               pinConflict={pinConflict}
@@ -1754,16 +1754,6 @@ function HardwareOverviewPanel({
   // SBC without MCU mode can only receive comm lines — no sub-components
   const canAddSubComponents = !isSbc || isMcu;
 
-  const color = {
-    sbc: 'var(--color-sbc)',
-    mainboard: 'var(--color-mainboard)',
-    toolhead: 'var(--color-toolhead)',
-    expander: 'var(--color-expander)',
-    probe: 'var(--color-probe)',
-    accelerometer: 'var(--color-accelerometer)',
-    other: 'var(--color-other)',
-  }[hwData.hardwareType] || 'var(--color-other)';
-
   const handleRenameSubmit = () => {
     if (renameValue.trim() && renameValue.trim() !== hwData.label) {
       onRename(renameValue.trim());
@@ -1776,7 +1766,6 @@ function HardwareOverviewPanel({
       {/* Header */}
       <div className="p-3 border-b border-[var(--color-bg-tertiary)] shrink-0">
         <div className="flex items-center gap-2">
-          <div className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: color }} />
           <WarningBadge status={validationStatus} size={10} />
           {renaming ? (
             <input

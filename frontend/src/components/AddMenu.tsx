@@ -1,17 +1,16 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useConfigStore } from '../stores/configStore';
 import { useGraphStore } from '../stores/graphStore';
 import * as api from '../services/api';
-import { buildGraphFromConfig } from '../utils/graphBuilder';
 import { applyBoardTypeMarkerToMcuSections, buildBoardTypeMarker } from '../utils/boardTypeMarker';
-import type { HardwareType, CommunicationType, SectionSchema, ExampleConfig } from '../types/config';
+import type { ConfigSection, CommunicationType, ExampleConfig, HardwareType } from '../types/config';
 import McuNameDialog from './dialogs/McuNameDialog';
 
 interface AddMenuProps {
   onClose: () => void;
 }
 
-type MenuTab = 'hardware' | 'sub_component' | 'feature' | 'connection' | 'group';
+type MenuTab = 'hardware' | 'sub_component' | 'feature';
 
 const HARDWARE_OPTIONS: Array<{ type: HardwareType; label: string; icon: string; description?: string }> = [
   { type: 'mainboard', label: 'Mainboard', icon: '📟', description: 'Main printer control board' },
@@ -21,12 +20,6 @@ const HARDWARE_OPTIONS: Array<{ type: HardwareType; label: string; icon: string;
   { type: 'probe', label: 'Probe', icon: '📍', description: 'Probe with dedicated MCU' },
   { type: 'accelerometer', label: 'Accelerometer', icon: '📊', description: 'Standalone accelerometer board' },
   { type: 'other', label: 'Other Component', icon: '⬜', description: 'Custom hardware component' },
-];
-
-const COMM_OPTIONS: Array<{ type: CommunicationType; label: string; color: string }> = [
-  { type: 'usb', label: 'USB', color: 'var(--color-usb)' },
-  { type: 'canbus', label: 'CAN Bus', color: 'var(--color-canbus)' },
-  { type: 'uart', label: 'UART', color: 'var(--color-uart)' },
 ];
 
 const CARTESIAN_STEPPERS = ['stepper_x', 'stepper_y', 'stepper_z', 'stepper_z1', 'stepper_z2', 'stepper_z3', 'manual_stepper', 'extruder_stepper', 'dual_carriage'];
@@ -58,6 +51,26 @@ const FEATURE_TYPES = [
   { group: 'gcode', label: 'G-Code Features', types: ['virtual_sdcard', 'pause_resume', 'firmware_retraction', 'force_move', 'idle_timeout', 'gcode_macro', 'delayed_gcode', 'gcode_arcs', 'respond', 'exclude_object', 'save_variables'] },
 ];
 
+function detectCommunicationType(mcuSection?: ConfigSection): CommunicationType {
+  if (!mcuSection) return 'usb';
+
+  for (const param of mcuSection.params || []) {
+    if (param.is_commented_out) continue;
+    if (param.key === 'canbus_uuid' || param.key === 'canbus_interface') {
+      return 'canbus';
+    }
+    if (param.key === 'serial') {
+      const value = param.value || '';
+      if (/\/dev\/tty(S|AMA|ACM|USB)/.test(value)) {
+        return 'uart';
+      }
+      return 'usb';
+    }
+  }
+
+  return 'usb';
+}
+
 export default function AddMenu({ onClose }: AddMenuProps) {
   const [tab, setTab] = useState<MenuTab>('hardware');
   const [selectedParent, setSelectedParent] = useState<string | null>(null);
@@ -65,11 +78,6 @@ export default function AddMenu({ onClose }: AddMenuProps) {
   const [templateSearch, setTemplateSearch] = useState('');
   const [templates, setTemplates] = useState<ExampleConfig[]>([]);
   const [templateLoading, setTemplateLoading] = useState(false);
-
-  // Custom group creation state
-  const [customGroupLabel, setCustomGroupLabel] = useState('');
-  const [customGroupColor, setCustomGroupColor] = useState('#64748b');
-  const [customGroupParent, setCustomGroupParent] = useState<string>('');
 
   // MCU name prompt state
   const [mcuNamePrompt, setMcuNamePrompt] = useState<{
@@ -79,10 +87,14 @@ export default function AddMenu({ onClose }: AddMenuProps) {
   } | null>(null);
 
   const { schemas } = useConfigStore();
-  const { addHardwareNode, addSubComponentNode, addFeatureNode, addCommunicationEdge, addCustomGroupNode, nodes } = useGraphStore();
+  const { addHardwareNode, addSubComponentNode, addFeatureNode, nodes } = useGraphStore();
   const { configFiles, activeFile, addSection } = useConfigStore();
 
   const hardwareNodes = nodes.filter((n) => n.type === 'hardware');
+  const attachableHardwareNodes = hardwareNodes.filter((n) => {
+    const data = n.data as Record<string, unknown>;
+    return data.hardwareType !== 'sbc' || !!data.isMcu;
+  });
 
   // Derive kinematics from the selected parent's config file (fall back to all files)
   const kinematics = (() => {
@@ -133,6 +145,43 @@ export default function AddMenu({ onClose }: AddMenuProps) {
     return () => clearTimeout(timer);
   }, [templateSearch, hwPickerStep]);
 
+  const ensureSbcNode = (preferAnchoredPosition: boolean) => {
+    const graphStore = useGraphStore.getState();
+    const existingSbc = graphStore.nodes.find(
+      (n) => n.type === 'hardware' && (n.data as Record<string, unknown>).hardwareType === 'sbc',
+    );
+    if (existingSbc) return existingSbc.id;
+
+    const sbcId = graphStore.addHardwareNode(
+      'sbc',
+      'SBC',
+      '',
+      preferAnchoredPosition ? { x: 80, y: 140 } : undefined,
+      'host_mcu',
+    );
+
+    if (preferAnchoredPosition) {
+      graphStore.toggleHardwareCollapse(sbcId);
+    }
+
+    return sbcId;
+  };
+
+  const ensureCommunicationEdge = (targetNodeId: string, commType: CommunicationType, preferAnchoredPosition: boolean) => {
+    const graphStore = useGraphStore.getState();
+    const sbcId = ensureSbcNode(preferAnchoredPosition);
+    const freshGraph = useGraphStore.getState();
+    const existingEdge = freshGraph.edges.find((edge) => (
+      (edge.data as Record<string, unknown>)?.edgeType === 'communication'
+      && ((edge.source === sbcId && edge.target === targetNodeId)
+        || (edge.source === targetNodeId && edge.target === sbcId))
+    ));
+
+    if (!existingEdge) {
+      graphStore.addCommunicationEdge(sbcId, targetNodeId, commType);
+    }
+  };
+
   const handleAddHardware = (hwType: HardwareType, label: string) => {
     // SBC is a singleton
     if (hwType === 'sbc') {
@@ -143,6 +192,8 @@ export default function AddMenu({ onClose }: AddMenuProps) {
 
     // For mainboard/toolhead/expander, show template picker first
     if (TEMPLATE_TYPES.has(hwType)) {
+      setTemplateSearch('');
+      setTemplates([]);
       setHwPickerStep({ hwType, label });
       return;
     }
@@ -151,6 +202,8 @@ export default function AddMenu({ onClose }: AddMenuProps) {
   };
 
   const finishAddHardware = (hwType: HardwareType, label: string, templateFilename?: string, mcuName?: string) => {
+    const isFreshHardwareView = hardwareNodes.length === 0;
+
     // Determine if this will be the primary MCU
     const hasPrimary = nodes.some(
       (n) => n.type === 'hardware' && !!(n.data as Record<string, unknown>).isPrimary,
@@ -184,7 +237,15 @@ export default function AddMenu({ onClose }: AddMenuProps) {
       });
     }
 
-    const nodeId = addHardwareNode(hwType, effectiveLabel, configFile, { x: 100 + Math.random() * 400, y: 100 + Math.random() * 300 }, mcuName || '');
+    const nodePosition = isFreshHardwareView && hwType !== 'sbc'
+      ? { x: 560, y: 140 }
+      : { x: 100 + Math.random() * 400, y: 100 + Math.random() * 300 };
+
+    if (isFreshHardwareView && hwType !== 'sbc') {
+      ensureSbcNode(true);
+    }
+
+    const nodeId = addHardwareNode(hwType, effectiveLabel, configFile, nodePosition, mcuName || '');
 
     // Set primary flag
     if (isPrimary) {
@@ -259,25 +320,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
         }
         // Add communication edge from SBC to this hardware node
         if (hwType !== 'sbc') {
-          const gStore = useGraphStore.getState();
-          const sbcNode = gStore.nodes.find(
-            (n) => n.type === 'hardware' && (n.data as Record<string, unknown>).hardwareType === 'sbc',
-          );
-          if (sbcNode) {
-            let commType: CommunicationType = 'usb';
-            if (mcuSection) {
-              for (const param of (mcuSection.params || [])) {
-                if (param.is_commented_out) continue;
-                if (param.key === 'canbus_uuid' || param.key === 'canbus_interface') { commType = 'canbus'; break; }
-                if (param.key === 'serial') {
-                  const val = param.value || '';
-                  if (val.includes('/dev/serial/by-id/usb-')) { commType = 'usb'; break; }
-                  if (/\/dev\/tty(S|AMA|ACM|USB)/.test(val)) { commType = 'uart'; break; }
-                }
-              }
-            }
-            gStore.addCommunicationEdge(sbcNode.id, nodeId, commType);
-          }
+          ensureCommunicationEdge(nodeId, detectCommunicationType(mcuSection), isFreshHardwareView);
         }
         setTemplateLoading(false);
         onClose();
@@ -289,13 +332,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
     } else {
       // Add communication edge from SBC to this hardware node (blank config)
       if (hwType !== 'sbc') {
-        const gStore = useGraphStore.getState();
-        const sbcNode = gStore.nodes.find(
-          (n) => n.type === 'hardware' && (n.data as Record<string, unknown>).hardwareType === 'sbc',
-        );
-        if (sbcNode) {
-          gStore.addCommunicationEdge(sbcNode.id, nodeId, 'usb');
-        }
+        ensureCommunicationEdge(nodeId, 'usb', isFreshHardwareView);
       }
       onClose();
     }
@@ -377,14 +414,6 @@ export default function AddMenu({ onClose }: AddMenuProps) {
     // Keep menu open for multi-select
   };
 
-  const handleAddCustomGroup = () => {
-    const label = customGroupLabel.trim() || 'Custom Group';
-    const parentId = customGroupParent || undefined;
-    addCustomGroupNode(label, customGroupColor, undefined, parentId);
-    setCustomGroupLabel('');
-    onClose();
-  };
-
   return (
     <div className="absolute inset-0 z-50 flex items-start justify-center pt-16 bg-black/40" onClick={onClose}>
       {mcuNamePrompt && (
@@ -405,7 +434,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
       >
         {/* Tabs */}
         <div className="flex border-b border-[var(--color-bg-tertiary)]">
-          {(['hardware', 'sub_component', 'feature', 'connection', 'group'] as MenuTab[]).map((t) => (
+          {(['hardware', 'sub_component', 'feature'] as MenuTab[]).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -415,7 +444,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
                   : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
               }`}
             >
-              {t === 'hardware' ? 'Major Components' : t === 'sub_component' ? 'Sub-Components' : t === 'feature' ? 'Features' : t === 'group' ? 'Groups' : 'Connections'}
+              {t === 'hardware' ? 'Major Components' : t === 'sub_component' ? 'Sub-Components' : 'Features'}
             </button>
           ))}
         </div>
@@ -455,98 +484,92 @@ export default function AddMenu({ onClose }: AddMenuProps) {
 
           {/* Hardware Template Picker */}
           {tab === 'hardware' && hwPickerStep && (
-            <div>
-              <div className="flex items-center gap-2 mb-4">
-                <button
-                  onClick={() => { setHwPickerStep(null); setTemplateSearch(''); setTemplates([]); }}
-                  className="text-xs text-[var(--color-accent)] hover:text-[var(--color-accent-hover)]"
-                >
-                  &larr; Back
-                </button>
-                <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
-                  Add {hwPickerStep.label}
-                </h3>
-              </div>
-
-              <div className="grid grid-cols-2 gap-2 mb-4">
-                <button
-                  onClick={() => finishAddHardware(hwPickerStep.hwType, hwPickerStep.label)}
-                  disabled={templateLoading}
-                  className="flex flex-col items-center gap-2 p-4 rounded-lg border border-[var(--color-bg-tertiary)] hover:border-[var(--color-accent)] hover:bg-[var(--color-bg-primary)] transition-all"
-                >
-                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" className="text-[var(--color-text-secondary)]">
-                    <rect x="4" y="4" width="16" height="16" rx="2" stroke="currentColor" strokeWidth="1.5"/>
-                    <path d="M12 8v8M8 12h8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
-                  </svg>
-                  <span className="text-xs font-medium text-[var(--color-text-primary)]">Blank</span>
-                  <span className="text-[10px] text-[var(--color-text-secondary)]">Start from scratch</span>
-                </button>
-                <div className="flex flex-col items-center justify-center gap-2 p-4 rounded-lg border border-dashed border-[var(--color-bg-tertiary)] text-center">
-                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" className="text-[var(--color-accent)]">
-                    <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/>
-                    <path d="M14 2v6h6" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/>
-                  </svg>
-                  <span className="text-xs font-medium text-[var(--color-accent)]">From Board Template</span>
-                  <span className="text-[10px] text-[var(--color-text-secondary)]">Search below</span>
+            <div className="space-y-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
+                    Add {hwPickerStep.label}
+                  </h3>
+                  <p className="text-xs text-[var(--color-text-secondary)] mt-1">
+                    Start blank or seed the component from a reference config.
+                  </p>
                 </div>
+                <button
+                  onClick={() => {
+                    setHwPickerStep(null);
+                    setTemplateSearch('');
+                    setTemplates([]);
+                  }}
+                  className="px-2.5 py-1.5 rounded-lg text-xs font-medium bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:border-[var(--color-accent)]"
+                >
+                  Back
+                </button>
               </div>
 
-              {/* Template search */}
-              <input
-                type="text"
-                placeholder="Search board templates (e.g., SKR, Octopus, EBB)..."
-                value={templateSearch}
-                onChange={(e) => setTemplateSearch(e.target.value)}
-                className="w-full px-3 py-2 rounded-lg text-sm bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)] mb-3"
-                autoFocus
-              />
+              <button
+                onClick={() => finishAddHardware(hwPickerStep.hwType, hwPickerStep.label)}
+                className="w-full p-3 rounded-lg border border-[var(--color-bg-tertiary)] hover:border-[var(--color-accent)] hover:bg-[var(--color-bg-primary)] transition-all text-left"
+              >
+                <div className="text-sm font-medium text-[var(--color-text-primary)]">Blank {hwPickerStep.label}</div>
+                <div className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
+                  Create the component with an empty config section set and wire it up manually.
+                </div>
+              </button>
 
-              {/* Template list */}
-              <div className="space-y-1 max-h-48 overflow-y-auto">
-                {templates.map((ex) => (
+              <div>
+                <label className="text-xs text-[var(--color-text-secondary)] mb-1 block">
+                  Reference templates
+                </label>
+                <input
+                  type="text"
+                  placeholder="Search board templates..."
+                  value={templateSearch}
+                  onChange={(e) => setTemplateSearch(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg text-sm bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)]"
+                />
+              </div>
+
+              <div className="space-y-1 max-h-72 overflow-y-auto pr-1">
+                {templateLoading && (
+                  <div className="px-3 py-2 text-xs text-[var(--color-text-secondary)]">
+                    Loading templates...
+                  </div>
+                )}
+                {!templateLoading && templates.map((template) => (
                   <button
-                    key={ex.filename}
-                    onClick={() => finishAddHardware(hwPickerStep.hwType, ex.name || hwPickerStep.label, ex.filename)}
-                    disabled={templateLoading}
-                    className="flex items-center justify-between w-full p-2.5 rounded-lg text-left transition-all border border-transparent hover:border-[var(--color-accent)] hover:bg-[var(--color-bg-primary)]"
+                    key={template.filename}
+                    onClick={() => finishAddHardware(hwPickerStep.hwType, hwPickerStep.label, template.filename)}
+                    className="w-full p-3 rounded-lg border border-[var(--color-bg-tertiary)] hover:border-[var(--color-accent)] hover:bg-[var(--color-bg-primary)] transition-all text-left"
                   >
-                    <div className="min-w-0">
-                      <div className="text-xs font-medium text-[var(--color-text-primary)] truncate">{ex.name}</div>
-                      <div className="text-[10px] text-[var(--color-text-secondary)] truncate">{ex.filename}</div>
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-medium text-[var(--color-text-primary)]">{template.name}</div>
+                        <div className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
+                          {template.filename}
+                        </div>
+                      </div>
+                      <span className="text-[10px] uppercase tracking-wider px-2 py-1 rounded-full bg-[var(--color-bg-primary)] text-[var(--color-text-secondary)] border border-[var(--color-bg-tertiary)] shrink-0">
+                        {template.category}
+                      </span>
                     </div>
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 shrink-0 ml-2">
-                      {ex.category}
-                    </span>
                   </button>
                 ))}
-                {templates.length === 0 && templateSearch && (
-                  <p className="text-xs text-[var(--color-text-secondary)] text-center py-4">
-                    No matching board templates found
-                  </p>
-                )}
-                {templates.length === 0 && !templateSearch && (
-                  <p className="text-xs text-[var(--color-text-secondary)] text-center py-4">
-                    Type to search board templates...
-                  </p>
+                {!templateLoading && templates.length === 0 && (
+                  <div className="px-3 py-5 text-xs text-[var(--color-text-secondary)] text-center border border-dashed border-[var(--color-bg-tertiary)] rounded-lg">
+                    No matching templates found.
+                  </div>
                 )}
               </div>
-
-              {templateLoading && (
-                <div className="mt-3 p-2 rounded-lg bg-[var(--color-accent)]/10 text-xs text-[var(--color-accent)] text-center">
-                  Loading template...
-                </div>
-              )}
             </div>
           )}
 
           {/* Sub-Component Tab */}
           {tab === 'sub_component' && (
             <div>
-              {/* Parent selector */}
-              {hardwareNodes.length > 0 && (
+              {attachableHardwareNodes.length > 0 && (
                 <div className="mb-4">
                   <label className="text-xs text-[var(--color-text-secondary)] mb-1 block">
-                    Attach to hardware component (optional):
+                    Attach to component (optional):
                   </label>
                   <select
                     value={selectedParent || ''}
@@ -554,13 +577,19 @@ export default function AddMenu({ onClose }: AddMenuProps) {
                     className="w-full px-3 py-2 rounded-lg text-sm bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)]"
                   >
                     <option value="">-- None (standalone) --</option>
-                    {hardwareNodes.map((n) => (
+                    {attachableHardwareNodes.map((n) => (
                       <option key={n.id} value={n.id}>
                         {(n.data as Record<string, unknown>).label as string}
                       </option>
                     ))}
                   </select>
                 </div>
+              )}
+
+              {attachableHardwareNodes.length === 0 && (
+                <p className="text-xs text-[var(--color-text-secondary)] mb-4">
+                  Add a hardware component first to attach sub-components, or create a standalone section.
+                </p>
               )}
 
               {subComponentGroups.map((group) => (
@@ -584,10 +613,11 @@ export default function AddMenu({ onClose }: AddMenuProps) {
             </div>
           )}
 
+
           {/* Feature Tab */}
           {tab === 'feature' && (
             <div>
-              {hardwareNodes.length > 0 && (
+              {attachableHardwareNodes.length > 0 && (
                 <div className="mb-4">
                   <label className="text-xs text-[var(--color-text-secondary)] mb-1 block">
                     Attach to component (optional):
@@ -598,7 +628,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
                     className="w-full px-3 py-2 rounded-lg text-sm bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)]"
                   >
                     <option value="">-- None (standalone) --</option>
-                    {nodes.map((n) => (
+                    {attachableHardwareNodes.map((n) => (
                       <option key={n.id} value={n.id}>
                         {(n.data as Record<string, unknown>).label as string}
                       </option>
@@ -636,137 +666,6 @@ export default function AddMenu({ onClose }: AddMenuProps) {
                   </div>
                 </div>
               ))}
-            </div>
-          )}
-
-          {/* Connection Tab */}
-          {tab === 'connection' && (
-            <div>
-              <p className="text-xs text-[var(--color-text-secondary)] mb-4">
-                Drag from an output handle to an input handle on the graph to create connections.
-                You can also create communication links below:
-              </p>
-              <div className="space-y-2">
-                {COMM_OPTIONS.map((comm) => (
-                  <div
-                    key={comm.type}
-                    className="flex items-center gap-3 p-3 rounded-lg border border-[var(--color-bg-tertiary)]"
-                  >
-                    <div
-                      className="w-4 h-1 rounded"
-                      style={{ backgroundColor: comm.color, borderStyle: 'dashed' }}
-                    />
-                    <span className="text-sm" style={{ color: comm.color }}>
-                      {comm.label}
-                    </span>
-                    <span className="text-xs text-[var(--color-text-secondary)] ml-auto">
-                      Dashed line
-                    </span>
-                  </div>
-                ))}
-              </div>
-              <p className="text-xs text-[var(--color-text-secondary)] mt-4">
-                All hardware components must have a communication trace to the host.
-              </p>
-            </div>
-          )}
-
-          {/* Groups Tab */}
-          {tab === 'group' && (
-            <div className="space-y-4">
-              <p className="text-xs text-[var(--color-text-secondary)]">
-                Create a custom group container to organise sub-components and features.
-                Groups can be standalone or nested inside hardware nodes.
-                Drag nodes in/out of groups freely on the canvas.
-              </p>
-
-              {/* Label */}
-              <div>
-                <label className="text-xs text-[var(--color-text-secondary)] mb-1 block">
-                  Group name
-                </label>
-                <input
-                  type="text"
-                  placeholder="e.g. Z Motors, Toolhead, Extras…"
-                  value={customGroupLabel}
-                  onChange={(e) => setCustomGroupLabel(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg text-sm bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)]"
-                />
-              </div>
-
-              {/* Color picker */}
-              <div>
-                <label className="text-xs text-[var(--color-text-secondary)] mb-2 block">
-                  Border colour
-                </label>
-                <div className="flex flex-wrap gap-2">
-                  {[
-                    '#64748b', '#38bdf8', '#f472b6', '#a78bfa',
-                    '#22c55e', '#f97316', '#ef4444', '#f59e0b',
-                    '#06b6d4', '#8b5cf6', '#ec4899', '#84cc16',
-                  ].map((c) => (
-                    <button
-                      key={c}
-                      onClick={() => setCustomGroupColor(c)}
-                      className="w-7 h-7 rounded-full border-2 transition-all"
-                      style={{
-                        backgroundColor: c,
-                        borderColor: customGroupColor === c ? '#fff' : 'transparent',
-                        boxShadow: customGroupColor === c ? `0 0 0 2px ${c}` : 'none',
-                      }}
-                    />
-                  ))}
-                  {/* Native colour input for custom colour */}
-                  <label
-                    className="w-7 h-7 rounded-full border-2 border-[var(--color-bg-tertiary)] flex items-center justify-center cursor-pointer hover:border-[var(--color-accent)]"
-                    title="Custom colour"
-                  >
-                    <input
-                      type="color"
-                      value={customGroupColor}
-                      onChange={(e) => setCustomGroupColor(e.target.value)}
-                      className="sr-only"
-                    />
-                    <span className="text-[10px]">+</span>
-                  </label>
-                </div>
-              </div>
-
-              {/* Optional parent hardware */}
-              {hardwareNodes.length > 0 && (
-                <div>
-                  <label className="text-xs text-[var(--color-text-secondary)] mb-1 block">
-                    Place inside hardware node (optional)
-                  </label>
-                  <select
-                    value={customGroupParent}
-                    onChange={(e) => setCustomGroupParent(e.target.value)}
-                    className="w-full px-3 py-2 rounded-lg text-sm bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)]"
-                  >
-                    <option value="">— Standalone (top level) —</option>
-                    {hardwareNodes.map((n) => (
-                      <option key={n.id} value={n.id}>
-                        {(n.data as Record<string, unknown>).label as string}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
-
-              {/* Preview */}
-              <div
-                className="p-3 rounded-lg border-2 border-dashed text-sm font-semibold"
-                style={{ borderColor: customGroupColor, color: customGroupColor, backgroundColor: `${customGroupColor}0a` }}
-              >
-                📦 {customGroupLabel || 'Custom Group'}
-              </div>
-
-              <button
-                onClick={handleAddCustomGroup}
-                className="w-full py-2.5 rounded-lg text-sm font-semibold bg-[var(--color-accent)] text-[var(--color-bg-primary)] hover:bg-[var(--color-accent-hover)] transition-colors"
-              >
-                Create Group
-              </button>
             </div>
           )}
         </div>

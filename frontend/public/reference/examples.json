@@ -2937,6 +2937,16 @@
       ]
     },
     {
+      "filename": "example-tmc-autotune.cfg",
+      "name": "example-tmc-autotune",
+      "category": "example",
+      "board_type": "other",
+      "tags": [
+        "tmc",
+        "autotune"
+      ]
+    },
+    {
       "filename": "example-winch.cfg",
       "name": "example-winch",
       "category": "example",
