@@ -8212,6 +8212,7 @@
           "enum_values": [
             "hd44780",
             "hd44780_spi",
+            "aip31068_spi",
             "st7920",
             "uc1701",
             "ssd1306",
@@ -8219,6 +8220,33 @@
             "emulated_st7920",
             "pcd8544"
           ],
+          "unit": ""
+        },
+        {
+          "name": "display_group",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Display data group name",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "menu_timeout",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "Menu timeout in seconds",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "menu_reverse_navigation",
+          "type": "bool",
+          "required": false,
+          "default": "False",
+          "description": "Reverse menu navigation",
+          "enum_values": [],
           "unit": ""
         },
         {
@@ -8276,11 +8304,29 @@
           "unit": ""
         },
         {
+          "name": "latch_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Latch pin (HD44780 SPI)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
           "name": "cs_pin",
           "type": "pin",
           "required": false,
           "default": null,
           "description": "SPI chip select",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "dc_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Display data/command pin",
           "enum_values": [],
           "unit": ""
         },
@@ -8303,6 +8349,15 @@
           "unit": ""
         },
         {
+          "name": "en_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Enable pin (emulated ST7920)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
           "name": "a0_pin",
           "type": "pin",
           "required": false,
@@ -8317,6 +8372,105 @@
           "required": false,
           "default": null,
           "description": "Reset pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "reset_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Reset pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_software_sclk_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software SPI clock pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_software_mosi_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software SPI MOSI pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_software_miso_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software SPI MISO pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_bus",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "SPI bus name",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_speed",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "SPI speed",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "i2c_mcu",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "I2C MCU name",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "i2c_bus",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "I2C bus name",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "i2c_software_scl_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software I2C SCL pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "i2c_software_sda_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software I2C SDA pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "i2c_speed",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "I2C speed",
           "enum_values": [],
           "unit": ""
         },
@@ -8384,6 +8538,51 @@
           "unit": ""
         },
         {
+          "name": "analog_range_click_pin",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Analog range for click pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "analog_range_back_pin",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Analog range for back pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "analog_range_up_pin",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Analog range for up pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "analog_range_down_pin",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Analog range for down pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "analog_range_kill_pin",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Analog range for kill pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
           "name": "encoder_steps_per_detent",
           "type": "int",
           "required": false,
@@ -8402,6 +8601,24 @@
           "unit": ""
         },
         {
+          "name": "hd44780_protocol_init",
+          "type": "bool",
+          "required": false,
+          "default": "True",
+          "description": "Initialize HD44780 protocol",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "line_length",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "Display line length",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
           "name": "contrast",
           "type": "int",
           "required": false,
@@ -8416,6 +8633,24 @@
           "required": false,
           "default": null,
           "description": "VCOMH value (SSD1306)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "invert",
+          "type": "bool",
+          "required": false,
+          "default": "False",
+          "description": "Invert display colors",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "x_offset",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "Display X offset",
           "enum_values": [],
           "unit": ""
         }
@@ -10548,6 +10783,17 @@
       "display_name": "SD Card Loop",
       "category": "feature",
       "component_group": "gcode",
+      "is_named": false,
+      "description": "",
+      "max_instances": 1,
+      "requires": [],
+      "params": []
+    },
+    "display_status": {
+      "section_type": "display_status",
+      "display_name": "Display Status",
+      "category": "feature",
+      "component_group": "display",
       "is_named": false,
       "description": "",
       "max_instances": 1,
