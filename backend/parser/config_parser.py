@@ -123,6 +123,7 @@ NAMED_SECTION_TYPES = {
     "gcode_macro", "delayed_gcode",
     "display_data", "display_template", "display_glyph", "menu",
     "mcu", "board_pins",
+    "autotune_tmc", "motor_constants", "motor_alias",
     "homing_heaters", "endstop_phase",
     "manual_stepper", "extruder_stepper",
     "stepper_z1", "stepper_z2", "stepper_z3",

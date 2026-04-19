@@ -7,6 +7,7 @@ import type { HardwareNodeData, SubComponentNodeData, FeatureNodeData, AppNode, 
 import { applyBoardTypeMarkerToMcuSections } from '../utils/boardTypeMarker';
 import { updateAllSectionPins } from '../utils/pinUtils';
 import { getValidationStatusColor } from '../utils/validationStatus';
+import { acknowledgeWarning } from '../services/api';
 import WarningBadge from './nodes/WarningBadge';
 import McuNameDialog from './dialogs/McuNameDialog';
 
@@ -163,6 +164,11 @@ export default function SettingsPanel() {
     }
     return issues;
   }, [sectionHeader, validation]);
+
+  const hasAcknowledgeableWarning = useMemo(
+    () => sectionIssues.some((issue) => issue.severity === 'warning' && issue.message.startsWith('Unknown section type ')),
+    [sectionIssues],
+  );
 
   // Active params (not commented out)
   const activeParams = useMemo(
@@ -685,6 +691,12 @@ export default function SettingsPanel() {
     }
   }, [sectionEditText, activeFile, sectionHeader, configFiles, updateSectionParam]);
 
+  const handleAcknowledgeWarning = useCallback(async () => {
+    if (!section || !sectionConfigFile) return;
+    await acknowledgeWarning(section);
+    void revalidateFile(sectionConfigFile);
+  }, [section, sectionConfigFile, revalidateFile]);
+
   // MCU name dialog overlay (rendered above all other content)
   const mcuNameDialog = mcuNamePrompt ? (
     <McuNameDialog
@@ -1031,6 +1043,15 @@ export default function SettingsPanel() {
           )}
         </div>
         <div className="flex items-center gap-2 shrink-0">
+          {hasAcknowledgeableWarning && (
+            <button
+              onClick={() => { void handleAcknowledgeWarning(); }}
+              className="text-xs px-2 py-1 rounded bg-[var(--color-bg-tertiary)] hover:bg-[var(--color-warning)] hover:text-[var(--color-bg-primary)] transition-colors"
+              title="Acknowledge this unknown section and hide its warning in future validations"
+            >
+              Acknowledge Warning
+            </button>
+          )}
           {isSuppressable && (
             <button
               onClick={handleToggleSuppress}

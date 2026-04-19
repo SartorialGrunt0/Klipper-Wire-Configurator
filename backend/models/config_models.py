@@ -31,6 +31,10 @@ class ConfigUpdate(BaseModel):
     raw_text: Optional[str] = None
 
 
+class WarningAcknowledgementRequest(BaseModel):
+    section: SectionUpdate
+
+
 class ProjectFile(BaseModel):
     filename: str
     content: str

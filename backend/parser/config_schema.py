@@ -866,6 +866,24 @@ _register(SectionDef(
     ],
 ))
 
+_register(SectionDef(
+    section_type="shaketune",
+    display_name="Shake&Tune",
+    category="feature",
+    component_group="accelerometer",
+    max_instances=1,
+    params=[
+        _str("result_folder", "Processed results directory"),
+        _int("number_of_results_to_keep", "Number of processed results to retain"),
+        _bool("keep_raw_data", "Keep raw .stdata files", default="False"),
+        _bool("show_macros_in_webui", "Expose Shake&Tune macros in the web UI", default="True"),
+        _int("timeout", "Maximum graph processing time", default="600"),
+        _int("measurements_chunk_size", "Measurements per chunk written to disk", default="2"),
+        _int("max_freq", "Maximum PSD cutoff frequency", default="200"),
+        _int("dpi", "Generated graph DPI", default="300"),
+    ],
+))
+
 # ── Temperature Sensors ──
 _register(SectionDef(
     section_type="temperature_sensor",
@@ -1249,6 +1267,61 @@ _register(SectionDef(
     component_group="gcode",
     max_instances=1,
     params=[],
+))
+
+_register(SectionDef(
+    section_type="autotune_tmc",
+    display_name="TMC Autotune",
+    category="feature",
+    component_group="stepper_driver",
+    is_named=True,
+    description="Automatic TMC driver configuration and tuning",
+    params=[
+        _str("motor", "Motor database name", required=True),
+        _enum("tuning_goal", ["auto", "silent", "performance", "autoswitch"], "Autotune strategy", default="auto"),
+        _int("extra_hysteresis", "Additional hysteresis"),
+        _int("tbl", "Comparator blank time"),
+        _int("toff", "Slow decay time"),
+        _int("sgt", "Sensorless homing threshold"),
+        _int("sg4_thrs", "StallGuard4 threshold"),
+        _int("semin", "CoolStep lower threshold"),
+        _int("semax", "CoolStep upper threshold"),
+        _int("seup", "CoolStep current increment step"),
+        _int("sedn", "CoolStep current decrement step"),
+        _int("seimin", "CoolStep lower motor current limit"),
+        _float("pwm_freq_target", "PWM target switching frequency", unit="Hz"),
+        _float("voltage", "Motor supply voltage", default="24", unit="V"),
+        _float("overvoltage_vth", "Optional overvoltage snubber threshold", unit="V"),
+    ],
+))
+
+_register(SectionDef(
+    section_type="motor_constants",
+    display_name="Motor Constants",
+    category="config_helper",
+    component_group="stepper_driver",
+    is_named=True,
+    description="User-defined motor constants for TMC autotune",
+    params=[
+        _float("resistance", "Coil resistance", required=True),
+        _float("inductance", "Coil inductance", required=True),
+        _float("holding_torque", "Holding torque", required=True),
+        _float("max_current", "Nominal rated current", required=True),
+        _int("steps_per_revolution", "Steps per revolution", required=True, default="200"),
+    ],
+))
+
+_register(SectionDef(
+    section_type="motor_alias",
+    display_name="Motor Alias",
+    category="config_helper",
+    component_group="stepper_driver",
+    is_named=True,
+    description="Alias to another TMC autotune motor definition",
+    params=[
+        _str("motor", "Target motor definition", required=True),
+        _bool("deprecated", "Whether the alias is deprecated"),
+    ],
 ))
 
 # ── Board Pins ──

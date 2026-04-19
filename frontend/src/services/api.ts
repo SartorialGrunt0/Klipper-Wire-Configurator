@@ -1,5 +1,6 @@
 import type {
   ConfigFile,
+  ConfigSection,
   ValidationResult,
   BoardInfo,
   ExampleConfig,
@@ -80,6 +81,13 @@ export async function validateConfig(config: ConfigFile): Promise<ValidationResu
   return request('/validate', {
     method: 'POST',
     body: JSON.stringify(config),
+  });
+}
+
+export async function acknowledgeWarning(section: ConfigSection): Promise<{ status: string; file: string }> {
+  return request('/warning-acknowledgements', {
+    method: 'POST',
+    body: JSON.stringify({ section }),
   });
 }
 

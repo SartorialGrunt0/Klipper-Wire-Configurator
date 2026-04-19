@@ -21,6 +21,10 @@ from parser.config_schema import (
     ParamType,
     get_section_def,
 )
+from services.warning_acknowledgments import (
+    canonicalize_section,
+    load_acknowledged_warning_sections,
+)
 
 
 @dataclass
@@ -72,6 +76,7 @@ PIN_RE = re.compile(
 def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> ValidationResult:
     """Validate a full configuration file."""
     result = ValidationResult()
+    acknowledged_sections = load_acknowledged_warning_sections()
 
     section_counts: dict[str, int] = {}
     used_pins: dict[str, list[str]] = {}  # pin -> list of sections using it
@@ -103,6 +108,8 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
         section_counts[sec_type] = section_counts.get(sec_type, 0) + 1
 
         if sec_def is None:
+            if canonicalize_section(section) in acknowledged_sections:
+                continue
             # Unknown section - just a warning
             result.errors.append(ValidationError(
                 severity="warning",

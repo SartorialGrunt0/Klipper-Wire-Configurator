@@ -15,6 +15,7 @@ from models.config_models import (
     ParamUpdate,
     ProjectSave,
     SectionUpdate,
+    WarningAcknowledgementRequest,
 )
 from parser.config_parser import ConfigFile, ConfigParam, ConfigSection, parse_config
 from parser.config_schema import (
@@ -33,6 +34,7 @@ from services.board_detector import (
     fuzzy_match_examples,
     get_available_examples,
 )
+from services.warning_acknowledgments import acknowledge_warning_for_section
 
 router = APIRouter()
 
@@ -174,6 +176,32 @@ async def validate_config_api(data: ConfigUpdate):
     config = _config_update_to_config_file(data)
     validation = validate_config(config)
     return validation.to_dict()
+
+
+@router.post("/warning-acknowledgements")
+async def acknowledge_warning_api(data: WarningAcknowledgementRequest):
+    """Persist a section whose unknown-section warning has been acknowledged."""
+    section = ConfigSection(
+        section_type=data.section.section_type,
+        section_name=data.section.section_name,
+        full_header=data.section.full_header,
+        line_number=0,
+        params=[
+            ConfigParam(
+                key=param.key,
+                value=param.value,
+                comment=param.comment,
+                is_commented_out=param.is_commented_out,
+                separator=param.separator,
+            )
+            for param in data.section.params
+        ],
+        header_comments=data.section.header_comments,
+        trailing_comments=data.section.trailing_comments,
+        is_commented_out=data.section.is_commented_out,
+    )
+    file_path = acknowledge_warning_for_section(section)
+    return {"status": "acknowledged", "file": file_path}
 
 
 # ── Export ──────────────────────────────────────────────────────
