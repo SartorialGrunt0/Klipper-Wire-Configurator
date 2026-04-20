@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
+from difflib import SequenceMatcher
 
 from parser.config_parser import ConfigFile, ConfigSection, ConfigParam, parse_config
 
@@ -220,6 +221,57 @@ def _format_param(param: ConfigParam) -> str:
         return f"{prefix}{param.key}: {param.value}{comment_suffix}"
 
 
+def _build_multiline_prefix(raw_line: str, original_value_line: str, fallback: str) -> str:
+    if not raw_line:
+        return fallback
+    if not original_value_line:
+        return raw_line
+    if raw_line.endswith(original_value_line):
+        return raw_line[:-len(original_value_line)]
+    return fallback
+
+
+def _format_multiline_param_preserving_original(param: ConfigParam, original_param: ConfigParam) -> str:
+    original_value_lines = original_param.value.split("\n")
+    new_value_lines = param.value.split("\n")
+    original_raw_lines = original_param.raw_line.split("\n") if original_param.raw_line else []
+
+    first_separator = original_param.separator if original_param.separator else param.separator
+    first_prefix = _build_multiline_prefix(
+        original_raw_lines[0] if original_raw_lines else "",
+        original_value_lines[0] if original_value_lines else "",
+        f"{('#' if param.is_commented_out else '')}{param.key}{first_separator} ",
+    )
+    continuation_fallback = f"{('#' if param.is_commented_out else '')}  "
+
+    rendered_lines = [""] * len(new_value_lines)
+    matcher = SequenceMatcher(a=original_value_lines, b=new_value_lines)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            for offset in range(j2 - j1):
+                orig_idx = i1 + offset
+                new_idx = j1 + offset
+                if orig_idx < len(original_raw_lines):
+                    rendered_lines[new_idx] = original_raw_lines[orig_idx]
+                else:
+                    prefix = first_prefix if new_idx == 0 else continuation_fallback
+                    rendered_lines[new_idx] = f"{prefix}{new_value_lines[new_idx]}" if new_value_lines[new_idx] else prefix.rstrip()
+            continue
+
+        for new_idx in range(j1, j2):
+            if new_idx == 0:
+                rendered_lines[new_idx] = f"{first_prefix}{new_value_lines[new_idx]}" if new_value_lines[new_idx] else first_prefix.rstrip()
+                continue
+
+            orig_idx = i1 + min(new_idx - j1, max(0, i2 - i1 - 1))
+            prefix = continuation_fallback
+            if 0 <= orig_idx < len(original_raw_lines) and orig_idx < len(original_value_lines):
+                prefix = _build_multiline_prefix(original_raw_lines[orig_idx], original_value_lines[orig_idx], continuation_fallback)
+            rendered_lines[new_idx] = f"{prefix}{new_value_lines[new_idx]}" if new_value_lines[new_idx] else prefix.rstrip()
+
+    return "\n".join(rendered_lines)
+
+
 def write_section(section: ConfigSection, original_section: ConfigSection | None = None) -> str:
     """Generate text for a single config section.
 
@@ -253,9 +305,13 @@ def write_section(section: ConfigSection, original_section: ConfigSection | None
             if (orig_p
                     and orig_p.raw_line
                     and orig_p.value == param.value
-                    and orig_p.is_commented_out == param.is_commented_out
-                    and "\n" not in param.value):
+                    and orig_p.is_commented_out == param.is_commented_out):
                 lines.append(orig_p.raw_line)
+            elif (orig_p
+                    and orig_p.raw_line
+                    and orig_p.is_commented_out == param.is_commented_out
+                    and "\n" in param.value):
+                lines.append(_format_multiline_param_preserving_original(param, orig_p))
             else:
                 lines.append(_format_param(param))
         param_idx += 1

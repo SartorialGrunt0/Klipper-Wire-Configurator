@@ -54,6 +54,7 @@ interface ConfigState {
 
   /* Section operations */
   addSection: (filename: string, section: ConfigSection) => void;
+  upsertSection: (filename: string, section: ConfigSection, previousFullHeader?: string) => void;
   removeSection: (filename: string, fullHeader: string) => void;
   updateSectionParam: (
     filename: string,
@@ -140,6 +141,41 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           [filename]: {
             ...cf,
             sections: [...cf.sections, section],
+          },
+        },
+      };
+    });
+    scheduleRevalidation(get, set);
+  },
+
+  upsertSection: (filename, section, previousFullHeader) => {
+    set((s) => {
+      const cf = s.configFiles[filename];
+      if (!cf) return s;
+      const sections = [...cf.sections];
+      const previousIndex = previousFullHeader
+        ? sections.findIndex((candidate) => candidate.full_header === previousFullHeader)
+        : -1;
+      const existingIndex = sections.findIndex((candidate) => candidate.full_header === section.full_header);
+
+      if (previousIndex !== -1) {
+        sections[previousIndex] = section;
+        if (existingIndex !== -1 && existingIndex !== previousIndex) {
+          sections.splice(existingIndex, 1);
+        }
+      } else if (existingIndex !== -1) {
+        sections[existingIndex] = section;
+      } else {
+        sections.push(section);
+      }
+
+      return {
+        isDirty: true,
+        configFiles: {
+          ...s.configFiles,
+          [filename]: {
+            ...cf,
+            sections,
           },
         },
       };

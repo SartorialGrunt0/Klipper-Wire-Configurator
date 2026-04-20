@@ -12,9 +12,15 @@ interface ToolbarProps {
   showTextView: boolean;
   onToggleTextView: () => void;
   onToggleAddMenu?: () => void;
+  onOpenMacroDesigner?: () => void;
 }
 
-export default function Toolbar({ showTextView, onToggleTextView, onToggleAddMenu }: ToolbarProps) {
+export default function Toolbar({
+  showTextView,
+  onToggleTextView,
+  onToggleAddMenu,
+  onOpenMacroDesigner,
+}: ToolbarProps) {
   const [showImport, setShowImport] = useState(false);
   const [showExport, setShowExport] = useState(false);
   const [showDiff, setShowDiff] = useState(false);
@@ -85,6 +91,18 @@ export default function Toolbar({ showTextView, onToggleTextView, onToggleAddMen
             <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
           </svg>
           Component
+        </button>
+      )}
+
+      {onOpenMacroDesigner && (
+        <button
+          onClick={onOpenMacroDesigner}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] transition-colors"
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+          </svg>
+          Macro
         </button>
       )}
 

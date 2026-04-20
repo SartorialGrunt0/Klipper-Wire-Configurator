@@ -30,9 +30,12 @@ import type { TextEditorHandle } from './components/TextEditor';
 import Toolbar from './components/Toolbar';
 import AddMenu from './components/AddMenu';
 import UnsavedChangesDialog from './components/dialogs/UnsavedChangesDialog';
+import MacroDesignerDialog from './components/dialogs/MacroDesignerDialog';
 
 import type { AppNode, ValidationStatus } from './types/graph';
+import type { MacroDesignerPersistedState } from './types/macroDesigner';
 import { combineValidationStatuses } from './utils/validationStatus';
+import { useMacroDesignerStore } from './stores/macroDesignerStore';
 
 function getDirectNodeStatus(
   node: AppNode,
@@ -112,8 +115,13 @@ export default function App() {
   } = useGraphStore();
 
   const { selectedSection, setSelectedSection, validation } = useConfigStore();
+  const macroDesignerDrafts = useMacroDesignerStore((state) => state.drafts);
+  const macroDesignerNoGoZones = useMacroDesignerStore((state) => state.noGoZones);
+  const macroDesignerDockPosition = useMacroDesignerStore((state) => state.dockPosition);
+  const macroDesignerRotation = useMacroDesignerStore((state) => state.rotation);
   const [showTextView, setShowTextView] = useState(false);
   const [showAddMenu, setShowAddMenu] = useState(false);
+  const [showMacroDesigner, setShowMacroDesigner] = useState(false);
   const [showUnsavedDialog, setShowUnsavedDialog] = useState(false);
   const textEditorRef = useRef<TextEditorHandle>(null);
 
@@ -210,7 +218,11 @@ export default function App() {
                 const layout = layoutResult.layout as {
                   graphNodes?: Array<{ id: string; position: { x: number; y: number } }>;
                   graphEdges?: Array<{ id: string; data?: Record<string, unknown> }>;
+                  macroDesigner?: MacroDesignerPersistedState;
                 };
+                if (layout.macroDesigner) {
+                  useMacroDesignerStore.getState().hydratePersistedState(layout.macroDesigner);
+                }
                 // Overlay saved positions onto the newly built graph nodes
                 if (layout.graphNodes) {
                   const positionMap = new Map(
@@ -254,13 +266,21 @@ export default function App() {
       api.saveNativeLayout({
         graphNodes: nodes,
         graphEdges: edges,
+        macroDesigner: useMacroDesignerStore.getState().exportPersistedState(),
       }).catch(() => { /* ignore save errors */ });
     }, 3000);
 
     return () => {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     };
-  }, [nodes, edges]);
+  }, [
+    nodes,
+    edges,
+    macroDesignerDrafts,
+    macroDesignerNoGoZones,
+    macroDesignerDockPosition,
+    macroDesignerRotation,
+  ]);
 
   useEffect(() => {
     const sectionStatuses = new Map<string, ValidationStatus>();
@@ -640,6 +660,7 @@ const w = (container.style?.width as number) || 400;
         <Toolbar
           showTextView={showTextView}
           onToggleAddMenu={() => setShowAddMenu(!showAddMenu)}
+          onOpenMacroDesigner={() => setShowMacroDesigner(true)}
           onToggleTextView={() => {
             if (showTextView) {
               // Switching FROM text TO graph — check for unsaved changes
@@ -738,6 +759,9 @@ const w = (container.style?.width as number) || 400;
           {/* Add Menu Overlay */}
           {showAddMenu && (
             <AddMenu onClose={() => setShowAddMenu(false)} />
+          )}
+          {showMacroDesigner && (
+            <MacroDesignerDialog onClose={() => setShowMacroDesigner(false)} />
           )}
         </div>
 

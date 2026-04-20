@@ -1,0 +1,618 @@
+import type { MacroSourceItem } from '../types/macroDesigner';
+import type {
+  MachineProfile,
+  MacroRuntimeState,
+  ParsedGcodeCommand,
+  RuntimeLedState,
+  SimulationBuildResult,
+  SimulationStep,
+  SimulationTickResult,
+} from '../types/macroDesigner';
+import { findPathZoneHit, findZoneHit, isPointInBounds } from './macroDesigner';
+
+function parseParams(tokens: string[]): Record<string, string> {
+  const params: Record<string, string> = {};
+  for (const token of tokens) {
+    if (!token) continue;
+    const eqIndex = token.indexOf('=');
+    if (eqIndex !== -1) {
+      const key = token.slice(0, eqIndex).trim().toUpperCase();
+      const value = token.slice(eqIndex + 1).trim().replace(/^"|"$/g, '');
+      if (key) params[key] = value;
+      continue;
+    }
+    const first = token[0]?.toUpperCase();
+    const rest = token.slice(1).trim();
+    if (first && rest) {
+      params[first] = rest;
+    }
+  }
+  return params;
+}
+
+function isTemplateDirective(line: string): boolean {
+  return /^\{[%#].*[%#]\}$/.test(line) || /^\{\s*printer\./.test(line) || /^\{\s*[^}]+\s*\}$/.test(line);
+}
+
+function isTemplateValue(value: string | undefined): boolean {
+  return typeof value === 'string' && /[{[]/.test(value);
+}
+
+function extractActionMessage(raw: string): string {
+  const match = raw.match(/^\{\s*action_[^(]+\((.*)\)\s*\}$/i);
+  return (match?.[1] || '').trim();
+}
+
+export function parseGcodeLine(line: string, lineNumber: number, sourceName: string): ParsedGcodeCommand | null {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.startsWith('#')) return null;
+  if (/^\{\s*action_respond_info\(/i.test(trimmed)) {
+    return { command: 'ACTION_RESPOND_INFO', raw: trimmed, params: { MSG: extractActionMessage(trimmed) }, lineNumber, sourceName };
+  }
+  if (/^\{\s*action_raise_error\(/i.test(trimmed)) {
+    return { command: 'ACTION_RAISE_ERROR', raw: trimmed, params: { MSG: extractActionMessage(trimmed) }, lineNumber, sourceName };
+  }
+  if (/^\{\s*action_emergency_stop/i.test(trimmed)) {
+    return { command: 'ACTION_EMERGENCY_STOP', raw: trimmed, params: { MSG: extractActionMessage(trimmed) }, lineNumber, sourceName };
+  }
+  if (isTemplateDirective(trimmed)) {
+    return { command: '__TEMPLATE__', raw: trimmed, params: {}, lineNumber, sourceName };
+  }
+  const withoutComment = line.replace(/;.*$/, '').trim();
+  if (!withoutComment || withoutComment.startsWith('#')) return null;
+  const tokens = withoutComment.match(/(?:"[^"]*"|\S+)/g) || [];
+  const [commandToken, ...paramTokens] = tokens;
+  if (!commandToken) return null;
+  return {
+    command: commandToken.toUpperCase(),
+    raw: withoutComment,
+    params: parseParams(paramTokens),
+    lineNumber,
+    sourceName,
+  };
+}
+
+function cloneLedState(state: RuntimeLedState): RuntimeLedState {
+  return { ...state };
+}
+
+export function createInitialRuntimeState(profile: MachineProfile, macroName: string): MacroRuntimeState {
+  return {
+    x: profile.centerX,
+    y: profile.centerY,
+    z: Math.max(profile.minZ, 0),
+    e: 0,
+    feedRate: 1500,
+    absoluteMoves: true,
+    absoluteExtrusion: true,
+    gcodeOffset: { x: 0, y: 0, z: 0 },
+    lastZDirection: 'flat',
+    homedAxes: [],
+    bed: { current: 25, target: 0 },
+    nozzle: { current: 25, target: 0 },
+    fanSpeed: 0,
+    displayText: '',
+    messages: [],
+    ledStates: {},
+    activeProbePoint: null,
+    activeBuiltInCommand: null,
+    activeMacro: macroName,
+    elapsedTimeS: 0,
+    savedStates: {},
+  };
+}
+
+function asNumber(value: string | undefined): number | null {
+  if (value === undefined) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeMessage(raw: string): string {
+  return raw.replace(/^"|"$/g, '');
+}
+
+function estimateMoveTime(distance: number, feedRate: number, maxVelocity: number, maxAccel: number): number {
+  if (distance <= 0 || maxAccel <= 0) return 0;
+  const requestedSpeed = feedRate / 60;
+  const effectiveSpeed = Math.min(requestedSpeed, maxVelocity);
+  if (effectiveSpeed <= 0) return 0;
+  const accelDist = (effectiveSpeed * effectiveSpeed) / (2 * maxAccel);
+  if (accelDist * 2 >= distance) {
+    return 2 * Math.sqrt(distance / maxAccel);
+  }
+  const accelTime = effectiveSpeed / maxAccel;
+  const cruiseDist = distance - 2 * accelDist;
+  const cruiseTime = cruiseDist / effectiveSpeed;
+  return 2 * accelTime + cruiseTime;
+}
+
+function buildMacroLookup(items: MacroSourceItem[]): Map<string, MacroSourceItem> {
+  const lookup = new Map<string, MacroSourceItem>();
+  for (const item of items) {
+    lookup.set(item.title.toUpperCase(), item);
+  }
+  return lookup;
+}
+
+function expandCommandToSteps(command: ParsedGcodeCommand, profile: MachineProfile): SimulationStep[] {
+  const points = profile.featurePoints[command.command] || [];
+  if (!points.length) {
+    return [{ kind: 'command', command }];
+  }
+  return points.flatMap((point) => ([
+    {
+      kind: 'move' as const,
+      x: point.x,
+      y: point.y,
+      label: `${command.command} move ${point.label || ''}`.trim(),
+      raw: command.raw,
+      sourceName: command.sourceName,
+      lineNumber: command.lineNumber,
+    },
+    {
+      kind: 'probe' as const,
+      x: point.x,
+      y: point.y,
+      label: `${command.command} probe ${point.label || ''}`.trim(),
+      raw: command.raw,
+      sourceName: command.sourceName,
+      lineNumber: command.lineNumber,
+    },
+  ]));
+}
+
+export function buildSimulationSteps(
+  root: MacroSourceItem,
+  allMacros: MacroSourceItem[],
+  profile: MachineProfile,
+): SimulationBuildResult {
+  const macroLookup = buildMacroLookup(allMacros);
+  const warnings: string[] = [];
+  const steps: SimulationStep[] = [];
+  const stack: string[] = [];
+
+  const visit = (macro: MacroSourceItem) => {
+    const title = macro.title.toUpperCase();
+    if (stack.includes(title)) {
+      warnings.push(`Macro loop detected: ${[...stack, title].join(' -> ')}`);
+      return;
+    }
+    stack.push(title);
+    const lines = macro.gcode.split(/\r?\n/);
+    lines.forEach((line, index) => {
+      const parsed = parseGcodeLine(line, index + 1, macro.title);
+      if (!parsed) return;
+      const nested = macroLookup.get(parsed.command);
+      if (nested && nested.key !== macro.key) {
+        visit(nested);
+        return;
+      }
+      steps.push(...expandCommandToSteps(parsed, profile));
+    });
+    stack.pop();
+  };
+
+  visit(root);
+  return { steps, warnings };
+}
+
+function updateTargetTemperature(current: number, target: number): number {
+  if (current === target) return current;
+  const delta = target - current;
+  const step = Math.min(Math.abs(delta), 20);
+  return current + Math.sign(delta) * step;
+}
+
+function applyLinearMove(
+  state: MacroRuntimeState,
+  params: Record<string, string>,
+  profile: MachineProfile,
+): SimulationTickResult {
+  const xValue = asNumber(params.X);
+  const yValue = asNumber(params.Y);
+  const zValue = asNumber(params.Z);
+  const eValue = asNumber(params.E);
+  const fValue = asNumber(params.F);
+
+  const nextX = xValue === null
+    ? state.x
+    : (state.absoluteMoves ? xValue + state.gcodeOffset.x : state.x + xValue);
+  const nextY = yValue === null
+    ? state.y
+    : (state.absoluteMoves ? yValue + state.gcodeOffset.y : state.y + yValue);
+  const nextZ = zValue === null
+    ? state.z
+    : (state.absoluteMoves ? zValue + state.gcodeOffset.z : state.z + zValue);
+  const nextE = eValue === null
+    ? state.e
+    : (state.absoluteExtrusion ? eValue : state.e + eValue);
+  const warnings: string[] = [];
+
+  if (isTemplateValue(params.X) || isTemplateValue(params.Y) || isTemplateValue(params.Z) || isTemplateValue(params.E)) {
+    return {
+      nextState: {
+        ...state,
+        feedRate: fValue ?? state.feedRate,
+        nozzle: { ...state.nozzle, current: updateTargetTemperature(state.nozzle.current, state.nozzle.target) },
+        bed: { ...state.bed, current: updateTargetTemperature(state.bed.current, state.bed.target) },
+        activeProbePoint: null,
+        activeBuiltInCommand: null,
+      },
+      warnings,
+      eventSummary: 'Dynamic move with template values',
+    };
+  }
+
+  if (!isPointInBounds(profile, nextX, nextY)) {
+    warnings.push(`Move to X${nextX.toFixed(2)} Y${nextY.toFixed(2)} exceeds the build area.`);
+  }
+  const zone = findPathZoneHit(profile, state.x, state.y, nextX, nextY);
+  if (zone) {
+    warnings.push(`Move path crosses no-go zone \"${zone.name}\".`);
+  }
+  if (nextZ < profile.minZ || nextZ > profile.maxZ) {
+    warnings.push(`Move to Z${nextZ.toFixed(2)} exceeds the configured Z range.`);
+  }
+
+  const distance = Math.sqrt((nextX - state.x) ** 2 + (nextY - state.y) ** 2 + (nextZ - state.z) ** 2);
+  const effectiveFeedRate = fValue ?? state.feedRate;
+  const moveTime = estimateMoveTime(distance, effectiveFeedRate, profile.maxVelocity, profile.maxAccel);
+  if (effectiveFeedRate / 60 > profile.maxVelocity) {
+    warnings.push(`Feed rate ${effectiveFeedRate} mm/min (${(effectiveFeedRate / 60).toFixed(1)} mm/s) exceeds max velocity ${profile.maxVelocity} mm/s.`);
+  }
+
+  return {
+    nextState: {
+      ...state,
+      x: nextX,
+      y: nextY,
+      z: nextZ,
+      e: nextE,
+      feedRate: effectiveFeedRate,
+      elapsedTimeS: state.elapsedTimeS + moveTime,
+      lastZDirection: nextZ > state.z ? 'up' : nextZ < state.z ? 'down' : 'flat',
+      nozzle: { ...state.nozzle, current: updateTargetTemperature(state.nozzle.current, state.nozzle.target) },
+      bed: { ...state.bed, current: updateTargetTemperature(state.bed.current, state.bed.target) },
+      activeProbePoint: null,
+      activeBuiltInCommand: null,
+    },
+    warnings,
+    eventSummary: `Move to X${nextX.toFixed(2)} Y${nextY.toFixed(2)} Z${nextZ.toFixed(2)}`,
+  };
+}
+
+function setLedState(state: MacroRuntimeState, params: Record<string, string>): MacroRuntimeState {
+  const ledName = params.LED || 'default';
+  const next = cloneLedState(state.ledStates[ledName] || { red: 0, green: 0, blue: 0, white: 0 });
+  if (params.RED !== undefined) next.red = Number(params.RED) || 0;
+  if (params.GREEN !== undefined) next.green = Number(params.GREEN) || 0;
+  if (params.BLUE !== undefined) next.blue = Number(params.BLUE) || 0;
+  if (params.WHITE !== undefined) next.white = Number(params.WHITE) || 0;
+  return {
+    ...state,
+    ledStates: {
+      ...state.ledStates,
+      [ledName]: next,
+    },
+  };
+}
+
+export function executeSimulationStep(
+  state: MacroRuntimeState,
+  step: SimulationStep,
+  profile: MachineProfile,
+): SimulationTickResult {
+  if (step.kind === 'move') {
+    const warnings: string[] = [];
+    if (!isPointInBounds(profile, step.x, step.y)) {
+      warnings.push(`${step.label} goes outside the build area.`);
+    }
+    const zone = findPathZoneHit(profile, state.x, state.y, step.x, step.y);
+    if (zone) warnings.push(`${step.label} path crosses no-go zone \"${zone.name}\".`);
+    const distance = Math.sqrt((step.x - state.x) ** 2 + (step.y - state.y) ** 2);
+    const moveTime = estimateMoveTime(distance, state.feedRate, profile.maxVelocity, profile.maxAccel);
+    return {
+      nextState: {
+        ...state,
+        x: step.x,
+        y: step.y,
+        z: typeof step.z === 'number' ? step.z : state.z,
+        elapsedTimeS: state.elapsedTimeS + moveTime,
+        lastZDirection: typeof step.z === 'number'
+          ? (step.z > state.z ? 'up' : step.z < state.z ? 'down' : 'flat')
+          : 'flat',
+        activeProbePoint: { x: step.x, y: step.y, label: step.label },
+      },
+      warnings,
+      eventSummary: step.label,
+    };
+  }
+
+  if (step.kind === 'probe') {
+    const warnings: string[] = [];
+    if (!isPointInBounds(profile, step.x, step.y)) {
+      warnings.push(`${step.label} is outside the probeable area.`);
+    }
+    const zone = findZoneHit(profile, step.x, step.y);
+    if (zone) warnings.push(`${step.label} is inside no-go zone \"${zone.name}\".`);
+    return {
+      nextState: {
+        ...state,
+        activeProbePoint: { x: step.x, y: step.y, label: step.label },
+        activeBuiltInCommand: step.label.split(' ')[0],
+      },
+      warnings,
+      eventSummary: step.label,
+    };
+  }
+
+  const { command } = step;
+  const warnings: string[] = [];
+  let nextState: MacroRuntimeState = {
+    ...state,
+    nozzle: { ...state.nozzle, current: updateTargetTemperature(state.nozzle.current, state.nozzle.target) },
+    bed: { ...state.bed, current: updateTargetTemperature(state.bed.current, state.bed.target) },
+    activeProbePoint: null,
+    activeBuiltInCommand: null,
+  };
+  let eventSummary = command.raw;
+
+  switch (command.command) {
+    case 'G0':
+    case 'G1':
+      return applyLinearMove(state, command.params, profile);
+    case 'G28': {
+      const homeX = command.params.X !== undefined || Object.keys(command.params).length === 0 ? profile.homeX : state.x;
+      const homeY = command.params.Y !== undefined || Object.keys(command.params).length === 0 ? profile.homeY : state.y;
+      const homeZ = command.params.Z !== undefined || Object.keys(command.params).length === 0 ? profile.homeZ : state.z;
+      nextState = {
+        ...nextState,
+        x: homeX,
+        y: homeY,
+        z: homeZ,
+        homedAxes: Object.keys(command.params).length === 0
+          ? ['X', 'Y', 'Z']
+          : Object.keys(command.params).map((key) => key.toUpperCase()),
+      };
+      eventSummary = 'Home axes';
+      break;
+    }
+    case 'G90':
+      nextState = { ...nextState, absoluteMoves: true };
+      eventSummary = 'Absolute positioning';
+      break;
+    case 'G91':
+      nextState = { ...nextState, absoluteMoves: false };
+      eventSummary = 'Relative positioning';
+      break;
+    case 'M82':
+      nextState = { ...nextState, absoluteExtrusion: true };
+      eventSummary = 'Absolute extrusion';
+      break;
+    case 'M83':
+      nextState = { ...nextState, absoluteExtrusion: false };
+      eventSummary = 'Relative extrusion';
+      break;
+    case 'G92':
+      nextState = {
+        ...nextState,
+        x: asNumber(command.params.X) ?? state.x,
+        y: asNumber(command.params.Y) ?? state.y,
+        z: asNumber(command.params.Z) ?? state.z,
+        e: asNumber(command.params.E) ?? state.e,
+      };
+      eventSummary = 'Set current position';
+      break;
+    case 'M104':
+    case 'M109': {
+      if (isTemplateValue(command.params.S)) {
+        eventSummary = `${command.command === 'M109' ? 'Wait for' : 'Set'} nozzle target (template)`;
+        break;
+      }
+      const target = asNumber(command.params.S) ?? nextState.nozzle.target;
+      if (target < 0 || target > profile.nozzleMaxTemp) {
+        warnings.push(`Requested nozzle temperature ${target} exceeds the configured range.`);
+      }
+      nextState = {
+        ...nextState,
+        nozzle: {
+          current: command.command === 'M109' ? target : nextState.nozzle.current,
+          target,
+        },
+      };
+      eventSummary = `${command.command === 'M109' ? 'Wait for' : 'Set'} nozzle target ${target}C`;
+      break;
+    }
+    case 'M140':
+    case 'M190': {
+      if (isTemplateValue(command.params.S)) {
+        eventSummary = `${command.command === 'M190' ? 'Wait for' : 'Set'} bed target (template)`;
+        break;
+      }
+      const target = asNumber(command.params.S) ?? nextState.bed.target;
+      if (target < 0 || target > profile.bedMaxTemp) {
+        warnings.push(`Requested bed temperature ${target} exceeds the configured range.`);
+      }
+      nextState = {
+        ...nextState,
+        bed: {
+          current: command.command === 'M190' ? target : nextState.bed.current,
+          target,
+        },
+      };
+      eventSummary = `${command.command === 'M190' ? 'Wait for' : 'Set'} bed target ${target}C`;
+      break;
+    }
+    case 'TURN_OFF_HEATERS':
+      nextState = {
+        ...nextState,
+        bed: { current: nextState.bed.current, target: 0 },
+        nozzle: { current: nextState.nozzle.current, target: 0 },
+      };
+      eventSummary = 'Turn off heaters';
+      break;
+    case 'M106': {
+      if (isTemplateValue(command.params.S)) {
+        eventSummary = 'Set fan speed (template)';
+        break;
+      }
+      const value = Math.max(0, Math.min(255, asNumber(command.params.S) ?? 255));
+      nextState = { ...nextState, fanSpeed: value / 255 };
+      eventSummary = `Set fan ${(value / 255 * 100).toFixed(0)}%`;
+      break;
+    }
+    case 'M107':
+      nextState = { ...nextState, fanSpeed: 0 };
+      eventSummary = 'Fan off';
+      break;
+    case 'M84':
+      eventSummary = 'Disable steppers';
+      break;
+    case 'SET_FAN_SPEED': {
+      if (isTemplateValue(command.params.SPEED)) {
+        eventSummary = 'Set fan speed (template)';
+        break;
+      }
+      const speed = Math.max(0, Math.min(1, Number(command.params.SPEED) || 0));
+      nextState = { ...nextState, fanSpeed: speed };
+      eventSummary = `Set fan ${(speed * 100).toFixed(0)}%`;
+      break;
+    }
+    case 'SET_LED':
+      nextState = setLedState(nextState, command.params);
+      eventSummary = `Update LED ${command.params.LED || 'default'}`;
+      break;
+    case 'SET_DISPLAY_TEXT':
+    case 'M117': {
+      const text = normalizeMessage(command.params.MSG || command.raw.replace(/^M117\s*/i, ''));
+      nextState = { ...nextState, displayText: text };
+      eventSummary = `Display: ${text}`;
+      break;
+    }
+    case 'RESPOND': {
+      const text = normalizeMessage(command.params.MSG || '');
+      nextState = { ...nextState, messages: [...nextState.messages, text] };
+      eventSummary = `Terminal: ${text}`;
+      break;
+    }
+    case 'ACTION_RESPOND_INFO': {
+      const text = normalizeMessage(command.params.MSG || command.raw);
+      nextState = { ...nextState, messages: [...nextState.messages, text] };
+      eventSummary = `Info: ${text}`;
+      break;
+    }
+    case 'ACTION_RAISE_ERROR': {
+      const text = normalizeMessage(command.params.MSG || command.raw);
+      nextState = { ...nextState, messages: [...nextState.messages, text] };
+      warnings.push(text || 'Macro raised an error.');
+      eventSummary = 'Raise error';
+      break;
+    }
+    case 'ACTION_EMERGENCY_STOP': {
+      const text = normalizeMessage(command.params.MSG || command.raw);
+      nextState = { ...nextState, messages: [...nextState.messages, text] };
+      warnings.push(text || 'Emergency stop requested.');
+      eventSummary = 'Emergency stop';
+      break;
+    }
+    case '__TEMPLATE__':
+      eventSummary = 'Template directive';
+      break;
+    case 'SET_GCODE_OFFSET': {
+      const nextOffset = { ...nextState.gcodeOffset };
+      if (command.params.X !== undefined) nextOffset.x = Number(command.params.X) || 0;
+      if (command.params.Y !== undefined) nextOffset.y = Number(command.params.Y) || 0;
+      if (command.params.Z !== undefined) nextOffset.z = Number(command.params.Z) || 0;
+      if (command.params.X_ADJUST !== undefined) nextOffset.x += Number(command.params.X_ADJUST) || 0;
+      if (command.params.Y_ADJUST !== undefined) nextOffset.y += Number(command.params.Y_ADJUST) || 0;
+      if (command.params.Z_ADJUST !== undefined) nextOffset.z += Number(command.params.Z_ADJUST) || 0;
+      nextState = { ...nextState, gcodeOffset: nextOffset };
+      eventSummary = 'Adjust gcode offset';
+      break;
+    }
+    case 'SAVE_GCODE_STATE': {
+      const name = command.params.NAME || 'default';
+      nextState = {
+        ...nextState,
+        savedStates: {
+          ...nextState.savedStates,
+          [name]: {
+            x: nextState.x,
+            y: nextState.y,
+            z: nextState.z,
+            e: nextState.e,
+            feedRate: nextState.feedRate,
+            absoluteMoves: nextState.absoluteMoves,
+            absoluteExtrusion: nextState.absoluteExtrusion,
+            gcodeOffset: { ...nextState.gcodeOffset },
+          },
+        },
+      };
+      eventSummary = `Saved gcode state ${name}`;
+      break;
+    }
+    case 'RESTORE_GCODE_STATE': {
+      const name = command.params.NAME || 'default';
+      const saved = nextState.savedStates[name];
+      if (!saved) {
+        warnings.push(`No saved gcode state named ${name}.`);
+      } else {
+        nextState = {
+          ...nextState,
+          ...saved,
+          gcodeOffset: { ...saved.gcodeOffset },
+        };
+        eventSummary = `Restored gcode state ${name}`;
+      }
+      break;
+    }
+    case 'M400':
+      eventSummary = 'Wait for queued moves';
+      break;
+    case 'G4':
+      eventSummary = `Dwell ${command.params.P || '0'}ms`;
+      break;
+    case 'RESET_ACCEL':
+    case 'SET_GCODE_VARIABLE':
+    case 'SAVE_VARIABLE':
+    case 'UPDATE_DELAYED_GCODE':
+    case 'ACTIVATE_EXTRUDER':
+    case 'TEMPERATURE_WAIT':
+    case 'QUERY_PROBE':
+    case 'QUERY_ENDSTOPS':
+    case 'PAUSE':
+    case 'RESUME':
+    case 'CANCEL_PRINT':
+    case 'M220':
+    case 'M221':
+    case 'BED_MESH_PROFILE':
+    case 'SET_VELOCITY_LIMIT':
+    case 'SET_IDLE_TIMEOUT':
+    case 'EXCLUDE_OBJECT_DEFINE':
+    case 'EXCLUDE_OBJECT':
+      eventSummary = command.command;
+      break;
+    case 'BED_MESH_CALIBRATE':
+    case 'QUAD_GANTRY_LEVEL':
+    case 'Z_TILT_ADJUST':
+    case 'SCREWS_TILT_CALCULATE':
+    case 'BED_SCREWS_ADJUST':
+    case 'BED_TILT_CALIBRATE':
+    case 'PROBE':
+    case 'PROBE_ACCURACY':
+    case 'PROBE_CALIBRATE':
+      nextState = { ...nextState, activeBuiltInCommand: command.command };
+      eventSummary = command.command;
+      break;
+    default:
+      warnings.push(`Unsupported command ${command.command} was displayed but not fully simulated.`);
+      break;
+  }
+
+  return {
+    nextState,
+    warnings,
+    eventSummary,
+  };
+}

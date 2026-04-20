@@ -225,6 +225,7 @@ def parse_config(text: str, filename: str = "printer.cfg") -> ConfigFile:
             if last_param is not None and current_section is not None:
                 if _is_continuation_context(i + 1):
                     last_param.value += "\n"
+                    last_param.raw_line += "\n"
                     i += 1
                     continue
             # Otherwise it's a section/block boundary
@@ -276,6 +277,7 @@ def parse_config(text: str, filename: str = "printer.cfg") -> ConfigFile:
             cont_match = CONTINUATION_RE.match(line)
             if cont_match:
                 last_param.value += "\n" + cont_match.group(1)
+                last_param.raw_line += "\n" + line
                 i += 1
                 continue
 
@@ -360,6 +362,7 @@ def parse_config(text: str, filename: str = "printer.cfg") -> ConfigFile:
             if last_param is not None and current_section is not None:
                 if _is_continuation_context(i + 1) or (line[0] in (" ", "\t")):
                     last_param.value += "\n" + stripped
+                    last_param.raw_line += "\n" + line
                     i += 1
                     continue
             pending_comments.append(stripped)
@@ -371,6 +374,7 @@ def parse_config(text: str, filename: str = "printer.cfg") -> ConfigFile:
         # If we have a multi-line param in progress, append as continuation
         if last_param is not None and current_section is not None:
             last_param.value += "\n" + stripped
+            last_param.raw_line += "\n" + line
             i += 1
             continue
 

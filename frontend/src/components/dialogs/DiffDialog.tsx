@@ -13,6 +13,19 @@ interface DiffLine {
   content: string;
 }
 
+function normalizeDiffText(text: string): string {
+  const lines = text.replace(/\r\n?/g, '\n').split('\n').map((line) => line.replace(/[ \t]+$/g, ''));
+  const normalized: string[] = [];
+  let previousBlank = false;
+  for (const line of lines) {
+    const isBlank = line.trim().length === 0;
+    if (isBlank && previousBlank) continue;
+    normalized.push(line);
+    previousBlank = isBlank;
+  }
+  return normalized.join('\n');
+}
+
 function parsePatch(patch: string): DiffLine[] {
   const lines: DiffLine[] = [];
   for (const line of patch.split('\n')) {
@@ -84,7 +97,7 @@ export default function DiffDialog({ onClose }: DiffDialogProps) {
   const hasOriginal = activeFile in originalTexts;
 
   const patch = hasOriginal && !loading
-    ? createTwoFilesPatch(activeFile, activeFile, original, current, 'imported', 'current', { context: 3 })
+    ? createTwoFilesPatch(activeFile, activeFile, normalizeDiffText(original), normalizeDiffText(current), 'imported', 'current', { context: 3 })
     : '';
   const diffLines = parsePatch(patch);
   const hasChanges = diffLines.some((l) => l.type === 'added' || l.type === 'removed');
@@ -116,7 +129,15 @@ export default function DiffDialog({ onClose }: DiffDialogProps) {
                 if (!hasOrig) {
                   badge = 'new';
                 } else {
-                  const p = createTwoFilesPatch(fn, fn, originalTexts[fn] || '', currentTexts[fn] || '', '', '', { context: 0 });
+                  const p = createTwoFilesPatch(
+                    fn,
+                    fn,
+                    normalizeDiffText(originalTexts[fn] || ''),
+                    normalizeDiffText(currentTexts[fn] || ''),
+                    '',
+                    '',
+                    { context: 0 },
+                  );
                   changeCount = countChangedLines(p);
                   badge = changeCount > 0 ? 'changed' : 'unchanged';
                 }
