@@ -46,6 +46,41 @@ Uninstall on Raspberry Pi:
 bash ~/klipper-wire-configurator/scripts/install.sh --uninstall
 ```
 
+### Moonraker update_manager
+
+If you want Moonraker to track this app and offer updates in Mainsail or Fluidd, add the following section to `moonraker.conf`:
+
+```ini
+[update_manager klipper-wire-configurator]
+type: git_repo
+channel: dev
+path: ~/klipper-wire-configurator
+origin: https://github.com/SartorialGrunt0/Klipper-Wire-Configurator.git
+primary_branch: main
+virtualenv: ~/klipper-wire-configurator/venv
+requirements: backend/requirements.txt
+managed_services: klipper-wire-configurator
+info_tags:
+	desc=Klipper Wire Configurator
+```
+
+Moonraker also needs permission to restart the service. Add this line to your `moonraker.asvc` allow-list file, which is typically located at `~/printer_data/moonraker.asvc`:
+
+```text
+klipper-wire-configurator
+```
+
+Then restart Moonraker.
+
+Moonraker will not rerun this repository's installer directly. Instead, the installed service checks whether the frontend assets are stale each time it starts. After a Moonraker-managed update, the service restart will automatically rebuild `frontend/dist` when frontend source files changed.
+
+If you installed Klipper Wire Configurator before this behavior was added, rerun the installer once so your systemd user service picks up the new startup wrapper:
+
+```bash
+cd ~/klipper-wire-configurator
+bash scripts/install.sh
+```
+
 ### Local install for development (copy/paste)
 
 From the repository root:

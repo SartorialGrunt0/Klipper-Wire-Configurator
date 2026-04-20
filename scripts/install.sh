@@ -263,7 +263,7 @@ Type=simple
 WorkingDirectory=${INSTALL_DIR}/backend
 Environment=KWC_PORT=${KWC_PORT}
 Environment=KWC_PROJECTS_DIR=${INSTALL_DIR}/data/projects
-ExecStart=${INSTALL_DIR}/venv/bin/uvicorn main:app --host 0.0.0.0 --port ${KWC_PORT}
+ExecStart=/usr/bin/env bash ${INSTALL_DIR}/scripts/run-service.sh
 Restart=on-failure
 RestartSec=5
 

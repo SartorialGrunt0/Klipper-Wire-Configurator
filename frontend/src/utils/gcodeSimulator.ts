@@ -135,31 +135,81 @@ function buildMacroLookup(items: MacroSourceItem[]): Map<string, MacroSourceItem
   return lookup;
 }
 
+// Commands where featurePoints are probe coordinates — nozzle = point - probeOffset
+const PROBE_COORD_COMMANDS = new Set([
+  'BED_MESH_CALIBRATE', 'Z_TILT_ADJUST', 'QUAD_GANTRY_LEVEL',
+  'BED_TILT_CALIBRATE', 'DELTA_CALIBRATE',
+]);
+// Commands where featurePoints are nozzle coordinates — probe = point + probeOffset
+const NOZZLE_COORD_PROBE_COMMANDS = new Set(['SCREWS_TILT_CALCULATE']);
+// Commands where the nozzle moves directly with no probe involvement
+const NOZZLE_DIRECT_COMMANDS = new Set(['BED_SCREWS_ADJUST']);
+
 function expandCommandToSteps(command: ParsedGcodeCommand, profile: MachineProfile): SimulationStep[] {
   const points = profile.featurePoints[command.command] || [];
-  if (!points.length) {
-    return [{ kind: 'command', command }];
+
+  if (PROBE_COORD_COMMANDS.has(command.command) && points.length) {
+    return points.flatMap((point) => ([
+      {
+        kind: 'move' as const,
+        x: point.x - profile.probeOffsetX,
+        y: point.y - profile.probeOffsetY,
+        z: profile.horizontalMoveZ,
+        label: `${command.command} travel to ${point.label || ''}`.trim(),
+        raw: command.raw,
+        sourceName: command.sourceName,
+        lineNumber: command.lineNumber,
+      },
+      {
+        kind: 'probe' as const,
+        x: point.x,
+        y: point.y,
+        label: `${command.command} probe ${point.label || ''}`.trim(),
+        raw: command.raw,
+        sourceName: command.sourceName,
+        lineNumber: command.lineNumber,
+      },
+    ]));
   }
-  return points.flatMap((point) => ([
-    {
+
+  if (NOZZLE_COORD_PROBE_COMMANDS.has(command.command) && points.length) {
+    return points.flatMap((point) => ([
+      {
+        kind: 'move' as const,
+        x: point.x,
+        y: point.y,
+        z: profile.horizontalMoveZ,
+        label: `${command.command} travel to ${point.label || ''}`.trim(),
+        raw: command.raw,
+        sourceName: command.sourceName,
+        lineNumber: command.lineNumber,
+      },
+      {
+        kind: 'probe' as const,
+        x: point.x + profile.probeOffsetX,
+        y: point.y + profile.probeOffsetY,
+        label: `${command.command} probe ${point.label || ''}`.trim(),
+        raw: command.raw,
+        sourceName: command.sourceName,
+        lineNumber: command.lineNumber,
+      },
+    ]));
+  }
+
+  if (NOZZLE_DIRECT_COMMANDS.has(command.command) && points.length) {
+    return points.map((point) => ({
       kind: 'move' as const,
       x: point.x,
       y: point.y,
-      label: `${command.command} move ${point.label || ''}`.trim(),
+      z: 0,
+      label: `${command.command} nozzle to ${point.label || ''}`.trim(),
       raw: command.raw,
       sourceName: command.sourceName,
       lineNumber: command.lineNumber,
-    },
-    {
-      kind: 'probe' as const,
-      x: point.x,
-      y: point.y,
-      label: `${command.command} probe ${point.label || ''}`.trim(),
-      raw: command.raw,
-      sourceName: command.sourceName,
-      lineNumber: command.lineNumber,
-    },
-  ]));
+    }));
+  }
+
+  return [{ kind: 'command', command }];
 }
 
 export function buildSimulationSteps(
@@ -171,6 +221,16 @@ export function buildSimulationSteps(
   const warnings: string[] = [];
   const steps: SimulationStep[] = [];
   const stack: string[] = [];
+
+  // Build a reverse map: rename_existing value → original command name.
+  // e.g. if [gcode_macro BED_MESH_CALIBRATE] has rename_existing: _BED_MESH_CALIBRATE,
+  // then "_BED_MESH_CALIBRATE" → "BED_MESH_CALIBRATE" (the built-in).
+  const renameMap = new Map<string, string>();
+  for (const item of allMacros) {
+    if (item.renameExisting.trim()) {
+      renameMap.set(item.renameExisting.trim().toUpperCase(), item.title.toUpperCase());
+    }
+  }
 
   const visit = (macro: MacroSourceItem) => {
     const title = macro.title.toUpperCase();
@@ -186,6 +246,13 @@ export function buildSimulationSteps(
       const nested = macroLookup.get(parsed.command);
       if (nested && nested.key !== macro.key) {
         visit(nested);
+        return;
+      }
+      // Check if this is a renamed built-in (e.g. _BED_MESH_CALIBRATE → BED_MESH_CALIBRATE)
+      const originalCommand = renameMap.get(parsed.command);
+      if (originalCommand) {
+        const rewritten: ParsedGcodeCommand = { ...parsed, command: originalCommand };
+        steps.push(...expandCommandToSteps(rewritten, profile));
         return;
       }
       steps.push(...expandCommandToSteps(parsed, profile));
@@ -322,7 +389,7 @@ export function executeSimulationStep(
         lastZDirection: typeof step.z === 'number'
           ? (step.z > state.z ? 'up' : step.z < state.z ? 'down' : 'flat')
           : 'flat',
-        activeProbePoint: { x: step.x, y: step.y, label: step.label },
+        activeProbePoint: null,
       },
       warnings,
       eventSummary: step.label,
@@ -591,6 +658,41 @@ export function executeSimulationStep(
     case 'SET_IDLE_TIMEOUT':
     case 'EXCLUDE_OBJECT_DEFINE':
     case 'EXCLUDE_OBJECT':
+    case 'SET_PRESSURE_ADVANCE':
+    case 'SET_INPUT_SHAPER':
+    case 'SET_RETRACTION':
+    case 'SET_HEATER_TEMPERATURE':
+    case 'SET_STEPPER_ENABLE':
+    case 'SET_TMC_FIELD':
+    case 'SET_TMC_CURRENT':
+    case 'SET_SERVO':
+    case 'SET_PIN':
+    case 'MANUAL_PROBE':
+    case 'Z_ENDSTOP_CALIBRATE':
+    case 'AXIS_TWIST_COMPENSATION_CALIBRATE':
+    case 'SAVE_CONFIG':
+    case 'FIRMWARE_RESTART':
+    case 'RESTART':
+    case 'STATUS':
+    case 'TUNING_TOWER':
+    case 'M204':
+    case 'M205':
+    case 'M900':
+    case 'M105':
+    case 'M112':
+    case 'M114':
+    case 'M115':
+    case 'M118':
+    case 'FORCE_MOVE':
+    case 'SET_KINEMATIC_POSITION':
+    case 'BED_MESH_CLEAR':
+    case 'BED_MESH_OUTPUT':
+    case 'BED_MESH_MAP':
+    case 'ACCEPT':
+    case 'ABORT':
+    case 'TESTZ':
+    case 'GET_POSITION':
+    case 'PID_CALIBRATE':
       eventSummary = command.command;
       break;
     case 'BED_MESH_CALIBRATE':
@@ -599,12 +701,26 @@ export function executeSimulationStep(
     case 'SCREWS_TILT_CALCULATE':
     case 'BED_SCREWS_ADJUST':
     case 'BED_TILT_CALIBRATE':
-    case 'PROBE':
-    case 'PROBE_ACCURACY':
-    case 'PROBE_CALIBRATE':
+    case 'DELTA_CALIBRATE':
       nextState = { ...nextState, activeBuiltInCommand: command.command };
       eventSummary = command.command;
       break;
+    case 'PROBE':
+    case 'PROBE_ACCURACY':
+    case 'PROBE_CALIBRATE': {
+      const probeX = nextState.x + profile.probeOffsetX;
+      const probeY = nextState.y + profile.probeOffsetY;
+      if (profile.hasProbe && !isPointInBounds(profile, probeX, probeY)) {
+        warnings.push(`${command.command} at X${probeX.toFixed(2)} Y${probeY.toFixed(2)} is outside the probeable area.`);
+      }
+      nextState = {
+        ...nextState,
+        activeProbePoint: profile.hasProbe ? { x: probeX, y: probeY, label: command.command } : null,
+        activeBuiltInCommand: command.command,
+      };
+      eventSummary = `${command.command} at nozzle X${nextState.x.toFixed(2)} Y${nextState.y.toFixed(2)}`;
+      break;
+    }
     default:
       warnings.push(`Unsupported command ${command.command} was displayed but not fully simulated.`);
       break;

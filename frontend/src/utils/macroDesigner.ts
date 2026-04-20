@@ -82,6 +82,13 @@ export const BUILT_IN_MACROS: BuiltInMacroDefinition[] = [
     requiredSections: ['probe'],
     description: 'Calibrate probe Z offset using the current probe setup.',
   },
+  {
+    id: 'delta_calibrate',
+    title: 'Delta Calibrate',
+    command: 'DELTA_CALIBRATE',
+    requiredSections: ['delta_calibrate'],
+    description: 'Calibrate delta parameters by probing seven points on the bed.',
+  },
 ];
 
 function getSections(configFiles: Record<string, ConfigFile>): ConfigSection[] {
@@ -305,6 +312,20 @@ export function sanitizeMacroName(name: string): string {
   return name.trim().replace(/\s+/g, '_').replace(/[^A-Za-z0-9_\-]/g, '_') || 'NEW_MACRO';
 }
 
+function generateDeltaCalibrationPoints(bedRadius: number, cx: number, cy: number): SimulationPoint[] {
+  const probeRadius = bedRadius * 0.7071;
+  const points: SimulationPoint[] = [{ x: cx, y: cy, label: 'Center' }];
+  for (let i = 0; i < 6; i += 1) {
+    const angle = (i * 60) * Math.PI / 180;
+    points.push({
+      x: Math.round((cx + probeRadius * Math.cos(angle)) * 100) / 100,
+      y: Math.round((cy + probeRadius * Math.sin(angle)) * 100) / 100,
+      label: `T${i + 1}`,
+    });
+  }
+  return points;
+}
+
 export function createMachineProfile(
   configFiles: Record<string, ConfigFile>,
   noGoZones: NoGoZone[],
@@ -352,6 +373,7 @@ export function createMachineProfile(
   const screwsTiltAdjust = sections.find((section) => section.section_type === 'screws_tilt_adjust');
   const bedScrews = sections.find((section) => section.section_type === 'bed_screws');
   const bedTilt = sections.find((section) => section.section_type === 'bed_tilt');
+  const deltaCalibrate = sections.find((section) => section.section_type === 'delta_calibrate');
 
   const meshMin = parsePair(getParamValue(bedMesh, 'mesh_min'));
   const meshMax = parsePair(getParamValue(bedMesh, 'mesh_max'));
@@ -366,9 +388,9 @@ export function createMachineProfile(
     SCREWS_TILT_CALCULATE: parseScrewPoints(screwsTiltAdjust),
     BED_SCREWS_ADJUST: parseScrewPoints(bedScrews),
     BED_TILT_CALIBRATE: parsePoints(getParamValue(bedTilt, 'points')),
-    PROBE: [{ x: centerX, y: centerY, label: 'Probe' }],
-    PROBE_ACCURACY: [{ x: centerX, y: centerY, label: 'Probe' }],
-    PROBE_CALIBRATE: [{ x: centerX, y: centerY, label: 'Probe' }],
+    DELTA_CALIBRATE: deltaCalibrate && isRound && radius
+      ? generateDeltaCalibrationPoints(radius, centerX, centerY)
+      : [],
   };
 
   return {
@@ -390,8 +412,10 @@ export function createMachineProfile(
     homeX,
     homeY,
     homeZ,
+    hasProbe: Boolean(probeSection),
     probeOffsetX: asNumber(getParamValue(probeSection, 'x_offset'), 0),
     probeOffsetY: asNumber(getParamValue(probeSection, 'y_offset'), 0),
+    horizontalMoveZ: asNumber(getParamValue(bedMesh, 'horizontal_move_z'), 5),
     nozzleMaxTemp: asNumber(getParamValue(extruder, 'max_temp'), 350),
     bedMaxTemp: asNumber(getParamValue(heaterBed, 'max_temp'), 130),
     maxVelocity: asNumber(getParamValue(printer, 'max_velocity'), 300),

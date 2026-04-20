@@ -68,8 +68,10 @@ export interface MachineProfile {
   homeX: number;
   homeY: number;
   homeZ: number;
+  hasProbe: boolean;
   probeOffsetX: number;
   probeOffsetY: number;
+  horizontalMoveZ: number;
   nozzleMaxTemp: number;
   bedMaxTemp: number;
   maxVelocity: number;

@@ -985,7 +985,9 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
   const toolheadMachine = toolheadDragPos || (currentRuntime ? { x: currentRuntime.x, y: currentRuntime.y, z: currentRuntime.z } : null);
   const toolheadSvg = toolheadMachine ? toSvg(toolheadMachine.x, toolheadMachine.y) : null;
   const probePoint = currentRuntime?.activeProbePoint ? toSvg(currentRuntime.activeProbePoint.x, currentRuntime.activeProbePoint.y) : null;
-  const probeMarker = currentRuntime ? toSvg(currentRuntime.x + machineProfile.probeOffsetX, currentRuntime.y + machineProfile.probeOffsetY) : null;
+  const probeMarker = machineProfile.hasProbe && toolheadMachine
+    ? toSvg(toolheadMachine.x + machineProfile.probeOffsetX, toolheadMachine.y + machineProfile.probeOffsetY)
+    : null;
 
   // Build plate outline (inner area)
   const buildCorners = useMemo(() => {
@@ -1188,6 +1190,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                     <div className="flex items-center gap-1"><span className="inline-block h-2 w-3 border border-gray-400 border-dashed bg-gray-400/10" /> Travel area</div>
                     <div className="flex items-center gap-1"><span className="inline-block h-2 w-3 border border-red-400 bg-red-400/20" /> No-go zone</div>
                     <div className="flex items-center gap-1"><span className="inline-block h-2 w-2 bg-sky-400" /> Toolhead</div>
+                    {machineProfile.hasProbe && <div className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full bg-orange-400" /> Probe</div>}
                     <div className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full bg-emerald-400" /> Dock</div>
                   </div>
                 </div>
@@ -1288,11 +1291,6 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                     </g>
                   )}
 
-                  {/* Probe offset marker */}
-                  {probeMarker && (
-                    <circle cx={probeMarker.x} cy={probeMarker.y} r={Math.max(1, toolheadSize * 0.35)} fill="rgba(236,72,153,0.92)" />
-                  )}
-
                   {/* Toolhead */}
                   {toolheadSvg && (
                     <g data-drag="toolhead" className={editMode ? 'cursor-move' : ''} onWheel={handleToolheadWheel}>
@@ -1317,6 +1315,18 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                         />
                       )}
                     </g>
+                  )}
+
+                  {/* Probe offset marker */}
+                  {probeMarker && (
+                    <circle
+                      cx={probeMarker.x}
+                      cy={probeMarker.y}
+                      r={Math.max(1, toolheadSize * 0.38)}
+                      fill="rgba(251,146,60,0.98)"
+                      stroke="rgba(255,255,255,0.9)"
+                      strokeWidth="0.2"
+                    />
                   )}
 
                   {/* Axis labels */}
