@@ -435,6 +435,15 @@ export function isPointInBounds(profile: MachineProfile, x: number, y: number): 
   return x >= profile.minX && x <= profile.maxX && y >= profile.minY && y <= profile.maxY;
 }
 
+export function isPointInMoveBounds(profile: MachineProfile, x: number, y: number): boolean {
+  if (profile.shape === 'round' && profile.radius !== null) {
+    const dx = x - profile.centerX;
+    const dy = y - profile.centerY;
+    if (Math.sqrt(dx * dx + dy * dy) > profile.radius) return false;
+  }
+  return x >= profile.moveMinX && x <= profile.moveMaxX && y >= profile.moveMinY && y <= profile.moveMaxY;
+}
+
 export function findZoneHit(profile: MachineProfile, x: number, y: number): NoGoZone | null {
   return profile.noGoZones.find((zone) => {
     return x >= zone.x && x <= zone.x + zone.width && y >= zone.y && y <= zone.y + zone.height;

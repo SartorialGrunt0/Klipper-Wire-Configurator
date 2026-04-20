@@ -8,7 +8,7 @@ import type {
   SimulationStep,
   SimulationTickResult,
 } from '../types/macroDesigner';
-import { findPathZoneHit, findZoneHit, isPointInBounds } from './macroDesigner';
+import { findPathZoneHit, findZoneHit, isPointInBounds, isPointInMoveBounds } from './macroDesigner';
 
 function parseParams(tokens: string[]): Record<string, string> {
   const params: Record<string, string> = {};
@@ -23,7 +23,7 @@ function parseParams(tokens: string[]): Record<string, string> {
     }
     const first = token[0]?.toUpperCase();
     const rest = token.slice(1).trim();
-    if (first && rest) {
+    if (first) {
       params[first] = rest;
     }
   }
@@ -112,19 +112,73 @@ function normalizeMessage(raw: string): string {
   return raw.replace(/^"|"$/g, '');
 }
 
-function estimateMoveTime(distance: number, feedRate: number, maxVelocity: number, maxAccel: number): number {
-  if (distance <= 0 || maxAccel <= 0) return 0;
+export interface TrapezoidalProfile {
+  totalTime: number;
+  accelTime: number;
+  cruiseTime: number;
+  accelDist: number;
+  cruiseDist: number;
+  totalDist: number;
+  maxSpeed: number;
+  accel: number;
+}
+
+export function computeTrapezoidalProfile(
+  distance: number,
+  feedRate: number,
+  maxVelocity: number,
+  maxAccel: number,
+): TrapezoidalProfile {
+  const zero: TrapezoidalProfile = { totalTime: 0, accelTime: 0, cruiseTime: 0, accelDist: 0, cruiseDist: 0, totalDist: 0, maxSpeed: 0, accel: maxAccel };
+  if (distance <= 0 || maxAccel <= 0) return zero;
   const requestedSpeed = feedRate / 60;
   const effectiveSpeed = Math.min(requestedSpeed, maxVelocity);
-  if (effectiveSpeed <= 0) return 0;
+  if (effectiveSpeed <= 0) return zero;
   const accelDist = (effectiveSpeed * effectiveSpeed) / (2 * maxAccel);
   if (accelDist * 2 >= distance) {
-    return 2 * Math.sqrt(distance / maxAccel);
+    const accelTime = Math.sqrt(distance / maxAccel);
+    return {
+      totalTime: 2 * accelTime,
+      accelTime,
+      cruiseTime: 0,
+      accelDist: distance / 2,
+      cruiseDist: 0,
+      totalDist: distance,
+      maxSpeed: maxAccel * accelTime,
+      accel: maxAccel,
+    };
   }
   const accelTime = effectiveSpeed / maxAccel;
   const cruiseDist = distance - 2 * accelDist;
   const cruiseTime = cruiseDist / effectiveSpeed;
-  return 2 * accelTime + cruiseTime;
+  return {
+    totalTime: 2 * accelTime + cruiseTime,
+    accelTime,
+    cruiseTime,
+    accelDist,
+    cruiseDist,
+    totalDist: distance,
+    maxSpeed: effectiveSpeed,
+    accel: maxAccel,
+  };
+}
+
+export function trapezoidalPositionAtTime(profile: TrapezoidalProfile, t: number): number {
+  if (t <= 0 || profile.totalTime <= 0) return 0;
+  if (t >= profile.totalTime) return profile.totalDist;
+  if (t <= profile.accelTime) {
+    return 0.5 * profile.accel * t * t;
+  }
+  const t2 = t - profile.accelTime;
+  if (t2 <= profile.cruiseTime) {
+    return profile.accelDist + profile.maxSpeed * t2;
+  }
+  const t3 = t2 - profile.cruiseTime;
+  return profile.accelDist + profile.cruiseDist + profile.maxSpeed * t3 - 0.5 * profile.accel * t3 * t3;
+}
+
+function estimateMoveTime(distance: number, feedRate: number, maxVelocity: number, maxAccel: number): number {
+  return computeTrapezoidalProfile(distance, feedRate, maxVelocity, maxAccel).totalTime;
 }
 
 function buildMacroLookup(items: MacroSourceItem[]): Map<string, MacroSourceItem> {
@@ -311,8 +365,8 @@ function applyLinearMove(
     };
   }
 
-  if (!isPointInBounds(profile, nextX, nextY)) {
-    warnings.push(`Move to X${nextX.toFixed(2)} Y${nextY.toFixed(2)} exceeds the build area.`);
+  if (!isPointInMoveBounds(profile, nextX, nextY)) {
+    warnings.push(`Move to X${nextX.toFixed(2)} Y${nextY.toFixed(2)} exceeds the moveable area.`);
   }
   const zone = findPathZoneHit(profile, state.x, state.y, nextX, nextY);
   if (zone) {
@@ -372,8 +426,8 @@ export function executeSimulationStep(
 ): SimulationTickResult {
   if (step.kind === 'move') {
     const warnings: string[] = [];
-    if (!isPointInBounds(profile, step.x, step.y)) {
-      warnings.push(`${step.label} goes outside the build area.`);
+    if (!isPointInMoveBounds(profile, step.x, step.y)) {
+      warnings.push(`${step.label} goes outside the moveable area.`);
     }
     const zone = findPathZoneHit(profile, state.x, state.y, step.x, step.y);
     if (zone) warnings.push(`${step.label} path crosses no-go zone \"${zone.name}\".`);
@@ -430,17 +484,19 @@ export function executeSimulationStep(
     case 'G1':
       return applyLinearMove(state, command.params, profile);
     case 'G28': {
-      const homeX = command.params.X !== undefined || Object.keys(command.params).length === 0 ? profile.homeX : state.x;
-      const homeY = command.params.Y !== undefined || Object.keys(command.params).length === 0 ? profile.homeY : state.y;
-      const homeZ = command.params.Z !== undefined || Object.keys(command.params).length === 0 ? profile.homeZ : state.z;
+      const requestedAxes = Object.keys(command.params).map((key) => key.toUpperCase());
+      const homeAllAxes = requestedAxes.length === 0;
+      const homeX = homeAllAxes || requestedAxes.includes('X') ? profile.homeX : state.x;
+      const homeY = homeAllAxes || requestedAxes.includes('Y') ? profile.homeY : state.y;
+      const homeZ = homeAllAxes || requestedAxes.includes('Z') ? profile.homeZ : state.z;
       nextState = {
         ...nextState,
         x: homeX,
         y: homeY,
         z: homeZ,
-        homedAxes: Object.keys(command.params).length === 0
+        homedAxes: homeAllAxes
           ? ['X', 'Y', 'Z']
-          : Object.keys(command.params).map((key) => key.toUpperCase()),
+          : requestedAxes,
       };
       eventSummary = 'Home axes';
       break;

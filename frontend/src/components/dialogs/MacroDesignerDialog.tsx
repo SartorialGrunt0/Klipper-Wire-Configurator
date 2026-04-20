@@ -17,7 +17,7 @@ import {
   findPathZoneHit,
   findZoneHit,
   fuzzyFilterItems,
-  isPointInBounds,
+  isPointInMoveBounds,
   normalizeMacroGcodeForConfig,
   parseMacroVariables,
   sanitizeMacroName,
@@ -25,9 +25,12 @@ import {
 } from '../../utils/macroDesigner';
 import {
   buildSimulationSteps,
+  computeTrapezoidalProfile,
   createInitialRuntimeState,
   executeSimulationStep,
+  trapezoidalPositionAtTime,
 } from '../../utils/gcodeSimulator';
+import type { TrapezoidalProfile } from '../../utils/gcodeSimulator';
 
 interface MacroDesignerDialogProps {
   onClose: () => void;
@@ -41,6 +44,25 @@ interface ToolheadPosition {
   x: number;
   y: number;
   z: number;
+}
+
+interface MovementTrace {
+  fromX: number;
+  fromY: number;
+  toX: number;
+  toY: number;
+}
+
+interface MoveAnimationState {
+  fromX: number;
+  fromY: number;
+  toX: number;
+  toY: number;
+  fromZ: number;
+  toZ: number;
+  profile: TrapezoidalProfile;
+  startTime: number;
+  onComplete: () => void;
 }
 
 interface ContextMenuState {
@@ -200,6 +222,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
   const setRotation = useMacroDesignerStore((state) => state.setRotation);
   const addNoGoZone = useMacroDesignerStore((state) => state.addNoGoZone);
   const updateNoGoZone = useMacroDesignerStore((state) => state.updateNoGoZone);
+  const deleteNoGoZone = useMacroDesignerStore((state) => state.deleteNoGoZone);
   const setDockPosition = useMacroDesignerStore((state) => state.setDockPosition);
 
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
@@ -226,6 +249,9 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [dragState, setDragState] = useState<DragState | null>(null);
   const [toolheadDragPos, setToolheadDragPos] = useState<ToolheadPosition | null>(null);
+  const [lastMovementTrace, setLastMovementTrace] = useState<MovementTrace | null>(null);
+  const [simulationZIndicator, setSimulationZIndicator] = useState<'up' | 'down' | null>(null);
+  const [isAnimating, setIsAnimating] = useState(false);
   const [editDraft, setEditDraft] = useState<MacroSourceItem | null>(null);
   const [runtimeHistory, setRuntimeHistory] = useState<MacroRuntimeState[]>([]);
   const [simulationLog, setSimulationLog] = useState<SimulationLogEntry[]>([]);
@@ -233,10 +259,19 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
   const [goToX, setGoToX] = useState('');
   const [goToY, setGoToY] = useState('');
   const [goToZ, setGoToZ] = useState('');
+  const [selectedZoneId, setSelectedZoneId] = useState<string | null>(null);
+  const [exactToolheadX, setExactToolheadX] = useState('');
+  const [exactToolheadY, setExactToolheadY] = useState('');
+  const [zoneEditX, setZoneEditX] = useState('');
+  const [zoneEditY, setZoneEditY] = useState('');
+  const [zoneEditWidth, setZoneEditWidth] = useState('');
+  const [zoneEditHeight, setZoneEditHeight] = useState('');
   const svgRef = useRef<SVGSVGElement>(null);
   const toolheadPositionRef = useRef<ToolheadPosition | null>(null);
   const zWheelStartRef = useRef<ToolheadPosition | null>(null);
   const zWheelTimeoutRef = useRef<number | null>(null);
+  const moveAnimationRef = useRef<MoveAnimationState | null>(null);
+  const animFrameRef = useRef<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -303,6 +338,11 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
 
   const machineProfile = useMemo(() => createMachineProfile(configFiles, noGoZones, dockPosition), [configFiles, dockPosition, noGoZones]);
 
+  const selectedZone = useMemo(
+    () => (selectedZoneId ? noGoZones.find((zone) => zone.id === selectedZoneId) || null : null),
+    [noGoZones, selectedZoneId],
+  );
+
   const viewBounds = useMemo(() => {
     const padding = 5;
     const rb = getRotatedBounds(
@@ -332,15 +372,33 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
     return buildSimulationSteps(selectedItem, allMacroItems, machineProfile);
   }, [allMacroItems, machineProfile, selectedItem]);
 
+  const cancelAnimation = useCallback((skipCompletion = false) => {
+    if (animFrameRef.current !== null) {
+      cancelAnimationFrame(animFrameRef.current);
+      animFrameRef.current = null;
+    }
+    const anim = moveAnimationRef.current;
+    if (anim) {
+      moveAnimationRef.current = null;
+      setIsAnimating(false);
+      if (!skipCompletion) {
+        anim.onComplete();
+      }
+    }
+  }, []);
+
   useEffect(() => {
+    cancelAnimation(true);
     setPlanWarnings(simulationPlan.warnings);
     setRuntime(selectedItem ? createInitialRuntimeState(machineProfile, selectedItem.title) : null);
     setRuntimeHistory([]);
     setSimulationLog([]);
+    setLastMovementTrace(null);
+    setSimulationZIndicator(null);
     setSelectedLogWarning(null);
     setStepIndex(0);
     setIsRunning(false);
-  }, [machineProfile, selectedItem, simulationPlan.warnings]);
+  }, [cancelAnimation, machineProfile, selectedItem, simulationPlan.warnings]);
 
   useEffect(() => {
     setToolheadDragPos(null);
@@ -358,45 +416,144 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
     toolheadPositionRef.current = toolheadDragPos || (runtime ? { x: runtime.x, y: runtime.y, z: runtime.z } : null);
   }, [runtime, toolheadDragPos]);
 
+  useEffect(() => {
+    const currentPosition = toolheadDragPos || (runtime ? { x: runtime.x, y: runtime.y, z: runtime.z } : null);
+    if (!currentPosition) return;
+    setExactToolheadX(formatNumber(currentPosition.x));
+    setExactToolheadY(formatNumber(currentPosition.y));
+  }, [runtime, toolheadDragPos]);
+
+  useEffect(() => {
+    if (!selectedZoneId || noGoZones.some((zone) => zone.id === selectedZoneId)) return;
+    setSelectedZoneId(noGoZones[0]?.id || null);
+  }, [noGoZones, selectedZoneId]);
+
+  useEffect(() => {
+    if (!selectedZone) {
+      setZoneEditX('');
+      setZoneEditY('');
+      setZoneEditWidth('');
+      setZoneEditHeight('');
+      return;
+    }
+    setZoneEditX(formatNumber(selectedZone.x));
+    setZoneEditY(formatNumber(selectedZone.y));
+    setZoneEditWidth(formatNumber(selectedZone.width));
+    setZoneEditHeight(formatNumber(selectedZone.height));
+  }, [selectedZone]);
+
   useEffect(() => () => {
     if (zWheelTimeoutRef.current !== null) {
       window.clearTimeout(zWheelTimeoutRef.current);
     }
+    if (animFrameRef.current !== null) {
+      cancelAnimationFrame(animFrameRef.current);
+    }
   }, []);
 
-  useEffect(() => {
-    if (!isRunning || !runtime) return;
-    const id = window.setInterval(() => {
-      setRuntime((current) => {
-        if (!current) return current;
-        const step = simulationPlan.steps[stepIndex];
-        if (!step) {
-          setIsRunning(false);
-          return current;
-        }
-        const result = executeSimulationStep(current, step, machineProfile);
-        const source = getStepSource(step);
-        setRuntimeHistory((prev) => [...prev, current]);
-        setSimulationLog((prev) => [...prev, {
-          id: `${stepIndex}-${source.sourceName}-${source.lineNumber}`,
-          raw: source.raw,
-          sourceName: source.sourceName,
-          lineNumber: source.lineNumber,
-          summary: result.eventSummary,
-          warnings: result.warnings,
-        }]);
-        setStepIndex((prev) => prev + 1);
-        return result.nextState;
-      });
-    }, 350);
-    return () => window.clearInterval(id);
-  }, [isRunning, machineProfile, runtime, simulationPlan.steps, stepIndex]);
-
-  useEffect(() => {
-    if (stepIndex >= simulationPlan.steps.length && isRunning) {
-      setIsRunning(false);
+  const animateTick = useCallback(() => {
+    const anim = moveAnimationRef.current;
+    if (!anim) return;
+    const elapsed = (performance.now() - anim.startTime) / 1000;
+    if (elapsed >= anim.profile.totalTime) {
+      moveAnimationRef.current = null;
+      animFrameRef.current = null;
+      setIsAnimating(false);
+      anim.onComplete();
+      return;
     }
-  }, [isRunning, simulationPlan.steps.length, stepIndex]);
+    const distanceCovered = trapezoidalPositionAtTime(anim.profile, elapsed);
+    const fraction = anim.profile.totalDist > 0 ? distanceCovered / anim.profile.totalDist : 1;
+    const x = anim.fromX + (anim.toX - anim.fromX) * fraction;
+    const y = anim.fromY + (anim.toY - anim.fromY) * fraction;
+    const z = anim.fromZ + (anim.toZ - anim.fromZ) * fraction;
+    setToolheadDragPos({ x, y, z });
+    animFrameRef.current = requestAnimationFrame(animateTick);
+  }, []);
+
+  const executeStepWithAnimation = useCallback((currentRuntime: MacroRuntimeState, currentStepIndex: number) => {
+    const step = simulationPlan.steps[currentStepIndex];
+    if (!step) {
+      setIsRunning(false);
+      return;
+    }
+    const result = executeSimulationStep(currentRuntime, step, machineProfile);
+    const xyMoved = Math.abs(result.nextState.x - currentRuntime.x) > 1e-6 || Math.abs(result.nextState.y - currentRuntime.y) > 1e-6;
+    const zDelta = result.nextState.z - currentRuntime.z;
+    const source = getStepSource(step);
+    const zIndicator: 'up' | 'down' | null = zDelta > 1e-6 ? 'up' : zDelta < -1e-6 ? 'down' : null;
+    const logEntry: SimulationLogEntry = {
+      id: `${currentStepIndex}-${source.sourceName}-${source.lineNumber}`,
+      raw: source.raw,
+      sourceName: source.sourceName,
+      lineNumber: source.lineNumber,
+      summary: result.eventSummary,
+      warnings: result.warnings,
+    };
+    const trace: MovementTrace | null = xyMoved ? {
+      fromX: currentRuntime.x,
+      fromY: currentRuntime.y,
+      toX: result.nextState.x,
+      toY: result.nextState.y,
+    } : null;
+
+    const applyFinalState = () => {
+      setRuntimeHistory((prev) => [...prev, currentRuntime]);
+      setRuntime(result.nextState);
+      setSimulationLog((prev) => [...prev, logEntry]);
+      if (trace) setLastMovementTrace(trace);
+      setSimulationZIndicator(zIndicator);
+      setStepIndex(currentStepIndex + 1);
+      setToolheadDragPos(null);
+    };
+
+    const distance = Math.sqrt(
+      (result.nextState.x - currentRuntime.x) ** 2
+      + (result.nextState.y - currentRuntime.y) ** 2
+      + (result.nextState.z - currentRuntime.z) ** 2,
+    );
+
+    if (xyMoved && distance > 0.5) {
+      const profile = computeTrapezoidalProfile(
+        distance,
+        result.nextState.feedRate,
+        machineProfile.maxVelocity,
+        machineProfile.maxAccel,
+      );
+      if (profile.totalTime > 0.016) {
+        if (trace) setLastMovementTrace(trace);
+        setSimulationZIndicator(zIndicator);
+        setIsAnimating(true);
+        moveAnimationRef.current = {
+          fromX: currentRuntime.x,
+          fromY: currentRuntime.y,
+          toX: result.nextState.x,
+          toY: result.nextState.y,
+          fromZ: currentRuntime.z,
+          toZ: result.nextState.z,
+          profile,
+          startTime: performance.now(),
+          onComplete: applyFinalState,
+        };
+        animFrameRef.current = requestAnimationFrame(animateTick);
+        return;
+      }
+    }
+    applyFinalState();
+  }, [animateTick, machineProfile, simulationPlan.steps]);
+
+  // Auto-play: chain steps via animation-aware effect
+  useEffect(() => {
+    if (!isRunning || !runtime || isAnimating) return;
+    if (stepIndex >= simulationPlan.steps.length) {
+      setIsRunning(false);
+      return;
+    }
+    const id = window.setTimeout(() => {
+      executeStepWithAnimation(runtime, stepIndex);
+    }, 50);
+    return () => window.clearTimeout(id);
+  }, [isRunning, runtime, stepIndex, isAnimating, executeStepWithAnimation, simulationPlan.steps.length]);
 
   useEffect(() => {
     if (selectedItem?.source === 'config' && selectedItem.sourceFile && configFiles[selectedItem.sourceFile]) {
@@ -513,8 +670,8 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
   const getCurrentToolheadPosition = (): ToolheadPosition | null => toolheadPositionRef.current;
 
   const validateToolheadMove = (from: ToolheadPosition, to: ToolheadPosition): string | null => {
-    if (!isPointInBounds(machineProfile, to.x, to.y)) {
-      return 'That move exceeds the configured build volume.';
+    if (!isPointInMoveBounds(machineProfile, to.x, to.y)) {
+      return 'That move exceeds the configured moveable area.';
     }
     const endZone = findZoneHit(machineProfile, to.x, to.y);
     if (endZone) {
@@ -528,6 +685,67 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
       return 'That move exceeds the configured Z range.';
     }
     return null;
+  };
+
+  const handleSetExactToolheadPosition = () => {
+    const currentPosition = getCurrentToolheadPosition();
+    if (!currentPosition) {
+      setMessage('No toolhead position is available yet.');
+      return;
+    }
+
+    const rawX = Number(exactToolheadX);
+    const rawY = Number(exactToolheadY);
+    if (!Number.isFinite(rawX) || !Number.isFinite(rawY)) {
+      setMessage('Enter valid numeric X and Y values for toolhead position.');
+      return;
+    }
+
+    const nextPosition = {
+      x: clamp(rawX, machineProfile.moveMinX, machineProfile.moveMaxX),
+      y: clamp(rawY, machineProfile.moveMinY, machineProfile.moveMaxY),
+      z: currentPosition.z,
+    };
+    const moveValidation = validateToolheadMove(currentPosition, nextPosition);
+    if (moveValidation) {
+      setMessage(moveValidation);
+      return;
+    }
+
+    const moveLines = buildMoveLines(currentPosition, nextPosition, moveMode);
+    if (!moveLines.length) {
+      setMessage('The requested move does not change the toolhead position.');
+      return;
+    }
+
+    appendGcodeLines(moveLines);
+    setToolheadDragPos(nextPosition);
+    setGoToX(formatNumber(nextPosition.x));
+    setGoToY(formatNumber(nextPosition.y));
+    setMessage(`Added move to X${formatNumber(nextPosition.x)} Y${formatNumber(nextPosition.y)}.`);
+  };
+
+  const handleApplyZonePosition = () => {
+    if (!selectedZone) {
+      setMessage('Select a no-go zone first.');
+      return;
+    }
+
+    const x = Number(zoneEditX);
+    const y = Number(zoneEditY);
+    const width = Number(zoneEditWidth);
+    const height = Number(zoneEditHeight);
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(width) || !Number.isFinite(height)) {
+      setMessage('Enter valid numeric values for the no-go zone.');
+      return;
+    }
+    if (width <= 0 || height <= 0) {
+      setMessage('No-go zone width and height must be greater than 0.');
+      return;
+    }
+
+    updateNoGoZone(selectedZone.id, { x, y, width, height });
+    setMessage(`Updated ${selectedZone.name} to X${formatNumber(x)} Y${formatNumber(y)}.`);
   };
 
   const buildMoveLines = (
@@ -616,29 +834,19 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
   };
 
   const handleStep = () => {
-    if (!runtime) return;
+    if (!runtime || isAnimating) return;
     setToolheadDragPos(null);
     const step = simulationPlan.steps[stepIndex];
     if (!step) return;
-    const result = executeSimulationStep(runtime, step, machineProfile);
-    const source = getStepSource(step);
-    setRuntimeHistory((prev) => [...prev, runtime]);
-    setRuntime(result.nextState);
-    setSimulationLog((prev) => [...prev, {
-      id: `${stepIndex}-${source.sourceName}-${source.lineNumber}`,
-      raw: source.raw,
-      sourceName: source.sourceName,
-      lineNumber: source.lineNumber,
-      summary: result.eventSummary,
-      warnings: result.warnings,
-    }]);
-    setStepIndex((prev) => prev + 1);
+    executeStepWithAnimation(runtime, stepIndex);
   };
 
   const handleStepBack = () => {
     if (!runtimeHistory.length) return;
+    cancelAnimation();
     setIsRunning(false);
     setToolheadDragPos(null);
+    setSimulationZIndicator(null);
     const previousRuntime = runtimeHistory[runtimeHistory.length - 1];
     setRuntime(previousRuntime);
     setRuntimeHistory((prev) => prev.slice(0, -1));
@@ -649,10 +857,13 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
 
   const handleReset = () => {
     if (!selectedItem) return;
+    cancelAnimation(true);
     setRuntime(createInitialRuntimeState(machineProfile, selectedItem.title));
     setStepIndex(0);
     setIsRunning(false);
     setToolheadDragPos(null);
+    setLastMovementTrace(null);
+    setSimulationZIndicator(null);
     setRuntimeHistory([]);
     setSimulationLog([]);
     setSelectedLogWarning(null);
@@ -847,6 +1058,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
 
     if (dragType === 'toolhead' && editMode && selectedItem) {
       event.preventDefault();
+      setSelectedZoneId(null);
       const machine = clientToMachine(event, svgRef.current, machineProfile, rotation, viewBounds.viewMaxY);
       setDragState({ type: 'toolhead', offsetX: 0, offsetY: 0 });
       setToolheadDragPos({ x: machine.x, y: machine.y, z: toolheadDragPos?.z ?? runtime?.z ?? Math.max(machineProfile.minZ, 0) });
@@ -866,6 +1078,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
     if (zoneResizeEl) {
       event.preventDefault();
       const zoneId = zoneResizeEl.getAttribute('data-zone-id')!;
+      setSelectedZoneId(zoneId);
       const fixX = Number(zoneResizeEl.getAttribute('data-fix-x'));
       const fixY = Number(zoneResizeEl.getAttribute('data-fix-y'));
       setDragState({ type: 'zone-resize', zoneId, fixedCornerX: fixX, fixedCornerY: fixY, offsetX: 0, offsetY: 0 });
@@ -877,6 +1090,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
     if (zoneEl) {
       event.preventDefault();
       const zoneId = zoneEl.getAttribute('data-zone-id')!;
+      setSelectedZoneId(zoneId);
       const zone = noGoZones.find(z => z.id === zoneId);
       if (zone) {
         const machine = clientToMachine(event, svgRef.current, machineProfile, rotation, viewBounds.viewMaxY);
@@ -984,6 +1198,18 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
   // Toolhead position (use drag pos if dragging, otherwise runtime)
   const toolheadMachine = toolheadDragPos || (currentRuntime ? { x: currentRuntime.x, y: currentRuntime.y, z: currentRuntime.z } : null);
   const toolheadSvg = toolheadMachine ? toSvg(toolheadMachine.x, toolheadMachine.y) : null;
+  const movementTraceSvg = lastMovementTrace
+    ? {
+      from: toSvg(lastMovementTrace.fromX, lastMovementTrace.fromY),
+      to: toSvg(lastMovementTrace.toX, lastMovementTrace.toY),
+    }
+    : null;
+  const movementDirection = lastMovementTrace
+    ? {
+      dx: lastMovementTrace.toX - lastMovementTrace.fromX,
+      dy: lastMovementTrace.toY - lastMovementTrace.fromY,
+    }
+    : null;
   const probePoint = currentRuntime?.activeProbePoint ? toSvg(currentRuntime.activeProbePoint.x, currentRuntime.activeProbePoint.y) : null;
   const probeMarker = machineProfile.hasProbe && toolheadMachine
     ? toSvg(toolheadMachine.x + machineProfile.probeOffsetX, toolheadMachine.y + machineProfile.probeOffsetY)
@@ -1035,8 +1261,8 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
           width={Math.max(1, w)}
           height={Math.max(1, h)}
           fill="rgba(248, 113, 113, 0.18)"
-          stroke="rgba(248, 113, 113, 0.9)"
-          strokeWidth="0.5"
+          stroke={selectedZoneId === zone.id ? 'rgba(248, 113, 113, 1)' : 'rgba(248, 113, 113, 0.9)'}
+          strokeWidth={selectedZoneId === zone.id ? '0.9' : '0.5'}
           className="cursor-move"
         />
         {machineCorners.map((c, i) => {
@@ -1084,6 +1310,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
   const viewBox = `${viewBounds.svgX} ${viewBounds.svgY} ${viewBounds.svgW} ${viewBounds.svgH}`;
 
   const toolheadSize = Math.max(2, Math.min(viewBounds.svgW, viewBounds.svgH) * 0.02);
+  const directionArrowLength = Math.max(4, toolheadSize * 2.6);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55" onClick={onClose}>
@@ -1175,7 +1402,10 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                 </div>
               </div>
               <div className="flex items-center gap-2 text-xs">
-                <button onClick={() => addNoGoZone({ x: machineProfile.centerX - 10, y: machineProfile.centerY - 10, width: 20, height: 20 })} className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-[var(--color-text-primary)] hover:border-[var(--color-accent)]">Add no-go zone</button>
+                <button onClick={() => {
+                  const zone = addNoGoZone({ x: machineProfile.centerX - 10, y: machineProfile.centerY - 10, width: 20, height: 20 });
+                  setSelectedZoneId(zone.id);
+                }} className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-[var(--color-text-primary)] hover:border-[var(--color-accent)]">Add no-go zone</button>
                 <button disabled={dockPosition !== null} onClick={() => setDockPosition({ x: machineProfile.centerX, y: machineProfile.centerY })} className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-[var(--color-text-primary)] hover:border-[var(--color-accent)] disabled:opacity-40">Add dock</button>
                 <button onClick={() => setRotation(rotation === 270 ? 0 : (rotation + 90) as 0 | 90 | 180 | 270)} className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-[var(--color-text-primary)] hover:border-[var(--color-accent)]">Rotate 90°</button>
               </div>
@@ -1208,11 +1438,18 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                     <div>Accel: {formatNumber(machineProfile.maxAccel)} mm/s²</div>
                   </div>
                   {editMode && selectedItem && (
-                    <div className="mt-1 flex items-center gap-1.5">
-                      <input value={goToX} onChange={(e) => setGoToX(e.target.value)} placeholder="X" className="w-14 rounded border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-primary)]" />
-                      <input value={goToY} onChange={(e) => setGoToY(e.target.value)} placeholder="Y" className="w-14 rounded border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-primary)]" />
-                      <input value={goToZ} onChange={(e) => setGoToZ(e.target.value)} placeholder="Z" className="w-14 rounded border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-primary)]" />
-                      <button onClick={handleGoTo} className="rounded bg-[var(--color-accent)] px-2 py-0.5 text-[10px] font-semibold text-[var(--color-bg-primary)]">Move</button>
+                    <div className="mt-1 space-y-1.5">
+                      <div className="flex items-center gap-1.5">
+                        <input value={goToX} onChange={(e) => setGoToX(e.target.value)} placeholder="X" className="w-14 rounded border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-primary)]" />
+                        <input value={goToY} onChange={(e) => setGoToY(e.target.value)} placeholder="Y" className="w-14 rounded border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-primary)]" />
+                        <input value={goToZ} onChange={(e) => setGoToZ(e.target.value)} placeholder="Z" className="w-14 rounded border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-primary)]" />
+                        <button onClick={handleGoTo} className="rounded bg-[var(--color-accent)] px-2 py-0.5 text-[10px] font-semibold text-[var(--color-bg-primary)]">Move</button>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <input value={exactToolheadX} onChange={(e) => setExactToolheadX(e.target.value)} placeholder="Exact X" className="w-16 rounded border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-primary)]" />
+                        <input value={exactToolheadY} onChange={(e) => setExactToolheadY(e.target.value)} placeholder="Exact Y" className="w-16 rounded border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-primary)]" />
+                        <button onClick={handleSetExactToolheadPosition} className="rounded border border-[var(--color-bg-tertiary)] px-2 py-0.5 text-[10px] font-semibold text-[var(--color-text-primary)]">Set XY</button>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -1236,6 +1473,9 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                     <pattern id="grid-10mm" width="10" height="10" patternUnits="userSpaceOnUse">
                       <path d="M 10 0 L 0 0 0 10" fill="none" stroke="rgba(148,163,184,0.2)" strokeWidth="0.25" />
                     </pattern>
+                    <marker id="toolhead-dir-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="4.8" markerHeight="4.8" orient="auto">
+                      <path d="M 0 0 L 8 4 L 0 8 z" fill="rgba(34,197,94,0.95)" />
+                    </marker>
                   </defs>
 
                   {/* Grid patterns */}
@@ -1280,6 +1520,19 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                   {/* No-go zones */}
                   {zoneSvg}
 
+                  {/* Last XY movement trace */}
+                  {movementTraceSvg && (
+                    <line
+                      x1={movementTraceSvg.from.x}
+                      y1={movementTraceSvg.from.y}
+                      x2={movementTraceSvg.to.x}
+                      y2={movementTraceSvg.to.y}
+                      stroke="rgba(34,197,94,0.95)"
+                      strokeWidth="0.7"
+                      strokeDasharray="2 1"
+                    />
+                  )}
+
                   {/* Dock dot */}
                   {dockSvg}
 
@@ -1303,17 +1556,6 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                         stroke="white"
                         strokeWidth="0.3"
                       />
-                      {zMoveIndicator === 'up' && (
-                        <circle cx={toolheadSvg.x} cy={toolheadSvg.y} r={toolheadSize * 0.4} fill="white" />
-                      )}
-                      {zMoveIndicator === 'down' && (
-                        <path
-                          d={`M ${toolheadSvg.x - toolheadSize * 0.4} ${toolheadSvg.y - toolheadSize * 0.4} L ${toolheadSvg.x + toolheadSize * 0.4} ${toolheadSvg.y + toolheadSize * 0.4} M ${toolheadSvg.x + toolheadSize * 0.4} ${toolheadSvg.y - toolheadSize * 0.4} L ${toolheadSvg.x - toolheadSize * 0.4} ${toolheadSvg.y + toolheadSize * 0.4}`}
-                          stroke="white"
-                          strokeWidth="0.3"
-                          strokeLinecap="round"
-                        />
-                      )}
                     </g>
                   )}
 
@@ -1326,6 +1568,46 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                       fill="rgba(251,146,60,0.98)"
                       stroke="rgba(255,255,255,0.9)"
                       strokeWidth="0.2"
+                    />
+                  )}
+
+                  {/* Toolhead overlays (top layer): XY direction arrows + Z movement indicator */}
+                  {toolheadSvg && movementDirection && (
+                    <g pointerEvents="none">
+                      {Math.abs(movementDirection.dx) > 1e-6 && (
+                        <line
+                          x1={toolheadSvg.x}
+                          y1={toolheadSvg.y}
+                          x2={toolheadSvg.x + (movementDirection.dx > 0 ? directionArrowLength : -directionArrowLength)}
+                          y2={toolheadSvg.y}
+                          stroke="rgba(34,197,94,0.95)"
+                          strokeWidth="0.8"
+                          markerEnd="url(#toolhead-dir-arrow)"
+                        />
+                      )}
+                      {Math.abs(movementDirection.dy) > 1e-6 && (
+                        <line
+                          x1={toolheadSvg.x}
+                          y1={toolheadSvg.y}
+                          x2={toolheadSvg.x}
+                          y2={toolheadSvg.y + (movementDirection.dy > 0 ? -directionArrowLength : directionArrowLength)}
+                          stroke="rgba(34,197,94,0.95)"
+                          strokeWidth="0.8"
+                          markerEnd="url(#toolhead-dir-arrow)"
+                        />
+                      )}
+                    </g>
+                  )}
+                  {toolheadSvg && (zMoveIndicator === 'up' || simulationZIndicator === 'up') && (
+                    <circle cx={toolheadSvg.x} cy={toolheadSvg.y} r={toolheadSize * 0.4} fill="white" pointerEvents="none" />
+                  )}
+                  {toolheadSvg && (zMoveIndicator === 'down' || simulationZIndicator === 'down') && (
+                    <path
+                      d={`M ${toolheadSvg.x - toolheadSize * 0.4} ${toolheadSvg.y - toolheadSize * 0.4} L ${toolheadSvg.x + toolheadSize * 0.4} ${toolheadSvg.y + toolheadSize * 0.4} M ${toolheadSvg.x + toolheadSize * 0.4} ${toolheadSvg.y - toolheadSize * 0.4} L ${toolheadSvg.x - toolheadSize * 0.4} ${toolheadSvg.y + toolheadSize * 0.4}`}
+                      stroke="white"
+                      strokeWidth="0.3"
+                      strokeLinecap="round"
+                      pointerEvents="none"
                     />
                   )}
 
@@ -1346,7 +1628,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                     <span className="text-[11px] text-[var(--color-text-secondary)]">Step {Math.min(stepIndex, simulationPlan.steps.length)} / {simulationPlan.steps.length}</span>
                   </div>
                   <div className="flex items-center gap-2">
-                    <button onClick={() => { if (isRunning) { setIsRunning(false); } else { setIsRunning(true); setToolheadDragPos(null); } }} disabled={!simulationPlan.steps.length || stepIndex >= simulationPlan.steps.length} className="flex h-8 w-8 items-center justify-center rounded-md border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] disabled:opacity-40" title={isRunning ? 'Pause' : 'Play'}>
+                    <button onClick={() => { if (isRunning) { setIsRunning(false); cancelAnimation(); } else { setIsRunning(true); setToolheadDragPos(null); } }} disabled={!simulationPlan.steps.length || stepIndex >= simulationPlan.steps.length} className="flex h-8 w-8 items-center justify-center rounded-md border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] disabled:opacity-40" title={isRunning ? 'Pause' : 'Play'}>
                       {isRunning ? (
                         <svg viewBox="0 0 16 16" className="h-4 w-4 fill-current"><rect x="3" y="2.5" width="3.5" height="11" rx="0.8" /><rect x="9.5" y="2.5" width="3.5" height="11" rx="0.8" /></svg>
                       ) : (
@@ -1356,7 +1638,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                     <button onClick={handleStepBack} disabled={!runtimeHistory.length} className="flex h-8 w-8 items-center justify-center rounded-md border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] disabled:opacity-40" title="Step back">
                       <svg viewBox="0 0 16 16" className="h-4 w-4 fill-current"><path d="M10.5 2.5 L4.5 8 L10.5 13.5 Z" /><rect x="11.5" y="2.5" width="1.5" height="11" rx="0.5" /></svg>
                     </button>
-                    <button onClick={handleStep} disabled={!simulationPlan.steps.length || stepIndex >= simulationPlan.steps.length} className="flex h-8 w-8 items-center justify-center rounded-md border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] disabled:opacity-40" title="Step forward">
+                    <button onClick={handleStep} disabled={isAnimating || !simulationPlan.steps.length || stepIndex >= simulationPlan.steps.length} className="flex h-8 w-8 items-center justify-center rounded-md border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] disabled:opacity-40" title="Step forward">
                       <svg viewBox="0 0 16 16" className="h-4 w-4 fill-current"><path d="M5.5 2.5 L11.5 8 L5.5 13.5 Z" /><rect x="3" y="2.5" width="1.5" height="11" rx="0.5" /></svg>
                     </button>
                     <button onClick={handleReset} disabled={!selectedItem} className="flex h-8 w-8 items-center justify-center rounded-md border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] disabled:opacity-40" title="Reset">
@@ -1550,6 +1832,52 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                       </div>
                     </div>
                   </div>
+                </div>
+                <div className="rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] p-3">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <div className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-text-secondary)]">No-go zone</div>
+                    <select
+                      value={selectedZoneId || ''}
+                      onChange={(event) => setSelectedZoneId(event.target.value || null)}
+                      className="rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1 text-xs text-[var(--color-text-primary)]"
+                    >
+                      <option value="">Select</option>
+                      {noGoZones.map((zone) => (
+                        <option key={zone.id} value={zone.id}>{zone.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  {selectedZone ? (
+                    <div className="space-y-2 text-xs">
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="mb-1 block text-[var(--color-text-secondary)]">X</label>
+                          <input value={zoneEditX} onChange={(event) => setZoneEditX(event.target.value)} className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)]" />
+                        </div>
+                        <div>
+                          <label className="mb-1 block text-[var(--color-text-secondary)]">Y</label>
+                          <input value={zoneEditY} onChange={(event) => setZoneEditY(event.target.value)} className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)]" />
+                        </div>
+                        <div>
+                          <label className="mb-1 block text-[var(--color-text-secondary)]">Width</label>
+                          <input value={zoneEditWidth} onChange={(event) => setZoneEditWidth(event.target.value)} className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)]" />
+                        </div>
+                        <div>
+                          <label className="mb-1 block text-[var(--color-text-secondary)]">Height</label>
+                          <input value={zoneEditHeight} onChange={(event) => setZoneEditHeight(event.target.value)} className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)]" />
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button onClick={handleApplyZonePosition} className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1 text-xs text-[var(--color-text-primary)]">Apply</button>
+                        <button onClick={() => {
+                          deleteNoGoZone(selectedZone.id);
+                          setMessage(`Deleted ${selectedZone.name}.`);
+                        }} className="rounded-md border border-red-400/60 px-3 py-1 text-xs text-red-300">Delete</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-[11px] text-[var(--color-text-secondary)]">Click a zone on the grid to edit exact X/Y position.</div>
+                  )}
                 </div>
                 {message && <div className="rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-3 py-2 text-[11px] text-[var(--color-text-secondary)]">{message}</div>}
               </div>
