@@ -188,6 +188,10 @@ export async function getExample(filename: string): Promise<{
   return request(`/examples/${encodeURIComponent(filename)}`);
 }
 
+export async function getConfigReference(): Promise<{ content: string }> {
+  return request('/reference/config-reference');
+}
+
 /* ── Schema ──────────────────────────────────────────── */
 
 export async function getSchema(): Promise<{ schemas: Record<string, SectionSchema> }> {

@@ -15,8 +15,12 @@ const CONFIG_DEST = join(__dirname, '..', 'public', 'reference', 'config');
 const MANIFEST_DEST = join(__dirname, '..', 'public', 'reference', 'examples.json');
 const SCHEMA_SRC = join(REPO_ROOT, 'reference', 'schema.json');
 const SCHEMA_DEST = join(__dirname, '..', 'public', 'reference', 'schema.json');
+const CONFIG_REFERENCE_SRC = join(REPO_ROOT, 'reference', 'reference_docs', 'klipper_docs', 'Config_Reference.md');
+const CONFIG_REFERENCE_DEST_DIR = join(__dirname, '..', 'public', 'reference', 'docs');
+const CONFIG_REFERENCE_DEST = join(CONFIG_REFERENCE_DEST_DIR, 'Config_Reference.md');
 
 mkdirSync(CONFIG_DEST, { recursive: true });
+mkdirSync(CONFIG_REFERENCE_DEST_DIR, { recursive: true });
 
 const CATEGORY_PREFIXES = [
   ['example-', 'example'],
@@ -98,4 +102,11 @@ if (existsSync(SCHEMA_SRC)) {
   console.log('Copied schema.json.');
 } else {
   console.warn('WARNING: reference/schema.json not found. Run: python scripts/generate-schema.py');
+}
+
+if (existsSync(CONFIG_REFERENCE_SRC)) {
+  copyFileSync(CONFIG_REFERENCE_SRC, CONFIG_REFERENCE_DEST);
+  console.log('Copied Config_Reference.md.');
+} else {
+  console.warn('WARNING: Config_Reference.md not found.');
 }

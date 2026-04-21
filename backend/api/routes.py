@@ -288,6 +288,15 @@ async def get_example(filename: str):
     return {"config": config.to_dict(), "raw_text": text}
 
 
+@router.get("/reference/config-reference")
+async def get_config_reference():
+    """Return the bundled Klipper Config_Reference.md document."""
+    config_ref = REFERENCE_DIR / "reference_docs" / "klipper_docs" / "Config_Reference.md"
+    if not config_ref.exists():
+        raise HTTPException(status_code=404, detail="Config_Reference.md not found")
+    return {"content": config_ref.read_text(encoding="utf-8", errors="replace")}
+
+
 # ── Schema ──────────────────────────────────────────────────────
 
 
