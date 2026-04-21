@@ -189,6 +189,17 @@ function buildMacroLookup(items: MacroSourceItem[]): Map<string, MacroSourceItem
   return lookup;
 }
 
+function getRequestedAxes(params: Record<string, string>): Array<'X' | 'Y' | 'Z'> {
+  const axes = new Set<'X' | 'Y' | 'Z'>();
+  for (const key of Object.keys(params)) {
+    const axis = key.toUpperCase();
+    if (axis === 'X' || axis === 'Y' || axis === 'Z') {
+      axes.add(axis);
+    }
+  }
+  return Array.from(axes);
+}
+
 // Commands where featurePoints are probe coordinates — nozzle = point - probeOffset
 const PROBE_COORD_COMMANDS = new Set([
   'BED_MESH_CALIBRATE', 'Z_TILT_ADJUST', 'QUAD_GANTRY_LEVEL',
@@ -286,7 +297,73 @@ export function buildSimulationSteps(
     }
   }
 
-  const visit = (macro: MacroSourceItem) => {
+  const appendHomingOverrideSteps = (parsed: ParsedGcodeCommand, appendParsedCommand: (command: ParsedGcodeCommand, currentMacro: MacroSourceItem | null, allowHomingOverride: boolean) => void) => {
+    if (parsed.command !== 'G28' || !profile.homingOverride?.gcode.trim()) return false;
+
+    const requestedAxes = getRequestedAxes(parsed.params);
+    const shouldUseOverride = requestedAxes.length === 0
+      ? true
+      : requestedAxes.some((axis) => profile.homingOverride?.axes.includes(axis));
+
+    if (!shouldUseOverride) return false;
+
+    const relevantAxes: Array<'X' | 'Y' | 'Z'> = requestedAxes.length ? requestedAxes : ['X', 'Y', 'Z'];
+    const preHomeParams = relevantAxes.reduce<Record<string, string>>((params, axis) => {
+      const value = profile.homingOverride?.setPosition[axis];
+      if (typeof value === 'number') {
+        params[axis] = `${value}`;
+      }
+      return params;
+    }, {});
+
+    if (Object.keys(preHomeParams).length > 0) {
+      steps.push({
+        kind: 'command',
+        command: {
+          command: 'G92',
+          raw: `G92 ${Object.entries(preHomeParams).map(([axis, value]) => `${axis}${value}`).join(' ')}`,
+          params: preHomeParams,
+          lineNumber: parsed.lineNumber,
+          sourceName: 'homing_override',
+        },
+      });
+    }
+
+    profile.homingOverride.gcode.split(/\r?\n/).forEach((line, index) => {
+      const overrideCommand = parseGcodeLine(line, index + 1, 'homing_override');
+      if (!overrideCommand) return;
+      appendParsedCommand(overrideCommand, null, false);
+    });
+
+    return true;
+  };
+
+  const appendParsedCommand = (
+    parsed: ParsedGcodeCommand,
+    currentMacro: MacroSourceItem | null,
+    allowHomingOverride = true,
+  ) => {
+    if (allowHomingOverride && appendHomingOverrideSteps(parsed, appendParsedCommand)) {
+      return;
+    }
+
+    const nested = macroLookup.get(parsed.command);
+    if (nested && (!currentMacro || nested.key !== currentMacro.key)) {
+      visit(nested, allowHomingOverride);
+      return;
+    }
+
+    const originalCommand = renameMap.get(parsed.command);
+    if (originalCommand) {
+      const rewritten: ParsedGcodeCommand = { ...parsed, command: originalCommand };
+      steps.push(...expandCommandToSteps(rewritten, profile));
+      return;
+    }
+
+    steps.push(...expandCommandToSteps(parsed, profile));
+  };
+
+  const visit = (macro: MacroSourceItem, allowHomingOverride = true) => {
     const title = macro.title.toUpperCase();
     if (stack.includes(title)) {
       warnings.push(`Macro loop detected: ${[...stack, title].join(' -> ')}`);
@@ -297,19 +374,7 @@ export function buildSimulationSteps(
     lines.forEach((line, index) => {
       const parsed = parseGcodeLine(line, index + 1, macro.title);
       if (!parsed) return;
-      const nested = macroLookup.get(parsed.command);
-      if (nested && nested.key !== macro.key) {
-        visit(nested);
-        return;
-      }
-      // Check if this is a renamed built-in (e.g. _BED_MESH_CALIBRATE → BED_MESH_CALIBRATE)
-      const originalCommand = renameMap.get(parsed.command);
-      if (originalCommand) {
-        const rewritten: ParsedGcodeCommand = { ...parsed, command: originalCommand };
-        steps.push(...expandCommandToSteps(rewritten, profile));
-        return;
-      }
-      steps.push(...expandCommandToSteps(parsed, profile));
+      appendParsedCommand(parsed, macro, allowHomingOverride);
     });
     stack.pop();
   };

@@ -182,6 +182,17 @@ function asNumber(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function asOptionalNumber(value: string | undefined): number | null {
+  if (typeof value !== 'string') return null;
+  const parsed = Number(value.trim());
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseAxesList(value: string | undefined): Array<'X' | 'Y' | 'Z'> {
+  const matches = value?.toUpperCase().match(/[XYZ]/g) || [];
+  return Array.from(new Set(matches)) as Array<'X' | 'Y' | 'Z'>;
+}
+
 function parsePair(value: string | undefined): [number, number] | null {
   if (!value) return null;
   const parts = value.split(',').map((part) => Number(part.trim()));
@@ -360,6 +371,7 @@ export function createMachineProfile(
   const bedScrews = sections.find((section) => section.section_type === 'bed_screws');
   const bedTilt = sections.find((section) => section.section_type === 'bed_tilt');
   const deltaCalibrate = sections.find((section) => section.section_type === 'delta_calibrate');
+  const homingOverride = sections.find((section) => section.section_type === 'homing_override');
 
   const meshMin = parsePair(getParamValue(bedMesh, 'mesh_min'));
   const meshMax = parsePair(getParamValue(bedMesh, 'mesh_max'));
@@ -378,6 +390,24 @@ export function createMachineProfile(
       ? generateDeltaCalibrationPoints(radius, centerX, centerY)
       : [],
   };
+
+  const homingOverrideGcode = normalizeMacroGcodeForEditor(getParamValue(homingOverride, 'gcode') || '');
+  const homingOverrideAxes = parseAxesList(getParamValue(homingOverride, 'axes'));
+  const homingOverrideSetPosition: Partial<Record<'X' | 'Y' | 'Z', number>> = {};
+  const setPositionX = asOptionalNumber(getParamValue(homingOverride, 'set_position_x'));
+  const setPositionY = asOptionalNumber(getParamValue(homingOverride, 'set_position_y'));
+  const setPositionZ = asOptionalNumber(getParamValue(homingOverride, 'set_position_z'));
+  if (setPositionX !== null) homingOverrideSetPosition.X = setPositionX;
+  if (setPositionY !== null) homingOverrideSetPosition.Y = setPositionY;
+  if (setPositionZ !== null) homingOverrideSetPosition.Z = setPositionZ;
+
+  const homingOverrideConfig = homingOverrideGcode
+    ? {
+        axes: homingOverrideAxes.length ? homingOverrideAxes : (['X', 'Y', 'Z'] as Array<'X' | 'Y' | 'Z'>),
+        setPosition: homingOverrideSetPosition,
+        gcode: homingOverrideGcode,
+      }
+    : null;
 
   return {
     shape: isRound ? 'round' : 'rect',
@@ -408,6 +438,7 @@ export function createMachineProfile(
     maxAccel: asNumber(getParamValue(printer, 'max_accel'), 3000),
     noGoZones,
     dockPosition,
+    homingOverride: homingOverrideConfig,
     featurePoints,
   };
 }

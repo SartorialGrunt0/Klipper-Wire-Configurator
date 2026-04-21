@@ -290,7 +290,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
   const [stepIndex, setStepIndex] = useState(0);
   const [planWarnings, setPlanWarnings] = useState<string[]>([]);
   const [isRunning, setIsRunning] = useState(false);
-  const [moveFeedRate, setMoveFeedRate] = useState('3000');
+  const [moveFeedRate, setMoveFeedRate] = useState('');
   const [nozzleTarget, setNozzleTarget] = useState('200');
   const [bedTarget, setBedTarget] = useState('60');
   const [fanPercent, setFanPercent] = useState('100');
@@ -771,6 +771,8 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
     to: ToolheadPosition,
     mode: 'absolute' | 'relative',
   ): string[] => {
+    const feedRate = Number(moveFeedRate.trim());
+    const feedSuffix = Number.isFinite(feedRate) && feedRate > 0 ? ` F${formatNumber(feedRate)}` : '';
     const isChanged = (left: number, right: number) => Math.abs(left - right) > 1e-6;
     if (mode === 'relative') {
       const deltas = [
@@ -779,7 +781,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
         isChanged(from.z, to.z) ? `Z${formatNumber(to.z - from.z)}` : null,
       ].filter(Boolean);
       if (!deltas.length) return [];
-      return [`G0 ${deltas.join(' ')} F${moveFeedRate || '3000'}`];
+      return [`G0 ${deltas.join(' ')}${feedSuffix}`];
     }
 
     const axes = [
@@ -788,7 +790,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
       isChanged(from.z, to.z) ? `Z${formatNumber(to.z)}` : null,
     ].filter(Boolean);
     if (!axes.length) return [];
-    return [`G0 ${axes.join(' ')} F${moveFeedRate || '3000'}`];
+    return [`G0 ${axes.join(' ')}${feedSuffix}`];
   };
 
   const handleCreateDraft = () => {
@@ -1482,7 +1484,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55" onClick={onClose}>
-      <div className="w-[min(96vw,1600px)] h-[min(92vh,980px)] overflow-hidden rounded-2xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] shadow-2xl" onClick={(event) => event.stopPropagation()}>
+      <div className="h-[min(92vh,980px)] w-[min(98vw,1680px)] overflow-hidden rounded-2xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] shadow-2xl" onClick={(event) => event.stopPropagation()}>
         <div className="flex items-center justify-between border-b border-[var(--color-bg-tertiary)] px-5 py-4">
           <div>
             <h2 className="text-sm font-semibold text-[var(--color-text-primary)]">G-Code Macro Designer</h2>
@@ -1499,7 +1501,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
           </div>
         </div>
 
-        <div className="grid h-[calc(100%-69px)] grid-cols-[280px_minmax(0,1fr)_360px]">
+        <div className="grid h-[calc(100%-69px)] grid-cols-[260px_minmax(0,1fr)_minmax(380px,30rem)]">
           {/* ==================== LEFT SIDEBAR ==================== */}
           <aside className="flex min-h-0 flex-col border-r border-[var(--color-bg-tertiary)] p-4">
             <div className="mb-3 flex items-center gap-2">
@@ -1843,7 +1845,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
           </main>
 
           {/* ==================== RIGHT SIDEBAR ==================== */}
-          <aside className="min-h-0 w-[clamp(21rem,30vw,30rem)] shrink-0 overflow-y-auto border-l border-[var(--color-bg-tertiary)] p-4">
+          <aside className="min-h-0 min-w-0 overflow-y-auto border-l border-[var(--color-bg-tertiary)] p-4 pr-5 [scrollbar-gutter:stable]">
             {selectedItem ? (
               <div className="flex flex-col gap-4">
                 <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
@@ -1881,18 +1883,20 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                   />
                 </div>
 
-                <div className="rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] p-3">
-                  <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
+                <div className="min-w-0 rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] p-3">
+                  <div className="mb-3 flex items-center justify-between gap-3">
                     <div className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-text-secondary)]">Control</div>
-                    <div className="flex flex-wrap items-center justify-end gap-2">
-                      <button disabled={!editMode} onClick={() => setShowCommandPicker(true)} className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-[10px] text-[var(--color-text-primary)] disabled:opacity-40">Commands</button>
-                      <label className="text-[10px] text-[var(--color-text-secondary)]">Feed rate</label>
-                      <input disabled={!editMode} value={moveFeedRate} onChange={(event) => setMoveFeedRate(event.target.value)} className="w-14 rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1 text-xs text-[var(--color-text-primary)] disabled:opacity-40" />
-                      <button disabled={!editMode} onClick={() => appendGcode('M84')} className="rounded-md border border-[var(--color-bg-tertiary)] px-2.5 py-1 text-xs text-[var(--color-text-primary)] disabled:opacity-40">M84</button>
-                      <button disabled={!editMode} onClick={() => appendGcode('G28')} className="rounded-md bg-[var(--color-accent)] px-2.5 py-1 text-xs font-semibold text-[var(--color-bg-primary)] disabled:opacity-40">Home all</button>
-                    </div>
+                    <button disabled={!editMode} onClick={() => setShowCommandPicker(true)} className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-[10px] text-[var(--color-text-primary)] disabled:opacity-40">Commands</button>
                   </div>
-                  <div className="mb-3 space-y-2 text-xs">
+                  <div className="mb-3 flex flex-wrap items-end gap-2 text-xs">
+                    <label className="min-w-[8rem] flex-1">
+                      <span className="mb-1 block text-[var(--color-text-secondary)]">Feedrate</span>
+                      <input disabled={!editMode} value={moveFeedRate} onChange={(event) => setMoveFeedRate(event.target.value)} placeholder="Optional" className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40" />
+                    </label>
+                    <button disabled={!editMode} onClick={() => appendGcode('G28')} className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-xs font-semibold text-[var(--color-bg-primary)] disabled:opacity-40">Home all</button>
+                    <button disabled={!editMode} onClick={() => appendGcode('M84')} className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-xs text-[var(--color-text-primary)] disabled:opacity-40">M84</button>
+                  </div>
+                  <div className="space-y-2 text-xs">
                     <div className="grid grid-cols-7 overflow-hidden rounded-lg border border-[var(--color-bg-tertiary)]">
                       <button disabled={!editMode} onClick={() => handleAxisJog('X', -100)} className="border-r border-[var(--color-bg-tertiary)] px-2 py-2 text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)] disabled:opacity-40">-100</button>
                       <button disabled={!editMode} onClick={() => handleAxisJog('X', -10)} className="border-r border-[var(--color-bg-tertiary)] px-2 py-2 text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)] disabled:opacity-40">-10</button>
@@ -1921,33 +1925,35 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                       <button disabled={!editMode} onClick={() => handleAxisJog('Z', 25)} className="px-2 py-2 text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)] disabled:opacity-40">+25</button>
                     </div>
                   </div>
-                  <div className="grid grid-cols-[repeat(auto-fit,minmax(10.5rem,1fr))] gap-2 text-xs">
-                    <div>
-                      <label className="mb-1 block text-[var(--color-text-secondary)]">Nozzle target</label>
-                      <div className="flex gap-1">
-                        <input disabled={!editMode} value={nozzleTarget} onChange={(event) => setNozzleTarget(event.target.value)} className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40" />
-                        <button disabled={!editMode} onClick={() => {
-                          const target = Number(nozzleTarget);
-                          if (!Number.isFinite(target) || target < 0 || target > machineProfile.nozzleMaxTemp) {
-                            setMessage(`Nozzle target must be between 0 and ${machineProfile.nozzleMaxTemp}.`);
-                            return;
-                          }
-                          appendGcode(`M104 S${target}`);
-                        }} className="rounded-md border border-[var(--color-bg-tertiary)] px-2 text-[var(--color-text-primary)] disabled:opacity-40" title="Set nozzle temp (no wait)">Set</button>
-                        <button disabled={!editMode} onClick={() => {
-                          const target = Number(nozzleTarget);
-                          if (!Number.isFinite(target) || target < 0 || target > machineProfile.nozzleMaxTemp) {
-                            setMessage(`Nozzle target must be between 0 and ${machineProfile.nozzleMaxTemp}.`);
-                            return;
-                          }
-                          appendGcode(`M109 S${target}`);
-                        }} className="rounded-md border border-[var(--color-bg-tertiary)] px-2 text-[var(--color-text-primary)] disabled:opacity-40" title="Set nozzle temp and wait">Wait</button>
-                      </div>
-                    </div>
-                    <div>
+                  <div className="mt-3 grid gap-2 text-xs [grid-template-columns:minmax(0,1.2fr)_minmax(0,1.2fr)_auto_auto]">
+                    <label className="min-w-0">
+                      <span className="mb-1 block text-[var(--color-text-secondary)]">Distance</span>
+                      <input disabled={!editMode} value={extrudeDistance} onChange={(event) => setExtrudeDistance(event.target.value)} placeholder="Distance (mm)" className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40" />
+                    </label>
+                    <label className="min-w-0">
+                      <span className="mb-1 block text-[var(--color-text-secondary)]">Feedrate</span>
+                      <input disabled={!editMode} value={extrudeFeedRate} onChange={(event) => setExtrudeFeedRate(event.target.value)} placeholder="Feedrate" className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40" />
+                    </label>
+                    <button
+                      disabled={!editMode}
+                      onClick={() => appendExtrusionCommand(1)}
+                      className="self-end rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40"
+                    >
+                      Extrude
+                    </button>
+                    <button
+                      disabled={!editMode}
+                      onClick={() => appendExtrusionCommand(-1)}
+                      className="self-end rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40"
+                    >
+                      Retract
+                    </button>
+                  </div>
+                  <div className="mt-3 grid gap-3 text-xs lg:grid-cols-2">
+                    <div className="min-w-0">
                       <label className="mb-1 block text-[var(--color-text-secondary)]">Bed target</label>
-                      <div className="flex gap-1">
-                        <input disabled={!editMode} value={bedTarget} onChange={(event) => setBedTarget(event.target.value)} className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40" />
+                      <div className="flex flex-wrap gap-1">
+                        <input disabled={!editMode} value={bedTarget} onChange={(event) => setBedTarget(event.target.value)} className="min-w-[8rem] flex-1 rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40" />
                         <button disabled={!editMode} onClick={() => {
                           const target = Number(bedTarget);
                           if (!Number.isFinite(target) || target < 0 || target > machineProfile.bedMaxTemp) {
@@ -1955,7 +1961,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                             return;
                           }
                           appendGcode(`M140 S${target}`);
-                        }} className="rounded-md border border-[var(--color-bg-tertiary)] px-2 text-[var(--color-text-primary)] disabled:opacity-40" title="Set bed temp (no wait)">Set</button>
+                        }} className="shrink-0 rounded-md border border-[var(--color-bg-tertiary)] px-2 text-[var(--color-text-primary)] disabled:opacity-40" title="Set bed temp (no wait)">Set</button>
                         <button disabled={!editMode} onClick={() => {
                           const target = Number(bedTarget);
                           if (!Number.isFinite(target) || target < 0 || target > machineProfile.bedMaxTemp) {
@@ -1963,62 +1969,51 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                             return;
                           }
                           appendGcode(`M190 S${target}`);
-                        }} className="rounded-md border border-[var(--color-bg-tertiary)] px-2 text-[var(--color-text-primary)] disabled:opacity-40" title="Set bed temp and wait">Wait</button>
+                        }} className="shrink-0 rounded-md border border-[var(--color-bg-tertiary)] px-2 text-[var(--color-text-primary)] disabled:opacity-40" title="Set bed temp and wait">Wait</button>
                       </div>
                     </div>
-                    <div>
-                      <label className="mb-1 block text-[var(--color-text-secondary)]">Fan %</label>
-                      <div className="flex gap-2">
-                        <input disabled={!editMode} value={fanPercent} onChange={(event) => setFanPercent(event.target.value)} className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40" />
+                    <div className="min-w-0">
+                      <label className="mb-1 block text-[var(--color-text-secondary)]">Nozzle target</label>
+                      <div className="flex flex-wrap gap-1">
+                        <input disabled={!editMode} value={nozzleTarget} onChange={(event) => setNozzleTarget(event.target.value)} className="min-w-[8rem] flex-1 rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40" />
                         <button disabled={!editMode} onClick={() => {
-                          const percent = Number(fanPercent);
-                          if (!Number.isFinite(percent) || percent < 0 || percent > 100) {
-                            setMessage('Fan percentage must be between 0 and 100.');
+                          const target = Number(nozzleTarget);
+                          if (!Number.isFinite(target) || target < 0 || target > machineProfile.nozzleMaxTemp) {
+                            setMessage(`Nozzle target must be between 0 and ${machineProfile.nozzleMaxTemp}.`);
                             return;
                           }
-                          appendGcode(percent === 0 ? 'M107' : `M106 S${Math.round(percent / 100 * 255)}`);
-                        }} className="rounded-md border border-[var(--color-bg-tertiary)] px-2 text-[var(--color-text-primary)] disabled:opacity-40">Add</button>
+                          appendGcode(`M104 S${target}`);
+                        }} className="shrink-0 rounded-md border border-[var(--color-bg-tertiary)] px-2 text-[var(--color-text-primary)] disabled:opacity-40" title="Set nozzle temp (no wait)">Set</button>
+                        <button disabled={!editMode} onClick={() => {
+                          const target = Number(nozzleTarget);
+                          if (!Number.isFinite(target) || target < 0 || target > machineProfile.nozzleMaxTemp) {
+                            setMessage(`Nozzle target must be between 0 and ${machineProfile.nozzleMaxTemp}.`);
+                            return;
+                          }
+                          appendGcode(`M109 S${target}`);
+                        }} className="shrink-0 rounded-md border border-[var(--color-bg-tertiary)] px-2 text-[var(--color-text-primary)] disabled:opacity-40" title="Set nozzle temp and wait">Wait</button>
                       </div>
                     </div>
-                    <div>
-                      <label className="mb-1 block text-[var(--color-text-secondary)]">LED</label>
-                      <div className="flex items-center gap-2">
-                        <input disabled={!editMode} value={ledName} onChange={(event) => setLedName(event.target.value)} placeholder="Name" className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40" />
-                        <input disabled={!editMode} type="color" value={ledColor} onChange={(event) => setLedColor(event.target.value)} className="h-9 w-14 rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] disabled:opacity-40" />
+                  </div>
+                  <div className="mt-3 grid gap-3 text-xs lg:grid-cols-[minmax(0,1fr)_minmax(0,1.25fr)]">
+                    <div className="min-w-0">
+                      <label className="mb-1 block text-[var(--color-text-secondary)]">LED status</label>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <input disabled={!editMode} value={ledName} onChange={(event) => setLedName(event.target.value)} placeholder="Name" className="min-w-[8rem] flex-1 rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40" />
+                        <input disabled={!editMode} type="color" value={ledColor} onChange={(event) => setLedColor(event.target.value)} className="h-9 w-14 shrink-0 rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] disabled:opacity-40" />
                         <button onClick={() => {
                           const red = parseInt(ledColor.slice(1, 3), 16) / 255;
                           const green = parseInt(ledColor.slice(3, 5), 16) / 255;
                           const blue = parseInt(ledColor.slice(5, 7), 16) / 255;
                           appendGcode(`SET_LED LED=${ledName || 'status_led'} RED=${red.toFixed(3)} GREEN=${green.toFixed(3)} BLUE=${blue.toFixed(3)}`);
-                        }} className="rounded-md border border-[var(--color-bg-tertiary)] px-3 text-[var(--color-text-primary)] disabled:opacity-40" disabled={!editMode}>Add</button>
+                        }} className="shrink-0 rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40" disabled={!editMode}>Add</button>
                       </div>
                     </div>
-                    <div className="col-span-full">
+                    <div className="min-w-0">
                       <label className="mb-1 block text-[var(--color-text-secondary)]">Terminal message</label>
-                      <div className="flex gap-2">
-                        <input disabled={!editMode} value={terminalMessage} onChange={(event) => setTerminalMessage(event.target.value)} className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40" />
-                        <button disabled={!editMode} onClick={() => appendGcode(`RESPOND MSG="${terminalMessage.replace(/"/g, '')}"`)} className="rounded-md border border-[var(--color-bg-tertiary)] px-3 text-[var(--color-text-primary)] disabled:opacity-40">Add</button>
-                      </div>
-                    </div>
-                    <div className="col-span-full">
-                      <label className="mb-1 block text-[var(--color-text-secondary)]">Extruder / Retract</label>
-                      <div className="grid grid-cols-[repeat(auto-fit,minmax(7rem,1fr))] gap-2">
-                        <input disabled={!editMode} value={extrudeDistance} onChange={(event) => setExtrudeDistance(event.target.value)} placeholder="Distance (mm)" className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40" />
-                        <input disabled={!editMode} value={extrudeFeedRate} onChange={(event) => setExtrudeFeedRate(event.target.value)} placeholder="Feed" className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40" />
-                        <button
-                          disabled={!editMode}
-                          onClick={() => appendExtrusionCommand(1)}
-                          className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40"
-                        >
-                          Extrude
-                        </button>
-                        <button
-                          disabled={!editMode}
-                          onClick={() => appendExtrusionCommand(-1)}
-                          className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40"
-                        >
-                          Retract
-                        </button>
+                      <div className="flex flex-wrap gap-2">
+                        <input disabled={!editMode} value={terminalMessage} onChange={(event) => setTerminalMessage(event.target.value)} className="min-w-[10rem] flex-1 rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40" />
+                        <button disabled={!editMode} onClick={() => appendGcode(`RESPOND MSG="${terminalMessage.replace(/"/g, '')}"`)} className="shrink-0 rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40">Add</button>
                       </div>
                     </div>
                   </div>

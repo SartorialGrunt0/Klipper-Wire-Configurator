@@ -49,6 +49,12 @@ export interface SimulationPoint {
   label?: string;
 }
 
+export interface HomingOverrideConfig {
+  axes: Array<'X' | 'Y' | 'Z'>;
+  setPosition: Partial<Record<'X' | 'Y' | 'Z', number>>;
+  gcode: string;
+}
+
 export interface MachineProfile {
   shape: 'rect' | 'round';
   kinematics: string;
@@ -78,6 +84,7 @@ export interface MachineProfile {
   maxAccel: number;
   noGoZones: NoGoZone[];
   dockPosition: DockPosition | null;
+  homingOverride: HomingOverrideConfig | null;
   featurePoints: Record<string, SimulationPoint[]>;
 }
 
