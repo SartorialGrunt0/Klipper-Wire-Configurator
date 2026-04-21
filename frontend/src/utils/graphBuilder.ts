@@ -96,6 +96,7 @@ interface GroupChildData {
   sectionType: string;
   label: string;
   sectionHeader: string;
+  sectionLineNumber: number;
   isFeature: boolean;
   params: ConfigParam[];
   configFile: string;
@@ -103,8 +104,8 @@ interface GroupChildData {
 
 interface GraphStore {
   addHardwareNode: (type: HardwareType, label: string, configFile: string, position?: { x: number; y: number }, mcuName?: string) => string;
-  addSubComponentNode: (parentId: string, sectionType: string, label: string, sectionHeader: string, configFile?: string) => string;
-  addFeatureNode: (parentId: string, sectionType: string, label: string, sectionHeader: string, configFile?: string) => string;
+  addSubComponentNode: (parentId: string, sectionType: string, label: string, sectionHeader: string, configFile?: string, sectionLineNumber?: number) => string;
+  addFeatureNode: (parentId: string, sectionType: string, label: string, sectionHeader: string, configFile?: string, sectionLineNumber?: number) => string;
   addGroupNode: (parentId: string, componentGroup: string, label: string, children: GroupChildData[], isFeature: boolean, configFile?: string) => string;
   addConfigurationEdge: (sourceId: string, targetId: string, hwType: HardwareType, sourceHandle?: string, targetHandle?: string) => string;
   addCommunicationEdge: (sourceId: string, targetId: string, commType: CommunicationType, sourceHandle?: string, targetHandle?: string, isNotIncluded?: boolean) => string;
@@ -556,6 +557,7 @@ export function buildProjectGraph(
         sectionType: item.sType,
         label: item.label,
         sectionHeader: item.sec.full_header,
+        sectionLineNumber: item.sec.line_number,
         isFeature: item.isFeature,
         isSuppressed: item.isSuppressed,
         params: item.sec.params.filter((p) => !p.is_commented_out),
@@ -578,11 +580,11 @@ export function buildProjectGraph(
       for (const item of items) {
         let nodeId: string;
         if (item.isFeature) {
-          nodeId = graphStore.addFeatureNode(item.parentId, item.sType, item.label, item.sec.full_header, item.filename);
+          nodeId = graphStore.addFeatureNode(item.parentId, item.sType, item.label, item.sec.full_header, item.filename, item.sec.line_number);
         } else if (SUB_COMPONENT_TYPES.has(item.sType)) {
-          nodeId = graphStore.addSubComponentNode(item.parentId, item.sType, item.label, item.sec.full_header, item.filename);
+          nodeId = graphStore.addSubComponentNode(item.parentId, item.sType, item.label, item.sec.full_header, item.filename, item.sec.line_number);
         } else {
-          nodeId = graphStore.addSubComponentNode(item.parentId, item.sType, item.label, item.sec.full_header, item.filename);
+          nodeId = graphStore.addSubComponentNode(item.parentId, item.sType, item.label, item.sec.full_header, item.filename, item.sec.line_number);
         }
         // Mark suppressed sections
         if (item.isSuppressed) {

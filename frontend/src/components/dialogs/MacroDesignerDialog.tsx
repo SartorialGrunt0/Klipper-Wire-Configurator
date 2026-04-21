@@ -80,6 +80,15 @@ interface CanvasContextMenuState {
   zoneId?: string;
 }
 
+interface ExactPositionDialogState {
+  target: 'dock' | 'zone';
+  zoneId?: string;
+  x: string;
+  y: string;
+  width: string;
+  height: string;
+}
+
 interface DragState {
   type: 'toolhead' | 'dock' | 'zone' | 'zone-resize';
   zoneId?: string;
@@ -310,12 +319,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
   const [goToZ, setGoToZ] = useState('');
   const [selectedZoneId, setSelectedZoneId] = useState<string | null>(null);
   const [isDockSelected, setIsDockSelected] = useState(false);
-  const [exactToolheadX, setExactToolheadX] = useState('');
-  const [exactToolheadY, setExactToolheadY] = useState('');
-  const [zoneEditX, setZoneEditX] = useState('');
-  const [zoneEditY, setZoneEditY] = useState('');
-  const [zoneEditWidth, setZoneEditWidth] = useState('');
-  const [zoneEditHeight, setZoneEditHeight] = useState('');
+  const [exactPositionDialog, setExactPositionDialog] = useState<ExactPositionDialogState | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const toolheadPositionRef = useRef<ToolheadPosition | null>(null);
   const zWheelStartRef = useRef<ToolheadPosition | null>(null);
@@ -474,13 +478,6 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
   }, [runtime, toolheadDragPos]);
 
   useEffect(() => {
-    const currentPosition = toolheadDragPos || (runtime ? { x: runtime.x, y: runtime.y, z: runtime.z } : null);
-    if (!currentPosition) return;
-    setExactToolheadX(formatNumber(currentPosition.x));
-    setExactToolheadY(formatNumber(currentPosition.y));
-  }, [runtime, toolheadDragPos]);
-
-  useEffect(() => {
     if (!selectedZoneId || noGoZones.some((zone) => zone.id === selectedZoneId)) return;
     setSelectedZoneId(noGoZones[0]?.id || null);
   }, [noGoZones, selectedZoneId]);
@@ -492,18 +489,17 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
   }, [selectedZoneId]);
 
   useEffect(() => {
-    if (!selectedZone) {
-      setZoneEditX('');
-      setZoneEditY('');
-      setZoneEditWidth('');
-      setZoneEditHeight('');
+    if (!exactPositionDialog) {
       return;
     }
-    setZoneEditX(formatNumber(selectedZone.x));
-    setZoneEditY(formatNumber(selectedZone.y));
-    setZoneEditWidth(formatNumber(selectedZone.width));
-    setZoneEditHeight(formatNumber(selectedZone.height));
-  }, [selectedZone]);
+    if (exactPositionDialog.target === 'dock' && !dockPosition) {
+      setExactPositionDialog(null);
+      return;
+    }
+    if (exactPositionDialog.target === 'zone' && !noGoZones.some((zone) => zone.id === exactPositionDialog.zoneId)) {
+      setExactPositionDialog(null);
+    }
+  }, [dockPosition, exactPositionDialog, noGoZones]);
 
   useEffect(() => () => {
     if (zWheelTimeoutRef.current !== null) {
@@ -768,71 +764,6 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
       return 'That move exceeds the configured Z range.';
     }
     return null;
-  };
-
-  const handleSetExactToolheadPosition = () => {
-    const currentPosition = getCurrentToolheadPosition();
-    if (!currentPosition) {
-      setMessage('No toolhead position is available yet.');
-      return;
-    }
-
-    const rawX = Number(exactToolheadX);
-    const rawY = Number(exactToolheadY);
-    if (!Number.isFinite(rawX) || !Number.isFinite(rawY)) {
-      setMessage('Enter valid numeric X and Y values for toolhead position.');
-      return;
-    }
-
-    const nextPosition = {
-      x: clamp(rawX, machineProfile.moveMinX, machineProfile.moveMaxX),
-      y: clamp(rawY, machineProfile.moveMinY, machineProfile.moveMaxY),
-      z: currentPosition.z,
-    };
-    const moveValidation = validateToolheadMove(currentPosition, nextPosition);
-    if (moveValidation) {
-      setMessage(moveValidation);
-      return;
-    }
-
-    const moveLines = buildMoveLines(currentPosition, nextPosition, moveMode);
-    if (!moveLines.length) {
-      setMessage('The requested move does not change the toolhead position.');
-      return;
-    }
-
-    appendGcodeLines(moveLines);
-    setToolheadDragPos(nextPosition);
-    setGoToX(formatNumber(nextPosition.x));
-    setGoToY(formatNumber(nextPosition.y));
-    setMessage(`Added move to X${formatNumber(nextPosition.x)} Y${formatNumber(nextPosition.y)}.`);
-  };
-
-  const handleApplyZonePosition = () => {
-    if (!selectedZone) {
-      setMessage('Select a no-go zone first.');
-      return;
-    }
-
-    const x = Number(zoneEditX);
-    const y = Number(zoneEditY);
-    const width = Number(zoneEditWidth);
-    const height = Number(zoneEditHeight);
-    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(width) || !Number.isFinite(height)) {
-      setMessage('Enter valid numeric values for the no-go zone.');
-      return;
-    }
-    if (width <= 0 || height <= 0) {
-      setMessage('No-go zone width and height must be greater than 0.');
-      return;
-    }
-
-    const boundedX = clamp(x, machineProfile.moveMinX, machineProfile.moveMaxX - width);
-    const boundedY = clamp(y, machineProfile.moveMinY, machineProfile.moveMaxY - height);
-    const boundedW = Math.min(width, machineProfile.moveMaxX - boundedX);
-    const boundedH = Math.min(height, machineProfile.moveMaxY - boundedY);
-    updateNoGoZone(selectedZone.id, { x: boundedX, y: boundedY, width: boundedW, height: boundedH });
-    setMessage(`Updated ${selectedZone.name} to X${formatNumber(boundedX)} Y${formatNumber(boundedY)}.`);
   };
 
   const buildMoveLines = (
@@ -1169,6 +1100,86 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
     }
     return false;
   }, [deleteNoGoZone, dockPosition, isDockSelected, selectedZone, setDockPosition]);
+
+  const openExactPositionDialog = useCallback((target: 'dock' | 'zone', zoneId?: string) => {
+    if (target === 'dock') {
+      if (!dockPosition) return;
+      setIsDockSelected(true);
+      setSelectedZoneId(null);
+      setExactPositionDialog({
+        target: 'dock',
+        x: formatNumber(dockPosition.x),
+        y: formatNumber(dockPosition.y),
+        width: '',
+        height: '',
+      });
+      return;
+    }
+
+    const zone = zoneId ? noGoZones.find((item) => item.id === zoneId) : selectedZone;
+    if (!zone) return;
+    setSelectedZoneId(zone.id);
+    setIsDockSelected(false);
+    setExactPositionDialog({
+      target: 'zone',
+      zoneId: zone.id,
+      x: formatNumber(zone.x),
+      y: formatNumber(zone.y),
+      width: formatNumber(zone.width),
+      height: formatNumber(zone.height),
+    });
+  }, [dockPosition, noGoZones, selectedZone]);
+
+  const handleApplyExactPosition = useCallback(() => {
+    if (!exactPositionDialog) return;
+
+    const x = Number(exactPositionDialog.x);
+    const y = Number(exactPositionDialog.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      setMessage(`Enter valid numeric values for the ${exactPositionDialog.target === 'dock' ? 'dock' : 'no-go zone'}.`);
+      return;
+    }
+
+    if (exactPositionDialog.target === 'dock') {
+      const boundedDock = {
+        x: clamp(x, machineProfile.moveMinX, machineProfile.moveMaxX),
+        y: clamp(y, machineProfile.moveMinY, machineProfile.moveMaxY),
+      };
+      setDockPosition(boundedDock);
+      setIsDockSelected(true);
+      setSelectedZoneId(null);
+      setExactPositionDialog(null);
+      setMessage(`Updated dock to X${formatNumber(boundedDock.x)} Y${formatNumber(boundedDock.y)}.`);
+      return;
+    }
+
+    const zone = noGoZones.find((item) => item.id === exactPositionDialog.zoneId);
+    if (!zone) {
+      setExactPositionDialog(null);
+      return;
+    }
+
+    const width = Number(exactPositionDialog.width);
+    const height = Number(exactPositionDialog.height);
+    if (!Number.isFinite(width) || !Number.isFinite(height)) {
+      setMessage('Enter valid numeric values for the no-go zone.');
+      return;
+    }
+    if (width <= 0 || height <= 0) {
+      setMessage('No-go zone width and height must be greater than 0.');
+      return;
+    }
+
+    const boundedX = clamp(x, machineProfile.moveMinX, machineProfile.moveMaxX - width);
+    const boundedY = clamp(y, machineProfile.moveMinY, machineProfile.moveMaxY - height);
+    const boundedW = Math.min(width, machineProfile.moveMaxX - boundedX);
+    const boundedH = Math.min(height, machineProfile.moveMaxY - boundedY);
+    updateNoGoZone(zone.id, { x: boundedX, y: boundedY, width: boundedW, height: boundedH });
+    setSelectedZoneId(zone.id);
+    setIsDockSelected(false);
+    setExactPositionDialog(null);
+    setMessage(`Updated ${zone.name} to X${formatNumber(boundedX)} Y${formatNumber(boundedY)}.`);
+  }, [exactPositionDialog, machineProfile, noGoZones, setDockPosition, updateNoGoZone]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -1586,7 +1597,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                     <div className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full bg-emerald-400" /> Dock</div>
                   </div>
                 </div>
-                <div className="min-w-[330px] flex-shrink-0 rounded-lg border border-[var(--color-bg-tertiary)] bg-[rgba(15,23,42,0.72)] px-3 py-2 text-[10px] text-[var(--color-text-secondary)]">
+                <div className="min-w-[300px] flex-shrink-0 rounded-lg border border-[var(--color-bg-tertiary)] bg-[rgba(15,23,42,0.72)] px-3 py-2 text-[10px] text-[var(--color-text-secondary)]">
                   <div className="mb-1 flex items-center justify-between gap-3">
                     <div className="text-[10px] font-semibold uppercase tracking-[0.16em]">Machine state</div>
                     <button disabled={!editMode || !displayedItem} onClick={() => setMoveMode((current) => { const next = current === 'absolute' ? 'relative' : 'absolute'; appendGcode(current === 'absolute' ? 'G91' : 'G90'); return next; })} className={`rounded-md border px-2 py-0.5 text-[10px] font-semibold disabled:cursor-not-allowed disabled:opacity-40 ${moveMode === 'relative' ? 'border-[var(--color-accent)] text-[var(--color-accent)]' : 'border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)]'}`}>{moveMode === 'absolute' ? 'Relative' : 'Absolute'}</button>
@@ -1606,11 +1617,6 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                         <input value={goToY} onChange={(e) => setGoToY(e.target.value)} placeholder="Y" className="w-14 rounded border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-primary)]" />
                         <input value={goToZ} onChange={(e) => setGoToZ(e.target.value)} placeholder="Z" className="w-14 rounded border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-primary)]" />
                         <button onClick={handleGoTo} className="rounded bg-[var(--color-accent)] px-2 py-0.5 text-[10px] font-semibold text-[var(--color-bg-primary)]">Move</button>
-                      </div>
-                      <div className="flex items-center gap-1.5">
-                        <input value={exactToolheadX} onChange={(e) => setExactToolheadX(e.target.value)} placeholder="Exact X" className="w-16 rounded border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-primary)]" />
-                        <input value={exactToolheadY} onChange={(e) => setExactToolheadY(e.target.value)} placeholder="Exact Y" className="w-16 rounded border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-primary)]" />
-                        <button onClick={handleSetExactToolheadPosition} className="rounded border border-[var(--color-bg-tertiary)] px-2 py-0.5 text-[10px] font-semibold text-[var(--color-text-primary)]">Set XY</button>
                       </div>
                     </div>
                   )}
@@ -1837,7 +1843,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
           </main>
 
           {/* ==================== RIGHT SIDEBAR ==================== */}
-          <aside className="min-h-0 border-l border-[var(--color-bg-tertiary)] overflow-y-auto p-4">
+          <aside className="min-h-0 w-[clamp(21rem,30vw,30rem)] shrink-0 overflow-y-auto border-l border-[var(--color-bg-tertiary)] p-4">
             {selectedItem ? (
               <div className="flex flex-col gap-4">
                 <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
@@ -1876,14 +1882,14 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                 </div>
 
                 <div className="rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] p-3">
-                  <div className="mb-2 flex items-center justify-between gap-2">
+                  <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
                     <div className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-text-secondary)]">Control</div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center justify-end gap-2">
                       <button disabled={!editMode} onClick={() => setShowCommandPicker(true)} className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-[10px] text-[var(--color-text-primary)] disabled:opacity-40">Commands</button>
                       <label className="text-[10px] text-[var(--color-text-secondary)]">Feed rate</label>
-                      <input disabled={!editMode} value={moveFeedRate} onChange={(event) => setMoveFeedRate(event.target.value)} className="w-16 rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1 text-xs text-[var(--color-text-primary)] disabled:opacity-40" />
-                      <button disabled={!editMode} onClick={() => appendGcode('M84')} className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1 text-xs text-[var(--color-text-primary)] disabled:opacity-40">M84</button>
-                      <button disabled={!editMode} onClick={() => appendGcode('G28')} className="rounded-md bg-[var(--color-accent)] px-3 py-1 text-xs font-semibold text-[var(--color-bg-primary)] disabled:opacity-40">Home all</button>
+                      <input disabled={!editMode} value={moveFeedRate} onChange={(event) => setMoveFeedRate(event.target.value)} className="w-14 rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1 text-xs text-[var(--color-text-primary)] disabled:opacity-40" />
+                      <button disabled={!editMode} onClick={() => appendGcode('M84')} className="rounded-md border border-[var(--color-bg-tertiary)] px-2.5 py-1 text-xs text-[var(--color-text-primary)] disabled:opacity-40">M84</button>
+                      <button disabled={!editMode} onClick={() => appendGcode('G28')} className="rounded-md bg-[var(--color-accent)] px-2.5 py-1 text-xs font-semibold text-[var(--color-bg-primary)] disabled:opacity-40">Home all</button>
                     </div>
                   </div>
                   <div className="mb-3 space-y-2 text-xs">
@@ -1915,7 +1921,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                       <button disabled={!editMode} onClick={() => handleAxisJog('Z', 25)} className="px-2 py-2 text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)] disabled:opacity-40">+25</button>
                     </div>
                   </div>
-                  <div className="grid grid-cols-2 gap-2 text-xs">
+                  <div className="grid grid-cols-[repeat(auto-fit,minmax(10.5rem,1fr))] gap-2 text-xs">
                     <div>
                       <label className="mb-1 block text-[var(--color-text-secondary)]">Nozzle target</label>
                       <div className="flex gap-1">
@@ -1987,29 +1993,29 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                         }} className="rounded-md border border-[var(--color-bg-tertiary)] px-3 text-[var(--color-text-primary)] disabled:opacity-40" disabled={!editMode}>Add</button>
                       </div>
                     </div>
-                    <div className="col-span-2">
+                    <div className="col-span-full">
                       <label className="mb-1 block text-[var(--color-text-secondary)]">Terminal message</label>
                       <div className="flex gap-2">
                         <input disabled={!editMode} value={terminalMessage} onChange={(event) => setTerminalMessage(event.target.value)} className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40" />
                         <button disabled={!editMode} onClick={() => appendGcode(`RESPOND MSG="${terminalMessage.replace(/"/g, '')}"`)} className="rounded-md border border-[var(--color-bg-tertiary)] px-3 text-[var(--color-text-primary)] disabled:opacity-40">Add</button>
                       </div>
                     </div>
-                    <div className="col-span-2">
+                    <div className="col-span-full">
                       <label className="mb-1 block text-[var(--color-text-secondary)]">Extruder / Retract</label>
-                      <div className="flex items-center gap-2">
-                        <input disabled={!editMode} value={extrudeDistance} onChange={(event) => setExtrudeDistance(event.target.value)} placeholder="Distance (mm)" className="w-28 rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40" />
-                        <input disabled={!editMode} value={extrudeFeedRate} onChange={(event) => setExtrudeFeedRate(event.target.value)} placeholder="Feed" className="w-24 rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40" />
+                      <div className="grid grid-cols-[repeat(auto-fit,minmax(7rem,1fr))] gap-2">
+                        <input disabled={!editMode} value={extrudeDistance} onChange={(event) => setExtrudeDistance(event.target.value)} placeholder="Distance (mm)" className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40" />
+                        <input disabled={!editMode} value={extrudeFeedRate} onChange={(event) => setExtrudeFeedRate(event.target.value)} placeholder="Feed" className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40" />
                         <button
                           disabled={!editMode}
                           onClick={() => appendExtrusionCommand(1)}
-                          className="rounded-md border border-[var(--color-bg-tertiary)] px-3 text-[var(--color-text-primary)] disabled:opacity-40"
+                          className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40"
                         >
                           Extrude
                         </button>
                         <button
                           disabled={!editMode}
                           onClick={() => appendExtrusionCommand(-1)}
-                          className="rounded-md border border-[var(--color-bg-tertiary)] px-3 text-[var(--color-text-primary)] disabled:opacity-40"
+                          className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40"
                         >
                           Retract
                         </button>
@@ -2018,49 +2024,39 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                   </div>
                 </div>
                 <div className="rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] p-3">
-                  <div className="mb-2 flex items-center justify-between gap-2">
-                    <div className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-text-secondary)]">No-go zone</div>
-                    <select
-                      value={selectedZoneId || ''}
-                      onChange={(event) => setSelectedZoneId(event.target.value || null)}
-                      className="rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1 text-xs text-[var(--color-text-primary)]"
-                    >
-                      <option value="">Select</option>
-                      {noGoZones.map((zone) => (
-                        <option key={zone.id} value={zone.id}>{zone.name}</option>
-                      ))}
-                    </select>
-                  </div>
+                  <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-text-secondary)]">Canvas selection</div>
                   {selectedZone ? (
                     <div className="space-y-2 text-xs">
-                      <div className="grid grid-cols-2 gap-2">
-                        <div>
-                          <label className="mb-1 block text-[var(--color-text-secondary)]">X</label>
-                          <input value={zoneEditX} onChange={(event) => setZoneEditX(event.target.value)} className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)]" />
-                        </div>
-                        <div>
-                          <label className="mb-1 block text-[var(--color-text-secondary)]">Y</label>
-                          <input value={zoneEditY} onChange={(event) => setZoneEditY(event.target.value)} className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)]" />
-                        </div>
-                        <div>
-                          <label className="mb-1 block text-[var(--color-text-secondary)]">Width</label>
-                          <input value={zoneEditWidth} onChange={(event) => setZoneEditWidth(event.target.value)} className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)]" />
-                        </div>
-                        <div>
-                          <label className="mb-1 block text-[var(--color-text-secondary)]">Height</label>
-                          <input value={zoneEditHeight} onChange={(event) => setZoneEditHeight(event.target.value)} className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)]" />
+                      <div className="rounded-lg border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-3 py-2 text-[11px] text-[var(--color-text-primary)]">
+                        <div className="font-semibold text-[var(--color-text-primary)]">{selectedZone.name}</div>
+                        <div className="mt-1 text-[var(--color-text-secondary)]">
+                          X {formatNumber(selectedZone.x)} | Y {formatNumber(selectedZone.y)} | W {formatNumber(selectedZone.width)} | H {formatNumber(selectedZone.height)}
                         </div>
                       </div>
-                      <div className="flex items-center gap-2">
-                        <button onClick={handleApplyZonePosition} className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1 text-xs text-[var(--color-text-primary)]">Apply</button>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button onClick={() => openExactPositionDialog('zone', selectedZone.id)} className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1 text-xs text-[var(--color-text-primary)]">Set exact position</button>
                         <button onClick={() => {
                           deleteNoGoZone(selectedZone.id);
                           setMessage(`Deleted ${selectedZone.name}.`);
                         }} className="rounded-md border border-red-400/60 px-3 py-1 text-xs text-red-300">Delete</button>
                       </div>
                     </div>
+                  ) : isDockSelected && dockPosition ? (
+                    <div className="space-y-2 text-xs">
+                      <div className="rounded-lg border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-3 py-2 text-[11px] text-[var(--color-text-primary)]">
+                        <div className="font-semibold text-[var(--color-text-primary)]">Dock</div>
+                        <div className="mt-1 text-[var(--color-text-secondary)]">X {formatNumber(dockPosition.x)} | Y {formatNumber(dockPosition.y)}</div>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button onClick={() => openExactPositionDialog('dock')} className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1 text-xs text-[var(--color-text-primary)]">Set exact position</button>
+                        <button onClick={() => {
+                          setDockPosition(null);
+                          setMessage('Dock deleted.');
+                        }} className="rounded-md border border-red-400/60 px-3 py-1 text-xs text-red-300">Delete</button>
+                      </div>
+                    </div>
                   ) : (
-                    <div className="text-[11px] text-[var(--color-text-secondary)]">Click a zone on the grid to edit exact X/Y position.</div>
+                    <div className="text-[11px] text-[var(--color-text-secondary)]">Right-click a no-go zone or dock on the grid and choose Set exact position to edit it in a popup.</div>
                   )}
                 </div>
                 {message && <div className="rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-3 py-2 text-[11px] text-[var(--color-text-secondary)]">{message}</div>}
@@ -2108,6 +2104,70 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
           </div>
         )}
 
+        {exactPositionDialog && (
+          <div className="fixed inset-0 z-[72] flex items-center justify-center bg-black/45" onClick={() => setExactPositionDialog(null)}>
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                handleApplyExactPosition();
+              }}
+              className="w-[360px] max-w-[95vw] rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] p-4 shadow-2xl"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="mb-3 flex items-center justify-between gap-2">
+                <div>
+                  <div className="text-sm font-semibold text-[var(--color-text-primary)]">Set exact position</div>
+                  <div className="text-[11px] text-[var(--color-text-secondary)]">{exactPositionDialog.target === 'dock' ? 'Dock position' : 'No-go zone bounds'}</div>
+                </div>
+                <button type="button" onClick={() => setExactPositionDialog(null)} className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-xs text-[var(--color-text-primary)]">Close</button>
+              </div>
+              <div className="grid grid-cols-2 gap-3 text-xs">
+                <label>
+                  <span className="mb-1 block text-[var(--color-text-secondary)]">X</span>
+                  <input
+                    value={exactPositionDialog.x}
+                    onChange={(event) => setExactPositionDialog((current) => (current ? { ...current, x: event.target.value } : current))}
+                    className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-2 py-1.5 text-[var(--color-text-primary)]"
+                    autoFocus
+                  />
+                </label>
+                <label>
+                  <span className="mb-1 block text-[var(--color-text-secondary)]">Y</span>
+                  <input
+                    value={exactPositionDialog.y}
+                    onChange={(event) => setExactPositionDialog((current) => (current ? { ...current, y: event.target.value } : current))}
+                    className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-2 py-1.5 text-[var(--color-text-primary)]"
+                  />
+                </label>
+                {exactPositionDialog.target === 'zone' && (
+                  <>
+                    <label>
+                      <span className="mb-1 block text-[var(--color-text-secondary)]">Width</span>
+                      <input
+                        value={exactPositionDialog.width}
+                        onChange={(event) => setExactPositionDialog((current) => (current ? { ...current, width: event.target.value } : current))}
+                        className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-2 py-1.5 text-[var(--color-text-primary)]"
+                      />
+                    </label>
+                    <label>
+                      <span className="mb-1 block text-[var(--color-text-secondary)]">Height</span>
+                      <input
+                        value={exactPositionDialog.height}
+                        onChange={(event) => setExactPositionDialog((current) => (current ? { ...current, height: event.target.value } : current))}
+                        className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-2 py-1.5 text-[var(--color-text-primary)]"
+                      />
+                    </label>
+                  </>
+                )}
+              </div>
+              <div className="mt-4 flex justify-end gap-2">
+                <button type="button" onClick={() => setExactPositionDialog(null)} className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-xs text-[var(--color-text-primary)]">Cancel</button>
+                <button type="submit" className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-xs font-semibold text-[var(--color-bg-primary)]">Apply</button>
+              </div>
+            </form>
+          </div>
+        )}
+
         {canvasContextMenu && (
           <div
             className="fixed z-[65] min-w-[180px] rounded-lg border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] py-1 shadow-xl"
@@ -2137,10 +2197,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                 </button>
                 <button
                   onClick={() => {
-                    const zone = noGoZones.find((item) => item.id === canvasContextMenu.zoneId);
-                    if (zone) {
-                      setSelectedZoneId(zone.id);
-                    }
+                    openExactPositionDialog('zone', canvasContextMenu.zoneId);
                     setCanvasContextMenu(null);
                   }}
                   className="w-full px-4 py-2 text-left text-xs text-[var(--color-text-primary)] hover:bg-[var(--color-bg-primary)]"
@@ -2152,20 +2209,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
             {canvasContextMenu.target === 'dock' && (
               <button
                 onClick={() => {
-                  if (dockPosition) {
-                    const x = window.prompt('Dock X position', formatNumber(dockPosition.x));
-                    const y = window.prompt('Dock Y position', formatNumber(dockPosition.y));
-                    if (x !== null && y !== null) {
-                      const nx = Number(x);
-                      const ny = Number(y);
-                      if (Number.isFinite(nx) && Number.isFinite(ny)) {
-                        setDockPosition({
-                          x: clamp(nx, machineProfile.moveMinX, machineProfile.moveMaxX),
-                          y: clamp(ny, machineProfile.moveMinY, machineProfile.moveMaxY),
-                        });
-                      }
-                    }
-                  }
+                  openExactPositionDialog('dock');
                   setCanvasContextMenu(null);
                 }}
                 className="w-full px-4 py-2 text-left text-xs text-[var(--color-text-primary)] hover:bg-[var(--color-bg-primary)]"

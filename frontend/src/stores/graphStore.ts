@@ -120,6 +120,25 @@ function computeHardwareSize(leftCount: number, rightCount: number) {
   return { width: CONTAINER_WIDTH, height: Math.max(height, 160) };
 }
 
+type SectionRef = {
+  sectionHeader: string;
+  sectionLineNumber?: number;
+};
+
+function matchesSectionRef(section: { full_header: string; line_number: number }, ref: SectionRef): boolean {
+  if (section.full_header !== ref.sectionHeader) return false;
+  if (ref.sectionLineNumber == null || ref.sectionLineNumber === 0) return true;
+  return section.line_number === ref.sectionLineNumber;
+}
+
+function sectionIdentity(sectionHeader: string, sectionLineNumber?: number): string {
+  return `${sectionHeader}#${sectionLineNumber ?? 0}`;
+}
+
+function sectionIdentityForSection(section: { full_header: string; line_number: number }): string {
+  return sectionIdentity(section.full_header, section.line_number);
+}
+
 interface GraphState {
   nodes: AppNode[];
   edges: AppEdge[];
@@ -182,6 +201,7 @@ interface GraphState {
     label: string,
     sectionHeader: string,
     configFile?: string,
+    sectionLineNumber?: number,
   ) => string;
 
   addFeatureNode: (
@@ -190,6 +210,7 @@ interface GraphState {
     label: string,
     sectionHeader: string,
     configFile?: string,
+    sectionLineNumber?: number,
   ) => string;
 
   addGroupNode: (
@@ -200,6 +221,7 @@ interface GraphState {
       sectionType: string;
       label: string;
       sectionHeader: string;
+      sectionLineNumber?: number;
       isFeature: boolean;
       params: Array<{ key: string; value: string }>;
       configFile?: string;
@@ -445,15 +467,15 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       if (rn.type === 'subComponent' || rn.type === 'feature') {
         const sectionHeader = d.sectionHeader as string | undefined;
         if (sectionHeader) {
-          configStore.removeSection(configFile, sectionHeader);
+          configStore.removeSection(configFile, sectionHeader, d.sectionLineNumber as number | undefined);
         }
       } else if (rn.type === 'group') {
-        const children = d.children as Array<{ sectionHeader: string; configFile?: string }> | undefined;
+        const children = d.children as Array<{ sectionHeader: string; sectionLineNumber?: number; configFile?: string }> | undefined;
         if (children) {
           for (const child of children) {
             const childFile = child.configFile || configFile;
             if (child.sectionHeader) {
-              configStore.removeSection(childFile, child.sectionHeader);
+              configStore.removeSection(childFile, child.sectionHeader, child.sectionLineNumber);
             }
           }
         }
@@ -629,9 +651,9 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     } else if (node.type === 'subComponent' || node.type === 'feature') {
       const configFile = d.configFile as string | undefined;
       const sectionHeader = d.sectionHeader as string | undefined;
+      const sectionLineNumber = d.sectionLineNumber as number | undefined;
       if (configFile && sectionHeader) {
-        const cf = configStore.configFiles[configFile];
-        const originalSection = cf?.sections.find((s) => s.full_header === sectionHeader);
+        const originalSection = configStore.getSection(configFile, sectionHeader, sectionLineNumber);
         if (originalSection) {
           const allHeaders = buildAllHeaders();
           const { newName, newHeader } = incrementSectionName(originalSection, allHeaders);
@@ -640,29 +662,31 @@ export const useGraphStore = create<GraphState>((set, get) => ({
             ...originalSection,
             section_name: newName,
             full_header: newHeader,
+            line_number: 0,
             params: originalSection.params.map((p) => ({ ...p })),
           });
           (cloneData as Record<string, unknown>).sectionHeader = newHeader;
+          (cloneData as Record<string, unknown>).sectionLineNumber = 0;
           (cloneData as Record<string, unknown>).label = `${d.label || originalSection.section_type}: ${newName}`;
         }
       }
     } else if (node.type === 'group') {
-      const children = d.children as Array<{ sectionType: string; label: string; sectionHeader: string; configFile?: string }> | undefined;
+      const children = d.children as Array<{ sectionType: string; label: string; sectionHeader: string; sectionLineNumber?: number; configFile?: string }> | undefined;
       if (children) {
         const allHeaders = buildAllHeaders();
         const newChildren = children.map((child) => {
           const childFile = child.configFile || (d.configFile as string);
-          const cf = configStore.configFiles[childFile];
-          const originalSection = cf?.sections.find((s) => s.full_header === child.sectionHeader);
+          const originalSection = configStore.getSection(childFile, child.sectionHeader, child.sectionLineNumber);
           if (originalSection) {
             const { newName, newHeader } = incrementSectionName(originalSection, allHeaders);
             configStore.addSection(childFile, {
               ...originalSection,
               section_name: newName,
               full_header: newHeader,
+              line_number: 0,
               params: originalSection.params.map((p) => ({ ...p })),
             });
-            return { ...child, sectionHeader: newHeader, label: `${child.sectionType}: ${newName}` };
+            return { ...child, sectionHeader: newHeader, sectionLineNumber: 0, label: `${child.sectionType}: ${newName}` };
           }
           return child;
         });
@@ -754,7 +778,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     return id;
   },
 
-  addSubComponentNode: (parentId, sectionType, label, sectionHeader, configFile) => {
+  addSubComponentNode: (parentId, sectionType, label, sectionHeader, configFile, sectionLineNumber) => {
     const id = nextNodeId();
 
     // Resolve config file from parent hardware node if not provided
@@ -777,8 +801,9 @@ export const useGraphStore = create<GraphState>((set, get) => ({
           label,
           sectionType,
           sectionHeader,
+          sectionLineNumber,
           componentGroup,
-          section: { section_type: sectionType, section_name: '', full_header: sectionHeader, line_number: 0, params: [], header_comments: [] },
+          section: { section_type: sectionType, section_name: '', full_header: sectionHeader, line_number: sectionLineNumber ?? 0, params: [], header_comments: [] },
           parentHardwareId: null,
           configFile: resolvedFile,
           hasErrors: false,
@@ -809,8 +834,9 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         label,
         sectionType,
         sectionHeader,
+        sectionLineNumber,
         componentGroup,
-        section: { section_type: sectionType, section_name: '', full_header: sectionHeader, line_number: 0, params: [], header_comments: [] },
+        section: { section_type: sectionType, section_name: '', full_header: sectionHeader, line_number: sectionLineNumber ?? 0, params: [], header_comments: [] },
         parentHardwareId: parentId,
         configFile: resolvedFile,
         hasErrors: false,
@@ -841,7 +867,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     return id;
   },
 
-  addFeatureNode: (parentId, sectionType, label, sectionHeader, configFile) => {
+  addFeatureNode: (parentId, sectionType, label, sectionHeader, configFile, sectionLineNumber) => {
     const id = nextNodeId();
 
     // Resolve config file from parent hardware node if not provided
@@ -861,7 +887,8 @@ export const useGraphStore = create<GraphState>((set, get) => ({
           label,
           sectionType,
           sectionHeader,
-          section: { section_type: sectionType, section_name: '', full_header: sectionHeader, line_number: 0, params: [], header_comments: [] },
+          sectionLineNumber,
+          section: { section_type: sectionType, section_name: '', full_header: sectionHeader, line_number: sectionLineNumber ?? 0, params: [], header_comments: [] },
           parentId: null,
           configFile: resolvedFile,
           hasErrors: false,
@@ -892,7 +919,8 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         label,
         sectionType,
         sectionHeader,
-        section: { section_type: sectionType, section_name: '', full_header: sectionHeader, line_number: 0, params: [], header_comments: [] },
+        sectionLineNumber,
+        section: { section_type: sectionType, section_name: '', full_header: sectionHeader, line_number: sectionLineNumber ?? 0, params: [], header_comments: [] },
         parentId,
         configFile: resolvedFile,
         hasErrors: false,
@@ -1010,15 +1038,15 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         if (children.length === 1) {
           const remaining = children[0];
           if (remaining.isFeature) {
-            get().addFeatureNode(parentId, remaining.sectionType, remaining.label, remaining.sectionHeader, remaining.configFile);
+            get().addFeatureNode(parentId, remaining.sectionType, remaining.label, remaining.sectionHeader, remaining.configFile, remaining.sectionLineNumber);
           } else {
-            get().addSubComponentNode(parentId, remaining.sectionType, remaining.label, remaining.sectionHeader, remaining.configFile);
+            get().addSubComponentNode(parentId, remaining.sectionType, remaining.label, remaining.sectionHeader, remaining.configFile, remaining.sectionLineNumber);
           }
         }
         if (removedChild.isFeature) {
-          get().addFeatureNode(parentId, removedChild.sectionType, removedChild.label, removedChild.sectionHeader, removedChild.configFile);
+          get().addFeatureNode(parentId, removedChild.sectionType, removedChild.label, removedChild.sectionHeader, removedChild.configFile, removedChild.sectionLineNumber);
         } else {
-          get().addSubComponentNode(parentId, removedChild.sectionType, removedChild.label, removedChild.sectionHeader, removedChild.configFile);
+          get().addSubComponentNode(parentId, removedChild.sectionType, removedChild.label, removedChild.sectionHeader, removedChild.configFile, removedChild.sectionLineNumber);
         }
         get().reflowParentChildren(parentId);
       }
@@ -1031,9 +1059,9 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       }));
       if (parentId) {
         if (removedChild.isFeature) {
-          get().addFeatureNode(parentId, removedChild.sectionType, removedChild.label, removedChild.sectionHeader, removedChild.configFile);
+          get().addFeatureNode(parentId, removedChild.sectionType, removedChild.label, removedChild.sectionHeader, removedChild.configFile, removedChild.sectionLineNumber);
         } else {
-          get().addSubComponentNode(parentId, removedChild.sectionType, removedChild.label, removedChild.sectionHeader, removedChild.configFile);
+          get().addSubComponentNode(parentId, removedChild.sectionType, removedChild.label, removedChild.sectionHeader, removedChild.configFile, removedChild.sectionLineNumber);
         }
         get().reflowParentChildren(parentId);
       }
@@ -1308,6 +1336,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     // Gather config info before state update
     const nodeData = node.data as Record<string, unknown>;
     const sectionHeader = nodeData.sectionHeader as string | undefined;
+    const sectionLineNumber = nodeData.sectionLineNumber as number | undefined;
 
     // Resolve old config file: from old parent, or from node's own configFile (standalone case)
     const oldConfigFile = oldParentNode
@@ -1330,13 +1359,13 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       : '';
 
     // Collect all section headers to move (single node or group with children)
-    const sectionHeaders: string[] = [];
+    const sectionRefs: SectionRef[] = [];
     if (node.type === 'group' && Array.isArray(nodeData.children)) {
-      for (const child of nodeData.children as Array<{ sectionHeader: string }>) {
-        if (child.sectionHeader) sectionHeaders.push(child.sectionHeader);
+      for (const child of nodeData.children as Array<{ sectionHeader: string; sectionLineNumber?: number }>) {
+        if (child.sectionHeader) sectionRefs.push({ sectionHeader: child.sectionHeader, sectionLineNumber: child.sectionLineNumber });
       }
     } else if (sectionHeader) {
-      sectionHeaders.push(sectionHeader);
+      sectionRefs.push({ sectionHeader, sectionLineNumber });
     }
 
     set((s) => {
@@ -1401,7 +1430,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     });
 
     // Move sections between config files and update pin prefixes
-    if (sectionHeaders.length > 0 && oldConfigFile && newConfigFile && oldConfigFile !== newConfigFile) {
+    if (sectionRefs.length > 0 && oldConfigFile && newConfigFile && oldConfigFile !== newConfigFile) {
       const configState = useConfigStore.getState();
       const schemas = configState.schemas;
 
@@ -1416,8 +1445,8 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       }
 
       // Move each section
-      for (const header of sectionHeaders) {
-        const section = configState.getSection(oldConfigFile, header);
+      for (const ref of sectionRefs) {
+        const section = configState.getSection(oldConfigFile, ref.sectionHeader, ref.sectionLineNumber);
         if (section) {
           // Update pin prefixes if MCU context changed
           let updatedSection = section;
@@ -1425,7 +1454,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
             updatedSection = updateSectionPins(section, oldMcuName, newMcuName, schemas);
           }
           configState.addSection(newConfigFile, updatedSection);
-          configState.removeSection(oldConfigFile, header);
+          configState.removeSection(oldConfigFile, ref.sectionHeader, ref.sectionLineNumber);
         }
       }
 
@@ -1440,19 +1469,19 @@ export const useGraphStore = create<GraphState>((set, get) => ({
           configState.removeConfigFile(oldConfigFile);
         }
       }
-    } else if (sectionHeaders.length > 0 && oldConfigFile && oldMcuName !== newMcuName) {
+    } else if (sectionRefs.length > 0 && oldConfigFile && oldMcuName !== newMcuName) {
       // Same config file but MCU context changed — update pin prefixes in place
       const configState = useConfigStore.getState();
       const schemas = configState.schemas;
-      for (const header of sectionHeaders) {
-        const section = configState.getSection(oldConfigFile, header);
+      for (const ref of sectionRefs) {
+        const section = configState.getSection(oldConfigFile, ref.sectionHeader, ref.sectionLineNumber);
         if (section) {
           const updatedSection = updateSectionPins(section, oldMcuName, newMcuName, schemas);
           const cf = configState.configFiles[oldConfigFile];
           if (cf) {
             configState.setConfigFile(oldConfigFile, {
               ...cf,
-              sections: cf.sections.map((s) => s.full_header === header ? updatedSection : s),
+              sections: cf.sections.map((s) => matchesSectionRef(s, ref) ? updatedSection : s),
             });
           }
         }
@@ -1463,10 +1492,10 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     if (node.type === 'group' && Array.isArray(nodeData.children) && oldMcuName !== newMcuName) {
       const freshConfigs = useConfigStore.getState().configFiles;
       const targetFile = newConfigFile || oldConfigFile || '';
-      const updatedChildren = (nodeData.children as Array<{ sectionHeader: string; configFile?: string; [key: string]: unknown }>).map((child) => {
+      const updatedChildren = (nodeData.children as Array<{ sectionHeader: string; sectionLineNumber?: number; configFile?: string; [key: string]: unknown }>).map((child) => {
         const childFile = (child.configFile as string) || targetFile;
         const cfData = freshConfigs[childFile];
-        const matchedSection = cfData?.sections.find((s: { full_header: string }) => s.full_header === child.sectionHeader);
+        const matchedSection = cfData?.sections.find((s: { full_header: string; line_number: number }) => matchesSectionRef(s, child));
         if (!matchedSection) return child;
         return {
           ...child,
@@ -1523,7 +1552,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     let changed = false;
 
     // Build a set of all section headers in this config file
-    const configSectionHeaders = new Set(cf.sections.map((s) => s.full_header));
+    const configSectionHeaders = new Set(cf.sections.map((s) => sectionIdentityForSection(s)));
 
     // Find all nodes that belong to this config file
     const fileNodes = updatedNodes.filter((n) => {
@@ -1539,14 +1568,14 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     const graphSectionHeaders = new Set<string>();
     for (const n of fileNodes) {
       const d = n.data as Record<string, unknown>;
-      graphSectionHeaders.add(d.sectionHeader as string);
+      graphSectionHeaders.add(sectionIdentity(d.sectionHeader as string, d.sectionLineNumber as number | undefined));
     }
     for (const n of fileGroups) {
       const d = n.data as Record<string, unknown>;
-      const children = d.children as Array<{ sectionHeader: string }> | undefined;
+      const children = d.children as Array<{ sectionHeader: string; sectionLineNumber?: number }> | undefined;
       if (children) {
         for (const c of children) {
-          graphSectionHeaders.add(c.sectionHeader);
+          graphSectionHeaders.add(sectionIdentity(c.sectionHeader, c.sectionLineNumber));
         }
       }
     }
@@ -1556,7 +1585,8 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     for (const n of fileNodes) {
       const d = n.data as Record<string, unknown>;
       const sectionHeader = d.sectionHeader as string;
-      if (!configSectionHeaders.has(sectionHeader)) {
+      const sectionLineNumber = d.sectionLineNumber as number | undefined;
+      if (!configSectionHeaders.has(sectionIdentity(sectionHeader, sectionLineNumber))) {
         removedIds.add(n.id);
         changed = true;
       }
@@ -1564,12 +1594,12 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     // Update groups: remove children whose sections no longer exist
     for (const n of fileGroups) {
       const d = n.data as Record<string, unknown>;
-      const children = d.children as Array<{ sectionHeader: string; configFile?: string }> | undefined;
+      const children = d.children as Array<{ sectionHeader: string; sectionLineNumber?: number; configFile?: string }> | undefined;
       if (children) {
         const filtered = children.filter((c) => {
           const childFile = c.configFile || filename;
           if (childFile !== filename) return true;
-          return configSectionHeaders.has(c.sectionHeader);
+          return configSectionHeaders.has(sectionIdentity(c.sectionHeader, c.sectionLineNumber));
         });
         if (filtered.length !== children.length) {
           changed = true;
@@ -1596,7 +1626,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 
       if (n.type === 'subComponent' || n.type === 'feature') {
         const sectionHeader = d.sectionHeader as string;
-        const section = cf.sections.find((s) => s.full_header === sectionHeader);
+        const section = cf.sections.find((s) => matchesSectionRef(s, { sectionHeader, sectionLineNumber: d.sectionLineNumber as number | undefined }));
         if (section) {
           const realParams = section.params.filter((p) => p.key !== '_comment_');
           const allCommented = realParams.length > 0 && realParams.every((p) => p.is_commented_out);
@@ -1607,12 +1637,12 @@ export const useGraphStore = create<GraphState>((set, get) => ({
           }
         }
       } else if (n.type === 'group') {
-        const children = d.children as Array<{ sectionHeader: string; configFile?: string; isSuppressed?: boolean }> | undefined;
+        const children = d.children as Array<{ sectionHeader: string; sectionLineNumber?: number; configFile?: string; isSuppressed?: boolean }> | undefined;
         if (children) {
           const updatedChildren = children.map((c) => {
             const childFile = c.configFile || filename;
             if (childFile !== filename) return c;
-            const section = cf.sections.find((s) => s.full_header === c.sectionHeader);
+            const section = cf.sections.find((s) => matchesSectionRef(s, c));
             if (section) {
               const realParams = section.params.filter((p) => p.key !== '_comment_');
               const allCommented = realParams.length > 0 && realParams.every((p) => p.is_commented_out);
@@ -1650,10 +1680,10 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       for (const n of updatedNodes) {
         const nd = n.data as Record<string, unknown>;
         if (n.type === 'subComponent' || n.type === 'feature') {
-          currentGraphHeaders.add(nd.sectionHeader as string);
+          currentGraphHeaders.add(sectionIdentity(nd.sectionHeader as string, nd.sectionLineNumber as number | undefined));
         } else if (n.type === 'group') {
-          const ch = nd.children as Array<{ sectionHeader: string }> | undefined;
-          if (ch) for (const c of ch) currentGraphHeaders.add(c.sectionHeader);
+          const ch = nd.children as Array<{ sectionHeader: string; sectionLineNumber?: number }> | undefined;
+          if (ch) for (const c of ch) currentGraphHeaders.add(sectionIdentity(c.sectionHeader, c.sectionLineNumber));
         }
       }
 
@@ -1684,7 +1714,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 
       for (const sec of cf.sections) {
         if (sec.section_type === 'include') continue;
-        if (currentGraphHeaders.has(sec.full_header)) continue;
+        if (currentGraphHeaders.has(sectionIdentityForSection(sec))) continue;
 
         const isFeature = FEAT_TYPES.has(sec.section_type);
         const isSub = SUB_TYPES.has(sec.section_type);
@@ -1707,6 +1737,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
           data: {
             sectionType: sec.section_type,
             sectionHeader: sec.full_header,
+            sectionLineNumber: sec.line_number,
             label,
             componentGroup,
             section: sec,

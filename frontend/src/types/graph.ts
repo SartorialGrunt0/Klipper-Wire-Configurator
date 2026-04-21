@@ -22,6 +22,7 @@ export interface SubComponentNodeData {
   label: string;
   sectionType: string;
   sectionHeader: string;
+  sectionLineNumber?: number;
   componentGroup: string;
   section: ConfigSection;
   parentHardwareId: string;
@@ -36,6 +37,7 @@ export interface FeatureNodeData {
   label: string;
   sectionType: string;
   sectionHeader: string;
+  sectionLineNumber?: number;
   section: ConfigSection;
   parentId: string;
   configFile: string;
@@ -49,6 +51,7 @@ export interface GroupChildItem {
   sectionType: string;
   label: string;
   sectionHeader: string;
+  sectionLineNumber?: number;
   isFeature: boolean;
   params: ConfigParam[];
   configFile: string;

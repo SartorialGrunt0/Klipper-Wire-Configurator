@@ -4,6 +4,12 @@ import type { ConfigFile, ConfigSection, ConfigParam, ValidationResult, SectionS
 /** Debounced revalidation timer — shared across all mutation methods. */
 let _revalidateTimer: ReturnType<typeof setTimeout> | null = null;
 
+function matchesSectionIdentity(section: ConfigSection, fullHeader: string, lineNumber?: number): boolean {
+  if (section.full_header !== fullHeader) return false;
+  if (lineNumber == null || lineNumber === 0) return true;
+  return section.line_number === lineNumber;
+}
+
 async function _revalidateFile(
   filename: string,
   get: () => ConfigState,
@@ -55,7 +61,7 @@ interface ConfigState {
   /* Section operations */
   addSection: (filename: string, section: ConfigSection) => void;
   upsertSection: (filename: string, section: ConfigSection, previousFullHeader?: string) => void;
-  removeSection: (filename: string, fullHeader: string) => void;
+  removeSection: (filename: string, fullHeader: string, lineNumber?: number) => void;
   updateSectionParam: (
     filename: string,
     fullHeader: string,
@@ -93,7 +99,7 @@ interface ConfigState {
   markClean: () => void;
 
   /* Helpers */
-  getSection: (filename: string, fullHeader: string) => ConfigSection | undefined;
+  getSection: (filename: string, fullHeader: string, lineNumber?: number) => ConfigSection | undefined;
   getSectionErrors: (fullHeader: string) => string[];
   revalidateFile: (filename: string) => Promise<void>;
 }
@@ -183,17 +189,21 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     scheduleRevalidation(get, set);
   },
 
-  removeSection: (filename, fullHeader) => {
+  removeSection: (filename, fullHeader, lineNumber) => {
     set((s) => {
       const cf = s.configFiles[filename];
       if (!cf) return s;
+      const removeIndex = cf.sections.findIndex((sec) => matchesSectionIdentity(sec, fullHeader, lineNumber));
+      if (removeIndex === -1) return s;
+      const sections = [...cf.sections];
+      sections.splice(removeIndex, 1);
       return {
         isDirty: true,
         configFiles: {
           ...s.configFiles,
           [filename]: {
             ...cf,
-            sections: cf.sections.filter((sec) => sec.full_header !== fullHeader),
+            sections,
           },
         },
       };
@@ -443,9 +453,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       };
     }),
 
-  getSection: (filename, fullHeader) => {
+  getSection: (filename, fullHeader, lineNumber) => {
     const cf = get().configFiles[filename];
-    return cf?.sections.find((s) => s.full_header === fullHeader);
+    return cf?.sections.find((s) => matchesSectionIdentity(s, fullHeader, lineNumber));
   },
 
   markClean: () => set({ isDirty: false }),

@@ -8,6 +8,29 @@ if (-not $rootDir) { $rootDir = Get-Location }
 $backendDir = Join-Path $rootDir 'backend'
 $frontendDir = Join-Path $rootDir 'frontend'
 
+function Get-PortListenerInfo {
+    param([int]$Port)
+
+    $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $listener) { return $null }
+
+    $process = Get-Process -Id $listener.OwningProcess -ErrorAction SilentlyContinue
+    return [PSCustomObject]@{
+        Port = $Port
+        ProcessId = $listener.OwningProcess
+        ProcessName = if ($process) { $process.ProcessName } else { 'unknown' }
+    }
+}
+
+foreach ($port in 8099, 5173) {
+    $listener = Get-PortListenerInfo -Port $port
+    if ($listener) {
+        Write-Host "Port $($listener.Port) is already in use by PID $($listener.ProcessId) ($($listener.ProcessName))." -ForegroundColor Red
+        Write-Host 'Stop the existing process before starting the dev stack so you do not end up talking to a stale backend.' -ForegroundColor Yellow
+        exit 1
+    }
+}
+
 # Start Backend (FastAPI on port 8099)
 Write-Host 'Starting backend (FastAPI on port 8099)...' -ForegroundColor Green
 $venvPython = Join-Path $backendDir 'venv\Scripts\python.exe'

@@ -83,6 +83,12 @@ export default function SettingsPanel() {
     return (data?.sectionHeader as string) || null;
   }, [selectedSection, selectedNode]);
 
+  const nodeSectionLineNumber = useMemo(() => {
+    if (!selectedNode) return null;
+    const data = selectedNode.data as Record<string, unknown>;
+    return typeof data?.sectionLineNumber === 'number' ? data.sectionLineNumber as number : null;
+  }, [selectedNode]);
+
   // Resolve the config file this node belongs to
   const nodeConfigFile = useMemo(() => {
     if (!selectedNode) return null;
@@ -106,17 +112,17 @@ export default function SettingsPanel() {
     if (nodeConfigFile) {
       const cf = configFiles[nodeConfigFile];
       if (cf) {
-        const found = cf.sections.find((s) => s.full_header === sectionHeader);
+        const found = cf.sections.find((s) => s.full_header === sectionHeader && (nodeSectionLineNumber == null || nodeSectionLineNumber === 0 || s.line_number === nodeSectionLineNumber));
         if (found) return { section: found, filename: nodeConfigFile };
       }
     }
     // Fallback: search across all config files
     for (const [filename, cf] of Object.entries(configFiles)) {
-      const found = cf.sections.find((s) => s.full_header === sectionHeader);
+      const found = cf.sections.find((s) => s.full_header === sectionHeader && (nodeSectionLineNumber == null || nodeSectionLineNumber === 0 || s.line_number === nodeSectionLineNumber));
       if (found) return { section: found, filename };
     }
     return null;
-  }, [sectionHeader, nodeConfigFile, configFiles]);
+  }, [sectionHeader, nodeConfigFile, configFiles, nodeSectionLineNumber]);
 
   const section = resolvedSectionInfo?.section || null;
   const sectionConfigFile = resolvedSectionInfo?.filename || null;

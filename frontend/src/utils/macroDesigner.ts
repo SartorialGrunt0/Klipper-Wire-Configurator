@@ -344,10 +344,10 @@ export function createMachineProfile(
   const maxY = posMaxY;
 
   const radius = isRound ? Math.max(Math.abs(posMinX), Math.abs(posMaxX), Math.abs(posMinY), Math.abs(posMaxY)) : null;
-  const centerX = (minX + maxX) / 2;
-  const centerY = (minY + maxY) / 2;
-  const homeX = isRound ? 0 : asNumber(getParamValue(stepperX, 'position_endstop'), minX);
-  const homeY = isRound ? 0 : asNumber(getParamValue(stepperY, 'position_endstop'), minY);
+  const centerX = isRound ? (minX + maxX) / 2 : (moveMinX + moveMaxX) / 2;
+  const centerY = isRound ? (minY + maxY) / 2 : (moveMinY + moveMaxY) / 2;
+  const homeX = isRound ? 0 : asNumber(getParamValue(stepperX, 'position_endstop'), moveMinX);
+  const homeY = isRound ? 0 : asNumber(getParamValue(stepperY, 'position_endstop'), moveMinY);
   const homeZ = asNumber(getParamValue(stepperZ, 'position_endstop'), minZ);
 
   const probeSection = sections.find((section) => ['probe', 'bltouch', 'smart_effector', 'probe_eddy_current'].includes(section.section_type));

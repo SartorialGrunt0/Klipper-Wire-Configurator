@@ -65,12 +65,28 @@ class ValidationResult:
         }
 
 
+@dataclass(frozen=True)
+class PinUse:
+    pin: str
+    section: str
+    section_type: str
+    param: str
+
+    @property
+    def label(self) -> str:
+        return f"[{self.section}] {self.param}"
+
+
 PIN_RE = re.compile(
-    r"^[!^~]*(?:[\w]+:\s*)?"
-    r"(?:P[A-Z]\d+|ar\d+|gpio\d+|[A-Z_]+\d*|<\w+>|"
-    r"z_virtual_endstop|virtual_endstop)$",
+    r"^[!^~]*(?:[\w]+:\s*)?(?:<[^>]+>|[A-Za-z0-9_]+(?:[./][A-Za-z0-9_]+)*)$",
     re.IGNORECASE,
 )
+
+
+REQUIREMENT_COMPONENT_GROUPS: dict[str, set[str]] = {
+    "probe": {"probe"},
+    "adxl345": {"accelerometer"},
+}
 
 
 def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> ValidationResult:
@@ -79,7 +95,7 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
     acknowledged_sections = load_acknowledged_warning_sections()
 
     section_counts: dict[str, int] = {}
-    used_pins: dict[str, list[str]] = {}  # pin -> list of sections using it
+    used_pins: dict[str, list[PinUse]] = {}
     defined_sections: set[str] = set()
 
     def _is_suppressed_for_validation(section: ConfigSection, category: str | None) -> bool:
@@ -137,17 +153,22 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
             if not p.is_commented_out and p.key != "_comment_"
         }
         for param_def in sec_def.params:
-            if param_def.required and param_def.name not in active_params:
-                # Skip wildcard params
-                if "*" in param_def.name:
-                    continue
-                result.errors.append(ValidationError(
-                    severity="error",
-                    section=section.full_header,
-                    param=param_def.name,
-                    message=f"Required parameter '{param_def.name}' is missing.",
-                    line_number=section.line_number,
-                ))
+            if not param_def.required or param_def.name in active_params:
+                continue
+            if _skip_missing_required_param(section, param_def.name, active_params):
+                continue
+            result.errors.append(ValidationError(
+                severity="error",
+                section=section.full_header,
+                param=param_def.name,
+                message=f"Required parameter '{param_def.name}' is missing.",
+                line_number=section.line_number,
+            ))
+
+        if sec_type == "printer":
+            _validate_printer_requirements(section, active_params, result)
+        elif sec_type == "bed_mesh":
+            _validate_bed_mesh_requirements(section, active_params, result)
 
         # MCU-specific: validate communication method (serial XOR canbus_uuid)
         if sec_type == "mcu":
@@ -202,7 +223,12 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
                 if clean_pin and not clean_pin.startswith("<"):
                     if clean_pin not in used_pins:
                         used_pins[clean_pin] = []
-                    used_pins[clean_pin].append(f"[{section.full_header}] {param.key}")
+                    used_pins[clean_pin].append(PinUse(
+                        pin=clean_pin,
+                        section=section.full_header,
+                        section_type=section.section_type,
+                        param=param.key,
+                    ))
 
     # Check for required sections
     _check_dependencies(config, defined_sections, result)
@@ -279,9 +305,58 @@ def _validate_param_value(param, param_def, section, result):
             ))
 
 
+def _skip_missing_required_param(section: ConfigSection, param_name: str, active_params: set[str]) -> bool:
+    if "*" in param_name:
+        return True
+
+    if section.section_type == "bed_mesh" and param_name in {"mesh_min", "mesh_max"}:
+        return _is_round_bed_mesh(active_params)
+
+    return False
+
+
+def _validate_printer_requirements(section: ConfigSection, active_params: set[str], result: ValidationResult):
+    kinematics = section.get_value("kinematics").strip().lower()
+    conditional_requirements = {
+        "delta": ["delta_radius"],
+        "rotary_delta": ["shoulder_radius", "shoulder_height"],
+    }
+
+    for param_name in conditional_requirements.get(kinematics, []):
+        if param_name in active_params:
+            continue
+        result.errors.append(ValidationError(
+            severity="error",
+            section=section.full_header,
+            param=param_name,
+            message=f"Required parameter '{param_name}' is missing.",
+            line_number=section.line_number,
+        ))
+
+
+def _is_round_bed_mesh(active_params: set[str]) -> bool:
+    return any(param in active_params for param in ("mesh_radius", "mesh_origin", "round_probe_count"))
+
+
+def _validate_bed_mesh_requirements(section: ConfigSection, active_params: set[str], result: ValidationResult):
+    required_params = ["mesh_radius"] if _is_round_bed_mesh(active_params) else ["mesh_min", "mesh_max"]
+
+    for param_name in required_params:
+        if param_name in active_params:
+            continue
+        result.errors.append(ValidationError(
+            severity="error",
+            section=section.full_header,
+            param=param_name,
+            message=f"Required parameter '{param_name}' is missing.",
+            line_number=section.line_number,
+        ))
+
+
 def _check_dependencies(config: ConfigFile, defined_sections: set[str], result: ValidationResult):
     """Check that required dependencies are present."""
     active_sections: list[ConfigSection] = []
+    active_component_groups: set[str] = set()
     for s in config.sections:
         sec_def = get_section_def(s.section_type)
         if sec_def is None:
@@ -294,6 +369,7 @@ def _check_dependencies(config: ConfigFile, defined_sections: set[str], result: 
             if real_params and all(p.is_commented_out for p in real_params):
                 continue
         active_sections.append(s)
+        active_component_groups.add(sec_def.component_group)
 
     section_types = {s.section_type for s in active_sections}
 
@@ -301,7 +377,7 @@ def _check_dependencies(config: ConfigFile, defined_sections: set[str], result: 
         sec_def = get_section_def(section.section_type)
         if sec_def and sec_def.requires:
             for req in sec_def.requires:
-                if req not in section_types:
+                if not _dependency_is_satisfied(req, section_types, active_component_groups):
                     result.errors.append(ValidationError(
                         severity="warning",
                         section=section.full_header,
@@ -311,13 +387,50 @@ def _check_dependencies(config: ConfigFile, defined_sections: set[str], result: 
                     ))
 
 
-def _check_pin_conflicts(used_pins: dict[str, list[str]], result: ValidationResult):
+def _dependency_is_satisfied(req: str, section_types: set[str], component_groups: set[str]) -> bool:
+    if req in section_types:
+        return True
+
+    return bool(REQUIREMENT_COMPONENT_GROUPS.get(req, set()) & component_groups)
+
+
+def _check_pin_conflicts(used_pins: dict[str, list[PinUse]], result: ValidationResult):
     """Check for pins used by multiple sections."""
     for pin, users in used_pins.items():
-        if len(users) > 1:
-            result.errors.append(ValidationError(
-                severity="warning",
-                section="",
-                param="",
-                message=f"Pin '{pin}' is used by multiple sections: {', '.join(users)}",
-            ))
+        if len(users) <= 1 or _is_allowed_shared_pin(users):
+            continue
+
+        result.errors.append(ValidationError(
+            severity="warning",
+            section="",
+            param="",
+            message=f"Pin '{pin}' is used by multiple sections: {', '.join(user.label for user in users)}",
+        ))
+
+
+def _is_allowed_shared_pin(users: list[PinUse]) -> bool:
+    return _is_allowed_shared_tmc_uart_pin(users) or _is_allowed_shared_enable_pin(users)
+
+
+def _is_allowed_shared_tmc_uart_pin(users: list[PinUse]) -> bool:
+    if not users:
+        return False
+
+    shared_params = {"uart_pin", "tx_pin"}
+    shared_driver_types = {"tmc2208", "tmc2209"}
+    return all(user.section_type in shared_driver_types and user.param in shared_params for user in users)
+
+
+def _is_allowed_shared_enable_pin(users: list[PinUse]) -> bool:
+    if not users:
+        return False
+
+    return all(
+        user.param == "enable_pin"
+        and (
+            user.section_type.startswith("stepper_")
+            or user.section_type.startswith("extruder")
+            or user.section_type == "manual_stepper"
+        )
+        for user in users
+    )

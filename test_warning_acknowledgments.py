@@ -19,6 +19,18 @@ def test_autotune_tmc_is_valid_plugin_section():
     assert not result.has_errors
 
 
+def test_display_i2c_params_are_valid():
+    result = _validate('[display]\nlcd_type: ssd1306\ni2c_mcu: host_mcu\ni2c_bus: i2c.1\n')
+    assert not result.has_warnings
+    assert not result.has_errors
+
+
+def test_bltouch_lift_speed_is_valid():
+    result = _validate('[bltouch]\nsensor_pin: ^P1.27\ncontrol_pin: P1.23\nlift_speed: 7\n')
+    assert not result.has_warnings
+    assert not result.has_errors
+
+
 def test_shaketune_is_valid_plugin_section():
     result = _validate('[shaketune]\nkeep_raw_data: True\nshow_macros_in_webui: True\n')
     assert not result.has_warnings
