@@ -372,6 +372,8 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         // Find which node is printer.cfg (primary/target) to add the include there.
         const srcConfigFile = srcData.configFile as string;
         const tgtConfigFile = tgtData.configFile as string;
+        const srcIsPrimary = Boolean(srcData.isPrimary) || srcConfigFile === 'printer.cfg';
+        const tgtIsPrimary = Boolean(tgtData.isPrimary) || tgtConfigFile === 'printer.cfg';
         const color = getHardwareColor(srcHwType);
         const newEdge: AppEdge = {
           id,
@@ -396,8 +398,14 @@ export const useGraphStore = create<GraphState>((set, get) => ({
             useConfigStore.getState().removeInclude(exSrcFile, exTgtFile);
           }
         });
-        // Target includes source
-        useConfigStore.getState().addInclude(tgtConfigFile, srcConfigFile);
+        // Include handling:
+        // - If one side is primary/printer.cfg, always include non-primary in printer.cfg.
+        // - Otherwise preserve drag direction (target includes source).
+        if (srcIsPrimary && !tgtIsPrimary) {
+          useConfigStore.getState().addInclude(srcConfigFile, tgtConfigFile);
+        } else {
+          useConfigStore.getState().addInclude(tgtConfigFile, srcConfigFile);
+        }
       }
       return;
     }

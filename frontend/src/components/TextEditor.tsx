@@ -25,6 +25,11 @@ interface TextIssue {
   severity: 'error' | 'warning';
 }
 
+interface ConfigSectionEntry {
+  title: string;
+  line: number;
+}
+
 const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref) {
   const { configFiles, activeFile, setActiveFile, setConfigFile, setValidation, renameConfigFile, copyConfigFile, removeConfigFile } = useConfigStore();
 
@@ -56,11 +61,17 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
     });
   }, [config, isDirty, exportConfigText]);
   const [showSearch, setShowSearch] = useState(false);
+  const [showFileSidebar, setShowFileSidebar] = useState(true);
+  const [showSectionsSidebar, setShowSectionsSidebar] = useState(true);
+  const [showReferenceViewer, setShowReferenceViewer] = useState(false);
+  const [configReferenceText, setConfigReferenceText] = useState('');
+  const [configReferenceError, setConfigReferenceError] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [showApplyWarning, setShowApplyWarning] = useState(false);
   const [liveValidation, setLiveValidation] = useState<Array<{ severity: string; section: string; param: string; message: string }>>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const lineNumbersRef = useRef<HTMLDivElement>(null);
+  const highlightRef = useRef<HTMLPreElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const editorScrollRef = useRef<HTMLDivElement>(null);
   const liveValidateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -78,6 +89,10 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
   const syncLineNumbersScroll = useCallback(() => {
     if (!textareaRef.current || !lineNumbersRef.current) return;
     lineNumbersRef.current.scrollTop = textareaRef.current.scrollTop;
+    if (highlightRef.current) {
+      highlightRef.current.scrollTop = textareaRef.current.scrollTop;
+      highlightRef.current.scrollLeft = textareaRef.current.scrollLeft;
+    }
   }, []);
 
   // Debounced live validation: parse the current text and validate it as the user types
@@ -193,12 +208,47 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
     return results.slice(0, 200);
   }, [searchQuery, allFilesText]);
 
+  const sectionEntries = useMemo<ConfigSectionEntry[]>(() => {
+    const lines = editText.split('\n');
+    const sections: ConfigSectionEntry[] = [];
+    lines.forEach((line, idx) => {
+      const match = line.match(/^\s*#?\[([^\]]+)\]\s*$/);
+      if (match) {
+        sections.push({ title: match[1], line: idx + 1 });
+      }
+    });
+    return sections;
+  }, [editText]);
+
+  const highlightedHtml = useMemo(() => buildHighlightedHtml(editText), [editText]);
+
   // Focus search input when panel opens
   useEffect(() => {
     if (showSearch && searchInputRef.current) {
       searchInputRef.current.focus();
     }
   }, [showSearch]);
+
+  useEffect(() => {
+    if (!showReferenceViewer || configReferenceText) return;
+    api.getConfigReference()
+      .then((res) => {
+        const text = res.content;
+        setConfigReferenceText(text);
+        setConfigReferenceError('');
+      })
+      .catch(async () => {
+        try {
+          const res = await fetch('/reference/docs/Config_Reference.md');
+          if (!res.ok) throw new Error('missing');
+          const text = await res.text();
+          setConfigReferenceText(text);
+          setConfigReferenceError('');
+        } catch {
+          setConfigReferenceError('Config reference could not be loaded.');
+        }
+      });
+  }, [configReferenceText, showReferenceViewer]);
 
   // Sync when switching files
   const handleFileSwitch = useCallback(async (filename: string) => {
@@ -580,6 +630,7 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
   return (
     <div className="flex h-full bg-[var(--color-bg-primary)]">
       {/* File list sidebar */}
+      {showFileSidebar && (
       <div className="w-48 shrink-0 flex flex-col bg-[var(--color-bg-secondary)] border-r border-[var(--color-bg-tertiary)]">
         <div className="px-3 py-2 shrink-0 border-b border-[var(--color-bg-tertiary)] flex items-center justify-between">
           <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-secondary)]">Files</span>
@@ -611,6 +662,31 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
           ))}
         </div>
       </div>
+      )}
+
+      {showSectionsSidebar && (
+        <div className="w-60 shrink-0 flex flex-col bg-[var(--color-bg-secondary)] border-r border-[var(--color-bg-tertiary)]">
+          <div className="px-3 py-2 shrink-0 border-b border-[var(--color-bg-tertiary)] flex items-center justify-between">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-secondary)]">Sections</span>
+            <span className="text-[10px] text-[var(--color-text-secondary)]">{sectionEntries.length}</span>
+          </div>
+          <div className="flex-1 overflow-y-auto py-1">
+            {sectionEntries.map((entry, idx) => (
+              <button
+                key={`${entry.title}-${idx}`}
+                onClick={() => jumpToLine(entry.line)}
+                className="w-full text-left px-3 py-1.5 text-xs text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text-primary)]"
+              >
+                <span className="font-mono text-[10px] text-[var(--color-accent)] mr-1">{entry.line}</span>
+                {entry.title}
+              </button>
+            ))}
+            {sectionEntries.length === 0 && (
+              <div className="px-3 py-3 text-xs text-[var(--color-text-secondary)]">No sections found.</div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* File context menu */}
       {contextMenu && (
@@ -791,6 +867,24 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
           </span>
           <div className="flex items-center gap-2 shrink-0">
             <button
+              onClick={() => setShowFileSidebar((prev) => !prev)}
+              className="px-2 py-1 rounded text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)]"
+            >
+              {showFileSidebar ? 'Hide files' : 'Show files'}
+            </button>
+            <button
+              onClick={() => setShowSectionsSidebar((prev) => !prev)}
+              className="px-2 py-1 rounded text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)]"
+            >
+              {showSectionsSidebar ? 'Hide sections' : 'Show sections'}
+            </button>
+            <button
+              onClick={() => setShowReferenceViewer(true)}
+              className="px-2 py-1 rounded text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)]"
+            >
+              Config ref
+            </button>
+            <button
               onClick={toggleSearch}
               className={`flex items-center gap-1.5 px-2 py-1 rounded text-xs font-medium transition-colors ${
                 showSearch
@@ -898,17 +992,28 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
                   );
                 })}
               </div>
-              {/* Text area */}
-              <textarea
-                ref={textareaRef}
-                value={editText}
-                onChange={(e) => handleTextChange(e.target.value)}
-                onScroll={syncLineNumbersScroll}
-                spellCheck={false}
-                wrap="off"
-                className="flex-1 w-full p-4 resize-none bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] font-mono text-sm leading-relaxed focus:outline-none overflow-auto"
-                style={{ tabSize: 4 }}
-              />
+              {/* Text area with syntax color parsing overlay */}
+              <div className="relative flex-1 overflow-hidden">
+                <pre
+                  ref={highlightRef}
+                  aria-hidden
+                  className="pointer-events-none absolute inset-0 overflow-auto p-4 font-mono text-sm leading-relaxed"
+                  style={{ margin: 0, tabSize: 4 }}
+                  dangerouslySetInnerHTML={{ __html: highlightedHtml }}
+                />
+                <textarea
+                  ref={textareaRef}
+                  aria-label="Configuration text editor with syntax highlighting overlay"
+                  value={editText}
+                  onChange={(e) => handleTextChange(e.target.value)}
+                  onScroll={syncLineNumbersScroll}
+                  spellCheck={false}
+                  wrap="off"
+                  // Text is intentionally transparent; syntax-highlighted text is rendered in the overlay <pre>.
+                  className="absolute inset-0 w-full resize-none overflow-auto bg-transparent p-4 font-mono text-sm leading-relaxed text-transparent caret-[var(--color-text-primary)] focus:outline-none"
+                  style={{ tabSize: 4 }}
+                />
+              </div>
             </div>
             {/* Inline issue messages below editor lines */}
             {inlineIssues.filter((i) => i.line > 0).length > 0 && (
@@ -939,6 +1044,27 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
             onProceed={handleApplyAnyway}
             onCancel={() => setShowApplyWarning(false)}
           />
+        )}
+
+        {showReferenceViewer && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setShowReferenceViewer(false)}>
+            <div className="h-[80vh] w-[80vw] max-w-[1100px] rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] p-4 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+              <div className="mb-3 flex items-center justify-between">
+                <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">Config_Reference.md</h3>
+                <button onClick={() => setShowReferenceViewer(false)} className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-xs text-[var(--color-text-primary)]">Close</button>
+              </div>
+              <div className="h-[calc(100%-44px)] overflow-auto rounded-lg border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] p-4">
+                {configReferenceError && <div className="text-xs text-[var(--color-error)]">{configReferenceError}</div>}
+                {!configReferenceError && !configReferenceText && <div className="text-xs text-[var(--color-text-secondary)]">Loading…</div>}
+                {!!configReferenceText && (
+                  <div
+                    className="prose prose-invert max-w-none text-xs leading-5 text-[var(--color-text-primary)]"
+                    dangerouslySetInnerHTML={{ __html: renderSimpleMarkdown(configReferenceText) }}
+                  />
+                )}
+              </div>
+            </div>
+          </div>
         )}
       </div>
     </div>
@@ -988,4 +1114,83 @@ function configToText(config: { header_comments: string[]; includes: string[]; s
   }
 
   return lines.join('\n');
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function buildHighlightedHtml(text: string): string {
+  const lines = text.split('\n');
+  return lines.map((line) => {
+    const escaped = escapeHtml(line);
+    if (/^\s*#/.test(line)) {
+      return `<span style="color: var(--color-text-secondary)">${escaped}</span>`;
+    }
+    const sectionMatch = line.match(/^\s*(#?)\[([^\]]+)\]\s*$/);
+    if (sectionMatch) {
+      const prefix = sectionMatch[1] ? '<span style="color: var(--color-text-secondary)">#</span>' : '';
+      return `${prefix}<span style="color: #22d3ee">[${escapeHtml(sectionMatch[2])}]</span>`;
+    }
+    const includeMatch = line.match(/^\s*\[include\s+([^\]]+)\]\s*$/i);
+    if (includeMatch) {
+      return `<span style="color: #a78bfa">[include ${escapeHtml(includeMatch[1])}]</span>`;
+    }
+    const paramMatch = line.match(/^(\s*)(#?)([A-Za-z0-9_][A-Za-z0-9_\-]*)(\s*[:=]\s*)(.*)$/);
+    if (paramMatch) {
+      const [, ws, hash, key, sep, rawValue] = paramMatch;
+      return `${escapeHtml(ws)}${hash ? '<span style="color: var(--color-text-secondary)">#</span>' : ''}<span style="color: #60a5fa">${escapeHtml(key)}</span><span style="color: var(--color-text-secondary)">${escapeHtml(sep)}</span><span style="color: var(--color-text-primary)">${escapeHtml(rawValue)}</span>`;
+    }
+    return escaped || ' ';
+  }).join('\n');
+}
+
+function renderSimpleMarkdown(markdown: string): string {
+  const lines = markdown.replace(/\r\n?/g, '\n').split('\n');
+  const html: string[] = [];
+  let inCode = false;
+  for (const rawLine of lines) {
+    const line = rawLine.trimEnd();
+    if (line.startsWith('```')) {
+      if (!inCode) {
+        html.push('<pre><code>');
+      } else {
+        html.push('</code></pre>');
+      }
+      inCode = !inCode;
+      continue;
+    }
+    if (inCode) {
+      html.push(`${escapeHtml(rawLine)}\n`);
+      continue;
+    }
+    if (/^###\s+/.test(line)) {
+      html.push(`<h3>${escapeHtml(line.replace(/^###\s+/, ''))}</h3>`);
+      continue;
+    }
+    if (/^##\s+/.test(line)) {
+      html.push(`<h2>${escapeHtml(line.replace(/^##\s+/, ''))}</h2>`);
+      continue;
+    }
+    if (/^#\s+/.test(line)) {
+      html.push(`<h1>${escapeHtml(line.replace(/^#\s+/, ''))}</h1>`);
+      continue;
+    }
+    if (/^\s*[-*]\s+/.test(line)) {
+      html.push(`<div>• ${escapeHtml(line.replace(/^\s*[-*]\s+/, ''))}</div>`);
+      continue;
+    }
+    if (!line) {
+      html.push('<br/>');
+      continue;
+    }
+    html.push(`<div>${escapeHtml(line)}</div>`);
+  }
+  if (inCode) {
+    html.push('</code></pre>');
+  }
+  return html.join('');
 }

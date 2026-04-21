@@ -73,6 +73,13 @@ interface ContextMenuState {
   draftId: string | null;
 }
 
+interface CanvasContextMenuState {
+  x: number;
+  y: number;
+  target: 'dock' | 'zone';
+  zoneId?: string;
+}
+
 interface DragState {
   type: 'toolhead' | 'dock' | 'zone' | 'zone-resize';
   zoneId?: string;
@@ -91,12 +98,45 @@ interface SimulationLogEntry {
   warnings: string[];
 }
 
+interface SupportedGcodeCommand {
+  command: string;
+  format: string;
+  description: string;
+}
+
 const AXIS_LABELS: Record<number, { tl: string; tr: string; bl: string; br: string }> = {
   0:   { tl: '+Y', tr: '+X', bl: '-X', br: '-Y' },
   90:  { tl: '+X', tr: '-Y', bl: '+Y', br: '-X' },
   180: { tl: '-Y', tr: '-X', bl: '+X', br: '+Y' },
   270: { tl: '-X', tr: '+Y', bl: '-Y', br: '+X' },
 };
+
+const SUPPORTED_GCODE_COMMANDS: SupportedGcodeCommand[] = [
+  { command: 'G0/G1', format: 'G1 Xnnn Ynnn Znnn Ennn Fnnn', description: 'Linear move / extrusion move.' },
+  { command: 'G28', format: 'G28 [X] [Y] [Z]', description: 'Home all axes or selected axes.' },
+  { command: 'G90', format: 'G90', description: 'Use absolute positioning.' },
+  { command: 'G91', format: 'G91', description: 'Use relative positioning.' },
+  { command: 'M82', format: 'M82', description: 'Use absolute extrusion mode.' },
+  { command: 'M83', format: 'M83', description: 'Use relative extrusion mode.' },
+  { command: 'G92', format: 'G92 Xnnn Ynnn Znnn Ennn', description: 'Set current coordinates/extruder position.' },
+  { command: 'M104', format: 'M104 Snnn', description: 'Set nozzle temperature (no wait).' },
+  { command: 'M109', format: 'M109 Snnn', description: 'Set nozzle temperature and wait.' },
+  { command: 'M140', format: 'M140 Snnn', description: 'Set bed temperature (no wait).' },
+  { command: 'M190', format: 'M190 Snnn', description: 'Set bed temperature and wait.' },
+  { command: 'M106', format: 'M106 S0-255', description: 'Set fan speed.' },
+  { command: 'M107', format: 'M107', description: 'Turn fan off.' },
+  { command: 'M84', format: 'M84', description: 'Disable steppers.' },
+  { command: 'G4', format: 'G4 Pms', description: 'Dwell for a period.' },
+  { command: 'RESPOND', format: 'RESPOND MSG="text"', description: 'Print message in terminal.' },
+  { command: 'SET_LED', format: 'SET_LED LED=name RED=r GREEN=g BLUE=b', description: 'Set LED color.' },
+  { command: 'SET_FAN_SPEED', format: 'SET_FAN_SPEED FAN=name SPEED=0..1', description: 'Set named fan speed.' },
+  { command: 'SET_GCODE_OFFSET', format: 'SET_GCODE_OFFSET X= Y= Z=', description: 'Adjust gcode offset.' },
+  { command: 'SAVE_GCODE_STATE', format: 'SAVE_GCODE_STATE NAME=name', description: 'Save current gcode state.' },
+  { command: 'RESTORE_GCODE_STATE', format: 'RESTORE_GCODE_STATE NAME=name', description: 'Restore saved gcode state.' },
+  { command: 'TURN_OFF_HEATERS', format: 'TURN_OFF_HEATERS', description: 'Disable all heaters.' },
+  { command: 'FIRMWARE_RESTART', format: 'FIRMWARE_RESTART', description: 'Restart firmware.' },
+  { command: 'RESTART', format: 'RESTART', description: 'Restart host and firmware.' },
+];
 
 function createGcodeMacroSection(item: MacroSourceItem): ConfigSection {
   const params = [];
@@ -122,6 +162,10 @@ function createGcodeMacroSection(item: MacroSourceItem): ConfigSection {
 
 function getSectionParamValue(section: ConfigSection | undefined, key: string): string {
   return section?.params.find((param) => param.key === key && !param.is_commented_out)?.value || '';
+}
+
+function normalizePlainText(value: string): string {
+  return value.replace(/\r\n?/g, '\n').trim();
 }
 
 function formatNumber(value: number): string {
@@ -244,9 +288,14 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
   const [ledName, setLedName] = useState('status_led');
   const [ledColor, setLedColor] = useState('#00ffaa');
   const [terminalMessage, setTerminalMessage] = useState('Macro designer');
+  const [extrudeDistance, setExtrudeDistance] = useState('1.0');
+  const [extrudeFeedRate, setExtrudeFeedRate] = useState('600');
+  const [commandSearch, setCommandSearch] = useState('');
+  const [showCommandPicker, setShowCommandPicker] = useState(false);
   const [moveMode, setMoveMode] = useState<'absolute' | 'relative'>('absolute');
   const [zMoveIndicator, setZMoveIndicator] = useState<'up' | 'down' | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [canvasContextMenu, setCanvasContextMenu] = useState<CanvasContextMenuState | null>(null);
   const [dragState, setDragState] = useState<DragState | null>(null);
   const [toolheadDragPos, setToolheadDragPos] = useState<ToolheadPosition | null>(null);
   const [lastMovementTrace, setLastMovementTrace] = useState<MovementTrace | null>(null);
@@ -260,6 +309,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
   const [goToY, setGoToY] = useState('');
   const [goToZ, setGoToZ] = useState('');
   const [selectedZoneId, setSelectedZoneId] = useState<string | null>(null);
+  const [isDockSelected, setIsDockSelected] = useState(false);
   const [exactToolheadX, setExactToolheadX] = useState('');
   const [exactToolheadY, setExactToolheadY] = useState('');
   const [zoneEditX, setZoneEditX] = useState('');
@@ -325,6 +375,13 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
   const visibleDraftItems = useMemo(() => fuzzyFilterItems(draftItems, search), [draftItems, search]);
   const visibleConfigItems = useMemo(() => fuzzyFilterItems(configMacroItems, search), [configMacroItems, search]);
   const visibleBuiltIns = useMemo(() => fuzzyFilterItems(builtInItems, search), [builtInItems, search]);
+  const visibleSupportedCommands = useMemo(
+    () => fuzzyFilterItems(
+      SUPPORTED_GCODE_COMMANDS.map((item) => ({ ...item, title: item.command, gcode: item.format })),
+      commandSearch,
+    ),
+    [commandSearch],
+  );
   const allMacroItems = useMemo(() => [...draftItems, ...configMacroItems, ...builtInItems], [builtInItems, configMacroItems, draftItems]);
 
   const selectedItem = useMemo(() => {
@@ -427,6 +484,12 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
     if (!selectedZoneId || noGoZones.some((zone) => zone.id === selectedZoneId)) return;
     setSelectedZoneId(noGoZones[0]?.id || null);
   }, [noGoZones, selectedZoneId]);
+
+  useEffect(() => {
+    if (selectedZoneId) {
+      setIsDockSelected(false);
+    }
+  }, [selectedZoneId]);
 
   useEffect(() => {
     if (!selectedZone) {
@@ -577,6 +640,13 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
     return () => window.removeEventListener('click', handler);
   }, [contextMenu]);
 
+  useEffect(() => {
+    if (!canvasContextMenu) return;
+    const handler = () => setCanvasContextMenu(null);
+    window.addEventListener('click', handler);
+    return () => window.removeEventListener('click', handler);
+  }, [canvasContextMenu]);
+
   const selectedDraftId = selectedItem?.source === 'draft' ? selectedItem.key.replace(/^draft:/, '') : null;
 
   const selectedMacroSection = useMemo(() => (
@@ -590,11 +660,13 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
 
   const isTargetSectionUnchanged = useMemo(() => {
     if (!selectedItem || !selectedMacroSection || !existingTargetSection) return false;
+    const existingGcode = normalizeMacroGcodeForConfig(getSectionParamValue(existingTargetSection, 'gcode'));
+    const selectedGcode = normalizeMacroGcodeForConfig(selectedItem.gcode);
     return (
-      getSectionParamValue(existingTargetSection, 'gcode') === normalizeMacroGcodeForConfig(selectedItem.gcode)
-      && getSectionParamValue(existingTargetSection, 'rename_existing') === selectedItem.renameExisting
-      && getSectionParamValue(existingTargetSection, 'description') === selectedItem.description
-      && serializeMacroVariables(existingTargetSection) === selectedItem.variables
+      existingGcode === selectedGcode
+      && normalizePlainText(getSectionParamValue(existingTargetSection, 'rename_existing')) === normalizePlainText(selectedItem.renameExisting)
+      && normalizePlainText(getSectionParamValue(existingTargetSection, 'description')) === normalizePlainText(selectedItem.description)
+      && normalizePlainText(serializeMacroVariables(existingTargetSection)) === normalizePlainText(selectedItem.variables)
     );
   }, [existingTargetSection, selectedItem, selectedMacroSection]);
 
@@ -665,6 +737,17 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
 
   const appendGcode = (line: string) => {
     appendGcodeLines([line]);
+  };
+
+  const appendExtrusionCommand = (direction: 1 | -1) => {
+    const distance = Number(extrudeDistance);
+    const feed = Number(extrudeFeedRate);
+    if (!Number.isFinite(distance) || distance <= 0) {
+      setMessage(`${direction > 0 ? 'Extruder' : 'Retract'} distance must be greater than 0.`);
+      return;
+    }
+    const signedDistance = direction > 0 ? distance : -distance;
+    appendGcode(`G1 E${formatNumber(signedDistance)}${Number.isFinite(feed) && feed > 0 ? ` F${formatNumber(feed)}` : ''}`);
   };
 
   const getCurrentToolheadPosition = (): ToolheadPosition | null => toolheadPositionRef.current;
@@ -744,8 +827,12 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
       return;
     }
 
-    updateNoGoZone(selectedZone.id, { x, y, width, height });
-    setMessage(`Updated ${selectedZone.name} to X${formatNumber(x)} Y${formatNumber(y)}.`);
+    const boundedX = clamp(x, machineProfile.moveMinX, machineProfile.moveMaxX - width);
+    const boundedY = clamp(y, machineProfile.moveMinY, machineProfile.moveMaxY - height);
+    const boundedW = Math.min(width, machineProfile.moveMaxX - boundedX);
+    const boundedH = Math.min(height, machineProfile.moveMaxY - boundedY);
+    updateNoGoZone(selectedZone.id, { x: boundedX, y: boundedY, width: boundedW, height: boundedH });
+    setMessage(`Updated ${selectedZone.name} to X${formatNumber(boundedX)} Y${formatNumber(boundedY)}.`);
   };
 
   const buildMoveLines = (
@@ -992,9 +1079,9 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
     const existingVariables = existingTargetSection ? serializeMacroVariables(existingTargetSection) : '';
     const selectedGcode = normalizeMacroGcodeForConfig(selectedItem.gcode);
     const sameHeader = existingTargetSection?.full_header === selectedMacroSection.full_header;
-    const structuralChanged = existingRename !== selectedItem.renameExisting
-      || existingDescription !== selectedItem.description
-      || existingVariables !== selectedItem.variables;
+    const structuralChanged = normalizePlainText(existingRename) !== normalizePlainText(selectedItem.renameExisting)
+      || normalizePlainText(existingDescription) !== normalizePlainText(selectedItem.description)
+      || normalizePlainText(existingVariables) !== normalizePlainText(selectedItem.variables);
 
     if (existingTargetSection && sameHeader) {
       if (structuralChanged) {
@@ -1050,6 +1137,52 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
     });
   };
 
+  const handleCanvasContextMenu = (event: React.MouseEvent, target: 'dock' | 'zone', zoneId?: string) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (target === 'zone' && zoneId) {
+      setSelectedZoneId(zoneId);
+      setIsDockSelected(false);
+    }
+    if (target === 'dock') {
+      setIsDockSelected(true);
+      setSelectedZoneId(null);
+    }
+    setCanvasContextMenu({
+      x: event.clientX,
+      y: event.clientY,
+      target,
+      zoneId,
+    });
+  };
+
+  const handleDeleteSelectedCanvasItem = useCallback(() => {
+    if (selectedZone) {
+      deleteNoGoZone(selectedZone.id);
+      setMessage(`Deleted ${selectedZone.name}.`);
+      return true;
+    }
+    if (isDockSelected && dockPosition) {
+      setDockPosition(null);
+      setMessage('Dock deleted.');
+      return true;
+    }
+    return false;
+  }, [deleteNoGoZone, dockPosition, isDockSelected, selectedZone, setDockPosition]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Delete' && event.key !== 'Backspace') return;
+      const target = event.target as HTMLElement | null;
+      if (target && ['INPUT', 'TEXTAREA'].includes(target.tagName)) return;
+      if (handleDeleteSelectedCanvasItem()) {
+        event.preventDefault();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleDeleteSelectedCanvasItem]);
+
   // --- SVG drag handlers ---
   const handleSvgPointerDown = (event: React.PointerEvent<SVGSVGElement>) => {
     if (!svgRef.current) return;
@@ -1068,6 +1201,8 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
 
     if (dragType === 'dock') {
       event.preventDefault();
+      setIsDockSelected(true);
+      setSelectedZoneId(null);
       const machine = clientToMachine(event, svgRef.current, machineProfile, rotation, viewBounds.viewMaxY);
       setDragState({ type: 'dock', offsetX: (dockPosition?.x ?? 0) - machine.x, offsetY: (dockPosition?.y ?? 0) - machine.y });
       svgRef.current.setPointerCapture(event.pointerId);
@@ -1090,6 +1225,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
     if (zoneEl) {
       event.preventDefault();
       const zoneId = zoneEl.getAttribute('data-zone-id')!;
+      setIsDockSelected(false);
       setSelectedZoneId(zoneId);
       const zone = noGoZones.find(z => z.id === zoneId);
       if (zone) {
@@ -1102,6 +1238,8 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
 
     // Click on the grid to add a move (only if in edit mode and not dragging)
     if (editMode && selectedItem) {
+      setIsDockSelected(false);
+      setSelectedZoneId(null);
       const machine = clientToMachine(event, svgRef.current, machineProfile, rotation, viewBounds.viewMaxY);
       const x = clamp(machine.x, machineProfile.moveMinX, machineProfile.moveMaxX);
       const y = clamp(machine.y, machineProfile.moveMinY, machineProfile.moveMaxY);
@@ -1143,8 +1281,10 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
     }
 
     if (dragState.type === 'zone' && dragState.zoneId) {
-      const x = machine.x + dragState.offsetX;
-      const y = machine.y + dragState.offsetY;
+      const zone = noGoZones.find((z) => z.id === dragState.zoneId);
+      if (!zone) return;
+      const x = clamp(machine.x + dragState.offsetX, machineProfile.moveMinX, machineProfile.moveMaxX - zone.width);
+      const y = clamp(machine.y + dragState.offsetY, machineProfile.moveMinY, machineProfile.moveMaxY - zone.height);
       updateNoGoZone(dragState.zoneId, { x, y });
       return;
     }
@@ -1152,10 +1292,14 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
     if (dragState.type === 'zone-resize' && dragState.zoneId && dragState.fixedCornerX != null && dragState.fixedCornerY != null) {
       const fixX = dragState.fixedCornerX;
       const fixY = dragState.fixedCornerY;
-      const newX = Math.min(machine.x, fixX);
-      const newY = Math.min(machine.y, fixY);
-      const newW = Math.max(1, Math.abs(machine.x - fixX));
-      const newH = Math.max(1, Math.abs(machine.y - fixY));
+      const rawX = Math.min(machine.x, fixX);
+      const rawY = Math.min(machine.y, fixY);
+      const rawW = Math.max(1, Math.abs(machine.x - fixX));
+      const rawH = Math.max(1, Math.abs(machine.y - fixY));
+      const newX = clamp(rawX, machineProfile.moveMinX, machineProfile.moveMaxX - rawW);
+      const newY = clamp(rawY, machineProfile.moveMinY, machineProfile.moveMaxY - rawH);
+      const newW = Math.min(rawW, machineProfile.moveMaxX - newX);
+      const newH = Math.min(rawH, machineProfile.moveMaxY - newY);
       updateNoGoZone(dragState.zoneId, { x: newX, y: newY, width: newW, height: newH });
     }
   };
@@ -1264,6 +1408,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
           stroke={selectedZoneId === zone.id ? 'rgba(248, 113, 113, 1)' : 'rgba(248, 113, 113, 0.9)'}
           strokeWidth={selectedZoneId === zone.id ? '0.9' : '0.5'}
           className="cursor-move"
+          onContextMenu={(event) => handleCanvasContextMenu(event, 'zone', zone.id)}
         />
         {machineCorners.map((c, i) => {
           const svgPos = toSvg(c.mx, c.my);
@@ -1294,8 +1439,20 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
     const d = toSvg(dockPosition.x, dockPosition.y);
     const dotR = Math.max(1, Math.min(viewBounds.svgW, viewBounds.svgH) * 0.012);
     return (
-      <g data-drag="dock" className="cursor-move">
-        <circle cx={d.x} cy={d.y} r={dotR} fill="rgba(52,211,153,0.95)" stroke="white" strokeWidth="0.3" />
+      <g
+        data-drag="dock"
+        className="cursor-move"
+        onContextMenu={(event) => handleCanvasContextMenu(event, 'dock')}
+        onClick={() => { setIsDockSelected(true); setSelectedZoneId(null); }}
+      >
+        <circle
+          cx={d.x}
+          cy={d.y}
+          r={dotR}
+          fill="rgba(52,211,153,0.95)"
+          stroke={isDockSelected ? 'rgba(250,204,21,0.95)' : 'white'}
+          strokeWidth={isDockSelected ? '0.8' : '0.3'}
+        />
         <text x={d.x + dotR + 1} y={d.y + 1} fill="rgba(52,211,153,0.95)" fontSize={Math.max(3, dotR * 1.2)}>
           Dock ({formatNumber(dockPosition.x)}, {formatNumber(dockPosition.y)})
         </text>
@@ -1405,8 +1562,13 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                 <button onClick={() => {
                   const zone = addNoGoZone({ x: machineProfile.centerX - 10, y: machineProfile.centerY - 10, width: 20, height: 20 });
                   setSelectedZoneId(zone.id);
+                  setIsDockSelected(false);
                 }} className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-[var(--color-text-primary)] hover:border-[var(--color-accent)]">Add no-go zone</button>
-                <button disabled={dockPosition !== null} onClick={() => setDockPosition({ x: machineProfile.centerX, y: machineProfile.centerY })} className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-[var(--color-text-primary)] hover:border-[var(--color-accent)] disabled:opacity-40">Add dock</button>
+                <button disabled={dockPosition !== null} onClick={() => {
+                  setDockPosition({ x: machineProfile.centerX, y: machineProfile.centerY });
+                  setIsDockSelected(true);
+                  setSelectedZoneId(null);
+                }} className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-[var(--color-text-primary)] hover:border-[var(--color-accent)] disabled:opacity-40">Add dock</button>
                 <button onClick={() => setRotation(rotation === 270 ? 0 : (rotation + 90) as 0 | 90 | 180 | 270)} className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-[var(--color-text-primary)] hover:border-[var(--color-accent)]">Rotate 90°</button>
               </div>
             </div>
@@ -1717,6 +1879,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                   <div className="mb-2 flex items-center justify-between gap-2">
                     <div className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-text-secondary)]">Control</div>
                     <div className="flex items-center gap-2">
+                      <button disabled={!editMode} onClick={() => setShowCommandPicker(true)} className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-[10px] text-[var(--color-text-primary)] disabled:opacity-40">Commands</button>
                       <label className="text-[10px] text-[var(--color-text-secondary)]">Feed rate</label>
                       <input disabled={!editMode} value={moveFeedRate} onChange={(event) => setMoveFeedRate(event.target.value)} className="w-16 rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1 text-xs text-[var(--color-text-primary)] disabled:opacity-40" />
                       <button disabled={!editMode} onClick={() => appendGcode('M84')} className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1 text-xs text-[var(--color-text-primary)] disabled:opacity-40">M84</button>
@@ -1831,6 +1994,27 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                         <button disabled={!editMode} onClick={() => appendGcode(`RESPOND MSG="${terminalMessage.replace(/"/g, '')}"`)} className="rounded-md border border-[var(--color-bg-tertiary)] px-3 text-[var(--color-text-primary)] disabled:opacity-40">Add</button>
                       </div>
                     </div>
+                    <div className="col-span-2">
+                      <label className="mb-1 block text-[var(--color-text-secondary)]">Extruder / Retract</label>
+                      <div className="flex items-center gap-2">
+                        <input disabled={!editMode} value={extrudeDistance} onChange={(event) => setExtrudeDistance(event.target.value)} placeholder="Distance (mm)" className="w-28 rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40" />
+                        <input disabled={!editMode} value={extrudeFeedRate} onChange={(event) => setExtrudeFeedRate(event.target.value)} placeholder="Feed" className="w-24 rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40" />
+                        <button
+                          disabled={!editMode}
+                          onClick={() => appendExtrusionCommand(1)}
+                          className="rounded-md border border-[var(--color-bg-tertiary)] px-3 text-[var(--color-text-primary)] disabled:opacity-40"
+                        >
+                          Extrude
+                        </button>
+                        <button
+                          disabled={!editMode}
+                          onClick={() => appendExtrusionCommand(-1)}
+                          className="rounded-md border border-[var(--color-bg-tertiary)] px-3 text-[var(--color-text-primary)] disabled:opacity-40"
+                        >
+                          Retract
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 </div>
                 <div className="rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] p-3">
@@ -1886,6 +2070,129 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
             )}
           </aside>
         </div>
+
+        {showCommandPicker && (
+          <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/45" onClick={() => setShowCommandPicker(false)}>
+            <div className="w-[720px] max-w-[95vw] rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] p-4 shadow-2xl" onClick={(event) => event.stopPropagation()}>
+              <div className="mb-3 flex items-center justify-between gap-2">
+                <div className="text-sm font-semibold text-[var(--color-text-primary)]">Supported gcode commands</div>
+                <button onClick={() => setShowCommandPicker(false)} className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-xs text-[var(--color-text-primary)]">Close</button>
+              </div>
+              <input
+                value={commandSearch}
+                onChange={(event) => setCommandSearch(event.target.value)}
+                placeholder="Filter commands..."
+                className="mb-3 w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-3 py-2 text-xs text-[var(--color-text-primary)]"
+              />
+              <div className="max-h-[55vh] overflow-y-auto rounded-lg border border-[var(--color-bg-tertiary)]">
+                {visibleSupportedCommands.map((entry) => (
+                  <button
+                    key={entry.command}
+                    onClick={() => {
+                      appendGcode(entry.format);
+                      setShowCommandPicker(false);
+                    }}
+                    disabled={!editMode}
+                    className="w-full border-b border-[var(--color-bg-tertiary)] px-3 py-2 text-left last:border-b-0 disabled:opacity-40"
+                  >
+                    <div className="text-xs font-semibold text-[var(--color-text-primary)]">{entry.command}</div>
+                    <div className="mt-0.5 font-mono text-[11px] text-[var(--color-accent)]">{entry.format}</div>
+                    <div className="mt-0.5 text-[11px] text-[var(--color-text-secondary)]">{entry.description}</div>
+                  </button>
+                ))}
+                {!visibleSupportedCommands.length && (
+                  <div className="px-3 py-4 text-xs text-[var(--color-text-secondary)]">No matching commands.</div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {canvasContextMenu && (
+          <div
+            className="fixed z-[65] min-w-[180px] rounded-lg border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] py-1 shadow-xl"
+            style={{ left: canvasContextMenu.x, top: canvasContextMenu.y }}
+            onClick={(event) => event.stopPropagation()}
+          >
+            {canvasContextMenu.target === 'zone' && canvasContextMenu.zoneId && (
+              <>
+                <button
+                  onClick={() => {
+                    const source = noGoZones.find((zone) => zone.id === canvasContextMenu.zoneId);
+                    if (source) {
+                      const copy = addNoGoZone({
+                        x: clamp(source.x + 5, machineProfile.moveMinX, machineProfile.moveMaxX - source.width),
+                        y: clamp(source.y + 5, machineProfile.moveMinY, machineProfile.moveMaxY - source.height),
+                        width: source.width,
+                        height: source.height,
+                        name: `${source.name} Copy`,
+                      });
+                      setSelectedZoneId(copy.id);
+                    }
+                    setCanvasContextMenu(null);
+                  }}
+                  className="w-full px-4 py-2 text-left text-xs text-[var(--color-text-primary)] hover:bg-[var(--color-bg-primary)]"
+                >
+                  Copy no-go zone
+                </button>
+                <button
+                  onClick={() => {
+                    const zone = noGoZones.find((item) => item.id === canvasContextMenu.zoneId);
+                    if (zone) {
+                      setSelectedZoneId(zone.id);
+                    }
+                    setCanvasContextMenu(null);
+                  }}
+                  className="w-full px-4 py-2 text-left text-xs text-[var(--color-text-primary)] hover:bg-[var(--color-bg-primary)]"
+                >
+                  Set exact position
+                </button>
+              </>
+            )}
+            {canvasContextMenu.target === 'dock' && (
+              <button
+                onClick={() => {
+                  if (dockPosition) {
+                    const x = window.prompt('Dock X position', formatNumber(dockPosition.x));
+                    const y = window.prompt('Dock Y position', formatNumber(dockPosition.y));
+                    if (x !== null && y !== null) {
+                      const nx = Number(x);
+                      const ny = Number(y);
+                      if (Number.isFinite(nx) && Number.isFinite(ny)) {
+                        setDockPosition({
+                          x: clamp(nx, machineProfile.moveMinX, machineProfile.moveMaxX),
+                          y: clamp(ny, machineProfile.moveMinY, machineProfile.moveMaxY),
+                        });
+                      }
+                    }
+                  }
+                  setCanvasContextMenu(null);
+                }}
+                className="w-full px-4 py-2 text-left text-xs text-[var(--color-text-primary)] hover:bg-[var(--color-bg-primary)]"
+              >
+                Set exact position
+              </button>
+            )}
+            <button
+              onClick={() => {
+                if (canvasContextMenu.target === 'zone' && canvasContextMenu.zoneId) {
+                  const zone = noGoZones.find((item) => item.id === canvasContextMenu.zoneId);
+                  if (zone) {
+                    deleteNoGoZone(zone.id);
+                    setMessage(`Deleted ${zone.name}.`);
+                  }
+                } else if (canvasContextMenu.target === 'dock') {
+                  setDockPosition(null);
+                  setMessage('Dock deleted.');
+                }
+                setCanvasContextMenu(null);
+              }}
+              className="w-full px-4 py-2 text-left text-xs text-red-300 hover:bg-red-400/10"
+            >
+              Delete
+            </button>
+          </div>
+        )}
 
         {/* Context menu */}
         {contextMenu && (

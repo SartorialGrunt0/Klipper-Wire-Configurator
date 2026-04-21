@@ -117,19 +117,6 @@ function stripLeadingGcodeDirective(value: string): string {
   return normalized.slice(match[0].length);
 }
 
-function dedentLines(lines: string[]): string[] {
-  const nonEmptyLines = lines.filter((line) => line.trim().length > 0);
-  if (!nonEmptyLines.length) return lines;
-
-  const commonIndent = nonEmptyLines.reduce((smallestIndent, line) => {
-    const indent = line.match(/^[ \t]*/)?.[0].length ?? 0;
-    return Math.min(smallestIndent, indent);
-  }, Number.POSITIVE_INFINITY);
-
-  if (!Number.isFinite(commonIndent) || commonIndent <= 0) return lines;
-  return lines.map((line) => (line.trim().length ? line.slice(commonIndent) : ''));
-}
-
 export function normalizeMacroGcodeForEditor(value: string): string {
   const normalized = value.replace(/\r\n?/g, '\n');
   return normalized.startsWith('\n') ? normalized.slice(1) : normalized;
@@ -139,8 +126,7 @@ export function normalizeMacroGcodeForConfig(value: string): string {
   const stripped = stripLeadingGcodeDirective(value).replace(/\r\n?/g, '\n');
   const trimmed = stripped.replace(/^\n+/, '').replace(/\n+$/, '');
   if (!trimmed) return '';
-  const lines = dedentLines(trimmed.split('\n'));
-  return `\n${lines.join('\n')}`;
+  return `\n${trimmed}`;
 }
 
 export function serializeMacroVariables(section: ConfigSection): string {
