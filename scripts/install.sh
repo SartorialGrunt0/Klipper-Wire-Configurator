@@ -101,6 +101,12 @@ if [[ "$ARCH" != "armv7l" && "$ARCH" != "aarch64" && "$ARCH" != "x86_64" ]]; the
     warn "Unexpected architecture: $ARCH. Proceeding anyway..."
 fi
 
+DEB_ARCH="unknown"
+if command -v dpkg >/dev/null 2>&1; then
+    DEB_ARCH="$(dpkg --print-architecture 2>/dev/null || echo unknown)"
+fi
+info "Detected package architecture: $DEB_ARCH"
+
 # --- Check OS ---
 if [ -f /etc/os-release ]; then
     . /etc/os-release
@@ -143,11 +149,13 @@ install_node_from_nodesource() {
 }
 
 install_node() {
-    if [[ "$ARCH" = "armv7l" ]]; then
-        warn "NodeSource does not support armv7/armhf. Falling back to Raspberry Pi OS packages."
-        install_node_from_apt
-    else
+    # NodeSource supports amd64 and arm64. For armhf/armv7 and other arches,
+    # use distro packages to avoid setup-script architecture failures.
+    if [[ "$ARCH" = "x86_64" && "$DEB_ARCH" = "amd64" ]] || [[ "$ARCH" = "aarch64" && "$DEB_ARCH" = "arm64" ]]; then
         install_node_from_nodesource
+    else
+        warn "NodeSource is not supported for detected architecture ($ARCH / $DEB_ARCH). Falling back to Raspberry Pi OS packages."
+        install_node_from_apt
     fi
 
     NODE_VER="$(get_node_major_version)"
