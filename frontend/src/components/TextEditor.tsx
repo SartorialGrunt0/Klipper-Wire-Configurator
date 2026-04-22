@@ -3,7 +3,7 @@ import { useConfigStore } from '../stores/configStore';
 import { useGraphStore } from '../stores/graphStore';
 import * as api from '../services/api';
 import ApplyWarningDialog from './dialogs/ApplyWarningDialog';
-import type { ExampleConfig, HardwareType, CommunicationType } from '../types/config';
+import type { ExampleConfig, HardwareType, CommunicationType, ConfigFile, ConfigSection } from '../types/config';
 import { getBoardTypeMarker } from '../utils/boardTypeMarker';
 
 interface SearchResult {
@@ -23,7 +23,12 @@ interface TextIssue {
   line: number;
   text: string;
   severity: 'error' | 'warning';
+  section?: string;
+  param?: string;
+  acknowledgeSection?: ConfigSection;
 }
+
+const ACKNOWLEDGEABLE_WARNING_PREFIX = 'Unknown section type ';
 
 interface ConfigParamEntry {
   key: string;
@@ -77,6 +82,7 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
   const [searchQuery, setSearchQuery] = useState('');
   const [showApplyWarning, setShowApplyWarning] = useState(false);
   const [liveValidation, setLiveValidation] = useState<Array<{ severity: string; section: string; param: string; message: string }>>([]);
+  const [liveParsedConfig, setLiveParsedConfig] = useState<ConfigFile | null>(null);
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({});
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const lineNumbersRef = useRef<HTMLDivElement>(null);
@@ -110,9 +116,11 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
     liveValidateTimerRef.current = setTimeout(async () => {
       try {
         const result = await api.parseConfigText(editText, activeFile);
+        setLiveParsedConfig(result.config);
         setLiveValidation(result.validation.errors || []);
       } catch {
         // Parse failed — don't update validation
+        setLiveParsedConfig(null);
       }
     }, 800);
     return () => {
@@ -155,11 +163,24 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
           line: lineNum,
           text: err.message,
           severity: err.severity as 'error' | 'warning',
+          section: err.section,
+          param: err.param,
+          acknowledgeSection: err.severity === 'warning' && err.message.startsWith(ACKNOWLEDGEABLE_WARNING_PREFIX)
+            ? liveParsedConfig?.sections.find((section) => section.full_header === err.section)
+            : undefined,
         });
       }
     }
     return issues;
-  }, [liveValidation, editText]);
+  }, [liveValidation, editText, liveParsedConfig]);
+
+  const handleAcknowledgeWarning = useCallback(async (section: ConfigSection) => {
+    await api.acknowledgeWarning(section);
+    const result = await api.parseConfigText(editText, activeFile);
+    setLiveParsedConfig(result.config);
+    setLiveValidation(result.validation.errors || []);
+    setValidation(activeFile, result.validation);
+  }, [activeFile, editText, setValidation]);
 
   // Map line numbers to issues for rendering
   const issuesByLine = useMemo(() => {
@@ -907,7 +928,7 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
               onClick={() => setShowReferenceViewer(true)}
               className="px-2 py-1 rounded text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)]"
             >
-              Config ref
+              Configuration Reference
             </button>
             <button
               onClick={toggleSearch}
@@ -1054,7 +1075,19 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
                     }}
                   >
                     <span>{issue.severity === 'error' ? '●' : '▲'}</span>
-                    <span>Line {issue.line}: {issue.text}</span>
+                    <span className="min-w-0 flex-1 truncate">Line {issue.line}: {issue.text}</span>
+                    {issue.acknowledgeSection && (
+                      <button
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void handleAcknowledgeWarning(issue.acknowledgeSection!);
+                        }}
+                        className="shrink-0 rounded border border-[var(--color-warning)] px-2 py-0.5 text-[10px] font-medium text-[var(--color-warning)] hover:bg-[var(--color-warning)] hover:text-[var(--color-bg-primary)] transition-colors"
+                        title="Acknowledge this unknown section warning"
+                      >
+                        Acknowledge
+                      </button>
+                    )}
                   </div>
                 ))}
               </div>

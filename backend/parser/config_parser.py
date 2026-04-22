@@ -82,6 +82,8 @@ class ConfigFile:
     includes: list[str] = field(default_factory=list)
     header_comments: list[str] = field(default_factory=list)
     raw_text: str = ""
+    save_config_sections: list[ConfigSection] = field(default_factory=list)
+    save_config_start_line: int = 0
 
     def get_section(self, full_header: str) -> Optional[ConfigSection]:
         for s in self.sections:
@@ -108,6 +110,9 @@ COMMENTED_SECTION_RE = re.compile(r"^#\[([^\]]+)\]\s*(?:#.*)?$")
 INCLUDE_RE = re.compile(r"^\[include\s+([^\]]+)\]\s*(?:#.*)?$")
 PARAM_RE = re.compile(r"^(\w[\w]*)\s*([:=])\s*(.*?)(?:\s*#(.*))?$")
 COMMENTED_PARAM_RE = re.compile(r"^#\s*(\w[\w]*)\s*([:=])\s*(.*?)(?:\s*#(.*))?$")
+SAVE_CONFIG_BANNER_RE = re.compile(r"^#\*#\s*<.*SAVE_CONFIG.*>\s*$")
+SAVE_CONFIG_SECTION_RE = re.compile(r"^#\*#\s*\[([^\]]+)\]\s*(?:#.*)?$")
+SAVE_CONFIG_PARAM_RE = re.compile(r"^#\*#\s*(\w[\w]*)\s*([:=])\s*(.*?)(?:\s*#(.*))?$")
 CONTINUATION_RE = re.compile(r"^[ \t]+(\S.*)$")
 
 # Section types that take a name parameter
@@ -156,6 +161,53 @@ def parse_section_header(header: str) -> tuple[str, str]:
 
     # Check if this looks like a named variant (e.g., extruder1, stepper_z1)
     return (header.strip(), "")
+
+
+def _parse_save_config_sections(lines: list[str]) -> tuple[int, list[ConfigSection]]:
+    save_config_start = 0
+    for index, line in enumerate(lines):
+        if SAVE_CONFIG_BANNER_RE.match(line.strip()):
+            save_config_start = index + 1
+            break
+
+    if save_config_start == 0:
+        return 0, []
+
+    sections: list[ConfigSection] = []
+    current_section: Optional[ConfigSection] = None
+
+    for index in range(save_config_start, len(lines)):
+        raw_line = lines[index]
+        stripped = raw_line.strip()
+        if not stripped.startswith("#*#"):
+            break
+
+        section_match = SAVE_CONFIG_SECTION_RE.match(stripped)
+        if section_match:
+            header = section_match.group(1).strip()
+            sec_type, sec_name = parse_section_header(header)
+            current_section = ConfigSection(
+                section_type=sec_type,
+                section_name=sec_name,
+                full_header=header,
+                line_number=index + 1,
+            )
+            sections.append(current_section)
+            continue
+
+        param_match = SAVE_CONFIG_PARAM_RE.match(stripped)
+        if param_match and current_section is not None:
+            current_section.params.append(ConfigParam(
+                key=param_match.group(1),
+                value=param_match.group(3).strip(),
+                comment=param_match.group(4).strip() if param_match.group(4) else "",
+                is_commented_out=False,
+                line_number=index + 1,
+                separator=param_match.group(2),
+                raw_line=raw_line,
+            ))
+
+    return save_config_start, sections
 
 
 def parse_config(text: str, filename: str = "printer.cfg") -> ConfigFile:
@@ -389,6 +441,8 @@ def parse_config(text: str, filename: str = "printer.cfg") -> ConfigFile:
             current_section.trailing_comments = pending_comments
         else:
             config.header_comments.extend(pending_comments)
+
+    config.save_config_start_line, config.save_config_sections = _parse_save_config_sections(lines)
 
     return config
 

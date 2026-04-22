@@ -7,6 +7,16 @@ from difflib import SequenceMatcher
 from parser.config_parser import ConfigFile, ConfigSection, ConfigParam, parse_config
 
 
+def _preserved_tail_start(raw_lines: list[str], save_config_start_line: int) -> int:
+    if save_config_start_line <= 0:
+        return len(raw_lines)
+
+    tail_start = save_config_start_line - 1
+    while tail_start > 0 and not raw_lines[tail_start - 1].strip():
+        tail_start -= 1
+    return tail_start
+
+
 def smart_export(config: ConfigFile) -> str:
     """Export config text, using raw_text as the base when available.
 
@@ -23,6 +33,7 @@ def smart_export(config: ConfigFile) -> str:
 
     raw_lines = config.raw_text.splitlines()
     original = parse_config(config.raw_text, config.filename)
+    preserved_tail_start = _preserved_tail_start(raw_lines, original.save_config_start_line)
 
     # Quick check: if sections match 1-to-1 in order, return raw_text verbatim.
     if len(original.sections) == len(config.sections):
@@ -52,7 +63,8 @@ def smart_export(config: ConfigFile) -> str:
                 scan -= 1
             start = scan + 1
 
-        # End = start of next section (including its header comments), or EOF
+        # End = start of next section (including its header comments), or the
+        # preserved SAVE_CONFIG/footer tail.
         if idx + 1 < len(original.sections):
             next_start = original.sections[idx + 1].line_number - 1
             if original.sections[idx + 1].header_comments:
@@ -65,7 +77,7 @@ def smart_export(config: ConfigFile) -> str:
                 next_start = scan + 1
             end = next_start
         else:
-            end = len(raw_lines)
+            end = preserved_tail_start
 
         section_ranges.append((start, end))
 
@@ -83,7 +95,7 @@ def smart_export(config: ConfigFile) -> str:
     result_parts: list[str] = []
 
     # Content before first section (header comments, blank lines, etc.)
-    pre_start = section_ranges[0][0] if section_ranges else len(raw_lines)
+    pre_start = section_ranges[0][0] if section_ranges else preserved_tail_start
     if pre_start > 0:
         result_parts.append("\n".join(raw_lines[:pre_start]))
 
@@ -126,6 +138,11 @@ def smart_export(config: ConfigFile) -> str:
             # New section added by user
             result_parts.append("")
             result_parts.append(write_section(sub_sec))
+
+    if preserved_tail_start < len(raw_lines):
+        tail_text = "\n".join(raw_lines[preserved_tail_start:])
+        if tail_text:
+            result_parts.append(tail_text)
 
     text = "\n".join(result_parts)
     if not text.endswith("\n"):

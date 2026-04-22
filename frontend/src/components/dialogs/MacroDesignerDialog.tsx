@@ -1616,6 +1616,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                     <div>Fan: {((currentRuntime?.fanSpeed ?? 0) * 100).toFixed(0)}%</div>
                     <div>Velocity: {formatNumber((currentRuntime?.feedRate ?? 0) / 60)} mm/s</div>
                     <div>Accel: {formatNumber(machineProfile.maxAccel)} mm/s²</div>
+                    <div className="col-span-2">Homed axes: {(currentRuntime?.homedAxes.length ? currentRuntime.homedAxes.join(', ') : 'none')}</div>
                   </div>
                   {editMode && selectedItem && (
                     <div className="mt-1 space-y-1.5">

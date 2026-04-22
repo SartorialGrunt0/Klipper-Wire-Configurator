@@ -97,6 +97,21 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
     section_counts: dict[str, int] = {}
     used_pins: dict[str, list[PinUse]] = {}
     defined_sections: set[str] = set()
+    save_config_params_by_header: dict[str, set[str]] = {}
+    save_config_section_types: set[str] = set()
+    save_config_component_groups: set[str] = set()
+
+    for save_section in config.save_config_sections:
+        save_config_params_by_header.setdefault(save_section.full_header, set()).update({
+            param.key
+            for param in save_section.params
+            if not param.is_commented_out and param.key != "_comment_"
+        })
+        defined_sections.add(save_section.full_header)
+        save_config_section_types.add(save_section.section_type)
+        sec_def = get_section_def(save_section.section_type)
+        if sec_def:
+            save_config_component_groups.add(sec_def.component_group)
 
     def _is_suppressed_for_validation(section: ConfigSection, category: str | None) -> bool:
         # Suppressed sub-components/features should not participate in validation.
@@ -152,6 +167,7 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
             for p in section.params
             if not p.is_commented_out and p.key != "_comment_"
         }
+        active_params |= save_config_params_by_header.get(section.full_header, set())
         for param_def in sec_def.params:
             if not param_def.required or param_def.name in active_params:
                 continue
@@ -231,7 +247,13 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
                     ))
 
     # Check for required sections
-    _check_dependencies(config, defined_sections, result)
+    _check_dependencies(
+        config,
+        defined_sections,
+        save_config_section_types,
+        save_config_component_groups,
+        result,
+    )
 
     # Check for pin conflicts
     _check_pin_conflicts(used_pins, result)
@@ -353,7 +375,13 @@ def _validate_bed_mesh_requirements(section: ConfigSection, active_params: set[s
         ))
 
 
-def _check_dependencies(config: ConfigFile, defined_sections: set[str], result: ValidationResult):
+def _check_dependencies(
+    config: ConfigFile,
+    defined_sections: set[str],
+    save_config_section_types: set[str],
+    save_config_component_groups: set[str],
+    result: ValidationResult,
+):
     """Check that required dependencies are present."""
     active_sections: list[ConfigSection] = []
     active_component_groups: set[str] = set()
@@ -371,7 +399,8 @@ def _check_dependencies(config: ConfigFile, defined_sections: set[str], result: 
         active_sections.append(s)
         active_component_groups.add(sec_def.component_group)
 
-    section_types = {s.section_type for s in active_sections}
+    section_types = {s.section_type for s in active_sections} | save_config_section_types
+    active_component_groups |= save_config_component_groups
 
     for section in active_sections:
         sec_def = get_section_def(section.section_type)

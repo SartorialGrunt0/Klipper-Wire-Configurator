@@ -200,6 +200,105 @@ function getRequestedAxes(params: Record<string, string>): Array<'X' | 'Y' | 'Z'
   return Array.from(axes);
 }
 
+type PlannerState = {
+  homedAxes: Set<'X' | 'Y' | 'Z'>;
+};
+
+const HOMING_AXES: Array<'X' | 'Y' | 'Z'> = ['X', 'Y', 'Z'];
+
+function getHomedAxesString(homedAxes: Set<'X' | 'Y' | 'Z'>): string {
+  return HOMING_AXES.filter((axis) => homedAxes.has(axis)).map((axis) => axis.toLowerCase()).join('');
+}
+
+function normalizeRuntimeHomedAxes(homedAxes: string[]): string[] {
+  const axisSet = new Set(homedAxes.map((axis) => axis.toUpperCase()).filter((axis): axis is 'X' | 'Y' | 'Z' => axis === 'X' || axis === 'Y' || axis === 'Z'));
+  return HOMING_AXES.filter((axis) => axisSet.has(axis));
+}
+
+function applyPlannerCommandEffects(command: ParsedGcodeCommand, plannerState: PlannerState) {
+  switch (command.command) {
+    case 'G28': {
+      const requestedAxes = getRequestedAxes(command.params);
+      const axesToHome = requestedAxes.length > 0 ? requestedAxes : HOMING_AXES;
+      for (const axis of axesToHome) {
+        plannerState.homedAxes.add(axis);
+      }
+      break;
+    }
+    case 'SET_KINEMATIC_POSITION': {
+      const requestedAxes = getRequestedAxes(command.params);
+      for (const axis of requestedAxes) {
+        plannerState.homedAxes.add(axis);
+      }
+      break;
+    }
+    case 'FIRMWARE_RESTART':
+    case 'RESTART':
+      plannerState.homedAxes.clear();
+      break;
+    default:
+      break;
+  }
+}
+
+function evaluateHomedAxesExpression(expression: string, homedAxes: Set<'X' | 'Y' | 'Z'>): boolean | null {
+  const trimmed = expression.trim().replace(/^\((.*)\)$/u, '$1').trim();
+
+  const andParts = trimmed.split(/\s+and\s+/i);
+  if (andParts.length > 1) {
+    const values = andParts.map((part) => evaluateHomedAxesExpression(part, homedAxes));
+    return values.every((value) => value !== null) ? values.every(Boolean) : null;
+  }
+
+  const orParts = trimmed.split(/\s+or\s+/i);
+  if (orParts.length > 1) {
+    const values = orParts.map((part) => evaluateHomedAxesExpression(part, homedAxes));
+    return values.every((value) => value !== null) ? values.some(Boolean) : null;
+  }
+
+  const notMatch = trimmed.match(/^not\s+(.+)$/i);
+  if (notMatch) {
+    const value = evaluateHomedAxesExpression(notMatch[1], homedAxes);
+    return value == null ? null : !value;
+  }
+
+  const membershipMatch = trimmed.match(/^['\"]([xyz]+)['\"]\s+(not\s+)?in\s+printer\.toolhead\.(?:homed_axes|home_axes)$/i);
+  if (membershipMatch) {
+    const wantedAxes = membershipMatch[1].toLowerCase();
+    const isNegated = Boolean(membershipMatch[2]);
+    const homed = getHomedAxesString(homedAxes);
+    const value = homed.includes(wantedAxes);
+    return isNegated ? !value : value;
+  }
+
+  const equalityMatch = trimmed.match(/^printer\.toolhead\.(?:homed_axes|home_axes)\s*([=!]=)\s*['\"]([xyz]+)['\"]$/i);
+  if (equalityMatch) {
+    const homed = getHomedAxesString(homedAxes);
+    return equalityMatch[1] === '==' ? homed === equalityMatch[2].toLowerCase() : homed !== equalityMatch[2].toLowerCase();
+  }
+
+  return null;
+}
+
+function parseTemplateControlDirective(
+  line: string,
+  homedAxes: Set<'X' | 'Y' | 'Z'>,
+): { kind: 'if' | 'elif' | 'else' | 'endif'; result?: boolean | null } | null {
+  const trimmed = line.trim();
+  const match = trimmed.match(/^\{%\s*(if|elif|else|endif)(.*?)%\}$/i);
+  if (!match) return null;
+
+  const kind = match[1].toLowerCase() as 'if' | 'elif' | 'else' | 'endif';
+  if (kind === 'else' || kind === 'endif') {
+    return { kind };
+  }
+
+  return {
+    kind,
+    result: evaluateHomedAxesExpression(match[2].trim(), homedAxes),
+  };
+}
+
 // Commands where featurePoints are probe coordinates — nozzle = point - probeOffset
 const PROBE_COORD_COMMANDS = new Set([
   'BED_MESH_CALIBRATE', 'Z_TILT_ADJUST', 'QUAD_GANTRY_LEVEL',
@@ -286,6 +385,7 @@ export function buildSimulationSteps(
   const warnings: string[] = [];
   const steps: SimulationStep[] = [];
   const stack: string[] = [];
+  const plannerState: PlannerState = { homedAxes: new Set<'X' | 'Y' | 'Z'>() };
 
   // Build a reverse map: rename_existing value → original command name.
   // e.g. if [gcode_macro BED_MESH_CALIBRATE] has rename_existing: _BED_MESH_CALIBRATE,
@@ -357,10 +457,12 @@ export function buildSimulationSteps(
     if (originalCommand) {
       const rewritten: ParsedGcodeCommand = { ...parsed, command: originalCommand };
       steps.push(...expandCommandToSteps(rewritten, profile));
+      applyPlannerCommandEffects(rewritten, plannerState);
       return;
     }
 
     steps.push(...expandCommandToSteps(parsed, profile));
+    applyPlannerCommandEffects(parsed, plannerState);
   };
 
   const visit = (macro: MacroSourceItem, allowHomingOverride = true) => {
@@ -371,7 +473,48 @@ export function buildSimulationSteps(
     }
     stack.push(title);
     const lines = macro.gcode.split(/\r?\n/);
+    const conditionalStack: Array<{ parentActive: boolean; branchTaken: boolean; active: boolean }> = [];
+    const isBranchActive = () => conditionalStack.every((entry) => entry.active);
+
     lines.forEach((line, index) => {
+      const templateControl = parseTemplateControlDirective(line, plannerState.homedAxes);
+      if (templateControl) {
+        switch (templateControl.kind) {
+          case 'if': {
+            const parentActive = isBranchActive();
+            const conditionMatched = templateControl.result === true;
+            conditionalStack.push({
+              parentActive,
+              branchTaken: conditionMatched,
+              active: parentActive && conditionMatched,
+            });
+            return;
+          }
+          case 'elif': {
+            const current = conditionalStack[conditionalStack.length - 1];
+            if (!current) return;
+            const conditionMatched = templateControl.result === true;
+            current.active = current.parentActive && !current.branchTaken && conditionMatched;
+            current.branchTaken = current.branchTaken || conditionMatched;
+            return;
+          }
+          case 'else': {
+            const current = conditionalStack[conditionalStack.length - 1];
+            if (!current) return;
+            current.active = current.parentActive && !current.branchTaken;
+            current.branchTaken = true;
+            return;
+          }
+          case 'endif':
+            conditionalStack.pop();
+            return;
+        }
+      }
+
+      if (!isBranchActive()) {
+        return;
+      }
+
       const parsed = parseGcodeLine(line, index + 1, macro.title);
       if (!parsed) return;
       appendParsedCommand(parsed, macro, allowHomingOverride);
@@ -559,9 +702,10 @@ export function executeSimulationStep(
         x: homeX,
         y: homeY,
         z: homeZ,
-        homedAxes: homeAllAxes
-          ? ['X', 'Y', 'Z']
-          : requestedAxes,
+        homedAxes: normalizeRuntimeHomedAxes([
+          ...state.homedAxes,
+          ...(homeAllAxes ? ['X', 'Y', 'Z'] : requestedAxes),
+        ]),
       };
       eventSummary = 'Home axes';
       break;
@@ -719,6 +863,18 @@ export function executeSimulationStep(
       eventSummary = 'Adjust gcode offset';
       break;
     }
+    case 'SET_KINEMATIC_POSITION': {
+      const requestedAxes = getRequestedAxes(command.params);
+      nextState = {
+        ...nextState,
+        x: asNumber(command.params.X) ?? nextState.x,
+        y: asNumber(command.params.Y) ?? nextState.y,
+        z: asNumber(command.params.Z) ?? nextState.z,
+        homedAxes: normalizeRuntimeHomedAxes([...nextState.homedAxes, ...requestedAxes]),
+      };
+      eventSummary = 'Set kinematic position';
+      break;
+    }
     case 'SAVE_GCODE_STATE': {
       const name = command.params.NAME || 'default';
       nextState = {
@@ -792,8 +948,13 @@ export function executeSimulationStep(
     case 'Z_ENDSTOP_CALIBRATE':
     case 'AXIS_TWIST_COMPENSATION_CALIBRATE':
     case 'SAVE_CONFIG':
+      eventSummary = command.command;
+      break;
     case 'FIRMWARE_RESTART':
     case 'RESTART':
+      nextState = { ...nextState, homedAxes: [] };
+      eventSummary = command.command;
+      break;
     case 'STATUS':
     case 'TUNING_TOWER':
     case 'M204':
@@ -805,7 +966,6 @@ export function executeSimulationStep(
     case 'M115':
     case 'M118':
     case 'FORCE_MOVE':
-    case 'SET_KINEMATIC_POSITION':
     case 'BED_MESH_CLEAR':
     case 'BED_MESH_OUTPUT':
     case 'BED_MESH_MAP':

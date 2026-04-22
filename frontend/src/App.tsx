@@ -558,24 +558,34 @@ export default function App() {
                 sectionType: string;
                 label: string;
                 sectionHeader: string;
+                sectionLineNumber?: number;
                 isFeature: boolean;
                 params: Array<{ key: string; value: string }>;
+                configFile?: string;
               }> = [];
+              const configStore = useConfigStore.getState();
 
               const extractChildren = (nd: Node) => {
                 const d = nd.data as Record<string, unknown>;
                 if (nd.type === 'group' && Array.isArray(d.children)) {
-                  for (const c of d.children as Array<{ sectionType: string; label: string; sectionHeader: string; isFeature: boolean; params: Array<{ key: string; value: string }> }>) {
+                  for (const c of d.children as Array<{ sectionType: string; label: string; sectionHeader: string; sectionLineNumber?: number; isFeature: boolean; params: Array<{ key: string; value: string }>; configFile?: string }>) {
                     children.push(c);
                   }
                 } else {
-                  const section = d.section as { params?: Array<{ key: string; value: string; is_commented_out?: boolean }> } | undefined;
+                  const configFile = d.configFile as string | undefined;
+                  const sectionHeader = (d.sectionHeader as string) || '';
+                  const sectionLineNumber = d.sectionLineNumber as number | undefined;
+                  const section = configFile && sectionHeader
+                    ? configStore.getSection(configFile, sectionHeader, sectionLineNumber)
+                    : null;
                   children.push({
                     sectionType: (d.sectionType as string) || '',
                     label: (d.label as string) || '',
-                    sectionHeader: (d.sectionHeader as string) || '',
+                    sectionHeader,
+                    sectionLineNumber,
                     isFeature: nd.type === 'feature',
-                    params: section?.params?.filter((p) => !p.is_commented_out).map((p) => ({ key: p.key, value: p.value })) || [],
+                    params: section?.params.filter((p) => !p.is_commented_out).map((p) => ({ key: p.key, value: p.value })) || [],
+                    configFile,
                   });
                 }
               };
@@ -584,11 +594,12 @@ export default function App() {
               extractChildren(sib);
 
               if (children.length > 0) {
-                const { addGroupNode, removeNode, reflowParentChildren } = useGraphStore.getState();
+                const { addGroupNode, removeNodeFromGraph, reflowParentChildren, pushHistory } = useGraphStore.getState();
                 const groupLabel = dragGroup.charAt(0).toUpperCase() + dragGroup.slice(1).replace(/_/g, ' ');
+                pushHistory();
                 addGroupNode(oldParentId, dragGroup, groupLabel + 's', children, isFeature);
-                removeNode(draggedNode.id);
-                removeNode(sib.id);
+                removeNodeFromGraph(draggedNode.id);
+                removeNodeFromGraph(sib.id);
                 if (oldParentId) reflowParentChildren(oldParentId);
               }
               return;

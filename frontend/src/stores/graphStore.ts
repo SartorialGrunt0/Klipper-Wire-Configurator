@@ -9,7 +9,7 @@ import {
   type Edge,
 } from '@xyflow/react';
 import type { AppNode, AppEdge, GroupNodeData } from '../types/graph';
-import type { HardwareType, CommunicationType } from '../types/config';
+import type { HardwareType, CommunicationType, ConfigFile, ConfigSection } from '../types/config';
 import { useConfigStore } from './configStore';
 import { updateSectionPins } from '../utils/pinUtils';
 
@@ -155,6 +155,57 @@ function sectionIdentityForSection(section: { full_header: string; line_number: 
   return sectionIdentity(section.full_header, section.line_number);
 }
 
+function cloneSnapshot<T>(value: T): T {
+  if (typeof structuredClone === 'function') {
+    return structuredClone(value);
+  }
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function getSectionSnapshot(
+  configFile: string,
+  sectionHeader: string,
+  sectionType: string,
+  sectionLineNumber?: number,
+): ConfigSection {
+  const section = useConfigStore.getState().getSection(configFile, sectionHeader, sectionLineNumber);
+  if (section) {
+    return cloneSnapshot(section);
+  }
+
+  return {
+    section_type: sectionType,
+    section_name: '',
+    full_header: sectionHeader,
+    line_number: sectionLineNumber ?? 0,
+    params: [],
+    header_comments: [],
+    trailing_comments: [],
+    is_commented_out: false,
+  };
+}
+
+function removeNodesFromGraph(nodes: AppNode[], edges: AppEdge[], id: string) {
+  const removedIds = new Set<string>();
+  const queue = [id];
+
+  while (queue.length > 0) {
+    const currentId = queue.shift()!;
+    if (removedIds.has(currentId)) continue;
+    removedIds.add(currentId);
+    for (const node of nodes) {
+      if (node.parentId === currentId && !removedIds.has(node.id)) {
+        queue.push(node.id);
+      }
+    }
+  }
+
+  return {
+    nodes: nodes.filter((node) => !removedIds.has(node.id)),
+    edges: edges.filter((edge) => !removedIds.has(edge.source) && !removedIds.has(edge.target)),
+  };
+}
+
 interface GraphState {
   nodes: AppNode[];
   edges: AppEdge[];
@@ -168,6 +219,7 @@ interface GraphState {
   /* Node operations */
   addNode: (node: AppNode) => void;
   removeNode: (id: string) => void;
+  removeNodeFromGraph: (id: string) => void;
   duplicateNode: (id: string) => void;
   updateNodeData: (id: string, data: Partial<AppNode['data']>) => void;
   setSelectedNode: (id: string | null) => void;
@@ -285,6 +337,8 @@ function nextEdgeId(): string {
 interface HistoryEntry {
   nodes: AppNode[];
   edges: AppEdge[];
+  configFiles: Record<string, ConfigFile>;
+  activeFile: string;
 }
 const MAX_HISTORY = 50;
 const undoStack: HistoryEntry[] = [];
@@ -514,6 +568,10 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         edges: s.edges.filter((e) => !removedIds.has(e.source) && !removedIds.has(e.target)),
       };
     });
+  },
+
+  removeNodeFromGraph: (id) => {
+    set((s) => removeNodesFromGraph(s.nodes, s.edges, id));
   },
 
   duplicateNode: (id) => {
@@ -807,6 +865,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 
     // Determine component group from section type
     const componentGroup = getComponentGroup(sectionType);
+    const sectionSnapshot = getSectionSnapshot(resolvedFile, sectionHeader, sectionType, sectionLineNumber);
 
     // If no parent, place as standalone top-level node
     if (!parentId) {
@@ -821,7 +880,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
           sectionHeader,
           sectionLineNumber,
           componentGroup,
-          section: { section_type: sectionType, section_name: '', full_header: sectionHeader, line_number: sectionLineNumber ?? 0, params: [], header_comments: [] },
+          section: sectionSnapshot,
           parentHardwareId: null,
           configFile: resolvedFile,
           hasErrors: false,
@@ -855,7 +914,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         sectionHeader,
         sectionLineNumber,
         componentGroup,
-        section: { section_type: sectionType, section_name: '', full_header: sectionHeader, line_number: sectionLineNumber ?? 0, params: [], header_comments: [] },
+        section: sectionSnapshot,
         parentHardwareId: parentId,
         configFile: resolvedFile,
         hasErrors: false,
@@ -896,6 +955,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       const parent = get().nodes.find((n) => n.id === parentId);
       return (parent?.data as Record<string, unknown>)?.configFile as string || '';
     })();
+    const sectionSnapshot = getSectionSnapshot(resolvedFile, sectionHeader, sectionType, sectionLineNumber);
 
     // If no parent, place as standalone top-level node
     if (!parentId) {
@@ -910,7 +970,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
           componentGroup,
           sectionHeader,
           sectionLineNumber,
-          section: { section_type: sectionType, section_name: '', full_header: sectionHeader, line_number: sectionLineNumber ?? 0, params: [], header_comments: [] },
+          section: sectionSnapshot,
           parentId: null,
           configFile: resolvedFile,
           hasErrors: false,
@@ -944,7 +1004,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         componentGroup,
         sectionHeader,
         sectionLineNumber,
-        section: { section_type: sectionType, section_name: '', full_header: sectionHeader, line_number: sectionLineNumber ?? 0, params: [], header_comments: [] },
+        section: sectionSnapshot,
         parentId,
         configFile: resolvedFile,
         hasErrors: false,
@@ -2027,7 +2087,13 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 
   pushHistory: () => {
     const { nodes, edges } = get();
-    undoStack.push({ nodes: [...nodes], edges: [...edges] });
+    const { configFiles, activeFile } = useConfigStore.getState();
+    undoStack.push({
+      nodes: cloneSnapshot(nodes),
+      edges: cloneSnapshot(edges),
+      configFiles: cloneSnapshot(configFiles),
+      activeFile,
+    });
     if (undoStack.length > MAX_HISTORY) undoStack.shift();
     redoStack.length = 0;
     set({ canUndo: true, canRedo: false });
@@ -2036,8 +2102,20 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   undo: () => {
     if (undoStack.length === 0) return;
     const { nodes, edges } = get();
-    redoStack.push({ nodes: [...nodes], edges: [...edges] });
+    const configState = useConfigStore.getState();
+    redoStack.push({
+      nodes: cloneSnapshot(nodes),
+      edges: cloneSnapshot(edges),
+      configFiles: cloneSnapshot(configState.configFiles),
+      activeFile: configState.activeFile,
+    });
     const prev = undoStack.pop()!;
+    useConfigStore.setState((state) => ({
+      ...state,
+      configFiles: cloneSnapshot(prev.configFiles),
+      activeFile: prev.activeFile,
+      isDirty: true,
+    }));
     set({
       nodes: prev.nodes,
       edges: prev.edges,
@@ -2049,8 +2127,20 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   redo: () => {
     if (redoStack.length === 0) return;
     const { nodes, edges } = get();
-    undoStack.push({ nodes: [...nodes], edges: [...edges] });
+    const configState = useConfigStore.getState();
+    undoStack.push({
+      nodes: cloneSnapshot(nodes),
+      edges: cloneSnapshot(edges),
+      configFiles: cloneSnapshot(configState.configFiles),
+      activeFile: configState.activeFile,
+    });
     const next = redoStack.pop()!;
+    useConfigStore.setState((state) => ({
+      ...state,
+      configFiles: cloneSnapshot(next.configFiles),
+      activeFile: next.activeFile,
+      isDirty: true,
+    }));
     set({
       nodes: next.nodes,
       edges: next.edges,
