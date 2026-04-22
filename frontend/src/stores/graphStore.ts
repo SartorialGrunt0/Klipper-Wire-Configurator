@@ -103,6 +103,12 @@ const GROUP_ITEM_HEIGHT = 22;
 const GROUP_BODY_PADDING = 12;
 /** Gap between tiles in a column */
 const TILE_GAP = 4;
+/** Base stacking for top-level hardware cards */
+const HARDWARE_Z_INDEX = 0;
+/** Elevated stacking for the selected parent hardware card */
+const SELECTED_PARENT_Z_INDEX = 100;
+/** Child cards should always render above major component cards */
+const CHILD_NODE_Z_INDEX = 200;
 
 function getNodeSlotHeight(node: AppNode, selectedId: string | null): number {
   if (node.type === 'group' && node.id === selectedId) {
@@ -724,8 +730,8 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     if (prevParentId !== newParentId) {
       set((s) => ({
         nodes: s.nodes.map((n) => {
-          if (n.id === prevParentId && n.id !== newParentId) return { ...n, zIndex: 0 };
-          if (n.id === newParentId) return { ...n, zIndex: 100 };
+          if (n.id === prevParentId && n.id !== newParentId) return { ...n, zIndex: HARDWARE_Z_INDEX };
+          if (n.id === newParentId) return { ...n, zIndex: SELECTED_PARENT_Z_INDEX };
           return n;
         }) as AppNode[],
       }));
@@ -763,6 +769,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       id,
       type: 'hardware',
       position: pos,
+      zIndex: HARDWARE_Z_INDEX,
       style: { width, height },
       data: {
         label,
@@ -797,6 +804,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         id,
         type: 'subComponent',
         position: { x: 100 + Math.random() * 400, y: 100 + Math.random() * 300 },
+        zIndex: CHILD_NODE_Z_INDEX,
         data: {
           label,
           sectionType,
@@ -830,6 +838,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       type: 'subComponent',
       position: pos,
       parentId,
+      zIndex: CHILD_NODE_Z_INDEX,
       data: {
         label,
         sectionType,
@@ -869,6 +878,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 
   addFeatureNode: (parentId, sectionType, label, sectionHeader, configFile, sectionLineNumber) => {
     const id = nextNodeId();
+    const componentGroup = COMPONENT_GROUP_MAP[sectionType] || sectionType;
 
     // Resolve config file from parent hardware node if not provided
     const resolvedFile = configFile || (() => {
@@ -883,9 +893,11 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         id,
         type: 'feature',
         position: { x: 100 + Math.random() * 400, y: 100 + Math.random() * 300 },
+        zIndex: CHILD_NODE_Z_INDEX,
         data: {
           label,
           sectionType,
+          componentGroup,
           sectionHeader,
           sectionLineNumber,
           section: { section_type: sectionType, section_name: '', full_header: sectionHeader, line_number: sectionLineNumber ?? 0, params: [], header_comments: [] },
@@ -915,9 +927,11 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       type: 'feature',
       position: pos,
       parentId,
+      zIndex: CHILD_NODE_Z_INDEX,
       data: {
         label,
         sectionType,
+        componentGroup,
         sectionHeader,
         sectionLineNumber,
         section: { section_type: sectionType, section_name: '', full_header: sectionHeader, line_number: sectionLineNumber ?? 0, params: [], header_comments: [] },
@@ -980,6 +994,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       type: 'group',
       position: pos,
       parentId,
+      zIndex: CHILD_NODE_Z_INDEX,
       data: {
         label,
         componentGroup,
@@ -1734,6 +1749,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
           type: isFeature ? 'feature' : 'subComponent',
           position: { x: isFeature ? 12 : 208, y: 0 },
           parentId,
+          zIndex: CHILD_NODE_Z_INDEX,
           data: {
             sectionType: sec.section_type,
             sectionHeader: sec.full_header,

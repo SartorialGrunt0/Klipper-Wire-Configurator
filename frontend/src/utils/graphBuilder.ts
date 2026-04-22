@@ -492,19 +492,8 @@ export function buildProjectGraph(
       const sType = sec.section_type;
       const suppressed = isSectionSuppressed(sec);
 
-      // Handle include sections: show commented includes but skip active includes (they're edges)
+      // Include directives affect file relationships only; they should not create graph cards.
       if (sType === 'include') {
-        // Active includes are already handled as edges, skip them
-        if (!suppressed) continue;
-        // Commented includes: show as suppressed feature node, no trace
-        const label = `Include: ${sec.section_name}`;
-        const parentId = fileOwner.get(filename) || primaryMcu.nodeId;
-        const gKey = `${parentId}::include::feat`;
-        if (!groupedSections.has(gKey)) groupedSections.set(gKey, []);
-        groupedSections.get(gKey)!.push({
-          sec, sType: 'include', label, parentId, isFeature: true,
-          componentGroup: 'other', isSuppressed: true, filename,
-        });
         continue;
       }
 

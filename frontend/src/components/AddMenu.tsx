@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useConfigStore } from '../stores/configStore';
 import { useGraphStore } from '../stores/graphStore';
 import * as api from '../services/api';
 import { applyBoardTypeMarkerToMcuSections, buildBoardTypeMarker } from '../utils/boardTypeMarker';
+import { buildUniqueSectionDraft } from '../utils/sectionNaming';
 import type { ConfigSection, CommunicationType, ExampleConfig, HardwareType } from '../types/config';
 import McuNameDialog from './dialogs/McuNameDialog';
 
@@ -89,6 +90,16 @@ export default function AddMenu({ onClose }: AddMenuProps) {
   const { schemas } = useConfigStore();
   const { addHardwareNode, addSubComponentNode, addFeatureNode, nodes } = useGraphStore();
   const { configFiles, activeFile, addSection } = useConfigStore();
+
+  const allSectionHeaders = useMemo(() => {
+    const headers = new Set<string>();
+    for (const cf of Object.values(configFiles)) {
+      for (const section of cf.sections) {
+        headers.add(section.full_header);
+      }
+    }
+    return headers;
+  }, [configFiles]);
 
   const hardwareNodes = nodes.filter((n) => n.type === 'hardware');
   const attachableHardwareNodes = hardwareNodes.filter((n) => {
@@ -341,17 +352,14 @@ export default function AddMenu({ onClose }: AddMenuProps) {
   const handleAddSubComponent = (sectionType: string) => {
     const schema = schemas[sectionType];
     const displayName = schema?.display_name || sectionType;
-    const isNamed = schema?.is_named;
-    const defaultName = `${sectionType}_default`;
-    const label = isNamed ? `${displayName}: ${defaultName}` : displayName;
-    const header = isNamed ? `${sectionType} ${defaultName}` : sectionType;
+    const draft = buildUniqueSectionDraft(sectionType, displayName, schema?.is_named, allSectionHeaders);
 
     if (selectedParent) {
-      addSubComponentNode(selectedParent, sectionType, label, header);
+      addSubComponentNode(selectedParent, sectionType, draft.label, draft.fullHeader);
     } else {
       // No parent selected — add as standalone node in empty space
       const { addSubComponentNode: addSub } = useGraphStore.getState();
-      addSub(null as unknown as string, sectionType, label, header);
+      addSub(null as unknown as string, sectionType, draft.label, draft.fullHeader);
     }
 
     // Add to the parent's config file (not just activeFile)
@@ -362,8 +370,8 @@ export default function AddMenu({ onClose }: AddMenuProps) {
 
     addSection(parentConfigFile, {
       section_type: sectionType,
-      section_name: isNamed ? `${sectionType}_default` : '',
-      full_header: header,
+      section_name: draft.sectionName,
+      full_header: draft.fullHeader,
       line_number: 0,
       params: [],
       header_comments: [],
@@ -383,18 +391,15 @@ export default function AddMenu({ onClose }: AddMenuProps) {
 
     const schema = schemas[sectionType];
     const displayName = schema?.display_name || sectionType;
-    const isNamed = schema?.is_named;
-    const defaultName = `${sectionType}_default`;
-    const label = isNamed ? `${displayName}: ${defaultName}` : displayName;
-    const header = isNamed ? `${sectionType} ${defaultName}` : sectionType;
+    const draft = buildUniqueSectionDraft(sectionType, displayName, schema?.is_named, allSectionHeaders);
     const pId = selectedParent || hardwareNodes[0]?.id || null;
 
     if (pId) {
-      addFeatureNode(pId, sectionType, label, header);
+      addFeatureNode(pId, sectionType, draft.label, draft.fullHeader);
     } else {
       // No parent selected — add as standalone feature node
       const { addFeatureNode: addFeat } = useGraphStore.getState();
-      addFeat(null as unknown as string, sectionType, label, header);
+      addFeat(null as unknown as string, sectionType, draft.label, draft.fullHeader);
     }
 
     // Add to the parent's config file
@@ -405,8 +410,8 @@ export default function AddMenu({ onClose }: AddMenuProps) {
 
     addSection(parentConfigFile, {
       section_type: sectionType,
-      section_name: isNamed ? `${sectionType}_default` : '',
-      full_header: header,
+      section_name: draft.sectionName,
+      full_header: draft.fullHeader,
       line_number: 0,
       params: [],
       header_comments: [],

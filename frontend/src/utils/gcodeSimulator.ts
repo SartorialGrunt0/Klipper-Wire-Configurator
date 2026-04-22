@@ -82,7 +82,7 @@ export function createInitialRuntimeState(profile: MachineProfile, macroName: st
     y: profile.centerY,
     z: Math.max(profile.minZ, 0),
     e: 0,
-    feedRate: 1500,
+    feedRate: profile.maxVelocity > 0 ? profile.maxVelocity * 60 : 1500,
     absoluteMoves: true,
     absoluteExtrusion: true,
     gcodeOffset: { x: 0, y: 0, z: 0 },

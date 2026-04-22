@@ -36,6 +36,7 @@ export interface SubComponentNodeData {
 export interface FeatureNodeData {
   label: string;
   sectionType: string;
+  componentGroup?: string;
   sectionHeader: string;
   sectionLineNumber?: number;
   section: ConfigSection;

@@ -6,6 +6,7 @@ import type { ParamSchema, ConfigParam, ConfigSection, HardwareType, SectionSche
 import type { HardwareNodeData, SubComponentNodeData, FeatureNodeData, AppNode, AppEdge, ValidationStatus } from '../types/graph';
 import { applyBoardTypeMarkerToMcuSections } from '../utils/boardTypeMarker';
 import { updateAllSectionPins } from '../utils/pinUtils';
+import { buildUniqueSectionDraft } from '../utils/sectionNaming';
 import { getValidationStatusColor } from '../utils/validationStatus';
 import { acknowledgeWarning } from '../services/api';
 import WarningBadge from './nodes/WarningBadge';
@@ -248,45 +249,34 @@ export default function SettingsPanel() {
     });
   }, [selectedNodeId, nodes]);
 
-  /** Generate a unique section name by appending a number suffix if the name already exists. */
-  const makeUniqueName = useCallback((sectionType: string, baseName: string): string => {
-    const allHeaders = new Set<string>();
+  const allSectionHeaders = useMemo(() => {
+    const headers = new Set<string>();
     for (const cf of Object.values(configFiles)) {
       for (const s of cf.sections) {
-        allHeaders.add(s.full_header);
+        headers.add(s.full_header);
       }
     }
-    let name = baseName;
-    let header = `${sectionType} ${name}`;
-    let counter = 2;
-    while (allHeaders.has(header)) {
-      name = `${baseName}_${counter}`;
-      header = `${sectionType} ${name}`;
-      counter++;
-    }
-    return name;
+    return headers;
   }, [configFiles]);
 
   const handleAddSubComponent = useCallback((sectionType: string) => {
     if (!selectedNodeId) return;
     const schemaDef = schemas[sectionType];
-    const label = schemaDef?.display_name || sectionType;
-    const isNamed = schemaDef?.is_named;
-    const sectionName = isNamed ? makeUniqueName(sectionType, `${sectionType}_default`) : '';
-    const header = isNamed ? `${sectionType} ${sectionName}` : sectionType;
+    const displayName = schemaDef?.display_name || sectionType;
+    const draft = buildUniqueSectionDraft(sectionType, displayName, schemaDef?.is_named, allSectionHeaders);
 
     const filename = hwData?.configFile || activeFile;
-    addSubComponentNode(selectedNodeId, sectionType, label, header, filename);
+    addSubComponentNode(selectedNodeId, sectionType, draft.label, draft.fullHeader, filename);
     addSection(filename, {
       section_type: sectionType,
-      section_name: sectionName,
-      full_header: header,
+      section_name: draft.sectionName,
+      full_header: draft.fullHeader,
       line_number: 0,
       params: [],
       header_comments: [],
     });
     // Keep menu open for multi-select
-  }, [selectedNodeId, schemas, addSubComponentNode, addSection, hwData, activeFile]);
+  }, [selectedNodeId, schemas, addSubComponentNode, addSection, hwData, activeFile, allSectionHeaders]);
 
   const handleAddFeature = useCallback((sectionType: string) => {
     if (!selectedNodeId) return;
@@ -303,23 +293,21 @@ export default function SettingsPanel() {
     }
 
     const schemaDef = schemas[sectionType];
-    const label = schemaDef?.display_name || sectionType;
-    const isNamed = schemaDef?.is_named;
-    const sectionName = isNamed ? makeUniqueName(sectionType, `${sectionType}_default`) : '';
-    const header = isNamed ? `${sectionType} ${sectionName}` : sectionType;
+    const displayName = schemaDef?.display_name || sectionType;
+    const draft = buildUniqueSectionDraft(sectionType, displayName, schemaDef?.is_named, allSectionHeaders);
 
     const filename = hwData?.configFile || activeFile;
-    addFeatureNode(selectedNodeId, sectionType, label, header, filename);
+    addFeatureNode(selectedNodeId, sectionType, draft.label, draft.fullHeader, filename);
     addSection(filename, {
       section_type: sectionType,
-      section_name: sectionName,
-      full_header: header,
+      section_name: draft.sectionName,
+      full_header: draft.fullHeader,
       line_number: 0,
       params: [],
       header_comments: [],
     });
     // Keep menu open for multi-select
-  }, [selectedNodeId, schemas, nodes, addFeatureNode, addSection, hwData, activeFile, configFiles]);
+  }, [selectedNodeId, schemas, nodes, addFeatureNode, addSection, hwData, activeFile, allSectionHeaders]);
 
   /**
    * Apply MCU name change to a hardware node:
