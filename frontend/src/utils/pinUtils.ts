@@ -42,7 +42,7 @@ interface ParsedPin {
   pinName: string;   // the actual pin identifier
 }
 
-const PIN_PARSE_RE = /^([!^~]*)(?:(\w+)\s*:\s*)?(.+)$/;
+const PIN_PARSE_RE = /^([!^~]*)(?:([A-Za-z0-9_][A-Za-z0-9_-]*)\s*:\s*)?(.+)$/;
 
 export function parsePin(value: string): ParsedPin | null {
   const trimmed = value.trim();

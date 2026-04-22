@@ -4,10 +4,44 @@ import type { ConfigFile, ConfigSection, ConfigParam, ValidationResult, SectionS
 /** Debounced revalidation timer — shared across all mutation methods. */
 let _revalidateTimer: ReturnType<typeof setTimeout> | null = null;
 
+const UNKNOWN_PARAM_WARNING_RE = /^Unknown parameter '([^']+)' for section \[([^\]]+)\]\.?$/;
+
 function matchesSectionIdentity(section: ConfigSection, fullHeader: string, lineNumber?: number): boolean {
   if (section.full_header !== fullHeader) return false;
   if (lineNumber == null || lineNumber === 0) return true;
   return section.line_number === lineNumber;
+}
+
+function sanitizeValidationResult(
+  result: ValidationResult,
+  schemas: Record<string, SectionSchema>,
+): ValidationResult {
+  if (result.errors.length === 0 || Object.keys(schemas).length === 0) {
+    return result;
+  }
+
+  const filteredErrors = result.errors.filter((error) => {
+    if (error.severity !== 'warning') return true;
+
+    const match = UNKNOWN_PARAM_WARNING_RE.exec(error.message);
+    if (!match) return true;
+
+    const [, paramName, sectionType] = match;
+    const schema = schemas[sectionType];
+    if (!schema) return true;
+
+    return !schema.params.some((param) => param.name === paramName);
+  });
+
+  if (filteredErrors.length === result.errors.length) {
+    return result;
+  }
+
+  return {
+    has_errors: filteredErrors.some((error) => error.severity === 'error'),
+    has_warnings: filteredErrors.some((error) => error.severity === 'warning'),
+    errors: filteredErrors,
+  };
 }
 
 async function _revalidateFile(
@@ -20,8 +54,9 @@ async function _revalidateFile(
   const api = await import('../services/api');
   try {
     const result = await api.validateConfig(cf);
+    const sanitized = sanitizeValidationResult(result, get().schemas);
     set((state) => ({
-      validation: { ...state.validation, [filename]: result },
+      validation: { ...state.validation, [filename]: sanitized },
     }));
   } catch {
     // Validation API unavailable — skip silently
@@ -67,17 +102,20 @@ interface ConfigState {
     fullHeader: string,
     key: string,
     value: string,
+    lineNumber?: number,
   ) => void;
   addParam: (
     filename: string,
     fullHeader: string,
     param: ConfigParam,
+    lineNumber?: number,
   ) => void;
-  removeParam: (filename: string, fullHeader: string, key: string) => void;
+  removeParam: (filename: string, fullHeader: string, key: string, lineNumber?: number) => void;
   toggleParamCommented: (
     filename: string,
     fullHeader: string,
     key: string,
+    lineNumber?: number,
   ) => void;
 
   /* Bulk */
@@ -129,10 +167,16 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
   setValidation: (filename, result) =>
     set((s) => ({
-      validation: { ...s.validation, [filename]: result },
+      validation: { ...s.validation, [filename]: sanitizeValidationResult(result, s.schemas) },
     })),
 
-  setSchemas: (schemas) => set({ schemas }),
+  setSchemas: (schemas) =>
+    set((s) => ({
+      schemas,
+      validation: Object.fromEntries(
+        Object.entries(s.validation).map(([filename, result]) => [filename, sanitizeValidationResult(result, schemas)]),
+      ),
+    })),
 
   setSelectedSection: (header) => set({ selectedSection: header }),
 
@@ -211,7 +255,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     scheduleRevalidation(get, set);
   },
 
-  updateSectionParam: (filename, fullHeader, key, value) => {
+  updateSectionParam: (filename, fullHeader, key, value, lineNumber) => {
     set((s) => {
       const cf = s.configFiles[filename];
       if (!cf) return s;
@@ -222,7 +266,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           [filename]: {
             ...cf,
             sections: cf.sections.map((sec) => {
-              if (sec.full_header !== fullHeader) return sec;
+              if (!matchesSectionIdentity(sec, fullHeader, lineNumber)) return sec;
               return {
                 ...sec,
                 params: sec.params.map((p) =>
@@ -237,7 +281,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     scheduleRevalidation(get, set);
   },
 
-  addParam: (filename, fullHeader, param) => {
+  addParam: (filename, fullHeader, param, lineNumber) => {
     set((s) => {
       const cf = s.configFiles[filename];
       if (!cf) return s;
@@ -248,7 +292,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           [filename]: {
             ...cf,
             sections: cf.sections.map((sec) => {
-              if (sec.full_header !== fullHeader) return sec;
+              if (!matchesSectionIdentity(sec, fullHeader, lineNumber)) return sec;
               return { ...sec, params: [...sec.params, param] };
             }),
           },
@@ -258,7 +302,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     scheduleRevalidation(get, set);
   },
 
-  removeParam: (filename, fullHeader, key) => {
+  removeParam: (filename, fullHeader, key, lineNumber) => {
     set((s) => {
       const cf = s.configFiles[filename];
       if (!cf) return s;
@@ -269,7 +313,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           [filename]: {
             ...cf,
             sections: cf.sections.map((sec) => {
-              if (sec.full_header !== fullHeader) return sec;
+              if (!matchesSectionIdentity(sec, fullHeader, lineNumber)) return sec;
               return {
                 ...sec,
                 params: sec.params.filter((p) => p.key !== key),
@@ -282,7 +326,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     scheduleRevalidation(get, set);
   },
 
-  toggleParamCommented: (filename, fullHeader, key) => {
+  toggleParamCommented: (filename, fullHeader, key, lineNumber) => {
     set((s) => {
       const cf = s.configFiles[filename];
       if (!cf) return s;
@@ -293,7 +337,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           [filename]: {
             ...cf,
             sections: cf.sections.map((sec) => {
-              if (sec.full_header !== fullHeader) return sec;
+              if (!matchesSectionIdentity(sec, fullHeader, lineNumber)) return sec;
               return {
                 ...sec,
                 params: sec.params.map((p) =>

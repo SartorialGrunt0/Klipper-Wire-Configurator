@@ -13,15 +13,15 @@ import type { HardwareType, CommunicationType } from '../types/config';
 import { useConfigStore } from './configStore';
 import { updateSectionPins } from '../utils/pinUtils';
 
+const STEPPER_SECTION_RE = /^stepper_[a-z]+(\d+)?$/;
+const EXTRUDER_SECTION_RE = /^extruder(\d+)?$/;
+
 // Map section types to component groups for coloring
 const COMPONENT_GROUP_MAP: Record<string, string> = {
-  stepper_x: 'stepper', stepper_y: 'stepper', stepper_z: 'stepper',
-  stepper_z1: 'stepper', stepper_z2: 'stepper', stepper_z3: 'stepper',
   stepper_a: 'stepper', stepper_b: 'stepper', stepper_c: 'stepper',
   manual_stepper: 'stepper', extruder_stepper: 'stepper', dual_carriage: 'stepper',
   tmc2209: 'stepper_driver', tmc2208: 'stepper_driver', tmc2130: 'stepper_driver',
   tmc2240: 'stepper_driver', tmc5160: 'stepper_driver', tmc2660: 'stepper_driver',
-  extruder: 'extruder', extruder1: 'extruder', extruder2: 'extruder',
   heater_bed: 'heater', heater_generic: 'heater',
   fan: 'fan', heater_fan: 'fan', controller_fan: 'fan', temperature_fan: 'fan', fan_generic: 'fan',
   temperature_sensor: 'temperature',
@@ -34,6 +34,16 @@ const COMPONENT_GROUP_MAP: Record<string, string> = {
   bmi160: 'accelerometer', mpu9250: 'accelerometer', icm20948: 'accelerometer',
   mcu: 'mcu', printer: 'printer',
 };
+
+function isDynamicSubComponentType(sectionType: string): boolean {
+  return STEPPER_SECTION_RE.test(sectionType) || EXTRUDER_SECTION_RE.test(sectionType);
+}
+
+function getComponentGroup(sectionType: string, isFeature = false): string {
+  if (STEPPER_SECTION_RE.test(sectionType)) return 'stepper';
+  if (EXTRUDER_SECTION_RE.test(sectionType)) return 'extruder';
+  return COMPONENT_GROUP_MAP[sectionType] || (isFeature ? sectionType : 'other');
+}
 
 // Hardware type → color mapping (shared with edge coloring)
 const HW_COLORS: Record<string, string> = {
@@ -796,7 +806,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     })();
 
     // Determine component group from section type
-    const componentGroup = COMPONENT_GROUP_MAP[sectionType] || 'other';
+    const componentGroup = getComponentGroup(sectionType);
 
     // If no parent, place as standalone top-level node
     if (!parentId) {
@@ -878,7 +888,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 
   addFeatureNode: (parentId, sectionType, label, sectionHeader, configFile, sectionLineNumber) => {
     const id = nextNodeId();
-    const componentGroup = COMPONENT_GROUP_MAP[sectionType] || sectionType;
+    const componentGroup = getComponentGroup(sectionType, true);
 
     // Resolve config file from parent hardware node if not provided
     const resolvedFile = configFile || (() => {
@@ -1703,9 +1713,8 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       }
 
       const SUB_TYPES = new Set([
-        'stepper_x', 'stepper_y', 'stepper_z', 'stepper_z1', 'stepper_z2', 'stepper_z3',
         'stepper_a', 'stepper_b', 'stepper_c', 'manual_stepper', 'extruder_stepper',
-        'dual_carriage', 'extruder', 'extruder1', 'extruder2',
+        'dual_carriage',
         'tmc2209', 'tmc2208', 'tmc2130', 'tmc2240', 'tmc5160', 'tmc2660',
         'heater_bed', 'heater_generic',
         'fan', 'heater_fan', 'controller_fan', 'temperature_fan', 'fan_generic',
@@ -1732,14 +1741,14 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         if (currentGraphHeaders.has(sectionIdentityForSection(sec))) continue;
 
         const isFeature = FEAT_TYPES.has(sec.section_type);
-        const isSub = SUB_TYPES.has(sec.section_type);
+        const isSub = SUB_TYPES.has(sec.section_type) || isDynamicSubComponentType(sec.section_type);
         if (!isFeature && !isSub) continue;
 
         const label = sec.section_name
           ? `${sec.section_type}: ${sec.section_name}`
           : sec.section_type;
 
-        const componentGroup = COMPONENT_GROUP_MAP[sec.section_type] || (isFeature ? sec.section_type : 'other');
+        const componentGroup = getComponentGroup(sec.section_type, isFeature);
 
         const suppressed = sec.params.filter((p) => p.key !== '_comment_').every((p) => p.is_commented_out) &&
           sec.params.filter((p) => p.key !== '_comment_').length > 0;

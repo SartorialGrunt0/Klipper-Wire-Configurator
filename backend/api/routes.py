@@ -185,7 +185,7 @@ async def acknowledge_warning_api(data: WarningAcknowledgementRequest):
         section_type=data.section.section_type,
         section_name=data.section.section_name,
         full_header=data.section.full_header,
-        line_number=0,
+        line_number=data.section.line_number,
         params=[
             ConfigParam(
                 key=param.key,
@@ -452,6 +452,7 @@ def _config_update_to_config_file(data: ConfigUpdate) -> ConfigFile:
             section_type=sec_data.section_type,
             section_name=sec_data.section_name,
             full_header=sec_data.full_header,
+            line_number=sec_data.line_number,
             params=params,
             header_comments=sec_data.header_comments,
             trailing_comments=sec_data.trailing_comments,

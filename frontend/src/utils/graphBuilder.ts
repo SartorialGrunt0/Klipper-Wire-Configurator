@@ -11,11 +11,13 @@ import type { ConfigFile, ConfigSection, ConfigParam, SectionSchema, ValidationR
 import type { HardwareType, CommunicationType } from '../types/config';
 import { getBoardTypeMarker } from './boardTypeMarker';
 
+const STEPPER_SECTION_RE = /^stepper_[a-z]+(\d+)?$/;
+const EXTRUDER_SECTION_RE = /^extruder(\d+)?$/;
+
 // Section types that are sub-components (attached to hardware)
 const SUB_COMPONENT_TYPES = new Set([
-  'stepper_x', 'stepper_y', 'stepper_z', 'stepper_z1', 'stepper_z2', 'stepper_z3',
   'stepper_a', 'stepper_b', 'stepper_c', 'manual_stepper', 'extruder_stepper',
-  'dual_carriage', 'extruder', 'extruder1', 'extruder2',
+  'dual_carriage',
   'tmc2209', 'tmc2208', 'tmc2130', 'tmc2240', 'tmc5160', 'tmc2660',
   'heater_bed', 'heater_generic',
   'fan', 'heater_fan', 'controller_fan', 'temperature_fan', 'fan_generic',
@@ -27,6 +29,10 @@ const SUB_COMPONENT_TYPES = new Set([
   'adxl345', 'lis2dw', 'lis3dh', 'bmi160', 'mpu9250', 'icm20948',
   'printer', 'mcu',
 ]);
+
+function isDynamicSubComponentType(sectionType: string): boolean {
+  return STEPPER_SECTION_RE.test(sectionType) || EXTRUDER_SECTION_RE.test(sectionType);
+}
 
 // Section types that are features
 const FEATURE_TYPES = new Set([
@@ -41,13 +47,10 @@ const FEATURE_TYPES = new Set([
 
 // Map section types to component groups (for grouping)
 const COMPONENT_GROUP_MAP: Record<string, string> = {
-  stepper_x: 'stepper', stepper_y: 'stepper', stepper_z: 'stepper',
-  stepper_z1: 'stepper', stepper_z2: 'stepper', stepper_z3: 'stepper',
   stepper_a: 'stepper', stepper_b: 'stepper', stepper_c: 'stepper',
   manual_stepper: 'stepper', extruder_stepper: 'stepper', dual_carriage: 'stepper',
   tmc2209: 'stepper_driver', tmc2208: 'stepper_driver', tmc2130: 'stepper_driver',
   tmc2240: 'stepper_driver', tmc5160: 'stepper_driver', tmc2660: 'stepper_driver',
-  extruder: 'extruder', extruder1: 'extruder', extruder2: 'extruder',
   heater_bed: 'heater', heater_generic: 'heater',
   fan: 'fan', heater_fan: 'fan', controller_fan: 'fan', temperature_fan: 'fan', fan_generic: 'fan',
   temperature_sensor: 'temperature',
@@ -68,6 +71,12 @@ const COMPONENT_GROUP_MAP: Record<string, string> = {
   safe_z_home: 'homing', homing_override: 'homing', endstop_phase: 'homing',
   input_shaper: 'resonance', resonance_tester: 'resonance',
 };
+
+function getComponentGroup(sectionType: string, isFeature: boolean): string {
+  if (STEPPER_SECTION_RE.test(sectionType)) return 'stepper';
+  if (EXTRUDER_SECTION_RE.test(sectionType)) return 'extruder';
+  return COMPONENT_GROUP_MAP[sectionType] || (isFeature ? sectionType : 'other');
+}
 
 // Human-readable group names
 const GROUP_DISPLAY_NAMES: Record<string, string> = {
@@ -244,10 +253,15 @@ export function buildProjectGraph(
   if (filenames.length === 0) return;
 
   // Filter out files that have no recognized Klipper sections (e.g. moonraker, crowsnest)
-  const RECOGNIZED_TYPES = new Set([...SUB_COMPONENT_TYPES, ...FEATURE_TYPES, 'mcu', 'include']);
   const recognizedConfigs: Record<string, ConfigFile> = {};
   for (const [fn, cfg] of Object.entries(configs)) {
-    const hasRecognized = cfg.sections.some((s) => RECOGNIZED_TYPES.has(s.section_type));
+    const hasRecognized = cfg.sections.some((s) =>
+      s.section_type === 'mcu'
+      || s.section_type === 'include'
+      || FEATURE_TYPES.has(s.section_type)
+      || SUB_COMPONENT_TYPES.has(s.section_type)
+      || isDynamicSubComponentType(s.section_type)
+    );
     if (hasRecognized) {
       recognizedConfigs[fn] = cfg;
     }
@@ -522,7 +536,7 @@ export function buildProjectGraph(
       }
 
       const isFeature = FEATURE_TYPES.has(sType);
-      const componentGroup = COMPONENT_GROUP_MAP[sType] || (isFeature ? sType : 'other');
+      const componentGroup = getComponentGroup(sType, isFeature);
 
       // Group key: parent + group type + feature/sub distinction
       const groupKey = `${parentId}::${componentGroup}::${isFeature ? 'feat' : 'sub'}`;
@@ -570,7 +584,7 @@ export function buildProjectGraph(
         let nodeId: string;
         if (item.isFeature) {
           nodeId = graphStore.addFeatureNode(item.parentId, item.sType, item.label, item.sec.full_header, item.filename, item.sec.line_number);
-        } else if (SUB_COMPONENT_TYPES.has(item.sType)) {
+        } else if (SUB_COMPONENT_TYPES.has(item.sType) || isDynamicSubComponentType(item.sType)) {
           nodeId = graphStore.addSubComponentNode(item.parentId, item.sType, item.label, item.sec.full_header, item.filename, item.sec.line_number);
         } else {
           nodeId = graphStore.addSubComponentNode(item.parentId, item.sType, item.label, item.sec.full_header, item.filename, item.sec.line_number);

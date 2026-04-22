@@ -11,7 +11,8 @@ def smart_export(config: ConfigFile) -> str:
     """Export config text, using raw_text as the base when available.
 
     If raw_text is present, parses it to find each section's line range,
-    matches submitted sections with parsed originals *by header name*,
+    matches submitted sections with parsed originals by line number when
+    available and by header name as a fallback,
     and only re-generates sections that have changed.  Unchanged sections
     keep their exact original text (comments, whitespace, formatting, and all).
 
@@ -68,12 +69,15 @@ def smart_export(config: ConfigFile) -> str:
 
         section_ranges.append((start, end))
 
-    # Build lookup of original sections by header for matching.
-    # Use a deque per header to handle duplicate section names correctly
-    # (each submitted section consumes the next matching original in order).
+    # Build lookup of original sections by line number first and by header name
+    # as a fallback for newly-added sections or older clients.
+    orig_by_line: dict[int, tuple[int, ConfigSection]] = {}
     orig_by_header: dict[str, deque[tuple[int, ConfigSection]]] = defaultdict(deque)
     for idx, sec in enumerate(original.sections):
+        if sec.line_number > 0:
+            orig_by_line[sec.line_number] = (idx, sec)
         orig_by_header[sec.full_header].append((idx, sec))
+    used_orig_indices: set[int] = set()
 
     # Build output
     result_parts: list[str] = []
@@ -83,13 +87,23 @@ def smart_export(config: ConfigFile) -> str:
     if pre_start > 0:
         result_parts.append("\n".join(raw_lines[:pre_start]))
 
-    # Match submitted sections by header name against originals
+    # Match submitted sections against originals.
     for sub_sec in config.sections:
-        entries = orig_by_header.get(sub_sec.full_header)
-        orig_entry = entries.popleft() if entries else None
+        orig_entry = None
+        if sub_sec.line_number > 0:
+            line_entry = orig_by_line.get(sub_sec.line_number)
+            if line_entry is not None and line_entry[0] not in used_orig_indices:
+                orig_entry = line_entry
+
+        if orig_entry is None:
+            entries = orig_by_header.get(sub_sec.full_header)
+            while entries and entries[0][0] in used_orig_indices:
+                entries.popleft()
+            orig_entry = entries.popleft() if entries else None
 
         if orig_entry is not None:
             orig_idx, orig_sec = orig_entry
+            used_orig_indices.add(orig_idx)
             start, end = section_ranges[orig_idx]
 
             if _sections_match(orig_sec, sub_sec):

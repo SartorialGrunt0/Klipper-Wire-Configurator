@@ -232,26 +232,26 @@ for axis in ["stepper_x", "stepper_y", "stepper_z"]:
         params=STEPPER_PARAMS[:],
     ))
 
-# Extra Z steppers
-for i in range(1, 4):
-    _register(SectionDef(
-        section_type=f"stepper_z{i}",
-        display_name=f"Stepper Z{i}",
-        category="sub_component",
-        component_group="stepper",
-        is_named=True,
-        description=f"Additional Z-axis stepper motor {i}",
-        params=[
-            _float("rotation_distance", "Distance per full rotation in mm"),
-            _int("microsteps", "Microsteps per full step"),
-            _int("full_steps_per_rotation", "Steps per full motor rotation", default="200"),
-            _str("gear_ratio", "Gear ratio"),
-            _pin("step_pin", "Step GPIO pin", required=True),
-            _pin("dir_pin", "Direction GPIO pin", required=True),
-            _pin("enable_pin", "Enable GPIO pin"),
-            _pin("endstop_pin", "Endstop pin"),
-        ],
-    ))
+# Additional steppers for the same axis
+for axis in ["x", "y", "z"]:
+    for i in range(1, 4):
+        _register(SectionDef(
+            section_type=f"stepper_{axis}{i}",
+            display_name=f"Stepper {axis.upper()}{i}",
+            category="sub_component",
+            component_group="stepper",
+            description=f"Additional {axis.upper()}-axis stepper motor {i}",
+            params=[
+                _float("rotation_distance", "Distance per full rotation in mm"),
+                _int("microsteps", "Microsteps per full step"),
+                _int("full_steps_per_rotation", "Steps per full motor rotation", default="200"),
+                _str("gear_ratio", "Gear ratio"),
+                _pin("step_pin", "Step GPIO pin", required=True),
+                _pin("dir_pin", "Direction GPIO pin", required=True),
+                _pin("enable_pin", "Enable GPIO pin"),
+                _pin("endstop_pin", "Endstop pin"),
+            ],
+        ))
 
 # Delta steppers
 for tower in ["stepper_a", "stepper_b", "stepper_c"]:

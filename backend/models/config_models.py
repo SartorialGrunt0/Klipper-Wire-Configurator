@@ -17,6 +17,7 @@ class SectionUpdate(BaseModel):
     full_header: str
     section_type: str
     section_name: str = ""
+    line_number: int = 0
     params: list[ParamUpdate]
     header_comments: list[str] = []
     trailing_comments: list[str] = []

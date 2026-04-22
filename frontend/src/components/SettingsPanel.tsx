@@ -195,19 +195,20 @@ export default function SettingsPanel() {
 
   /** Resolve the owning config filename for the current section. */
   const resolveFilename = useCallback(() => {
+    if (sectionConfigFile) return sectionConfigFile;
     if (nodeConfigFile) return nodeConfigFile;
     if (!sectionHeader) return activeFile;
     return Object.entries(configFiles).find(([_, cf]) =>
       cf.sections.some((s) => s.full_header === sectionHeader)
     )?.[0] || activeFile;
-  }, [nodeConfigFile, sectionHeader, configFiles, activeFile]);
+  }, [sectionConfigFile, nodeConfigFile, sectionHeader, configFiles, activeFile]);
 
   const handleParamChange = useCallback(
     (key: string, value: string) => {
       if (!sectionHeader) return;
-      updateSectionParam(resolveFilename(), sectionHeader, key, value);
+      updateSectionParam(resolveFilename(), sectionHeader, key, value, nodeSectionLineNumber ?? undefined);
     },
-    [sectionHeader, resolveFilename, updateSectionParam],
+    [sectionHeader, resolveFilename, updateSectionParam, nodeSectionLineNumber],
   );
 
   const handleParamCommit = useCallback(() => {
@@ -223,17 +224,17 @@ export default function SettingsPanel() {
         value: paramSchema.default || '',
         comment: '',
         is_commented_out: false,
-      });
+      }, nodeSectionLineNumber ?? undefined);
     },
-    [sectionHeader, resolveFilename, addParam],
+    [sectionHeader, resolveFilename, addParam, nodeSectionLineNumber],
   );
 
   const handleRemoveParam = useCallback(
     (key: string) => {
       if (!sectionHeader) return;
-      removeParam(resolveFilename(), sectionHeader, key);
+      removeParam(resolveFilename(), sectionHeader, key, nodeSectionLineNumber ?? undefined);
     },
-    [sectionHeader, resolveFilename, removeParam],
+    [sectionHeader, resolveFilename, removeParam, nodeSectionLineNumber],
   );
 
   // For hardware nodes: show overview with add buttons
@@ -249,23 +250,19 @@ export default function SettingsPanel() {
     });
   }, [selectedNodeId, nodes]);
 
-  const allSectionHeaders = useMemo(() => {
-    const headers = new Set<string>();
-    for (const cf of Object.values(configFiles)) {
-      for (const s of cf.sections) {
-        headers.add(s.full_header);
-      }
-    }
-    return headers;
-  }, [configFiles]);
+  const targetConfigSections = useMemo(() => {
+    const filename = hwData?.configFile || sectionConfigFile || nodeConfigFile || activeFile;
+    return configFiles[filename]?.sections || [];
+  }, [hwData?.configFile, sectionConfigFile, nodeConfigFile, activeFile, configFiles]);
 
   const handleAddSubComponent = useCallback((sectionType: string) => {
     if (!selectedNodeId) return;
     const schemaDef = schemas[sectionType];
     const displayName = schemaDef?.display_name || sectionType;
-    const draft = buildUniqueSectionDraft(sectionType, displayName, schemaDef?.is_named, allSectionHeaders);
 
     const filename = hwData?.configFile || activeFile;
+    const existingSections = configFiles[filename]?.sections || targetConfigSections;
+    const draft = buildUniqueSectionDraft(sectionType, displayName, schemaDef, existingSections);
     addSubComponentNode(selectedNodeId, sectionType, draft.label, draft.fullHeader, filename);
     addSection(filename, {
       section_type: sectionType,
@@ -276,7 +273,7 @@ export default function SettingsPanel() {
       header_comments: [],
     });
     // Keep menu open for multi-select
-  }, [selectedNodeId, schemas, addSubComponentNode, addSection, hwData, activeFile, allSectionHeaders]);
+  }, [selectedNodeId, schemas, addSubComponentNode, addSection, hwData, activeFile, configFiles, targetConfigSections]);
 
   const handleAddFeature = useCallback((sectionType: string) => {
     if (!selectedNodeId) return;
@@ -294,9 +291,10 @@ export default function SettingsPanel() {
 
     const schemaDef = schemas[sectionType];
     const displayName = schemaDef?.display_name || sectionType;
-    const draft = buildUniqueSectionDraft(sectionType, displayName, schemaDef?.is_named, allSectionHeaders);
 
     const filename = hwData?.configFile || activeFile;
+    const existingSections = configFiles[filename]?.sections || targetConfigSections;
+    const draft = buildUniqueSectionDraft(sectionType, displayName, schemaDef, existingSections);
     addFeatureNode(selectedNodeId, sectionType, draft.label, draft.fullHeader, filename);
     addSection(filename, {
       section_type: sectionType,
@@ -307,7 +305,7 @@ export default function SettingsPanel() {
       header_comments: [],
     });
     // Keep menu open for multi-select
-  }, [selectedNodeId, schemas, nodes, addFeatureNode, addSection, hwData, activeFile, allSectionHeaders]);
+  }, [selectedNodeId, schemas, nodes, addFeatureNode, addSection, hwData, activeFile, configFiles, targetConfigSections]);
 
   /**
    * Apply MCU name change to a hardware node:
@@ -672,18 +670,18 @@ export default function SettingsPanel() {
       const result = await import('../services/api').then((m) => m.parseConfigText(sectionEditText, activeFile));
       const parsedSection = result.config.sections.find((s: ConfigSection) => s.full_header === sectionHeader);
       if (parsedSection) {
-        const filename = Object.entries(configFiles).find(([_, cf]) =>
-          cf.sections.some((s) => s.full_header === sectionHeader)
+        const filename = sectionConfigFile || Object.entries(configFiles).find(([_, cf]) =>
+          cf.sections.some((s) => s.full_header === sectionHeader && (nodeSectionLineNumber == null || nodeSectionLineNumber === 0 || s.line_number === nodeSectionLineNumber))
         )?.[0] || activeFile;
         for (const p of parsedSection.params) {
-          updateSectionParam(filename, sectionHeader!, p.key, p.value);
+          updateSectionParam(filename, sectionHeader!, p.key, p.value, nodeSectionLineNumber ?? undefined);
         }
       }
       setSectionTextDirty(false);
     } catch (err) {
       console.error('Parse error:', err);
     }
-  }, [sectionEditText, activeFile, sectionHeader, configFiles, updateSectionParam]);
+  }, [sectionEditText, activeFile, sectionHeader, configFiles, updateSectionParam, nodeSectionLineNumber, sectionConfigFile]);
 
   const handleAcknowledgeWarning = useCallback(async () => {
     if (!section || !sectionConfigFile) return;
@@ -997,8 +995,8 @@ export default function SettingsPanel() {
         </button>
       )}
       {/* Header */}
-      <div className="flex items-start justify-between p-3 border-b border-[var(--color-bg-tertiary)] shrink-0">
-        <div className="flex-1 min-w-0 mr-2">
+      <div className="flex flex-col gap-3 p-3 border-b border-[var(--color-bg-tertiary)] shrink-0">
+        <div className="min-w-0">
           <h2 className="text-sm font-semibold text-[var(--color-text-primary)]">
             [{section.full_header}]
           </h2>
@@ -1036,7 +1034,7 @@ export default function SettingsPanel() {
             </div>
           )}
         </div>
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex flex-wrap items-center gap-2">
           {hasAcknowledgeableWarning && (
             <button
               onClick={() => { void handleAcknowledgeWarning(); }}

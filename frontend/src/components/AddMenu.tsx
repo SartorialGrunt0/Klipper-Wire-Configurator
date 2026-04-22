@@ -91,16 +91,6 @@ export default function AddMenu({ onClose }: AddMenuProps) {
   const { addHardwareNode, addSubComponentNode, addFeatureNode, nodes } = useGraphStore();
   const { configFiles, activeFile, addSection } = useConfigStore();
 
-  const allSectionHeaders = useMemo(() => {
-    const headers = new Set<string>();
-    for (const cf of Object.values(configFiles)) {
-      for (const section of cf.sections) {
-        headers.add(section.full_header);
-      }
-    }
-    return headers;
-  }, [configFiles]);
-
   const hardwareNodes = nodes.filter((n) => n.type === 'hardware');
   const attachableHardwareNodes = hardwareNodes.filter((n) => {
     const data = n.data as Record<string, unknown>;
@@ -350,23 +340,22 @@ export default function AddMenu({ onClose }: AddMenuProps) {
   };
 
   const handleAddSubComponent = (sectionType: string) => {
-    const schema = schemas[sectionType];
-    const displayName = schema?.display_name || sectionType;
-    const draft = buildUniqueSectionDraft(sectionType, displayName, schema?.is_named, allSectionHeaders);
-
-    if (selectedParent) {
-      addSubComponentNode(selectedParent, sectionType, draft.label, draft.fullHeader);
-    } else {
-      // No parent selected — add as standalone node in empty space
-      const { addSubComponentNode: addSub } = useGraphStore.getState();
-      addSub(null as unknown as string, sectionType, draft.label, draft.fullHeader);
-    }
-
-    // Add to the parent's config file (not just activeFile)
     const parentNode = selectedParent ? nodes.find((n) => n.id === selectedParent) : null;
     const parentConfigFile = parentNode
       ? ((parentNode.data as Record<string, unknown>).configFile as string) || activeFile
       : activeFile;
+    const schema = schemas[sectionType];
+    const displayName = schema?.display_name || sectionType;
+    const existingSections = configFiles[parentConfigFile]?.sections || [];
+    const draft = buildUniqueSectionDraft(sectionType, displayName, schema, existingSections);
+
+    if (selectedParent) {
+      addSubComponentNode(selectedParent, sectionType, draft.label, draft.fullHeader, parentConfigFile);
+    } else {
+      // No parent selected — add as standalone node in empty space
+      const { addSubComponentNode: addSub } = useGraphStore.getState();
+      addSub(null as unknown as string, sectionType, draft.label, draft.fullHeader, parentConfigFile);
+    }
 
     addSection(parentConfigFile, {
       section_type: sectionType,
@@ -389,24 +378,24 @@ export default function AddMenu({ onClose }: AddMenuProps) {
       if (existing) return;
     }
 
-    const schema = schemas[sectionType];
-    const displayName = schema?.display_name || sectionType;
-    const draft = buildUniqueSectionDraft(sectionType, displayName, schema?.is_named, allSectionHeaders);
     const pId = selectedParent || hardwareNodes[0]?.id || null;
-
-    if (pId) {
-      addFeatureNode(pId, sectionType, draft.label, draft.fullHeader);
-    } else {
-      // No parent selected — add as standalone feature node
-      const { addFeatureNode: addFeat } = useGraphStore.getState();
-      addFeat(null as unknown as string, sectionType, draft.label, draft.fullHeader);
-    }
-
-    // Add to the parent's config file
     const parentNode = pId ? nodes.find((n) => n.id === pId) : null;
     const parentConfigFile = parentNode
       ? ((parentNode.data as Record<string, unknown>).configFile as string) || activeFile
       : activeFile;
+
+    const schema = schemas[sectionType];
+    const displayName = schema?.display_name || sectionType;
+    const existingSections = configFiles[parentConfigFile]?.sections || [];
+    const draft = buildUniqueSectionDraft(sectionType, displayName, schema, existingSections);
+
+    if (pId) {
+      addFeatureNode(pId, sectionType, draft.label, draft.fullHeader, parentConfigFile);
+    } else {
+      // No parent selected — add as standalone feature node
+      const { addFeatureNode: addFeat } = useGraphStore.getState();
+      addFeat(null as unknown as string, sectionType, draft.label, draft.fullHeader, parentConfigFile);
+    }
 
     addSection(parentConfigFile, {
       section_type: sectionType,

@@ -1050,6 +1050,11 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
         || graphStore.nodes.find((node) => node.type === 'hardware');
       if (parent) {
         graphStore.addFeatureNode(parent.id, 'gcode_macro', selectedMacroSection.section_name, selectedMacroSection.full_header, targetFile);
+        const parentData = parent.data as Record<string, unknown>;
+        if (parentData.collapsed) {
+          graphStore.toggleHardwareCollapse(parent.id);
+        }
+        graphStore.reflowParentChildren(parent.id);
       }
     }
     setMessage(existingTargetSection
@@ -1952,8 +1957,8 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                   <div className="mt-3 grid gap-3 text-xs lg:grid-cols-2">
                     <div className="min-w-0">
                       <label className="mb-1 block text-[var(--color-text-secondary)]">Bed target</label>
-                      <div className="flex flex-wrap gap-1">
-                        <input disabled={!editMode} value={bedTarget} onChange={(event) => setBedTarget(event.target.value)} className="min-w-[8rem] flex-1 rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40" />
+                      <div className="flex items-center gap-1">
+                        <input disabled={!editMode} value={bedTarget} onChange={(event) => setBedTarget(event.target.value)} className="w-16 min-w-0 rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40" />
                         <button disabled={!editMode} onClick={() => {
                           const target = Number(bedTarget);
                           if (!Number.isFinite(target) || target < 0 || target > machineProfile.bedMaxTemp) {
@@ -1974,8 +1979,8 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                     </div>
                     <div className="min-w-0">
                       <label className="mb-1 block text-[var(--color-text-secondary)]">Nozzle target</label>
-                      <div className="flex flex-wrap gap-1">
-                        <input disabled={!editMode} value={nozzleTarget} onChange={(event) => setNozzleTarget(event.target.value)} className="min-w-[8rem] flex-1 rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40" />
+                      <div className="flex items-center gap-1">
+                        <input disabled={!editMode} value={nozzleTarget} onChange={(event) => setNozzleTarget(event.target.value)} className="w-16 min-w-0 rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40" />
                         <button disabled={!editMode} onClick={() => {
                           const target = Number(nozzleTarget);
                           if (!Number.isFinite(target) || target < 0 || target > machineProfile.nozzleMaxTemp) {
