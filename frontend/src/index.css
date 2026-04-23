@@ -179,6 +179,20 @@ body {
   overflow: visible !important;
 }
 
+.kwc-hardware-drop-preview {
+  position: absolute;
+  top: calc(100% - 2px);
+  left: 0;
+  pointer-events: none;
+  overflow: hidden;
+  border: 1px solid;
+  border-top: none;
+  border-radius: 0 0 14px 14px;
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.98), rgba(30, 41, 59, 0.92));
+  backdrop-filter: blur(8px);
+  z-index: 20;
+}
+
 /* Force edges behind all nodes */
 .react-flow__edges {
   z-index: 0 !important;

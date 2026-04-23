@@ -1044,10 +1044,39 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
       return !!children?.some((child) => child.sectionHeader === selectedMacroSection.full_header && child.configFile === targetFile);
     });
     if (!alreadyInGraph) {
-      const parent = graphStore.nodes.find((node) => node.type === 'hardware' && !!(node.data as Record<string, unknown>).isPrimary)
-        || graphStore.nodes.find((node) => node.type === 'hardware' && (node.data as Record<string, unknown>).configFile === targetFile && (node.data as Record<string, unknown>).hardwareType !== 'sbc')
-        || graphStore.nodes.find((node) => node.type === 'hardware' && (node.data as Record<string, unknown>).hardwareType !== 'sbc')
-        || graphStore.nodes.find((node) => node.type === 'hardware');
+      const basename = (value: string) => value.replace(/^.*[\\/]/, '');
+      const hardwareNodes = graphStore.nodes.filter((node) => node.type === 'hardware');
+      const nonSbcHardwareNodes = hardwareNodes.filter(
+        (node) => (node.data as Record<string, unknown>).hardwareType !== 'sbc',
+      );
+      const findHardwareForFile = (filename: string) => nonSbcHardwareNodes.find((node) => {
+        const nodeFile = (node.data as Record<string, unknown>).configFile as string | undefined;
+        return !!nodeFile && (nodeFile === filename || basename(nodeFile) === basename(filename));
+      });
+      const findIncludingFile = (filename: string): string | null => {
+        const targetBase = basename(filename);
+        for (const [candidateFile, config] of Object.entries(configFiles)) {
+          if (config.includes.some((includePath) => includePath === filename || basename(includePath) === targetBase)) {
+            return candidateFile;
+          }
+        }
+        return null;
+      };
+
+      let ownerFile: string | null = targetFile;
+      const visitedFiles = new Set<string>();
+      let parent = ownerFile ? findHardwareForFile(ownerFile) : undefined;
+
+      while (!parent && ownerFile && !visitedFiles.has(ownerFile)) {
+        visitedFiles.add(ownerFile);
+        ownerFile = findIncludingFile(ownerFile);
+        parent = ownerFile ? findHardwareForFile(ownerFile) : undefined;
+      }
+
+      parent = parent
+        || nonSbcHardwareNodes.find((node) => !!(node.data as Record<string, unknown>).isPrimary)
+        || nonSbcHardwareNodes[0]
+        || hardwareNodes[0];
       if (parent) {
         graphStore.addFeatureNode(parent.id, 'gcode_macro', selectedMacroSection.section_name, selectedMacroSection.full_header, targetFile);
         const parentData = parent.data as Record<string, unknown>;

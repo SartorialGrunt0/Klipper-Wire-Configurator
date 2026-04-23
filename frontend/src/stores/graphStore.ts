@@ -51,6 +51,7 @@ const HW_COLORS: Record<string, string> = {
   mainboard: '#38bdf8',
   toolhead: '#f472b6',
   expander: '#a78bfa',
+  config_file: '#0f766e',
   probe: '#ec4899',
   accelerometer: '#84cc16',
   other: '#64748b',
@@ -119,6 +120,8 @@ const HARDWARE_Z_INDEX = 0;
 const SELECTED_PARENT_Z_INDEX = 100;
 /** Child cards should always render above major component cards */
 const CHILD_NODE_Z_INDEX = 200;
+/** Selected child cards stay above sibling cards and action overlays */
+const ACTIVE_CHILD_Z_INDEX = 300;
 
 function getNodeSlotHeight(node: AppNode, selectedId: string | null): number {
   if (node.type === 'group' && node.id === selectedId) {
@@ -160,6 +163,13 @@ function cloneSnapshot<T>(value: T): T {
     return structuredClone(value);
   }
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function revalidateConfigFiles(configFiles: Record<string, ConfigFile>): void {
+  const configStore = useConfigStore.getState();
+  for (const filename of Object.keys(configFiles)) {
+    void configStore.revalidateFile(filename);
+  }
 }
 
 function getSectionSnapshot(
@@ -210,6 +220,7 @@ interface GraphState {
   nodes: AppNode[];
   edges: AppEdge[];
   selectedNodeId: string | null;
+  dragHoverHardwareId: string | null;
 
   /* React Flow callbacks */
   onNodesChange: (changes: NodeChange[]) => void;
@@ -223,6 +234,7 @@ interface GraphState {
   duplicateNode: (id: string) => void;
   updateNodeData: (id: string, data: Partial<AppNode['data']>) => void;
   setSelectedNode: (id: string | null) => void;
+  setDragHoverHardwareId: (id: string | null) => void;
 
   /* Edge operations */
   addEdge: (edge: AppEdge) => void;
@@ -378,6 +390,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   nodes: [],
   edges: [],
   selectedNodeId: null,
+  dragHoverHardwareId: null,
   selectedEdgeId: null,
   fitViewTrigger: 0,
 
@@ -794,16 +807,16 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     const prevParentId = prevNode?.parentId;
     const newParentId = newNode?.parentId;
 
-    // Elevate the parent hardware node so the action overlay renders above sibling hardware nodes
-    if (prevParentId !== newParentId) {
-      set((s) => ({
-        nodes: s.nodes.map((n) => {
-          if (n.id === prevParentId && n.id !== newParentId) return { ...n, zIndex: HARDWARE_Z_INDEX };
-          if (n.id === newParentId) return { ...n, zIndex: SELECTED_PARENT_Z_INDEX };
-          return n;
-        }) as AppNode[],
-      }));
-    }
+    set((s) => ({
+      nodes: s.nodes.map((n) => {
+        const isChildNode = n.type === 'subComponent' || n.type === 'feature' || n.type === 'group' || n.type === 'customGroup';
+        if (isChildNode && n.id === prevId && n.id !== id) return { ...n, zIndex: CHILD_NODE_Z_INDEX };
+        if (isChildNode && n.id === id) return { ...n, zIndex: ACTIVE_CHILD_Z_INDEX };
+        if (n.id === prevParentId && n.id !== newParentId) return { ...n, zIndex: HARDWARE_Z_INDEX };
+        if (n.id === newParentId) return { ...n, zIndex: SELECTED_PARENT_Z_INDEX };
+        return n;
+      }) as AppNode[],
+    }));
 
     // Reflow the parent of the old selection
     if (prevId && prevId !== id) {
@@ -814,6 +827,8 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       if (newParentId) get().reflowParentChildren(newParentId);
     }
   },
+
+  setDragHoverHardwareId: (id) => set({ dragHoverHardwareId: id }),
 
   addEdge: (edge) => set((s) => ({ edges: [...s.edges, edge] })),
   removeEdge: (id) => {
@@ -1391,8 +1406,8 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     const oldParentId = node.parentId ?? null;
     if (oldParentId === newParentId) return;
 
-    const oldParentNode = oldParentId ? currentState.nodes.find((n) => n.id === oldParentId) : null;
-    const newParentNode = newParentId ? currentState.nodes.find((n) => n.id === newParentId) : null;
+    const oldParentNode = oldParentId ? currentState.nodes.find((n) => n.id === oldParentId) || null : null;
+    const newParentNode = newParentId ? currentState.nodes.find((n) => n.id === newParentId) || null : null;
 
     // Compute new position
     let newX = absolutePos ? absolutePos.x : node.position.x;
@@ -1423,25 +1438,38 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     const sectionHeader = nodeData.sectionHeader as string | undefined;
     const sectionLineNumber = nodeData.sectionLineNumber as number | undefined;
 
-    // Resolve old config file: from old parent, or from node's own configFile (standalone case)
-    const oldConfigFile = oldParentNode
-      ? ((oldParentNode.data as Record<string, unknown>).configFile as string | undefined)
-      : (nodeData.configFile as string | undefined);
+    const resolveConfigFile = (parentNode: AppNode | null, fallbackConfigFile?: string) => (
+      parentNode
+        ? ((parentNode.data as Record<string, unknown>).configFile as string | undefined)
+        : fallbackConfigFile
+    );
 
-    // Resolve new config file: from new parent, or generate standalone file from section header
+    const resolveMcuName = (parentNode: AppNode | null, configFile?: string) => {
+      if (parentNode) {
+        return ((parentNode.data as Record<string, unknown>).mcuName as string) || '';
+      }
+      if (!configFile) return '';
+      const ownerNode = currentState.nodes.find(
+        (candidate) => candidate.type === 'hardware' && ((candidate.data as Record<string, unknown>).configFile as string | undefined) === configFile,
+      );
+      return ownerNode ? (((ownerNode.data as Record<string, unknown>).mcuName as string) || '') : '';
+    };
+
+    // Resolve old config file: from old parent, or from node's own configFile (standalone case)
+    const oldConfigFile = resolveConfigFile(oldParentNode, nodeData.configFile as string | undefined);
+
+    // Orphaned child nodes stay in their existing config file; only reparenting to
+    // another major component should move sections between files.
     const newConfigFile = newParentNode
-      ? ((newParentNode.data as Record<string, unknown>).configFile as string | undefined)
-      : sectionHeader
-      ? `${sectionHeader.replace(/\s+/g, '_')}.cfg`
-      : undefined;
+      ? resolveConfigFile(newParentNode)
+      : oldConfigFile;
 
     // Determine MCU context change for pin prefix updates
-    const oldMcuName = oldParentNode
-      ? ((oldParentNode.data as Record<string, unknown>).mcuName as string || '')
-      : '';
+    const oldMcuName = resolveMcuName(oldParentNode, oldConfigFile);
     const newMcuName = newParentNode
-      ? ((newParentNode.data as Record<string, unknown>).mcuName as string || '')
-      : '';
+      ? resolveMcuName(newParentNode, newConfigFile)
+      : oldMcuName;
+    const movedAcrossFiles = !!oldConfigFile && !!newConfigFile && oldConfigFile !== newConfigFile;
 
     // Collect all section headers to move (single node or group with children)
     const sectionRefs: SectionRef[] = [];
@@ -1499,14 +1527,24 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       if (movedIdx >= 0) {
         const movedData = { ...newNodes[movedIdx].data } as Record<string, unknown>;
         if ('parentHardwareId' in movedData) {
-          movedData.parentHardwareId = newParentId ?? '';
+          movedData.parentHardwareId = newParentId;
         }
         if (newNodes[movedIdx].type === 'feature') {
-          movedData.parentId = newParentId ?? '';
+          movedData.parentId = newParentId;
         }
         // Update configFile on the node
         if (newConfigFile) {
           movedData.configFile = newConfigFile;
+        }
+        if (movedAcrossFiles && 'sectionLineNumber' in movedData) {
+          movedData.sectionLineNumber = 0;
+        }
+        if (Array.isArray(movedData.children)) {
+          movedData.children = movedData.children.map((child) => ({
+            ...child,
+            ...(newConfigFile ? { configFile: newConfigFile } : {}),
+            ...(movedAcrossFiles ? { sectionLineNumber: 0 } : {}),
+          }));
         }
         newNodes[movedIdx] = { ...newNodes[movedIdx], data: movedData } as AppNode;
       }
@@ -1538,13 +1576,15 @@ export const useGraphStore = create<GraphState>((set, get) => ({
           if (oldMcuName !== newMcuName) {
             updatedSection = updateSectionPins(section, oldMcuName, newMcuName, schemas);
           }
-          configState.addSection(newConfigFile, updatedSection);
+          const movedSection = cloneSnapshot(updatedSection);
+          movedSection.line_number = 0;
+          configState.addSection(newConfigFile, movedSection);
           configState.removeSection(oldConfigFile, ref.sectionHeader, ref.sectionLineNumber);
         }
       }
 
       // Clean up old config file if it's now empty and not a standard file
-      const oldFile = configState.configFiles[oldConfigFile];
+      const oldFile = useConfigStore.getState().configFiles[oldConfigFile];
       if (oldFile && oldFile.sections.length === 0 && oldConfigFile !== 'printer.cfg') {
         // Check no hardware nodes still reference this file
         const stillReferenced = get().nodes.some(
@@ -1574,18 +1614,24 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     }
 
     // Sync group children's params with updated config store data
-    if (node.type === 'group' && Array.isArray(nodeData.children) && oldMcuName !== newMcuName) {
+    if (node.type === 'group' && Array.isArray(nodeData.children) && (oldMcuName !== newMcuName || movedAcrossFiles)) {
       const freshConfigs = useConfigStore.getState().configFiles;
       const targetFile = newConfigFile || oldConfigFile || '';
       const updatedChildren = (nodeData.children as Array<{ sectionHeader: string; sectionLineNumber?: number; configFile?: string; [key: string]: unknown }>).map((child) => {
-        const childFile = (child.configFile as string) || targetFile;
+        const childFile = targetFile || (child.configFile as string) || '';
         const cfData = freshConfigs[childFile];
-        const matchedSection = cfData?.sections.find((s: { full_header: string; line_number: number }) => matchesSectionRef(s, child));
-        if (!matchedSection) return child;
+        const childRef = {
+          sectionHeader: child.sectionHeader,
+          sectionLineNumber: movedAcrossFiles ? 0 : child.sectionLineNumber,
+        };
+        const matchedSection = cfData?.sections.find((s: { full_header: string; line_number: number }) => matchesSectionRef(s, childRef));
         return {
           ...child,
           configFile: newConfigFile || child.configFile,
-          params: matchedSection.params.filter((p: { is_commented_out?: boolean }) => !p.is_commented_out),
+          sectionLineNumber: movedAcrossFiles ? 0 : child.sectionLineNumber,
+          params: matchedSection
+            ? matchedSection.params.filter((p: { is_commented_out?: boolean }) => !p.is_commented_out)
+            : child.params,
         };
       });
       get().updateNodeData(nodeId, { children: updatedChildren });
@@ -1625,7 +1671,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 
   setNodes: (nodes) => set({ nodes: sortNodesParentsFirst(nodes) }),
   setEdges: (edges) => set({ edges }),
-  clearGraph: () => set({ nodes: [], edges: [], selectedNodeId: null }),
+  clearGraph: () => set({ nodes: [], edges: [], selectedNodeId: null, dragHoverHardwareId: null }),
 
   syncGraphWithConfig: (filename) => {
     const configStore = useConfigStore.getState();
@@ -2114,14 +2160,17 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       ...state,
       configFiles: cloneSnapshot(prev.configFiles),
       activeFile: prev.activeFile,
+      validation: {},
       isDirty: true,
     }));
     set({
       nodes: prev.nodes,
       edges: prev.edges,
+      dragHoverHardwareId: null,
       canUndo: undoStack.length > 0,
       canRedo: true,
     });
+    revalidateConfigFiles(prev.configFiles);
   },
 
   redo: () => {
@@ -2139,13 +2188,16 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       ...state,
       configFiles: cloneSnapshot(next.configFiles),
       activeFile: next.activeFile,
+      validation: {},
       isDirty: true,
     }));
     set({
       nodes: next.nodes,
       edges: next.edges,
+      dragHoverHardwareId: null,
       canUndo: true,
       canRedo: redoStack.length > 0,
     });
+    revalidateConfigFiles(next.configFiles);
   },
 }));

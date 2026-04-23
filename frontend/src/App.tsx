@@ -32,7 +32,7 @@ import AddMenu from './components/AddMenu';
 import UnsavedChangesDialog from './components/dialogs/UnsavedChangesDialog';
 import MacroDesignerDialog from './components/dialogs/MacroDesignerDialog';
 
-import type { AppNode, ValidationStatus } from './types/graph';
+import type { AppEdge, AppNode, ValidationStatus } from './types/graph';
 import type { MacroDesignerPersistedState } from './types/macroDesigner';
 import { combineValidationStatuses } from './utils/validationStatus';
 import { useMacroDesignerStore } from './stores/macroDesignerStore';
@@ -77,6 +77,33 @@ const edgeTypes: EdgeTypes = {
   configuration: ConfigurationEdge,
 };
 
+const HARDWARE_DRAG_PREVIEW_WIDTH = 400;
+const HARDWARE_DRAG_PREVIEW_HEADER_HEIGHT = 110;
+const HARDWARE_DRAG_PREVIEW_SLOT_HEIGHT = 40;
+const HARDWARE_DRAG_PREVIEW_PADDING_BOTTOM = 16;
+const HARDWARE_DRAG_PREVIEW_COLLAPSED_HEIGHT = 56;
+const HARDWARE_DRAG_PREVIEW_COLLAPSED_WIDTH = 200;
+
+function computeHardwareDragPreviewSize(nodes: Node[], hardwareId: string) {
+  const children = nodes.filter((node) => node.parentId === hardwareId);
+  const featureCount = children.filter((node) => {
+    const nodeData = node.data as Record<string, unknown>;
+    return node.type === 'feature' || (node.type === 'group' && !!nodeData.isFeature);
+  }).length;
+  const componentCount = children.filter((node) => {
+    const nodeData = node.data as Record<string, unknown>;
+    return node.type === 'subComponent' || (node.type === 'group' && !nodeData.isFeature);
+  }).length;
+  const rowCount = Math.max(featureCount, componentCount, 0);
+  return {
+    width: HARDWARE_DRAG_PREVIEW_WIDTH,
+    height: Math.max(
+      HARDWARE_DRAG_PREVIEW_HEADER_HEIGHT + rowCount * HARDWARE_DRAG_PREVIEW_SLOT_HEIGHT + HARDWARE_DRAG_PREVIEW_PADDING_BOTTOM,
+      160,
+    ),
+  };
+}
+
 /** Sits inside <ReactFlow> and calls fitView whenever trigger increments. */
 function AutoFitController({ trigger }: { trigger: number }) {
   const { fitView } = useReactFlow();
@@ -112,6 +139,7 @@ export default function App() {
     canRedo,
     fitViewTrigger,
     setNodes,
+    setDragHoverHardwareId,
   } = useGraphStore();
 
   const { selectedSection, setSelectedSection, validation } = useConfigStore();
@@ -124,6 +152,7 @@ export default function App() {
   const [showMacroDesigner, setShowMacroDesigner] = useState(false);
   const [showUnsavedDialog, setShowUnsavedDialog] = useState(false);
   const textEditorRef = useRef<TextEditorHandle>(null);
+  const dragHoverHardwareIdRef = useRef<string | null>(null);
 
   // Load section schemas on mount
   useEffect(() => {
@@ -388,8 +417,16 @@ export default function App() {
   // Keyboard shortcuts for undo/redo (graph only — let textarea handle its own undo)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // When the text view is active, let the textarea handle undo/redo natively
-      if (showTextView) return;
+      const target = e.target as HTMLElement | null;
+      const isTextInput = !!target && (
+        target.tagName === 'INPUT'
+        || target.tagName === 'TEXTAREA'
+        || target.tagName === 'SELECT'
+        || target.isContentEditable
+      );
+
+      // When the text view is active or a text input has focus, let the browser handle undo/redo natively.
+      if (showTextView || isTextInput) return;
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 'z') {
         e.preventDefault();
         undo();
@@ -403,9 +440,98 @@ export default function App() {
   }, [undo, redo, showTextView]);
 
   const { toggleHardwareCollapse } = useGraphStore();
+  const CHILD_TYPES = new Set(['subComponent', 'feature', 'group', 'customGroup']);
+  const DRAGGED_CHILD_Z_INDEX = 1000;
+
+  const clearDragHoverPreview = useCallback(() => {
+    if (dragHoverHardwareIdRef.current === null) return;
+    dragHoverHardwareIdRef.current = null;
+    setDragHoverHardwareId(null);
+  }, [setDragHoverHardwareId]);
+
+  const getAbsoluteNodePosition = useCallback((draggedNode: Node, currentNodes: Node[]) => {
+    let absX = draggedNode.position.x;
+    let absY = draggedNode.position.y;
+    const parentId = draggedNode.parentId ?? null;
+    if (parentId) {
+      const parentNode = currentNodes.find((node) => node.id === parentId);
+      if (parentNode) {
+        absX += parentNode.position.x;
+        absY += parentNode.position.y;
+      }
+    }
+    return { x: absX, y: absY };
+  }, []);
+
+  const getContainerBounds = useCallback((container: Node, currentNodes: Node[]) => {
+    if (container.type === 'hardware') {
+      const nodeData = container.data as Record<string, unknown>;
+      if (nodeData.collapsed) {
+        return computeHardwareDragPreviewSize(currentNodes, container.id);
+      }
+      return {
+        width: (container.style?.width as number) || HARDWARE_DRAG_PREVIEW_WIDTH,
+        height: (container.style?.height as number) || HARDWARE_DRAG_PREVIEW_COLLAPSED_HEIGHT,
+      };
+    }
+
+    return {
+      width: (container.style?.width as number) || HARDWARE_DRAG_PREVIEW_COLLAPSED_WIDTH,
+      height: (container.style?.height as number) || HARDWARE_DRAG_PREVIEW_COLLAPSED_HEIGHT,
+    };
+  }, []);
+
+  const getHoveredHardwareId = useCallback((draggedNode: Node, currentNodes: Node[]) => {
+    if (!CHILD_TYPES.has(draggedNode.type || '')) return null;
+    const absolutePosition = getAbsoluteNodePosition(draggedNode, currentNodes);
+    const nodeCenterX = absolutePosition.x + 90;
+    const nodeCenterY = absolutePosition.y + 18;
+    const candidates: Array<{ id: string; distance: number }> = [];
+
+    for (const container of currentNodes) {
+      if (container.type !== 'hardware' || container.id === draggedNode.id) continue;
+      const containerData = container.data as Record<string, unknown>;
+      if (containerData.hardwareType === 'sbc' && !containerData.isMcu) continue;
+      const { width, height } = getContainerBounds(container, currentNodes);
+      if (
+        nodeCenterX >= container.position.x
+        && nodeCenterX <= container.position.x + width
+        && nodeCenterY >= container.position.y
+        && nodeCenterY <= container.position.y + height
+      ) {
+        candidates.push({
+          id: container.id,
+          distance: Math.hypot(
+            nodeCenterX - (container.position.x + width / 2),
+            nodeCenterY - (container.position.y + height / 2),
+          ),
+        });
+      }
+    }
+
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    const existingCandidate = candidates.find((candidate) => candidate.id === dragHoverHardwareIdRef.current);
+    if (existingCandidate) {
+      return existingCandidate.id;
+    }
+
+    candidates.sort((left, right) => left.distance - right.distance);
+    return candidates[0].id;
+  }, [CHILD_TYPES, getAbsoluteNodePosition, getContainerBounds]);
+
+  const finalizeNodeDrag = useCallback((draggedNodeId: string | null) => {
+    clearDragHoverPreview();
+    if (draggedNodeId) {
+      setSelectedNode(draggedNodeId);
+    }
+  }, [clearDragHoverPreview, setSelectedNode]);
 
   const onNodeClick = useCallback(
     (_: React.MouseEvent, node: AppNode) => {
+      clearDragHoverPreview();
       setSelectedNode(node.id);
       setSelectedEdge(null);
       const data = node.data as Record<string, unknown>;
@@ -421,7 +547,7 @@ export default function App() {
         toggleHardwareCollapse(node.id);
       }
     },
-    [setSelectedNode, setSelectedEdge, setSelectedSection, toggleHardwareCollapse],
+    [clearDragHoverPreview, setSelectedNode, setSelectedEdge, setSelectedSection, toggleHardwareCollapse],
   );
 
   const onEdgeClick = useCallback(
@@ -434,10 +560,58 @@ export default function App() {
   );
 
   const onPaneClick = useCallback(() => {
+    clearDragHoverPreview();
     setSelectedNode(null);
     setSelectedEdge(null);
     setSelectedSection(null);
-  }, [setSelectedNode, setSelectedEdge, setSelectedSection]);
+  }, [clearDragHoverPreview, setSelectedNode, setSelectedEdge, setSelectedSection]);
+
+  const onNodeDragStart = useCallback(
+    (_event: React.MouseEvent, draggedNode: Node) => {
+      clearDragHoverPreview();
+      const data = draggedNode.data as Record<string, unknown>;
+      setSelectedNode(draggedNode.id);
+      setSelectedEdge(null);
+      setSelectedSection(typeof data.sectionHeader === 'string' ? data.sectionHeader : null);
+
+      useGraphStore.setState((s) => ({
+        nodes: s.nodes.map((node) => {
+          if (node.id !== draggedNode.id || !CHILD_TYPES.has(node.type || '')) return node;
+          return { ...node, zIndex: DRAGGED_CHILD_Z_INDEX } as AppNode;
+        }),
+        edges: s.edges.map((edge) => {
+          const edgeData = edge.data as Record<string, unknown> | undefined;
+          if ((edge.source !== draggedNode.id && edge.target !== draggedNode.id) || !edgeData?.customMiddlePoints) {
+            return edge;
+          }
+          return {
+            ...edge,
+            data: {
+              ...edgeData,
+              customMiddlePoints: undefined,
+            } as unknown as AppEdge['data'],
+          } as AppEdge;
+        }),
+      }));
+    },
+    [CHILD_TYPES, clearDragHoverPreview, setSelectedEdge, setSelectedNode, setSelectedSection],
+  );
+
+  const onNodeDrag = useCallback(
+    (_event: React.MouseEvent, draggedNode: Node) => {
+      if (!CHILD_TYPES.has(draggedNode.type || '')) return;
+
+      const currentNodes = useGraphStore.getState().nodes;
+      const hoveredHardwareId = getHoveredHardwareId(draggedNode, currentNodes);
+      if (hoveredHardwareId === dragHoverHardwareIdRef.current) {
+        return;
+      }
+
+      dragHoverHardwareIdRef.current = hoveredHardwareId;
+      setDragHoverHardwareId(hoveredHardwareId);
+    },
+    [CHILD_TYPES, getHoveredHardwareId, setDragHoverHardwareId],
+  );
 
   /**
    * Find the nearest non-overlapping position by nudging rightward, then
@@ -486,7 +660,6 @@ export default function App() {
   const onNodeDragStop = useCallback(
     (_event: React.MouseEvent, draggedNode: Node) => {
       const currentNodes = useGraphStore.getState().nodes;
-      const CHILD_TYPES = new Set(['subComponent', 'feature', 'group', 'customGroup']);
 
       /* ── Hardware node overlap prevention ───────────────── */
       if (draggedNode.type === 'hardware') {
@@ -513,6 +686,7 @@ export default function App() {
             ),
           }));
         }
+        finalizeNodeDrag(draggedNode.id);
         return;
       }
 
@@ -597,10 +771,11 @@ export default function App() {
                 const { addGroupNode, removeNodeFromGraph, reflowParentChildren, pushHistory } = useGraphStore.getState();
                 const groupLabel = dragGroup.charAt(0).toUpperCase() + dragGroup.slice(1).replace(/_/g, ' ');
                 pushHistory();
-                addGroupNode(oldParentId, dragGroup, groupLabel + 's', children, isFeature);
+                const groupId = addGroupNode(oldParentId, dragGroup, groupLabel + 's', children, isFeature);
                 removeNodeFromGraph(draggedNode.id);
                 removeNodeFromGraph(sib.id);
                 if (oldParentId) reflowParentChildren(oldParentId);
+                finalizeNodeDrag(groupId);
               }
               return;
             }
@@ -622,8 +797,7 @@ export default function App() {
       const nodeCenterY = absY + 18;
 
       for (const container of containerNodes) {
-const w = (container.style?.width as number) || 400;
-        const h = (container.style?.height as number) || 400;
+        const { width: w, height: h } = getContainerBounds(container, currentNodes);
 
         if (
           nodeCenterX >= container.position.x &&
@@ -639,6 +813,14 @@ const w = (container.style?.width as number) || 400;
       // Reparent if the parent changed (reparent already snaps to grid)
       if (newParentId !== oldParentId) {
         reparentNode(draggedNode.id, newParentId, { x: absX, y: absY });
+        if (newParentId) {
+          const parentNow = useGraphStore.getState().nodes.find((node) => node.id === newParentId);
+          const parentData = parentNow?.data as Record<string, unknown> | undefined;
+          if (parentNow?.type === 'hardware' && parentData?.collapsed) {
+            toggleHardwareCollapse(newParentId);
+          }
+        }
+        finalizeNodeDrag(draggedNode.id);
         return;
       }
 
@@ -647,8 +829,9 @@ const w = (container.style?.width as number) || 400;
         const { snapChildrenToColumns } = useGraphStore.getState();
         snapChildrenToColumns(oldParentId, draggedNode.id, draggedNode.position.y);
       }
+      finalizeNodeDrag(draggedNode.id);
     },
-    [reparentNode],
+    [CHILD_TYPES, finalizeNodeDrag, getContainerBounds, reparentNode, toggleHardwareCollapse],
   );
 
   return (
@@ -707,6 +890,8 @@ const w = (container.style?.width as number) || 400;
               onNodeClick={onNodeClick}
               onEdgeClick={onEdgeClick}
               onPaneClick={onPaneClick}
+              onNodeDragStart={onNodeDragStart}
+              onNodeDrag={onNodeDrag}
               onNodeDragStop={onNodeDragStop}
               nodeTypes={nodeTypes}
               edgeTypes={edgeTypes}

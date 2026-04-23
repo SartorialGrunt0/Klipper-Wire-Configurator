@@ -267,6 +267,15 @@ def parse_config(text: str, filename: str = "printer.cfg") -> ConfigFile:
             return True
         return False
 
+    def _is_commented_gcode_continuation(line: str) -> bool:
+        if last_param is None or current_section is None:
+            return False
+        if not line.startswith("#") or len(line) < 2:
+            return False
+        if line[1] not in (" ", "\t"):
+            return False
+        return last_param.key == "gcode" or last_param.key.endswith("_gcode")
+
     while i < n:
         line = lines[i]
         stripped = line.strip()
@@ -412,7 +421,7 @@ def parse_config(text: str, filename: str = "printer.cfg") -> ConfigFile:
         if stripped.startswith("#"):
             # If inside a multi-line value, treat as continuation
             if last_param is not None and current_section is not None:
-                if _is_continuation_context(i + 1) or (line[0] in (" ", "\t")):
+                if _is_commented_gcode_continuation(line) or _is_continuation_context(i + 1) or (line[0] in (" ", "\t")):
                     last_param.value += "\n" + stripped
                     last_param.raw_line += "\n" + line
                     i += 1

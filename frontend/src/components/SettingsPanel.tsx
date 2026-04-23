@@ -50,6 +50,7 @@ export default function SettingsPanel() {
     activeFile,
     schemas,
     validation,
+    setConfigFile,
     updateSectionParam,
     addParam,
     removeParam,
@@ -57,7 +58,7 @@ export default function SettingsPanel() {
     addSection,
     revalidateFile,
   } = useConfigStore();
-  const { selectedNodeId, nodes, addSubComponentNode, addFeatureNode, updateNodeData, selectedEdgeId, edges, updateEdgeData, setSelectedNode } = useGraphStore();
+  const { selectedNodeId, nodes, addSubComponentNode, addFeatureNode, updateNodeData, selectedEdgeId, edges, updateEdgeData, setSelectedNode, setSelectedEdge } = useGraphStore();
 
   const [showHidden, setShowHidden] = useState(false);
   const [textViewMode, setTextViewMode] = useState(false);
@@ -127,6 +128,11 @@ export default function SettingsPanel() {
 
   const section = resolvedSectionInfo?.section || null;
   const sectionConfigFile = resolvedSectionInfo?.filename || null;
+
+  useEffect(() => {
+    if (!textViewMode || !section || sectionTextDirty) return;
+    setSectionEditText(sectionToText(section));
+  }, [textViewMode, section, sectionTextDirty]);
 
   const includeParents = useMemo(() => {
     if (!sectionConfigFile) return [] as string[];
@@ -255,6 +261,10 @@ export default function SettingsPanel() {
     return configFiles[filename]?.sections || [];
   }, [hwData?.configFile, sectionConfigFile, nodeConfigFile, activeFile, configFiles]);
 
+  const hasFeatureSectionType = useCallback((sectionType: string) => sectionType !== 'gcode_macro' && Object.values(configFiles).some(
+    (configFile) => configFile.sections.some((section) => section.section_type === sectionType),
+  ), [configFiles]);
+
   const handleAddSubComponent = useCallback((sectionType: string) => {
     if (!selectedNodeId) return;
     const schemaDef = schemas[sectionType];
@@ -279,14 +289,8 @@ export default function SettingsPanel() {
     if (!selectedNodeId) return;
 
     // Feature uniqueness: prevent duplicates for non-gcode_macro features
-    if (sectionType !== 'gcode_macro') {
-      const existing = nodes.find((n) => {
-        const d = n.data as Record<string, unknown>;
-        return n.type === 'feature' && d.sectionType === sectionType;
-      });
-      if (existing) {
-        return; // Already exists
-      }
+    if (hasFeatureSectionType(sectionType)) {
+      return; // Already exists
     }
 
     const schemaDef = schemas[sectionType];
@@ -305,7 +309,7 @@ export default function SettingsPanel() {
       header_comments: [],
     });
     // Keep menu open for multi-select
-  }, [selectedNodeId, schemas, nodes, addFeatureNode, addSection, hwData, activeFile, configFiles, targetConfigSections]);
+  }, [selectedNodeId, schemas, addFeatureNode, addSection, hwData, activeFile, configFiles, targetConfigSections, hasFeatureSectionType]);
 
   /**
    * Apply MCU name change to a hardware node:
@@ -666,22 +670,55 @@ export default function SettingsPanel() {
 
   // Apply section text edits back to config
   const handleApplySectionText = useCallback(async () => {
+    if (!sectionHeader) return;
     try {
-      const result = await import('../services/api').then((m) => m.parseConfigText(sectionEditText, activeFile));
-      const parsedSection = result.config.sections.find((s: ConfigSection) => s.full_header === sectionHeader);
-      if (parsedSection) {
-        const filename = sectionConfigFile || Object.entries(configFiles).find(([_, cf]) =>
-          cf.sections.some((s) => s.full_header === sectionHeader && (nodeSectionLineNumber == null || nodeSectionLineNumber === 0 || s.line_number === nodeSectionLineNumber))
-        )?.[0] || activeFile;
-        for (const p of parsedSection.params) {
-          updateSectionParam(filename, sectionHeader!, p.key, p.value, nodeSectionLineNumber ?? undefined);
-        }
+      const filename = sectionConfigFile || Object.entries(configFiles).find(([_, cf]) =>
+        cf.sections.some((s) => s.full_header === sectionHeader && (nodeSectionLineNumber == null || nodeSectionLineNumber === 0 || s.line_number === nodeSectionLineNumber))
+      )?.[0] || activeFile;
+      const currentConfig = configFiles[filename];
+      if (!currentConfig) return;
+
+      const result = await import('../services/api').then((m) => m.parseConfigText(sectionEditText, filename));
+      const parsedSection = result.config.sections.find((s: ConfigSection) => s.full_header === sectionHeader) || result.config.sections[0];
+      if (!parsedSection) return;
+
+      const targetIndex = currentConfig.sections.findIndex((s) =>
+        s.full_header === sectionHeader
+        && (nodeSectionLineNumber == null || nodeSectionLineNumber === 0 || s.line_number === nodeSectionLineNumber),
+      );
+      if (targetIndex === -1) return;
+
+      const currentSection = currentConfig.sections[targetIndex];
+      const nextSection: ConfigSection = {
+        ...parsedSection,
+        line_number: currentSection.line_number,
+      };
+      const nextConfig = {
+        ...currentConfig,
+        sections: currentConfig.sections.map((candidate, index) => index === targetIndex ? nextSection : candidate),
+      };
+
+      setConfigFile(filename, nextConfig);
+
+      if (selectedNodeId && selectedNode && selectedNode.type !== 'hardware' && selectedNode.type !== 'group') {
+        const displayName = schemas[nextSection.section_type]?.display_name || nextSection.section_type;
+        const label = nextSection.section_name ? `${displayName}: ${nextSection.section_name}` : displayName;
+        updateNodeData(selectedNodeId, {
+          sectionHeader: nextSection.full_header,
+          sectionLineNumber: nextSection.line_number,
+          sectionType: nextSection.section_type,
+          label,
+        } as Partial<AppNode['data']>);
       }
+
+      setSelectedSection(nextSection.full_header);
+      setSectionEditText(sectionToText(nextSection));
       setSectionTextDirty(false);
+      void revalidateFile(filename);
     } catch (err) {
       console.error('Parse error:', err);
     }
-  }, [sectionEditText, activeFile, sectionHeader, configFiles, updateSectionParam, nodeSectionLineNumber, sectionConfigFile]);
+  }, [sectionEditText, activeFile, sectionHeader, sectionConfigFile, configFiles, nodeSectionLineNumber, setConfigFile, selectedNodeId, selectedNode, schemas, updateNodeData, setSelectedSection, revalidateFile]);
 
   const handleAcknowledgeWarning = useCallback(async () => {
     if (!section || !sectionConfigFile) return;
@@ -811,7 +848,7 @@ export default function SettingsPanel() {
                   const paramSchema = mcuSchema?.params.find((p) => p.name === param.key);
                   return (
                     <ParamField
-                      key={`${param.key}_${param.value}_${mcuSection.full_header}`}
+                      key={`${param.key}_${mcuSection.full_header}`}
                       param={param}
                       schema={paramSchema}
                       isMcuParam
@@ -850,6 +887,22 @@ export default function SettingsPanel() {
         onAddFeature={handleAddFeature}
         onSelectSection={(header: string) => setSelectedSection(header)}
         onSelectNode={(nodeId: string) => { setSelectedNode(nodeId); setSelectedSection(null); }}
+        onOpenCommunication={() => {
+          if (!selectedNodeId) return;
+          const communicationEdge = edges.find((edge) => {
+            const edgeData = edge.data as Record<string, unknown> | undefined;
+            return edgeData?.edgeType === 'communication' && (edge.source === selectedNodeId || edge.target === selectedNodeId);
+          });
+          if (communicationEdge) {
+            setSelectedSection(null);
+            setSelectedNode(null);
+            setSelectedEdge(communicationEdge.id);
+            return;
+          }
+          const mcuHeader = hwData?.mcuName ? `mcu ${hwData.mcuName}` : 'mcu';
+          setSelectedEdge(null);
+          setSelectedSection(mcuHeader);
+        }}
         onTogglePrimary={handleTogglePrimary}
         onToggleMcu={handleToggleMcu}
         onRename={handleRename}
@@ -935,14 +988,7 @@ export default function SettingsPanel() {
     );
   }
 
-  // Sync edit text when entering text view (no hook call — just state write in effect would be better,
-  // but we keep it simple: update on the fly before render)
   if (textViewMode) {
-    const textContent = sectionToText(section);
-    if (!sectionTextDirty && sectionEditText !== textContent) {
-      setSectionEditText(textContent);
-    }
-
     return (
       <>{mcuNameDialog}
       <div className="w-96 border-l border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] flex flex-col">
@@ -1107,7 +1153,7 @@ export default function SettingsPanel() {
           }
           return (
             <ParamField
-              key={`${param.key}_${index}_${param.value}`}
+              key={`${param.key}_${index}`}
               param={param}
               schema={paramSchema}
               pinConflict={pinConflict}
@@ -1694,6 +1740,7 @@ function HardwareOverviewPanel({
   onAddFeature,
   onSelectSection,
   onSelectNode,
+  onOpenCommunication,
   onTogglePrimary,
   onToggleMcu,
   onRename,
@@ -1710,6 +1757,7 @@ function HardwareOverviewPanel({
   onAddFeature: (type: string) => void;
   onSelectSection: (header: string) => void;
   onSelectNode: (nodeId: string) => void;
+  onOpenCommunication: () => void;
   onTogglePrimary: () => void;
   onToggleMcu: () => void;
   onRename: (newLabel: string) => void;
@@ -1796,6 +1844,7 @@ function HardwareOverviewPanel({
             <option value="mainboard">MAINBOARD</option>
             <option value="toolhead">TOOLHEAD</option>
             <option value="expander">EXPANDER</option>
+            <option value="config_file">CONFIG FILE</option>
             <option value="sbc">SBC</option>
             <option value="probe">PROBE</option>
             <option value="accelerometer">ACCELEROMETER</option>
@@ -1815,10 +1864,7 @@ function HardwareOverviewPanel({
             {(hwData as Record<string, unknown>).isPrimary ? '★ Primary (printer.cfg)' : 'Set as Primary'}
           </button>
           <button
-            onClick={() => {
-              const mcuHeader = hwData.mcuName ? `mcu ${hwData.mcuName}` : 'mcu';
-              onSelectSection(mcuHeader);
-            }}
+            onClick={onOpenCommunication}
             className="text-xs px-3 py-1 rounded transition-colors bg-[var(--color-bg-tertiary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] text-[var(--color-text-secondary)]"
             title="View and edit MCU communication settings"
           >

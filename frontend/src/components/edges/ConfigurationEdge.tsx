@@ -12,6 +12,7 @@ const HARDWARE_COLORS: Record<string, string> = {
   mainboard: 'var(--color-mainboard)',
   toolhead: 'var(--color-toolhead)',
   expander: 'var(--color-expander)',
+  config_file: '#0f766e',
   probe: 'var(--color-probe)',
   accelerometer: 'var(--color-accelerometer)',
   other: 'var(--color-other)',

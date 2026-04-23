@@ -1,6 +1,6 @@
 import type { ConfigSection, HardwareType } from '../types/config';
 
-const BOARD_TYPE_MARKER_RE = /^\s*#\s*kwc:\s*board_type\s*=\s*(sbc|mainboard|expander|toolhead|probe|accelerometer|other)\s*$/i;
+const BOARD_TYPE_MARKER_RE = /^\s*#\s*kwc:\s*board_type\s*=\s*(sbc|mainboard|expander|toolhead|config_file|probe|accelerometer|other)\s*$/i;
 
 export function getBoardTypeMarker(comments: string[] | undefined): HardwareType | null {
   if (!comments) return null;

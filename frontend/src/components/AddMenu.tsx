@@ -17,6 +17,7 @@ const HARDWARE_OPTIONS: Array<{ type: HardwareType; label: string; icon: string;
   { type: 'mainboard', label: 'Mainboard', icon: '📟', description: 'Main printer control board' },
   { type: 'toolhead', label: 'Toolhead Board', icon: '🔧', description: 'CAN/UART toolhead board' },
   { type: 'expander', label: 'Expander Board', icon: '🔌', description: 'Additional MCU or I/O expander' },
+  { type: 'config_file', label: 'Configuration File', icon: '📄', description: 'Non-MCU configuration files' },
   { type: 'sbc', label: 'SBC', icon: '🖥️', description: 'Single-board computer (Raspberry Pi, CB1, etc.)' },
   { type: 'probe', label: 'Probe', icon: '📍', description: 'Probe with dedicated MCU' },
   { type: 'accelerometer', label: 'Accelerometer', icon: '📊', description: 'Standalone accelerometer board' },
@@ -96,6 +97,9 @@ export default function AddMenu({ onClose }: AddMenuProps) {
     const data = n.data as Record<string, unknown>;
     return data.hardwareType !== 'sbc' || !!data.isMcu;
   });
+  const hasFeatureSectionType = (sectionType: string) => sectionType !== 'gcode_macro' && Object.values(configFiles).some(
+    (configFile) => configFile.sections.some((section) => section.section_type === sectionType),
+  );
 
   // Derive kinematics from the selected parent's config file (fall back to all files)
   const kinematics = (() => {
@@ -204,6 +208,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
 
   const finishAddHardware = (hwType: HardwareType, label: string, templateFilename?: string, mcuName?: string) => {
     const isFreshHardwareView = hardwareNodes.length === 0;
+    const createsMcuSection = hwType !== 'sbc' && hwType !== 'config_file';
 
     // Determine if this will be the primary MCU
     const hasPrimary = nodes.some(
@@ -212,7 +217,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
     const isPrimary = hwType === 'mainboard' && !hasPrimary;
 
     // Non-primary non-SBC boards need an MCU name
-    if (!isPrimary && hwType !== 'sbc' && !mcuName) {
+    if (!isPrimary && createsMcuSection && !mcuName) {
       // Check if template already provides an MCU name (will be resolved after load)
       // For blank (no template), prompt now
       if (!templateFilename) {
@@ -242,7 +247,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
       ? { x: 560, y: 140 }
       : { x: 100 + Math.random() * 400, y: 100 + Math.random() * 300 };
 
-    if (isFreshHardwareView && hwType !== 'sbc') {
+    if (isFreshHardwareView && createsMcuSection) {
       ensureSbcNode(true);
     }
 
@@ -254,7 +259,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
     }
 
     // Create [mcu] or [mcu name] section for the board
-    if (hwType !== 'sbc') {
+    if (createsMcuSection) {
       const mcuHeader = mcuName ? `mcu ${mcuName}` : 'mcu';
       const cs = useConfigStore.getState();
       const existingMcu = cs.configFiles[configFile]?.sections.some(
@@ -283,7 +288,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
         const templateMcuName = mcuSection?.section_name || '';
 
         // If the board should be non-primary and we don't have an MCU name yet, prompt
-        if (!isPrimary && hwType !== 'sbc' && !mcuName && !templateMcuName) {
+        if (!isPrimary && createsMcuSection && !mcuName && !templateMcuName) {
           // Remove the node we just created — will recreate after naming
           useGraphStore.getState().removeNode(nodeId);
           useConfigStore.getState().removeConfigFile(configFile);
@@ -320,7 +325,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
           }
         }
         // Add communication edge from SBC to this hardware node
-        if (hwType !== 'sbc') {
+        if (createsMcuSection) {
           ensureCommunicationEdge(nodeId, detectCommunicationType(mcuSection), isFreshHardwareView);
         }
         setTemplateLoading(false);
@@ -332,7 +337,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
       });
     } else {
       // Add communication edge from SBC to this hardware node (blank config)
-      if (hwType !== 'sbc') {
+      if (createsMcuSection) {
         ensureCommunicationEdge(nodeId, 'usb', isFreshHardwareView);
       }
       onClose();
@@ -370,12 +375,8 @@ export default function AddMenu({ onClose }: AddMenuProps) {
 
   const handleAddFeature = (sectionType: string) => {
     // Feature uniqueness: prevent duplicates for non-gcode_macro features
-    if (sectionType !== 'gcode_macro') {
-      const existing = nodes.find((n) => {
-        const d = n.data as Record<string, unknown>;
-        return n.type === 'feature' && d.sectionType === sectionType;
-      });
-      if (existing) return;
+    if (hasFeatureSectionType(sectionType)) {
+      return;
     }
 
     const pId = selectedParent || hardwareNodes[0]?.id || null;
@@ -638,10 +639,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
                   </h3>
                   <div className="grid grid-cols-2 gap-1">
                     {group.types.map((t) => {
-                      const alreadyAdded = t !== 'gcode_macro' && nodes.some((n) => {
-                        const d = n.data as Record<string, unknown>;
-                        return n.type === 'feature' && d.sectionType === t;
-                      });
+                      const alreadyAdded = hasFeatureSectionType(t);
                       return (
                         <button
                           key={t}

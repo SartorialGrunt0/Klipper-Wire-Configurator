@@ -93,6 +93,7 @@ export type HardwareType =
   | 'mainboard'
   | 'expander'
   | 'toolhead'
+  | 'config_file'
   | 'probe'
   | 'accelerometer'
   | 'other';

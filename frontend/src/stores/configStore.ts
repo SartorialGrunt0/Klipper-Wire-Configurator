@@ -438,17 +438,10 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const existingIdx = cf.sections.findIndex(
         (sec) => sec.section_type === 'include' && sec.section_name === includePath,
       );
-      let updatedSections = [...cf.sections];
-      if (existingIdx !== -1) {
-        // Uncomment the existing include section
-        updatedSections = updatedSections.map((sec, i) =>
-          i === existingIdx ? { ...sec, is_commented_out: false } : sec,
-        );
-      } else {
-        // Add a new include section
-        updatedSections = [
-          ...updatedSections,
-          {
+      const includeInsertIndex = cf.sections.findIndex((sec) => sec.section_type !== 'include');
+      const nextIncludeSection = existingIdx !== -1
+        ? { ...cf.sections[existingIdx], is_commented_out: false }
+        : {
             section_type: 'include',
             section_name: includePath,
             full_header: includeHeader,
@@ -457,8 +450,16 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
             header_comments: [],
             trailing_comments: [],
             is_commented_out: false,
-          } as ConfigSection,
-        ];
+          } as ConfigSection;
+
+      let updatedSections = cf.sections.filter((_, i) => i !== existingIdx);
+      const insertAt = includeInsertIndex === -1
+        ? updatedSections.length
+        : Math.min(includeInsertIndex, updatedSections.length);
+      if (existingIdx !== -1) {
+        updatedSections.splice(insertAt, 0, nextIncludeSection);
+      } else {
+        updatedSections.splice(insertAt, 0, nextIncludeSection);
       }
       return {
         isDirty: true,

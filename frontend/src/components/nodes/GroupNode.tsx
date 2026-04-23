@@ -1,5 +1,5 @@
 import { memo, useCallback } from 'react';
-import { Handle, Position, type NodeProps } from '@xyflow/react';
+import { type NodeProps } from '@xyflow/react';
 import type { GroupNodeData, GroupChildItem } from '../../types/graph';
 import { useGraphStore } from '../../stores/graphStore';
 import { useConfigStore } from '../../stores/configStore';
@@ -34,7 +34,10 @@ function GroupNode({ data, selected, id }: NodeProps) {
   const isFeature = nodeData.isFeature;
   const children: GroupChildItem[] = nodeData.children || [];
   const isEmbedded = !!nodeData.parentHardwareId;
+  const isOrphan = !isEmbedded;
   const validationStatus = (nodeData.validationStatus || 'valid') as ValidationStatus;
+  const effectiveValidationStatus = isOrphan ? 'error' : validationStatus;
+  const hasErrors = nodeData.hasErrors || isOrphan;
 
   const { setSelectedNode, removeFromGroup } = useGraphStore();
   const { setSelectedSection } = useConfigStore();
@@ -52,7 +55,7 @@ function GroupNode({ data, selected, id }: NodeProps) {
 
   return (
     <div
-      className={`kwc-compact-tile rounded-lg ${selected ? 'selected' : ''} ${nodeData.hasErrors ? 'kwc-error' : ''} ${validationStatus === 'warning' ? 'kwc-warning' : ''}`}
+      className={`kwc-compact-tile rounded-lg ${selected ? 'selected' : ''} ${hasErrors ? 'kwc-error' : ''} ${effectiveValidationStatus === 'warning' ? 'kwc-warning' : ''}`}
       style={{
         borderColor: color,
         borderStyle: isFeature ? 'dashed' : 'solid',
@@ -61,21 +64,6 @@ function GroupNode({ data, selected, id }: NodeProps) {
         position: 'relative',
       }}
     >
-      {!isEmbedded && (
-        <>
-          <Handle type="target" position={Position.Left} id="left-in"
-            style={{ background: color, width: 10, height: 10, top: '50%' }}
-            isConnectableStart={false} />
-          <Handle type="source" position={Position.Right} id="right-out"
-            style={{ background: color, width: 10, height: 10, top: '50%' }} />
-          <Handle type="target" position={Position.Top} id="top-in"
-            style={{ background: color, width: 10, height: 10, left: '50%' }}
-            isConnectableStart={false} />
-          <Handle type="source" position={Position.Bottom} id="bottom-out"
-            style={{ background: color, width: 10, height: 10, left: '50%' }} />
-        </>
-      )}
-
       {/* Actions overlay — shown above card when selected */}
       {selected && (
         <div className="kwc-actions-overlay" style={{ borderColor: color }}>
@@ -88,10 +76,15 @@ function GroupNode({ data, selected, id }: NodeProps) {
         className="kwc-tile-header"
         style={{ backgroundColor: `${color}22`, borderLeft: `3px solid ${color}` }}
       >
-        <WarningBadge status={validationStatus} />
+        <WarningBadge status={effectiveValidationStatus} />
         <span className="text-xs font-semibold truncate" style={{ color }}>
           {nodeData.label}
         </span>
+        {isOrphan && (
+          <span className="text-[9px] px-1 py-0.5 rounded bg-red-500/15 text-[var(--color-error)] shrink-0">
+            ORPHAN
+          </span>
+        )}
         <span
           className="text-[10px] px-1.5 py-0.5 rounded-full font-bold ml-auto shrink-0"
           style={{ backgroundColor: `${color}33`, color }}

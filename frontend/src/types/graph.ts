@@ -25,7 +25,7 @@ export interface SubComponentNodeData {
   sectionLineNumber?: number;
   componentGroup: string;
   section: ConfigSection;
-  parentHardwareId: string;
+  parentHardwareId: string | null;
   configFile: string;
   customImage?: string;
   hasErrors: boolean;
@@ -40,7 +40,7 @@ export interface FeatureNodeData {
   sectionHeader: string;
   sectionLineNumber?: number;
   section: ConfigSection;
-  parentId: string;
+  parentId: string | null;
   configFile: string;
   customImage?: string;
   hasErrors: boolean;
@@ -66,7 +66,7 @@ export interface GroupNodeData {
   componentGroup: string;
   isFeature: boolean;
   children: GroupChildItem[];
-  parentHardwareId: string;
+  parentHardwareId: string | null;
   configFile: string;
   hasErrors: boolean;
   validationStatus?: ValidationStatus;

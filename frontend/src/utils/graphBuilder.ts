@@ -44,6 +44,7 @@ const FEATURE_TYPES = new Set([
   'idle_timeout', 'gcode_macro', 'delayed_gcode', 'gcode_arcs',
   'respond', 'exclude_object', 'save_variables', 'display_status',
 ]);
+const TWO_ITEM_FEATURE_GROUPS = new Set(['bed_leveling', 'homing', 'resonance']);
 
 // Map section types to component groups (for grouping)
 const COMPONENT_GROUP_MAP: Record<string, string> = {
@@ -552,9 +553,10 @@ export function buildProjectGraph(
 
   // Create nodes: groups of 3+ become collapsible groups, smaller sets stay individual
   for (const [, items] of groupedSections) {
-    if (items.length >= 3) {
+    const first = items[0];
+    const groupThreshold = first.isFeature && TWO_ITEM_FEATURE_GROUPS.has(first.componentGroup) ? 2 : 3;
+    if (items.length >= groupThreshold) {
       // Create a group node with children collapsed inside
-      const first = items[0];
       const groupLabel = GROUP_DISPLAY_NAMES[first.componentGroup] || first.componentGroup;
       const childData = items.map((item) => ({
         sectionType: item.sType,

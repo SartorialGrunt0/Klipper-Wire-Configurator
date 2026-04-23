@@ -11,6 +11,7 @@ const HARDWARE_COLORS: Record<string, string> = {
   mainboard: 'var(--color-mainboard)',
   toolhead: 'var(--color-toolhead)',
   expander: 'var(--color-expander)',
+  config_file: '#0f766e',
   probe: 'var(--color-probe)',
   accelerometer: 'var(--color-accelerometer)',
   other: 'var(--color-other)',
@@ -21,15 +22,23 @@ const HARDWARE_SHAPES: Record<string, string> = {
   mainboard: 'rounded-lg',
   toolhead: 'rounded-2xl',
   expander: 'rounded-lg',
+  config_file: 'rounded-md',
   probe: 'rounded-xl',
   accelerometer: 'rounded-lg',
   other: 'rounded-md',
 };
 
+const PREVIEW_WIDTH = 400;
+const PREVIEW_HEADER_HEIGHT = 110;
+const PREVIEW_SLOT_HEIGHT = 40;
+const PREVIEW_PADDING_BOTTOM = 16;
+const PREVIEW_COLLAPSED_HEIGHT = 56;
+
 function HardwareNode({ data, selected, id }: NodeProps) {
   const nodeData = data as unknown as HardwareNodeData;
   const color = HARDWARE_COLORS[nodeData.hardwareType] || HARDWARE_COLORS.other;
   const shape = HARDWARE_SHAPES[nodeData.hardwareType] || HARDWARE_SHAPES.other;
+  const hardwareTypeLabel = nodeData.hardwareType.replace(/_/g, ' ');
   const isPrimary = !!(nodeData as Record<string, unknown>).isPrimary;
   const isMcu = !!(nodeData as Record<string, unknown>).isMcu;
   const collapsed = !!nodeData.collapsed;
@@ -41,7 +50,7 @@ function HardwareNode({ data, selected, id }: NodeProps) {
   const isSbc = nodeData.hardwareType === 'sbc';
   const showLabel = !(isSbc && !isMcu) && !(nodeData.hardwareType === 'mainboard' && isPrimary);
 
-  const { toggleHardwareCollapse, nodes, selectedNodeId } = useGraphStore();
+  const { toggleHardwareCollapse, nodes, selectedNodeId, dragHoverHardwareId } = useGraphStore();
 
   const [isHovered, setIsHovered] = useState(false);
   // Show handles on all nodes while any connection drag is in progress
@@ -51,6 +60,20 @@ function HardwareNode({ data, selected, id }: NodeProps) {
   // True when a direct child of this hardware node is selected
   const childSelected = !!selectedNodeId && nodes.some(
     (n) => n.id === selectedNodeId && n.parentId === id,
+  );
+  const directChildren = nodes.filter((n) => n.parentId === id);
+  const featureCount = directChildren.filter((n) => {
+    const childData = n.data as Record<string, unknown>;
+    return n.type === 'feature' || (n.type === 'group' && !!childData.isFeature);
+  }).length;
+  const componentCount = directChildren.filter((n) => {
+    const childData = n.data as Record<string, unknown>;
+    return n.type === 'subComponent' || (n.type === 'group' && !childData.isFeature);
+  }).length;
+  const previewExpanded = collapsed && dragHoverHardwareId === id;
+  const previewHeight = Math.max(
+    PREVIEW_HEADER_HEIGHT + Math.max(featureCount, componentCount, 0) * PREVIEW_SLOT_HEIGHT + PREVIEW_PADDING_BOTTOM,
+    160,
   );
   // Derive selection from the store so both values update atomically
   const isSelected = selectedNodeId === id;
@@ -77,6 +100,55 @@ function HardwareNode({ data, selected, id }: NodeProps) {
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
     >
+
+      {previewExpanded && (
+        <div
+          className="kwc-hardware-drop-preview"
+          style={{
+            width: PREVIEW_WIDTH,
+            minHeight: Math.max(previewHeight - PREVIEW_COLLAPSED_HEIGHT, 104),
+            borderColor: `${color}44`,
+            boxShadow: `0 16px 32px ${color}1f`,
+          }}
+        >
+          <div className="kwc-node-body" style={{ borderBottom: `1px solid ${color}22` }}>
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-xs opacity-60 uppercase tracking-wider">
+                Drop Into {hardwareTypeLabel}
+              </div>
+              <div className="text-[10px] uppercase tracking-[0.16em]" style={{ color }}>
+                {nodeData.configFile}
+              </div>
+            </div>
+            <div className="mt-2 text-[11px] text-[var(--color-text-secondary)]">
+              Release to move this card into {nodeData.label || hardwareTypeLabel}.
+            </div>
+          </div>
+
+          <div
+            className="flex justify-between gap-3 px-3 py-2"
+            style={{ borderTop: `1px dashed ${color}22` }}
+          >
+            <div className="flex-1 rounded-lg border border-transparent bg-black/10 px-3 py-2">
+              <div className="text-[9px] uppercase tracking-widest font-semibold opacity-50" style={{ color }}>
+                Features
+              </div>
+              <div className="mt-1 text-xs text-[var(--color-text-primary)]">
+                {featureCount === 0 ? 'Drop into feature column' : `${featureCount} existing item${featureCount === 1 ? '' : 's'}`}
+              </div>
+            </div>
+            <div className="flex-1 rounded-lg border border-transparent bg-black/10 px-3 py-2 text-right">
+              <div className="text-[9px] uppercase tracking-widest font-semibold opacity-50" style={{ color }}>
+                Components
+              </div>
+              <div className="mt-1 text-xs text-[var(--color-text-primary)]">
+                {componentCount === 0 ? 'Drop into component column' : `${componentCount} existing item${componentCount === 1 ? '' : 's'}`}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Handles on all sides for hardware-to-hardware connections */}
       {/* ConnectionMode.Loose lets a single handle on each side serve both roles. */}
       <Handle type="source" position={Position.Left} id="left"
@@ -122,7 +194,7 @@ function HardwareNode({ data, selected, id }: NodeProps) {
             <img src={nodeData.customImage} alt="" className="w-5 h-5 object-contain shrink-0" />
           ) : (
             <span className="shrink-0" style={{ color, fontSize: 13, fontWeight: 700 }}>
-              {nodeData.hardwareType.toUpperCase()}
+              {hardwareTypeLabel.toUpperCase()}
             </span>
           )}
           <div className="min-w-0 flex flex-col leading-tight">
@@ -148,7 +220,7 @@ function HardwareNode({ data, selected, id }: NodeProps) {
           {/* Hardware info */}
           <div className="kwc-node-body" style={{ borderBottom: `1px solid ${color}22` }}>
             <div className="text-xs opacity-60 uppercase tracking-wider">
-              {nodeData.hardwareType}
+              {hardwareTypeLabel}
             </div>
             <div className="text-xs mt-1 text-[var(--color-text-secondary)]">
               {nodeData.configFile}
