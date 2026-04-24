@@ -355,15 +355,15 @@ export default function AddMenu({ onClose }: AddMenuProps) {
     const draft = buildUniqueSectionDraft(sectionType, displayName, schema, existingSections);
 
     if (selectedParent) {
-      addSubComponentNode(selectedParent, sectionType, draft.label, draft.fullHeader, parentConfigFile);
+      addSubComponentNode(selectedParent, draft.sectionType, draft.label, draft.fullHeader, parentConfigFile);
     } else {
       // No parent selected — add as standalone node in empty space
       const { addSubComponentNode: addSub } = useGraphStore.getState();
-      addSub(null as unknown as string, sectionType, draft.label, draft.fullHeader, parentConfigFile);
+      addSub(null as unknown as string, draft.sectionType, draft.label, draft.fullHeader, parentConfigFile);
     }
 
     addSection(parentConfigFile, {
-      section_type: sectionType,
+      section_type: draft.sectionType,
       section_name: draft.sectionName,
       full_header: draft.fullHeader,
       line_number: 0,
@@ -391,15 +391,15 @@ export default function AddMenu({ onClose }: AddMenuProps) {
     const draft = buildUniqueSectionDraft(sectionType, displayName, schema, existingSections);
 
     if (pId) {
-      addFeatureNode(pId, sectionType, draft.label, draft.fullHeader, parentConfigFile);
+      addFeatureNode(pId, draft.sectionType, draft.label, draft.fullHeader, parentConfigFile);
     } else {
       // No parent selected — add as standalone feature node
       const { addFeatureNode: addFeat } = useGraphStore.getState();
-      addFeat(null as unknown as string, sectionType, draft.label, draft.fullHeader, parentConfigFile);
+      addFeat(null as unknown as string, draft.sectionType, draft.label, draft.fullHeader, parentConfigFile);
     }
 
     addSection(parentConfigFile, {
-      section_type: sectionType,
+      section_type: draft.sectionType,
       section_name: draft.sectionName,
       full_header: draft.fullHeader,
       line_number: 0,

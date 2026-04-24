@@ -102,7 +102,7 @@ STEPPER_PARAMS = [
 TMC_UART_PARAMS = [
     _pin("uart_pin", "UART pin for TMC communication", required=True),
     _pin("tx_pin", "UART TX pin (if separate)"),
-    _pin("select_pins", "Select pins for UART mux"),
+    _str("select_pins", "Select pins for UART mux"),
     _int("uart_address", "UART address (0-3)", default="0"),
     _bool("interpolate", "Enable 256 microstep interpolation", default="True"),
     _float("run_current", "Motor run current in amps", required=True),
@@ -137,7 +137,7 @@ TMC_UART_PARAMS = [
 
 TMC_SPI_PARAMS = [
     _pin("cs_pin", "SPI chip select pin", required=True),
-    _pin("spi_bus", "SPI bus"),
+    _str("spi_bus", "SPI bus"),
     _str("spi_speed", "SPI speed"),
     _pin("spi_software_sclk_pin", "Software SPI clock pin"),
     _pin("spi_software_mosi_pin", "Software SPI MOSI pin"),
@@ -165,6 +165,21 @@ SENSOR_TYPE_ENUM = [
     "MAX6675", "MAX31855", "MAX31856", "MAX31865",
     "BME280", "AHT10", "HTU21D", "SHT21", "lm75", "temperature_mcu", "temperature_host",
     "DS18B20", "temperature_combined",
+]
+
+SOFTWARE_SPI_PARAMS = [
+    _str("spi_bus", "SPI bus"),
+    _pin("spi_software_sclk_pin", "Software SPI clock"),
+    _pin("spi_software_mosi_pin", "Software SPI MOSI"),
+    _pin("spi_software_miso_pin", "Software SPI MISO"),
+]
+
+SOFTWARE_I2C_PARAMS = [
+    _str("i2c_mcu", "I2C MCU name"),
+    _str("i2c_bus", "I2C bus name"),
+    _pin("i2c_software_scl_pin", "Software I2C SCL pin"),
+    _pin("i2c_software_sda_pin", "Software I2C SDA pin"),
+    _int("i2c_speed", "I2C speed"),
 ]
 
 # ─── Section Definitions ────────────────────────────────────────
@@ -300,7 +315,7 @@ _register(SectionDef(
         _float("max_power", "Maximum heater power", default="1.0"),
         _enum("sensor_type", SENSOR_TYPE_ENUM, "Temperature sensor type", required=True),
         _pin("sensor_pin", "Sensor analog pin"),
-        _pin("spi_bus", "SPI bus (for SPI sensors)"),
+        _str("spi_bus", "SPI bus (for SPI sensors)"),
         _pin("spi_software_sclk_pin", "Software SPI clock"),
         _pin("spi_software_mosi_pin", "Software SPI MOSI"),
         _pin("spi_software_miso_pin", "Software SPI MISO"),
@@ -473,11 +488,13 @@ _register(SectionDef(
         _float("max_power", "Maximum power", default="1.0"),
         _float("shutdown_speed", "Shutdown speed", default="1.0"),
         _float("cycle_time", "PWM cycle time", default="0.010"),
+        _bool("hardware_pwm", "Use hardware PWM", default="False"),
         _float("kick_start_time", "Kick start time", default="0.100"),
         _float("off_below", "Off below this speed", default="0.0"),
         _pin("tachometer_pin", "Tachometer input pin"),
         _int("tachometer_ppr", "Tachometer pulses per revolution", default="2"),
         _float("tachometer_poll_interval", "Tachometer poll interval", default="0.0015"),
+        _pin("enable_pin", "Enable pin"),
         _str("heater", "Associated heater", default="extruder"),
         _float("heater_temp", "Temp threshold to enable fan", default="50.0", unit="°C"),
         _float("fan_speed", "Fan speed when heater active", default="1.0"),
@@ -855,11 +872,16 @@ for accel in ["lis2dw", "lis3dh", "bmi160", "mpu9250", "icm20948"]:
         is_named=True,
         params=[
             _pin("cs_pin", "SPI/I2C chip select pin"),
+            _str("spi_speed", "SPI speed"),
             _str("spi_bus", "SPI bus"),
             _pin("spi_software_sclk_pin", "Software SPI clock"),
             _pin("spi_software_mosi_pin", "Software SPI MOSI"),
             _pin("spi_software_miso_pin", "Software SPI MISO"),
+            _str("i2c_mcu", "I2C MCU name"),
             _str("i2c_bus", "I2C bus"),
+            _pin("i2c_software_scl_pin", "Software I2C SCL pin"),
+            _pin("i2c_software_sda_pin", "Software I2C SDA pin"),
+            _int("i2c_speed", "I2C speed"),
             _str("i2c_address", "I2C address"),
             _str("axes_map", "Axes mapping", default="x,y,z"),
         ],
@@ -933,6 +955,12 @@ _register(SectionDef(
         _float("sensor_adc2", "Second calibration ADC value"),
         _float("adc_voltage", "ADC reference voltage"),
         _float("voltage_offset", "ADC voltage offset"),
+        _float("pullup_resistor", "Sensor pullup resistor", default="4700"),
+        _float("inline_resistor", "Sensor inline resistor", default="0"),
+        _str("spi_bus", "SPI bus (for SPI sensors)"),
+        _pin("spi_software_sclk_pin", "Software SPI clock"),
+        _pin("spi_software_mosi_pin", "Software SPI MOSI"),
+        _pin("spi_software_miso_pin", "Software SPI MISO"),
         _float("min_temp", "Minimum temperature", default="0"),
         _float("max_temp", "Maximum temperature", default="100"),
         _str("gcode_id", "G-code ID for temperature reporting"),
@@ -1165,6 +1193,26 @@ _register(SectionDef(
     component_group="display",
     max_instances=1,
     params=[],
+))
+
+_register(SectionDef(
+    section_type="menu",
+    display_name="Menu",
+    category="feature",
+    component_group="display",
+    is_named=True,
+    params=[
+        _enum("type", ["disabled", "command", "input", "list", "text", "vsdlist"], "Menu entry type", required=True),
+        _str("name", "Menu entry display name"),
+        _str("enable", "Template controlling whether the entry is shown"),
+        _int("index", "Insertion index within the parent list"),
+        _str("input", "Initial input value template"),
+        _str("input_min", "Minimum input value template"),
+        _str("input_max", "Maximum input value template"),
+        _str("input_step", "Input step size"),
+        _bool("realtime", "Run gcode as input changes", default="False"),
+        _ml("gcode", "Menu action gcode"),
+    ],
 ))
 
 _register(SectionDef(
@@ -1413,6 +1461,7 @@ _register(SectionDef(
         _float("rotation_distance", "Distance per rotation", required=True),
         _int("microsteps", "Microsteps", required=True),
         _int("full_steps_per_rotation", "Full steps per rotation", default="200"),
+        _str("gear_ratio", "Gear ratio"),
         _pin("step_pin", "Step pin", required=True),
         _pin("dir_pin", "Direction pin", required=True),
         _pin("enable_pin", "Enable pin"),
@@ -1443,11 +1492,137 @@ _register(SectionDef(
     display_name="Dual Carriage",
     category="sub_component",
     component_group="stepper",
-    max_instances=1,
-    params=STEPPER_PARAMS[:] + [
-        _enum("axis", ["x", "y"], "Axis for dual carriage", required=True),
+    is_named=True,
+    params=[
+        _str("primary_carriage", "Primary carriage paired with this dual carriage"),
+        _enum("axis", ["x", "y"], "Axis for dual carriage"),
         _float("safe_distance", "Safe distance between carriages", default="0", unit="mm"),
+        _pin("endstop_pin", "Endstop switch detection pin"),
+        _float("position_min", "Minimum position", default="0", unit="mm"),
+        _float("position_endstop", "Endstop position", unit="mm"),
+        _float("position_max", "Maximum position", unit="mm"),
+        _float("homing_speed", "Homing speed", default="5", unit="mm/s"),
+        _float("homing_retract_dist", "Retract distance after homing", default="5", unit="mm"),
+        _float("homing_retract_speed", "Retract speed after homing", default="homing_speed", unit="mm/s"),
+        _float("second_homing_speed", "Second homing speed", default="homing_speed/2", unit="mm/s"),
+        _bool("homing_positive_dir", "Home in positive direction"),
+        _pin("step_pin", "Step GPIO pin"),
+        _pin("dir_pin", "Direction GPIO pin"),
+        _pin("enable_pin", "Enable GPIO pin"),
+        _float("rotation_distance", "Distance per full rotation in mm"),
+        _int("microsteps", "Microsteps per full step"),
+        _int("full_steps_per_rotation", "Steps per full motor rotation", default="200"),
+        _str("gear_ratio", "Gear ratio"),
+        _float("step_pulse_duration", "Step pulse duration"),
     ],
+))
+
+_register(SectionDef(
+    section_type="carriage",
+    display_name="Carriage",
+    category="sub_component",
+    component_group="stepper",
+    is_named=True,
+    params=[
+        _enum("axis", ["x", "y", "z"], "Axis for the carriage"),
+        _pin("endstop_pin", "Endstop switch detection pin", required=True),
+        _float("position_min", "Minimum position", default="0", unit="mm"),
+        _float("position_endstop", "Endstop position", required=True, unit="mm"),
+        _float("position_max", "Maximum position", required=True, unit="mm"),
+        _float("homing_speed", "Homing speed", default="5", unit="mm/s"),
+        _float("homing_retract_dist", "Retract distance after homing", default="5", unit="mm"),
+        _float("homing_retract_speed", "Retract speed after homing", default="homing_speed", unit="mm/s"),
+        _float("second_homing_speed", "Second homing speed", default="homing_speed/2", unit="mm/s"),
+        _bool("homing_positive_dir", "Home in positive direction"),
+    ],
+))
+
+_register(SectionDef(
+    section_type="extra_carriage",
+    display_name="Extra Carriage",
+    category="sub_component",
+    component_group="stepper",
+    is_named=True,
+    params=[
+        _str("primary_carriage", "Primary carriage that this extra carriage follows", required=True),
+        _pin("endstop_pin", "Endstop switch detection pin", required=True),
+    ],
+))
+
+_register(SectionDef(
+    section_type="stepper",
+    display_name="Generic Stepper",
+    category="sub_component",
+    component_group="stepper",
+    is_named=True,
+    params=[
+        _str("carriages", "Carriages moved by this stepper", required=True),
+        _pin("step_pin", "Step GPIO pin", required=True),
+        _pin("dir_pin", "Direction GPIO pin", required=True),
+        _pin("enable_pin", "Enable GPIO pin"),
+        _float("rotation_distance", "Distance per full rotation in mm", required=True),
+        _int("microsteps", "Microsteps per full step", required=True),
+        _int("full_steps_per_rotation", "Steps per full motor rotation", default="200"),
+        _str("gear_ratio", "Gear ratio"),
+        _float("step_pulse_duration", "Step pulse duration"),
+    ],
+))
+
+_register(SectionDef(
+    section_type="stepper_left",
+    display_name="Stepper Left",
+    category="sub_component",
+    component_group="stepper",
+    params=STEPPER_PARAMS[:] + [
+        _float("arm_length", "Diagonal rod length", unit="mm"),
+        _float("arm_x_length", "Horizontal arm distance when homed", unit="mm"),
+    ],
+))
+
+_register(SectionDef(
+    section_type="stepper_right",
+    display_name="Stepper Right",
+    category="sub_component",
+    component_group="stepper",
+    params=STEPPER_PARAMS[:] + [
+        _float("arm_length", "Diagonal rod length", unit="mm"),
+        _float("arm_x_length", "Horizontal arm distance when homed", unit="mm"),
+    ],
+))
+
+_register(SectionDef(
+    section_type="stepper_bed",
+    display_name="Stepper Bed",
+    category="sub_component",
+    component_group="stepper",
+    params=[
+        _float("step_distance", "Distance per step in mm", default=""),
+        _float("rotation_distance", "Distance per full rotation in mm"),
+        _int("microsteps", "Microsteps per full step", required=True),
+        _int("full_steps_per_rotation", "Steps per full motor rotation", default="200"),
+        _str("gear_ratio", "Gear ratio", required=True),
+        _float("step_pulse_duration", "Step pulse duration"),
+        _pin("step_pin", "Step GPIO pin", required=True),
+        _pin("dir_pin", "Direction GPIO pin", required=True),
+        _pin("enable_pin", "Enable GPIO pin"),
+        _pin("endstop_pin", "Endstop switch detection pin"),
+        _float("position_min", "Minimum position", default="0", unit="mm"),
+        _float("position_endstop", "Endstop position", unit="mm"),
+        _float("position_max", "Maximum position", unit="mm"),
+        _float("homing_speed", "Homing speed", default="5", unit="mm/s"),
+        _float("homing_retract_dist", "Retract distance after homing", default="5", unit="mm"),
+        _float("homing_retract_speed", "Retract speed after homing", default="homing_speed", unit="mm/s"),
+        _float("second_homing_speed", "Second homing speed", default="homing_speed/2", unit="mm/s"),
+        _bool("homing_positive_dir", "Home in positive direction"),
+    ],
+))
+
+_register(SectionDef(
+    section_type="stepper_arm",
+    display_name="Stepper Arm",
+    category="sub_component",
+    component_group="stepper",
+    params=STEPPER_PARAMS[:],
 ))
 
 _register(SectionDef(
@@ -1603,7 +1778,7 @@ for chip_type in ["ad5206", "mcp4728"]:
             _pin("enable_pin", "Enable pin"),
             _str("i2c_bus", "I2C bus"),
             _str("i2c_address", "I2C address"),
-            _pin("spi_bus", "SPI bus"),
+            _str("spi_bus", "SPI bus"),
             _pin("cs_pin", "SPI chip select"),
             _str("channel_*", "Channel values"),
             _str("scale", "Scale factor"),
@@ -1647,15 +1822,59 @@ _register(SectionDef(
 ))
 
 # ── Board-specific (brief) ──
-for hw_type in ["sx1509", "samd_sercom", "ads1x1x", "replicape"]:
-    _register(SectionDef(
-        section_type=hw_type,
-        display_name=hw_type.replace("_", " ").title(),
-        category="config_helper",
-        component_group="hardware",
-        is_named=True,
-        params=[],
-    ))
+_register(SectionDef(
+    section_type="sx1509",
+    display_name="Sx1509",
+    category="config_helper",
+    component_group="hardware",
+    is_named=True,
+    params=[
+        _int("i2c_address", "I2C address", required=True),
+        _str("i2c_mcu", "I2C MCU name"),
+        _str("i2c_bus", "I2C bus name"),
+        _pin("i2c_software_scl_pin", "Software I2C SCL pin"),
+        _pin("i2c_software_sda_pin", "Software I2C SDA pin"),
+        _int("i2c_speed", "I2C speed"),
+    ],
+))
+
+_register(SectionDef(
+    section_type="samd_sercom",
+    display_name="Samd Sercom",
+    category="config_helper",
+    component_group="hardware",
+    is_named=True,
+    params=[
+        _str("sercom", "SERCOM bus name", required=True),
+        _pin("tx_pin", "SERCOM TX or SDA pin", required=True),
+        _pin("rx_pin", "SERCOM RX or MISO pin"),
+        _pin("clk_pin", "SERCOM clock or SCL pin", required=True),
+    ],
+))
+
+_register(SectionDef(
+    section_type="ads1x1x",
+    display_name="Ads1x1x",
+    category="config_helper",
+    component_group="hardware",
+    is_named=True,
+    params=[],
+))
+
+_register(SectionDef(
+    section_type="replicape",
+    display_name="Replicape",
+    category="config_helper",
+    component_group="hardware",
+    params=[
+        _enum("revision", ["B3"], "Replicape revision", required=True),
+        _pin("enable_pin", "Global enable pin"),
+        _str("host_mcu", "Linux process MCU section name", required=True),
+        _bool("standstill_power_down", "Allow motors to power down at standstill", default="False"),
+        _str("stepper_*_microstep_mode", "Microstep mode for a given stepper"),
+        _float("stepper_*_current", "Current for a given stepper"),
+    ],
+))
 
 _register(SectionDef(
     section_type="adc_scaled",
@@ -1725,6 +1944,14 @@ _register(SectionDef(
     params=[
         _enum("sensor_type", SENSOR_TYPE_ENUM, "Sensor type", required=True),
         _pin("sensor_pin", "Sensor pin"),
+        _float("adc_voltage", "ADC reference voltage"),
+        _float("voltage_offset", "ADC voltage offset"),
+        _float("pullup_resistor", "Sensor pullup resistor", default="4700"),
+        _float("inline_resistor", "Sensor inline resistor", default="0"),
+        _str("spi_bus", "SPI bus (for SPI sensors)"),
+        _pin("spi_software_sclk_pin", "Software SPI clock"),
+        _pin("spi_software_mosi_pin", "Software SPI MOSI"),
+        _pin("spi_software_miso_pin", "Software SPI MISO"),
         _float("horizontal_move_z", "Z height for probe moves"),
         _float("min_temp", "Min temp", default="0"),
         _float("max_temp", "Max temp", default="100"),

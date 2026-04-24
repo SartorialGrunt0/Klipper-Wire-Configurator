@@ -37,6 +37,18 @@ import type { MacroDesignerPersistedState } from './types/macroDesigner';
 import { combineValidationStatuses } from './utils/validationStatus';
 import { useMacroDesignerStore } from './stores/macroDesignerStore';
 
+function getSectionValidationKey(configFile: string | undefined, sectionHeader: string): string {
+  return `${configFile || ''}::${sectionHeader}`;
+}
+
+function getSectionStatus(
+  sectionStatuses: Map<string, ValidationStatus>,
+  configFile: string | undefined,
+  sectionHeader: string,
+): ValidationStatus {
+  return sectionStatuses.get(getSectionValidationKey(configFile, sectionHeader)) || 'valid';
+}
+
 function getDirectNodeStatus(
   node: AppNode,
   sectionStatuses: Map<string, ValidationStatus>,
@@ -45,18 +57,20 @@ function getDirectNodeStatus(
 
   if (node.type === 'subComponent' || node.type === 'feature') {
     const sectionHeader = nodeData.sectionHeader;
+    const configFile = typeof nodeData.configFile === 'string' ? nodeData.configFile : undefined;
     return typeof sectionHeader === 'string'
-      ? (sectionStatuses.get(sectionHeader) || 'valid')
+      ? getSectionStatus(sectionStatuses, configFile, sectionHeader)
       : 'valid';
   }
 
   if (node.type === 'group') {
     const children = Array.isArray(nodeData.children)
-      ? nodeData.children as Array<{ sectionHeader?: string }>
+      ? nodeData.children as Array<{ sectionHeader?: string; configFile?: string }>
       : [];
+    const fallbackConfigFile = typeof nodeData.configFile === 'string' ? nodeData.configFile : undefined;
     return combineValidationStatuses(children.map((child) => (
       typeof child.sectionHeader === 'string'
-        ? (sectionStatuses.get(child.sectionHeader) || 'valid')
+        ? getSectionStatus(sectionStatuses, child.configFile || fallbackConfigFile, child.sectionHeader)
         : 'valid'
     )));
   }
@@ -313,14 +327,15 @@ export default function App() {
 
   useEffect(() => {
     const sectionStatuses = new Map<string, ValidationStatus>();
-    for (const result of Object.values(validation)) {
+    for (const [filename, result] of Object.entries(validation)) {
       for (const issue of result.errors) {
         if (!issue.section) continue;
-        const currentStatus = sectionStatuses.get(issue.section) || 'valid';
+        const sectionKey = getSectionValidationKey(filename, issue.section);
+        const currentStatus = sectionStatuses.get(sectionKey) || 'valid';
         if (issue.severity === 'error') {
-          sectionStatuses.set(issue.section, 'error');
+          sectionStatuses.set(sectionKey, 'error');
         } else if (issue.severity === 'warning' && currentStatus !== 'error') {
-          sectionStatuses.set(issue.section, 'warning');
+          sectionStatuses.set(sectionKey, 'warning');
         }
       }
     }
@@ -370,10 +385,12 @@ export default function App() {
 
       if (node.type === 'group' && Array.isArray(currentData.children)) {
         const currentChildren = currentData.children as Array<Record<string, unknown>>;
+        const fallbackConfigFile = typeof currentData.configFile === 'string' ? currentData.configFile : undefined;
         const updatedChildren = currentChildren.map((child) => {
           const sectionHeader = child.sectionHeader;
+          const configFile = typeof child.configFile === 'string' ? child.configFile : fallbackConfigFile;
           const childStatus = typeof sectionHeader === 'string'
-            ? (sectionStatuses.get(sectionHeader) || 'valid')
+            ? getSectionStatus(sectionStatuses, configFile, sectionHeader)
             : 'valid';
           const childHasErrors = childStatus === 'error';
           if (child.validationStatus === childStatus && !!child.hasErrors === childHasErrors) {

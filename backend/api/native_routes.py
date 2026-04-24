@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from parser.config_parser import parse_config
 from parser.config_writer import smart_export
-from parser.validator import validate_config
+from parser.validator import validate_project_configs
 from services.board_detector import detect_board_from_config
 from services.native_services import (
     firmware_restart_klipper,
@@ -125,23 +125,29 @@ async def read_config_files(data: dict):
         except ValueError:
             raise HTTPException(status_code=400, detail=f"Invalid filename: {fn}")
 
-    results = {}
     configs = {}
+    raw_texts = {}
+    board_infos = {}
     for fn in filenames:
         file_path = base / fn
         if not file_path.exists():
             continue
         text = read_config_file(str(file_path))
         config = parse_config(text, fn)
-        validation = validate_config(config, is_multi_file=len(filenames) > 1)
-        board_info = detect_board_from_config(config)
         configs[fn] = config
-        results[fn] = {
+        raw_texts[fn] = text
+        board_infos[fn] = detect_board_from_config(config)
+
+    validations = validate_project_configs(configs)
+    results = {
+        filename: {
             "config": config.to_dict(),
-            "validation": validation.to_dict(),
-            "board_info": board_info,
-            "raw_text": text,
+            "validation": validations[filename].to_dict(),
+            "board_info": board_infos[filename],
+            "raw_text": raw_texts[filename],
         }
+        for filename, config in configs.items()
+    }
 
     # Discover MCUs
     mcus = []

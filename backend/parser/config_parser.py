@@ -131,6 +131,7 @@ NAMED_SECTION_TYPES = {
     "autotune_tmc", "motor_constants", "motor_alias",
     "homing_heaters", "endstop_phase",
     "manual_stepper", "extruder_stepper",
+    "stepper", "carriage", "extra_carriage", "dual_carriage",
     "stepper_z1", "stepper_z2", "stepper_z3",
     "ad5206", "mcp4451", "mcp4728", "mcp4018",
     "sx1509", "samd_sercom", "adc_scaled", "ads1x1x",

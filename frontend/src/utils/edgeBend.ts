@@ -12,7 +12,7 @@ import { useState, useCallback, useRef, useMemo } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import type React from 'react';
 import { useGraphStore } from '../stores/graphStore';
-import { getAvoidancePath, buildOrthogonalPath, type NodeRect } from './edgeRouting';
+import { getAvoidancePath, getPathMidpoint, buildOrthogonalPath, type NodeRect } from './edgeRouting';
 
 type Point = [number, number];
 
@@ -77,8 +77,8 @@ export function useBendPath(
     if (effectiveMiddle && effectiveMiddle.length > 0) {
       const full: Point[] = [[sourceX, sourceY], ...effectiveMiddle, [targetX, targetY]];
       const p = buildOrthogonalPath(full);
-      const mid = full[Math.floor(full.length / 2)];
-      return { path: p, labelX: mid[0], labelY: mid[1], waypoints: full };
+      const [labelX, labelY] = getPathMidpoint(full);
+      return { path: p, labelX, labelY, waypoints: full };
     }
     const r = getAvoidancePath(sourceX, sourceY, targetX, targetY, sourceSide, targetSide, obstacles);
     return { path: r.path, labelX: r.labelX, labelY: r.labelY, waypoints: r.waypoints as Point[] };

@@ -12,6 +12,7 @@ import type { AppNode, AppEdge, GroupNodeData } from '../types/graph';
 import type { HardwareType, CommunicationType, ConfigFile, ConfigSection } from '../types/config';
 import { useConfigStore } from './configStore';
 import { updateSectionPins } from '../utils/pinUtils';
+import { buildUniqueSectionDraft } from '../utils/sectionNaming';
 
 const STEPPER_SECTION_RE = /^stepper_[a-z]+(\d+)?$/;
 const EXTRUDER_SECTION_RE = /^extruder(\d+)?$/;
@@ -610,6 +611,22 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 
     // Helper: generate a unique section name by incrementing a counter suffix
     const incrementSectionName = (originalSection: { section_type: string; section_name: string; full_header: string }, allHeaders: Set<string>) => {
+      if (isDynamicSubComponentType(originalSection.section_type)) {
+        const allSections = Object.values(configStore.configFiles).flatMap((configFile) => configFile.sections);
+        const draft = buildUniqueSectionDraft(
+          originalSection.section_type,
+          originalSection.full_header,
+          undefined,
+          allSections,
+        );
+        allHeaders.add(draft.fullHeader);
+        return {
+          newSectionType: draft.sectionType,
+          newName: draft.sectionName,
+          newHeader: draft.fullHeader,
+        };
+      }
+
       const baseName = originalSection.section_name || originalSection.section_type;
       let counter = 2;
       let newName = `${baseName}_${counter}`;
@@ -621,7 +638,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       }
       // Add to set so subsequent calls within same batch don't collide
       allHeaders.add(newHeader);
-      return { newName, newHeader };
+      return { newSectionType: originalSection.section_type, newName, newHeader };
     };
 
     if (node.type === 'hardware') {
@@ -743,18 +760,20 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         const originalSection = configStore.getSection(configFile, sectionHeader, sectionLineNumber);
         if (originalSection) {
           const allHeaders = buildAllHeaders();
-          const { newName, newHeader } = incrementSectionName(originalSection, allHeaders);
+          const { newSectionType, newName, newHeader } = incrementSectionName(originalSection, allHeaders);
           // Add the duplicated section to the config store
           configStore.addSection(configFile, {
             ...originalSection,
+            section_type: newSectionType,
             section_name: newName,
             full_header: newHeader,
             line_number: 0,
             params: originalSection.params.map((p) => ({ ...p })),
           });
+          (cloneData as Record<string, unknown>).sectionType = newSectionType;
           (cloneData as Record<string, unknown>).sectionHeader = newHeader;
           (cloneData as Record<string, unknown>).sectionLineNumber = 0;
-          (cloneData as Record<string, unknown>).label = `${d.label || originalSection.section_type}: ${newName}`;
+          (cloneData as Record<string, unknown>).label = newName ? `${d.label || originalSection.section_type}: ${newName}` : newHeader;
         }
       }
     } else if (node.type === 'group') {
@@ -765,15 +784,22 @@ export const useGraphStore = create<GraphState>((set, get) => ({
           const childFile = child.configFile || (d.configFile as string);
           const originalSection = configStore.getSection(childFile, child.sectionHeader, child.sectionLineNumber);
           if (originalSection) {
-            const { newName, newHeader } = incrementSectionName(originalSection, allHeaders);
+            const { newSectionType, newName, newHeader } = incrementSectionName(originalSection, allHeaders);
             configStore.addSection(childFile, {
               ...originalSection,
+              section_type: newSectionType,
               section_name: newName,
               full_header: newHeader,
               line_number: 0,
               params: originalSection.params.map((p) => ({ ...p })),
             });
-            return { ...child, sectionHeader: newHeader, sectionLineNumber: 0, label: `${child.sectionType}: ${newName}` };
+            return {
+              ...child,
+              sectionType: newSectionType,
+              sectionHeader: newHeader,
+              sectionLineNumber: 0,
+              label: newName ? `${child.sectionType}: ${newName}` : newHeader,
+            };
           }
           return child;
         });

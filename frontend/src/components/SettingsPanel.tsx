@@ -13,7 +13,14 @@ import WarningBadge from './nodes/WarningBadge';
 import McuNameDialog from './dialogs/McuNameDialog';
 
 // Pin param names that should be unique
-const PIN_PARAM_NAMES = new Set(['pin', 'sensor_pin', 'heater_pin', 'step_pin', 'dir_pin', 'enable_pin', 'endstop_pin', 'uart_pin', 'cs_pin', 'spi_bus', 'en_pin', 'a_pin', 'b_pin', 'click_pin', 'pwm_pin']);
+const PIN_PARAM_NAMES = new Set(['pin', 'sensor_pin', 'heater_pin', 'step_pin', 'dir_pin', 'enable_pin', 'endstop_pin', 'uart_pin', 'tx_pin', 'cs_pin', 'en_pin', 'a_pin', 'b_pin', 'click_pin', 'pwm_pin']);
+
+type PinUse = {
+  section: string;
+  sectionType: string;
+  param: string;
+  label: string;
+};
 
 function isPinParam(paramName: string): boolean {
   return PIN_PARAM_NAMES.has(paramName) || paramName.endsWith('_pin');
@@ -25,7 +32,7 @@ function basename(filename: string): string {
 
 /** Build a map of pin value → list of sections using it (excluding inversion prefix) */
 function buildPinUsageMap(configFiles: Record<string, { sections: ConfigSection[] }>) {
-  const pinMap = new Map<string, string[]>();
+  const pinMap = new Map<string, PinUse[]>();
   for (const cf of Object.values(configFiles)) {
     for (const sec of cf.sections) {
       for (const p of sec.params) {
@@ -34,12 +41,52 @@ function buildPinUsageMap(configFiles: Record<string, { sections: ConfigSection[
         const pinVal = p.value.replace(/^[!^~]*/, '').trim();
         if (!pinVal || pinVal === 'none' || pinVal === '') continue;
         const existing = pinMap.get(pinVal) || [];
-        existing.push(sec.full_header);
+        existing.push({
+          section: sec.full_header,
+          sectionType: sec.section_type,
+          param: p.key,
+          label: `[${sec.full_header}] ${p.key}`,
+        });
         pinMap.set(pinVal, existing);
       }
     }
   }
   return pinMap;
+}
+
+function isAllowedSharedPin(users: PinUse[]): boolean {
+  if (users.length === 0) return false;
+
+  const sharedTmcParams = new Set(['uart_pin', 'tx_pin']);
+  if (users.every((user) => (user.sectionType === 'tmc2208' || user.sectionType === 'tmc2209') && sharedTmcParams.has(user.param))) {
+    return true;
+  }
+
+  if (users.every((user) => user.param === 'enable_pin' && (
+    user.sectionType.startsWith('stepper_')
+    || user.sectionType.startsWith('extruder')
+    || user.sectionType === 'manual_stepper'
+  ))) {
+    return true;
+  }
+
+  const sharedCommunicationParams = new Set([
+    'spi_software_sclk_pin',
+    'spi_software_mosi_pin',
+    'spi_software_miso_pin',
+    'i2c_software_scl_pin',
+    'i2c_software_sda_pin',
+  ]);
+  if (sharedCommunicationParams.has(users[0].param) && users.every((user) => user.param === users[0].param)) {
+    return true;
+  }
+
+  const sharedDisplayParams = new Set(['up_pin', 'down_pin', 'click_pin', 'back_pin', 'kill_pin']);
+  if (users.every((user) => user.sectionType === 'display' && user.section === users[0].section && sharedDisplayParams.has(user.param))) {
+    return true;
+  }
+
+  return false;
 }
 
 export default function SettingsPanel() {
@@ -167,7 +214,14 @@ export default function SettingsPanel() {
   const sectionIssues = useMemo(() => {
     if (!sectionHeader) return [] as Array<{ severity: 'error' | 'warning'; message: string }>;
     const issues: Array<{ severity: 'error' | 'warning'; message: string }> = [];
-    for (const result of Object.values(validation)) {
+    const validationFiles = sectionConfigFile
+      ? [sectionConfigFile]
+      : nodeConfigFile
+        ? [nodeConfigFile]
+        : Object.keys(validation);
+    for (const filename of validationFiles) {
+      const result = validation[filename];
+      if (!result) continue;
       for (const issue of result.errors) {
         if (issue.section !== sectionHeader) continue;
         if (issue.severity === 'error' || issue.severity === 'warning') {
@@ -176,7 +230,7 @@ export default function SettingsPanel() {
       }
     }
     return issues;
-  }, [sectionHeader, validation]);
+  }, [nodeConfigFile, sectionConfigFile, sectionHeader, validation]);
 
   const hasAcknowledgeableWarning = useMemo(
     () => sectionIssues.some((issue) => issue.severity === 'warning' && issue.message.startsWith('Unknown section type ')),
@@ -273,9 +327,9 @@ export default function SettingsPanel() {
     const filename = hwData?.configFile || activeFile;
     const existingSections = configFiles[filename]?.sections || targetConfigSections;
     const draft = buildUniqueSectionDraft(sectionType, displayName, schemaDef, existingSections);
-    addSubComponentNode(selectedNodeId, sectionType, draft.label, draft.fullHeader, filename);
+    addSubComponentNode(selectedNodeId, draft.sectionType, draft.label, draft.fullHeader, filename);
     addSection(filename, {
-      section_type: sectionType,
+      section_type: draft.sectionType,
       section_name: draft.sectionName,
       full_header: draft.fullHeader,
       line_number: 0,
@@ -299,9 +353,9 @@ export default function SettingsPanel() {
     const filename = hwData?.configFile || activeFile;
     const existingSections = configFiles[filename]?.sections || targetConfigSections;
     const draft = buildUniqueSectionDraft(sectionType, displayName, schemaDef, existingSections);
-    addFeatureNode(selectedNodeId, sectionType, draft.label, draft.fullHeader, filename);
+    addFeatureNode(selectedNodeId, draft.sectionType, draft.label, draft.fullHeader, filename);
     addSection(filename, {
-      section_type: sectionType,
+      section_type: draft.sectionType,
       section_name: draft.sectionName,
       full_header: draft.fullHeader,
       line_number: 0,
@@ -1145,9 +1199,9 @@ export default function SettingsPanel() {
             const pinVal = param.value.replace(/^[!^~]*/, '').trim();
             const users = pinUsageMap.get(pinVal);
             if (users && users.length > 1) {
-              const others = users.filter((h) => h !== sectionHeader);
-              if (others.length > 0) {
-                pinConflict = `Pin "${pinVal}" also used by: ${others.join(', ')}`;
+              const others = users.filter((user) => user.section !== sectionHeader || user.param !== param.key);
+              if (others.length > 0 && !isAllowedSharedPin(users)) {
+                pinConflict = `Pin "${pinVal}" also used by: ${others.map((user) => user.label).join(', ')}`;
               }
             }
           }
@@ -1394,7 +1448,13 @@ function ParamField({
   commType?: string;
 }) {
   const isRequired = schema?.required ?? false;
-  const hasError = (isRequired && !param.value.trim()) || !!pinConflict;
+  const hasError = isRequired && !param.value.trim();
+  const hasWarning = !!pinConflict;
+  const inputBorderClass = hasError
+    ? 'border-[var(--color-error)]'
+    : hasWarning
+      ? 'border-[var(--color-warning)]'
+      : 'border-[var(--color-bg-tertiary)]';
 
   return (
     <div className="group">
@@ -1422,9 +1482,7 @@ function ParamField({
           value={param.value}
           onChange={(e) => onChange(e.target.value)}
           onBlur={onCommit}
-          className={`w-full px-2 py-1.5 rounded text-xs bg-[var(--color-bg-primary)] border text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)] ${
-            hasError ? 'border-[var(--color-error)]' : 'border-[var(--color-bg-tertiary)]'
-          }`}
+          className={`w-full px-2 py-1.5 rounded text-xs bg-[var(--color-bg-primary)] border text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)] ${inputBorderClass}`}
         >
           <option value="">-- Select --</option>
           {schema.enum_values.map((v) => (
@@ -1449,9 +1507,7 @@ function ParamField({
           onChange={(e) => onChange(e.target.value)}
           onBlur={onCommit}
           rows={4}
-          className={`w-full px-2 py-1.5 rounded text-xs font-mono bg-[var(--color-bg-primary)] border text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)] resize-y ${
-            hasError ? 'border-[var(--color-error)]' : 'border-[var(--color-bg-tertiary)]'
-          }`}
+          className={`w-full px-2 py-1.5 rounded text-xs font-mono bg-[var(--color-bg-primary)] border text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)] resize-y ${inputBorderClass}`}
         />
       ) : (
         <input
@@ -1460,9 +1516,7 @@ function ParamField({
           onChange={(e) => onChange(e.target.value)}
           onBlur={onCommit}
           placeholder={schema?.default || ''}
-          className={`w-full px-2 py-1.5 rounded text-xs bg-[var(--color-bg-primary)] border text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)] ${
-            hasError ? 'border-[var(--color-error)]' : 'border-[var(--color-bg-tertiary)]'
-          }`}
+          className={`w-full px-2 py-1.5 rounded text-xs bg-[var(--color-bg-primary)] border text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)] ${inputBorderClass}`}
         />
       )}
 
@@ -2000,10 +2054,9 @@ function HardwareOverviewPanel({
                   </h4>
                   <div className="flex flex-wrap gap-1">
                     {group.types.map((t) => {
-                      const alreadyAdded = t !== 'gcode_macro' && allNodes.some((n) => {
-                        const d = n.data as Record<string, unknown>;
-                        return n.type === 'feature' && d.sectionType === t;
-                      });
+                      const alreadyAdded = t !== 'gcode_macro' && Object.values(allConfigFiles).some(
+                        (configFile) => configFile.sections.some((section) => section.section_type === t),
+                      );
                       return (
                         <button
                           key={t}

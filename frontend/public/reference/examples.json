@@ -2722,15 +2722,12 @@
       ]
     },
     {
-      "filename": "sample-fysetc-portable-input-shaper.cfg",
-      "name": "sample-fysetc-portable-input-shaper",
+      "filename": "sample-idmscanner.cfg",
+      "name": "sample-idmscanner",
       "category": "sample",
       "board_type": "probe",
       "tags": [
-        "fysetc",
-        "portable",
-        "input",
-        "shaper"
+        "idmscanner"
       ]
     },
     {
@@ -2831,6 +2828,72 @@
         "bigtreetech",
         "adxl345",
         "v2"
+      ]
+    },
+    {
+      "filename": "sample-bigtreetech-lis2dw-v1.0.cfg",
+      "name": "sample-bigtreetech-lis2dw-v1.0",
+      "category": "sample",
+      "board_type": "accelerometer",
+      "tags": [
+        "bigtreetech",
+        "lis2dw",
+        "v1"
+      ]
+    },
+    {
+      "filename": "sample-fysetc-portable-input-shaper.cfg",
+      "name": "sample-fysetc-portable-input-shaper",
+      "category": "sample",
+      "board_type": "accelerometer",
+      "tags": [
+        "fysetc",
+        "portable",
+        "input",
+        "shaper"
+      ]
+    },
+    {
+      "filename": "sample-kusba-adxl345.cfg",
+      "name": "sample-kusba-adxl345",
+      "category": "sample",
+      "board_type": "accelerometer",
+      "tags": [
+        "kusba",
+        "adxl345"
+      ]
+    },
+    {
+      "filename": "sample-mellow-usb-adxl345.cfg",
+      "name": "sample-mellow-usb-adxl345",
+      "category": "sample",
+      "board_type": "accelerometer",
+      "tags": [
+        "mellow",
+        "usb",
+        "adxl345"
+      ]
+    },
+    {
+      "filename": "sample-mellow-usb-lis2dw.cfg",
+      "name": "sample-mellow-usb-lis2dw",
+      "category": "sample",
+      "board_type": "accelerometer",
+      "tags": [
+        "mellow",
+        "usb",
+        "lis2dw"
+      ]
+    },
+    {
+      "filename": "sample-trianglelabs-usb-adxl345.cfg",
+      "name": "sample-trianglelabs-usb-adxl345",
+      "category": "sample",
+      "board_type": "accelerometer",
+      "tags": [
+        "trianglelabs",
+        "usb",
+        "adxl345"
       ]
     },
     {

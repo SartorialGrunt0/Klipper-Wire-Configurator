@@ -1,6 +1,7 @@
 import type { ConfigSection, SectionSchema } from '../types/config';
 
 export interface UniqueSectionDraft {
+  sectionType: string;
   sectionName: string;
   fullHeader: string;
   label: string;
@@ -20,8 +21,9 @@ function nextAvailableIndex(used: Set<number>, start = 1): number {
   return candidate;
 }
 
-function buildUnnamedDraft(fullHeader: string, label: string): UniqueSectionDraft {
+function buildUnnamedDraft(sectionType: string, fullHeader: string, label: string): UniqueSectionDraft {
   return {
+    sectionType,
     sectionName: '',
     fullHeader,
     label,
@@ -50,6 +52,7 @@ function buildIncrementedHeader(sectionType: string, baseName: string, existingH
   }
 
   return {
+    sectionType,
     sectionName,
     fullHeader,
     label: '',
@@ -64,7 +67,7 @@ function buildExtruderDraft(
 ): UniqueSectionDraft {
   const match = EXTRUDER_SECTION_RE.exec(sectionType);
   if (!match) {
-    return buildUnnamedDraft(sectionType, displayName);
+    return buildUnnamedDraft(sectionType, sectionType, displayName);
   }
 
   const requestedIndex = match[1] ? Number(match[1]) : 0;
@@ -80,7 +83,7 @@ function buildExtruderDraft(
     ? nextAvailableIndex(used, 1)
     : requestedIndex;
   const fullHeader = chosenIndex === 0 ? 'extruder' : `extruder${chosenIndex}`;
-  return buildUnnamedDraft(fullHeader, chosenIndex === 0 ? displayName : fullHeader);
+  return buildUnnamedDraft(fullHeader, fullHeader, chosenIndex === 0 ? displayName : fullHeader);
 }
 
 function buildStepperDraft(
@@ -91,7 +94,7 @@ function buildStepperDraft(
 ): UniqueSectionDraft {
   const match = STEPPER_SECTION_RE.exec(sectionType);
   if (!match) {
-    return buildUnnamedDraft(sectionType, displayName);
+    return buildUnnamedDraft(sectionType, sectionType, displayName);
   }
 
   const axis = match[1];
@@ -108,7 +111,7 @@ function buildStepperDraft(
     ? nextAvailableIndex(used, 1)
     : requestedIndex;
   const fullHeader = chosenIndex === 0 ? `stepper_${axis}` : `stepper_${axis}${chosenIndex}`;
-  return buildUnnamedDraft(fullHeader, chosenIndex === 0 ? displayName : fullHeader);
+  return buildUnnamedDraft(fullHeader, fullHeader, chosenIndex === 0 ? displayName : fullHeader);
 }
 
 function buildDriverDraft(
@@ -131,6 +134,7 @@ function buildDriverDraft(
   );
   if (availableReference) {
     return {
+      sectionType,
       sectionName: availableReference,
       fullHeader: `${sectionType} ${availableReference}`,
       label: `${displayName}: ${availableReference}`,
@@ -141,6 +145,7 @@ function buildDriverDraft(
   const fallbackHeader = `${sectionType} ${fallbackName}`;
   if (!existingHeaders.has(fallbackHeader)) {
     return {
+      sectionType,
       sectionName: fallbackName,
       fullHeader: fallbackHeader,
       label: `${displayName}: ${fallbackName}`,
@@ -180,6 +185,7 @@ export function buildUniqueSectionDraft(
     const defaultHeader = `${sectionType} ${defaultName}`;
     if (!headers.has(defaultHeader)) {
       return {
+        sectionType,
         sectionName: defaultName,
         fullHeader: defaultHeader,
         label: `${displayName}: ${defaultName}`,
@@ -195,6 +201,7 @@ export function buildUniqueSectionDraft(
 
   if (!headers.has(sectionType)) {
     return {
+      sectionType,
       sectionName: '',
       fullHeader: sectionType,
       label: displayName,

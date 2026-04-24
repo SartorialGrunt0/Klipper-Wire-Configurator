@@ -2,6 +2,7 @@ import { useState, useCallback, useMemo, useRef, useEffect, useImperativeHandle,
 import { useConfigStore } from '../stores/configStore';
 import { useGraphStore } from '../stores/graphStore';
 import * as api from '../services/api';
+import { buildProjectGraph } from '../utils/graphBuilder';
 import ApplyWarningDialog from './dialogs/ApplyWarningDialog';
 import type { ExampleConfig, HardwareType, CommunicationType, ConfigFile, ConfigSection } from '../types/config';
 import { getBoardTypeMarker } from '../utils/boardTypeMarker';
@@ -44,7 +45,18 @@ interface ConfigSectionEntry {
 }
 
 const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref) {
-  const { configFiles, activeFile, setActiveFile, setConfigFile, setValidation, renameConfigFile, copyConfigFile, removeConfigFile } = useConfigStore();
+  const {
+    configFiles,
+    activeFile,
+    setActiveFile,
+    setConfigFile,
+    setValidation,
+    renameConfigFile,
+    copyConfigFile,
+    removeConfigFile,
+    schemas,
+    validation,
+  } = useConfigStore();
 
   const config = configFiles[activeFile];
   const filenames = Object.keys(configFiles);
@@ -324,15 +336,25 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
   const doApply = useCallback(async () => {
     try {
       const result = await api.parseConfigText(editText, activeFile);
+      const updatedConfigs = {
+        ...configFiles,
+        [activeFile]: result.config,
+      };
+
       setConfigFile(activeFile, result.config);
       setValidation(activeFile, result.validation);
       setIsDirty(false);
-      // Sync the graph with the updated config
-      useGraphStore.getState().syncGraphWithConfig(activeFile);
+
+      const graphStore = useGraphStore.getState();
+      graphStore.clearGraph();
+      buildProjectGraph(updatedConfigs, graphStore, schemas, {
+        ...validation,
+        [activeFile]: result.validation,
+      });
     } catch (err) {
       console.error('Parse error:', err);
     }
-  }, [editText, activeFile, setConfigFile, setValidation]);
+  }, [editText, activeFile, configFiles, schemas, setConfigFile, setValidation, validation]);
 
   const handleApply = useCallback(async () => {
     // Check for active issues

@@ -84,6 +84,16 @@ export async function validateConfig(config: ConfigFile): Promise<ValidationResu
   });
 }
 
+export async function validateProject(
+  configFiles: Record<string, ConfigFile>,
+): Promise<Record<string, ValidationResult>> {
+  const result = await request<{ files: Record<string, ValidationResult> }>('/validate-project', {
+    method: 'POST',
+    body: JSON.stringify({ config_files: Object.values(configFiles) }),
+  });
+  return result.files;
+}
+
 export async function acknowledgeWarning(section: ConfigSection): Promise<{ status: string; file: string }> {
   return request('/warning-acknowledgements', {
     method: 'POST',

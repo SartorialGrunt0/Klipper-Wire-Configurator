@@ -1,17 +1,15 @@
 {
   "summary": {
     "files_scanned": 280,
-    "files_with_diagnostics": 79,
-    "diagnostic_count": 342,
+    "files_with_diagnostics": 64,
+    "diagnostic_count": 273,
     "severity_counts": {
-      "warning": 141,
+      "warning": 72,
       "error": 201
     },
     "classification_counts": {
-      "needs_review": 258,
-      "likely_partial_example": 54,
-      "documented_unknown_param": 17,
-      "documented_unknown_section": 13
+      "needs_review": 219,
+      "likely_partial_example": 54
     }
   },
   "top_diagnostics": [
@@ -481,20 +479,6 @@
       ]
     },
     {
-      "file": "reference/config/Expander/sample-fysetc-ercf-hardware.cfg",
-      "severity": "warning",
-      "section": "manual_stepper gear_stepper",
-      "param": "gear_ratio",
-      "message": "Unknown parameter 'gear_ratio' for section [manual_stepper].",
-      "line_number": 18,
-      "classification": "needs_review",
-      "doc_hits": [],
-      "partial_reasons": [
-        "sample file without [printer] section",
-        "Expander reference file without [printer] section"
-      ]
-    },
-    {
       "file": "reference/config/Mainboard/generic-alligator-r2.cfg",
       "severity": "warning",
       "section": "dac084S085 stepper_digipot",
@@ -517,77 +501,11 @@
       "partial_reasons": []
     },
     {
-      "file": "reference/config/Mainboard/generic-archim2.cfg",
-      "severity": "warning",
-      "section": "",
-      "param": "",
-      "message": "Pin 'PD2' is used by multiple sections: [tmc2130 stepper_x] spi_software_sclk_pin, [tmc2130 stepper_y] spi_software_sclk_pin, [tmc2130 stepper_z] spi_software_sclk_pin, [tmc2130 extruder] spi_software_sclk_pin",
-      "line_number": 0,
-      "classification": "needs_review",
-      "doc_hits": [],
-      "partial_reasons": []
-    },
-    {
-      "file": "reference/config/Mainboard/generic-archim2.cfg",
-      "severity": "warning",
-      "section": "",
-      "param": "",
-      "message": "Pin 'PD3' is used by multiple sections: [tmc2130 stepper_x] spi_software_mosi_pin, [tmc2130 stepper_y] spi_software_mosi_pin, [tmc2130 stepper_z] spi_software_mosi_pin, [tmc2130 extruder] spi_software_mosi_pin",
-      "line_number": 0,
-      "classification": "needs_review",
-      "doc_hits": [],
-      "partial_reasons": []
-    },
-    {
-      "file": "reference/config/Mainboard/generic-archim2.cfg",
-      "severity": "warning",
-      "section": "",
-      "param": "",
-      "message": "Pin 'PD1' is used by multiple sections: [tmc2130 stepper_x] spi_software_miso_pin, [tmc2130 stepper_y] spi_software_miso_pin, [tmc2130 stepper_z] spi_software_miso_pin, [tmc2130 extruder] spi_software_miso_pin",
-      "line_number": 0,
-      "classification": "needs_review",
-      "doc_hits": [],
-      "partial_reasons": []
-    },
-    {
-      "file": "reference/config/Mainboard/generic-bigtreetech-gtr.cfg",
-      "severity": "warning",
-      "section": "temperature_sensor k_therm",
-      "param": "spi_bus",
-      "message": "Unknown parameter 'spi_bus' for section [temperature_sensor].",
-      "line_number": 103,
-      "classification": "needs_review",
-      "doc_hits": [],
-      "partial_reasons": []
-    },
-    {
       "file": "reference/config/Mainboard/generic-duet2-duex.cfg",
       "severity": "warning",
       "section": "",
       "param": "",
       "message": "Pin 'usart1' is used by multiple sections: [tmc2660 stepper_x] spi_bus, [tmc2660 stepper_y] spi_bus, [tmc2660 stepper_z] spi_bus, [tmc2660 stepper_z1] spi_bus, [tmc2660 stepper_z2] spi_bus, [tmc2660 stepper_z3] spi_bus, [tmc2660 extruder] spi_bus, [tmc2660 extruder1] spi_bus, [tmc2660 extruder2] spi_bus, [tmc2660 extruder3] spi_bus",
-      "line_number": 0,
-      "classification": "needs_review",
-      "doc_hits": [],
-      "partial_reasons": []
-    },
-    {
-      "file": "reference/config/Mainboard/generic-duet2-maestro.cfg",
-      "severity": "warning",
-      "section": "",
-      "param": "",
-      "message": "Pin 'PC14, !PC16, !PC17' is used by multiple sections: [tmc2208 stepper_x] select_pins, [tmc2208 stepper_y] select_pins",
-      "line_number": 0,
-      "classification": "needs_review",
-      "doc_hits": [],
-      "partial_reasons": []
-    },
-    {
-      "file": "reference/config/Mainboard/generic-duet2-maestro.cfg",
-      "severity": "warning",
-      "section": "",
-      "param": "",
-      "message": "Pin 'PC14, PC16, !PC17' is used by multiple sections: [tmc2208 stepper_z] select_pins, [tmc2208 extruder] select_pins",
       "line_number": 0,
       "classification": "needs_review",
       "doc_hits": [],
@@ -616,56 +534,12 @@
       "partial_reasons": []
     },
     {
-      "file": "reference/config/Mainboard/generic-duet3-mini.cfg",
-      "severity": "warning",
-      "section": "",
-      "param": "",
-      "message": "Pin 'PD0' is used by multiple sections: [tmc2209 stepper_x] select_pins, [tmc2209 stepper_y] select_pins, [tmc2209 stepper_z] select_pins, [tmc2209 extruder] select_pins",
-      "line_number": 0,
-      "classification": "needs_review",
-      "doc_hits": [],
-      "partial_reasons": []
-    },
-    {
-      "file": "reference/config/Mainboard/generic-ldo-leviathan-v1.2.cfg",
-      "severity": "warning",
-      "section": "",
-      "param": "",
-      "message": "Pin 'spi4' is used by multiple sections: [tmc5160 stepper_x] spi_bus, [tmc5160 stepper_y] spi_bus",
-      "line_number": 0,
-      "classification": "needs_review",
-      "doc_hits": [],
-      "partial_reasons": []
-    },
-    {
-      "file": "reference/config/Mainboard/generic-mightyboard.cfg",
-      "severity": "warning",
-      "section": "",
-      "param": "",
-      "message": "Pin 'PJ5' is used by multiple sections: [mcp4018 x_axis_pot] i2c_software_scl_pin, [mcp4018 y_axis_pot] i2c_software_scl_pin, [mcp4018 z_axis_pot] i2c_software_scl_pin, [mcp4018 a_axis_pot] i2c_software_scl_pin, [mcp4018 b_axis_pot] i2c_software_scl_pin",
-      "line_number": 0,
-      "classification": "needs_review",
-      "doc_hits": [],
-      "partial_reasons": []
-    },
-    {
       "file": "reference/config/Mainboard/generic-printrboard-g2.cfg",
       "severity": "error",
       "section": "extruder",
       "param": "sensor_type",
       "message": "Invalid value 'G2' for 'sensor_type'. Expected one of: EPCOS 100K B57560G104F, ATC Semitec 104GT-2, ATC Semitec 104NT-4-R025H42G, Generic 3950, Honeywell 100K 135-104LAG-J01, NTC 100K MGB18-104F39050L32, SliceEngineering 450, TDK NTCG104LH104JT1, PT100 INA826, PT1000, AD595, AD597, AD8494, AD8495, AD8496, AD8497, MAX6675, MAX31855, MAX31856, MAX31865, BME280, AHT10, HTU21D, SHT21, lm75, temperature_mcu, temperature_host, DS18B20, temperature_combined",
       "line_number": 95,
-      "classification": "needs_review",
-      "doc_hits": [],
-      "partial_reasons": []
-    },
-    {
-      "file": "reference/config/Mainboard/generic-remram.cfg",
-      "severity": "warning",
-      "section": "",
-      "param": "",
-      "message": "Pin 'spi1' is used by multiple sections: [tmc2130 stepper_x] spi_bus, [tmc2130 stepper_y] spi_bus, [tmc2130 stepper_z] spi_bus, [tmc2130 extruder] spi_bus",
-      "line_number": 0,
       "classification": "needs_review",
       "doc_hits": [],
       "partial_reasons": []
@@ -759,100 +633,12 @@
       "partial_reasons": []
     },
     {
-      "file": "reference/config/Mainboard/printer-flashforge-creator-pro-2018.cfg",
-      "severity": "warning",
-      "section": "",
-      "param": "",
-      "message": "Pin 'PE5' is used by multiple sections: [extruder] spi_software_miso_pin, [extruder1] spi_software_miso_pin",
-      "line_number": 0,
-      "classification": "needs_review",
-      "doc_hits": [],
-      "partial_reasons": []
-    },
-    {
-      "file": "reference/config/Mainboard/printer-flashforge-creator-pro-2018.cfg",
-      "severity": "warning",
-      "section": "",
-      "param": "",
-      "message": "Pin 'PE2' is used by multiple sections: [extruder] spi_software_sclk_pin, [extruder1] spi_software_sclk_pin",
-      "line_number": 0,
-      "classification": "needs_review",
-      "doc_hits": [],
-      "partial_reasons": []
-    },
-    {
-      "file": "reference/config/Mainboard/printer-flashforge-creator-pro-2018.cfg",
-      "severity": "warning",
-      "section": "",
-      "param": "",
-      "message": "Pin 'PA1' is used by multiple sections: [extruder] spi_software_mosi_pin, [extruder1] spi_software_mosi_pin",
-      "line_number": 0,
-      "classification": "needs_review",
-      "doc_hits": [],
-      "partial_reasons": []
-    },
-    {
-      "file": "reference/config/Mainboard/printer-flashforge-creator-pro-2018.cfg",
-      "severity": "warning",
-      "section": "",
-      "param": "",
-      "message": "Pin 'PJ5' is used by multiple sections: [mcp4018 x_axis_pot] i2c_software_scl_pin, [mcp4018 y_axis_pot] i2c_software_scl_pin, [mcp4018 z_axis_pot] i2c_software_scl_pin, [mcp4018 a_axis_pot] i2c_software_scl_pin, [mcp4018 b_axis_pot] i2c_software_scl_pin",
-      "line_number": 0,
-      "classification": "needs_review",
-      "doc_hits": [],
-      "partial_reasons": []
-    },
-    {
       "file": "reference/config/Mainboard/printer-geeetech-301-2019.cfg",
       "severity": "error",
       "section": "heater_bed",
       "param": "sensor_type",
       "message": "Invalid value 'bed_thermistor' for 'sensor_type'. Expected one of: EPCOS 100K B57560G104F, ATC Semitec 104GT-2, ATC Semitec 104NT-4-R025H42G, Generic 3950, Honeywell 100K 135-104LAG-J01, NTC 100K MGB18-104F39050L32, SliceEngineering 450, TDK NTCG104LH104JT1, PT100 INA826, PT1000, AD595, AD597, AD8494, AD8495, AD8496, AD8497, MAX6675, MAX31855, MAX31856, MAX31865, BME280, AHT10, HTU21D, SHT21, lm75, temperature_mcu, temperature_host, DS18B20, temperature_combined",
       "line_number": 92,
-      "classification": "needs_review",
-      "doc_hits": [],
-      "partial_reasons": []
-    },
-    {
-      "file": "reference/config/Mainboard/printer-geeetech-301-2019.cfg",
-      "severity": "warning",
-      "section": "temperature_sensor secondary",
-      "param": "pullup_resistor",
-      "message": "Unknown parameter 'pullup_resistor' for section [temperature_sensor].",
-      "line_number": 108,
-      "classification": "needs_review",
-      "doc_hits": [],
-      "partial_reasons": []
-    },
-    {
-      "file": "reference/config/Mainboard/printer-geeetech-301-2019.cfg",
-      "severity": "warning",
-      "section": "temperature_sensor secondary",
-      "param": "inline_resistor",
-      "message": "Unknown parameter 'inline_resistor' for section [temperature_sensor].",
-      "line_number": 109,
-      "classification": "needs_review",
-      "doc_hits": [],
-      "partial_reasons": []
-    },
-    {
-      "file": "reference/config/Mainboard/printer-geeetech-301-2019.cfg",
-      "severity": "warning",
-      "section": "temperature_sensor ambient",
-      "param": "pullup_resistor",
-      "message": "Unknown parameter 'pullup_resistor' for section [temperature_sensor].",
-      "line_number": 115,
-      "classification": "needs_review",
-      "doc_hits": [],
-      "partial_reasons": []
-    },
-    {
-      "file": "reference/config/Mainboard/printer-geeetech-301-2019.cfg",
-      "severity": "warning",
-      "section": "temperature_sensor ambient",
-      "param": "inline_resistor",
-      "message": "Unknown parameter 'inline_resistor' for section [temperature_sensor].",
-      "line_number": 116,
       "classification": "needs_review",
       "doc_hits": [],
       "partial_reasons": []
@@ -996,17 +782,6 @@
       "param": "rtd_use_50Hz_filter",
       "message": "Unknown parameter 'rtd_use_50Hz_filter' for section [extruder1].",
       "line_number": 112,
-      "classification": "needs_review",
-      "doc_hits": [],
-      "partial_reasons": []
-    },
-    {
-      "file": "reference/config/Mainboard/printer-modix-big60-2020.cfg",
-      "severity": "warning",
-      "section": "",
-      "param": "",
-      "message": "Pin 'usart0' is used by multiple sections: [extruder] spi_bus, [extruder1] spi_bus",
-      "line_number": 0,
       "classification": "needs_review",
       "doc_hits": [],
       "partial_reasons": []
@@ -1524,39 +1299,6 @@
       "param": "points",
       "message": "Required parameter 'points' is missing.",
       "line_number": 388,
-      "classification": "needs_review",
-      "doc_hits": [],
-      "partial_reasons": []
-    },
-    {
-      "file": "reference/config/Mainboard/printer-Voron-Trident_Kraken_Config.cfg",
-      "severity": "warning",
-      "section": "",
-      "param": "",
-      "message": "Pin 'PC7' is used by multiple sections: [tmc5160 stepper_x] spi_software_miso_pin, [tmc5160 stepper_y] spi_software_miso_pin, [tmc5160 stepper_z] spi_software_miso_pin, [tmc5160 stepper_z1] spi_software_miso_pin, [tmc5160 stepper_z2] spi_software_miso_pin, [tmc5160 extruder] spi_software_miso_pin",
-      "line_number": 0,
-      "classification": "needs_review",
-      "doc_hits": [],
-      "partial_reasons": []
-    },
-    {
-      "file": "reference/config/Mainboard/printer-Voron-Trident_Kraken_Config.cfg",
-      "severity": "warning",
-      "section": "",
-      "param": "",
-      "message": "Pin 'PC8' is used by multiple sections: [tmc5160 stepper_x] spi_software_mosi_pin, [tmc5160 stepper_y] spi_software_mosi_pin, [tmc5160 stepper_z] spi_software_mosi_pin, [tmc5160 stepper_z1] spi_software_mosi_pin, [tmc5160 stepper_z2] spi_software_mosi_pin, [tmc5160 extruder] spi_software_mosi_pin",
-      "line_number": 0,
-      "classification": "needs_review",
-      "doc_hits": [],
-      "partial_reasons": []
-    },
-    {
-      "file": "reference/config/Mainboard/printer-Voron-Trident_Kraken_Config.cfg",
-      "severity": "warning",
-      "section": "",
-      "param": "",
-      "message": "Pin 'PC6' is used by multiple sections: [tmc5160 stepper_x] spi_software_sclk_pin, [tmc5160 stepper_y] spi_software_sclk_pin, [tmc5160 stepper_z] spi_software_sclk_pin, [tmc5160 stepper_z1] spi_software_sclk_pin, [tmc5160 stepper_z2] spi_software_sclk_pin, [tmc5160 extruder] spi_software_sclk_pin",
-      "line_number": 0,
       "classification": "needs_review",
       "doc_hits": [],
       "partial_reasons": []
@@ -2233,39 +1975,6 @@
       "partial_reasons": []
     },
     {
-      "file": "reference/config/Mainboard/printer-Voron2.4-Kraken_Config.cfg",
-      "severity": "warning",
-      "section": "",
-      "param": "",
-      "message": "Pin 'PC7' is used by multiple sections: [tmc5160 stepper_x] spi_software_miso_pin, [tmc5160 stepper_y] spi_software_miso_pin, [tmc5160 stepper_z] spi_software_miso_pin, [tmc5160 stepper_z1] spi_software_miso_pin, [tmc5160 stepper_z2] spi_software_miso_pin, [tmc5160 stepper_z3] spi_software_miso_pin, [tmc5160 extruder] spi_software_miso_pin",
-      "line_number": 0,
-      "classification": "needs_review",
-      "doc_hits": [],
-      "partial_reasons": []
-    },
-    {
-      "file": "reference/config/Mainboard/printer-Voron2.4-Kraken_Config.cfg",
-      "severity": "warning",
-      "section": "",
-      "param": "",
-      "message": "Pin 'PC8' is used by multiple sections: [tmc5160 stepper_x] spi_software_mosi_pin, [tmc5160 stepper_y] spi_software_mosi_pin, [tmc5160 stepper_z] spi_software_mosi_pin, [tmc5160 stepper_z1] spi_software_mosi_pin, [tmc5160 stepper_z2] spi_software_mosi_pin, [tmc5160 stepper_z3] spi_software_mosi_pin, [tmc5160 extruder] spi_software_mosi_pin",
-      "line_number": 0,
-      "classification": "needs_review",
-      "doc_hits": [],
-      "partial_reasons": []
-    },
-    {
-      "file": "reference/config/Mainboard/printer-Voron2.4-Kraken_Config.cfg",
-      "severity": "warning",
-      "section": "",
-      "param": "",
-      "message": "Pin 'PC6' is used by multiple sections: [tmc5160 stepper_x] spi_software_sclk_pin, [tmc5160 stepper_y] spi_software_sclk_pin, [tmc5160 stepper_z] spi_software_sclk_pin, [tmc5160 stepper_z1] spi_software_sclk_pin, [tmc5160 stepper_z2] spi_software_sclk_pin, [tmc5160 stepper_z3] spi_software_sclk_pin, [tmc5160 extruder] spi_software_sclk_pin",
-      "line_number": 0,
-      "classification": "needs_review",
-      "doc_hits": [],
-      "partial_reasons": []
-    },
-    {
       "file": "reference/config/Mainboard/printer-Voron2.4-M8P-v1.0_config.cfg",
       "severity": "error",
       "section": "extruder",
@@ -2495,423 +2204,305 @@
       "classification": "needs_review",
       "doc_hits": [],
       "partial_reasons": []
-    }
-  ],
-  "documented_unknowns": [
+    },
     {
-      "file": "reference/config/Mainboard/generic-duet2-duex.cfg",
-      "severity": "warning",
-      "section": "sx1509 duex",
-      "param": "i2c_address",
-      "message": "Unknown parameter 'i2c_address' for section [sx1509].",
-      "line_number": 316,
-      "classification": "documented_unknown_param",
-      "doc_hits": [
-        "reference/reference_docs/klipper_docs/Config_Reference.md"
-      ],
+      "file": "reference/config/Mainboard/printer-Voron2.4-Spider_Config.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 215,
+      "classification": "needs_review",
+      "doc_hits": [],
       "partial_reasons": []
     },
     {
-      "file": "reference/config/Mainboard/generic-replicape.cfg",
-      "severity": "warning",
-      "section": "replicape",
-      "param": "revision",
-      "message": "Unknown parameter 'revision' for section [replicape].",
-      "line_number": 23,
-      "classification": "documented_unknown_param",
-      "doc_hits": [
-        "reference/reference_docs/klipper_docs/Config_Reference.md"
-      ],
+      "file": "reference/config/Mainboard/printer-Voron2.4-Spider_Config.cfg",
+      "severity": "error",
+      "section": "heater_bed",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 265,
+      "classification": "needs_review",
+      "doc_hits": [],
       "partial_reasons": []
     },
     {
-      "file": "reference/config/Mainboard/generic-replicape.cfg",
-      "severity": "warning",
-      "section": "replicape",
-      "param": "host_mcu",
-      "message": "Unknown parameter 'host_mcu' for section [replicape].",
-      "line_number": 24,
-      "classification": "documented_unknown_param",
-      "doc_hits": [
-        "reference/reference_docs/klipper_docs/Config_Reference.md"
-      ],
+      "file": "reference/config/Mainboard/printer-Voron2.4-Spider_Config.cfg",
+      "severity": "error",
+      "section": "heater_fan hotend_fan",
+      "param": "pin",
+      "message": "Required parameter 'pin' is missing.",
+      "line_number": 312,
+      "classification": "needs_review",
+      "doc_hits": [],
       "partial_reasons": []
     },
     {
-      "file": "reference/config/Mainboard/generic-replicape.cfg",
-      "severity": "warning",
-      "section": "replicape",
-      "param": "stepper_x_microstep_mode",
-      "message": "Unknown parameter 'stepper_x_microstep_mode' for section [replicape].",
-      "line_number": 25,
-      "classification": "documented_unknown_param",
-      "doc_hits": [
-        "reference/reference_docs/klipper_docs/Config_Reference.md"
-      ],
+      "file": "reference/config/Mainboard/printer-Voron2.4-Spider_Config.cfg",
+      "severity": "error",
+      "section": "fan",
+      "param": "pin",
+      "message": "Required parameter 'pin' is missing.",
+      "line_number": 326,
+      "classification": "needs_review",
+      "doc_hits": [],
       "partial_reasons": []
     },
     {
-      "file": "reference/config/Mainboard/generic-replicape.cfg",
-      "severity": "warning",
-      "section": "replicape",
-      "param": "stepper_x_current",
-      "message": "Unknown parameter 'stepper_x_current' for section [replicape].",
-      "line_number": 26,
-      "classification": "documented_unknown_param",
-      "doc_hits": [
-        "reference/reference_docs/klipper_docs/Config_Reference.md"
-      ],
+      "file": "reference/config/Mainboard/printer-Voron2.4-Spider_Config.cfg",
+      "severity": "error",
+      "section": "quad_gantry_level",
+      "param": "gantry_corners",
+      "message": "Required parameter 'gantry_corners' is missing.",
+      "line_number": 386,
+      "classification": "needs_review",
+      "doc_hits": [],
       "partial_reasons": []
     },
     {
-      "file": "reference/config/Mainboard/generic-replicape.cfg",
-      "severity": "warning",
-      "section": "replicape",
-      "param": "stepper_y_microstep_mode",
-      "message": "Unknown parameter 'stepper_y_microstep_mode' for section [replicape].",
-      "line_number": 27,
-      "classification": "documented_unknown_param",
-      "doc_hits": [
-        "reference/reference_docs/klipper_docs/Config_Reference.md"
-      ],
+      "file": "reference/config/Mainboard/printer-Voron2.4-Spider_Config.cfg",
+      "severity": "error",
+      "section": "quad_gantry_level",
+      "param": "points",
+      "message": "Required parameter 'points' is missing.",
+      "line_number": 386,
+      "classification": "needs_review",
+      "doc_hits": [],
       "partial_reasons": []
     },
     {
-      "file": "reference/config/Mainboard/generic-replicape.cfg",
-      "severity": "warning",
-      "section": "replicape",
-      "param": "stepper_y_current",
-      "message": "Unknown parameter 'stepper_y_current' for section [replicape].",
-      "line_number": 28,
-      "classification": "documented_unknown_param",
-      "doc_hits": [
-        "reference/reference_docs/klipper_docs/Config_Reference.md"
-      ],
-      "partial_reasons": []
-    },
-    {
-      "file": "reference/config/Mainboard/generic-replicape.cfg",
-      "severity": "warning",
-      "section": "replicape",
-      "param": "stepper_z_microstep_mode",
-      "message": "Unknown parameter 'stepper_z_microstep_mode' for section [replicape].",
-      "line_number": 29,
-      "classification": "documented_unknown_param",
-      "doc_hits": [
-        "reference/reference_docs/klipper_docs/Config_Reference.md"
-      ],
-      "partial_reasons": []
-    },
-    {
-      "file": "reference/config/Mainboard/generic-replicape.cfg",
-      "severity": "warning",
-      "section": "replicape",
-      "param": "stepper_z_current",
-      "message": "Unknown parameter 'stepper_z_current' for section [replicape].",
-      "line_number": 30,
-      "classification": "documented_unknown_param",
-      "doc_hits": [
-        "reference/reference_docs/klipper_docs/Config_Reference.md"
-      ],
-      "partial_reasons": []
-    },
-    {
-      "file": "reference/config/Mainboard/generic-replicape.cfg",
-      "severity": "warning",
-      "section": "replicape",
-      "param": "stepper_e_microstep_mode",
-      "message": "Unknown parameter 'stepper_e_microstep_mode' for section [replicape].",
-      "line_number": 31,
-      "classification": "documented_unknown_param",
-      "doc_hits": [
-        "reference/reference_docs/klipper_docs/Config_Reference.md"
-      ],
-      "partial_reasons": []
-    },
-    {
-      "file": "reference/config/Mainboard/generic-replicape.cfg",
-      "severity": "warning",
-      "section": "replicape",
-      "param": "stepper_e_current",
-      "message": "Unknown parameter 'stepper_e_current' for section [replicape].",
-      "line_number": 32,
-      "classification": "documented_unknown_param",
-      "doc_hits": [
-        "reference/reference_docs/klipper_docs/Config_Reference.md"
-      ],
-      "partial_reasons": []
-    },
-    {
-      "file": "reference/config/Mainboard/printer-makergear-m2-2012.cfg",
-      "severity": "warning",
-      "section": "heater_fan nozzle_fan",
-      "param": "hardware_pwm",
-      "message": "Unknown parameter 'hardware_pwm' for section [heater_fan].",
-      "line_number": 83,
-      "classification": "documented_unknown_param",
-      "doc_hits": [
-        "reference/reference_docs/klipper_docs/Config_Reference.md"
-      ],
-      "partial_reasons": []
-    },
-    {
-      "file": "reference/config/Other/example-deltesian.cfg",
-      "severity": "warning",
-      "section": "stepper_left",
-      "param": "",
-      "message": "Unknown section type 'stepper_left'. Parameters won't be validated.",
-      "line_number": 10,
-      "classification": "documented_unknown_section",
-      "doc_hits": [
-        "reference/reference_docs/klipper_docs/Config_Reference.md"
-      ],
-      "partial_reasons": []
-    },
-    {
-      "file": "reference/config/Other/example-deltesian.cfg",
-      "severity": "warning",
-      "section": "stepper_right",
-      "param": "",
-      "message": "Unknown section type 'stepper_right'. Parameters won't be validated.",
-      "line_number": 22,
-      "classification": "documented_unknown_section",
-      "doc_hits": [
-        "reference/reference_docs/klipper_docs/Config_Reference.md"
-      ],
-      "partial_reasons": []
-    },
-    {
-      "file": "reference/config/Other/example-generic-caretesian.cfg",
-      "severity": "warning",
-      "section": "carriage carriage_x",
-      "param": "",
-      "message": "Unknown section type 'carriage carriage_x'. Parameters won't be validated.",
-      "line_number": 10,
-      "classification": "documented_unknown_section",
-      "doc_hits": [
-        "reference/reference_docs/klipper_docs/Config_Reference.md"
-      ],
-      "partial_reasons": []
-    },
-    {
-      "file": "reference/config/Other/example-generic-caretesian.cfg",
-      "severity": "warning",
-      "section": "carriage carriage_y",
-      "param": "",
-      "message": "Unknown section type 'carriage carriage_y'. Parameters won't be validated.",
-      "line_number": 17,
-      "classification": "documented_unknown_section",
-      "doc_hits": [
-        "reference/reference_docs/klipper_docs/Config_Reference.md"
-      ],
-      "partial_reasons": []
-    },
-    {
-      "file": "reference/config/Other/example-generic-caretesian.cfg",
-      "severity": "warning",
-      "section": "extra_carriage carriage_y1",
-      "param": "",
-      "message": "Unknown section type 'extra_carriage carriage_y1'. Parameters won't be validated.",
-      "line_number": 24,
-      "classification": "documented_unknown_section",
-      "doc_hits": [
-        "reference/reference_docs/klipper_docs/Config_Reference.md"
-      ],
-      "partial_reasons": []
-    },
-    {
-      "file": "reference/config/Other/example-generic-caretesian.cfg",
-      "severity": "warning",
-      "section": "dual_carriage carriage_u",
-      "param": "",
-      "message": "Unknown section type 'dual_carriage carriage_u'. Parameters won't be validated.",
-      "line_number": 34,
-      "classification": "documented_unknown_section",
-      "doc_hits": [
-        "reference/reference_docs/klipper_docs/Config_Reference.md"
-      ],
-      "partial_reasons": []
-    },
-    {
-      "file": "reference/config/Other/example-polar.cfg",
-      "severity": "warning",
-      "section": "stepper_bed",
-      "param": "",
-      "message": "Unknown section type 'stepper_bed'. Parameters won't be validated.",
+      "file": "reference/config/Other/example-rotary-delta.cfg",
+      "severity": "error",
+      "section": "stepper_a",
+      "param": "rotation_distance",
+      "message": "Required parameter 'rotation_distance' is missing.",
       "line_number": 9,
-      "classification": "documented_unknown_section",
-      "doc_hits": [
-        "reference/reference_docs/klipper_docs/Config_Reference.md"
-      ],
+      "classification": "needs_review",
+      "doc_hits": [],
       "partial_reasons": []
     },
     {
-      "file": "reference/config/Other/example-polar.cfg",
+      "file": "reference/config/Other/example-rotary-delta.cfg",
       "severity": "warning",
-      "section": "stepper_arm",
-      "param": "",
-      "message": "Unknown section type 'stepper_arm'. Parameters won't be validated.",
-      "line_number": 16,
-      "classification": "documented_unknown_section",
-      "doc_hits": [
-        "reference/reference_docs/klipper_docs/Config_Reference.md"
-      ],
+      "section": "stepper_a",
+      "param": "upper_arm_length",
+      "message": "Unknown parameter 'upper_arm_length' for section [stepper_a].",
+      "line_number": 18,
+      "classification": "needs_review",
+      "doc_hits": [],
       "partial_reasons": []
     },
     {
-      "file": "reference/config/Other/sample-corexyuv.cfg",
+      "file": "reference/config/Other/example-rotary-delta.cfg",
       "severity": "warning",
-      "section": "carriage carriage_x",
-      "param": "",
-      "message": "Unknown section type 'carriage carriage_x'. Parameters won't be validated.",
-      "line_number": 6,
-      "classification": "documented_unknown_section",
-      "doc_hits": [
-        "reference/reference_docs/klipper_docs/Config_Reference.md"
-      ],
+      "section": "stepper_a",
+      "param": "lower_arm_length",
+      "message": "Unknown parameter 'lower_arm_length' for section [stepper_a].",
+      "line_number": 19,
+      "classification": "needs_review",
+      "doc_hits": [],
       "partial_reasons": []
     },
     {
-      "file": "reference/config/Other/sample-corexyuv.cfg",
-      "severity": "warning",
-      "section": "carriage carriage_y",
-      "param": "",
-      "message": "Unknown section type 'carriage carriage_y'. Parameters won't be validated.",
-      "line_number": 13,
-      "classification": "documented_unknown_section",
-      "doc_hits": [
-        "reference/reference_docs/klipper_docs/Config_Reference.md"
-      ],
+      "file": "reference/config/Other/example-rotary-delta.cfg",
+      "severity": "error",
+      "section": "stepper_b",
+      "param": "rotation_distance",
+      "message": "Required parameter 'rotation_distance' is missing.",
+      "line_number": 21,
+      "classification": "needs_review",
+      "doc_hits": [],
       "partial_reasons": []
     },
     {
-      "file": "reference/config/Other/sample-corexyuv.cfg",
-      "severity": "warning",
-      "section": "dual_carriage carriage_u",
-      "param": "",
-      "message": "Unknown section type 'dual_carriage carriage_u'. Parameters won't be validated.",
-      "line_number": 20,
-      "classification": "documented_unknown_section",
-      "doc_hits": [
-        "reference/reference_docs/klipper_docs/Config_Reference.md"
-      ],
-      "partial_reasons": []
-    },
-    {
-      "file": "reference/config/Other/sample-pwm-tool.cfg",
-      "severity": "warning",
-      "section": "menu __main __control __toolonoff",
-      "param": "",
-      "message": "Unknown section type 'menu'. Parameters won't be validated.",
-      "line_number": 36,
-      "classification": "documented_unknown_section",
-      "doc_hits": [
-        "reference/reference_docs/klipper_docs/Config_Reference.md",
-        "reference/reference_docs/klipper_docs/Command_Templates.md",
-        "reference/reference_docs/klipper_docs/Hall_Filament_Width_Sensor.md"
-      ],
-      "partial_reasons": [
-        "sample file without [printer] section"
-      ]
-    },
-    {
-      "file": "reference/config/Other/sample-pwm-tool.cfg",
-      "severity": "warning",
-      "section": "menu __main __control __toolspeed",
-      "param": "",
-      "message": "Unknown section type 'menu'. Parameters won't be validated.",
-      "line_number": 47,
-      "classification": "documented_unknown_section",
-      "doc_hits": [
-        "reference/reference_docs/klipper_docs/Config_Reference.md",
-        "reference/reference_docs/klipper_docs/Command_Templates.md",
-        "reference/reference_docs/klipper_docs/Hall_Filament_Width_Sensor.md"
-      ],
-      "partial_reasons": [
-        "sample file without [printer] section"
-      ]
-    },
-    {
-      "file": "reference/config/Probe/sample-cartographer-v3.cfg",
-      "severity": "warning",
-      "section": "temperature_probe carto",
-      "param": "pullup_resistor",
-      "message": "Unknown parameter 'pullup_resistor' for section [temperature_probe].",
+      "file": "reference/config/Other/example-rotary-delta.cfg",
+      "severity": "error",
+      "section": "stepper_c",
+      "param": "rotation_distance",
+      "message": "Required parameter 'rotation_distance' is missing.",
       "line_number": 29,
-      "classification": "documented_unknown_param",
-      "doc_hits": [
-        "reference/reference_docs/klipper_docs/Config_Reference.md"
-      ],
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Other/example-winch.cfg",
+      "severity": "warning",
+      "section": "stepper_a",
+      "param": "anchor_x",
+      "message": "Unknown parameter 'anchor_x' for section [stepper_a].",
+      "line_number": 19,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Other/example-winch.cfg",
+      "severity": "warning",
+      "section": "stepper_a",
+      "param": "anchor_y",
+      "message": "Unknown parameter 'anchor_y' for section [stepper_a].",
+      "line_number": 20,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Other/example-winch.cfg",
+      "severity": "warning",
+      "section": "stepper_a",
+      "param": "anchor_z",
+      "message": "Unknown parameter 'anchor_z' for section [stepper_a].",
+      "line_number": 21,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Other/example-winch.cfg",
+      "severity": "warning",
+      "section": "stepper_b",
+      "param": "anchor_x",
+      "message": "Unknown parameter 'anchor_x' for section [stepper_b].",
+      "line_number": 29,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Other/example-winch.cfg",
+      "severity": "warning",
+      "section": "stepper_b",
+      "param": "anchor_y",
+      "message": "Unknown parameter 'anchor_y' for section [stepper_b].",
+      "line_number": 30,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Other/example-winch.cfg",
+      "severity": "warning",
+      "section": "stepper_b",
+      "param": "anchor_z",
+      "message": "Unknown parameter 'anchor_z' for section [stepper_b].",
+      "line_number": 31,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Other/example-winch.cfg",
+      "severity": "warning",
+      "section": "stepper_c",
+      "param": "anchor_x",
+      "message": "Unknown parameter 'anchor_x' for section [stepper_c].",
+      "line_number": 39,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Other/example-winch.cfg",
+      "severity": "warning",
+      "section": "stepper_c",
+      "param": "anchor_y",
+      "message": "Unknown parameter 'anchor_y' for section [stepper_c].",
+      "line_number": 40,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Other/example-winch.cfg",
+      "severity": "warning",
+      "section": "stepper_c",
+      "param": "anchor_z",
+      "message": "Unknown parameter 'anchor_z' for section [stepper_c].",
+      "line_number": 41,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Other/example-winch.cfg",
+      "severity": "warning",
+      "section": "stepper_d",
+      "param": "",
+      "message": "Unknown section type 'stepper_d'. Parameters won't be validated.",
+      "line_number": 43,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Other/sample-lcd.cfg",
+      "severity": "warning",
+      "section": "",
+      "param": "",
+      "message": "Pin 'EXP1_4' is used by multiple sections: [display] cs_pin, [display] rs_pin, [display] sclk_pin, [display] a0_pin",
+      "line_number": 0,
+      "classification": "needs_review",
+      "doc_hits": [],
       "partial_reasons": [
-        "sample file without [printer] section",
-        "Probe reference file without [printer] section"
+        "sample file without [printer] section"
       ]
     },
     {
-      "file": "reference/config/Toolhead/sample-duet3-1lc.cfg",
+      "file": "reference/config/Other/sample-lcd.cfg",
       "severity": "warning",
-      "section": "samd_sercom sercom_i2c",
-      "param": "sercom",
-      "message": "Unknown parameter 'sercom' for section [samd_sercom].",
-      "line_number": 81,
-      "classification": "documented_unknown_param",
-      "doc_hits": [
-        "reference/reference_docs/klipper_docs/Config_Reference.md"
-      ],
+      "section": "",
+      "param": "",
+      "message": "Pin 'EXP1_5' is used by multiple sections: [display] sclk_pin, [display] d4_pin, [display] rst_pin",
+      "line_number": 0,
+      "classification": "needs_review",
+      "doc_hits": [],
       "partial_reasons": [
-        "sample file without [printer] section",
-        "Toolhead reference file without [printer] section"
+        "sample file without [printer] section"
       ]
     },
     {
-      "file": "reference/config/Toolhead/sample-duet3-1lc.cfg",
+      "file": "reference/config/Other/sample-lcd.cfg",
       "severity": "warning",
-      "section": "samd_sercom sercom_i2c",
-      "param": "tx_pin",
-      "message": "Unknown parameter 'tx_pin' for section [samd_sercom].",
-      "line_number": 82,
-      "classification": "documented_unknown_param",
-      "doc_hits": [
-        "reference/reference_docs/klipper_docs/Config_Reference.md"
-      ],
+      "section": "",
+      "param": "",
+      "message": "Pin 'EXP1_3' is used by multiple sections: [display] sid_pin, [display] e_pin, [display] click_pin, [display] cs_pin",
+      "line_number": 0,
+      "classification": "needs_review",
+      "doc_hits": [],
       "partial_reasons": [
-        "sample file without [printer] section",
-        "Toolhead reference file without [printer] section"
+        "sample file without [printer] section"
       ]
     },
     {
-      "file": "reference/config/Toolhead/sample-duet3-1lc.cfg",
+      "file": "reference/config/Other/sample-lcd.cfg",
       "severity": "warning",
-      "section": "samd_sercom sercom_i2c",
-      "param": "clk_pin",
-      "message": "Unknown parameter 'clk_pin' for section [samd_sercom].",
-      "line_number": 83,
-      "classification": "documented_unknown_param",
-      "doc_hits": [
-        "reference/reference_docs/klipper_docs/Config_Reference.md"
-      ],
+      "section": "",
+      "param": "",
+      "message": "Pin 'EXP2_3, ^EXP2_5' is used by multiple sections: [display] encoder_pins, [display] encoder_pins, [display] encoder_pins",
+      "line_number": 0,
+      "classification": "needs_review",
+      "doc_hits": [],
       "partial_reasons": [
-        "sample file without [printer] section",
-        "Toolhead reference file without [printer] section"
+        "sample file without [printer] section"
       ]
     },
     {
-      "file": "reference/config/Toolhead/sample-duet3-1lc.cfg",
+      "file": "reference/config/Other/sample-lcd.cfg",
       "severity": "warning",
-      "section": "lis3dh",
-      "param": "i2c_mcu",
-      "message": "Unknown parameter 'i2c_mcu' for section [lis3dh].",
-      "line_number": 86,
-      "classification": "documented_unknown_param",
-      "doc_hits": [
-        "reference/reference_docs/klipper_docs/Config_Reference.md"
-      ],
+      "section": "",
+      "param": "",
+      "message": "Pin 'EXP1_1' is used by multiple sections: [output_pin beeper] pin, [output_pin beeper] pin, [output_pin beeper] pin, [output_pin beeper] pin, [output_pin beeper] pin, [output_pin beeper] pin",
+      "line_number": 0,
+      "classification": "needs_review",
+      "doc_hits": [],
       "partial_reasons": [
-        "sample file without [printer] section",
-        "Toolhead reference file without [printer] section"
+        "sample file without [printer] section"
       ]
     }
   ],
+  "documented_unknowns": [],
   "likely_partial_examples": [
     {
       "file": "reference/config/Expander/sample-bigtreetech-mmb-cubic.cfg",

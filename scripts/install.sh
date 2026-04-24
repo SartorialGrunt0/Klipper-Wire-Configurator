@@ -56,6 +56,16 @@ mkdir -p "$LOG_DIR"
 exec > >(tee -a "$LOG_FILE") 2>&1
 trap 'on_error "$LINENO" "$?"' ERR
 
+# Detect if we're already running from inside a valid clone of this repo.
+# This avoids creating a duplicate when the local directory name differs in
+# case from INSTALL_DIR (e.g. Klipper-Wire-Configurator vs klipper-wire-configurator).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CANDIDATE_DIR="$(dirname "$SCRIPT_DIR")"
+if [ -d "$CANDIDATE_DIR/.git" ] && [ -f "$CANDIDATE_DIR/scripts/install.sh" ] && [ "$CANDIDATE_DIR" != "$INSTALL_DIR" ]; then
+    info "Running from an existing clone at $CANDIDATE_DIR. Using it as the install directory."
+    INSTALL_DIR="$CANDIDATE_DIR"
+fi
+
 # --- Uninstall ---
 if [ "${1:-}" = "--uninstall" ]; then
     echo ""
@@ -190,16 +200,6 @@ fi
 ok "Python $PY_VER found."
 
 # --- Clone or update repository ---
-# Detect if we're already running from inside a valid clone of this repo.
-# This avoids creating a duplicate when the local directory name differs in
-# case from INSTALL_DIR (e.g. Klipper-Wire-Configurator vs klipper-wire-configurator).
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CANDIDATE_DIR="$(dirname "$SCRIPT_DIR")"
-if [ -d "$CANDIDATE_DIR/.git" ] && [ -f "$CANDIDATE_DIR/scripts/install.sh" ] && [ "$CANDIDATE_DIR" != "$INSTALL_DIR" ]; then
-    info "Running from an existing clone at $CANDIDATE_DIR. Using it as the install directory."
-    INSTALL_DIR="$CANDIDATE_DIR"
-fi
-
 if [ -d "$INSTALL_DIR/.git" ]; then
     info "Existing installation found. Updating..."
     cd "$INSTALL_DIR"

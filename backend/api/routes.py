@@ -13,6 +13,7 @@ from models.config_models import (
     ExportRequest,
     GenerateRequest,
     ParamUpdate,
+    ProjectValidationRequest,
     ProjectSave,
     SectionUpdate,
     WarningAcknowledgementRequest,
@@ -27,7 +28,7 @@ from parser.config_schema import (
     get_sections_by_group,
 )
 from parser.config_writer import write_config, smart_export
-from parser.validator import validate_config
+from parser.validator import validate_config, validate_project_configs
 from services.board_detector import (
     BOARD_TYPE_DIRS,
     detect_board_from_config,
@@ -87,8 +88,8 @@ async def import_project(files: List[UploadFile] = File(...)):
     with the most [include] directives), and returns per-file results
     plus a project-level summary of MCUs found and include relationships.
     """
-    results = {}
     configs = {}
+    board_infos = {}
 
     for f in files:
         content = await f.read()
@@ -101,18 +102,21 @@ async def import_project(files: List[UploadFile] = File(...)):
             continue
 
         config = parse_config(text, filename)
-        validation = validate_config(config, is_multi_file=len(files) > 1)
-        board_info = detect_board_from_config(config)
-
         configs[filename] = config
-        results[filename] = {
-            "config": config.to_dict(),
-            "validation": validation.to_dict(),
-            "board_info": board_info,
-        }
+        board_infos[filename] = detect_board_from_config(config)
 
-    if not results:
+    if not configs:
         raise HTTPException(status_code=400, detail="No .cfg files found in upload")
+
+    validations = validate_project_configs(configs)
+    results = {
+        filename: {
+            "config": config.to_dict(),
+            "validation": validations[filename].to_dict(),
+            "board_info": board_infos[filename],
+        }
+        for filename, config in configs.items()
+    }
 
     # Detect main file
     main_file = "printer.cfg" if "printer.cfg" in configs else None
@@ -176,6 +180,25 @@ async def validate_config_api(data: ConfigUpdate):
     config = _config_update_to_config_file(data)
     validation = validate_config(config)
     return validation.to_dict()
+
+
+@router.post("/validate-project")
+async def validate_project_api(data: ProjectValidationRequest):
+    """Validate a multi-file configuration project."""
+    configs = {}
+    for config_data in data.config_files:
+        config = _config_update_to_config_file(config_data)
+        if config_data.raw_text:
+            config.raw_text = config_data.raw_text
+        configs[config_data.filename] = config
+
+    validations = validate_project_configs(configs)
+    return {
+        "files": {
+            filename: validation.to_dict()
+            for filename, validation in validations.items()
+        }
+    }
 
 
 @router.post("/warning-acknowledgements")

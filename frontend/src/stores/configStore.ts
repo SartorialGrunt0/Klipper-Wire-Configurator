@@ -44,6 +44,15 @@ function sanitizeValidationResult(
   };
 }
 
+function sanitizeValidationMap(
+  results: Record<string, ValidationResult>,
+  schemas: Record<string, SectionSchema>,
+): Record<string, ValidationResult> {
+  return Object.fromEntries(
+    Object.entries(results).map(([filename, result]) => [filename, sanitizeValidationResult(result, schemas)]),
+  );
+}
+
 async function _revalidateFile(
   filename: string,
   get: () => ConfigState,
@@ -64,9 +73,26 @@ async function _revalidateFile(
 }
 
 async function _revalidateAll(get: () => ConfigState, set: (partial: Partial<ConfigState> | ((s: ConfigState) => Partial<ConfigState>)) => void) {
-  const { configFiles } = get();
-  for (const filename of Object.keys(configFiles)) {
-    await _revalidateFile(filename, get, set);
+  const { configFiles, schemas } = get();
+  const filenames = Object.keys(configFiles);
+  if (filenames.length === 0) return;
+
+  if (filenames.length === 1) {
+    await _revalidateFile(filenames[0], get, set);
+    return;
+  }
+
+  const api = await import('../services/api');
+  try {
+    const results = await api.validateProject(configFiles);
+    const sanitized = sanitizeValidationMap(results, schemas);
+    set((state) => ({
+      validation: { ...state.validation, ...sanitized },
+    }));
+  } catch {
+    for (const filename of filenames) {
+      await _revalidateFile(filename, get, set);
+    }
   }
 }
 
@@ -519,6 +545,10 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   },
 
   revalidateFile: async (filename) => {
+    if (Object.keys(get().configFiles).length > 1) {
+      await _revalidateAll(get, set);
+      return;
+    }
     await _revalidateFile(filename, get, set);
   },
 }));

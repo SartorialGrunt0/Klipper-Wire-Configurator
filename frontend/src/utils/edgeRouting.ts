@@ -22,6 +22,45 @@ const STUB_LEN = 20;
 
 type Point = [number, number];
 
+export function getPathMidpoint(pts: Point[]): Point {
+  if (pts.length === 0) return [0, 0];
+  if (pts.length === 1) return pts[0];
+
+  const lengths = pts.slice(1).map((point, index) => (
+    Math.abs(point[0] - pts[index][0]) + Math.abs(point[1] - pts[index][1])
+  ));
+  const totalLength = lengths.reduce((sum, length) => sum + length, 0);
+
+  if (totalLength <= 0) {
+    return pts[Math.floor(pts.length / 2)];
+  }
+
+  const targetLength = totalLength / 2;
+  let traversed = 0;
+
+  for (let index = 0; index < lengths.length; index += 1) {
+    const segmentLength = lengths[index];
+    if (traversed + segmentLength < targetLength) {
+      traversed += segmentLength;
+      continue;
+    }
+
+    const [x1, y1] = pts[index];
+    const [x2, y2] = pts[index + 1];
+    if (segmentLength === 0) {
+      return [x1, y1];
+    }
+
+    const ratio = (targetLength - traversed) / segmentLength;
+    return [
+      x1 + (x2 - x1) * ratio,
+      y1 + (y2 - y1) * ratio,
+    ];
+  }
+
+  return pts[pts.length - 1];
+}
+
 // ── Liang-Barsky segment vs AABB intersection ──────────────────────────────
 
 function segmentIntersectsRect(
@@ -203,10 +242,11 @@ export function getAvoidancePath(
   const blocking = obstacles.filter((r) => pathIntersectsRect(waypoints, r));
 
   if (blocking.length === 0) {
+    const [labelX, labelY] = getPathMidpoint(waypoints);
     return {
       path: buildOrthogonalPath(waypoints),
-      labelX: (sx + tx) / 2,
-      labelY: (sy + ty) / 2,
+      labelX,
+      labelY,
       waypoints: waypoints as [number, number][],
     };
   }
@@ -241,12 +281,12 @@ export function getAvoidancePath(
 
   const useAbove = pathLength(aboveWaypoints) <= pathLength(belowWaypoints);
   const chosen = useAbove ? aboveWaypoints : belowWaypoints;
-  const bypassY = useAbove ? unionTop : unionBottom;
+  const [labelX, labelY] = getPathMidpoint(chosen);
 
   return {
     path: buildOrthogonalPath(chosen),
-    labelX: mx,
-    labelY: bypassY,
+    labelX,
+    labelY,
     waypoints: chosen as [number, number][],
   };
 }

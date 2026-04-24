@@ -32,6 +32,10 @@ class ConfigUpdate(BaseModel):
     raw_text: Optional[str] = None
 
 
+class ProjectValidationRequest(BaseModel):
+    config_files: list[ConfigUpdate]
+
+
 class WarningAcknowledgementRequest(BaseModel):
     section: SectionUpdate
 
