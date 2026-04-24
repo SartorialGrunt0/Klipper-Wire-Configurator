@@ -9,6 +9,10 @@ frontend/node_modules/
 # Build output
 frontend/dist/
 frontend/.vite/
+frontend/public/reference/config/
+frontend/public/reference/examples.json
+frontend/public/reference/schema.json
+frontend/public/reference/docs/Config_Reference.md
 
 # Python
 __pycache__/

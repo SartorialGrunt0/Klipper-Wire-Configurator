@@ -83,6 +83,8 @@ That full install flow is what refreshes the systemd user service, reinstalls ba
 
 The installed service still keeps a startup safeguard: if frontend source files are newer than `frontend/dist`, `scripts/run-service.sh` rebuilds the frontend bundle before starting the backend.
 
+If Moonraker reports untracked files under `frontend/public/reference/` that would be overwritten by merge, those are stale generated frontend reference assets from an older build. Remove that `frontend/public/reference` directory inside the installed repo once, then retry the update. Current builds regenerate those assets automatically.
+
 If you installed Klipper Wire Configurator before this behavior was added, rerun the installer once so your systemd user service picks up the new startup wrapper:
 
 ```bash

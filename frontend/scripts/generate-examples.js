@@ -4,7 +4,7 @@
  * public/reference/config/ so they can be served as static assets on
  * Cloudflare Workers / Pages without a Python backend.
  */
-import { readdirSync, mkdirSync, copyFileSync, writeFileSync, existsSync } from 'fs';
+import { readdirSync, mkdirSync, copyFileSync, writeFileSync, existsSync, rmSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -18,6 +18,11 @@ const SCHEMA_DEST = join(__dirname, '..', 'public', 'reference', 'schema.json');
 const CONFIG_REFERENCE_SRC = join(REPO_ROOT, 'reference', 'reference_docs', 'klipper_docs', 'Config_Reference.md');
 const CONFIG_REFERENCE_DEST_DIR = join(__dirname, '..', 'public', 'reference', 'docs');
 const CONFIG_REFERENCE_DEST = join(CONFIG_REFERENCE_DEST_DIR, 'Config_Reference.md');
+
+rmSync(CONFIG_DEST, { recursive: true, force: true });
+rmSync(CONFIG_REFERENCE_DEST_DIR, { recursive: true, force: true });
+rmSync(MANIFEST_DEST, { force: true });
+rmSync(SCHEMA_DEST, { force: true });
 
 mkdirSync(CONFIG_DEST, { recursive: true });
 mkdirSync(CONFIG_REFERENCE_DEST_DIR, { recursive: true });
