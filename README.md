@@ -78,6 +78,8 @@ klipper-wire-configurator
 
 Then restart Moonraker.
 
+Once the service is installed as `/etc/systemd/system/klipper-wire-configurator.service` and Moonraker has been restarted, Mainsail's Service Control menu can list `klipper-wire-configurator` and send start, stop, and restart actions through Moonraker.
+
 Moonraker's `git_repo` updater does not run this repository's installer script. It pulls the repo, updates Python requirements from `backend/requirements.txt`, and restarts the configured managed service.
 
 Klipper Wire Configurator's system service starts through `scripts/run-service.sh`. On every service start it checks whether frontend dependencies need reinstalling and whether the frontend bundle needs rebuilding, then launches uvicorn. That makes a Moonraker-triggered service restart sufficient for normal application updates.

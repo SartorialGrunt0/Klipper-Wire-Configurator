@@ -36,6 +36,14 @@ ok()    { echo -e "${GREEN}[OK]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 
+is_legacy_user_service_active() {
+    systemctl --user is-active --quiet "$SERVICE_NAME" 2>/dev/null
+}
+
+is_system_service_active() {
+    sudo systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null
+}
+
 on_error() {
     local line_no="$1"
     local exit_code="$2"
@@ -324,11 +332,22 @@ ok "Service installed and start requested."
 # --- Wait for service to come up ---
 info "Waiting for service to start..."
 for i in $(seq 1 30); do
-    if curl -sf "http://localhost:${KWC_PORT}/health" > /dev/null 2>&1; then
+    if is_system_service_active && curl -sf "http://localhost:${KWC_PORT}/health" > /dev/null 2>&1; then
         break
     fi
     sleep 1
 done
+
+if is_legacy_user_service_active; then
+    systemctl --user status "$SERVICE_NAME" --no-pager || true
+    error "Legacy user service is still active. Stop it before using the Moonraker-managed system service."
+fi
+
+if ! is_system_service_active; then
+    sudo systemctl status "$SERVICE_NAME" --no-pager || true
+    sudo journalctl -u "$SERVICE_NAME" -n 50 --no-pager || true
+    error "System service failed to reach the active state."
+fi
 
 if curl -sf "http://localhost:${KWC_PORT}/health" > /dev/null 2>&1; then
     ok "Service is running!"
