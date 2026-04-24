@@ -123,7 +123,7 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
         return bool(real_params) and all(p.is_commented_out for p in real_params)
 
     for section in config.sections:
-        if section.section_type == "include":
+        if section.section_type == "include" or section.is_commented_out:
             continue
         sec_type = section.section_type
 
@@ -438,7 +438,11 @@ def _check_pin_conflicts(used_pins: dict[str, list[PinUse]], result: ValidationR
 
 
 def _is_allowed_shared_pin(users: list[PinUse]) -> bool:
-    return _is_allowed_shared_tmc_uart_pin(users) or _is_allowed_shared_enable_pin(users)
+    return (
+        _is_allowed_shared_tmc_uart_pin(users)
+        or _is_allowed_shared_enable_pin(users)
+        or _is_allowed_shared_display_button_pin(users)
+    )
 
 
 def _is_allowed_shared_tmc_uart_pin(users: list[PinUse]) -> bool:
@@ -463,3 +467,12 @@ def _is_allowed_shared_enable_pin(users: list[PinUse]) -> bool:
         )
         for user in users
     )
+
+
+def _is_allowed_shared_display_button_pin(users: list[PinUse]) -> bool:
+    if not users:
+        return False
+
+    shared_params = {"up_pin", "down_pin", "click_pin", "back_pin", "kill_pin"}
+    section = users[0].section
+    return all(user.section_type == "display" and user.section == section and user.param in shared_params for user in users)

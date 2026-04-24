@@ -1,0 +1,3785 @@
+{
+  "summary": {
+    "files_scanned": 280,
+    "files_with_diagnostics": 79,
+    "diagnostic_count": 342,
+    "severity_counts": {
+      "warning": 141,
+      "error": 201
+    },
+    "classification_counts": {
+      "needs_review": 258,
+      "likely_partial_example": 54,
+      "documented_unknown_param": 17,
+      "documented_unknown_section": 13
+    }
+  },
+  "top_diagnostics": [
+    {
+      "classification": "needs_review",
+      "diagnostic": "error|Required parameter 'sensor_type' is missing.",
+      "count": 50,
+      "examples": [
+        "reference/config/Mainboard/printer-Voron-Switchwire-einsy_config.cfg",
+        "reference/config/Mainboard/printer-Voron-Switchwire-einsy_config.cfg",
+        "reference/config/Mainboard/printer-Voron-Switchwire-skr_mini_e3_v2_config.cfg",
+        "reference/config/Mainboard/printer-Voron-Switchwire-skr_mini_e3_v2_config.cfg",
+        "reference/config/Mainboard/printer-Voron-Switchwire-skr_mini_e3_v3_config.cfg"
+      ]
+    },
+    {
+      "classification": "needs_review",
+      "diagnostic": "error|Required parameter 'run_current' is missing.",
+      "count": 31,
+      "examples": [
+        "reference/config/Mainboard/printer-voron-v0-bigtreetech-manta-m4p.cfg",
+        "reference/config/Mainboard/printer-voron-v0-bigtreetech-manta-m4p.cfg",
+        "reference/config/Mainboard/printer-voron-v0-bigtreetech-manta-m4p.cfg",
+        "reference/config/Mainboard/printer-voron-v0-bigtreetech-manta-m4p.cfg",
+        "reference/config/Mainboard/printer-voron-v0-bigtreetech-skr-3-ez.cfg"
+      ]
+    },
+    {
+      "classification": "needs_review",
+      "diagnostic": "error|Required parameter 'rotation_distance' is missing.",
+      "count": 10,
+      "examples": [
+        "reference/config/Mainboard/printer-Voron-Switchwire-einsy_config.cfg",
+        "reference/config/Mainboard/printer-Voron-Switchwire-einsy_config.cfg",
+        "reference/config/Mainboard/printer-Voron-Switchwire-einsy_config.cfg",
+        "reference/config/Mainboard/printer-Voron-Trident-M8P_v1.0_config.cfg",
+        "reference/config/Mainboard/printer-Voron-Trident-M8P_v2.0_config.cfg"
+      ]
+    },
+    {
+      "classification": "needs_review",
+      "diagnostic": "error|Required parameter 'points' is missing.",
+      "count": 10,
+      "examples": [
+        "reference/config/Mainboard/printer-Voron-Trident-M8P_v1.0_config.cfg",
+        "reference/config/Mainboard/printer-Voron-Trident-M8P_v2.0_config.cfg",
+        "reference/config/Mainboard/printer-Voron-Trident-Octopus_Config.cfg",
+        "reference/config/Mainboard/printer-Voron-Trident_Kraken_Config.cfg",
+        "reference/config/Mainboard/printer-Voron-Trident_SKR_1.3.cfg"
+      ]
+    },
+    {
+      "classification": "likely_partial_example",
+      "diagnostic": "error|Required parameter 'microsteps' is missing.",
+      "count": 9,
+      "examples": [
+        "reference/config/Expander/sample-bigtreetech-mmb-cubic.cfg",
+        "reference/config/Probe/sample-beacon-probe.cfg",
+        "reference/config/Probe/sample-probe-as-z-endstop.cfg",
+        "reference/config/Toolhead/sample-huvud-v0.61.cfg",
+        "reference/config/Toolhead/sample-ldo-nitehawk-36.cfg"
+      ]
+    },
+    {
+      "classification": "likely_partial_example",
+      "diagnostic": "error|Required parameter 'rotation_distance' is missing.",
+      "count": 8,
+      "examples": [
+        "reference/config/Expander/sample-bigtreetech-mmb-cubic.cfg",
+        "reference/config/Probe/sample-beacon-probe.cfg",
+        "reference/config/Probe/sample-probe-as-z-endstop.cfg",
+        "reference/config/Toolhead/sample-ldo-nitehawk-36.cfg",
+        "reference/config/Toolhead/sample-ldo-nitehawk-36.cfg"
+      ]
+    },
+    {
+      "classification": "likely_partial_example",
+      "diagnostic": "error|Required parameter 'step_pin' is missing.",
+      "count": 6,
+      "examples": [
+        "reference/config/Expander/sample-bigtreetech-mmb-cubic.cfg",
+        "reference/config/Probe/sample-beacon-probe.cfg",
+        "reference/config/Probe/sample-probe-as-z-endstop.cfg",
+        "reference/config/Toolhead/sample-ldo-nitehawk-36.cfg",
+        "reference/config/Toolhead/sample-ldo-nitehawk-sb.cfg"
+      ]
+    },
+    {
+      "classification": "likely_partial_example",
+      "diagnostic": "error|Required parameter 'dir_pin' is missing.",
+      "count": 6,
+      "examples": [
+        "reference/config/Expander/sample-bigtreetech-mmb-cubic.cfg",
+        "reference/config/Probe/sample-beacon-probe.cfg",
+        "reference/config/Probe/sample-probe-as-z-endstop.cfg",
+        "reference/config/Toolhead/sample-ldo-nitehawk-36.cfg",
+        "reference/config/Toolhead/sample-ldo-nitehawk-sb.cfg"
+      ]
+    },
+    {
+      "classification": "needs_review",
+      "diagnostic": "error|Required parameter 'pin' is missing.",
+      "count": 6,
+      "examples": [
+        "reference/config/Mainboard/printer-Voron-Trident-Octopus_Config.cfg",
+        "reference/config/Mainboard/printer-Voron-Trident_Kraken_Config.cfg",
+        "reference/config/Mainboard/printer-Voron2.4-Kraken_Config.cfg",
+        "reference/config/Mainboard/printer-Voron2.4-Octopus_Config.cfg",
+        "reference/config/Mainboard/printer-Voron2.4-Spider_Config.cfg"
+      ]
+    },
+    {
+      "classification": "needs_review",
+      "diagnostic": "error|Required parameter 'z_positions' is missing.",
+      "count": 5,
+      "examples": [
+        "reference/config/Mainboard/printer-Voron-Trident-M8P_v1.0_config.cfg",
+        "reference/config/Mainboard/printer-Voron-Trident-M8P_v2.0_config.cfg",
+        "reference/config/Mainboard/printer-Voron-Trident-Octopus_Config.cfg",
+        "reference/config/Mainboard/printer-Voron-Trident_Kraken_Config.cfg",
+        "reference/config/Mainboard/printer-Voron-Trident_SKR_1.3.cfg"
+      ]
+    },
+    {
+      "classification": "needs_review",
+      "diagnostic": "error|Required parameter 'heater_pin' is missing.",
+      "count": 5,
+      "examples": [
+        "reference/config/Mainboard/printer-Voron-Trident-Octopus_Config.cfg",
+        "reference/config/Mainboard/printer-Voron-Trident_Kraken_Config.cfg",
+        "reference/config/Mainboard/printer-Voron2.4-Kraken_Config.cfg",
+        "reference/config/Mainboard/printer-Voron2.4-Octopus_Config.cfg",
+        "reference/config/Mainboard/printer-Voron2.4-Octopus_Config.cfg"
+      ]
+    },
+    {
+      "classification": "needs_review",
+      "diagnostic": "error|Required parameter 'gantry_corners' is missing.",
+      "count": 5,
+      "examples": [
+        "reference/config/Mainboard/printer-Voron2.4-Kraken_Config.cfg",
+        "reference/config/Mainboard/printer-Voron2.4-Octopus_Config.cfg",
+        "reference/config/Mainboard/printer-Voron2.4-SKR_13_Config.cfg",
+        "reference/config/Mainboard/printer-Voron2.4-SKR_14_Config.cfg",
+        "reference/config/Mainboard/printer-Voron2.4-Spider_Config.cfg"
+      ]
+    },
+    {
+      "classification": "likely_partial_example",
+      "diagnostic": "error|Required parameter 'sensor_type' is missing.",
+      "count": 4,
+      "examples": [
+        "reference/config/Expander/sample-bigtreetech-mmb-cubic.cfg",
+        "reference/config/Expander/sample-bigtreetech-mmb-cubic.cfg",
+        "reference/config/Toolhead/sample-ldo-nitehawk-36.cfg",
+        "reference/config/Toolhead/sample-ldo-nitehawk-sb.cfg"
+      ]
+    },
+    {
+      "classification": "likely_partial_example",
+      "diagnostic": "error|Required parameter 'max_temp' is missing.",
+      "count": 4,
+      "examples": [
+        "reference/config/Expander/sample-bigtreetech-mmb-cubic.cfg",
+        "reference/config/Expander/sample-bigtreetech-mmb-cubic.cfg",
+        "reference/config/Toolhead/sample-ldo-nitehawk-36.cfg",
+        "reference/config/Toolhead/sample-ldo-nitehawk-sb.cfg"
+      ]
+    },
+    {
+      "classification": "needs_review",
+      "diagnostic": "error|Required parameter 'microsteps' is missing.",
+      "count": 4,
+      "examples": [
+        "reference/config/Mainboard/printer-Voron-Switchwire-einsy_config.cfg",
+        "reference/config/Mainboard/printer-Voron-Switchwire-einsy_config.cfg",
+        "reference/config/Mainboard/printer-Voron-Switchwire-einsy_config.cfg",
+        "reference/config/Mainboard/printer-Voron-Switchwire-einsy_config.cfg"
+      ]
+    },
+    {
+      "classification": "needs_review",
+      "diagnostic": "warning|Unknown parameter 'microsteps' for section [tmc2130].",
+      "count": 4,
+      "examples": [
+        "reference/config/Mainboard/printer-Voron-Switchwire-einsy_config.cfg",
+        "reference/config/Mainboard/printer-Voron-Switchwire-einsy_config.cfg",
+        "reference/config/Mainboard/printer-Voron-Switchwire-einsy_config.cfg",
+        "reference/config/Mainboard/printer-Voron-Switchwire-einsy_config.cfg"
+      ]
+    },
+    {
+      "classification": "needs_review",
+      "diagnostic": "warning|Unknown parameter 'microsteps' for section [tmc2209].",
+      "count": 3,
+      "examples": [
+        "reference/config/Expander/sample-bigtreetech-exp-mot.cfg",
+        "reference/config/Expander/sample-bigtreetech-exp-mot.cfg",
+        "reference/config/Expander/sample-bigtreetech-exp-mot.cfg"
+      ]
+    },
+    {
+      "classification": "likely_partial_example",
+      "diagnostic": "error|Required parameter 'nozzle_diameter' is missing.",
+      "count": 3,
+      "examples": [
+        "reference/config/Expander/sample-bigtreetech-mmb-cubic.cfg",
+        "reference/config/Toolhead/sample-ldo-nitehawk-36.cfg",
+        "reference/config/Toolhead/sample-ldo-nitehawk-sb.cfg"
+      ]
+    },
+    {
+      "classification": "likely_partial_example",
+      "diagnostic": "error|Required parameter 'filament_diameter' is missing.",
+      "count": 3,
+      "examples": [
+        "reference/config/Expander/sample-bigtreetech-mmb-cubic.cfg",
+        "reference/config/Toolhead/sample-ldo-nitehawk-36.cfg",
+        "reference/config/Toolhead/sample-ldo-nitehawk-sb.cfg"
+      ]
+    },
+    {
+      "classification": "needs_review",
+      "diagnostic": "warning|Unknown parameter 'screw5' for section [bed_screws].",
+      "count": 3,
+      "examples": [
+        "reference/config/Mainboard/printer-bq-hephestos-2014.cfg",
+        "reference/config/Mainboard/printer-tronxy-x5sa-pro-2020.cfg",
+        "reference/config/Mainboard/printer-tronxy-x5sa-v6-2019.cfg"
+      ]
+    }
+  ],
+  "review_candidates": [
+    {
+      "file": "reference/config/Expander/bigtreetech-mmb-ercf.cfg",
+      "severity": "warning",
+      "section": "manual_extruder_stepper gear_stepper",
+      "param": "",
+      "message": "Unknown section type 'manual_extruder_stepper gear_stepper'. Parameters won't be validated.",
+      "line_number": 50,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": [
+        "Expander reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Expander/bigtreetech-mmb-ercf.cfg",
+      "severity": "warning",
+      "section": "ercf_servo ercf_servo",
+      "param": "",
+      "message": "Unknown section type 'ercf_servo ercf_servo'. Parameters won't be validated.",
+      "line_number": 112,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": [
+        "Expander reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Expander/bigtreetech-mmb-ercf.cfg",
+      "severity": "warning",
+      "section": "ercf_encoder ercf_encoder",
+      "param": "",
+      "message": "Unknown section type 'ercf_encoder ercf_encoder'. Parameters won't be validated.",
+      "line_number": 121,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": [
+        "Expander reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Expander/sample-bigtreetech-exp-mot.cfg",
+      "severity": "warning",
+      "section": "stepper_1",
+      "param": "",
+      "message": "Unknown section type 'stepper_1'. Parameters won't be validated.",
+      "line_number": 4,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Expander reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Expander/sample-bigtreetech-exp-mot.cfg",
+      "severity": "warning",
+      "section": "stepper_2",
+      "param": "",
+      "message": "Unknown section type 'stepper_2'. Parameters won't be validated.",
+      "line_number": 13,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Expander reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Expander/sample-bigtreetech-exp-mot.cfg",
+      "severity": "warning",
+      "section": "stepper_3",
+      "param": "",
+      "message": "Unknown section type 'stepper_3'. Parameters won't be validated.",
+      "line_number": 22,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Expander reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Expander/sample-bigtreetech-exp-mot.cfg",
+      "severity": "warning",
+      "section": "tmc2209 stepper_1",
+      "param": "microsteps",
+      "message": "Unknown parameter 'microsteps' for section [tmc2209].",
+      "line_number": 35,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Expander reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Expander/sample-bigtreetech-exp-mot.cfg",
+      "severity": "warning",
+      "section": "tmc2209 stepper_2",
+      "param": "microsteps",
+      "message": "Unknown parameter 'microsteps' for section [tmc2209].",
+      "line_number": 42,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Expander reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Expander/sample-bigtreetech-exp-mot.cfg",
+      "severity": "warning",
+      "section": "tmc2209 stepper_3",
+      "param": "microsteps",
+      "message": "Unknown parameter 'microsteps' for section [tmc2209].",
+      "line_number": 49,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Expander reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Expander/sample-bigtreetech-mmb-canbus-v1.x.cfg",
+      "severity": "warning",
+      "section": "ez_driver1",
+      "param": "",
+      "message": "Unknown section type 'ez_driver1'. Parameters won't be validated.",
+      "line_number": 13,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Expander reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Expander/sample-bigtreetech-mmb-canbus-v1.x.cfg",
+      "severity": "warning",
+      "section": "ez_driver2",
+      "param": "",
+      "message": "Unknown section type 'ez_driver2'. Parameters won't be validated.",
+      "line_number": 22,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Expander reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Expander/sample-bigtreetech-mmb-canbus-v1.x.cfg",
+      "severity": "warning",
+      "section": "ez_driver3",
+      "param": "",
+      "message": "Unknown section type 'ez_driver3'. Parameters won't be validated.",
+      "line_number": 30,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Expander reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Expander/sample-bigtreetech-mmb-canbus-v1.x.cfg",
+      "severity": "warning",
+      "section": "ez_driver4",
+      "param": "",
+      "message": "Unknown section type 'ez_driver4'. Parameters won't be validated.",
+      "line_number": 38,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Expander reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Expander/sample-bigtreetech-mmb-canbus-v2.0.cfg",
+      "severity": "warning",
+      "section": "ez_driver1",
+      "param": "",
+      "message": "Unknown section type 'ez_driver1'. Parameters won't be validated.",
+      "line_number": 13,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Expander reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Expander/sample-bigtreetech-mmb-canbus-v2.0.cfg",
+      "severity": "warning",
+      "section": "ez_driver2",
+      "param": "",
+      "message": "Unknown section type 'ez_driver2'. Parameters won't be validated.",
+      "line_number": 21,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Expander reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Expander/sample-bigtreetech-mmb-canbus-v2.0.cfg",
+      "severity": "warning",
+      "section": "ez_driver3",
+      "param": "",
+      "message": "Unknown section type 'ez_driver3'. Parameters won't be validated.",
+      "line_number": 29,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Expander reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Expander/sample-bigtreetech-mmb-canbus-v2.0.cfg",
+      "severity": "warning",
+      "section": "ez_driver4",
+      "param": "",
+      "message": "Unknown section type 'ez_driver4'. Parameters won't be validated.",
+      "line_number": 37,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Expander reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Expander/sample-fysetc-ercf-hardware.cfg",
+      "severity": "warning",
+      "section": "manual_stepper gear_stepper",
+      "param": "gear_ratio",
+      "message": "Unknown parameter 'gear_ratio' for section [manual_stepper].",
+      "line_number": 18,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Expander reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Mainboard/generic-alligator-r2.cfg",
+      "severity": "warning",
+      "section": "dac084S085 stepper_digipot",
+      "param": "",
+      "message": "Unknown section type 'dac084S085 stepper_digipot'. Parameters won't be validated.",
+      "line_number": 19,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/generic-alligator-r3.cfg",
+      "severity": "warning",
+      "section": "dac084S085 stepper_digipot",
+      "param": "",
+      "message": "Unknown section type 'dac084S085 stepper_digipot'. Parameters won't be validated.",
+      "line_number": 19,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/generic-archim2.cfg",
+      "severity": "warning",
+      "section": "",
+      "param": "",
+      "message": "Pin 'PD2' is used by multiple sections: [tmc2130 stepper_x] spi_software_sclk_pin, [tmc2130 stepper_y] spi_software_sclk_pin, [tmc2130 stepper_z] spi_software_sclk_pin, [tmc2130 extruder] spi_software_sclk_pin",
+      "line_number": 0,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/generic-archim2.cfg",
+      "severity": "warning",
+      "section": "",
+      "param": "",
+      "message": "Pin 'PD3' is used by multiple sections: [tmc2130 stepper_x] spi_software_mosi_pin, [tmc2130 stepper_y] spi_software_mosi_pin, [tmc2130 stepper_z] spi_software_mosi_pin, [tmc2130 extruder] spi_software_mosi_pin",
+      "line_number": 0,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/generic-archim2.cfg",
+      "severity": "warning",
+      "section": "",
+      "param": "",
+      "message": "Pin 'PD1' is used by multiple sections: [tmc2130 stepper_x] spi_software_miso_pin, [tmc2130 stepper_y] spi_software_miso_pin, [tmc2130 stepper_z] spi_software_miso_pin, [tmc2130 extruder] spi_software_miso_pin",
+      "line_number": 0,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/generic-bigtreetech-gtr.cfg",
+      "severity": "warning",
+      "section": "temperature_sensor k_therm",
+      "param": "spi_bus",
+      "message": "Unknown parameter 'spi_bus' for section [temperature_sensor].",
+      "line_number": 103,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/generic-duet2-duex.cfg",
+      "severity": "warning",
+      "section": "",
+      "param": "",
+      "message": "Pin 'usart1' is used by multiple sections: [tmc2660 stepper_x] spi_bus, [tmc2660 stepper_y] spi_bus, [tmc2660 stepper_z] spi_bus, [tmc2660 stepper_z1] spi_bus, [tmc2660 stepper_z2] spi_bus, [tmc2660 stepper_z3] spi_bus, [tmc2660 extruder] spi_bus, [tmc2660 extruder1] spi_bus, [tmc2660 extruder2] spi_bus, [tmc2660 extruder3] spi_bus",
+      "line_number": 0,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/generic-duet2-maestro.cfg",
+      "severity": "warning",
+      "section": "",
+      "param": "",
+      "message": "Pin 'PC14, !PC16, !PC17' is used by multiple sections: [tmc2208 stepper_x] select_pins, [tmc2208 stepper_y] select_pins",
+      "line_number": 0,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/generic-duet2-maestro.cfg",
+      "severity": "warning",
+      "section": "",
+      "param": "",
+      "message": "Pin 'PC14, PC16, !PC17' is used by multiple sections: [tmc2208 stepper_z] select_pins, [tmc2208 extruder] select_pins",
+      "line_number": 0,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/generic-duet2.cfg",
+      "severity": "warning",
+      "section": "",
+      "param": "",
+      "message": "Pin 'usart1' is used by multiple sections: [tmc2660 stepper_x] spi_bus, [tmc2660 stepper_y] spi_bus, [tmc2660 stepper_z] spi_bus, [tmc2660 extruder] spi_bus",
+      "line_number": 0,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/generic-duet3-6hc.cfg",
+      "severity": "warning",
+      "section": "",
+      "param": "",
+      "message": "Pin 'PD17' is used by multiple sections: [tmc5160 stepper_x] cs_pin, [tmc5160 stepper_y] cs_pin, [tmc5160 stepper_z] cs_pin, [tmc5160 extruder] cs_pin",
+      "line_number": 0,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/generic-duet3-mini.cfg",
+      "severity": "warning",
+      "section": "",
+      "param": "",
+      "message": "Pin 'PD0' is used by multiple sections: [tmc2209 stepper_x] select_pins, [tmc2209 stepper_y] select_pins, [tmc2209 stepper_z] select_pins, [tmc2209 extruder] select_pins",
+      "line_number": 0,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/generic-ldo-leviathan-v1.2.cfg",
+      "severity": "warning",
+      "section": "",
+      "param": "",
+      "message": "Pin 'spi4' is used by multiple sections: [tmc5160 stepper_x] spi_bus, [tmc5160 stepper_y] spi_bus",
+      "line_number": 0,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/generic-mightyboard.cfg",
+      "severity": "warning",
+      "section": "",
+      "param": "",
+      "message": "Pin 'PJ5' is used by multiple sections: [mcp4018 x_axis_pot] i2c_software_scl_pin, [mcp4018 y_axis_pot] i2c_software_scl_pin, [mcp4018 z_axis_pot] i2c_software_scl_pin, [mcp4018 a_axis_pot] i2c_software_scl_pin, [mcp4018 b_axis_pot] i2c_software_scl_pin",
+      "line_number": 0,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/generic-printrboard-g2.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "sensor_type",
+      "message": "Invalid value 'G2' for 'sensor_type'. Expected one of: EPCOS 100K B57560G104F, ATC Semitec 104GT-2, ATC Semitec 104NT-4-R025H42G, Generic 3950, Honeywell 100K 135-104LAG-J01, NTC 100K MGB18-104F39050L32, SliceEngineering 450, TDK NTCG104LH104JT1, PT100 INA826, PT1000, AD595, AD597, AD8494, AD8495, AD8496, AD8497, MAX6675, MAX31855, MAX31856, MAX31865, BME280, AHT10, HTU21D, SHT21, lm75, temperature_mcu, temperature_host, DS18B20, temperature_combined",
+      "line_number": 95,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/generic-remram.cfg",
+      "severity": "warning",
+      "section": "",
+      "param": "",
+      "message": "Pin 'spi1' is used by multiple sections: [tmc2130 stepper_x] spi_bus, [tmc2130 stepper_y] spi_bus, [tmc2130 stepper_z] spi_bus, [tmc2130 extruder] spi_bus",
+      "line_number": 0,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-artillery-sidewinder-x3-plus-2024.cfg",
+      "severity": "warning",
+      "section": "screws_tilt_adjust",
+      "param": "screw5",
+      "message": "Unknown parameter 'screw5' for section [screws_tilt_adjust].",
+      "line_number": 180,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-artillery-sidewinder-x3-plus-2024.cfg",
+      "severity": "warning",
+      "section": "screws_tilt_adjust",
+      "param": "screw5_name",
+      "message": "Unknown parameter 'screw5_name' for section [screws_tilt_adjust].",
+      "line_number": 181,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-artillery-sidewinder-x3-plus-2024.cfg",
+      "severity": "warning",
+      "section": "screws_tilt_adjust",
+      "param": "screw6",
+      "message": "Unknown parameter 'screw6' for section [screws_tilt_adjust].",
+      "line_number": 182,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-artillery-sidewinder-x3-plus-2024.cfg",
+      "severity": "warning",
+      "section": "screws_tilt_adjust",
+      "param": "screw6_name",
+      "message": "Unknown parameter 'screw6_name' for section [screws_tilt_adjust].",
+      "line_number": 183,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-artillery-sidewinder-x3-plus-2024.cfg",
+      "severity": "warning",
+      "section": "screws_tilt_adjust",
+      "param": "screw7",
+      "message": "Unknown parameter 'screw7' for section [screws_tilt_adjust].",
+      "line_number": 184,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-artillery-sidewinder-x3-plus-2024.cfg",
+      "severity": "warning",
+      "section": "screws_tilt_adjust",
+      "param": "screw7_name",
+      "message": "Unknown parameter 'screw7_name' for section [screws_tilt_adjust].",
+      "line_number": 185,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-bq-hephestos-2014.cfg",
+      "severity": "warning",
+      "section": "bed_screws",
+      "param": "screw5",
+      "message": "Unknown parameter 'screw5' for section [bed_screws].",
+      "line_number": 81,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-creality-cr5pro-ht-2022.cfg",
+      "severity": "error",
+      "section": "bltouch",
+      "param": "set_output_mode",
+      "message": "Expected integer for 'set_output_mode', got '5V'.",
+      "line_number": 95,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-flashforge-creator-pro-2018.cfg",
+      "severity": "warning",
+      "section": "",
+      "param": "",
+      "message": "Pin 'PE5' is used by multiple sections: [extruder] spi_software_miso_pin, [extruder1] spi_software_miso_pin",
+      "line_number": 0,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-flashforge-creator-pro-2018.cfg",
+      "severity": "warning",
+      "section": "",
+      "param": "",
+      "message": "Pin 'PE2' is used by multiple sections: [extruder] spi_software_sclk_pin, [extruder1] spi_software_sclk_pin",
+      "line_number": 0,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-flashforge-creator-pro-2018.cfg",
+      "severity": "warning",
+      "section": "",
+      "param": "",
+      "message": "Pin 'PA1' is used by multiple sections: [extruder] spi_software_mosi_pin, [extruder1] spi_software_mosi_pin",
+      "line_number": 0,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-flashforge-creator-pro-2018.cfg",
+      "severity": "warning",
+      "section": "",
+      "param": "",
+      "message": "Pin 'PJ5' is used by multiple sections: [mcp4018 x_axis_pot] i2c_software_scl_pin, [mcp4018 y_axis_pot] i2c_software_scl_pin, [mcp4018 z_axis_pot] i2c_software_scl_pin, [mcp4018 a_axis_pot] i2c_software_scl_pin, [mcp4018 b_axis_pot] i2c_software_scl_pin",
+      "line_number": 0,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-geeetech-301-2019.cfg",
+      "severity": "error",
+      "section": "heater_bed",
+      "param": "sensor_type",
+      "message": "Invalid value 'bed_thermistor' for 'sensor_type'. Expected one of: EPCOS 100K B57560G104F, ATC Semitec 104GT-2, ATC Semitec 104NT-4-R025H42G, Generic 3950, Honeywell 100K 135-104LAG-J01, NTC 100K MGB18-104F39050L32, SliceEngineering 450, TDK NTCG104LH104JT1, PT100 INA826, PT1000, AD595, AD597, AD8494, AD8495, AD8496, AD8497, MAX6675, MAX31855, MAX31856, MAX31865, BME280, AHT10, HTU21D, SHT21, lm75, temperature_mcu, temperature_host, DS18B20, temperature_combined",
+      "line_number": 92,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-geeetech-301-2019.cfg",
+      "severity": "warning",
+      "section": "temperature_sensor secondary",
+      "param": "pullup_resistor",
+      "message": "Unknown parameter 'pullup_resistor' for section [temperature_sensor].",
+      "line_number": 108,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-geeetech-301-2019.cfg",
+      "severity": "warning",
+      "section": "temperature_sensor secondary",
+      "param": "inline_resistor",
+      "message": "Unknown parameter 'inline_resistor' for section [temperature_sensor].",
+      "line_number": 109,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-geeetech-301-2019.cfg",
+      "severity": "warning",
+      "section": "temperature_sensor ambient",
+      "param": "pullup_resistor",
+      "message": "Unknown parameter 'pullup_resistor' for section [temperature_sensor].",
+      "line_number": 115,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-geeetech-301-2019.cfg",
+      "severity": "warning",
+      "section": "temperature_sensor ambient",
+      "param": "inline_resistor",
+      "message": "Unknown parameter 'inline_resistor' for section [temperature_sensor].",
+      "line_number": 116,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-kingroon-kp3s-2020.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "sensor_type",
+      "message": "Invalid value 'Kingroon_B3950' for 'sensor_type'. Expected one of: EPCOS 100K B57560G104F, ATC Semitec 104GT-2, ATC Semitec 104NT-4-R025H42G, Generic 3950, Honeywell 100K 135-104LAG-J01, NTC 100K MGB18-104F39050L32, SliceEngineering 450, TDK NTCG104LH104JT1, PT100 INA826, PT1000, AD595, AD597, AD8494, AD8495, AD8496, AD8497, MAX6675, MAX31855, MAX31856, MAX31865, BME280, AHT10, HTU21D, SHT21, lm75, temperature_mcu, temperature_host, DS18B20, temperature_combined",
+      "line_number": 73,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-kingroon-kp3s-2020.cfg",
+      "severity": "error",
+      "section": "heater_bed",
+      "param": "sensor_type",
+      "message": "Invalid value 'Kingroon_B3950' for 'sensor_type'. Expected one of: EPCOS 100K B57560G104F, ATC Semitec 104GT-2, ATC Semitec 104NT-4-R025H42G, Generic 3950, Honeywell 100K 135-104LAG-J01, NTC 100K MGB18-104F39050L32, SliceEngineering 450, TDK NTCG104LH104JT1, PT100 INA826, PT1000, AD595, AD597, AD8494, AD8495, AD8496, AD8497, MAX6675, MAX31855, MAX31856, MAX31865, BME280, AHT10, HTU21D, SHT21, lm75, temperature_mcu, temperature_host, DS18B20, temperature_combined",
+      "line_number": 84,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-makergear-m2-2012.cfg",
+      "severity": "error",
+      "section": "endstop_phase stepper_x",
+      "param": "endstop_accuracy",
+      "message": "Expected integer for 'endstop_accuracy', got '.200'.",
+      "line_number": 18,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-makergear-m2-2012.cfg",
+      "severity": "error",
+      "section": "endstop_phase stepper_y",
+      "param": "endstop_accuracy",
+      "message": "Expected integer for 'endstop_accuracy', got '.200'.",
+      "line_number": 32,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-makergear-m2-2012.cfg",
+      "severity": "error",
+      "section": "endstop_phase stepper_z",
+      "param": "endstop_accuracy",
+      "message": "Expected integer for 'endstop_accuracy', got '.070'.",
+      "line_number": 47,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-modix-big60-2020.cfg",
+      "severity": "warning",
+      "section": "extruder",
+      "param": "rtd_nominal_r",
+      "message": "Unknown parameter 'rtd_nominal_r' for section [extruder].",
+      "line_number": 85,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-modix-big60-2020.cfg",
+      "severity": "warning",
+      "section": "extruder",
+      "param": "rtd_reference_r",
+      "message": "Unknown parameter 'rtd_reference_r' for section [extruder].",
+      "line_number": 86,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-modix-big60-2020.cfg",
+      "severity": "warning",
+      "section": "extruder",
+      "param": "rtd_num_of_wires",
+      "message": "Unknown parameter 'rtd_num_of_wires' for section [extruder].",
+      "line_number": 87,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-modix-big60-2020.cfg",
+      "severity": "warning",
+      "section": "extruder",
+      "param": "rtd_use_50Hz_filter",
+      "message": "Unknown parameter 'rtd_use_50Hz_filter' for section [extruder].",
+      "line_number": 88,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-modix-big60-2020.cfg",
+      "severity": "warning",
+      "section": "extruder1",
+      "param": "rtd_nominal_r",
+      "message": "Unknown parameter 'rtd_nominal_r' for section [extruder1].",
+      "line_number": 109,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-modix-big60-2020.cfg",
+      "severity": "warning",
+      "section": "extruder1",
+      "param": "rtd_reference_r",
+      "message": "Unknown parameter 'rtd_reference_r' for section [extruder1].",
+      "line_number": 110,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-modix-big60-2020.cfg",
+      "severity": "warning",
+      "section": "extruder1",
+      "param": "rtd_num_of_wires",
+      "message": "Unknown parameter 'rtd_num_of_wires' for section [extruder1].",
+      "line_number": 111,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-modix-big60-2020.cfg",
+      "severity": "warning",
+      "section": "extruder1",
+      "param": "rtd_use_50Hz_filter",
+      "message": "Unknown parameter 'rtd_use_50Hz_filter' for section [extruder1].",
+      "line_number": 112,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-modix-big60-2020.cfg",
+      "severity": "warning",
+      "section": "",
+      "param": "",
+      "message": "Pin 'usart0' is used by multiple sections: [extruder] spi_bus, [extruder1] spi_bus",
+      "line_number": 0,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-modix-big60-2020.cfg",
+      "severity": "warning",
+      "section": "",
+      "param": "",
+      "message": "Pin 'usart1' is used by multiple sections: [tmc2660 stepper_x] spi_bus, [tmc2660 stepper_y] spi_bus, [tmc2660 stepper_z] spi_bus, [tmc2660 extruder] spi_bus, [tmc2660 extruder1] spi_bus",
+      "line_number": 0,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-robo3d-r2-2017.cfg",
+      "severity": "error",
+      "section": "heater_bed",
+      "param": "sensor_type",
+      "message": "Invalid value 'NTCS0603E3104FXT' for 'sensor_type'. Expected one of: EPCOS 100K B57560G104F, ATC Semitec 104GT-2, ATC Semitec 104NT-4-R025H42G, Generic 3950, Honeywell 100K 135-104LAG-J01, NTC 100K MGB18-104F39050L32, SliceEngineering 450, TDK NTCG104LH104JT1, PT100 INA826, PT1000, AD595, AD597, AD8494, AD8495, AD8496, AD8497, MAX6675, MAX31855, MAX31856, MAX31865, BME280, AHT10, HTU21D, SHT21, lm75, temperature_mcu, temperature_host, DS18B20, temperature_combined",
+      "line_number": 117,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-tronxy-x5sa-pro-2020.cfg",
+      "severity": "warning",
+      "section": "bed_screws",
+      "param": "screw5",
+      "message": "Unknown parameter 'screw5' for section [bed_screws].",
+      "line_number": 131,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-tronxy-x5sa-pro-2020.cfg",
+      "severity": "warning",
+      "section": "bed_screws",
+      "param": "screw6",
+      "message": "Unknown parameter 'screw6' for section [bed_screws].",
+      "line_number": 132,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-tronxy-x5sa-v6-2019.cfg",
+      "severity": "warning",
+      "section": "bed_screws",
+      "param": "screw5",
+      "message": "Unknown parameter 'screw5' for section [bed_screws].",
+      "line_number": 121,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-tronxy-x5sa-v6-2019.cfg",
+      "severity": "warning",
+      "section": "bed_screws",
+      "param": "screw6",
+      "message": "Unknown parameter 'screw6' for section [bed_screws].",
+      "line_number": 122,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Switchwire-einsy_config.cfg",
+      "severity": "error",
+      "section": "stepper_x",
+      "param": "rotation_distance",
+      "message": "Required parameter 'rotation_distance' is missing.",
+      "line_number": 6,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Switchwire-einsy_config.cfg",
+      "severity": "error",
+      "section": "stepper_x",
+      "param": "microsteps",
+      "message": "Required parameter 'microsteps' is missing.",
+      "line_number": 6,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Switchwire-einsy_config.cfg",
+      "severity": "warning",
+      "section": "tmc2130 stepper_x",
+      "param": "microsteps",
+      "message": "Unknown parameter 'microsteps' for section [tmc2130].",
+      "line_number": 19,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Switchwire-einsy_config.cfg",
+      "severity": "error",
+      "section": "stepper_y",
+      "param": "rotation_distance",
+      "message": "Required parameter 'rotation_distance' is missing.",
+      "line_number": 36,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Switchwire-einsy_config.cfg",
+      "severity": "error",
+      "section": "stepper_y",
+      "param": "microsteps",
+      "message": "Required parameter 'microsteps' is missing.",
+      "line_number": 36,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Switchwire-einsy_config.cfg",
+      "severity": "warning",
+      "section": "tmc2130 stepper_y",
+      "param": "microsteps",
+      "message": "Unknown parameter 'microsteps' for section [tmc2130].",
+      "line_number": 51,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Switchwire-einsy_config.cfg",
+      "severity": "error",
+      "section": "stepper_z",
+      "param": "rotation_distance",
+      "message": "Required parameter 'rotation_distance' is missing.",
+      "line_number": 69,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Switchwire-einsy_config.cfg",
+      "severity": "error",
+      "section": "stepper_z",
+      "param": "microsteps",
+      "message": "Required parameter 'microsteps' is missing.",
+      "line_number": 69,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Switchwire-einsy_config.cfg",
+      "severity": "warning",
+      "section": "tmc2130 stepper_z",
+      "param": "microsteps",
+      "message": "Unknown parameter 'microsteps' for section [tmc2130].",
+      "line_number": 82,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Switchwire-einsy_config.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "microsteps",
+      "message": "Required parameter 'microsteps' is missing.",
+      "line_number": 119,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Switchwire-einsy_config.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 119,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Switchwire-einsy_config.cfg",
+      "severity": "warning",
+      "section": "tmc2130 extruder",
+      "param": "microsteps",
+      "message": "Unknown parameter 'microsteps' for section [tmc2130].",
+      "line_number": 149,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Switchwire-einsy_config.cfg",
+      "severity": "error",
+      "section": "heater_bed",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 169,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Switchwire-skr_mini_e3_v2_config.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 131,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Switchwire-skr_mini_e3_v2_config.cfg",
+      "severity": "error",
+      "section": "heater_bed",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 188,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Switchwire-skr_mini_e3_v3_config.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 130,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Switchwire-skr_mini_e3_v3_config.cfg",
+      "severity": "error",
+      "section": "heater_bed",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 187,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Trident-M8P_v1.0_config.cfg",
+      "severity": "error",
+      "section": "stepper_z",
+      "param": "rotation_distance",
+      "message": "Required parameter 'rotation_distance' is missing.",
+      "line_number": 116,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Trident-M8P_v1.0_config.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 183,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Trident-M8P_v1.0_config.cfg",
+      "severity": "error",
+      "section": "heater_bed",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 237,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Trident-M8P_v1.0_config.cfg",
+      "severity": "error",
+      "section": "z_tilt",
+      "param": "z_positions",
+      "message": "Required parameter 'z_positions' is missing.",
+      "line_number": 354,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Trident-M8P_v1.0_config.cfg",
+      "severity": "error",
+      "section": "z_tilt",
+      "param": "points",
+      "message": "Required parameter 'points' is missing.",
+      "line_number": 354,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Trident-M8P_v2.0_config.cfg",
+      "severity": "error",
+      "section": "stepper_z",
+      "param": "rotation_distance",
+      "message": "Required parameter 'rotation_distance' is missing.",
+      "line_number": 116,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Trident-M8P_v2.0_config.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 183,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Trident-M8P_v2.0_config.cfg",
+      "severity": "error",
+      "section": "heater_bed",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 237,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Trident-M8P_v2.0_config.cfg",
+      "severity": "error",
+      "section": "z_tilt",
+      "param": "z_positions",
+      "message": "Required parameter 'z_positions' is missing.",
+      "line_number": 354,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Trident-M8P_v2.0_config.cfg",
+      "severity": "error",
+      "section": "z_tilt",
+      "param": "points",
+      "message": "Required parameter 'points' is missing.",
+      "line_number": 354,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Trident-Octopus_Config.cfg",
+      "severity": "error",
+      "section": "stepper_z",
+      "param": "rotation_distance",
+      "message": "Required parameter 'rotation_distance' is missing.",
+      "line_number": 128,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Trident-Octopus_Config.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "heater_pin",
+      "message": "Required parameter 'heater_pin' is missing.",
+      "line_number": 203,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Trident-Octopus_Config.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 203,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Trident-Octopus_Config.cfg",
+      "severity": "error",
+      "section": "heater_bed",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 256,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Trident-Octopus_Config.cfg",
+      "severity": "error",
+      "section": "probe",
+      "param": "pin",
+      "message": "Required parameter 'pin' is missing.",
+      "line_number": 279,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Trident-Octopus_Config.cfg",
+      "severity": "error",
+      "section": "z_tilt",
+      "param": "z_positions",
+      "message": "Required parameter 'z_positions' is missing.",
+      "line_number": 373,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Trident-Octopus_Config.cfg",
+      "severity": "error",
+      "section": "z_tilt",
+      "param": "points",
+      "message": "Required parameter 'points' is missing.",
+      "line_number": 373,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Trident_Kraken_Config.cfg",
+      "severity": "error",
+      "section": "stepper_z",
+      "param": "rotation_distance",
+      "message": "Required parameter 'rotation_distance' is missing.",
+      "line_number": 138,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Trident_Kraken_Config.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 219,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Trident_Kraken_Config.cfg",
+      "severity": "error",
+      "section": "heater_bed",
+      "param": "heater_pin",
+      "message": "Required parameter 'heater_pin' is missing.",
+      "line_number": 274,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Trident_Kraken_Config.cfg",
+      "severity": "error",
+      "section": "heater_bed",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 274,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Trident_Kraken_Config.cfg",
+      "severity": "error",
+      "section": "probe",
+      "param": "pin",
+      "message": "Required parameter 'pin' is missing.",
+      "line_number": 300,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Trident_Kraken_Config.cfg",
+      "severity": "error",
+      "section": "z_tilt",
+      "param": "z_positions",
+      "message": "Required parameter 'z_positions' is missing.",
+      "line_number": 388,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Trident_Kraken_Config.cfg",
+      "severity": "error",
+      "section": "z_tilt",
+      "param": "points",
+      "message": "Required parameter 'points' is missing.",
+      "line_number": 388,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Trident_Kraken_Config.cfg",
+      "severity": "warning",
+      "section": "",
+      "param": "",
+      "message": "Pin 'PC7' is used by multiple sections: [tmc5160 stepper_x] spi_software_miso_pin, [tmc5160 stepper_y] spi_software_miso_pin, [tmc5160 stepper_z] spi_software_miso_pin, [tmc5160 stepper_z1] spi_software_miso_pin, [tmc5160 stepper_z2] spi_software_miso_pin, [tmc5160 extruder] spi_software_miso_pin",
+      "line_number": 0,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Trident_Kraken_Config.cfg",
+      "severity": "warning",
+      "section": "",
+      "param": "",
+      "message": "Pin 'PC8' is used by multiple sections: [tmc5160 stepper_x] spi_software_mosi_pin, [tmc5160 stepper_y] spi_software_mosi_pin, [tmc5160 stepper_z] spi_software_mosi_pin, [tmc5160 stepper_z1] spi_software_mosi_pin, [tmc5160 stepper_z2] spi_software_mosi_pin, [tmc5160 extruder] spi_software_mosi_pin",
+      "line_number": 0,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Trident_Kraken_Config.cfg",
+      "severity": "warning",
+      "section": "",
+      "param": "",
+      "message": "Pin 'PC6' is used by multiple sections: [tmc5160 stepper_x] spi_software_sclk_pin, [tmc5160 stepper_y] spi_software_sclk_pin, [tmc5160 stepper_z] spi_software_sclk_pin, [tmc5160 stepper_z1] spi_software_sclk_pin, [tmc5160 stepper_z2] spi_software_sclk_pin, [tmc5160 extruder] spi_software_sclk_pin",
+      "line_number": 0,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Trident_SKR_1.3.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 291,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Trident_SKR_1.3.cfg",
+      "severity": "error",
+      "section": "heater_bed",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 348,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Trident_SKR_1.3.cfg",
+      "severity": "error",
+      "section": "z_tilt",
+      "param": "z_positions",
+      "message": "Required parameter 'z_positions' is missing.",
+      "line_number": 492,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron-Trident_SKR_1.3.cfg",
+      "severity": "error",
+      "section": "z_tilt",
+      "param": "points",
+      "message": "Required parameter 'points' is missing.",
+      "line_number": 492,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-bigtreetech-manta-m4p.cfg",
+      "severity": "error",
+      "section": "tmc2209 stepper_x",
+      "param": "run_current",
+      "message": "Required parameter 'run_current' is missing.",
+      "line_number": 60,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-bigtreetech-manta-m4p.cfg",
+      "severity": "error",
+      "section": "tmc2209 stepper_y",
+      "param": "run_current",
+      "message": "Required parameter 'run_current' is missing.",
+      "line_number": 83,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-bigtreetech-manta-m4p.cfg",
+      "severity": "error",
+      "section": "tmc2209 stepper_z",
+      "param": "run_current",
+      "message": "Required parameter 'run_current' is missing.",
+      "line_number": 110,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-bigtreetech-manta-m4p.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 125,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-bigtreetech-manta-m4p.cfg",
+      "severity": "error",
+      "section": "tmc2209 extruder",
+      "param": "run_current",
+      "message": "Required parameter 'run_current' is missing.",
+      "line_number": 152,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-bigtreetech-manta-m4p.cfg",
+      "severity": "error",
+      "section": "heater_bed",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 168,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-bigtreetech-skr-3-ez.cfg",
+      "severity": "error",
+      "section": "tmc2209 stepper_x",
+      "param": "run_current",
+      "message": "Required parameter 'run_current' is missing.",
+      "line_number": 71,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-bigtreetech-skr-3-ez.cfg",
+      "severity": "error",
+      "section": "tmc2209 stepper_y",
+      "param": "run_current",
+      "message": "Required parameter 'run_current' is missing.",
+      "line_number": 95,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-bigtreetech-skr-3-ez.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 138,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-bigtreetech-skr-3-ez.cfg",
+      "severity": "error",
+      "section": "tmc2209 extruder",
+      "param": "run_current",
+      "message": "Required parameter 'run_current' is missing.",
+      "line_number": 165,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-bigtreetech-skr-3-ez.cfg",
+      "severity": "error",
+      "section": "heater_bed",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 181,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-bigtreetech-skr-3-ez.cfg",
+      "severity": "warning",
+      "section": "",
+      "param": "",
+      "message": "Pin 'PC3' is used by multiple sections: [tmc2209 stepper_y] diag_pin, [tmc2209 stepper_y] diag_pin",
+      "line_number": 0,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-bigtreetech-skr-mini-e3-v2.0.cfg",
+      "severity": "error",
+      "section": "tmc2209 stepper_x",
+      "param": "run_current",
+      "message": "Required parameter 'run_current' is missing.",
+      "line_number": 57,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-bigtreetech-skr-mini-e3-v2.0.cfg",
+      "severity": "error",
+      "section": "tmc2209 stepper_y",
+      "param": "run_current",
+      "message": "Required parameter 'run_current' is missing.",
+      "line_number": 84,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-bigtreetech-skr-mini-e3-v2.0.cfg",
+      "severity": "error",
+      "section": "tmc2209 stepper_z",
+      "param": "run_current",
+      "message": "Required parameter 'run_current' is missing.",
+      "line_number": 114,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-bigtreetech-skr-mini-e3-v2.0.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 130,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-bigtreetech-skr-mini-e3-v2.0.cfg",
+      "severity": "error",
+      "section": "tmc2209 extruder",
+      "param": "run_current",
+      "message": "Required parameter 'run_current' is missing.",
+      "line_number": 157,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-bigtreetech-skr-mini-e3-v2.0.cfg",
+      "severity": "error",
+      "section": "heater_bed",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 175,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-bigtreetech-skr-mini-e3-v3.0.cfg",
+      "severity": "error",
+      "section": "tmc2209 stepper_x",
+      "param": "run_current",
+      "message": "Required parameter 'run_current' is missing.",
+      "line_number": 65,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-bigtreetech-skr-mini-e3-v3.0.cfg",
+      "severity": "error",
+      "section": "tmc2209 stepper_y",
+      "param": "run_current",
+      "message": "Required parameter 'run_current' is missing.",
+      "line_number": 92,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-bigtreetech-skr-mini-e3-v3.0.cfg",
+      "severity": "error",
+      "section": "tmc2209 stepper_z",
+      "param": "run_current",
+      "message": "Required parameter 'run_current' is missing.",
+      "line_number": 122,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-bigtreetech-skr-mini-e3-v3.0.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 138,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-bigtreetech-skr-mini-e3-v3.0.cfg",
+      "severity": "error",
+      "section": "tmc2209 extruder",
+      "param": "run_current",
+      "message": "Required parameter 'run_current' is missing.",
+      "line_number": 165,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-bigtreetech-skr-mini-e3-v3.0.cfg",
+      "severity": "error",
+      "section": "heater_bed",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 183,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-bigtreetech-skr-pico-v1.0.cfg",
+      "severity": "error",
+      "section": "tmc2209 stepper_x",
+      "param": "run_current",
+      "message": "Required parameter 'run_current' is missing.",
+      "line_number": 68,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-bigtreetech-skr-pico-v1.0.cfg",
+      "severity": "error",
+      "section": "tmc2209 stepper_y",
+      "param": "run_current",
+      "message": "Required parameter 'run_current' is missing.",
+      "line_number": 95,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-bigtreetech-skr-pico-v1.0.cfg",
+      "severity": "error",
+      "section": "tmc2209 stepper_z",
+      "param": "run_current",
+      "message": "Required parameter 'run_current' is missing.",
+      "line_number": 126,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-bigtreetech-skr-pico-v1.0.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 142,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-bigtreetech-skr-pico-v1.0.cfg",
+      "severity": "error",
+      "section": "tmc2209 extruder",
+      "param": "run_current",
+      "message": "Required parameter 'run_current' is missing.",
+      "line_number": 169,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-bigtreetech-skr-pico-v1.0.cfg",
+      "severity": "error",
+      "section": "heater_bed",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 187,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-fysetc-cheetah-v2.0.cfg",
+      "severity": "error",
+      "section": "tmc2209 stepper_x",
+      "param": "run_current",
+      "message": "Required parameter 'run_current' is missing.",
+      "line_number": 66,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-fysetc-cheetah-v2.0.cfg",
+      "severity": "error",
+      "section": "tmc2209 stepper_y",
+      "param": "run_current",
+      "message": "Required parameter 'run_current' is missing.",
+      "line_number": 94,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-fysetc-cheetah-v2.0.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 140,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-fysetc-cheetah-v2.0.cfg",
+      "severity": "error",
+      "section": "heater_bed",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 180,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-fysetc-cheetah-v3.0.cfg",
+      "severity": "error",
+      "section": "mcu",
+      "param": "serial",
+      "message": "MCU requires either 'serial' (USB/UART) or 'canbus_uuid' (CAN bus) to be set.",
+      "line_number": 44,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-fysetc-cheetah-v3.0.cfg",
+      "severity": "error",
+      "section": "tmc2209 stepper_x",
+      "param": "run_current",
+      "message": "Required parameter 'run_current' is missing.",
+      "line_number": 107,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-fysetc-cheetah-v3.0.cfg",
+      "severity": "error",
+      "section": "tmc2209 stepper_y",
+      "param": "run_current",
+      "message": "Required parameter 'run_current' is missing.",
+      "line_number": 138,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-fysetc-cheetah-v3.0.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 181,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-fysetc-cheetah-v3.0.cfg",
+      "severity": "error",
+      "section": "heater_bed",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 221,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-mellow-fly-gemini-v2.cfg",
+      "severity": "error",
+      "section": "tmc2209 stepper_x",
+      "param": "run_current",
+      "message": "Required parameter 'run_current' is missing.",
+      "line_number": 64,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-mellow-fly-gemini-v2.cfg",
+      "severity": "error",
+      "section": "tmc2209 stepper_y",
+      "param": "run_current",
+      "message": "Required parameter 'run_current' is missing.",
+      "line_number": 89,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-mellow-fly-gemini-v2.cfg",
+      "severity": "error",
+      "section": "tmc2209 stepper_z",
+      "param": "run_current",
+      "message": "Required parameter 'run_current' is missing.",
+      "line_number": 120,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-mellow-fly-gemini-v2.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 135,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-mellow-fly-gemini-v2.cfg",
+      "severity": "error",
+      "section": "tmc2209 extruder",
+      "param": "run_current",
+      "message": "Required parameter 'run_current' is missing.",
+      "line_number": 165,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-mellow-fly-gemini-v2.cfg",
+      "severity": "error",
+      "section": "heater_bed",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 181,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-mellow-fly-gemini-v3.cfg",
+      "severity": "error",
+      "section": "tmc2209 stepper_x",
+      "param": "run_current",
+      "message": "Required parameter 'run_current' is missing.",
+      "line_number": 64,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-mellow-fly-gemini-v3.cfg",
+      "severity": "error",
+      "section": "tmc2209 stepper_y",
+      "param": "run_current",
+      "message": "Required parameter 'run_current' is missing.",
+      "line_number": 89,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-mellow-fly-gemini-v3.cfg",
+      "severity": "error",
+      "section": "tmc2209 stepper_z",
+      "param": "run_current",
+      "message": "Required parameter 'run_current' is missing.",
+      "line_number": 120,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-mellow-fly-gemini-v3.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 135,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-mellow-fly-gemini-v3.cfg",
+      "severity": "error",
+      "section": "tmc2209 extruder",
+      "param": "run_current",
+      "message": "Required parameter 'run_current' is missing.",
+      "line_number": 165,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-voron-v0-mellow-fly-gemini-v3.cfg",
+      "severity": "error",
+      "section": "heater_bed",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 181,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron2.4-Kraken_Config.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 252,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron2.4-Kraken_Config.cfg",
+      "severity": "error",
+      "section": "heater_bed",
+      "param": "heater_pin",
+      "message": "Required parameter 'heater_pin' is missing.",
+      "line_number": 306,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron2.4-Kraken_Config.cfg",
+      "severity": "error",
+      "section": "heater_bed",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 306,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron2.4-Kraken_Config.cfg",
+      "severity": "error",
+      "section": "probe",
+      "param": "pin",
+      "message": "Required parameter 'pin' is missing.",
+      "line_number": 332,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron2.4-Kraken_Config.cfg",
+      "severity": "error",
+      "section": "quad_gantry_level",
+      "param": "gantry_corners",
+      "message": "Required parameter 'gantry_corners' is missing.",
+      "line_number": 425,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron2.4-Kraken_Config.cfg",
+      "severity": "error",
+      "section": "quad_gantry_level",
+      "param": "points",
+      "message": "Required parameter 'points' is missing.",
+      "line_number": 425,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron2.4-Kraken_Config.cfg",
+      "severity": "warning",
+      "section": "",
+      "param": "",
+      "message": "Pin 'PC7' is used by multiple sections: [tmc5160 stepper_x] spi_software_miso_pin, [tmc5160 stepper_y] spi_software_miso_pin, [tmc5160 stepper_z] spi_software_miso_pin, [tmc5160 stepper_z1] spi_software_miso_pin, [tmc5160 stepper_z2] spi_software_miso_pin, [tmc5160 stepper_z3] spi_software_miso_pin, [tmc5160 extruder] spi_software_miso_pin",
+      "line_number": 0,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron2.4-Kraken_Config.cfg",
+      "severity": "warning",
+      "section": "",
+      "param": "",
+      "message": "Pin 'PC8' is used by multiple sections: [tmc5160 stepper_x] spi_software_mosi_pin, [tmc5160 stepper_y] spi_software_mosi_pin, [tmc5160 stepper_z] spi_software_mosi_pin, [tmc5160 stepper_z1] spi_software_mosi_pin, [tmc5160 stepper_z2] spi_software_mosi_pin, [tmc5160 stepper_z3] spi_software_mosi_pin, [tmc5160 extruder] spi_software_mosi_pin",
+      "line_number": 0,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron2.4-Kraken_Config.cfg",
+      "severity": "warning",
+      "section": "",
+      "param": "",
+      "message": "Pin 'PC6' is used by multiple sections: [tmc5160 stepper_x] spi_software_sclk_pin, [tmc5160 stepper_y] spi_software_sclk_pin, [tmc5160 stepper_z] spi_software_sclk_pin, [tmc5160 stepper_z1] spi_software_sclk_pin, [tmc5160 stepper_z2] spi_software_sclk_pin, [tmc5160 stepper_z3] spi_software_sclk_pin, [tmc5160 extruder] spi_software_sclk_pin",
+      "line_number": 0,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron2.4-M8P-v1.0_config.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 210,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron2.4-M8P-v1.0_config.cfg",
+      "severity": "error",
+      "section": "heater_bed",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 268,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron2.4-M8P-v1.1_config.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 210,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron2.4-M8P-v1.1_config.cfg",
+      "severity": "error",
+      "section": "heater_bed",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 268,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron2.4-M8P-v2.0_config.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 210,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron2.4-M8P-v2.0_config.cfg",
+      "severity": "error",
+      "section": "heater_bed",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 268,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron2.4-Octopus_Config.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "heater_pin",
+      "message": "Required parameter 'heater_pin' is missing.",
+      "line_number": 233,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron2.4-Octopus_Config.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 233,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron2.4-Octopus_Config.cfg",
+      "severity": "error",
+      "section": "heater_bed",
+      "param": "heater_pin",
+      "message": "Required parameter 'heater_pin' is missing.",
+      "line_number": 288,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron2.4-Octopus_Config.cfg",
+      "severity": "error",
+      "section": "heater_bed",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 288,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron2.4-Octopus_Config.cfg",
+      "severity": "error",
+      "section": "probe",
+      "param": "pin",
+      "message": "Required parameter 'pin' is missing.",
+      "line_number": 314,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron2.4-Octopus_Config.cfg",
+      "severity": "error",
+      "section": "quad_gantry_level",
+      "param": "gantry_corners",
+      "message": "Required parameter 'gantry_corners' is missing.",
+      "line_number": 414,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron2.4-Octopus_Config.cfg",
+      "severity": "error",
+      "section": "quad_gantry_level",
+      "param": "points",
+      "message": "Required parameter 'points' is missing.",
+      "line_number": 414,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron2.4-SKR_13_Config.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 272,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron2.4-SKR_13_Config.cfg",
+      "severity": "error",
+      "section": "heater_bed",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 322,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron2.4-SKR_13_Config.cfg",
+      "severity": "error",
+      "section": "quad_gantry_level",
+      "param": "gantry_corners",
+      "message": "Required parameter 'gantry_corners' is missing.",
+      "line_number": 432,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron2.4-SKR_13_Config.cfg",
+      "severity": "error",
+      "section": "quad_gantry_level",
+      "param": "points",
+      "message": "Required parameter 'points' is missing.",
+      "line_number": 432,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron2.4-SKR_14_Config.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 273,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron2.4-SKR_14_Config.cfg",
+      "severity": "error",
+      "section": "heater_bed",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 323,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron2.4-SKR_14_Config.cfg",
+      "severity": "error",
+      "section": "quad_gantry_level",
+      "param": "gantry_corners",
+      "message": "Required parameter 'gantry_corners' is missing.",
+      "line_number": 433,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-Voron2.4-SKR_14_Config.cfg",
+      "severity": "error",
+      "section": "quad_gantry_level",
+      "param": "points",
+      "message": "Required parameter 'points' is missing.",
+      "line_number": 433,
+      "classification": "needs_review",
+      "doc_hits": [],
+      "partial_reasons": []
+    }
+  ],
+  "documented_unknowns": [
+    {
+      "file": "reference/config/Mainboard/generic-duet2-duex.cfg",
+      "severity": "warning",
+      "section": "sx1509 duex",
+      "param": "i2c_address",
+      "message": "Unknown parameter 'i2c_address' for section [sx1509].",
+      "line_number": 316,
+      "classification": "documented_unknown_param",
+      "doc_hits": [
+        "reference/reference_docs/klipper_docs/Config_Reference.md"
+      ],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/generic-replicape.cfg",
+      "severity": "warning",
+      "section": "replicape",
+      "param": "revision",
+      "message": "Unknown parameter 'revision' for section [replicape].",
+      "line_number": 23,
+      "classification": "documented_unknown_param",
+      "doc_hits": [
+        "reference/reference_docs/klipper_docs/Config_Reference.md"
+      ],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/generic-replicape.cfg",
+      "severity": "warning",
+      "section": "replicape",
+      "param": "host_mcu",
+      "message": "Unknown parameter 'host_mcu' for section [replicape].",
+      "line_number": 24,
+      "classification": "documented_unknown_param",
+      "doc_hits": [
+        "reference/reference_docs/klipper_docs/Config_Reference.md"
+      ],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/generic-replicape.cfg",
+      "severity": "warning",
+      "section": "replicape",
+      "param": "stepper_x_microstep_mode",
+      "message": "Unknown parameter 'stepper_x_microstep_mode' for section [replicape].",
+      "line_number": 25,
+      "classification": "documented_unknown_param",
+      "doc_hits": [
+        "reference/reference_docs/klipper_docs/Config_Reference.md"
+      ],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/generic-replicape.cfg",
+      "severity": "warning",
+      "section": "replicape",
+      "param": "stepper_x_current",
+      "message": "Unknown parameter 'stepper_x_current' for section [replicape].",
+      "line_number": 26,
+      "classification": "documented_unknown_param",
+      "doc_hits": [
+        "reference/reference_docs/klipper_docs/Config_Reference.md"
+      ],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/generic-replicape.cfg",
+      "severity": "warning",
+      "section": "replicape",
+      "param": "stepper_y_microstep_mode",
+      "message": "Unknown parameter 'stepper_y_microstep_mode' for section [replicape].",
+      "line_number": 27,
+      "classification": "documented_unknown_param",
+      "doc_hits": [
+        "reference/reference_docs/klipper_docs/Config_Reference.md"
+      ],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/generic-replicape.cfg",
+      "severity": "warning",
+      "section": "replicape",
+      "param": "stepper_y_current",
+      "message": "Unknown parameter 'stepper_y_current' for section [replicape].",
+      "line_number": 28,
+      "classification": "documented_unknown_param",
+      "doc_hits": [
+        "reference/reference_docs/klipper_docs/Config_Reference.md"
+      ],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/generic-replicape.cfg",
+      "severity": "warning",
+      "section": "replicape",
+      "param": "stepper_z_microstep_mode",
+      "message": "Unknown parameter 'stepper_z_microstep_mode' for section [replicape].",
+      "line_number": 29,
+      "classification": "documented_unknown_param",
+      "doc_hits": [
+        "reference/reference_docs/klipper_docs/Config_Reference.md"
+      ],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/generic-replicape.cfg",
+      "severity": "warning",
+      "section": "replicape",
+      "param": "stepper_z_current",
+      "message": "Unknown parameter 'stepper_z_current' for section [replicape].",
+      "line_number": 30,
+      "classification": "documented_unknown_param",
+      "doc_hits": [
+        "reference/reference_docs/klipper_docs/Config_Reference.md"
+      ],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/generic-replicape.cfg",
+      "severity": "warning",
+      "section": "replicape",
+      "param": "stepper_e_microstep_mode",
+      "message": "Unknown parameter 'stepper_e_microstep_mode' for section [replicape].",
+      "line_number": 31,
+      "classification": "documented_unknown_param",
+      "doc_hits": [
+        "reference/reference_docs/klipper_docs/Config_Reference.md"
+      ],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/generic-replicape.cfg",
+      "severity": "warning",
+      "section": "replicape",
+      "param": "stepper_e_current",
+      "message": "Unknown parameter 'stepper_e_current' for section [replicape].",
+      "line_number": 32,
+      "classification": "documented_unknown_param",
+      "doc_hits": [
+        "reference/reference_docs/klipper_docs/Config_Reference.md"
+      ],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Mainboard/printer-makergear-m2-2012.cfg",
+      "severity": "warning",
+      "section": "heater_fan nozzle_fan",
+      "param": "hardware_pwm",
+      "message": "Unknown parameter 'hardware_pwm' for section [heater_fan].",
+      "line_number": 83,
+      "classification": "documented_unknown_param",
+      "doc_hits": [
+        "reference/reference_docs/klipper_docs/Config_Reference.md"
+      ],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Other/example-deltesian.cfg",
+      "severity": "warning",
+      "section": "stepper_left",
+      "param": "",
+      "message": "Unknown section type 'stepper_left'. Parameters won't be validated.",
+      "line_number": 10,
+      "classification": "documented_unknown_section",
+      "doc_hits": [
+        "reference/reference_docs/klipper_docs/Config_Reference.md"
+      ],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Other/example-deltesian.cfg",
+      "severity": "warning",
+      "section": "stepper_right",
+      "param": "",
+      "message": "Unknown section type 'stepper_right'. Parameters won't be validated.",
+      "line_number": 22,
+      "classification": "documented_unknown_section",
+      "doc_hits": [
+        "reference/reference_docs/klipper_docs/Config_Reference.md"
+      ],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Other/example-generic-caretesian.cfg",
+      "severity": "warning",
+      "section": "carriage carriage_x",
+      "param": "",
+      "message": "Unknown section type 'carriage carriage_x'. Parameters won't be validated.",
+      "line_number": 10,
+      "classification": "documented_unknown_section",
+      "doc_hits": [
+        "reference/reference_docs/klipper_docs/Config_Reference.md"
+      ],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Other/example-generic-caretesian.cfg",
+      "severity": "warning",
+      "section": "carriage carriage_y",
+      "param": "",
+      "message": "Unknown section type 'carriage carriage_y'. Parameters won't be validated.",
+      "line_number": 17,
+      "classification": "documented_unknown_section",
+      "doc_hits": [
+        "reference/reference_docs/klipper_docs/Config_Reference.md"
+      ],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Other/example-generic-caretesian.cfg",
+      "severity": "warning",
+      "section": "extra_carriage carriage_y1",
+      "param": "",
+      "message": "Unknown section type 'extra_carriage carriage_y1'. Parameters won't be validated.",
+      "line_number": 24,
+      "classification": "documented_unknown_section",
+      "doc_hits": [
+        "reference/reference_docs/klipper_docs/Config_Reference.md"
+      ],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Other/example-generic-caretesian.cfg",
+      "severity": "warning",
+      "section": "dual_carriage carriage_u",
+      "param": "",
+      "message": "Unknown section type 'dual_carriage carriage_u'. Parameters won't be validated.",
+      "line_number": 34,
+      "classification": "documented_unknown_section",
+      "doc_hits": [
+        "reference/reference_docs/klipper_docs/Config_Reference.md"
+      ],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Other/example-polar.cfg",
+      "severity": "warning",
+      "section": "stepper_bed",
+      "param": "",
+      "message": "Unknown section type 'stepper_bed'. Parameters won't be validated.",
+      "line_number": 9,
+      "classification": "documented_unknown_section",
+      "doc_hits": [
+        "reference/reference_docs/klipper_docs/Config_Reference.md"
+      ],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Other/example-polar.cfg",
+      "severity": "warning",
+      "section": "stepper_arm",
+      "param": "",
+      "message": "Unknown section type 'stepper_arm'. Parameters won't be validated.",
+      "line_number": 16,
+      "classification": "documented_unknown_section",
+      "doc_hits": [
+        "reference/reference_docs/klipper_docs/Config_Reference.md"
+      ],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Other/sample-corexyuv.cfg",
+      "severity": "warning",
+      "section": "carriage carriage_x",
+      "param": "",
+      "message": "Unknown section type 'carriage carriage_x'. Parameters won't be validated.",
+      "line_number": 6,
+      "classification": "documented_unknown_section",
+      "doc_hits": [
+        "reference/reference_docs/klipper_docs/Config_Reference.md"
+      ],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Other/sample-corexyuv.cfg",
+      "severity": "warning",
+      "section": "carriage carriage_y",
+      "param": "",
+      "message": "Unknown section type 'carriage carriage_y'. Parameters won't be validated.",
+      "line_number": 13,
+      "classification": "documented_unknown_section",
+      "doc_hits": [
+        "reference/reference_docs/klipper_docs/Config_Reference.md"
+      ],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Other/sample-corexyuv.cfg",
+      "severity": "warning",
+      "section": "dual_carriage carriage_u",
+      "param": "",
+      "message": "Unknown section type 'dual_carriage carriage_u'. Parameters won't be validated.",
+      "line_number": 20,
+      "classification": "documented_unknown_section",
+      "doc_hits": [
+        "reference/reference_docs/klipper_docs/Config_Reference.md"
+      ],
+      "partial_reasons": []
+    },
+    {
+      "file": "reference/config/Other/sample-pwm-tool.cfg",
+      "severity": "warning",
+      "section": "menu __main __control __toolonoff",
+      "param": "",
+      "message": "Unknown section type 'menu'. Parameters won't be validated.",
+      "line_number": 36,
+      "classification": "documented_unknown_section",
+      "doc_hits": [
+        "reference/reference_docs/klipper_docs/Config_Reference.md",
+        "reference/reference_docs/klipper_docs/Command_Templates.md",
+        "reference/reference_docs/klipper_docs/Hall_Filament_Width_Sensor.md"
+      ],
+      "partial_reasons": [
+        "sample file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Other/sample-pwm-tool.cfg",
+      "severity": "warning",
+      "section": "menu __main __control __toolspeed",
+      "param": "",
+      "message": "Unknown section type 'menu'. Parameters won't be validated.",
+      "line_number": 47,
+      "classification": "documented_unknown_section",
+      "doc_hits": [
+        "reference/reference_docs/klipper_docs/Config_Reference.md",
+        "reference/reference_docs/klipper_docs/Command_Templates.md",
+        "reference/reference_docs/klipper_docs/Hall_Filament_Width_Sensor.md"
+      ],
+      "partial_reasons": [
+        "sample file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Probe/sample-cartographer-v3.cfg",
+      "severity": "warning",
+      "section": "temperature_probe carto",
+      "param": "pullup_resistor",
+      "message": "Unknown parameter 'pullup_resistor' for section [temperature_probe].",
+      "line_number": 29,
+      "classification": "documented_unknown_param",
+      "doc_hits": [
+        "reference/reference_docs/klipper_docs/Config_Reference.md"
+      ],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Probe reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-duet3-1lc.cfg",
+      "severity": "warning",
+      "section": "samd_sercom sercom_i2c",
+      "param": "sercom",
+      "message": "Unknown parameter 'sercom' for section [samd_sercom].",
+      "line_number": 81,
+      "classification": "documented_unknown_param",
+      "doc_hits": [
+        "reference/reference_docs/klipper_docs/Config_Reference.md"
+      ],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-duet3-1lc.cfg",
+      "severity": "warning",
+      "section": "samd_sercom sercom_i2c",
+      "param": "tx_pin",
+      "message": "Unknown parameter 'tx_pin' for section [samd_sercom].",
+      "line_number": 82,
+      "classification": "documented_unknown_param",
+      "doc_hits": [
+        "reference/reference_docs/klipper_docs/Config_Reference.md"
+      ],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-duet3-1lc.cfg",
+      "severity": "warning",
+      "section": "samd_sercom sercom_i2c",
+      "param": "clk_pin",
+      "message": "Unknown parameter 'clk_pin' for section [samd_sercom].",
+      "line_number": 83,
+      "classification": "documented_unknown_param",
+      "doc_hits": [
+        "reference/reference_docs/klipper_docs/Config_Reference.md"
+      ],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-duet3-1lc.cfg",
+      "severity": "warning",
+      "section": "lis3dh",
+      "param": "i2c_mcu",
+      "message": "Unknown parameter 'i2c_mcu' for section [lis3dh].",
+      "line_number": 86,
+      "classification": "documented_unknown_param",
+      "doc_hits": [
+        "reference/reference_docs/klipper_docs/Config_Reference.md"
+      ],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    }
+  ],
+  "likely_partial_examples": [
+    {
+      "file": "reference/config/Expander/sample-bigtreetech-mmb-cubic.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "rotation_distance",
+      "message": "Required parameter 'rotation_distance' is missing.",
+      "line_number": 21,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Expander reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Expander/sample-bigtreetech-mmb-cubic.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "microsteps",
+      "message": "Required parameter 'microsteps' is missing.",
+      "line_number": 21,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Expander reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Expander/sample-bigtreetech-mmb-cubic.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "nozzle_diameter",
+      "message": "Required parameter 'nozzle_diameter' is missing.",
+      "line_number": 21,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Expander reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Expander/sample-bigtreetech-mmb-cubic.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "filament_diameter",
+      "message": "Required parameter 'filament_diameter' is missing.",
+      "line_number": 21,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Expander reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Expander/sample-bigtreetech-mmb-cubic.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "step_pin",
+      "message": "Required parameter 'step_pin' is missing.",
+      "line_number": 21,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Expander reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Expander/sample-bigtreetech-mmb-cubic.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "dir_pin",
+      "message": "Required parameter 'dir_pin' is missing.",
+      "line_number": 21,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Expander reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Expander/sample-bigtreetech-mmb-cubic.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 21,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Expander reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Expander/sample-bigtreetech-mmb-cubic.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "max_temp",
+      "message": "Required parameter 'max_temp' is missing.",
+      "line_number": 21,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Expander reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Expander/sample-bigtreetech-mmb-cubic.cfg",
+      "severity": "error",
+      "section": "heater_bed",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 25,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Expander reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Expander/sample-bigtreetech-mmb-cubic.cfg",
+      "severity": "error",
+      "section": "heater_bed",
+      "param": "max_temp",
+      "message": "Required parameter 'max_temp' is missing.",
+      "line_number": 25,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Expander reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Expander/sample-fysetc-ercf-hardware.cfg",
+      "severity": "error",
+      "section": "filament_switch_sensor toolhead_sensor",
+      "param": "switch_pin",
+      "message": "Required parameter 'switch_pin' is missing.",
+      "line_number": 84,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Expander reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Probe/sample-beacon-probe.cfg",
+      "severity": "error",
+      "section": "stepper_z",
+      "param": "rotation_distance",
+      "message": "Required parameter 'rotation_distance' is missing.",
+      "line_number": 122,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Probe reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Probe/sample-beacon-probe.cfg",
+      "severity": "error",
+      "section": "stepper_z",
+      "param": "microsteps",
+      "message": "Required parameter 'microsteps' is missing.",
+      "line_number": 122,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Probe reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Probe/sample-beacon-probe.cfg",
+      "severity": "error",
+      "section": "stepper_z",
+      "param": "step_pin",
+      "message": "Required parameter 'step_pin' is missing.",
+      "line_number": 122,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Probe reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Probe/sample-beacon-probe.cfg",
+      "severity": "error",
+      "section": "stepper_z",
+      "param": "dir_pin",
+      "message": "Required parameter 'dir_pin' is missing.",
+      "line_number": 122,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Probe reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Probe/sample-bigtreetech-eddy-homing.cfg",
+      "severity": "error",
+      "section": "probe_eddy_current btt_eddy",
+      "param": "descend_z",
+      "message": "Required parameter 'descend_z' is missing.",
+      "line_number": 13,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Probe reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Probe/sample-bigtreetech-eddy-zoffbeta.cfg",
+      "severity": "error",
+      "section": "probe_eddy_current btt_eddy",
+      "param": "descend_z",
+      "message": "Required parameter 'descend_z' is missing.",
+      "line_number": 13,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Probe reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Probe/sample-bigtreetech-eddy.cfg",
+      "severity": "error",
+      "section": "probe_eddy_current btt_eddy",
+      "param": "descend_z",
+      "message": "Required parameter 'descend_z' is missing.",
+      "line_number": 13,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Probe reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Probe/sample-probe-as-z-endstop.cfg",
+      "severity": "error",
+      "section": "stepper_z",
+      "param": "rotation_distance",
+      "message": "Required parameter 'rotation_distance' is missing.",
+      "line_number": 17,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Probe reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Probe/sample-probe-as-z-endstop.cfg",
+      "severity": "error",
+      "section": "stepper_z",
+      "param": "microsteps",
+      "message": "Required parameter 'microsteps' is missing.",
+      "line_number": 17,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Probe reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Probe/sample-probe-as-z-endstop.cfg",
+      "severity": "error",
+      "section": "stepper_z",
+      "param": "step_pin",
+      "message": "Required parameter 'step_pin' is missing.",
+      "line_number": 17,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Probe reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Probe/sample-probe-as-z-endstop.cfg",
+      "severity": "error",
+      "section": "stepper_z",
+      "param": "dir_pin",
+      "message": "Required parameter 'dir_pin' is missing.",
+      "line_number": 17,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Probe reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-fysetc-H36-combo-V1-onekeytest-can.cfg",
+      "severity": "error",
+      "section": "mcu H36_combo",
+      "param": "serial",
+      "message": "MCU requires either 'serial' (USB/UART) or 'canbus_uuid' (CAN bus) to be set.",
+      "line_number": 1,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-fysetc-H36-combo-V1x-template.cfg",
+      "severity": "error",
+      "section": "mcu H36_combo",
+      "param": "serial",
+      "message": "MCU requires either 'serial' (USB/UART) or 'canbus_uuid' (CAN bus) to be set.",
+      "line_number": 1,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-fysetc-H36-combo-V2-template.cfg",
+      "severity": "error",
+      "section": "mcu H36_combo",
+      "param": "serial",
+      "message": "MCU requires either 'serial' (USB/UART) or 'canbus_uuid' (CAN bus) to be set.",
+      "line_number": 1,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-huvud-v0.61.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "microsteps",
+      "message": "Required parameter 'microsteps' is missing.",
+      "line_number": 21,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-ldo-nitehawk-36.cfg",
+      "severity": "error",
+      "section": "stepper_x",
+      "param": "rotation_distance",
+      "message": "Required parameter 'rotation_distance' is missing.",
+      "line_number": 28,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "header mentions 'partial config'",
+        "header mentions 'include this config'",
+        "header mentions 'include this partial config'",
+        "header mentions 'overwrite the relevent sections'",
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-ldo-nitehawk-36.cfg",
+      "severity": "error",
+      "section": "stepper_x",
+      "param": "microsteps",
+      "message": "Required parameter 'microsteps' is missing.",
+      "line_number": 28,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "header mentions 'partial config'",
+        "header mentions 'include this config'",
+        "header mentions 'include this partial config'",
+        "header mentions 'overwrite the relevent sections'",
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-ldo-nitehawk-36.cfg",
+      "severity": "error",
+      "section": "stepper_x",
+      "param": "step_pin",
+      "message": "Required parameter 'step_pin' is missing.",
+      "line_number": 28,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "header mentions 'partial config'",
+        "header mentions 'include this config'",
+        "header mentions 'include this partial config'",
+        "header mentions 'overwrite the relevent sections'",
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-ldo-nitehawk-36.cfg",
+      "severity": "error",
+      "section": "stepper_x",
+      "param": "dir_pin",
+      "message": "Required parameter 'dir_pin' is missing.",
+      "line_number": 28,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "header mentions 'partial config'",
+        "header mentions 'include this config'",
+        "header mentions 'include this partial config'",
+        "header mentions 'overwrite the relevent sections'",
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-ldo-nitehawk-36.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "rotation_distance",
+      "message": "Required parameter 'rotation_distance' is missing.",
+      "line_number": 42,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "header mentions 'partial config'",
+        "header mentions 'include this config'",
+        "header mentions 'include this partial config'",
+        "header mentions 'overwrite the relevent sections'",
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-ldo-nitehawk-36.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "microsteps",
+      "message": "Required parameter 'microsteps' is missing.",
+      "line_number": 42,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "header mentions 'partial config'",
+        "header mentions 'include this config'",
+        "header mentions 'include this partial config'",
+        "header mentions 'overwrite the relevent sections'",
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-ldo-nitehawk-36.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "nozzle_diameter",
+      "message": "Required parameter 'nozzle_diameter' is missing.",
+      "line_number": 42,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "header mentions 'partial config'",
+        "header mentions 'include this config'",
+        "header mentions 'include this partial config'",
+        "header mentions 'overwrite the relevent sections'",
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-ldo-nitehawk-36.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "filament_diameter",
+      "message": "Required parameter 'filament_diameter' is missing.",
+      "line_number": 42,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "header mentions 'partial config'",
+        "header mentions 'include this config'",
+        "header mentions 'include this partial config'",
+        "header mentions 'overwrite the relevent sections'",
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-ldo-nitehawk-36.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 42,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "header mentions 'partial config'",
+        "header mentions 'include this config'",
+        "header mentions 'include this partial config'",
+        "header mentions 'overwrite the relevent sections'",
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-ldo-nitehawk-36.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "max_temp",
+      "message": "Required parameter 'max_temp' is missing.",
+      "line_number": 42,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "header mentions 'partial config'",
+        "header mentions 'include this config'",
+        "header mentions 'include this partial config'",
+        "header mentions 'overwrite the relevent sections'",
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-ldo-nitehawk-36.cfg",
+      "severity": "error",
+      "section": "tmc2209 extruder",
+      "param": "run_current",
+      "message": "Required parameter 'run_current' is missing.",
+      "line_number": 50,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "header mentions 'partial config'",
+        "header mentions 'include this config'",
+        "header mentions 'include this partial config'",
+        "header mentions 'overwrite the relevent sections'",
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-ldo-nitehawk-36.cfg",
+      "severity": "error",
+      "section": "resonance_tester",
+      "param": "probe_points",
+      "message": "Required parameter 'probe_points' is missing.",
+      "line_number": 104,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "header mentions 'partial config'",
+        "header mentions 'include this config'",
+        "header mentions 'include this partial config'",
+        "header mentions 'overwrite the relevent sections'",
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-ldo-nitehawk-sb.cfg",
+      "severity": "error",
+      "section": "stepper_x",
+      "param": "rotation_distance",
+      "message": "Required parameter 'rotation_distance' is missing.",
+      "line_number": 29,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "header mentions 'partial config'",
+        "header mentions 'include this config'",
+        "header mentions 'include this partial config'",
+        "header mentions 'overwrite the relevent sections'",
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-ldo-nitehawk-sb.cfg",
+      "severity": "error",
+      "section": "stepper_x",
+      "param": "microsteps",
+      "message": "Required parameter 'microsteps' is missing.",
+      "line_number": 29,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "header mentions 'partial config'",
+        "header mentions 'include this config'",
+        "header mentions 'include this partial config'",
+        "header mentions 'overwrite the relevent sections'",
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-ldo-nitehawk-sb.cfg",
+      "severity": "error",
+      "section": "stepper_x",
+      "param": "step_pin",
+      "message": "Required parameter 'step_pin' is missing.",
+      "line_number": 29,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "header mentions 'partial config'",
+        "header mentions 'include this config'",
+        "header mentions 'include this partial config'",
+        "header mentions 'overwrite the relevent sections'",
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-ldo-nitehawk-sb.cfg",
+      "severity": "error",
+      "section": "stepper_x",
+      "param": "dir_pin",
+      "message": "Required parameter 'dir_pin' is missing.",
+      "line_number": 29,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "header mentions 'partial config'",
+        "header mentions 'include this config'",
+        "header mentions 'include this partial config'",
+        "header mentions 'overwrite the relevent sections'",
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-ldo-nitehawk-sb.cfg",
+      "severity": "error",
+      "section": "stepper_y",
+      "param": "rotation_distance",
+      "message": "Required parameter 'rotation_distance' is missing.",
+      "line_number": 33,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "header mentions 'partial config'",
+        "header mentions 'include this config'",
+        "header mentions 'include this partial config'",
+        "header mentions 'overwrite the relevent sections'",
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-ldo-nitehawk-sb.cfg",
+      "severity": "error",
+      "section": "stepper_y",
+      "param": "microsteps",
+      "message": "Required parameter 'microsteps' is missing.",
+      "line_number": 33,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "header mentions 'partial config'",
+        "header mentions 'include this config'",
+        "header mentions 'include this partial config'",
+        "header mentions 'overwrite the relevent sections'",
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-ldo-nitehawk-sb.cfg",
+      "severity": "error",
+      "section": "stepper_y",
+      "param": "step_pin",
+      "message": "Required parameter 'step_pin' is missing.",
+      "line_number": 33,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "header mentions 'partial config'",
+        "header mentions 'include this config'",
+        "header mentions 'include this partial config'",
+        "header mentions 'overwrite the relevent sections'",
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-ldo-nitehawk-sb.cfg",
+      "severity": "error",
+      "section": "stepper_y",
+      "param": "dir_pin",
+      "message": "Required parameter 'dir_pin' is missing.",
+      "line_number": 33,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "header mentions 'partial config'",
+        "header mentions 'include this config'",
+        "header mentions 'include this partial config'",
+        "header mentions 'overwrite the relevent sections'",
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-ldo-nitehawk-sb.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "rotation_distance",
+      "message": "Required parameter 'rotation_distance' is missing.",
+      "line_number": 39,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "header mentions 'partial config'",
+        "header mentions 'include this config'",
+        "header mentions 'include this partial config'",
+        "header mentions 'overwrite the relevent sections'",
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-ldo-nitehawk-sb.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "microsteps",
+      "message": "Required parameter 'microsteps' is missing.",
+      "line_number": 39,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "header mentions 'partial config'",
+        "header mentions 'include this config'",
+        "header mentions 'include this partial config'",
+        "header mentions 'overwrite the relevent sections'",
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-ldo-nitehawk-sb.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "nozzle_diameter",
+      "message": "Required parameter 'nozzle_diameter' is missing.",
+      "line_number": 39,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "header mentions 'partial config'",
+        "header mentions 'include this config'",
+        "header mentions 'include this partial config'",
+        "header mentions 'overwrite the relevent sections'",
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-ldo-nitehawk-sb.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "filament_diameter",
+      "message": "Required parameter 'filament_diameter' is missing.",
+      "line_number": 39,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "header mentions 'partial config'",
+        "header mentions 'include this config'",
+        "header mentions 'include this partial config'",
+        "header mentions 'overwrite the relevent sections'",
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-ldo-nitehawk-sb.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "sensor_type",
+      "message": "Required parameter 'sensor_type' is missing.",
+      "line_number": 39,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "header mentions 'partial config'",
+        "header mentions 'include this config'",
+        "header mentions 'include this partial config'",
+        "header mentions 'overwrite the relevent sections'",
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-ldo-nitehawk-sb.cfg",
+      "severity": "error",
+      "section": "extruder",
+      "param": "max_temp",
+      "message": "Required parameter 'max_temp' is missing.",
+      "line_number": 39,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "header mentions 'partial config'",
+        "header mentions 'include this config'",
+        "header mentions 'include this partial config'",
+        "header mentions 'overwrite the relevent sections'",
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-ldo-nitehawk-sb.cfg",
+      "severity": "error",
+      "section": "tmc2209 extruder",
+      "param": "run_current",
+      "message": "Required parameter 'run_current' is missing.",
+      "line_number": 47,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "header mentions 'partial config'",
+        "header mentions 'include this config'",
+        "header mentions 'include this partial config'",
+        "header mentions 'overwrite the relevent sections'",
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    },
+    {
+      "file": "reference/config/Toolhead/sample-ldo-nitehawk-sb.cfg",
+      "severity": "error",
+      "section": "resonance_tester",
+      "param": "probe_points",
+      "message": "Required parameter 'probe_points' is missing.",
+      "line_number": 103,
+      "classification": "likely_partial_example",
+      "doc_hits": [],
+      "partial_reasons": [
+        "header mentions 'partial config'",
+        "header mentions 'include this config'",
+        "header mentions 'include this partial config'",
+        "header mentions 'overwrite the relevent sections'",
+        "sample file without [printer] section",
+        "Toolhead reference file without [printer] section"
+      ]
+    }
+  ]
+}

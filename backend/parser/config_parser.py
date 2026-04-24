@@ -255,13 +255,14 @@ def parse_config(text: str, filename: str = "printer.cfg") -> ConfigFile:
                 # comment line — could be inside gcode; keep looking
                 j += 1
                 continue
+            if l[0] in (" ", "\t"):
+                # Indented lines continue a multi-line value even if they look
+                # like key/value pairs once stripped (for example board_pins aliases).
+                return True
             if SECTION_RE.match(ls) or INCLUDE_RE.match(ls):
                 return False
             if PARAM_RE.match(ls) or COMMENTED_PARAM_RE.match(ls):
                 return False
-            # indented non-empty line → still in continuation
-            if l[0] in (" ", "\t"):
-                return True
             # Non-indented, non-param, non-section (e.g. bare Jinja line at col 0)
             # This is ambiguous; treat as continuation if preceded by a multi-line param
             return True

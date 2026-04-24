@@ -142,6 +142,8 @@ TMC_SPI_PARAMS = [
     _pin("spi_software_sclk_pin", "Software SPI clock pin"),
     _pin("spi_software_mosi_pin", "Software SPI MOSI pin"),
     _pin("spi_software_miso_pin", "Software SPI MISO pin"),
+    _int("chain_position", "SPI daisy-chain position"),
+    _int("chain_length", "SPI daisy-chain length"),
     _bool("interpolate", "Enable 256 microstep interpolation", default="True"),
     _float("run_current", "Motor run current in amps", required=True),
     _float("hold_current", "Motor hold current"),
@@ -149,6 +151,10 @@ TMC_SPI_PARAMS = [
     _int("stealthchop_threshold", "StealthChop threshold velocity", default="0"),
     _int("coolstep_threshold", "CoolStep threshold velocity"),
     _int("high_velocity_threshold", "High velocity threshold"),
+    _pin("diag0_pin", "Diagnostic pin 0 for sensorless homing"),
+    _pin("diag1_pin", "Diagnostic pin 1 for sensorless homing"),
+    _str("driver_SGT", "StallGuard threshold (TMC SPI drivers)"),
+    _str("driver_*", "TMC driver register override"),
 ]
 
 SENSOR_TYPE_ENUM = [
@@ -469,6 +475,9 @@ _register(SectionDef(
         _float("cycle_time", "PWM cycle time", default="0.010"),
         _float("kick_start_time", "Kick start time", default="0.100"),
         _float("off_below", "Off below this speed", default="0.0"),
+        _pin("tachometer_pin", "Tachometer input pin"),
+        _int("tachometer_ppr", "Tachometer pulses per revolution", default="2"),
+        _float("tachometer_poll_interval", "Tachometer poll interval", default="0.0015"),
         _str("heater", "Associated heater", default="extruder"),
         _float("heater_temp", "Temp threshold to enable fan", default="50.0", unit="°C"),
         _float("fan_speed", "Fan speed when heater active", default="1.0"),
@@ -847,6 +856,9 @@ for accel in ["lis2dw", "lis3dh", "bmi160", "mpu9250", "icm20948"]:
         params=[
             _pin("cs_pin", "SPI/I2C chip select pin"),
             _str("spi_bus", "SPI bus"),
+            _pin("spi_software_sclk_pin", "Software SPI clock"),
+            _pin("spi_software_mosi_pin", "Software SPI MOSI"),
+            _pin("spi_software_miso_pin", "Software SPI MISO"),
             _str("i2c_bus", "I2C bus"),
             _str("i2c_address", "I2C address"),
             _str("axes_map", "Axes mapping", default="x,y,z"),
@@ -919,6 +931,8 @@ _register(SectionDef(
         _float("sensor_adc1", "First calibration ADC value"),
         _float("sensor_temperature2", "Second calibration temperature"),
         _float("sensor_adc2", "Second calibration ADC value"),
+        _float("adc_voltage", "ADC reference voltage"),
+        _float("voltage_offset", "ADC voltage offset"),
         _float("min_temp", "Minimum temperature", default="0"),
         _float("max_temp", "Maximum temperature", default="100"),
         _str("gcode_id", "G-code ID for temperature reporting"),
@@ -1153,6 +1167,19 @@ _register(SectionDef(
     params=[],
 ))
 
+_register(SectionDef(
+    section_type="display_glyph",
+    display_name="Display Glyph",
+    category="config_helper",
+    component_group="display",
+    is_named=True,
+    params=[
+        _ml("data", "16x16 glyph data"),
+        _ml("hd44780_data", "5x8 hd44780 glyph data"),
+        _int("hd44780_slot", "hd44780 glyph slot"),
+    ],
+))
+
 # ── G-Code Features ──
 _register(SectionDef(
     section_type="virtual_sdcard",
@@ -1385,6 +1412,7 @@ _register(SectionDef(
     params=[
         _float("rotation_distance", "Distance per rotation", required=True),
         _int("microsteps", "Microsteps", required=True),
+        _int("full_steps_per_rotation", "Full steps per rotation", default="200"),
         _pin("step_pin", "Step pin", required=True),
         _pin("dir_pin", "Direction pin", required=True),
         _pin("enable_pin", "Enable pin"),
@@ -1497,8 +1525,16 @@ _register(SectionDef(
     component_group="probe",
     is_named=True,
     params=[
-        _pin("sensor_type", "Sensor type", required=True),
-        _pin("sensor_pin", "Sensor pin"),
+        _enum("sensor_type", ["ldc1612"], "Sensor type", required=True),
+        _int("frequency", "Sensor crystal frequency"),
+        _pin("intb_pin", "Sensor interrupt pin"),
+        _float("descend_z", "Probe descend distance", required=True),
+        _str("i2c_address", "I2C address"),
+        _str("i2c_mcu", "I2C MCU name"),
+        _str("i2c_bus", "I2C bus name"),
+        _pin("i2c_software_scl_pin", "Software I2C SCL pin"),
+        _pin("i2c_software_sda_pin", "Software I2C SDA pin"),
+        _int("i2c_speed", "I2C speed"),
         _float("x_offset", "X offset", default="0"),
         _float("y_offset", "Y offset", default="0"),
         _float("z_offset", "Z offset"),
@@ -1556,7 +1592,7 @@ _register(SectionDef(
 ))
 
 # ── Digipots/DACs (brief) ──
-for chip_type in ["ad5206", "mcp4451", "mcp4728", "mcp4018"]:
+for chip_type in ["ad5206", "mcp4728"]:
     _register(SectionDef(
         section_type=chip_type,
         display_name=chip_type.upper(),
@@ -1574,8 +1610,44 @@ for chip_type in ["ad5206", "mcp4451", "mcp4728", "mcp4018"]:
         ],
     ))
 
+_register(SectionDef(
+    section_type="mcp4451",
+    display_name="MCP4451",
+    category="sub_component",
+    component_group="stepper_driver",
+    is_named=True,
+    params=[
+        _pin("enable_pin", "Enable pin"),
+        _str("i2c_bus", "I2C bus"),
+        _str("i2c_address", "I2C address"),
+        _pin("i2c_software_scl_pin", "Software I2C SCL pin"),
+        _pin("i2c_software_sda_pin", "Software I2C SDA pin"),
+        _int("i2c_speed", "I2C speed"),
+        _str("wiper_*", "Digital potentiometer wiper value"),
+        _str("scale", "Scale factor"),
+    ],
+))
+
+_register(SectionDef(
+    section_type="mcp4018",
+    display_name="MCP4018",
+    category="sub_component",
+    component_group="stepper_driver",
+    is_named=True,
+    params=[
+        _pin("enable_pin", "Enable pin"),
+        _str("i2c_bus", "I2C bus"),
+        _str("i2c_address", "I2C address"),
+        _pin("i2c_software_scl_pin", "Software I2C SCL pin"),
+        _pin("i2c_software_sda_pin", "Software I2C SDA pin"),
+        _int("i2c_speed", "I2C speed"),
+        _str("wiper", "Digital potentiometer wiper value", required=True),
+        _str("scale", "Scale factor"),
+    ],
+))
+
 # ── Board-specific (brief) ──
-for hw_type in ["sx1509", "samd_sercom", "adc_scaled", "ads1x1x", "replicape"]:
+for hw_type in ["sx1509", "samd_sercom", "ads1x1x", "replicape"]:
     _register(SectionDef(
         section_type=hw_type,
         display_name=hw_type.replace("_", " ").title(),
@@ -1584,6 +1656,19 @@ for hw_type in ["sx1509", "samd_sercom", "adc_scaled", "ads1x1x", "replicape"]:
         is_named=True,
         params=[],
     ))
+
+_register(SectionDef(
+    section_type="adc_scaled",
+    display_name="Adc Scaled",
+    category="config_helper",
+    component_group="hardware",
+    is_named=True,
+    params=[
+        _pin("vref_pin", "ADC VREF monitoring pin", required=True),
+        _pin("vssa_pin", "ADC VSSA monitoring pin", required=True),
+        _float("smooth_time", "ADC smoothing window", default="2.0"),
+    ],
+))
 
 # ── PCA LED controllers ──
 for pca in ["pca9533", "pca9632"]:
@@ -1640,6 +1725,7 @@ _register(SectionDef(
     params=[
         _enum("sensor_type", SENSOR_TYPE_ENUM, "Sensor type", required=True),
         _pin("sensor_pin", "Sensor pin"),
+        _float("horizontal_move_z", "Z height for probe moves"),
         _float("min_temp", "Min temp", default="0"),
         _float("max_temp", "Max temp", default="100"),
         _str("smooth_time", "Smooth time"),
@@ -1653,7 +1739,9 @@ _register(SectionDef(
     component_group="temperature",
     is_named=True,
     params=[
-        _ml("temperature1", "Calibration data"),
+        _float("temperature*", "Calibration temperature"),
+        _float("voltage*", "Calibration voltage"),
+        _float("resistance*", "Calibration resistance"),
     ],
 ))
 
