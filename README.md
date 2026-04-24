@@ -30,11 +30,7 @@ bash scripts/install.sh
 
 On 32-bit Raspberry Pi OS (`armv7` / `armhf`), the installer automatically uses the distro `nodejs` package.
 
-After install, open the app from another device on your network:
-
-```bash
-hostname -I | awk '{print "http://" $1 ":8099"}'
-```
+After install, proceed to http://{your_ip_here}:8099
 
 A successful install ends by checking the service health and printing the installer log path under `/tmp/klipper-wire-configurator-install-*.log`.
 
