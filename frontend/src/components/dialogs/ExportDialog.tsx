@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { createTwoFilesPatch } from 'diff';
+import JSZip from 'jszip';
 import { useConfigStore } from '../../stores/configStore';
 import * as api from '../../services/api';
 import type { ConfigFile } from '../../types/config';
@@ -42,6 +43,7 @@ export default function ExportDialog({ onClose }: ExportDialogProps) {
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set(filenames));
   const [exportStatus, setExportStatus] = useState<'idle' | 'loading' | 'error'>('idle');
   const [exportMessage, setExportMessage] = useState('');
+  const [exportFormat, setExportFormat] = useState<'files' | 'zip'>('files');
 
   // Current exported texts (for diffing)
   const [currentTexts, setCurrentTexts] = useState<Record<string, string>>({});
@@ -81,25 +83,47 @@ export default function ExportDialog({ onClose }: ExportDialogProps) {
   const handleExport = useCallback(async () => {
     setExportStatus('loading');
     try {
+      const exportedFiles: Array<{ filename: string; text: string }> = [];
+
       for (const filename of selectedFiles) {
         const cf = configFiles[filename];
         if (!cf) continue;
         const text = currentTexts[filename] ?? await exportConfigText(cf);
-        const blob = new Blob([text], { type: 'text/plain' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        a.click();
-        URL.revokeObjectURL(url);
+        exportedFiles.push({ filename, text });
       }
+
+      if (exportFormat === 'zip') {
+        const zip = new JSZip();
+        for (const file of exportedFiles) {
+          zip.file(file.filename, file.text);
+        }
+
+        const zipBlob = await zip.generateAsync({ type: 'blob' });
+        const zipUrl = URL.createObjectURL(zipBlob);
+        const a = document.createElement('a');
+        a.href = zipUrl;
+        a.download = 'klipper-config-export.zip';
+        a.click();
+        URL.revokeObjectURL(zipUrl);
+      } else {
+        for (const file of exportedFiles) {
+          const blob = new Blob([file.text], { type: 'text/plain' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = file.filename;
+          a.click();
+          URL.revokeObjectURL(url);
+        }
+      }
+
       setExportStatus('idle');
       onClose();
     } catch (err) {
       setExportStatus('error');
       setExportMessage(err instanceof Error ? err.message : 'Export failed');
     }
-  }, [selectedFiles, configFiles, currentTexts, onClose]);
+  }, [selectedFiles, configFiles, currentTexts, exportFormat, onClose]);
 
   const hasErrors = Object.entries(validation).some(
     ([fn, v]) => selectedFiles.has(fn) && v.has_errors,
@@ -281,6 +305,20 @@ export default function ExportDialog({ onClose }: ExportDialogProps) {
           </div>
         )}
         <div className="flex justify-end gap-2 p-4 border-t border-[var(--color-bg-tertiary)]">
+          <div className="mr-auto flex items-center gap-2">
+            <label htmlFor="export-format" className="text-xs text-[var(--color-text-secondary)]">
+              Format:
+            </label>
+            <select
+              id="export-format"
+              value={exportFormat}
+              onChange={(e) => setExportFormat(e.target.value as 'files' | 'zip')}
+              className="px-2 py-1 rounded-md text-xs bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] border border-[var(--color-bg-primary)]"
+            >
+              <option value="files">Individual files (.cfg)</option>
+              <option value="zip">ZIP archive (.zip)</option>
+            </select>
+          </div>
           <button
             onClick={onClose}
             className="px-4 py-2 rounded-lg text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-primary)]"
@@ -292,7 +330,11 @@ export default function ExportDialog({ onClose }: ExportDialogProps) {
             disabled={selectedFiles.size === 0 || exportStatus === 'loading'}
             className="px-4 py-2 rounded-lg text-xs font-medium bg-[var(--color-accent)] text-[var(--color-bg-primary)] hover:bg-[var(--color-accent-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {exportStatus === 'loading' ? 'Exporting...' : `Export ${selectedFiles.size} file(s)`}
+            {exportStatus === 'loading'
+              ? 'Exporting...'
+              : exportFormat === 'zip'
+                ? `Export ZIP (${selectedFiles.size} file(s))`
+                : `Export ${selectedFiles.size} file(s)`}
           </button>
         </div>
       </div>

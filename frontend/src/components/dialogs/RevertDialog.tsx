@@ -25,8 +25,11 @@ export default function RevertDialog({ onClose }: RevertDialogProps) {
       const schemas = configStore.schemas;
 
       if (isNative) {
-        // Native mode: re-read config files from Pi
-        const filenames = Object.keys(configStore.configFiles);
+        // Native mode: re-read both the current working set and original files so deleted files return.
+        const filenames = Array.from(new Set([
+          ...Object.keys(configStore.originalTexts),
+          ...Object.keys(configStore.configFiles),
+        ]));
         if (filenames.length === 0) {
           setStatus('error');
           setMessage('No files to revert.');

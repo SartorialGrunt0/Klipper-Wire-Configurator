@@ -14,14 +14,14 @@ interface AddMenuProps {
 type MenuTab = 'hardware' | 'sub_component' | 'feature';
 
 const HARDWARE_OPTIONS: Array<{ type: HardwareType; label: string; icon: string; description?: string }> = [
-  { type: 'mainboard', label: 'Mainboard', icon: '📟', description: 'Main printer control board' },
-  { type: 'toolhead', label: 'Toolhead Board', icon: '🔧', description: 'CAN/UART toolhead board' },
-  { type: 'expander', label: 'Expander Board', icon: '🔌', description: 'Additional MCU or I/O expander' },
-  { type: 'config_file', label: 'Configuration File', icon: '📄', description: 'Non-MCU configuration files' },
-  { type: 'sbc', label: 'SBC', icon: '🖥️', description: 'Single-board computer (Raspberry Pi, CB1, etc.)' },
-  { type: 'probe', label: 'Probe', icon: '📍', description: 'Probe with dedicated MCU' },
-  { type: 'accelerometer', label: 'Accelerometer', icon: '📊', description: 'Standalone accelerometer board' },
-  { type: 'other', label: 'Other Component', icon: '⬜', description: 'Custom hardware component' },
+  { type: 'mainboard', label: 'Mainboard', icon: '', description: 'Main printer control board' },
+  { type: 'toolhead', label: 'Toolhead Board', icon: '', description: 'CAN/USB toolhead board' },
+  { type: 'expander', label: 'Expander Board', icon: '', description: 'Additional MCU or I/O expander' },
+  { type: 'config_file', label: 'Configuration File', icon: '', description: 'Non-MCU configuration files' },
+  { type: 'sbc', label: 'SBC', icon: '', description: 'Single-board computer (Raspberry Pi, CB1, etc.)' },
+  { type: 'probe', label: 'Probe', icon: '', description: 'Probe with dedicated MCU' },
+  { type: 'accelerometer', label: 'Accelerometer', icon: '', description: 'Standalone accelerometer board' },
+  { type: 'other', label: 'Other Component', icon: '', description: 'Custom hardware component' },
 ];
 
 const CARTESIAN_STEPPERS = ['stepper_x', 'stepper_y', 'stepper_z', 'stepper_z1', 'stepper_z2', 'stepper_z3', 'manual_stepper', 'extruder_stepper', 'dual_carriage'];

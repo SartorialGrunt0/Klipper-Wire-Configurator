@@ -54,15 +54,16 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
     renameConfigFile,
     copyConfigFile,
     removeConfigFile,
+    setTextEditorDirty,
     schemas,
     validation,
   } = useConfigStore();
+  const isDirty = useConfigStore((s) => s.textEditorDirty);
 
   const config = configFiles[activeFile];
   const filenames = Object.keys(configFiles);
 
   const [editText, setEditText] = useState('');
-  const [isDirty, setIsDirty] = useState(false);
 
   // Helper: export config text via backend (preserves comments, whitespace, #*# markers)
   const exportTextRef = useRef<number>(0);
@@ -85,6 +86,13 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
       }
     });
   }, [config, isDirty, exportConfigText]);
+
+  useEffect(() => {
+    return () => {
+      useConfigStore.getState().setTextEditorDirty(false);
+    };
+  }, []);
+
   const [showSearch, setShowSearch] = useState(false);
   const [showFileSidebar, setShowFileSidebar] = useState(true);
   const [showSectionsSidebar, setShowSectionsSidebar] = useState(true);
@@ -324,13 +332,13 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
     if (cf) {
       const text = await exportConfigText(cf);
       setEditText(text);
-      setIsDirty(false);
+      setTextEditorDirty(false);
     }
-  }, [configFiles, setActiveFile, exportConfigText]);
+  }, [configFiles, setActiveFile, setTextEditorDirty, exportConfigText]);
 
   const handleTextChange = (newText: string) => {
     setEditText(newText);
-    setIsDirty(true);
+    setTextEditorDirty(true);
   };
 
   const doApply = useCallback(async () => {
@@ -343,7 +351,7 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
 
       setConfigFile(activeFile, result.config);
       setValidation(activeFile, result.validation);
-      setIsDirty(false);
+      setTextEditorDirty(false);
 
       const graphStore = useGraphStore.getState();
       graphStore.clearGraph();
@@ -354,7 +362,7 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
     } catch (err) {
       console.error('Parse error:', err);
     }
-  }, [editText, activeFile, configFiles, schemas, setConfigFile, setValidation, validation]);
+  }, [editText, activeFile, configFiles, schemas, setConfigFile, setTextEditorDirty, setValidation, validation]);
 
   const handleApply = useCallback(async () => {
     // Check for active issues
@@ -399,7 +407,7 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
       const fileText = await exportConfigText(cf);
       setActiveFile(file);
       setEditText(fileText);
-      setIsDirty(false);
+      setTextEditorDirty(false);
     }
     // Select the matching line after state settles
     setTimeout(() => {
@@ -498,7 +506,7 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
     setActiveFile(copyName);
     const cf = useConfigStore.getState().configFiles[copyName];
     if (cf) setEditText(await exportConfigText(cf));
-    setIsDirty(false);
+    setTextEditorDirty(false);
     setContextMenu(null);
   };
 
@@ -523,7 +531,7 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
       setActiveFile(next);
       const cf = useConfigStore.getState().configFiles[next];
       if (cf) setEditText(await exportConfigText(cf));
-      setIsDirty(false);
+      setTextEditorDirty(false);
     }
   };
 
@@ -543,7 +551,7 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
     });
     setActiveFile(name);
     setEditText('');
-    setIsDirty(false);
+    setTextEditorDirty(false);
     setShowAddConfig(false);
     setAddConfigStep('choose');
     setNewFileName('');
@@ -698,7 +706,7 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
       setActiveFile(name);
       const cf = useConfigStore.getState().configFiles[name];
       if (cf) setEditText(await exportConfigText(cf));
-      setIsDirty(false);
+      setTextEditorDirty(false);
 
       // Build graph nodes for the newly added config file
       buildGraphForNewFile(name, res.config.sections);

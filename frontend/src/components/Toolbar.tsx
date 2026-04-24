@@ -30,12 +30,14 @@ export default function Toolbar({
   const hasOriginals = Object.keys(useConfigStore((s) => s.originalTexts)).length > 0;
   const isNative = useNativeStore((s) => s.isNative);
   const hasConfig = Object.keys(useConfigStore((s) => s.configFiles)).length > 0;
-  const isDirty = useConfigStore((s) => s.isDirty);
+  const isConfigDirty = useConfigStore((s) => s.isDirty);
+  const isTextDirty = useConfigStore((s) => s.textEditorDirty);
   const validation = useConfigStore((s) => s.validation);
+  const hasPendingChanges = isConfigDirty || isTextDirty;
 
   // Compute Save button color based on dirty state and validation
   const getSaveButtonClass = () => {
-    if (!isDirty) {
+    if (!isConfigDirty) {
       // No changes — normal grey
       return 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)]';
     }
@@ -131,7 +133,7 @@ export default function Toolbar({
       )}
 
       {/* Revert Changes (native or when originals exist) */}
-      {isDirty && hasConfig && hasOriginals && (
+      {hasPendingChanges && hasOriginals && (
         <button
           onClick={() => setShowRevert(true)}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] transition-colors"
