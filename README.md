@@ -2,18 +2,24 @@
 
 ## Introduction
 
-Klipper Wire Configurator is a web app that helps you inspect, create, and modify Klipper `printer.cfg` files in a visual wiring interface.
+Klipper Wire Configurator is a web app for inspecting, creating, and editing Klipper `printer.cfg` files in a visual wiring interface.
+
+The main README focuses on Raspberry Pi installation and development. Additional Moonraker details, platform-specific startup shortcuts, deployment notes, and validation commands are in `notes.md`.
 
 ## Prerequisites
 
+- Raspberry Pi OS or another Debian-based distro on a Raspberry Pi
 - Python 3.10+
-- Node.js 18+ and npm
+- Git and internet access for the initial install
+- A second device on the same network if you want to open the web UI remotely
 
-## Installing
+The Raspberry Pi installer handles Node.js setup and installs the systemd service.
 
-### Install on Raspberry Pi
+## Installing/Uninstalling on Raspberry Pi
 
-On your Raspberry Pi (Raspberry Pi OS / Debian-based):
+### Install
+
+On your Raspberry Pi:
 
 ```bash
 cd ~
@@ -22,31 +28,15 @@ cd Klipper-Wire-Configurator
 bash scripts/install.sh
 ```
 
-On 32-bit Raspberry Pi OS (`armv7` / `armhf`), the installer uses the distro `nodejs` package instead of NodeSource because NodeSource does not publish that architecture.
+On 32-bit Raspberry Pi OS (`armv7` / `armhf`), the installer automatically uses the distro `nodejs` package.
 
-After install, open from another device on your network:
+After install, open the app from another device on your network:
 
 ```bash
 hostname -I | awk '{print "http://" $1 ":8099"}'
 ```
 
-A successful install now ends with a terminal confirmation that the service passed its health check and prints the installer log path under `/tmp/klipper-wire-configurator-install-*.log`.
-
-Service management on Raspberry Pi:
-
-```bash
-sudo systemctl status klipper-wire-configurator
-sudo systemctl restart klipper-wire-configurator
-sudo journalctl -u klipper-wire-configurator -f
-```
-
-The repository name is `Klipper-Wire-Configurator`, so a plain `git clone` creates `~/Klipper-Wire-Configurator`. The installer's fallback directory is `~/klipper-wire-configurator` when it clones the repo itself. On Linux, `path`, `virtualenv`, uninstall commands, and manual installer reruns must all use the exact directory name that actually exists on disk.
-
-Uninstall on Raspberry Pi:
-
-```bash
-bash ~/Klipper-Wire-Configurator/scripts/install.sh --uninstall
-```
+A successful install ends by checking the service health and printing the installer log path under `/tmp/klipper-wire-configurator-install-*.log`.
 
 ### Moonraker update_manager
 
@@ -66,75 +56,36 @@ info_tags:
 	desc=Klipper Wire Configurator
 ```
 
-If your installation actually lives at `~/klipper-wire-configurator`, use that lower-case path everywhere instead.
+### Uninstall
 
-Klipper Wire Configurator installs a systemd service at `/etc/systemd/system/klipper-wire-configurator.service`, running as your Linux user. That lets Moonraker restart it after updates using normal `managed_services` handling.
-
-Moonraker also needs permission to restart the service. Add this line to your `moonraker.asvc` allow-list file, which is typically located at `~/printer_data/moonraker.asvc`:
-
-```text
-klipper-wire-configurator
-```
-
-Then restart Moonraker.
-
-Once the service is installed as `/etc/systemd/system/klipper-wire-configurator.service` and Moonraker has been restarted, Mainsail's Service Control menu can list `klipper-wire-configurator` and send start, stop, and restart actions through Moonraker.
-
-Moonraker's `git_repo` updater does not run this repository's installer script. It pulls the repo, updates Python requirements from `backend/requirements.txt`, and restarts the configured managed service.
-
-Klipper Wire Configurator's system service starts through `scripts/run-service.sh`. On every service start it checks whether frontend dependencies need reinstalling and whether the frontend bundle needs rebuilding, then launches uvicorn. That makes a Moonraker-triggered service restart sufficient for normal application updates.
-
-If Moonraker shows `Unit klipper-wire-configurator.service not found` after an update, you are still on the older user-service install. Pull this repo, then run the installer once manually to migrate to the system service:
+If you installed into `~/Klipper-Wire-Configurator`:
 
 ```bash
-cd ~/Klipper-Wire-Configurator
-bash scripts/install.sh
+bash ~/Klipper-Wire-Configurator/scripts/install.sh --uninstall
 ```
 
-The installed service still keeps a startup safeguard: if frontend source files are newer than `frontend/dist`, `scripts/run-service.sh` rebuilds the frontend bundle before starting the backend.
+If your repo lives at `~/klipper-wire-configurator`, use that exact lower-case path instead.
 
-If Moonraker reports untracked files under `frontend/public/reference/` that would be overwritten by merge, those are stale generated frontend reference assets from an older build. Remove that `frontend/public/reference` directory inside the installed repo once, then retry the update. Current builds regenerate those assets automatically.
+## Troubleshooting
 
-If you installed Klipper Wire Configurator before this behavior was added, rerun the installer once so it migrates the legacy user service to the new Moonraker-compatible system service:
+### Service checks
 
 ```bash
-cd ~/Klipper-Wire-Configurator
-bash scripts/install.sh
+sudo systemctl status klipper-wire-configurator
+sudo systemctl restart klipper-wire-configurator
+sudo journalctl -u klipper-wire-configurator -f
 ```
 
-### Local install for development (copy/paste)
+- If the installer fails or the app does not start, review the log path printed at the end of the install. Logs are written under `/tmp/klipper-wire-configurator-install-*.log`.
+- Use the exact repo directory name that exists on disk for uninstall commands, Moonraker paths, and manual installer reruns.
+- If Moonraker reports `Unit klipper-wire-configurator.service not found`, rerun the installer once from the repo root to migrate older user-service installs.
+- If Moonraker reports untracked files under `frontend/public/reference/` that would be overwritten, remove that directory once inside the installed repo and retry the update.
 
-From the repository root:
+## Development setup
 
-#### Linux / macOS
+Use this when you want backend and frontend running in separate terminals.
 
-```bash
-chmod +x ./start-dev.sh
-./start-dev.sh
-```
-
-#### Windows (PowerShell)
-
-```powershell
-./start-dev.ps1
-```
-
-#### Windows (Command Prompt)
-
-```bat
-start-dev.bat
-```
-
-After startup:
-
-- Frontend: http://localhost:5173
-- Backend: http://localhost:8099
-
-## Development Setup
-
-Use this if you want backend and frontend in separate terminals.
-
-### 1) Backend (FastAPI)
+### Backend
 
 ```bash
 cd backend
@@ -144,19 +95,9 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Windows PowerShell equivalent:
+### Frontend
 
-```powershell
-cd backend
-python -m venv venv
-.\venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-python main.py
-```
-
-### 2) Frontend (Vite)
-
-In a second terminal, from the repository root:
+From the repository root in a second terminal:
 
 ```bash
 cd frontend
@@ -164,41 +105,7 @@ npm install
 npm run dev
 ```
 
-## Deploying
+After startup:
 
-### Build frontend bundle
-
-```bash
-cd frontend
-npm install
-npm run build
-```
-
-### Run backend to serve built frontend
-
-From the repository root, backend serves `frontend/dist` when present:
-
-```bash
-cd backend
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-python main.py
-```
-
-## Validation commands
-
-From the repository root:
-
-```bash
-python3 test_roundtrip.py
-python3 test_diff_roundtrip.py
-cd frontend
-npm install
-npm run build
-```
-
-## Notes
-
-- API health endpoint: `GET /health` (http://localhost:8099/health)
-- Backend API routes are mounted under `/api`.
+- Frontend: http://localhost:5173
+- Backend: http://localhost:8099
