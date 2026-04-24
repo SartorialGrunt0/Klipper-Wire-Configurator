@@ -35,9 +35,9 @@ A successful install now ends with a terminal confirmation that the service pass
 Service management on Raspberry Pi:
 
 ```bash
-systemctl --user status klipper-wire-configurator
-systemctl --user restart klipper-wire-configurator
-journalctl --user -u klipper-wire-configurator -f
+sudo systemctl status klipper-wire-configurator
+sudo systemctl restart klipper-wire-configurator
+sudo journalctl -u klipper-wire-configurator -f
 ```
 
 The repository name is `Klipper-Wire-Configurator`, so a plain `git clone` creates `~/Klipper-Wire-Configurator`. The installer's fallback directory is `~/klipper-wire-configurator` when it clones the repo itself. On Linux, `path`, `virtualenv`, uninstall commands, and manual installer reruns must all use the exact directory name that actually exists on disk.
@@ -61,13 +61,14 @@ origin: https://github.com/SartorialGrunt0/Klipper-Wire-Configurator.git
 primary_branch: main
 virtualenv: ~/Klipper-Wire-Configurator/venv
 requirements: backend/requirements.txt
-install_script: scripts/install.sh
 managed_services: klipper-wire-configurator
 info_tags:
 	desc=Klipper Wire Configurator
 ```
 
 If your installation actually lives at `~/klipper-wire-configurator`, use that lower-case path everywhere instead.
+
+Klipper Wire Configurator installs a systemd service at `/etc/systemd/system/klipper-wire-configurator.service`, running as your Linux user. That lets Moonraker restart it after updates using normal `managed_services` handling.
 
 Moonraker also needs permission to restart the service. Add this line to your `moonraker.asvc` allow-list file, which is typically located at `~/printer_data/moonraker.asvc`:
 
@@ -77,15 +78,22 @@ klipper-wire-configurator
 
 Then restart Moonraker.
 
-Moonraker only reruns this repository's full installer if `install_script` is configured. Without that line, Mainsail or Fluidd updates will fetch the repo and may refresh Python requirements, but they will not run Klipper Wire Configurator's full install flow.
+Moonraker's `git_repo` updater does not run this repository's installer script. It pulls the repo, updates Python requirements from `backend/requirements.txt`, and restarts the configured managed service.
 
-That full install flow is what refreshes the systemd user service, reinstalls backend dependencies, reinstalls frontend dependencies, rebuilds `frontend/dist`, restarts the service, and waits for the `/health` check to pass.
+Klipper Wire Configurator's system service starts through `scripts/run-service.sh`. On every service start it checks whether frontend dependencies need reinstalling and whether the frontend bundle needs rebuilding, then launches uvicorn. That makes a Moonraker-triggered service restart sufficient for normal application updates.
+
+If Moonraker shows `Unit klipper-wire-configurator.service not found` after an update, you are still on the older user-service install. Pull this repo, then run the installer once manually to migrate to the system service:
+
+```bash
+cd ~/Klipper-Wire-Configurator
+bash scripts/install.sh
+```
 
 The installed service still keeps a startup safeguard: if frontend source files are newer than `frontend/dist`, `scripts/run-service.sh` rebuilds the frontend bundle before starting the backend.
 
 If Moonraker reports untracked files under `frontend/public/reference/` that would be overwritten by merge, those are stale generated frontend reference assets from an older build. Remove that `frontend/public/reference` directory inside the installed repo once, then retry the update. Current builds regenerate those assets automatically.
 
-If you installed Klipper Wire Configurator before this behavior was added, rerun the installer once so your systemd user service picks up the new startup wrapper:
+If you installed Klipper Wire Configurator before this behavior was added, rerun the installer once so it migrates the legacy user service to the new Moonraker-compatible system service:
 
 ```bash
 cd ~/Klipper-Wire-Configurator

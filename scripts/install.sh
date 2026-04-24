@@ -21,6 +21,8 @@ PYTHON_MIN_VERSION="3.9"
 NODE_MIN_VERSION="18"
 LOG_DIR="${TMPDIR:-/tmp}"
 LOG_FILE="${LOG_DIR}/klipper-wire-configurator-install-$(date +%Y%m%d-%H%M%S).log"
+SYSTEM_SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+LEGACY_USER_SERVICE_FILE="$HOME/.config/systemd/user/${SERVICE_NAME}.service"
 
 # --- Colors ---
 RED='\033[0;31m'
@@ -42,12 +44,19 @@ on_error() {
     echo -e "${RED}Installer failed at line ${line_no} with exit code ${exit_code}.${NC}"
     echo -e "${YELLOW}Log file:${NC} ${LOG_FILE}"
 
-    if [ -f "$HOME/.config/systemd/user/${SERVICE_NAME}.service" ]; then
+    if [ -f "$SYSTEM_SERVICE_FILE" ]; then
         echo ""
         info "systemd status snapshot:"
-        systemctl --user status "$SERVICE_NAME" --no-pager || true
+        sudo systemctl status "$SERVICE_NAME" --no-pager || true
         echo ""
         info "Recent service logs:"
+        sudo journalctl -u "$SERVICE_NAME" -n 50 --no-pager || true
+    elif [ -f "$LEGACY_USER_SERVICE_FILE" ]; then
+        echo ""
+        info "legacy systemd user-service status snapshot:"
+        systemctl --user status "$SERVICE_NAME" --no-pager || true
+        echo ""
+        info "Recent legacy user-service logs:"
         journalctl --user -u "$SERVICE_NAME" -n 50 --no-pager || true
     fi
 }
@@ -72,17 +81,31 @@ if [ "${1:-}" = "--uninstall" ]; then
     echo -e "${YELLOW}Uninstalling Klipper Wire Configurator...${NC}"
     echo ""
 
+    if sudo systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+        info "Stopping system service..."
+        sudo systemctl stop "$SERVICE_NAME"
+    fi
+    if sudo systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
+        info "Disabling system service..."
+        sudo systemctl disable "$SERVICE_NAME"
+    fi
+    if [ -f "$SYSTEM_SERVICE_FILE" ]; then
+        info "Removing system service file..."
+        sudo rm -f "$SYSTEM_SERVICE_FILE"
+        sudo systemctl daemon-reload
+    fi
+
     if systemctl --user is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
-        info "Stopping service..."
+        info "Stopping legacy user service..."
         systemctl --user stop "$SERVICE_NAME"
     fi
     if systemctl --user is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
-        info "Disabling service..."
+        info "Disabling legacy user service..."
         systemctl --user disable "$SERVICE_NAME"
     fi
-    if [ -f "$HOME/.config/systemd/user/${SERVICE_NAME}.service" ]; then
-        info "Removing service file..."
-        rm -f "$HOME/.config/systemd/user/${SERVICE_NAME}.service"
+    if [ -f "$LEGACY_USER_SERVICE_FILE" ]; then
+        info "Removing legacy user service file..."
+        rm -f "$LEGACY_USER_SERVICE_FILE"
         systemctl --user daemon-reload
     fi
 
@@ -256,11 +279,18 @@ cd "$INSTALL_DIR"
 # --- Create data directory for projects ---
 mkdir -p "$INSTALL_DIR/data/projects"
 
-# --- Install systemd user service ---
+# --- Install systemd service ---
 info "Setting up systemd service..."
-mkdir -p "$HOME/.config/systemd/user"
 
-cat > "$HOME/.config/systemd/user/${SERVICE_NAME}.service" << EOF
+if [ -f "$LEGACY_USER_SERVICE_FILE" ]; then
+    info "Removing legacy systemd user service so Moonraker can manage the system service..."
+    systemctl --user stop "$SERVICE_NAME" 2>/dev/null || true
+    systemctl --user disable "$SERVICE_NAME" 2>/dev/null || true
+    rm -f "$LEGACY_USER_SERVICE_FILE"
+    systemctl --user daemon-reload 2>/dev/null || true
+fi
+
+sudo tee "$SYSTEM_SERVICE_FILE" > /dev/null << EOF
 [Unit]
 Description=Klipper Wire Configurator
 After=network-online.target
@@ -268,7 +298,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=${USER}
 WorkingDirectory=${INSTALL_DIR}/backend
+Environment=HOME=${HOME}
 Environment=KWC_PORT=${KWC_PORT}
 Environment=KWC_PROJECTS_DIR=${INSTALL_DIR}/data/projects
 ExecStart=/usr/bin/env bash ${INSTALL_DIR}/scripts/run-service.sh
@@ -276,18 +308,15 @@ Restart=on-failure
 RestartSec=5
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target
 EOF
 
-systemctl --user daemon-reload
-systemctl --user enable "$SERVICE_NAME"
-systemctl --user restart "$SERVICE_NAME"
+sudo systemctl daemon-reload
+sudo systemctl enable "$SERVICE_NAME"
+sudo systemctl restart "$SERVICE_NAME"
 
-# Enable lingering so the user service starts at boot without login
-sudo loginctl enable-linger "$USER" 2>/dev/null || true
-
-if [ ! -f "$HOME/.config/systemd/user/${SERVICE_NAME}.service" ]; then
-    error "Service file was not created at $HOME/.config/systemd/user/${SERVICE_NAME}.service"
+if [ ! -f "$SYSTEM_SERVICE_FILE" ]; then
+    error "Service file was not created at $SYSTEM_SERVICE_FILE"
 fi
 
 ok "Service installed and start requested."
@@ -304,8 +333,8 @@ done
 if curl -sf "http://localhost:${KWC_PORT}/health" > /dev/null 2>&1; then
     ok "Service is running!"
 else
-    systemctl --user status "$SERVICE_NAME" --no-pager || true
-    journalctl --user -u "$SERVICE_NAME" -n 50 --no-pager || true
+    sudo systemctl status "$SERVICE_NAME" --no-pager || true
+    sudo journalctl -u "$SERVICE_NAME" -n 50 --no-pager || true
     error "Service did not become healthy on http://localhost:${KWC_PORT}/health"
 fi
 
@@ -328,10 +357,10 @@ echo -e "  Open in your browser:"
 echo -e "    ${BLUE}http://${IP_ADDR}:${KWC_PORT}${NC}"
 echo ""
 echo -e "  Manage the service:"
-echo -e "    Status:  ${YELLOW}systemctl --user status ${SERVICE_NAME}${NC}"
-echo -e "    Stop:    ${YELLOW}systemctl --user stop ${SERVICE_NAME}${NC}"
-echo -e "    Start:   ${YELLOW}systemctl --user start ${SERVICE_NAME}${NC}"
-echo -e "    Logs:    ${YELLOW}journalctl --user -u ${SERVICE_NAME} -f${NC}"
+echo -e "    Status:  ${YELLOW}sudo systemctl status ${SERVICE_NAME}${NC}"
+echo -e "    Stop:    ${YELLOW}sudo systemctl stop ${SERVICE_NAME}${NC}"
+echo -e "    Start:   ${YELLOW}sudo systemctl start ${SERVICE_NAME}${NC}"
+echo -e "    Logs:    ${YELLOW}sudo journalctl -u ${SERVICE_NAME} -f${NC}"
 echo ""
 echo -e "  Update:    ${YELLOW}cd ${INSTALL_DIR} && bash scripts/install.sh${NC}"
 echo -e "  Uninstall: ${YELLOW}bash ${INSTALL_DIR}/scripts/install.sh --uninstall${NC}"
