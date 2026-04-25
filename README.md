@@ -2,7 +2,7 @@
 
 ## Introduction
 
-Klipper Wire Configurator is a web app for inspecting, creating, and editing Klipper `printer.cfg` files in a graphical frontend. It has aims to make creating and managing your klipper configuration easier.
+Klipper Wire Configurator is a web app for inspecting, creating, and editing Klipper `printer.cfg` files in a graphical frontend. It aims to make creating and managing your klipper configuration easier.
 It runs directly on your SBC. The software is entirely free to use and licensed under GPL3.
 
 Credit to the klipper, mainsail, moonraker, fluidd, and other teams whom which I borrowed and referenced alot from.
