@@ -6,6 +6,24 @@ Klipper Wire Configurator is a web app for inspecting, creating, and editing Kli
 
 The main README focuses on Raspberry Pi installation and development. Additional Moonraker details, platform-specific startup shortcuts, deployment notes, and validation commands are in `notes.md`.
 
+## Features
+
+### Graphical UI
+
+<img src="Graph_UI.png" width="495" height="330">
+
+<img src="Side_Menu.png" width="330" height="495">
+
+<img src="Live_Errors.png" width="495" height="330">
+
+### Text UI
+
+<img src="Text_UI.png" width="495" height="330">
+
+### Macro Designer
+
+<img src="Macro_Designer.png" width="495" height="330">
+
 ## Prerequisites
 
 - Raspberry Pi OS or another Debian-based distro, bookworm or newer.
