@@ -12,9 +12,15 @@ The main README focuses on Raspberry Pi installation and development. Additional
 
 <img src="images/Graph_UI.png" width="1000" height="660">
 
+#### Side Menu
+
 <img src="images/Side_Menu.png" width="330" height="495">
 
+#### Live Errors
+
 <img src="images/Live_Errors.png" width="495" height="330">
+
+#### Diff Checking
 
 <img src="images/Diff_Menu.png" width="495" height="330">
 
