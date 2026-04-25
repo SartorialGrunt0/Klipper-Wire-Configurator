@@ -8,7 +8,7 @@ The main README focuses on Raspberry Pi installation and development. Additional
 
 ## Prerequisites
 
-- Raspberry Pi OS or another Debian-based distro on a Raspberry Pi
+- Raspberry Pi OS or another Debian-based distro, bookworm or newer.
 - Python 3.10+
 - Git and internet access for the initial install
 - A second device on the same network if you want to open the web UI remotely
@@ -28,7 +28,7 @@ cd Klipper-Wire-Configurator
 bash scripts/install.sh
 ```
 
-On 32-bit Raspberry Pi OS (`armv7` / `armhf`), the installer automatically uses the distro `nodejs` package.
+On 32-bit Raspberry Pi OS (`armv7` / `armhf`), the installer automatically uses the distro `nodejs` package. I havent tried 64-bit YMMV.
 
 After install, proceed to http://{your_ip_here}:8099
 
@@ -36,7 +36,7 @@ A successful install ends by checking the service health and printing the instal
 
 ### Moonraker update_manager
 
-If you want Moonraker to track this app and offer updates in Mainsail or Fluidd, add the following section to `moonraker.conf`:
+If you want Moonraker to manage updates in Mainsail or Fluidd, add the following section to `moonraker.conf`:
 
 ```ini
 [update_manager klipper-wire-configurator]
