@@ -2,11 +2,23 @@
 
 ## Introduction
 
-Klipper Wire Configurator is a web app for inspecting, creating, and editing Klipper `printer.cfg` files in a visual wiring interface.
+Klipper Wire Configurator is a web app for inspecting, creating, and editing Klipper `printer.cfg` files in a graphical frontend. It has aims to make creating and managing your klipper configuration easier.
+It runs directly on your SBC. The software is entirely free to use and licensed under GPL3.
 
-The main README focuses on Raspberry Pi installation and development. Additional Moonraker details, platform-specific startup shortcuts, deployment notes, and validation commands are in `notes.md`.
+Credit to the klipper, mainsail, moonraker, fluidd, and other teams whom which I borrowed and referenced alot from.
 
 ## Features
+
+- Graphical front end with cards and wires to show connections
+- Add components and features directly from the configuration reference.
+- Add configurations directly from the klipper configuration examples and others.
+- Delete, modify, or move components with simple UI elements and actions
+- Live configuration checks with warnings and errors basedon the configuration reference.
+- Diff configuration changes before exporting or applying changes.
+- Apply changes directly to your configuration and firmware restart directly.
+- Manage USB, UART, or CAN communcations with ID detection.
+- Text View for traditonal configuration management, faster multi-file fuzzy search, and line referenced table of contents.
+- Macro Designer with easy modifications and simulation.
 
 ### Graphical UI
 
