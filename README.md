@@ -13,7 +13,7 @@ Credit to the klipper, mainsail, moonraker, fluidd, and other teams whom which I
 - Add components and features directly from the configuration reference.
 - Add configurations directly from the klipper configuration examples and others.
 - Delete, modify, or move components with simple UI elements and actions
-- Live configuration checks with warnings and errors basedon the configuration reference.
+- Live configuration checks with warnings and errors based on the klipper configuration reference.
 - Diff configuration changes before exporting or applying changes.
 - Apply changes directly to your configuration and firmware restart directly.
 - Manage USB, UART, or CAN communcations with ID detection.
