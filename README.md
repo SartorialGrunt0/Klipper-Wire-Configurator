@@ -10,7 +10,7 @@ The main README focuses on Raspberry Pi installation and development. Additional
 
 ### Graphical UI
 
-<img src="images/Graph_UI.png" width="495" height="330">
+<img src="images/Graph_UI.png" width="1000" height="660">
 
 <img src="images/Side_Menu.png" width="330" height="495">
 
@@ -20,11 +20,11 @@ The main README focuses on Raspberry Pi installation and development. Additional
 
 ### Text UI
 
-<img src="images/Text_UI.png" width="495" height="330">
+<img src="images/Text_UI.png" width="1000" height="660">
 
 ### Macro Designer
 
-<img src="images/Macro_Designer.png" width="495" height="330">
+<img src="images/Macro_Designer.png" width="1000" height="660">
 
 ## Prerequisites
 
