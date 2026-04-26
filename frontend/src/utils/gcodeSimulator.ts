@@ -329,7 +329,7 @@ function expandCommandToSteps(command: ParsedGcodeCommand, profile: MachineProfi
         x: point.x,
         y: point.y,
         label: `${command.command} probe ${point.label || ''}`.trim(),
-        raw: command.raw,
+        raw: `probe at ${point.x.toFixed(3)},${point.y.toFixed(3)} is z=0.000`,
         sourceName: command.sourceName,
         lineNumber: command.lineNumber,
       },
@@ -337,6 +337,8 @@ function expandCommandToSteps(command: ParsedGcodeCommand, profile: MachineProfi
   }
 
   if (NOZZLE_COORD_PROBE_COMMANDS.has(command.command) && points.length) {
+    const calculateProbeX = (point: { x: number; y: number }) => point.x + profile.probeOffsetX;
+    const calculateProbeY = (point: { x: number; y: number }) => point.y + profile.probeOffsetY;
     return points.flatMap((point) => ([
       {
         kind: 'move' as const,
@@ -350,10 +352,10 @@ function expandCommandToSteps(command: ParsedGcodeCommand, profile: MachineProfi
       },
       {
         kind: 'probe' as const,
-        x: point.x + profile.probeOffsetX,
-        y: point.y + profile.probeOffsetY,
+        x: calculateProbeX(point),
+        y: calculateProbeY(point),
         label: `${command.command} probe ${point.label || ''}`.trim(),
-        raw: command.raw,
+        raw: `probe at ${calculateProbeX(point).toFixed(3)},${calculateProbeY(point).toFixed(3)} is z=0.000`,
         sourceName: command.sourceName,
         lineNumber: command.lineNumber,
       },
@@ -455,7 +457,8 @@ export function buildSimulationSteps(
 
     const originalCommand = renameMap.get(parsed.command);
     if (originalCommand) {
-      const rewritten: ParsedGcodeCommand = { ...parsed, command: originalCommand };
+      const rawRest = parsed.raw.slice(parsed.command.length);
+      const rewritten: ParsedGcodeCommand = { ...parsed, command: originalCommand, raw: `${originalCommand}${rawRest}` };
       steps.push(...expandCommandToSteps(rewritten, profile));
       applyPlannerCommandEffects(rewritten, plannerState);
       return;
@@ -482,7 +485,9 @@ export function buildSimulationSteps(
         switch (templateControl.kind) {
           case 'if': {
             const parentActive = isBranchActive();
-            const conditionMatched = templateControl.result === true;
+            // Treat unknown (null) conditions as true so that template-guarded blocks
+            // (e.g. homing_override sections using `params`) are included in the simulation.
+            const conditionMatched = templateControl.result !== false;
             conditionalStack.push({
               parentActive,
               branchTaken: conditionMatched,
@@ -493,7 +498,8 @@ export function buildSimulationSteps(
           case 'elif': {
             const current = conditionalStack[conditionalStack.length - 1];
             if (!current) return;
-            const conditionMatched = templateControl.result === true;
+            // Treat unknown (null) conditions as true for the same reason as 'if'.
+            const conditionMatched = templateControl.result !== false;
             current.active = current.parentActive && !current.branchTaken && conditionMatched;
             current.branchTaken = current.branchTaken || conditionMatched;
             return;

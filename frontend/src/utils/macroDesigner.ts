@@ -200,6 +200,19 @@ function parsePair(value: string | undefined): [number, number] | null {
   return [parts[0], parts[1]];
 }
 
+/**
+ * Parse a probe_count value which may be either a comma-separated pair (e.g. "5, 3")
+ * or a single integer that applies to both axes (e.g. "5" means 5x5).
+ * probe_count must be a positive integer, so zero and negative values are rejected.
+ */
+function parseProbeCount(value: string | undefined): [number, number] | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (trimmed.includes(',')) return parsePair(trimmed);
+  const single = Number(trimmed);
+  return Number.isFinite(single) && single > 0 ? [single, single] : null;
+}
+
 function parsePoints(value: string | undefined): SimulationPoint[] {
   if (!value) return [];
   return value
@@ -236,7 +249,10 @@ function interpolateMeshPoints(meshMin: [number, number], meshMax: [number, numb
     const y = yCount === 1
       ? meshMin[1]
       : meshMin[1] + ((meshMax[1] - meshMin[1]) * yIndex) / (yCount - 1);
-    for (let xIndex = 0; xIndex < xCount; xIndex += 1) {
+    // Klipper probes in boustrophedon (serpentine) order: odd rows are reversed
+    const reversed = yIndex % 2 !== 0;
+    for (let i = 0; i < xCount; i += 1) {
+      const xIndex = reversed ? (xCount - 1 - i) : i;
       const x = xCount === 1
         ? meshMin[0]
         : meshMin[0] + ((meshMax[0] - meshMin[0]) * xIndex) / (xCount - 1);
@@ -375,7 +391,7 @@ export function createMachineProfile(
 
   const meshMin = parsePair(getParamValue(bedMesh, 'mesh_min'));
   const meshMax = parsePair(getParamValue(bedMesh, 'mesh_max'));
-  const probeCount = parsePair(getParamValue(bedMesh, 'probe_count'));
+  const probeCount = parseProbeCount(getParamValue(bedMesh, 'probe_count'));
 
   const featurePoints: Record<string, SimulationPoint[]> = {
     BED_MESH_CALIBRATE: meshMin && meshMax && probeCount
