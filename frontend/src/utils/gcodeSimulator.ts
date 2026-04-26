@@ -455,7 +455,8 @@ export function buildSimulationSteps(
 
     const originalCommand = renameMap.get(parsed.command);
     if (originalCommand) {
-      const rewritten: ParsedGcodeCommand = { ...parsed, command: originalCommand, raw: originalCommand };
+      const rawRest = parsed.raw.slice(parsed.command.length);
+      const rewritten: ParsedGcodeCommand = { ...parsed, command: originalCommand, raw: `${originalCommand}${rawRest}` };
       steps.push(...expandCommandToSteps(rewritten, profile));
       applyPlannerCommandEffects(rewritten, plannerState);
       return;
