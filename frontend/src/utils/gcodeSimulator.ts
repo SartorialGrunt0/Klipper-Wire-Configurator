@@ -402,6 +402,15 @@ export function buildSimulationSteps(
   const appendHomingOverrideSteps = (parsed: ParsedGcodeCommand, appendParsedCommand: (command: ParsedGcodeCommand, currentMacro: MacroSourceItem | null, allowHomingOverride: boolean) => void) => {
     if (parsed.command !== 'G28' || !profile.homingOverride?.gcode.trim()) return false;
 
+    // If the homing override gcode would call a macro that is already in the
+    // call stack (e.g. _HOME_X calling G28 X0 while homing_override calls _HOME_X),
+    // skip the override and fall through to raw G28 behaviour to avoid a loop.
+    const overrideWouldLoop = profile.homingOverride.gcode.split(/\r?\n/).some((line) => {
+      const cmd = parseGcodeLine(line, 0, 'homing_override');
+      return cmd && cmd.command !== '__TEMPLATE__' && stack.includes(cmd.command.toUpperCase());
+    });
+    if (overrideWouldLoop) return false;
+
     const requestedAxes = getRequestedAxes(parsed.params);
     const shouldUseOverride = requestedAxes.length === 0
       ? true
@@ -908,9 +917,16 @@ export function executeSimulationStep(
       if (!saved) {
         warnings.push(`No saved gcode state named ${name}.`);
       } else {
+        // In Klipper, RESTORE_GCODE_STATE defaults to MOVE=0, meaning the
+        // toolhead does NOT physically move. Only restore the coordinate-system
+        // settings; only restore position when MOVE=1 is explicitly requested.
+        const shouldMove = command.params.MOVE === '1';
         nextState = {
           ...nextState,
-          ...saved,
+          ...(shouldMove ? { x: saved.x, y: saved.y, z: saved.z, e: saved.e } : {}),
+          feedRate: saved.feedRate,
+          absoluteMoves: saved.absoluteMoves,
+          absoluteExtrusion: saved.absoluteExtrusion,
           gcodeOffset: { ...saved.gcodeOffset },
         };
         eventSummary = `Restored gcode state ${name}`;

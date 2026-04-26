@@ -265,7 +265,7 @@ function interpolateMeshPoints(meshMin: [number, number], meshMax: [number, numb
 export function deriveCurrentMacroItems(configFiles: Record<string, ConfigFile>): MacroSourceItem[] {
   return Object.entries(configFiles).flatMap(([filename, config]) => (
     config.sections
-      .filter((section) => section.section_type === 'gcode_macro')
+      .filter((section) => section.section_type === 'gcode_macro' && !section.is_commented_out)
       .map((section) => ({
         key: `config:${filename}:${section.full_header}`,
         source: 'config' as const,
