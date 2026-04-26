@@ -236,7 +236,10 @@ function interpolateMeshPoints(meshMin: [number, number], meshMax: [number, numb
     const y = yCount === 1
       ? meshMin[1]
       : meshMin[1] + ((meshMax[1] - meshMin[1]) * yIndex) / (yCount - 1);
-    for (let xIndex = 0; xIndex < xCount; xIndex += 1) {
+    // Klipper probes in boustrophedon (serpentine) order: odd rows are reversed
+    const reversed = yIndex % 2 !== 0;
+    for (let i = 0; i < xCount; i += 1) {
+      const xIndex = reversed ? (xCount - 1 - i) : i;
       const x = xCount === 1
         ? meshMin[0]
         : meshMin[0] + ((meshMax[0] - meshMin[0]) * xIndex) / (xCount - 1);

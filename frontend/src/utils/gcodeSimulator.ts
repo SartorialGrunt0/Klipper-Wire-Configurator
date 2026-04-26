@@ -455,7 +455,7 @@ export function buildSimulationSteps(
 
     const originalCommand = renameMap.get(parsed.command);
     if (originalCommand) {
-      const rewritten: ParsedGcodeCommand = { ...parsed, command: originalCommand };
+      const rewritten: ParsedGcodeCommand = { ...parsed, command: originalCommand, raw: originalCommand };
       steps.push(...expandCommandToSteps(rewritten, profile));
       applyPlannerCommandEffects(rewritten, plannerState);
       return;
@@ -482,7 +482,9 @@ export function buildSimulationSteps(
         switch (templateControl.kind) {
           case 'if': {
             const parentActive = isBranchActive();
-            const conditionMatched = templateControl.result === true;
+            // Treat unknown (null) conditions as true so that template-guarded blocks
+            // (e.g. homing_override sections using `params`) are included in the simulation.
+            const conditionMatched = templateControl.result !== false;
             conditionalStack.push({
               parentActive,
               branchTaken: conditionMatched,
@@ -493,7 +495,8 @@ export function buildSimulationSteps(
           case 'elif': {
             const current = conditionalStack[conditionalStack.length - 1];
             if (!current) return;
-            const conditionMatched = templateControl.result === true;
+            // Treat unknown (null) conditions as true for the same reason as 'if'.
+            const conditionMatched = templateControl.result !== false;
             current.active = current.parentActive && !current.branchTaken && conditionMatched;
             current.branchTaken = current.branchTaken || conditionMatched;
             return;
