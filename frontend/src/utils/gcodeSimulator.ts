@@ -337,8 +337,8 @@ function expandCommandToSteps(command: ParsedGcodeCommand, profile: MachineProfi
   }
 
   if (NOZZLE_COORD_PROBE_COMMANDS.has(command.command) && points.length) {
-    const probeX = (point: { x: number; y: number }) => point.x + profile.probeOffsetX;
-    const probeY = (point: { x: number; y: number }) => point.y + profile.probeOffsetY;
+    const calculateProbeX = (point: { x: number; y: number }) => point.x + profile.probeOffsetX;
+    const calculateProbeY = (point: { x: number; y: number }) => point.y + profile.probeOffsetY;
     return points.flatMap((point) => ([
       {
         kind: 'move' as const,
@@ -352,10 +352,10 @@ function expandCommandToSteps(command: ParsedGcodeCommand, profile: MachineProfi
       },
       {
         kind: 'probe' as const,
-        x: probeX(point),
-        y: probeY(point),
+        x: calculateProbeX(point),
+        y: calculateProbeY(point),
         label: `${command.command} probe ${point.label || ''}`.trim(),
-        raw: `probe at ${probeX(point).toFixed(3)},${probeY(point).toFixed(3)} is z=0.000`,
+        raw: `probe at ${calculateProbeX(point).toFixed(3)},${calculateProbeY(point).toFixed(3)} is z=0.000`,
         sourceName: command.sourceName,
         lineNumber: command.lineNumber,
       },

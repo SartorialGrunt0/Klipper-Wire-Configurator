@@ -203,6 +203,7 @@ function parsePair(value: string | undefined): [number, number] | null {
 /**
  * Parse a probe_count value which may be either a comma-separated pair (e.g. "5, 3")
  * or a single integer that applies to both axes (e.g. "5" means 5x5).
+ * probe_count must be a positive integer, so zero and negative values are rejected.
  */
 function parseProbeCount(value: string | undefined): [number, number] | null {
   if (!value) return null;
