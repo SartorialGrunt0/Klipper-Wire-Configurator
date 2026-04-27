@@ -7,6 +7,13 @@ It runs directly on your SBC. The software is entirely free to use and licensed 
 
 Credit to the klipper, mainsail, moonraker, fluidd, and other teams whom which I borrowed and referenced alot from.
 
+## Table of contents
+
+- [Features](#features)
+- [Installing](#installing/uninstalling)
+- [Troubleshooting](#troubleshooting)
+- [Development](#development)
+
 ## Features
 
 - Graphical front end with cards and wires to show connections
@@ -53,7 +60,7 @@ Credit to the klipper, mainsail, moonraker, fluidd, and other teams whom which I
 
 The Raspberry Pi installer handles Node.js setup and installs the systemd service.
 
-## Installing/Uninstalling on Raspberry Pi
+## Installing/Uninstalling
 
 ### Install
 
@@ -115,7 +122,7 @@ sudo journalctl -u klipper-wire-configurator -f
 - If Moonraker reports `Unit klipper-wire-configurator.service not found`, rerun the installer once from the repo root to migrate older user-service installs.
 - If Moonraker reports untracked files under `frontend/public/reference/` that would be overwritten, remove that directory once inside the installed repo and retry the update.
 
-## Development setup
+## Development
 
 Use this when you want backend and frontend running in separate terminals.
 
