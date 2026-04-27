@@ -854,8 +854,8 @@ export default function App() {
   return (
     <div className="flex flex-col h-screen w-screen">
       {/* Header */}
-      <header className="flex items-center justify-between h-12 px-4 border-b border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] shrink-0">
-        <div className="flex items-center gap-3">
+      <header className="flex items-center gap-4 h-12 px-4 border-b border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] shrink-0 overflow-hidden">
+        <div className="flex items-center gap-3 shrink-0">
           <svg width="24" height="24" viewBox="0 0 32 32" fill="none">
             <rect width="32" height="32" rx="4" fill="#1e293b" />
             <path d="M8 16h16M16 8v16" stroke="#38bdf8" strokeWidth="2" strokeLinecap="round" />
@@ -868,27 +868,31 @@ export default function App() {
             Klipper Wire Configurator
           </h1>
         </div>
-        <Toolbar
-          showTextView={showTextView}
-          onToggleAddMenu={() => setShowAddMenu(!showAddMenu)}
-          onOpenMacroDesigner={() => setShowMacroDesigner(true)}
-          onToggleTextView={() => {
-            if (showTextView) {
-              // Switching FROM text TO graph — check for unsaved changes
-              if (textEditorRef.current?.isDirty()) {
-                setShowUnsavedDialog(true);
-                return;
-              }
-              setShowTextView(false);
-            } else {
-              // Switching TO text view — close the settings panel
-              setSelectedNode(null);
-              setSelectedEdge(null);
-              setSelectedSection(null);
-              setShowTextView(true);
-            }
-          }}
-        />
+        <div className="flex-1 min-w-0 overflow-x-auto overflow-y-hidden">
+          <div className="flex justify-end min-w-max pl-2">
+            <Toolbar
+              showTextView={showTextView}
+              onToggleAddMenu={() => setShowAddMenu(!showAddMenu)}
+              onOpenMacroDesigner={() => setShowMacroDesigner(true)}
+              onToggleTextView={() => {
+                if (showTextView) {
+                  // Switching FROM text TO graph — check for unsaved changes
+                  if (textEditorRef.current?.isDirty()) {
+                    setShowUnsavedDialog(true);
+                    return;
+                  }
+                  setShowTextView(false);
+                } else {
+                  // Switching TO text view — close the settings panel
+                  setSelectedNode(null);
+                  setSelectedEdge(null);
+                  setSelectedSection(null);
+                  setShowTextView(true);
+                }
+              }}
+            />
+          </div>
+        </div>
       </header>
 
       {/* Main content */}

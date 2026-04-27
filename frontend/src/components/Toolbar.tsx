@@ -60,7 +60,7 @@ export default function Toolbar({
   };
 
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex items-center gap-2 min-w-max">
       {/* Import */}
       <button
         onClick={() => setShowImport(true)}
