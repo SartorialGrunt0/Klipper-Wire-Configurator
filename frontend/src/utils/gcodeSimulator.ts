@@ -58,8 +58,12 @@ export function parseGcodeLine(line: string, lineNumber: number, sourceName: str
   if (isTemplateDirective(trimmed)) {
     return { command: '__TEMPLATE__', raw: trimmed, params: {}, lineNumber, sourceName };
   }
-  const withoutComment = line.replace(/;.*$/, '').trim();
-  if (!withoutComment || withoutComment.startsWith('#')) return null;
+  // Strip both ; gcode comments and # config-style comments before tokenizing.
+  // Without this, a line like `G1 X5 Y5 F1200  ## note` gets words from the
+  // comment parsed as extra params (e.g. 'you' → Y:'ou'), silently overwriting
+  // the real Y value.
+  const withoutComment = line.replace(/;.*$/, '').replace(/\s*#.*$/, '').trim();
+  if (!withoutComment) return null;
   const tokens = withoutComment.match(/(?:"[^"]*"|\S+)/g) || [];
   const [commandToken, ...paramTokens] = tokens;
   if (!commandToken) return null;
@@ -313,66 +317,78 @@ function expandCommandToSteps(command: ParsedGcodeCommand, profile: MachineProfi
   const points = profile.featurePoints[command.command] || [];
 
   if (PROBE_COORD_COMMANDS.has(command.command) && points.length) {
-    return points.flatMap((point) => ([
-      {
-        kind: 'move' as const,
-        x: point.x - profile.probeOffsetX,
-        y: point.y - profile.probeOffsetY,
-        z: profile.horizontalMoveZ,
-        label: `${command.command} travel to ${point.label || ''}`.trim(),
-        raw: command.raw,
-        sourceName: command.sourceName,
-        lineNumber: command.lineNumber,
-      },
-      {
-        kind: 'probe' as const,
-        x: point.x,
-        y: point.y,
-        label: `${command.command} probe ${point.label || ''}`.trim(),
-        raw: `probe at ${point.x.toFixed(3)},${point.y.toFixed(3)} is z=0.000`,
-        sourceName: command.sourceName,
-        lineNumber: command.lineNumber,
-      },
-    ]));
+    const initialStep: SimulationStep = { kind: 'command', command };
+    return [
+      initialStep,
+      ...points.flatMap((point) => ([
+        {
+          kind: 'move' as const,
+          x: point.x - profile.probeOffsetX,
+          y: point.y - profile.probeOffsetY,
+          z: profile.horizontalMoveZ,
+          label: `Travel to ${point.label || ''}`.trim(),
+          raw: command.raw,
+          sourceName: command.sourceName,
+          lineNumber: command.lineNumber,
+        },
+        {
+          kind: 'probe' as const,
+          x: point.x,
+          y: point.y,
+          label: `Probe ${point.label || ''}`.trim(),
+          raw: `probe at ${point.x.toFixed(3)},${point.y.toFixed(3)} is z=0.000`,
+          sourceName: command.sourceName,
+          lineNumber: command.lineNumber,
+        },
+      ])),
+    ];
   }
 
   if (NOZZLE_COORD_PROBE_COMMANDS.has(command.command) && points.length) {
     const calculateProbeX = (point: { x: number; y: number }) => point.x + profile.probeOffsetX;
     const calculateProbeY = (point: { x: number; y: number }) => point.y + profile.probeOffsetY;
-    return points.flatMap((point) => ([
-      {
-        kind: 'move' as const,
-        x: point.x,
-        y: point.y,
-        z: profile.horizontalMoveZ,
-        label: `${command.command} travel to ${point.label || ''}`.trim(),
-        raw: command.raw,
-        sourceName: command.sourceName,
-        lineNumber: command.lineNumber,
-      },
-      {
-        kind: 'probe' as const,
-        x: calculateProbeX(point),
-        y: calculateProbeY(point),
-        label: `${command.command} probe ${point.label || ''}`.trim(),
-        raw: `probe at ${calculateProbeX(point).toFixed(3)},${calculateProbeY(point).toFixed(3)} is z=0.000`,
-        sourceName: command.sourceName,
-        lineNumber: command.lineNumber,
-      },
-    ]));
+    const initialStep: SimulationStep = { kind: 'command', command };
+    return [
+      initialStep,
+      ...points.flatMap((point) => ([
+        {
+          kind: 'move' as const,
+          x: point.x,
+          y: point.y,
+          z: profile.horizontalMoveZ,
+          label: `Travel to ${point.label || ''}`.trim(),
+          raw: command.raw,
+          sourceName: command.sourceName,
+          lineNumber: command.lineNumber,
+        },
+        {
+          kind: 'probe' as const,
+          x: calculateProbeX(point),
+          y: calculateProbeY(point),
+          label: `Probe ${point.label || ''}`.trim(),
+          raw: `probe at ${calculateProbeX(point).toFixed(3)},${calculateProbeY(point).toFixed(3)} is z=0.000`,
+          sourceName: command.sourceName,
+          lineNumber: command.lineNumber,
+        },
+      ])),
+    ];
   }
 
   if (NOZZLE_DIRECT_COMMANDS.has(command.command) && points.length) {
-    return points.map((point) => ({
-      kind: 'move' as const,
-      x: point.x,
-      y: point.y,
-      z: 0,
-      label: `${command.command} nozzle to ${point.label || ''}`.trim(),
-      raw: command.raw,
-      sourceName: command.sourceName,
-      lineNumber: command.lineNumber,
-    }));
+    const initialStep: SimulationStep = { kind: 'command', command };
+    return [
+      initialStep,
+      ...points.map((point) => ({
+        kind: 'move' as const,
+        x: point.x,
+        y: point.y,
+        z: 0,
+        label: `Move to ${point.label || ''}`.trim(),
+        raw: command.raw,
+        sourceName: command.sourceName,
+        lineNumber: command.lineNumber,
+      })),
+    ];
   }
 
   return [{ kind: 'command', command }];
