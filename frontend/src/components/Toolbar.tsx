@@ -7,6 +7,7 @@ import DiffDialog from './dialogs/DiffDialog';
 import OpenFromPiDialog from './dialogs/OpenFromPiDialog';
 import ApplyDialog from './dialogs/ApplyDialog';
 import RevertDialog from './dialogs/RevertDialog';
+import FirmwareDialog from './dialogs/FirmwareDialog';
 
 interface ToolbarProps {
   showTextView: boolean;
@@ -27,6 +28,7 @@ export default function Toolbar({
   const [showOpenFromPi, setShowOpenFromPi] = useState(false);
   const [showApply, setShowApply] = useState(false);
   const [showRevert, setShowRevert] = useState(false);
+  const [showFirmware, setShowFirmware] = useState(false);
   const hasOriginals = Object.keys(useConfigStore((s) => s.originalTexts)).length > 0;
   const isNative = useNativeStore((s) => s.isNative);
   const hasConfig = Object.keys(useConfigStore((s) => s.configFiles)).length > 0;
@@ -132,6 +134,18 @@ export default function Toolbar({
         </button>
       )}
 
+      {isNative && (
+        <button
+          onClick={() => setShowFirmware(true)}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] transition-colors"
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <path d="M3 5.5h10M5 2.5h6M5 8.5h6M4.5 11.5h7M4 14h8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+          </svg>
+          Firmware
+        </button>
+      )}
+
       {/* Revert Changes (native or when originals exist) */}
       {hasPendingChanges && hasOriginals && (
         <button
@@ -196,6 +210,7 @@ export default function Toolbar({
       {showDiff && <DiffDialog onClose={() => setShowDiff(false)} />}
       {showOpenFromPi && <OpenFromPiDialog onClose={() => setShowOpenFromPi(false)} />}
       {showApply && <ApplyDialog onClose={() => setShowApply(false)} />}
+      {showFirmware && <FirmwareDialog onClose={() => setShowFirmware(false)} />}
       {showRevert && <RevertDialog onClose={() => setShowRevert(false)} />}
     </div>
   );

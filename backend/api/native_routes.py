@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from parser.config_parser import parse_config
@@ -25,6 +26,12 @@ from services.native_services import (
     load_settings,
     query_klipper_status,
     save_settings,
+)
+from services.klipper_firmware import (
+    build_klipper_firmware,
+    get_klipper_firmware_artifact_path,
+    get_klipper_firmware_state,
+    save_klipper_menuconfig,
 )
 
 router = APIRouter()
@@ -258,6 +265,64 @@ async def klipper_status():
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+class FirmwareAssignment(BaseModel):
+    symbol: str
+    value: str
+
+
+class FirmwareConfigUpdate(BaseModel):
+    klipper_path: str | None = None
+    assignments: list[FirmwareAssignment] = []
+
+
+class FirmwareBuildRequest(BaseModel):
+    klipper_path: str | None = None
+
+
+@router.get("/firmware")
+async def klipper_firmware_state(klipper_path: str | None = None):
+    """Return Klipper menuconfig options and current firmware artifacts."""
+    if not is_native_platform():
+        raise HTTPException(status_code=501, detail="Only available on Pi")
+    return get_klipper_firmware_state(klipper_path)
+
+
+@router.put("/firmware")
+async def update_klipper_firmware_config(data: FirmwareConfigUpdate):
+    """Persist menuconfig selections to Klipper's active .config file."""
+    if not is_native_platform():
+        raise HTTPException(status_code=501, detail="Only available on Pi")
+    assignments = [(item.symbol, item.value) for item in data.assignments]
+    return save_klipper_menuconfig(assignments, data.klipper_path)
+
+
+@router.post("/firmware/build")
+async def build_klipper_firmware_api(data: FirmwareBuildRequest):
+    """Run Klipper's firmware build using the active local checkout."""
+    if not is_native_platform():
+        raise HTTPException(status_code=501, detail="Only available on Pi")
+    return build_klipper_firmware(data.klipper_path)
+
+
+@router.get("/firmware/artifacts/{filename}")
+async def download_klipper_firmware_artifact(filename: str, klipper_path: str | None = None):
+    """Download a generated firmware artifact from Klipper's out directory."""
+    if not is_native_platform():
+        raise HTTPException(status_code=501, detail="Only available on Pi")
+    try:
+        artifact_path = get_klipper_firmware_artifact_path(filename, klipper_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return FileResponse(
+        artifact_path,
+        media_type="application/octet-stream",
+        filename=Path(artifact_path).name,
+    )
 
 
 # ── Layout persistence ─────────────────────────────────────────
