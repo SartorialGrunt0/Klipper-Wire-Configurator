@@ -6,10 +6,8 @@ from typing import Any
 
 from services.flash_targets import (
     _load_target_kconfig_state,
-    _serialize_kconfig_fields,
     build_flash_target,
     flash_flash_target,
-    get_flash_target_artifact_path,
     get_flash_target_state,
     list_flash_target_artifacts,
     pick_primary_flash_target_artifact,
