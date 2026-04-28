@@ -35,6 +35,7 @@ def _candidate_klipper_paths(requested_path: str | None = None) -> list[Path]:
         requested_path,
         settings.get("klipper_path"),
         os.environ.get("KWC_KLIPPER_PATH"),
+        "~/klipper",
         f"/home/{user}/klipper",
         "/home/pi/klipper",
     ]
@@ -293,7 +294,7 @@ def get_klipper_firmware_state(klipper_path: str | None = None) -> dict[str, Any
         return {
             "available": False,
             "error": error,
-            "klipper_path": klipper_path or "",
+            "klipper_path": klipper_path or "~/klipper",
             "config_path": "",
             "out_path": "",
             "config_exists": False,
@@ -302,7 +303,20 @@ def get_klipper_firmware_state(klipper_path: str | None = None) -> dict[str, Any
             "primary_artifact": None,
         }
 
-    kconfiglib, kconf, config_path = _load_kconfig_state(resolved_path)
+    try:
+        kconfiglib, kconf, config_path = _load_kconfig_state(resolved_path)
+    except Exception as exc:  # kconfiglib raises many types; catch broadly
+        return {
+            "available": False,
+            "error": f"Failed to load Klipper build config: {exc}",
+            "klipper_path": str(resolved_path),
+            "config_path": "",
+            "out_path": str(resolved_path / "out"),
+            "config_exists": False,
+            "fields": [],
+            "artifacts": list_klipper_firmware_artifacts(resolved_path),
+            "primary_artifact": None,
+        }
     artifacts = list_klipper_firmware_artifacts(resolved_path)
     return {
         "available": True,
@@ -335,7 +349,12 @@ def save_klipper_menuconfig(assignments: list[tuple[str, str]], klipper_path: st
     if resolved_path is None:
         return get_klipper_firmware_state(klipper_path)
 
-    kconfiglib, kconf, config_path = _load_kconfig_state(resolved_path)
+    try:
+        kconfiglib, kconf, config_path = _load_kconfig_state(resolved_path)
+    except Exception as exc:  # kconfiglib raises many types; catch broadly
+        state = get_klipper_firmware_state(str(resolved_path))
+        state["error"] = f"Failed to load Klipper build config: {exc}"
+        return state
     issues: list[str] = []
 
     for symbol_name, raw_value in assignments:
