@@ -14,11 +14,30 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
     headers: { 'Content-Type': 'application/json' },
     ...options,
   });
+  const text = await res.text();
   if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`API error ${res.status}: ${err}`);
+    throw new Error(`API error ${res.status}: ${text}`);
   }
-  return res.json();
+
+  const contentType = res.headers.get('content-type') || '';
+  if (contentType.includes('application/json')) {
+    return JSON.parse(text) as T;
+  }
+
+  const trimmed = text.trimStart().toLowerCase();
+  if (trimmed.startsWith('<!doctype') || trimmed.startsWith('<html')) {
+    throw new Error(
+      'The frontend received HTML instead of JSON from the backend. '
+      + 'This usually means the backend service is older than the frontend bundle or the firmware API route is missing. '
+      + 'Update and restart the backend service, then refresh the page.',
+    );
+  }
+
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(`Invalid API response from ${url}`);
+  }
 }
 
 /* ── Import ──────────────────────────────────────────── */

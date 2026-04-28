@@ -17,6 +17,7 @@ REPO_URL="https://github.com/SartorialGrunt0/Klipper-Wire-Configurator.git"
 INSTALL_DIR="$HOME/klipper-wire-configurator"
 SERVICE_NAME="klipper-wire-configurator"
 KWC_PORT="${KWC_PORT:-8099}"
+KWC_GIT_REF="${KWC_GIT_REF:-}"
 PYTHON_MIN_VERSION="3.9"
 NODE_MIN_VERSION="18"
 LOG_DIR="${TMPDIR:-/tmp}"
@@ -230,20 +231,72 @@ if [ "$PY_MAJOR" -lt "$REQ_MAJOR" ] || { [ "$PY_MAJOR" -eq "$REQ_MAJOR" ] && [ "
 fi
 ok "Python $PY_VER found."
 
+resolve_install_git_ref() {
+    local current_branch="$1"
+
+    if [ -n "$KWC_GIT_REF" ]; then
+        echo "$KWC_GIT_REF"
+        return
+    fi
+
+    if [ -n "$current_branch" ]; then
+        echo "$current_branch"
+        return
+    fi
+
+    echo "main"
+}
+
+checkout_remote_branch() {
+    local branch="$1"
+    local current_branch="$2"
+
+    if [ "$current_branch" = "$branch" ]; then
+        return
+    fi
+
+    if git show-ref --verify --quiet "refs/heads/$branch"; then
+        git checkout "$branch" --quiet
+    else
+        git checkout -B "$branch" "origin/$branch" --quiet
+    fi
+}
+
 # --- Clone or update repository ---
 if [ -d "$INSTALL_DIR/.git" ]; then
     info "Existing installation found. Updating..."
     cd "$INSTALL_DIR"
-    git fetch --quiet
-    git reset --hard origin/main --quiet
-    ok "Repository updated."
+
+    if [ -n "$(git status --porcelain)" ]; then
+        error "Install directory has local changes. Commit, stash, or clean them before rerunning the installer."
+    fi
+
+    CURRENT_BRANCH="$(git branch --show-current 2>/dev/null || true)"
+    TARGET_GIT_REF="$(resolve_install_git_ref "$CURRENT_BRANCH")"
+
+    git fetch --quiet origin
+
+    if git show-ref --verify --quiet "refs/remotes/origin/$TARGET_GIT_REF"; then
+        checkout_remote_branch "$TARGET_GIT_REF" "$CURRENT_BRANCH"
+        git pull --ff-only --quiet origin "$TARGET_GIT_REF"
+        ok "Repository updated on branch $TARGET_GIT_REF."
+    else
+        warn "Remote branch '$TARGET_GIT_REF' was not found. Falling back to origin/main."
+        checkout_remote_branch "main" "$CURRENT_BRANCH"
+        git pull --ff-only --quiet origin main
+        ok "Repository updated on branch main."
+    fi
 else
     if [ -d "$INSTALL_DIR" ]; then
         warn "Directory $INSTALL_DIR exists but is not a git repo. Backing up..."
         mv "$INSTALL_DIR" "${INSTALL_DIR}.bak.$(date +%s)"
     fi
     info "Cloning repository..."
-    git clone --depth 1 "$REPO_URL" "$INSTALL_DIR" --quiet
+    if [ -n "$KWC_GIT_REF" ]; then
+        git clone --depth 1 --branch "$KWC_GIT_REF" "$REPO_URL" "$INSTALL_DIR" --quiet
+    else
+        git clone --depth 1 "$REPO_URL" "$INSTALL_DIR" --quiet
+    fi
     ok "Repository cloned to $INSTALL_DIR"
 fi
 

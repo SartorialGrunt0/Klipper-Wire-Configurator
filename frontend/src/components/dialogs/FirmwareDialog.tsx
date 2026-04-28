@@ -332,7 +332,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
             </div>
 
             <div className="flex-1 overflow-y-auto p-4 space-y-4">
-              {!firmwareState?.available && (
+              {firmwareState && !firmwareState.available && (
                 <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-4">
                   <p className="text-sm text-red-300">
                     {firmwareState?.error || 'Klipper was not detected on this SBC.'}

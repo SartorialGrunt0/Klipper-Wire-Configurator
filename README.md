@@ -73,6 +73,19 @@ cd Klipper-Wire-Configurator
 bash scripts/install.sh
 ```
 
+If you want to install or update a non-`main` branch, either check out that branch first and rerun the installer from that repo, or set `KWC_GIT_REF` explicitly:
+
+```bash
+cd ~/Klipper-Wire-Configurator
+git checkout your-branch
+git pull --ff-only
+bash scripts/install.sh
+```
+
+```bash
+KWC_GIT_REF=your-branch bash scripts/install.sh
+```
+
 On 32-bit Raspberry Pi OS (`armv7` / `armhf`), the installer automatically uses the distro `nodejs` package. I havent tried 64-bit YMMV.
 
 After install, proceed to http://{your_ip_here}:8099
@@ -121,6 +134,7 @@ sudo journalctl -u klipper-wire-configurator -f
 - Use the exact repo directory name that exists on disk for uninstall commands, Moonraker paths, and manual installer reruns.
 - If Moonraker reports `Unit klipper-wire-configurator.service not found`, rerun the installer once from the repo root to migrate older user-service installs.
 - If Moonraker reports untracked files under `frontend/public/reference/` that would be overwritten, remove that directory once inside the installed repo and retry the update.
+- If the firmware dialog reports that it received HTML instead of JSON, the frontend bundle is newer than the backend service. Rerun the installer or restart the `klipper-wire-configurator` service from the updated repo.
 
 ## Development
 
