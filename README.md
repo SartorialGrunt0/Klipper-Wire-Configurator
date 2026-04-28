@@ -134,7 +134,7 @@ sudo journalctl -u klipper-wire-configurator -f
 - Use the exact repo directory name that exists on disk for uninstall commands, Moonraker paths, and manual installer reruns.
 - If Moonraker reports `Unit klipper-wire-configurator.service not found`, rerun the installer once from the repo root to migrate older user-service installs.
 - If Moonraker reports untracked files under `frontend/public/reference/` that would be overwritten, remove that directory once inside the installed repo and retry the update.
-- If the firmware dialog reports that it received HTML instead of JSON, the frontend bundle is newer than the backend service. Rerun the installer or restart the `klipper-wire-configurator` service from the updated repo.
+- If the Flash dialog reports that it received HTML instead of JSON, the frontend bundle is newer than the backend service. Rerun the installer or restart the `klipper-wire-configurator` service from the updated repo.
 
 ## Development
 
