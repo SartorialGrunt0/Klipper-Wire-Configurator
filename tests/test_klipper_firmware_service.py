@@ -1,7 +1,7 @@
 import sys
 from pathlib import Path
 
-sys.path.insert(0, 'backend')
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'backend'))
 
 from services.klipper_firmware import (  # noqa: E402
     get_klipper_firmware_artifact_path,

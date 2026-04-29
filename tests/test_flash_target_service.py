@@ -1,6 +1,7 @@
 import sys
+from pathlib import Path
 
-sys.path.insert(0, 'backend')
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'backend'))
 
 from services.flash_targets import (  # noqa: E402
     get_flash_target_state,

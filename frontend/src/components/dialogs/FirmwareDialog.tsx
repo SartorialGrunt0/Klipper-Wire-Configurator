@@ -13,6 +13,11 @@ interface FirmwareDialogProps {
   onClose: () => void;
 }
 
+interface FlashDeviceCandidate {
+  value: string;
+  label: string;
+}
+
 type DialogStatus = 'idle' | 'loading' | 'previewing' | 'saving' | 'building' | 'flashing';
 type MessageTone = 'info' | 'success' | 'error';
 
@@ -369,6 +374,101 @@ function HelpPopover({ text }: { text: string }) {
   );
 }
 
+function FlashDeviceField({
+  value,
+  onChange,
+  placeholder,
+  candidates,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+  candidates: FlashDeviceCandidate[];
+}) {
+  const [open, setOpen] = useState(false);
+  const fieldRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) {
+      return undefined;
+    }
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && fieldRef.current?.contains(target)) {
+        return;
+      }
+      setOpen(false);
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setOpen(false);
+      }
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [open]);
+
+  return (
+    <div ref={fieldRef} className="relative">
+      <input
+        type="text"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+        className={`w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-3 py-2 text-xs font-mono text-[var(--color-text-primary)] ${candidates.length > 0 ? 'pr-12' : ''}`}
+      />
+      {candidates.length > 0 && (
+        <>
+          <button
+            type="button"
+            onClick={() => setOpen((current) => !current)}
+            className="absolute inset-y-[1px] right-[1px] flex w-10 items-center justify-center rounded-r-md border-l border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] text-[var(--color-text-secondary)] transition-colors hover:text-[var(--color-text-primary)]"
+            aria-label="Select detected flash device"
+            aria-expanded={open}
+          >
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 16 16"
+              fill="none"
+              className={`transition-transform ${open ? 'rotate-180' : ''}`}
+            >
+              <path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+          {open && (
+            <div className="absolute right-0 top-[calc(100%+0.5rem)] z-30 max-h-64 w-full overflow-auto rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] shadow-xl">
+              {candidates.map((candidate) => (
+                <button
+                  key={`${candidate.value}:${candidate.label}`}
+                  type="button"
+                  onClick={() => {
+                    onChange(candidate.value);
+                    setOpen(false);
+                  }}
+                  className={`block w-full px-3 py-2 text-left transition-colors hover:bg-[var(--color-bg-primary)] ${value === candidate.value ? 'bg-[var(--color-bg-primary)]/70' : ''}`}
+                >
+                  <p className="truncate text-xs font-mono text-[var(--color-text-primary)]">{candidate.value}</p>
+                  {candidate.label !== candidate.value && (
+                    <p className="mt-1 text-[10px] text-[var(--color-text-secondary)]">{candidate.label}</p>
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
   const [activeTarget, setActiveTarget] = useState<FlashTargetKey>('klipper');
   const [panels, setPanels] = useState<Record<FlashTargetKey, FlashPanelState>>({
@@ -711,7 +811,6 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
   const saveLabel = panel.status === 'saving' ? 'Saving...' : 'Save .config';
   const trimmedFlashDevice = panel.flashDevice.trim();
   const flashDeviceCandidates = panel.flashState?.flash_device_candidates || [];
-  const selectedFlashDeviceCandidate = flashDeviceCandidates.find((candidate) => candidate.value === panel.flashDevice) || null;
   const showFlashDevice = Boolean(
     panel.flashState?.flash_supported
       && (
@@ -807,39 +906,12 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                 <label className="mb-1 block text-xs font-medium text-[var(--color-text-secondary)]">
                   Flash Device{panel.flashState?.flash_device_required ? ' *' : ''}
                 </label>
-                <input
-                  type="text"
+                <FlashDeviceField
                   value={panel.flashDevice}
-                  onChange={(event) => updatePanel(activeTarget, (current) => ({ ...current, flashDevice: event.target.value }))}
+                  onChange={(value) => updatePanel(activeTarget, (current) => ({ ...current, flashDevice: value }))}
                   placeholder={panel.flashState?.flash_device_placeholder || 'Optional flash device override'}
-                  className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-3 py-2 text-xs font-mono text-[var(--color-text-primary)]"
+                  candidates={flashDeviceCandidates}
                 />
-                {flashDeviceCandidates.length > 0 && (
-                  <select
-                    value={selectedFlashDeviceCandidate?.value || ''}
-                    onChange={(event) => {
-                      const nextValue = event.target.value;
-                      if (!nextValue) {
-                        return;
-                      }
-                      updatePanel(activeTarget, (current) => ({
-                        ...current,
-                        flashDevice: nextValue,
-                      }));
-                    }}
-                    className="mt-2 w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-3 py-2 text-xs text-[var(--color-text-primary)]"
-                  >
-                    <option value="">Detected flash devices</option>
-                    {flashDeviceCandidates.map((candidate) => (
-                      <option
-                        key={`${candidate.value}:${candidate.label}`}
-                        value={candidate.value}
-                      >
-                        {candidate.value}
-                      </option>
-                    ))}
-                  </select>
-                )}
               </div>
             )}
 
