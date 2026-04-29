@@ -1,143 +1,121 @@
-# System Spec
+# Klipper Wire Configurator Requirements Specification
+
+Last reviewed: 2026-04-29
+
+This document reflects the capabilities implemented in the current repository. It is intentionally descriptive of the shipped product state, including native-only behavior and backend capabilities that are present even when not yet exposed by the main frontend toolbar.
 
 ## Scope
-This document provides the system requirements for the klipper wire configurator software. It is focused easily viewing, creating, and modifying printer.cfg files (and sub-files) in a graphical format. 
 
-## Intended Use
-The software shall import, export, modify and generate .cfg files based upon the loaded klipper configuration files into the software.
+Klipper Wire Configurator is a browser-based editor for Klipper configuration projects. It combines a React single-page application with a FastAPI backend to import, validate, generate, edit, export, diff, and optionally apply Klipper `.cfg` files. In native Linux/SBC mode it also interacts with the local filesystem, Klipper's Unix socket API, connected devices, and firmware build trees.
 
-## Use Environment
-It shall run as a software program on a raspberry pi as a webclient as well as a standalone webpage that is displayed on a webpage for viewing viewing, creating, and modifying printer.cfg files in a graphical representation from a phone or desktop computer.
+## Supported Operating Modes
 
-## Major Features
-The software shall have the following high-level features:
+- Browser mode: the frontend consumes the backend API for import, generation, validation, export, and editing workflows.
+- Native SBC mode: the same UI enables direct file access, device discovery, layout persistence, Klipper restart/status checks, and firmware tooling when the backend is running on Linux or `KWC_FAKE_NATIVE` is enabled.
+- Development mode: the frontend runs under Vite and the backend under FastAPI/Uvicorn; frontend reference assets are generated before `dev` and `build` runs.
 
-- A web UI for user interaction.
-- An installer/uninstaller for ease of use setup.
-- A graphical interface representing configuration with symbols and wires to create configuration and connections.
-- A traditional text view of the configuration.
-- The ability to import an existing printer.cfg or other .cfg files.
-- The ability to generate .cfg files from examples as a baseline.
-- The ability to modify a generated or imported configuration file graphically.
-- The ability to export loaded configuration files.
-- The ability to error check the configuration.
+## Capability Legend
 
-# Functional and Performance Requirements
+- UI: available in the current shipped frontend.
+- Native UI: available only when native mode is active.
+- API: implemented in the backend, but not surfaced by the current primary UI.
 
-## Installer/Uninstaller
+## Functional Requirements
 
-The software shall have a linux arm installer for raspberry pi.
+### Platform and Deployment
 
-The installer shall allow the user to specify a file path and WebUI Port.
+| ID | Requirement | Surface | Primary implementation |
+| --- | --- | --- | --- |
+| REQ-PLAT-01 | The application shall run as a React frontend backed by a FastAPI service. | UI | [frontend/src/main.tsx](frontend/src/main.tsx), [frontend/src/App.tsx](frontend/src/App.tsx), [backend/main.py](backend/main.py) |
+| REQ-PLAT-02 | The backend shall expose a health endpoint and serve the built SPA when frontend assets are present. | UI | [backend/main.py](backend/main.py) |
+| REQ-PLAT-03 | The Linux installer shall install dependencies, build the frontend, create or replace the systemd service, support uninstall, and honor the configured port via `KWC_PORT`. | Native UI | [scripts/install.sh](scripts/install.sh), [scripts/run-service.sh](scripts/run-service.sh) |
 
-## Web UI
+### Config Import, Parsing, Reference Data, and Generation
 
-The software shall have a WebUI specified http port.
+| ID | Requirement | Surface | Primary implementation |
+| --- | --- | --- | --- |
+| REQ-CONF-01 | The system shall import a single Klipper `.cfg` file, parse it into structured sections/parameters, validate it, and attempt board detection. | UI | [frontend/src/components/dialogs/ImportDialog.tsx](frontend/src/components/dialogs/ImportDialog.tsx), [backend/api/routes.py](backend/api/routes.py), [backend/parser/config_parser.py](backend/parser/config_parser.py), [backend/services/board_detector.py](backend/services/board_detector.py) |
+| REQ-CONF-02 | The system shall import a multi-file project, infer the main file, collect MCU metadata, resolve include relationships, and validate the active included file set. | UI | [frontend/src/components/dialogs/ImportDialog.tsx](frontend/src/components/dialogs/ImportDialog.tsx), [backend/api/routes.py](backend/api/routes.py), [frontend/src/utils/graphBuilder.ts](frontend/src/utils/graphBuilder.ts) |
+| REQ-CONF-03 | The backend parser shall preserve comments, separators, include directives, line identity, and `SAVE_CONFIG` overlays for round-trip editing. | UI | [backend/parser/config_parser.py](backend/parser/config_parser.py), [backend/parser/config_writer.py](backend/parser/config_writer.py) |
+| REQ-CONF-04 | The system shall generate a new blank configuration for supported kinematics including default printer, MCU, motion, extruder, and bed sections. | UI | [frontend/src/components/dialogs/GenerateDialog.tsx](frontend/src/components/dialogs/GenerateDialog.tsx), [backend/api/routes.py](backend/api/routes.py) |
+| REQ-CONF-05 | The system shall generate a configuration from bundled reference examples. | UI | [frontend/src/components/dialogs/GenerateDialog.tsx](frontend/src/components/dialogs/GenerateDialog.tsx), [backend/api/routes.py](backend/api/routes.py), [reference/config](reference/config) |
+| REQ-CONF-06 | The system shall expose example listing and fuzzy search for bundled example configs. | UI | [frontend/src/services/api.ts](frontend/src/services/api.ts), [backend/api/routes.py](backend/api/routes.py), [frontend/scripts/generate-examples.js](frontend/scripts/generate-examples.js) |
+| REQ-CONF-07 | The system shall expose section schema metadata and the bundled Klipper `Config_Reference.md` content to the frontend. | UI | [frontend/src/services/api.ts](frontend/src/services/api.ts), [backend/api/routes.py](backend/api/routes.py), [backend/parser/config_schema.py](backend/parser/config_schema.py) |
 
-The WebUI shall support importing, generating, and exporting configuration files.
+### Graph Workspace
 
-Generating configuration files shall allow them to start as blank or select a config example. 
+| ID | Requirement | Surface | Primary implementation |
+| --- | --- | --- | --- |
+| REQ-GRAPH-01 | The UI shall render a graph workspace backed by React Flow and represent the loaded project as hardware nodes, child nodes, and routed edges. | UI | [frontend/src/App.tsx](frontend/src/App.tsx), [frontend/src/stores/graphStore.ts](frontend/src/stores/graphStore.ts), [frontend/src/utils/graphBuilder.ts](frontend/src/utils/graphBuilder.ts) |
+| REQ-GRAPH-02 | The graph shall support SBC, mainboard, expander, toolhead, config file, probe, accelerometer, and generic hardware containers. | UI | [frontend/src/components/AddMenu.tsx](frontend/src/components/AddMenu.tsx), [frontend/src/components/nodes/HardwareNode.tsx](frontend/src/components/nodes/HardwareNode.tsx) |
+| REQ-GRAPH-03 | The graph shall support adding sub-components and feature nodes grouped around the hardware model, including steppers, drivers, extruders, heaters, fans, sensors, probes, LEDs, displays, servos, pins, bed-leveling, homing, resonance, and G-code features. | UI | [frontend/src/components/AddMenu.tsx](frontend/src/components/AddMenu.tsx), [frontend/src/utils/graphBuilder.ts](frontend/src/utils/graphBuilder.ts) |
+| REQ-GRAPH-04 | The graph shall support communication edges (USB, CAN bus, UART) and configuration/include edges between hardware nodes. | UI | [frontend/src/stores/graphStore.ts](frontend/src/stores/graphStore.ts), [frontend/src/components/edges](frontend/src/components/edges), [frontend/src/utils/edgeRouting.ts](frontend/src/utils/edgeRouting.ts) |
+| REQ-GRAPH-05 | The graph shall support drag, reparent, grouping, collapse/expand, auto-arrange, node duplication/removal, and undo/redo of graph-plus-config snapshots. | UI | [frontend/src/App.tsx](frontend/src/App.tsx), [frontend/src/stores/graphStore.ts](frontend/src/stores/graphStore.ts), [frontend/src/components/nodes/NodeActions.tsx](frontend/src/components/nodes/NodeActions.tsx) |
+| REQ-GRAPH-06 | Validation state shall be propagated onto nodes, groups, and hardware containers so that graph elements visibly reflect errors and warnings. | UI | [frontend/src/App.tsx](frontend/src/App.tsx), [frontend/src/components/nodes/WarningBadge.tsx](frontend/src/components/nodes/WarningBadge.tsx), [frontend/src/utils/validationStatus.ts](frontend/src/utils/validationStatus.ts) |
 
-Importing a configuration file shall attempt to detect the board type.
+### Settings and Text Editing
 
-Selecting a config example shall support a fuzzy search option.
+| ID | Requirement | Surface | Primary implementation |
+| --- | --- | --- | --- |
+| REQ-EDIT-01 | Selecting graph elements shall open a schema-driven settings panel for editing section parameters, pin assignments, and node metadata. | UI | [frontend/src/components/SettingsPanel.tsx](frontend/src/components/SettingsPanel.tsx), [frontend/src/stores/configStore.ts](frontend/src/stores/configStore.ts), [backend/parser/config_schema.py](backend/parser/config_schema.py) |
+| REQ-EDIT-02 | The text editor shall display the active config file as exported backend text and support live validation, cross-file search, a section/parameter table of contents, and a reference viewer. | UI | [frontend/src/components/TextEditor.tsx](frontend/src/components/TextEditor.tsx), [frontend/src/services/api.ts](frontend/src/services/api.ts) |
+| REQ-EDIT-03 | The text editor shall support file-level operations including add blank config, add from example, rename, copy, delete, and switching between files in the loaded project. | UI | [frontend/src/components/TextEditor.tsx](frontend/src/components/TextEditor.tsx), [frontend/src/stores/configStore.ts](frontend/src/stores/configStore.ts) |
+| REQ-EDIT-04 | Applying text edits shall reparse the changed file through the backend, update config state, and rebuild the graph from the parsed project model. | UI | [frontend/src/components/TextEditor.tsx](frontend/src/components/TextEditor.tsx), [frontend/src/utils/graphBuilder.ts](frontend/src/utils/graphBuilder.ts), [backend/api/routes.py](backend/api/routes.py) |
+| REQ-EDIT-05 | Unknown-section warnings shall be acknowledgeable so the validator can suppress accepted custom/plugin sections on later parses. | UI | [frontend/src/components/TextEditor.tsx](frontend/src/components/TextEditor.tsx), [backend/api/routes.py](backend/api/routes.py), [backend/services/warning_acknowledgments.py](backend/services/warning_acknowledgments.py) |
 
-The WebUI shall have a graphical view of loaded configuration files for each board (such as the mainboards, toolhead boards, expander boards, usb accelerometers, the SBC, USB/CAN probes, or any other components).
+### Validation, Diff, and Export
 
-The graphical view shall have a unique configuration file for each hardware component, where the primary mainboard is defined as "printer.cfg". All other components shall be in a unique configuration file that are imported into printer.cfg.
+| ID | Requirement | Surface | Primary implementation |
+| --- | --- | --- | --- |
+| REQ-VAL-01 | The validator shall detect missing required parameters, invalid types, unknown sections/parameters, duplicate singleton sections, missing dependencies, and invalid MCU communication definitions. | UI | [backend/parser/validator.py](backend/parser/validator.py), [backend/parser/config_schema.py](backend/parser/config_schema.py) |
+| REQ-VAL-02 | Multi-file validation shall consider only files reachable from the active main config and shall distinguish cross-file hard errors from softer reused sub-component/feature warnings. | UI | [backend/parser/validator.py](backend/parser/validator.py), [backend/api/routes.py](backend/api/routes.py) |
+| REQ-VAL-03 | Pin validation shall support shared-pin exceptions already encoded by the validator and settings panel logic, including shared TMC UART pins and some shared bus wiring patterns. | UI | [backend/parser/validator.py](backend/parser/validator.py), [frontend/src/components/SettingsPanel.tsx](frontend/src/components/SettingsPanel.tsx) |
+| REQ-OUT-01 | The backend shall export a single config or multi-file project as `.cfg` text while preserving as much original formatting as possible. | UI | [frontend/src/components/dialogs/ExportDialog.tsx](frontend/src/components/dialogs/ExportDialog.tsx), [backend/api/routes.py](backend/api/routes.py), [backend/parser/config_writer.py](backend/parser/config_writer.py) |
+| REQ-OUT-02 | The frontend shall present diff views between original and current config text before export or apply workflows. | UI | [frontend/src/components/dialogs/DiffDialog.tsx](frontend/src/components/dialogs/DiffDialog.tsx), [frontend/src/components/dialogs/ExportDialog.tsx](frontend/src/components/dialogs/ExportDialog.tsx), [frontend/src/components/dialogs/ApplyDialog.tsx](frontend/src/components/dialogs/ApplyDialog.tsx) |
 
-### Graphical View
+### Native SBC Integration
 
-The graphical view shall have a generic outline representing the component type with the following outlines:
+| ID | Requirement | Surface | Primary implementation |
+| --- | --- | --- | --- |
+| REQ-NATIVE-01 | The backend shall detect native mode and expose the active config directory setting to the frontend. | Native UI | [frontend/src/stores/nativeStore.ts](frontend/src/stores/nativeStore.ts), [backend/api/native_routes.py](backend/api/native_routes.py), [backend/services/native_services.py](backend/services/native_services.py) |
+| REQ-NATIVE-02 | In native mode the UI shall be able to list and open `.cfg` files directly from the SBC config directory. | Native UI | [frontend/src/components/dialogs/OpenFromPiDialog.tsx](frontend/src/components/dialogs/OpenFromPiDialog.tsx), [backend/api/native_routes.py](backend/api/native_routes.py), [backend/services/native_services.py](backend/services/native_services.py) |
+| REQ-NATIVE-03 | In native mode the backend shall list USB serial, UART, and CAN devices and support CAN UUID queries. | Native UI | [frontend/src/stores/nativeStore.ts](frontend/src/stores/nativeStore.ts), [backend/api/native_routes.py](backend/api/native_routes.py), [backend/services/native_services.py](backend/services/native_services.py) |
+| REQ-NATIVE-04 | In native mode the UI shall be able to apply selected config files back to disk and then request a Klipper firmware restart. | Native UI | [frontend/src/components/dialogs/ApplyDialog.tsx](frontend/src/components/dialogs/ApplyDialog.tsx), [backend/api/native_routes.py](backend/api/native_routes.py), [backend/services/native_services.py](backend/services/native_services.py) |
+| REQ-NATIVE-05 | The UI shall support revert by reloading original imported text in browser mode and by re-reading disk state in native mode. | UI / Native UI | [frontend/src/components/dialogs/RevertDialog.tsx](frontend/src/components/dialogs/RevertDialog.tsx), [frontend/src/stores/configStore.ts](frontend/src/stores/configStore.ts) |
+| REQ-NATIVE-06 | The backend shall expose Klipper state and recent log errors through the Unix socket API when native mode is active. | Native UI | [backend/api/native_routes.py](backend/api/native_routes.py), [backend/services/native_services.py](backend/services/native_services.py) |
+| REQ-NATIVE-07 | The native backend shall persist UI layout and settings under the application state directory and restore them on reload. | Native UI | [frontend/src/App.tsx](frontend/src/App.tsx), [frontend/src/services/api.ts](frontend/src/services/api.ts), [backend/api/native_routes.py](backend/api/native_routes.py), [backend/services/native_services.py](backend/services/native_services.py) |
 
-- SBC (with optional MCU option)
-- Mainboard
-- Expander board
-- Toolhead board
-- Probe
-- Accelerometer
-- Other (generic square)
+### Firmware Tooling
 
-The graphical view shall have an add button that creates bubble tied to the hardware component outline with a trace that can assigned to different sub-components including the following:
+| ID | Requirement | Surface | Primary implementation |
+| --- | --- | --- | --- |
+| REQ-FW-01 | The UI shall expose firmware tooling for both Klipper and Katapult targets when native mode is active. | Native UI | [frontend/src/components/dialogs/FirmwareDialog.tsx](frontend/src/components/dialogs/FirmwareDialog.tsx), [backend/api/native_routes.py](backend/api/native_routes.py) |
+| REQ-FW-02 | The backend shall load current Kconfig state, expose editable fields, preview changes, and persist target `.config` assignments. | Native UI | [backend/api/native_routes.py](backend/api/native_routes.py), [backend/services/flash_targets.py](backend/services/flash_targets.py), [backend/services/klipper_firmware.py](backend/services/klipper_firmware.py) |
+| REQ-FW-03 | The backend shall build flash targets, run target-specific flash commands, and expose generated artifacts for download. | Native UI | [backend/api/native_routes.py](backend/api/native_routes.py), [backend/services/flash_targets.py](backend/services/flash_targets.py), [backend/services/klipper_firmware.py](backend/services/klipper_firmware.py) |
+| REQ-FW-04 | The firmware workflow shall surface flash-device candidates such as USB serial, UART, DFU VID:PID, and RP2040 mass-storage shortcuts when the target supports them. | Native UI | [backend/services/flash_targets.py](backend/services/flash_targets.py), [frontend/src/components/dialogs/FirmwareDialog.tsx](frontend/src/components/dialogs/FirmwareDialog.tsx) |
 
-- MCU
-- Printer
-- Steppers
-- Stepper Drivers
-- Extruders
-- Heaters
-- Fans
-- Endstops
-- Motors
-- Temperature Sensors
-- Servos
-- Probes
-- LEDs
-- Displays
-- Filament Sensors
-- Anything else available but not listed here
+### Macro Designer
 
-The graphical view shall allow you to configure features under those hardware components and sub-components including:
+| ID | Requirement | Surface | Primary implementation |
+| --- | --- | --- | --- |
+| REQ-MACRO-01 | The UI shall provide a macro designer for creating, updating, duplicating, and deleting macro drafts and no-go zones. | UI | [frontend/src/components/dialogs/MacroDesignerDialog.tsx](frontend/src/components/dialogs/MacroDesignerDialog.tsx), [frontend/src/stores/macroDesignerStore.ts](frontend/src/stores/macroDesignerStore.ts) |
+| REQ-MACRO-02 | The macro designer shall derive macros from loaded config files, normalize macro content for config output, and simulate motion/toolhead state. | UI | [frontend/src/components/dialogs/MacroDesignerDialog.tsx](frontend/src/components/dialogs/MacroDesignerDialog.tsx), [frontend/src/utils/macroDesigner.ts](frontend/src/utils/macroDesigner.ts), [frontend/src/utils/gcodeSimulator.ts](frontend/src/utils/gcodeSimulator.ts) |
+| REQ-MACRO-03 | Macro designer state shall persist in local storage and, in native mode, be included in saved layout payloads. | UI / Native UI | [frontend/src/stores/macroDesignerStore.ts](frontend/src/stores/macroDesignerStore.ts), [frontend/src/App.tsx](frontend/src/App.tsx), [backend/api/native_routes.py](backend/api/native_routes.py) |
 
-- Input Shaper
-- Bed Mesh
-- Quad Gantry Level
-- Z Tilt
-- Screws Tilt Adjust
-- Bed Screws
-- Bed Tilt
-- Resonance Tester
-- Firmware Retraction
-- pause_resume
-- force_move
-- virtual sdcard
-- idle timeout
-- gcode macro
-- homing override
-- endstop phase
-- safe z home
-- Anything else availble but not listed here.
+### Backend-only Project Persistence
 
-The features shall be under their relevant component and unavailable if lacking the required hardware.
+| ID | Requirement | Surface | Primary implementation |
+| --- | --- | --- | --- |
+| REQ-API-01 | The backend shall support save/list/load project endpoints for config files plus graph layout, even though the current primary frontend does not call them. | API | [backend/api/routes.py](backend/api/routes.py), [backend/models/config_models.py](backend/models/config_models.py), [backend/projects](backend/projects) |
 
-Configuration settings are shown when the user selects a bubble.
+## Non-Functional and Operational Constraints
 
-Settings are shown as drop down if a fixed option or text boxes if an number defined value. 
+- The parser/exporter path is the single source of truth for config text fidelity. Both the graph workspace and the text editor ultimately round-trip through backend parsing and export logic.
+- Native filesystem, device, Klipper socket, and firmware features are gated by native mode and return HTTP 501 outside that environment.
+- The frontend auto-generates reference assets before `dev` and `build` so example search and static schema fallbacks remain available.
+- The current repository does not implement authentication, authorization, or multi-user collaboration.
 
-Settings that are assigned by default are hidden. Settings that must be defined are shown and blank by default if not yet assigned. The user can add those hidden values with an add button and select and define them with the default shown. Setting values can only be defined once.
+## Current Gaps and Notes
 
-All components shall allow the user to define an optional title.
-
-The exported configuration files shall use the defined name with the exception of printer.cfg (which must be assigned to at least one major hardware component).
-
-All bubbles shall have names the defaults to the component but can be renamed.
-
-All major hardware component image outline, sub-component bubbles, and feature bubbles shall have a default symbol/image. The symbol can be replaced with a user defined image with an import image button.
-
-All hardware components, sub-components, and features shall be able to shown as its traditional text format with a button to switch the view.
-
-Errors in the configuration shall be highlighted in red.
-
-#### Connecting Components
-
-The graphical view shall allow the user to create, move, and delte trace lines between connecting components, sub-components, and features. 
-
-Major components have communications trace lines with options for USB, CANBus, or UART that must be tied to the SBC.
-
-Major components have outbound configuration trace lines connected to other Major components that define which document they are imported to. Printer.cfg does not have an output configuration trace line as it is the central configuration that all others must point to directly or through another component.
-
-Sub-components have outbound trace lines that must be connected to a major component. Note the SBC does not count as a major componet unless defined as an MCU.
-
-Features have an output trace line that must be connected to a major component or sub-component.
-
-All major hardware components must have a communucations trace to the SBC. 
-
-All hardware sub-component must have a trace back to a major hardware component.
-
-All features must have a trace back to a major component or sub-component.
-
-Communications lines are color coded by type and shown as a dashed line.
-
-Configuration lines are solid lines color coded by major hardware component type.
-
-### Specifications
+- Project save/load endpoints exist in the backend but are not currently wired to the main toolbar or startup workflow.
+- Automated test coverage is strongest for parser, validator, save-config, and firmware route/service behavior. UI interaction paths and physical hardware flashing still require manual functional verification.

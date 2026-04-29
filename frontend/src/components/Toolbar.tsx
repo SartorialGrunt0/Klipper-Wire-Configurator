@@ -85,30 +85,8 @@ export default function Toolbar({
         </button>
       )}
 
-      {/* + Component */}
-      {onToggleAddMenu && (
-        <button
-          onClick={onToggleAddMenu}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] transition-colors"
-        >
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-            <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
-          </svg>
-          Component
-        </button>
-      )}
-
-      {onOpenMacroDesigner && (
-        <button
-          onClick={onOpenMacroDesigner}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] transition-colors"
-        >
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-            <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
-          </svg>
-          Macro
-        </button>
-      )}
+      {/* Divider */}
+      <div className="w-px h-5 bg-[var(--color-bg-tertiary)]" />
 
       {/* Export */}
       <button
@@ -131,18 +109,6 @@ export default function Toolbar({
             <path d="M3 8l3.5 3.5L13 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
           Save
-        </button>
-      )}
-
-      {isNative && (
-        <button
-          onClick={() => setShowFlash(true)}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] transition-colors"
-        >
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-            <path d="M3 5.5h10M5 2.5h6M5 8.5h6M4.5 11.5h7M4 14h8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
-          </svg>
-          Flash
         </button>
       )}
 
@@ -170,6 +136,49 @@ export default function Toolbar({
             <path d="M4 3v10M8 3v10M12 6l-4 4M12 10l-4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
           Diff
+        </button>
+      )}
+
+      {/* Divider */}
+      <div className="w-px h-5 bg-[var(--color-bg-tertiary)]" />
+
+      {isNative && (
+        <button
+          onClick={() => setShowFlash(true)}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] transition-colors"
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <path d="M3 5.5h10M5 2.5h6M5 8.5h6M4.5 11.5h7M4 14h8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+          </svg>
+          Flash
+        </button>
+      )}
+
+      {/* Divider */}
+      <div className="w-px h-5 bg-[var(--color-bg-tertiary)]" />
+      
+      {/* + Component */}
+      {onToggleAddMenu && (
+        <button
+          onClick={onToggleAddMenu}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] transition-colors"
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+          </svg>
+          Component
+        </button>
+      )}
+
+      {onOpenMacroDesigner && (
+        <button
+          onClick={onOpenMacroDesigner}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] transition-colors"
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+          </svg>
+          Macro
         </button>
       )}
 
