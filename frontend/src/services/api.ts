@@ -382,6 +382,11 @@ export interface NativeFlashArtifact {
   modified: number;
 }
 
+export interface NativeFlashDeviceCandidate {
+  value: string;
+  label: string;
+}
+
 export interface NativeFlashChoiceOption {
   symbol: string;
   prompt: string;
@@ -417,6 +422,7 @@ export interface NativeFlashState {
   flash_device_required: boolean;
   flash_device_placeholder: string;
   default_flash_device: string;
+  flash_device_candidates: NativeFlashDeviceCandidate[];
   flash_help: string;
 }
 

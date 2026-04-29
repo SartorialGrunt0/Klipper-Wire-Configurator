@@ -6,13 +6,14 @@ import getpass
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from services.native_services import load_settings, save_settings
+from services.native_services import load_settings, save_settings, list_uart_devices, list_usb_serial_devices
 
 _SUPPORTED_TARGETS = {"klipper", "katapult"}
 
@@ -76,6 +77,12 @@ _TRISTATE_VALUE_NAMES = {
     1: "m",
     2: "y",
 }
+
+_DFU_UTIL_USB_ID_RE = re.compile(r"\[([0-9a-fA-F]{4}:[0-9a-fA-F]{4})\]")
+_DFU_UTIL_NAME_RE = re.compile(r'name="([^"]+)"')
+_DFU_UTIL_SERIAL_RE = re.compile(r'serial="([^"]+)"')
+_LSUSB_ENTRY_RE = re.compile(r"ID\s+([0-9a-fA-F]{4}:[0-9a-fA-F]{4})\s+(.+)$")
+_DFU_HINT_RE = re.compile(r"\b(dfu|bootloader)\b", re.IGNORECASE)
 
 
 def _require_supported_target(target: str) -> str:
@@ -410,6 +417,156 @@ def _current_symbol_value(kconf, symbol_name: str) -> str:
     return getattr(symbol, "str_value", "n")
 
 
+def _enabled_machine_symbols(kconf) -> set[str]:
+    candidates = (
+        "MACH_RPXXXX",
+        "MACH_ATSAM",
+        "MACH_ATSAMD",
+        "MACH_AVR",
+        "MACH_LPC176X",
+        "MACH_STM32",
+    )
+    return {symbol_name for symbol_name in candidates if _current_symbol_value(kconf, symbol_name) == "y"}
+
+
+def _append_flash_device_candidate(
+    candidates: list[dict[str, str]],
+    seen_values: set[str],
+    value: str,
+    label: str,
+) -> None:
+    normalized_value = value.strip()
+    if not normalized_value or normalized_value in seen_values:
+        return
+    seen_values.add(normalized_value)
+    candidates.append({
+        "value": normalized_value,
+        "label": label.strip() or normalized_value,
+    })
+
+
+def _serial_flash_device_candidates() -> list[dict[str, str]]:
+    candidates: list[dict[str, str]] = []
+    seen_values: set[str] = set()
+    represented_paths: set[str] = set()
+
+    for device in list_usb_serial_devices():
+        device_path = str(device.get("path", "")).strip()
+        device_value = str(device.get("by_id") or device_path).strip()
+        description = str(device.get("description") or Path(device_value or device_path).name).strip()
+        if device_path:
+            represented_paths.add(device_path)
+        label = f"USB serial: {description}"
+        if device_path and device_path != device_value:
+            label = f"{label} ({device_path})"
+        _append_flash_device_candidate(candidates, seen_values, device_value, label)
+
+    for device in list_uart_devices():
+        device_path = str(device.get("path", "")).strip()
+        if not device_path or device_path in represented_paths:
+            continue
+        description = str(device.get("description") or Path(device_path).name).strip()
+        _append_flash_device_candidate(candidates, seen_values, device_path, f"Serial: {description}")
+
+    return candidates
+
+
+def _run_optional_text_command(command: list[str], timeout: int = 5) -> str:
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return ""
+    return "\n".join(chunk for chunk in (completed.stdout, completed.stderr) if chunk).strip()
+
+
+def _parse_dfu_util_flash_candidates(output: str) -> list[dict[str, str]]:
+    candidates: list[dict[str, str]] = []
+    seen_values: set[str] = set()
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        identifier_match = _DFU_UTIL_USB_ID_RE.search(line)
+        if identifier_match is None:
+            continue
+
+        value = identifier_match.group(1).lower()
+        label = f"DFU device: {value}"
+        name_match = _DFU_UTIL_NAME_RE.search(line)
+        serial_match = _DFU_UTIL_SERIAL_RE.search(line)
+        details = []
+        if name_match is not None and name_match.group(1).strip():
+            details.append(name_match.group(1).strip())
+        if serial_match is not None and serial_match.group(1).strip():
+            details.append(f"serial {serial_match.group(1).strip()}")
+        if details:
+            label = f"{label} ({', '.join(details)})"
+
+        _append_flash_device_candidate(candidates, seen_values, value, label)
+    return candidates
+
+
+def _parse_lsusb_flash_candidates(output: str) -> list[dict[str, str]]:
+    candidates: list[dict[str, str]] = []
+    seen_values: set[str] = set()
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = _LSUSB_ENTRY_RE.search(line)
+        if match is None:
+            continue
+
+        value = match.group(1).lower()
+        description = match.group(2).strip()
+        if description and not _DFU_HINT_RE.search(description):
+            continue
+
+        label = f"USB DFU candidate: {value}"
+        if description:
+            label = f"{label} ({description})"
+        _append_flash_device_candidate(candidates, seen_values, value, label)
+    return candidates
+
+
+def _dfu_flash_device_candidates() -> list[dict[str, str]]:
+    candidates = _parse_dfu_util_flash_candidates(_run_optional_text_command(["dfu-util", "-l"]))
+    if candidates:
+        return candidates
+    return _parse_lsusb_flash_candidates(_run_optional_text_command(["lsusb"]))
+
+
+def _flash_device_candidates(target: str, kconf) -> list[dict[str, str]]:
+    normalized_target = _require_supported_target(target)
+    machine_symbols = _enabled_machine_symbols(kconf)
+    candidates: list[dict[str, str]] = []
+    seen_values: set[str] = set()
+
+    if normalized_target == "klipper" and "MACH_RPXXXX" in machine_symbols:
+        _append_flash_device_candidate(
+            candidates,
+            seen_values,
+            "first",
+            "Auto-detect the first RP2040 mass-storage target",
+        )
+
+    if "MACH_STM32" in machine_symbols:
+        for candidate in _dfu_flash_device_candidates():
+            _append_flash_device_candidate(candidates, seen_values, candidate["value"], candidate["label"])
+
+    if machine_symbols & {"MACH_ATSAM", "MACH_ATSAMD", "MACH_AVR", "MACH_LPC176X", "MACH_STM32"}:
+        for candidate in _serial_flash_device_candidates():
+            _append_flash_device_candidate(candidates, seen_values, candidate["value"], candidate["label"])
+
+    return candidates
+
+
 def _klipper_flash_capabilities(kconf) -> dict[str, Any]:
     if _current_symbol_value(kconf, "MACH_RPXXXX") == "y":
         return {
@@ -456,7 +613,7 @@ def _katapult_flash_capabilities(kconf) -> dict[str, Any]:
             "device_required": True,
             "device_placeholder": "USB VID:PID for dfu-util, e.g. 0483:df11",
             "default_device": "",
-            "help": "Runs `make flash NOSUDO=1 FLASH_DEVICE=...` using Katapult's STM32 DFU flow.",
+            "help": "Runs `make flash NOSUDO=1 FLASH_DEVICE=...` using Katapult's STM32 DFU flow or a serial flashtool target when a serial device path is selected.",
         }
     if _current_symbol_value(kconf, "MACH_RPXXXX") == "y":
         return {
@@ -503,6 +660,7 @@ def _empty_flash_target_state(target: str, requested_path: str | None, error: st
         "flash_device_required": False,
         "flash_device_placeholder": "",
         "default_flash_device": "",
+        "flash_device_candidates": [],
         "flash_help": "",
     }
 
@@ -584,6 +742,7 @@ def get_flash_target_state(
         "flash_device_required": flash_capabilities["device_required"],
         "flash_device_placeholder": flash_capabilities["device_placeholder"],
         "default_flash_device": flash_capabilities["default_device"],
+        "flash_device_candidates": _flash_device_candidates(normalized_target, kconf),
         "flash_help": flash_capabilities["help"],
     }
     if issues:

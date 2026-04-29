@@ -610,12 +610,15 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
   const flashLabel = panel.status === 'flashing' ? `Flash${flashDots}` : 'Flash';
   const loadLabel = panel.status === 'loading' ? 'Loading...' : 'Load';
   const saveLabel = panel.status === 'saving' ? 'Saving...' : 'Save .config';
+  const flashDeviceCandidates = panel.flashState?.flash_device_candidates || [];
+  const flashDeviceListId = `flash-device-options-${activeTarget}`;
   const showFlashDevice = Boolean(
     panel.flashState?.flash_supported
       && (
         panel.flashState.flash_device_required
         || panel.flashState.flash_device_placeholder
         || panel.flashState.default_flash_device
+        || flashDeviceCandidates.length > 0
       ),
   );
 
@@ -697,10 +700,52 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                 <input
                   type="text"
                   value={panel.flashDevice}
+                  list={flashDeviceCandidates.length > 0 ? flashDeviceListId : undefined}
                   onChange={(event) => updatePanel(activeTarget, (current) => ({ ...current, flashDevice: event.target.value }))}
                   placeholder={panel.flashState?.flash_device_placeholder || 'Optional flash device override'}
                   className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-3 py-2 text-xs font-mono text-[var(--color-text-primary)]"
                 />
+                {flashDeviceCandidates.length > 0 && (
+                  <>
+                    <datalist id={flashDeviceListId}>
+                      {flashDeviceCandidates.map((candidate) => (
+                        <option
+                          key={`${candidate.value}:${candidate.label}`}
+                          value={candidate.value}
+                          label={candidate.label}
+                        />
+                      ))}
+                    </datalist>
+                    <div className="mt-2 space-y-2">
+                      <p className="text-[11px] text-[var(--color-text-secondary)]">
+                        Detected candidates from USB and serial probing.
+                      </p>
+                      <div className="flex flex-wrap gap-2">
+                        {flashDeviceCandidates.map((candidate) => {
+                          const selected = panel.flashDevice === candidate.value;
+                          return (
+                            <button
+                              key={`${candidate.value}:${candidate.label}`}
+                              type="button"
+                              title={candidate.label}
+                              onClick={() => updatePanel(activeTarget, (current) => ({ ...current, flashDevice: candidate.value }))}
+                              className={`max-w-full rounded-lg border px-3 py-2 text-left transition-colors ${
+                                selected
+                                  ? 'border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-text-primary)]'
+                                  : 'border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)]/70 text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-text-primary)]'
+                              }`}
+                            >
+                              <p className="truncate text-[11px] font-semibold text-inherit">{candidate.value}</p>
+                              {candidate.label !== candidate.value && (
+                                <p className="mt-1 line-clamp-2 text-[10px] text-inherit/80">{candidate.label}</p>
+                              )}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </>
+                )}
               </div>
             )}
 
