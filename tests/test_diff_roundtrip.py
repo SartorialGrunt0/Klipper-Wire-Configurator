@@ -1,11 +1,13 @@
 """Test the full diff roundtrip with Trident backup printer.cfg"""
-import sys, json
-sys.path.insert(0, 'backend')
+import sys
+import json
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'backend'))
 from parser.config_parser import parse_config
 from parser.config_writer import smart_export, _sections_match
 from models.config_models import ConfigUpdate, SectionUpdate, ParamUpdate
 from api.routes import _config_update_to_config_file
-from pathlib import Path
 
 # Read Trident printer.cfg with preserved CRLF (as browser upload would)
 raw_bytes = Path('reference/Trident_backup/printer_data/config/printer.cfg').read_bytes()
@@ -19,7 +21,7 @@ data = json.loads(json.dumps(config.to_dict()))
 
 # originalTexts in the frontend comes from config.raw_text (after parse_config normalization)
 original_text = data['raw_text']
-print(f"original_text (from raw_text): {len(original_text)} chars, has \\r: {chr(13) in original_text}")
+print(f"original_text (from raw_text): {len(original_text)} chars, has \\\r: {chr(13) in original_text}")
 print(f"Sections: {len(data['sections'])}")
 
 # Step 1: Parse (simulating import endpoint)
