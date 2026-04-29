@@ -97,3 +97,28 @@ def test_get_flash_target_state_surfaces_dfu_candidates(monkeypatch, tmp_path):
     assert state['flash_device_candidates'] == [
         {'value': '0483:df11', 'label': 'DFU device: 0483:df11 (STM32 DFU mode)'},
     ]
+
+
+def test_get_flash_target_state_surfaces_rp2040_candidates_for_katapult(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        'services.flash_targets.resolve_flash_target_checkout',
+        lambda target, checkout_path=None: (tmp_path, None),
+    )
+    monkeypatch.setattr(
+        'services.flash_targets._load_target_kconfig_state',
+        lambda target, checkout_path: (object(), _FakeKconf(MACH_RPXXXX='y'), tmp_path / '.config'),
+    )
+    monkeypatch.setattr('services.flash_targets._serialize_kconfig_fields', lambda kconfiglib, kconf: [])
+    monkeypatch.setattr('services.flash_targets._dfu_flash_device_candidates', lambda: [])
+    monkeypatch.setattr('services.flash_targets.list_usb_serial_devices', lambda: [])
+    monkeypatch.setattr('services.flash_targets.list_uart_devices', lambda: [])
+
+    state = get_flash_target_state('katapult', str(tmp_path))
+
+    assert state['flash_supported'] is True
+    assert state['flash_device_candidates'] == [
+        {
+            'value': 'first',
+            'label': 'Auto-detect the first RP2040 mass-storage target',
+        },
+    ]

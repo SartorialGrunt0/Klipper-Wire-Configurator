@@ -548,7 +548,7 @@ def _flash_device_candidates(target: str, kconf) -> list[dict[str, str]]:
     candidates: list[dict[str, str]] = []
     seen_values: set[str] = set()
 
-    if normalized_target == "klipper" and "MACH_RPXXXX" in machine_symbols:
+    if normalized_target in {"klipper", "katapult"} and "MACH_RPXXXX" in machine_symbols:
         _append_flash_device_candidate(
             candidates,
             seen_values,

@@ -33,7 +33,6 @@ interface FlashPanelState {
 
 const TARGETS: FlashTargetKey[] = ['klipper', 'katapult'];
 
-const CUSTOM_FLASH_DEVICE_VALUE = '__custom__';
 const FLASH_WORKFLOW_HELP = 'Changes update the visible menuconfig fields immediately. Save writes the active .config file. Build runs make olddefconfig followed by make. Flash runs make flash with NOSUDO=1 and uses the flash device field when the selected target requires one.';
 const ARTIFACTS_HELP = 'Generated files stay on the SBC under the active out directory and can also be downloaded directly from here.';
 const COMMAND_LOG_HELP = 'The latest output from the most recent build or flash command.';
@@ -710,14 +709,9 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
   const flashLabel = panel.status === 'flashing' ? `Flash${flashDots}` : 'Flash';
   const loadLabel = panel.status === 'loading' ? 'Loading...' : 'Load';
   const saveLabel = panel.status === 'saving' ? 'Saving...' : 'Save .config';
+  const trimmedFlashDevice = panel.flashDevice.trim();
   const flashDeviceCandidates = panel.flashState?.flash_device_candidates || [];
   const selectedFlashDeviceCandidate = flashDeviceCandidates.find((candidate) => candidate.value === panel.flashDevice) || null;
-  const flashDeviceSelectValue = flashDeviceCandidates.length === 0
-    ? ''
-    : panel.flashDevice
-      ? (selectedFlashDeviceCandidate ? panel.flashDevice : CUSTOM_FLASH_DEVICE_VALUE)
-      : '';
-  const showCustomFlashDeviceInput = flashDeviceCandidates.length === 0 || flashDeviceSelectValue === CUSTOM_FLASH_DEVICE_VALUE;
   const showFlashDevice = Boolean(
     panel.flashState?.flash_supported
       && (
@@ -726,6 +720,13 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
         || panel.flashState.default_flash_device
         || flashDeviceCandidates.length > 0
       ),
+  );
+  const flashDeviceRequired = Boolean(panel.flashState?.flash_device_required);
+  const flashButtonDisabled = Boolean(
+    actionBusy
+      || !panel.flashState?.available
+      || !panel.flashState?.flash_supported
+      || (flashDeviceRequired && !trimmedFlashDevice),
   );
 
   return (
@@ -806,30 +807,29 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                 <label className="mb-1 block text-xs font-medium text-[var(--color-text-secondary)]">
                   Flash Device{panel.flashState?.flash_device_required ? ' *' : ''}
                 </label>
+                <input
+                  type="text"
+                  value={panel.flashDevice}
+                  onChange={(event) => updatePanel(activeTarget, (current) => ({ ...current, flashDevice: event.target.value }))}
+                  placeholder={panel.flashState?.flash_device_placeholder || 'Optional flash device override'}
+                  className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-3 py-2 text-xs font-mono text-[var(--color-text-primary)]"
+                />
                 {flashDeviceCandidates.length > 0 && (
                   <select
-                    value={flashDeviceSelectValue}
+                    value={selectedFlashDeviceCandidate?.value || ''}
                     onChange={(event) => {
                       const nextValue = event.target.value;
-                      updatePanel(activeTarget, (current) => {
-                        if (nextValue === CUSTOM_FLASH_DEVICE_VALUE) {
-                          const hasKnownSelection = flashDeviceCandidates.some((candidate) => candidate.value === current.flashDevice);
-                          return {
-                            ...current,
-                            flashDevice: hasKnownSelection ? '' : current.flashDevice,
-                          };
-                        }
-                        return {
-                          ...current,
-                          flashDevice: nextValue,
-                        };
-                      });
+                      if (!nextValue) {
+                        return;
+                      }
+                      updatePanel(activeTarget, (current) => ({
+                        ...current,
+                        flashDevice: nextValue,
+                      }));
                     }}
-                    className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-3 py-2 text-xs text-[var(--color-text-primary)]"
+                    className="mt-2 w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-3 py-2 text-xs text-[var(--color-text-primary)]"
                   >
-                    <option value="">
-                      {panel.flashState?.flash_device_required ? 'Select a flash device' : 'No flash device override'}
-                    </option>
+                    <option value="">Detected flash devices</option>
                     {flashDeviceCandidates.map((candidate) => (
                       <option
                         key={`${candidate.value}:${candidate.label}`}
@@ -838,27 +838,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                         {candidate.value}
                       </option>
                     ))}
-                    <option value={CUSTOM_FLASH_DEVICE_VALUE}>Custom value...</option>
                   </select>
-                )}
-                {selectedFlashDeviceCandidate && selectedFlashDeviceCandidate.label !== selectedFlashDeviceCandidate.value && (
-                  <p className="mt-2 text-[11px] text-[var(--color-text-secondary)]">
-                    {selectedFlashDeviceCandidate.label}
-                  </p>
-                )}
-                {showCustomFlashDeviceInput && (
-                  <input
-                    type="text"
-                    value={panel.flashDevice}
-                    onChange={(event) => updatePanel(activeTarget, (current) => ({ ...current, flashDevice: event.target.value }))}
-                    placeholder={panel.flashState?.flash_device_placeholder || 'Optional flash device override'}
-                    className={`w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-3 py-2 text-xs font-mono text-[var(--color-text-primary)] ${flashDeviceCandidates.length > 0 ? 'mt-2' : ''}`}
-                  />
-                )}
-                {flashDeviceCandidates.length > 0 && !selectedFlashDeviceCandidate && !showCustomFlashDeviceInput && (
-                  <p className="mt-2 text-[11px] text-[var(--color-text-secondary)]">
-                    Select a detected device or switch to a custom value.
-                  </p>
                 )}
               </div>
             )}
@@ -881,14 +861,14 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
               <button
                 onClick={() => void handleBuild(activeTarget)}
                 disabled={actionBusy || !panel.flashState?.available}
-                className="rounded-md bg-amber-500 px-4 py-2 text-xs font-semibold text-black transition-colors hover:bg-amber-400 disabled:opacity-50"
+                className="inline-flex min-w-[5.75rem] justify-center rounded-md bg-amber-500 px-4 py-2 text-xs font-semibold text-black transition-colors hover:bg-amber-400 disabled:opacity-50"
               >
                 {buildLabel}
               </button>
               <button
                 onClick={() => void handleFlash(activeTarget)}
-                disabled={actionBusy || !panel.flashState?.available || !panel.flashState?.flash_supported}
-                className="rounded-md bg-emerald-500 px-4 py-2 text-xs font-semibold text-black transition-colors hover:bg-emerald-400 disabled:opacity-50"
+                disabled={flashButtonDisabled}
+                className="inline-flex min-w-[5.75rem] justify-center rounded-md bg-emerald-500 px-4 py-2 text-xs font-semibold text-black transition-colors hover:bg-emerald-400 disabled:bg-[var(--color-bg-tertiary)] disabled:text-[var(--color-text-secondary)] disabled:hover:bg-[var(--color-bg-tertiary)]"
               >
                 {flashLabel}
               </button>
