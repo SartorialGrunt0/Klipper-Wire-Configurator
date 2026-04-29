@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import * as api from '../../services/api';
 import type {
   FlashTargetKey,
@@ -31,6 +32,19 @@ interface FlashPanelState {
 }
 
 const TARGETS: FlashTargetKey[] = ['klipper', 'katapult'];
+
+const CUSTOM_FLASH_DEVICE_VALUE = '__custom__';
+const FLASH_WORKFLOW_HELP = 'Changes update the visible menuconfig fields immediately. Save writes the active .config file. Build runs make olddefconfig followed by make. Flash runs make flash with NOSUDO=1 and uses the flash device field when the selected target requires one.';
+const ARTIFACTS_HELP = 'Generated files stay on the SBC under the active out directory and can also be downloaded directly from here.';
+const COMMAND_LOG_HELP = 'The latest output from the most recent build or flash command.';
+const HELP_POPOVER_WIDTH = 288;
+const HELP_POPOVER_MARGIN = 12;
+const HELP_POPOVER_OFFSET = 8;
+
+interface HelpPopoverPosition {
+  top: number;
+  left: number;
+}
 
 function cloneField(field: NativeFlashField): NativeFlashField {
   return {
@@ -246,25 +260,111 @@ function useAnimatedDots(active: boolean): string {
 
 function HelpPopover({ text }: { text: string }) {
   const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState<HelpPopoverPosition | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const popoverRef = useRef<HTMLDivElement | null>(null);
+
+  function updatePosition() {
+    const trigger = triggerRef.current;
+    if (!open || !trigger) {
+      return;
+    }
+
+    const rect = trigger.getBoundingClientRect();
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    const popoverWidth = Math.min(
+      popoverRef.current?.offsetWidth || HELP_POPOVER_WIDTH,
+      viewportWidth - (HELP_POPOVER_MARGIN * 2),
+    );
+    const popoverHeight = popoverRef.current?.offsetHeight || 120;
+    const left = Math.max(
+      HELP_POPOVER_MARGIN,
+      Math.min(rect.right - popoverWidth, viewportWidth - popoverWidth - HELP_POPOVER_MARGIN),
+    );
+    const fitsBelow = rect.bottom + HELP_POPOVER_OFFSET + popoverHeight <= viewportHeight - HELP_POPOVER_MARGIN;
+    const top = fitsBelow
+      ? rect.bottom + HELP_POPOVER_OFFSET
+      : Math.max(HELP_POPOVER_MARGIN, rect.top - popoverHeight - HELP_POPOVER_OFFSET);
+
+    setPosition({ top, left });
+  }
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setPosition(null);
+      return;
+    }
+    updatePosition();
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) {
+      return undefined;
+    }
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) {
+        setOpen(false);
+        return;
+      }
+      if (triggerRef.current?.contains(target) || popoverRef.current?.contains(target)) {
+        return;
+      }
+      setOpen(false);
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setOpen(false);
+      }
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('scroll', updatePosition, true);
+    window.addEventListener('resize', updatePosition);
+
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+      document.removeEventListener('scroll', updatePosition, true);
+      window.removeEventListener('resize', updatePosition);
+    };
+  }, [open]);
 
   if (!text) {
     return null;
   }
 
   return (
-    <div className="relative shrink-0">
+    <div className="shrink-0">
       <button
+        ref={triggerRef}
         type="button"
         onClick={() => setOpen((value) => !value)}
         className="flex h-5 w-5 items-center justify-center rounded-full border border-[var(--color-bg-tertiary)] text-[10px] font-semibold text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-text-primary)] transition-colors"
         aria-label="Show option help"
+        aria-expanded={open}
       >
         i
       </button>
-      {open && (
-        <div className="absolute right-0 top-7 z-20 w-72 rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] p-3 shadow-xl">
+      {open && createPortal(
+        <div
+          ref={popoverRef}
+          className="fixed rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] p-3 shadow-2xl"
+          style={{
+            top: position?.top ?? 0,
+            left: position?.left ?? HELP_POPOVER_MARGIN,
+            width: `min(18rem, calc(100vw - ${HELP_POPOVER_MARGIN * 2}px))`,
+            visibility: position ? 'visible' : 'hidden',
+            zIndex: 80,
+          }}
+        >
           <p className="text-xs leading-5 whitespace-pre-wrap text-[var(--color-text-secondary)]">{text}</p>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
@@ -611,7 +711,13 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
   const loadLabel = panel.status === 'loading' ? 'Loading...' : 'Load';
   const saveLabel = panel.status === 'saving' ? 'Saving...' : 'Save .config';
   const flashDeviceCandidates = panel.flashState?.flash_device_candidates || [];
-  const flashDeviceListId = `flash-device-options-${activeTarget}`;
+  const selectedFlashDeviceCandidate = flashDeviceCandidates.find((candidate) => candidate.value === panel.flashDevice) || null;
+  const flashDeviceSelectValue = flashDeviceCandidates.length === 0
+    ? ''
+    : panel.flashDevice
+      ? (selectedFlashDeviceCandidate ? panel.flashDevice : CUSTOM_FLASH_DEVICE_VALUE)
+      : '';
+  const showCustomFlashDeviceInput = flashDeviceCandidates.length === 0 || flashDeviceSelectValue === CUSTOM_FLASH_DEVICE_VALUE;
   const showFlashDevice = Boolean(
     panel.flashState?.flash_supported
       && (
@@ -630,7 +736,10 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
       >
         <div className="flex items-start justify-between border-b border-[var(--color-bg-tertiary)] px-4 py-4">
           <div>
-            <h2 className="text-base font-semibold text-[var(--color-text-primary)]">Flash</h2>
+            <div className="flex items-center gap-2">
+              <h2 className="text-base font-semibold text-[var(--color-text-primary)]">Flash</h2>
+              <HelpPopover text={FLASH_WORKFLOW_HELP} />
+            </div>
             <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">
               Preview menuconfig changes live, save the active .config, build firmware locally, and run make flash when the target supports it.
             </p>
@@ -697,54 +806,59 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                 <label className="mb-1 block text-xs font-medium text-[var(--color-text-secondary)]">
                   Flash Device{panel.flashState?.flash_device_required ? ' *' : ''}
                 </label>
-                <input
-                  type="text"
-                  value={panel.flashDevice}
-                  list={flashDeviceCandidates.length > 0 ? flashDeviceListId : undefined}
-                  onChange={(event) => updatePanel(activeTarget, (current) => ({ ...current, flashDevice: event.target.value }))}
-                  placeholder={panel.flashState?.flash_device_placeholder || 'Optional flash device override'}
-                  className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-3 py-2 text-xs font-mono text-[var(--color-text-primary)]"
-                />
                 {flashDeviceCandidates.length > 0 && (
-                  <>
-                    <datalist id={flashDeviceListId}>
-                      {flashDeviceCandidates.map((candidate) => (
-                        <option
-                          key={`${candidate.value}:${candidate.label}`}
-                          value={candidate.value}
-                          label={candidate.label}
-                        />
-                      ))}
-                    </datalist>
-                    <div className="mt-2 space-y-2">
-                      <p className="text-[11px] text-[var(--color-text-secondary)]">
-                        Detected candidates from USB and serial probing.
-                      </p>
-                      <div className="flex flex-wrap gap-2">
-                        {flashDeviceCandidates.map((candidate) => {
-                          const selected = panel.flashDevice === candidate.value;
-                          return (
-                            <button
-                              key={`${candidate.value}:${candidate.label}`}
-                              type="button"
-                              title={candidate.label}
-                              onClick={() => updatePanel(activeTarget, (current) => ({ ...current, flashDevice: candidate.value }))}
-                              className={`max-w-full rounded-lg border px-3 py-2 text-left transition-colors ${
-                                selected
-                                  ? 'border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-text-primary)]'
-                                  : 'border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)]/70 text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-text-primary)]'
-                              }`}
-                            >
-                              <p className="truncate text-[11px] font-semibold text-inherit">{candidate.value}</p>
-                              {candidate.label !== candidate.value && (
-                                <p className="mt-1 line-clamp-2 text-[10px] text-inherit/80">{candidate.label}</p>
-                              )}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  </>
+                  <select
+                    value={flashDeviceSelectValue}
+                    onChange={(event) => {
+                      const nextValue = event.target.value;
+                      updatePanel(activeTarget, (current) => {
+                        if (nextValue === CUSTOM_FLASH_DEVICE_VALUE) {
+                          const hasKnownSelection = flashDeviceCandidates.some((candidate) => candidate.value === current.flashDevice);
+                          return {
+                            ...current,
+                            flashDevice: hasKnownSelection ? '' : current.flashDevice,
+                          };
+                        }
+                        return {
+                          ...current,
+                          flashDevice: nextValue,
+                        };
+                      });
+                    }}
+                    className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-3 py-2 text-xs text-[var(--color-text-primary)]"
+                  >
+                    <option value="">
+                      {panel.flashState?.flash_device_required ? 'Select a flash device' : 'No flash device override'}
+                    </option>
+                    {flashDeviceCandidates.map((candidate) => (
+                      <option
+                        key={`${candidate.value}:${candidate.label}`}
+                        value={candidate.value}
+                      >
+                        {candidate.value}
+                      </option>
+                    ))}
+                    <option value={CUSTOM_FLASH_DEVICE_VALUE}>Custom value...</option>
+                  </select>
+                )}
+                {selectedFlashDeviceCandidate && selectedFlashDeviceCandidate.label !== selectedFlashDeviceCandidate.value && (
+                  <p className="mt-2 text-[11px] text-[var(--color-text-secondary)]">
+                    {selectedFlashDeviceCandidate.label}
+                  </p>
+                )}
+                {showCustomFlashDeviceInput && (
+                  <input
+                    type="text"
+                    value={panel.flashDevice}
+                    onChange={(event) => updatePanel(activeTarget, (current) => ({ ...current, flashDevice: event.target.value }))}
+                    placeholder={panel.flashState?.flash_device_placeholder || 'Optional flash device override'}
+                    className={`w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-3 py-2 text-xs font-mono text-[var(--color-text-primary)] ${flashDeviceCandidates.length > 0 ? 'mt-2' : ''}`}
+                  />
+                )}
+                {flashDeviceCandidates.length > 0 && !selectedFlashDeviceCandidate && !showCustomFlashDeviceInput && (
+                  <p className="mt-2 text-[11px] text-[var(--color-text-secondary)]">
+                    Select a detected device or switch to a custom value.
+                  </p>
                 )}
               </div>
             )}
@@ -781,11 +895,6 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
             </div>
           </div>
 
-          <div className="rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)]/60 px-3 py-3">
-            <p className="text-xs leading-5 text-[var(--color-text-secondary)]">
-              Changes update the visible menuconfig fields immediately. Save writes the active .config file. Build runs make olddefconfig followed by make. Flash runs make flash with NOSUDO=1 and uses the flash device field when the selected target requires one.
-            </p>
-          </div>
         </div>
 
         <div className="flex min-h-0 flex-1 flex-col xl:flex-row">
@@ -917,10 +1026,10 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
             <div className="flex-1 space-y-4 overflow-y-auto p-4">
               <section className="overflow-hidden rounded-xl border border-[var(--color-bg-tertiary)]">
                 <div className="border-b border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)]/70 px-4 py-3">
-                  <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">Artifacts</h3>
-                  <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
-                    Generated files stay on the SBC under the active out directory and can also be downloaded directly from here.
-                  </p>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">Artifacts</h3>
+                    <HelpPopover text={ARTIFACTS_HELP} />
+                  </div>
                 </div>
                 <div className="space-y-2 p-4">
                   {artifacts.length === 0 && (
@@ -957,10 +1066,10 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
 
               <section className="flex min-h-[320px] flex-col overflow-hidden rounded-xl border border-[var(--color-bg-tertiary)]">
                 <div className="border-b border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)]/70 px-4 py-3">
-                  <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">Command Log</h3>
-                  <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
-                    The latest output from the most recent build or flash command.
-                  </p>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">Command Log</h3>
+                    <HelpPopover text={COMMAND_LOG_HELP} />
+                  </div>
                 </div>
                 <div className="flex-1 overflow-auto bg-black/30 p-4">
                   <pre className="whitespace-pre-wrap break-words text-[11px] leading-5 text-[var(--color-text-primary)]">
