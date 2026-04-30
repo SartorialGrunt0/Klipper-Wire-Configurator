@@ -26,6 +26,7 @@ Credit to the klipper, mainsail, moonraker, fluidd, and other teams whom which I
 - Manage USB, UART, or CAN communcations with ID detection.
 - Text View for traditonal configuration management, faster multi-file fuzzy search, and line referenced table of contents.
 - Macro Designer with easy modifications and simulation.
+- Build, download, and flash Klipper and Katapult firmware.
 
 ### Graphical UI
 
@@ -51,12 +52,17 @@ Credit to the klipper, mainsail, moonraker, fluidd, and other teams whom which I
 
 <img src="images/Macro_Designer.png" width="1000" height="660">
 
+### Firmware Flash Tool
+
+<img src="images/Flash_Tool.png" width="1000" height="660">
+
 ## Prerequisites
 
 - Raspberry Pi OS or another Debian-based distro, bookworm or newer.
 - Python 3.10+
 - Git and internet access for the initial install
-- A second device on the same network if you want to open the web UI remotely
+- Klipper
+- Katapult (optional)
 
 The Raspberry Pi installer handles Node.js setup and installs the systemd service.
 
