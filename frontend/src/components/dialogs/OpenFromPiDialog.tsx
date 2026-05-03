@@ -24,19 +24,23 @@ export default function OpenFromPiDialog({ onClose }: OpenFromPiDialogProps) {
   const loadFiles = useCallback(async (path: string) => {
     setStatus('loading');
     setMessage('');
+    // Extract the filename component from a relative POSIX path returned by the backend.
+    // The backend (Linux/Raspberry Pi) always uses forward slashes, so splitting on '/'
+    // is safe here.
+    const basename = (p: string) => p.split('/').pop() ?? p;
     try {
       const result = await api.listNativeConfigFiles(path);
       // Filter out backup files like printer-20251130_014641.cfg
       const isBackup = (name: string) => /^printer-\d{8}_\d+\.cfg$/i.test(name);
-      const visible = result.files.filter((f) => !isBackup(f.name));
+      const visible = result.files.filter((f) => !isBackup(basename(f.name)));
       setFiles(visible);
       // Auto-select all .cfg files, deselect known non-klipper ones
       const sel: Record<string, boolean> = {};
       for (const f of visible) {
-        const name = f.name.toLowerCase();
-        const skip = name === 'moonraker.conf' || name === 'crowsnest.conf' ||
-          name === 'klipperscreen.conf' || name === 'sonar.conf' ||
-          name.endsWith('.bak') || name.endsWith('.old');
+        const base = basename(f.name).toLowerCase();
+        const skip = base === 'moonraker.conf' || base === 'crowsnest.conf' ||
+          base === 'klipperscreen.conf' || base === 'sonar.conf' ||
+          base.endsWith('.bak') || base.endsWith('.old');
         sel[f.name] = !skip;
       }
       setSelected(sel);

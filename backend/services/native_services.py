@@ -218,19 +218,35 @@ def get_default_config_path() -> str:
 
 
 def list_config_files(config_dir: str) -> list[dict]:
-    """List .cfg files in the given directory."""
+    """List .cfg files in the given directory and its subdirectories.
+
+    Follows symlinks for the root directory itself but skips any discovered
+    file whose resolved path escapes the resolved config directory root,
+    preventing symlink-based directory traversal.
+    """
     path = Path(config_dir)
     if not path.is_dir():
         return []
+    resolved_base = path.resolve()
     files = []
-    for f in sorted(path.iterdir()):
-        if f.is_file() and f.suffix == ".cfg":
-            files.append({
-                "name": f.name,
-                "path": str(f),
-                "size": f.stat().st_size,
-                "modified": f.stat().st_mtime,
-            })
+    for f in sorted(path.rglob("*.cfg")):
+        if not f.is_file():
+            continue
+        # Guard against symlinks inside the config dir pointing outside it.
+        # Resolve once and reuse for both the containment check and stat calls.
+        resolved_f = f.resolve()
+        try:
+            resolved_f.relative_to(resolved_base)
+        except ValueError:
+            continue
+        rel = f.relative_to(path)
+        stat = resolved_f.stat()
+        files.append({
+            "name": rel.as_posix(),
+            "path": str(f),
+            "size": stat.st_size,
+            "modified": stat.st_mtime,
+        })
     return files
 
 
