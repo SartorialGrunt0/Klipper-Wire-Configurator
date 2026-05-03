@@ -24,6 +24,9 @@ export default function OpenFromPiDialog({ onClose }: OpenFromPiDialogProps) {
   const loadFiles = useCallback(async (path: string) => {
     setStatus('loading');
     setMessage('');
+    // Extract the filename component from a relative POSIX path returned by the backend.
+    // The backend (Linux/Raspberry Pi) always uses forward slashes, so splitting on '/'
+    // is safe here.
     const basename = (p: string) => p.split('/').pop() ?? p;
     try {
       const result = await api.listNativeConfigFiles(path);

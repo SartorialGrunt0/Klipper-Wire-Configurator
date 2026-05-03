@@ -233,16 +233,19 @@ def list_config_files(config_dir: str) -> list[dict]:
         if not f.is_file():
             continue
         # Guard against symlinks inside the config dir pointing outside it.
+        # Resolve once and reuse for both the containment check and stat calls.
+        resolved_f = f.resolve()
         try:
-            f.resolve().relative_to(resolved_base)
+            resolved_f.relative_to(resolved_base)
         except ValueError:
             continue
         rel = f.relative_to(path)
+        stat = resolved_f.stat()
         files.append({
             "name": rel.as_posix(),
             "path": str(f),
-            "size": f.stat().st_size,
-            "modified": f.stat().st_mtime,
+            "size": stat.st_size,
+            "modified": stat.st_mtime,
         })
     return files
 
