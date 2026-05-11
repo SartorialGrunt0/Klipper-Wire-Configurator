@@ -2,7 +2,13 @@ import React, { useState, useRef, useEffect, type ComponentPropsWithoutRef } fro
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useAiStore, AiProvider, ChatMessage } from '../../stores/aiStore';
+import { useConfigStore } from '../../stores/configStore';
 import * as api from '../../services/api';
+import AiDraftPreviewDialog from './AiDraftPreviewDialog';
+import { mergeAssistantSectionsIntoConfig, type AssistantDraftChange } from '../../utils/assistantDraftMerge';
+import { normalizeDiffText } from '../../utils/configDiff';
+import type { LmStudioMcpStatus } from '../../types/ai';
+import type { ConfigFile } from '../../types/config';
 
 interface ProviderInfo {
   label: string;
@@ -87,17 +93,122 @@ type TableCellProps = ComponentPropsWithoutRef<'th'>;
 type TableDataCellProps = ComponentPropsWithoutRef<'td'>;
 type CodeProps = ComponentPropsWithoutRef<'code'>;
 
+interface AttachedConfigFile {
+  id: string;
+  name: string;
+  content: string;
+}
+
+const CONTEXT_TRUNCATION_LIMIT = 40000;
+const CONFIG_CODE_LANGUAGES = new Set(['', 'cfg', 'conf', 'ini', 'klipper', 'printercfg']);
+
+function truncateConfigContext(content: string): string {
+  if (content.length <= CONTEXT_TRUNCATION_LIMIT) {
+    return content;
+  }
+
+  return `${content.slice(0, CONTEXT_TRUNCATION_LIMIT)}\n\n# Context truncated after ${CONTEXT_TRUNCATION_LIMIT} characters.`;
+}
+
+function buildConfigContextMessage(filename: string, content: string, label: string): string {
+  return `${label}: ${filename}\n\n\`\`\`cfg\n${truncateConfigContext(content)}\n\`\`\``;
+}
+
+function extractConfigCodeBlock(content: string): string | null {
+  const codeBlockPattern = /```([^\n`]*)\n([\s\S]*?)```/g;
+  let fallback: string | null = null;
+
+  for (const match of content.matchAll(codeBlockPattern)) {
+    const language = match[1].trim().toLowerCase();
+    const block = match[2].trim();
+    if (!block) {
+      continue;
+    }
+    if (fallback == null) {
+      fallback = block;
+    }
+    if (CONFIG_CODE_LANGUAGES.has(language)) {
+      return block;
+    }
+  }
+
+  return fallback;
+}
+
+function getLmStudioMcpStatusPresentation(status: LmStudioMcpStatus): {
+  label: string;
+  className: string;
+  title: string;
+} {
+  const pluginText = status.pluginId ?? 'disabled';
+
+  if (!status.requested) {
+    return {
+      label: 'Docs MCP off',
+      className: 'border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]',
+      title: 'LM Studio docs MCP was disabled for this request.',
+    };
+  }
+
+  if (status.fallbackUsed) {
+    return {
+      label: 'Docs MCP fallback',
+      className: 'border-amber-500/30 bg-amber-500/10 text-amber-300',
+      title: `${status.fallbackReason ?? 'The proxy retried on the OpenAI-compatible endpoint.'} Plugin: ${pluginText}.`,
+    };
+  }
+
+  if (status.toolUsed) {
+    const toolText = status.toolNames.length > 0 ? ` Tools: ${status.toolNames.join(', ')}.` : '';
+    return {
+      label: 'Docs MCP used',
+      className: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300',
+      title: `LM Studio used ${pluginText} through /api/v1/chat.${toolText}`,
+    };
+  }
+
+  return {
+    label: 'Docs MCP not used',
+    className: 'border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]',
+    title: `LM Studio enabled ${pluginText}, but the model answered without calling it.`,
+  };
+}
+
 interface ChatDialogProps {
   open: boolean;
   onClose: () => void;
 }
 
+interface AssistantDraftPreview {
+  filename: string;
+  originalText: string;
+  baseConfig: ConfigFile;
+  assistantConfig: ConfigFile;
+  mergedText: string;
+  changes: AssistantDraftChange[];
+  selectedChangeIds: string[];
+  previewUpdating: boolean;
+}
+
 const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
   const { settings, setSettings, isConfigured, messages, setMessages, clearMessages } = useAiStore();
+  const {
+    configFiles,
+    activeFile,
+    textEditorDirty,
+    textDraftFile,
+    textDraftText,
+    setTextDraft,
+    setTextEditorDirty,
+  } = useConfigStore();
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [includeActiveConfig, setIncludeActiveConfig] = useState(true);
+  const [attachedConfigFiles, setAttachedConfigFiles] = useState<AttachedConfigFile[]>([]);
+  const [assistantDraftPreview, setAssistantDraftPreview] = useState<AssistantDraftPreview | null>(null);
+  const [assistantDraftPreviewLoading, setAssistantDraftPreviewLoading] = useState<string | null>(null);
 
   // Settings editing state
   const [editApiKey, setEditApiKey] = useState(settings.apiKey);
@@ -106,6 +217,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
   const [editApiProvider, setEditApiProvider] = useState<AiProvider>(settings.apiProvider);
   const [editLmStudioHost, setEditLmStudioHost] = useState(settings.lmStudioHost);
   const [editLmStudioPort, setEditLmStudioPort] = useState(settings.lmStudioPort);
+  const [editLmStudioMcpPluginId, setEditLmStudioMcpPluginId] = useState(settings.lmStudioMcpPluginId);
   const [editOllamaHost, setEditOllamaHost] = useState(settings.ollamaHost);
   const [editOllamaPort, setEditOllamaPort] = useState(settings.ollamaPort);
 
@@ -115,15 +227,19 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
   const [modelsError, setModelsError] = useState<string | null>(null);
 
   // Fetch available models from local server
-  const fetchAvailableModels = async () => {
-    if (!isLocalProvider(editApiProvider)) {
+  const fetchAvailableModels = async (
+    provider: AiProvider = editApiProvider,
+    apiUrl: string = editApiUrl,
+    apiKey: string = editApiKey,
+  ) => {
+    if (!isLocalProvider(provider)) {
       setAvailableModels([]);
       return;
     }
     setModelsLoading(true);
     setModelsError(null);
     try {
-      const result = await api.listModels(editApiUrl, editApiKey);
+      const result = await api.listModels(apiUrl, apiKey);
       setAvailableModels(result.models || []);
       if (result.error) setModelsError(result.error);
     } catch (err: unknown) {
@@ -137,7 +253,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
   // Fetch models when local provider settings change
   useEffect(() => {
     if (isLocalProvider(editApiProvider)) {
-      fetchAvailableModels();
+      void fetchAvailableModels(editApiProvider, editApiUrl, editApiKey);
     } else {
       setAvailableModels([]);
     }
@@ -152,9 +268,13 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
       setEditApiProvider(settings.apiProvider);
       setEditLmStudioHost(settings.lmStudioHost);
       setEditLmStudioPort(settings.lmStudioPort);
+      setEditLmStudioMcpPluginId(settings.lmStudioMcpPluginId);
       setEditOllamaHost(settings.ollamaHost);
       setEditOllamaPort(settings.ollamaPort);
       setError(null);
+      if (isLocalProvider(settings.apiProvider)) {
+        void fetchAvailableModels(settings.apiProvider, settings.apiUrl, settings.apiKey);
+      }
     }
   }, [open, settings]);
 
@@ -165,9 +285,219 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const assistantDraftPreviewRequestRef = useRef(0);
+
+  const handleAttachConfigFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) {
+      return;
+    }
+
+    try {
+      const loadedFiles = await Promise.all(files.map(async (file, index) => ({
+        id: `${file.name}-${file.lastModified}-${index}`,
+        name: file.name,
+        content: await file.text(),
+      })));
+      setAttachedConfigFiles((prev) => [...prev, ...loadedFiles]);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to attach config file.');
+    } finally {
+      e.target.value = '';
+    }
+  };
+
+  const handleRemoveAttachedFile = (id: string) => {
+    setAttachedConfigFiles((prev) => prev.filter((file) => file.id !== id));
+  };
+
+  const getActiveConfigText = async (): Promise<string | null> => {
+    if (!activeFile) {
+      return null;
+    }
+
+    if (textDraftFile === activeFile) {
+      return textDraftText;
+    }
+
+    const activeConfig = configFiles[activeFile];
+    if (!activeConfig) {
+      return null;
+    }
+
+    return api.exportConfig(activeConfig);
+  };
+
+  const getActiveConfigContext = async (): Promise<string | null> => {
+    if (!includeActiveConfig || !activeFile) {
+      return null;
+    }
+
+    const activeConfigText = await getActiveConfigText();
+    if (activeConfigText == null) {
+      return null;
+    }
+
+    return buildConfigContextMessage(
+      activeFile,
+      activeConfigText,
+      textDraftFile === activeFile && textEditorDirty
+        ? 'Active Klipper config draft with unapplied text-view changes'
+        : 'Active Klipper config draft',
+    );
+  };
+
+  const buildAssistantDraftMergedText = async (
+    baseConfig: ConfigFile,
+    assistantConfig: ConfigFile,
+    originalText: string,
+    selectedChangeIds: string[],
+  ): Promise<string> => {
+    if (selectedChangeIds.length === 0) {
+      return originalText;
+    }
+
+    const { mergedConfig } = mergeAssistantSectionsIntoConfig(baseConfig, assistantConfig, selectedChangeIds);
+    return api.exportConfig({ ...mergedConfig, raw_text: originalText });
+  };
+
+  const handleApplyAssistantEdit = async (content: string) => {
+    if (!activeFile) {
+      return;
+    }
+
+    const configBlock = extractConfigCodeBlock(content);
+    if (!configBlock) {
+      setError('The assistant response did not include a config code block to review.');
+      return;
+    }
+
+    setAssistantDraftPreviewLoading(content);
+    setError(null);
+
+    try {
+      const baseText = await getActiveConfigText();
+      if (baseText == null) {
+        throw new Error(`Unable to load ${activeFile} for preview.`);
+      }
+
+      const [baseResult, assistantResult] = await Promise.all([
+        api.parseConfigText(baseText, activeFile),
+        api.parseConfigText(configBlock, activeFile),
+      ]);
+
+      if (assistantResult.config.sections.length === 0) {
+        throw new Error('The assistant response did not include any complete config sections to merge.');
+      }
+
+      const { mergedConfig, changes } = mergeAssistantSectionsIntoConfig(
+        { ...baseResult.config, raw_text: baseText },
+        assistantResult.config,
+      );
+      const mergedText = await api.exportConfig({ ...mergedConfig, raw_text: baseText });
+      const selectedChangeIds = changes.map((change) => change.id);
+
+      if (normalizeDiffText(baseText) === normalizeDiffText(mergedText)) {
+        throw new Error('The assistant response does not change the current draft.');
+      }
+
+      setAssistantDraftPreview({
+        filename: activeFile,
+        originalText: baseText,
+        baseConfig: { ...baseResult.config, raw_text: baseText },
+        assistantConfig: assistantResult.config,
+        mergedText,
+        changes,
+        selectedChangeIds,
+        previewUpdating: false,
+      });
+    } catch (err: unknown) {
+      setAssistantDraftPreview(null);
+      setError(err instanceof Error ? err.message : 'Failed to prepare assistant changes.');
+    } finally {
+      setAssistantDraftPreviewLoading(null);
+    }
+  };
+
+  const handleAssistantDraftSelectionChange = async (selectedChangeIds: string[]) => {
+    const currentPreview = assistantDraftPreview;
+    if (!currentPreview) {
+      return;
+    }
+
+    if (
+      selectedChangeIds.length === currentPreview.selectedChangeIds.length &&
+      selectedChangeIds.every((id, index) => id === currentPreview.selectedChangeIds[index])
+    ) {
+      return;
+    }
+
+    const requestId = ++assistantDraftPreviewRequestRef.current;
+    setAssistantDraftPreview({
+      ...currentPreview,
+      selectedChangeIds,
+      previewUpdating: true,
+    });
+
+    try {
+      const mergedText = await buildAssistantDraftMergedText(
+        currentPreview.baseConfig,
+        currentPreview.assistantConfig,
+        currentPreview.originalText,
+        selectedChangeIds,
+      );
+
+      if (requestId !== assistantDraftPreviewRequestRef.current) {
+        return;
+      }
+
+      setAssistantDraftPreview((preview) => {
+        if (!preview) {
+          return preview;
+        }
+
+        return {
+          ...preview,
+          selectedChangeIds,
+          mergedText,
+          previewUpdating: false,
+        };
+      });
+      setError(null);
+    } catch (err: unknown) {
+      if (requestId !== assistantDraftPreviewRequestRef.current) {
+        return;
+      }
+
+      setAssistantDraftPreview((preview) => {
+        if (!preview) {
+          return preview;
+        }
+
+        return {
+          ...preview,
+          previewUpdating: false,
+        };
+      });
+      setError(err instanceof Error ? err.message : 'Failed to update the assistant preview.');
+    }
+  };
+
+  const handleAcceptAssistantEdit = () => {
+    if (!assistantDraftPreview) {
+      return;
+    }
+
+    setTextDraft(assistantDraftPreview.filename, assistantDraftPreview.mergedText);
+    setTextEditorDirty(true);
+    setAssistantDraftPreview(null);
+    setError(null);
+  };
 
   const handleNewChat = () => {
     clearMessages();
+    setAssistantDraftPreview(null);
     setError(null);
     setInput('');
     if (inputRef.current) {
@@ -190,12 +520,37 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
     setError(null);
 
     try {
+      const contextMessages: Array<{ role: 'system'; content: string }> = [];
+      const activeConfigContext = await getActiveConfigContext();
+
+      if (activeConfigContext) {
+        contextMessages.push({ role: 'system', content: activeConfigContext });
+      }
+
+      for (const attachedFile of attachedConfigFiles) {
+        contextMessages.push({
+          role: 'system',
+          content: buildConfigContextMessage(attachedFile.name, attachedFile.content, 'User-attached local Klipper config file'),
+        });
+      }
+
+      if (activeFile) {
+        contextMessages.push({
+          role: 'system',
+          content: `If the user asks you to modify ${activeFile}, return only the changed or new sections for that file inside a single fenced code block labeled cfg. Include full section headers and the full contents of each changed section. Do not return the entire file unless the user explicitly asks for a full replacement.`,
+        });
+      }
+
       const response = await api.aiChat({
         apiKey: editApiKey,
         model: editModel,
         apiUrl: editApiUrl,
         apiProvider: editApiProvider,
-        messages: newMessages.map((m) => ({ role: m.role, content: m.content })),
+        lmStudioMcpPluginId: editApiProvider === 'lm-studio' ? editLmStudioMcpPluginId : undefined,
+        messages: [
+          ...contextMessages,
+          ...newMessages.map((m) => ({ role: m.role, content: m.content })),
+        ],
       });
 
       if (response.error) {
@@ -205,6 +560,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
       const assistantMsg: ChatMessage = {
         role: 'assistant',
         content: response.content || 'No response.',
+        lmStudioMcp: response.lmStudioMcp,
       };
       setMessages([...newMessages, assistantMsg]);
     } catch (err: unknown) {
@@ -232,9 +588,13 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
       apiProvider: editApiProvider,
       lmStudioHost: editLmStudioHost,
       lmStudioPort: editLmStudioPort,
+      lmStudioMcpPluginId: editLmStudioMcpPluginId,
       ollamaHost: editOllamaHost,
       ollamaPort: editOllamaPort,
     });
+    if (isLocalProvider(editApiProvider)) {
+      void fetchAvailableModels(editApiProvider, editApiUrl, editApiKey);
+    }
     setShowSettings(false);
   };
 
@@ -270,8 +630,8 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
 
   // Unconfigured state — show settings panel in the center
   if (!isConfigured()) {
-    const providerInfo = PROVIDER_DEFAULTS[editApiProvider];
     const showLocalFields = isLocalProvider(editApiProvider);
+    const showLmStudioMcpField = editApiProvider === 'lm-studio';
 
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
@@ -384,6 +744,24 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
                       placeholder="1234"
                     />
                   </div>
+                </div>
+              )}
+
+              {showLmStudioMcpField && (
+                <div>
+                  <label className="block text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-1.5">
+                    LM Studio MCP Plugin ID
+                  </label>
+                  <input
+                    type="text"
+                    className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
+                    value={editLmStudioMcpPluginId}
+                    onChange={(e) => setEditLmStudioMcpPluginId(e.target.value)}
+                    placeholder="mcp/klipper-docs"
+                  />
+                  <p className="mt-1 text-[10px] text-[var(--color-text-secondary)]">
+                    Leave blank to disable MCP docs lookup for LM Studio.
+                  </p>
                 </div>
               )}
 
@@ -503,21 +881,33 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
                     ))}
                   </select>
                 </div>
-                {/* Model selector - dropdown for local providers, text input for remote */}
-                {isLocalProvider(editApiProvider) && availableModels.length > 0 && (
+                {/* Model selector */}
+                {isLocalProvider(editApiProvider) && (
                   <div>
                     <label className="block text-[10px] text-[var(--color-text-secondary)] mb-1">Model</label>
-                    <select
-                      className="w-full px-3 py-1.5 rounded text-xs font-mono bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-                      value={editModel}
-                      onChange={(e) => setEditModel(e.target.value)}
-                    >
-                      {availableModels.map((m) => (
-                        <option key={m} value={m}>{m}</option>
-                      ))}
-                    </select>
+                    {availableModels.length > 0 ? (
+                      <select
+                        className="w-full px-3 py-1.5 rounded text-xs font-mono bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
+                        value={editModel}
+                        onChange={(e) => setEditModel(e.target.value)}
+                      >
+                        {availableModels.map((m) => (
+                          <option key={m} value={m}>{m}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        type="text"
+                        className="w-full px-3 py-1.5 rounded text-xs font-mono bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
+                        value={editModel}
+                        onChange={(e) => setEditModel(e.target.value)}
+                        placeholder="Model name"
+                      />
+                    )}
                     <button
-                      onClick={fetchAvailableModels}
+                      onClick={() => {
+                        void fetchAvailableModels(editApiProvider, editApiUrl, editApiKey);
+                      }}
                       className="mt-1 text-[10px] text-[var(--color-accent)] hover:underline"
                     >
                       Refresh models
@@ -577,6 +967,21 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
                     </div>
                   </div>
                 )}
+                {editApiProvider === 'lm-studio' && (
+                  <div>
+                    <label className="block text-[10px] text-[var(--color-text-secondary)] mb-1">LM Studio MCP Plugin ID</label>
+                    <input
+                      type="text"
+                      className="w-full px-3 py-1.5 rounded text-xs font-mono bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
+                      value={editLmStudioMcpPluginId}
+                      onChange={(e) => setEditLmStudioMcpPluginId(e.target.value)}
+                      placeholder="mcp/klipper-docs"
+                    />
+                    <p className="mt-1 text-[10px] text-[var(--color-text-secondary)]">
+                      Leave blank to disable MCP docs lookup for LM Studio.
+                    </p>
+                  </div>
+                )}
                 {/* API Key (always shown) */}
                 <div>
                   <label className="block text-[10px] text-[var(--color-text-secondary)] mb-1">API Key</label>
@@ -603,72 +1008,103 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
             </div>
           )}
           {messages.map((msg, i) => (
-            <div
-              key={i}
-              className={`mb-2 ${msg.role === 'user' ? 'text-right' : 'text-left'}`}
-            >
-              <div
-                className={`inline-block max-w-[80%] px-3 py-2 rounded-lg text-xs leading-6 ${
-                  msg.role === 'user'
-                    ? 'bg-[var(--color-accent)] text-white'
-                    : 'bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] border border-[var(--color-bg-tertiary)]'
-                }`}
-                style={{ wordBreak: 'break-word' }}
-              >
-                {msg.role === 'assistant' ? (
-                  <ReactMarkdown
-                    remarkPlugins={[remarkGfm]}
-                    components={{
-                      p: ({ children }: ParagraphProps) => <p className="mb-2 last:mb-0">{children}</p>,
-                      ul: ({ children }: ListProps) => <ul className="mb-2 list-disc pl-5 last:mb-0">{children}</ul>,
-                      ol: ({ children }: OrderedListProps) => <ol className="mb-2 list-decimal pl-5 last:mb-0">{children}</ol>,
-                      li: ({ children }: ListItemProps) => <li className="mb-1 last:mb-0">{children}</li>,
-                      a: ({ children, href }: AnchorProps) => (
-                        <a className="text-[var(--color-accent)] underline" href={href} target="_blank" rel="noreferrer">
-                          {children}
-                        </a>
-                      ),
-                      blockquote: ({ children }: BlockquoteProps) => (
-                        <blockquote className="my-2 border-l-2 border-[var(--color-bg-tertiary)] pl-3 text-[var(--color-text-secondary)]">
-                          {children}
-                        </blockquote>
-                      ),
-                      table: ({ children }: TableProps) => (
-                        <div className="my-2 overflow-x-auto">
-                          <table className="min-w-full border-collapse text-left text-[11px]">{children}</table>
-                        </div>
-                      ),
-                      th: ({ children }: TableCellProps) => (
-                        <th className="border border-[var(--color-bg-tertiary)] px-2 py-1 font-semibold">{children}</th>
-                      ),
-                      td: ({ children }: TableDataCellProps) => (
-                        <td className="border border-[var(--color-bg-tertiary)] px-2 py-1 align-top">{children}</td>
-                      ),
-                      code: ({ children, className }: CodeProps) => {
-                        const content = String(children).replace(/\n$/, '');
-                        const isBlock = Boolean(className) || content.includes('\n');
-                        if (!isBlock) {
-                          return (
-                            <code className="rounded bg-[var(--color-bg-secondary)] px-1 py-0.5 font-mono text-[11px]">
-                              {content}
-                            </code>
-                          );
-                        }
-                        return (
-                          <pre className="my-2 overflow-x-auto rounded-md bg-[var(--color-bg-secondary)] p-3">
-                            <code className="font-mono text-[11px]">{content}</code>
-                          </pre>
-                        );
-                      },
-                    }}
+            (() => {
+              const assistantConfigBlock = msg.role === 'assistant' ? extractConfigCodeBlock(msg.content) : null;
+              const lmStudioMcpStatus = msg.role === 'assistant' ? msg.lmStudioMcp : undefined;
+              const lmStudioMcpPresentation = lmStudioMcpStatus ? getLmStudioMcpStatusPresentation(lmStudioMcpStatus) : null;
+              return (
+                <div
+                  key={i}
+                  className={`mb-2 ${msg.role === 'user' ? 'text-right' : 'text-left'}`}
+                >
+                  <div
+                    className={`inline-block max-w-[80%] px-3 py-2 rounded-lg text-xs leading-6 ${
+                      msg.role === 'user'
+                        ? 'bg-[var(--color-accent)] text-white'
+                        : 'bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] border border-[var(--color-bg-tertiary)]'
+                    }`}
+                    style={{ wordBreak: 'break-word' }}
                   >
-                    {msg.content}
-                  </ReactMarkdown>
-                ) : (
-                  <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
-                )}
-              </div>
-            </div>
+                    {msg.role === 'assistant' ? (
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        components={{
+                          p: ({ children }: ParagraphProps) => <p className="mb-2 last:mb-0">{children}</p>,
+                          ul: ({ children }: ListProps) => <ul className="mb-2 list-disc pl-5 last:mb-0">{children}</ul>,
+                          ol: ({ children }: OrderedListProps) => <ol className="mb-2 list-decimal pl-5 last:mb-0">{children}</ol>,
+                          li: ({ children }: ListItemProps) => <li className="mb-1 last:mb-0">{children}</li>,
+                          a: ({ children, href }: AnchorProps) => (
+                            <a className="text-[var(--color-accent)] underline" href={href} target="_blank" rel="noreferrer">
+                              {children}
+                            </a>
+                          ),
+                          blockquote: ({ children }: BlockquoteProps) => (
+                            <blockquote className="my-2 border-l-2 border-[var(--color-bg-tertiary)] pl-3 text-[var(--color-text-secondary)]">
+                              {children}
+                            </blockquote>
+                          ),
+                          table: ({ children }: TableProps) => (
+                            <div className="my-2 overflow-x-auto">
+                              <table className="min-w-full border-collapse text-left text-[11px]">{children}</table>
+                            </div>
+                          ),
+                          th: ({ children }: TableCellProps) => (
+                            <th className="border border-[var(--color-bg-tertiary)] px-2 py-1 font-semibold">{children}</th>
+                          ),
+                          td: ({ children }: TableDataCellProps) => (
+                            <td className="border border-[var(--color-bg-tertiary)] px-2 py-1 align-top">{children}</td>
+                          ),
+                          code: ({ children, className }: CodeProps) => {
+                            const content = String(children).replace(/\n$/, '');
+                            const isBlock = Boolean(className) || content.includes('\n');
+                            if (!isBlock) {
+                              return (
+                                <code className="rounded bg-[var(--color-bg-secondary)] px-1 py-0.5 font-mono text-[11px]">
+                                  {content}
+                                </code>
+                              );
+                            }
+                            return (
+                              <pre className="my-2 overflow-x-auto rounded-md bg-[var(--color-bg-secondary)] p-3">
+                                <code className="font-mono text-[11px]">{content}</code>
+                              </pre>
+                            );
+                          },
+                        }}
+                      >
+                        {msg.content}
+                      </ReactMarkdown>
+                    ) : (
+                      <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
+                    )}
+                    {msg.role === 'assistant' && lmStudioMcpPresentation && (
+                      <div className="mt-3 flex">
+                        <span
+                          className={`inline-flex items-center rounded-full border px-2 py-1 text-[10px] font-medium ${lmStudioMcpPresentation.className}`}
+                          title={lmStudioMcpPresentation.title}
+                        >
+                          {lmStudioMcpPresentation.label}
+                        </span>
+                      </div>
+                    )}
+                    {msg.role === 'assistant' && assistantConfigBlock && activeFile && (
+                      <div className="mt-3 flex justify-end">
+                        <button
+                          onClick={() => {
+                            void handleApplyAssistantEdit(msg.content);
+                          }}
+                          disabled={assistantDraftPreviewLoading === msg.content}
+                          className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-[10px] font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-60"
+                          title={`Preview how the assistant sections would merge into ${activeFile}`}
+                        >
+                          {assistantDraftPreviewLoading === msg.content ? 'Preparing Preview...' : `Replace ${activeFile} Draft`}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })()
           ))}
           {loading && (
             <div className="text-left mb-2">
@@ -689,8 +1125,50 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
           <div ref={messagesEndRef} />
         </div>
 
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".cfg,text/plain"
+          multiple
+          className="hidden"
+          onChange={handleAttachConfigFiles}
+        />
+
         {/* Input bar */}
-        <div className="flex items-center gap-2 p-4 border-t border-[var(--color-bg-tertiary)]">
+        <div className="border-t border-[var(--color-bg-tertiary)]">
+          <div className="flex flex-wrap items-center gap-2 px-4 pt-3 pb-2 text-[10px] text-[var(--color-text-secondary)]">
+            <label className="inline-flex items-center gap-1.5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={includeActiveConfig}
+                onChange={(e) => setIncludeActiveConfig(e.target.checked)}
+                className="rounded border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)]"
+                disabled={!activeFile}
+              />
+              Include active .cfg{activeFile ? ` (${activeFile})` : ''}
+            </label>
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 font-medium hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] transition-colors"
+            >
+              Attach local .cfg
+            </button>
+          </div>
+          {attachedConfigFiles.length > 0 && (
+            <div className="flex flex-wrap gap-2 px-4 pb-2">
+              {attachedConfigFiles.map((file) => (
+                <button
+                  key={file.id}
+                  onClick={() => handleRemoveAttachedFile(file.id)}
+                  className="rounded-full border border-[var(--color-bg-tertiary)] px-2 py-1 text-[10px] text-[var(--color-text-secondary)] hover:border-[var(--color-error)] hover:text-[var(--color-error)] transition-colors"
+                  title="Remove attached file from chat context"
+                >
+                  {file.name} ×
+                </button>
+              ))}
+            </div>
+          )}
+        <div className="flex items-center gap-2 p-4 pt-2">
           <div
             ref={inputRef as React.RefObject<HTMLDivElement>}
             className={`flex-1 px-3 py-2 rounded-lg text-xs bg-[var(--color-bg-primary)] border text-[var(--color-text-primary)] focus:outline-none transition-colors resize-none ${
@@ -715,8 +1193,25 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
           >
             {loading ? '...' : 'Send'}
           </button>
+          </div>
         </div>
       </div>
+
+      {assistantDraftPreview && (
+        <AiDraftPreviewDialog
+          filename={assistantDraftPreview.filename}
+          originalText={assistantDraftPreview.originalText}
+          mergedText={assistantDraftPreview.mergedText}
+          changes={assistantDraftPreview.changes}
+          selectedChangeIds={assistantDraftPreview.selectedChangeIds}
+          previewUpdating={assistantDraftPreview.previewUpdating}
+          onSelectionChange={(selectedChangeIds) => {
+            void handleAssistantDraftSelectionChange(selectedChangeIds);
+          }}
+          onAccept={handleAcceptAssistantEdit}
+          onClose={() => setAssistantDraftPreview(null)}
+        />
+      )}
     </div>
   );
 };

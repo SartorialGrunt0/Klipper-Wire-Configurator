@@ -1,5 +1,7 @@
 import { create } from 'zustand';
 
+import type { LmStudioMcpStatus } from '../types/ai';
+
 const STORAGE_KEY = 'klipper-wire-ai-state';
 const LEGACY_SETTINGS_KEY = 'klipper-wire-ai-settings';
 
@@ -8,6 +10,7 @@ export type AiProvider = 'google' | 'chatgpt' | 'anthropic' | 'github' | 'openai
 export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
+  lmStudioMcp?: LmStudioMcpStatus;
 }
 
 export interface AiSettings {
@@ -17,6 +20,7 @@ export interface AiSettings {
   apiProvider: AiProvider;
   lmStudioHost: string;
   lmStudioPort: string;
+  lmStudioMcpPluginId: string;
   ollamaHost: string;
   ollamaPort: string;
 }
@@ -91,6 +95,7 @@ const DEFAULT_SETTINGS: AiSettings = {
   apiProvider: 'chatgpt',
   lmStudioHost: 'localhost',
   lmStudioPort: '1234',
+  lmStudioMcpPluginId: 'mcp/klipper-docs',
   ollamaHost: 'localhost',
   ollamaPort: '11434',
 };

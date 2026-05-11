@@ -1,56 +1,11 @@
 import { useState, useEffect, useRef } from 'react';
-import { createTwoFilesPatch } from 'diff';
 import { useConfigStore } from '../../stores/configStore';
 import * as api from '../../services/api';
 import type { ConfigFile } from '../../types/config';
+import { countChangedLines, createConfigPatch, parsePatch } from '../../utils/configDiff';
 
 interface DiffDialogProps {
   onClose: () => void;
-}
-
-interface DiffLine {
-  type: 'added' | 'removed' | 'context' | 'header';
-  content: string;
-}
-
-function normalizeDiffText(text: string): string {
-  const lines = text.replace(/\r\n?/g, '\n').split('\n').map((line) => line.replace(/[ \t]+$/g, ''));
-  const normalized: string[] = [];
-  let previousBlank = false;
-  for (const line of lines) {
-    const isBlank = line.trim().length === 0;
-    if (isBlank && previousBlank) continue;
-    normalized.push(line);
-    previousBlank = isBlank;
-  }
-  return normalized.join('\n');
-}
-
-function parsePatch(patch: string): DiffLine[] {
-  const lines: DiffLine[] = [];
-  for (const line of patch.split('\n')) {
-    if (line.startsWith('@@')) {
-      lines.push({ type: 'header', content: line });
-    } else if (line.startsWith('+') && !line.startsWith('+++')) {
-      lines.push({ type: 'added', content: line.slice(1) });
-    } else if (line.startsWith('-') && !line.startsWith('---')) {
-      lines.push({ type: 'removed', content: line.slice(1) });
-    } else if (line.startsWith(' ')) {
-      lines.push({ type: 'context', content: line.slice(1) });
-    }
-  }
-  return lines;
-}
-
-function countChangedLines(patch: string): number {
-  let count = 0;
-  for (const line of patch.split('\n')) {
-    if ((line.startsWith('+') && !line.startsWith('+++')) ||
-        (line.startsWith('-') && !line.startsWith('---'))) {
-      count++;
-    }
-  }
-  return count;
 }
 
 async function exportConfigText(cf: ConfigFile): Promise<string> {
@@ -60,7 +15,7 @@ async function exportConfigText(cf: ConfigFile): Promise<string> {
 export default function DiffDialog({ onClose }: DiffDialogProps) {
   // Snapshot store state once on mount — avoids re-running export on every Zustand update.
   const storeSnapshot = useRef(useConfigStore.getState());
-  const { configFiles, originalTexts } = storeSnapshot.current;
+  const { configFiles, originalTexts, textDraftFile, textDraftText, textEditorDirty } = storeSnapshot.current;
   const filenames = Object.keys(configFiles);
 
   const [activeFile, setActiveFile] = useState(filenames[0] || '');
@@ -77,7 +32,11 @@ export default function DiffDialog({ onClose }: DiffDialogProps) {
         for (const filename of filenames) {
           const cf = configFiles[filename];
           if (!cf) continue;
-          texts[filename] = await exportConfigText(cf);
+          if (textEditorDirty && textDraftFile === filename) {
+            texts[filename] = textDraftText;
+          } else {
+            texts[filename] = await exportConfigText(cf);
+          }
           if (cancelled) return;
         }
         setCurrentTexts(texts);
@@ -97,7 +56,7 @@ export default function DiffDialog({ onClose }: DiffDialogProps) {
   const hasOriginal = activeFile in originalTexts;
 
   const patch = hasOriginal && !loading
-    ? createTwoFilesPatch(activeFile, activeFile, normalizeDiffText(original), normalizeDiffText(current), 'imported', 'current', { context: 3 })
+    ? createConfigPatch(activeFile, original, current, 'imported', 'current', 3)
     : '';
   const diffLines = parsePatch(patch);
   const hasChanges = diffLines.some((l) => l.type === 'added' || l.type === 'removed');
@@ -129,15 +88,7 @@ export default function DiffDialog({ onClose }: DiffDialogProps) {
                 if (!hasOrig) {
                   badge = 'new';
                 } else {
-                  const p = createTwoFilesPatch(
-                    fn,
-                    fn,
-                    normalizeDiffText(originalTexts[fn] || ''),
-                    normalizeDiffText(currentTexts[fn] || ''),
-                    '',
-                    '',
-                    { context: 0 },
-                  );
+                  const p = createConfigPatch(fn, originalTexts[fn] || '', currentTexts[fn] || '', '', '', 0);
                   changeCount = countChangedLines(p);
                   badge = changeCount > 0 ? 'changed' : 'unchanged';
                 }

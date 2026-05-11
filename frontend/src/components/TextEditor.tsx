@@ -55,6 +55,10 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
     copyConfigFile,
     removeConfigFile,
     setTextEditorDirty,
+    textDraftFile,
+    textDraftText,
+    setTextDraft,
+    clearTextDraft,
     schemas,
     validation,
   } = useConfigStore();
@@ -78,6 +82,10 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
 
   // When config changes and text is not dirty, re-export via backend
   useEffect(() => {
+    if (textDraftFile === activeFile) {
+      setEditText(textDraftText);
+      return;
+    }
     if (!config || isDirty) return;
     const requestId = ++exportTextRef.current;
     exportConfigText(config).then((text) => {
@@ -85,7 +93,7 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
         setEditText(text);
       }
     });
-  }, [config, isDirty, exportConfigText]);
+  }, [activeFile, config, exportConfigText, isDirty, textDraftFile, textDraftText]);
 
   useEffect(() => {
     return () => {
@@ -331,14 +339,16 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
     const cf = configFiles[filename];
     if (cf) {
       const text = await exportConfigText(cf);
+      clearTextDraft();
       setEditText(text);
       setTextEditorDirty(false);
     }
-  }, [configFiles, setActiveFile, setTextEditorDirty, exportConfigText]);
+  }, [clearTextDraft, configFiles, setActiveFile, setTextEditorDirty, exportConfigText]);
 
   const handleTextChange = (newText: string) => {
     setEditText(newText);
     setTextEditorDirty(true);
+    setTextDraft(activeFile, newText);
   };
 
   const doApply = useCallback(async () => {
@@ -352,6 +362,7 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
       setConfigFile(activeFile, result.config);
       setValidation(activeFile, result.validation);
       setTextEditorDirty(false);
+      clearTextDraft();
 
       const graphStore = useGraphStore.getState();
       graphStore.clearGraph();
@@ -362,7 +373,7 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
     } catch (err) {
       console.error('Parse error:', err);
     }
-  }, [editText, activeFile, configFiles, schemas, setConfigFile, setTextEditorDirty, setValidation, validation]);
+  }, [activeFile, clearTextDraft, configFiles, editText, schemas, setConfigFile, setTextEditorDirty, setValidation, validation]);
 
   const handleApply = useCallback(async () => {
     // Check for active issues
@@ -405,6 +416,7 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
     if (!cf) return;
     if (file !== activeFile) {
       const fileText = await exportConfigText(cf);
+      clearTextDraft();
       setActiveFile(file);
       setEditText(fileText);
       setTextEditorDirty(false);
@@ -487,7 +499,10 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
     }
     if (activeFile === renameDialog.file) {
       const cf = useConfigStore.getState().configFiles[newName];
-      if (cf) setEditText(await exportConfigText(cf));
+      if (cf) {
+        clearTextDraft();
+        setEditText(await exportConfigText(cf));
+      }
     }
     setRenameDialog(null);
     setFileError('');
@@ -505,7 +520,10 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
     copyConfigFile(contextMenu.file, copyName);
     setActiveFile(copyName);
     const cf = useConfigStore.getState().configFiles[copyName];
-    if (cf) setEditText(await exportConfigText(cf));
+    if (cf) {
+      clearTextDraft();
+      setEditText(await exportConfigText(cf));
+    }
     setTextEditorDirty(false);
     setContextMenu(null);
   };
@@ -530,7 +548,10 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
       const next = remaining[0];
       setActiveFile(next);
       const cf = useConfigStore.getState().configFiles[next];
-      if (cf) setEditText(await exportConfigText(cf));
+      if (cf) {
+        clearTextDraft();
+        setEditText(await exportConfigText(cf));
+      }
       setTextEditorDirty(false);
     }
   };
@@ -550,6 +571,7 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
       header_comments: [],
     });
     setActiveFile(name);
+    clearTextDraft();
     setEditText('');
     setTextEditorDirty(false);
     setShowAddConfig(false);
@@ -705,7 +727,10 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
       });
       setActiveFile(name);
       const cf = useConfigStore.getState().configFiles[name];
-      if (cf) setEditText(await exportConfigText(cf));
+      if (cf) {
+        clearTextDraft();
+        setEditText(await exportConfigText(cf));
+      }
       setTextEditorDirty(false);
 
       // Build graph nodes for the newly added config file
