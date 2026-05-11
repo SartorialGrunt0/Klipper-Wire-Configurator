@@ -1,12 +1,14 @@
 import { useState } from 'react';
 import { useConfigStore } from '../stores/configStore';
 import { useNativeStore } from '../stores/nativeStore';
+import { useAiStore } from '../stores/aiStore';
 import ImportDialog from './dialogs/ImportDialog';
 import ExportDialog from './dialogs/ExportDialog';
 import DiffDialog from './dialogs/DiffDialog';
 import OpenFromPiDialog from './dialogs/OpenFromPiDialog';
 import ApplyDialog from './dialogs/ApplyDialog';
 import RevertDialog from './dialogs/RevertDialog';
+import ChatDialog from './dialogs/ChatDialog';
 
 interface ToolbarProps {
   showTextView: boolean;
@@ -27,6 +29,8 @@ export default function Toolbar({
   const [showOpenFromPi, setShowOpenFromPi] = useState(false);
   const [showApply, setShowApply] = useState(false);
   const [showRevert, setShowRevert] = useState(false);
+  const [showChat, setShowChat] = useState(false);
+  const aiConfigured = useAiStore((s) => s.isConfigured());
   const hasOriginals = Object.keys(useConfigStore((s) => s.originalTexts)).length > 0;
   const isNative = useNativeStore((s) => s.isNative);
   const hasConfig = Object.keys(useConfigStore((s) => s.configFiles)).length > 0;
@@ -56,7 +60,6 @@ export default function Toolbar({
     // Valid changes
     return 'bg-green-600 text-white hover:bg-green-700';
   };
-
   return (
     <div className="flex items-center gap-2">
       {/* Import */}
@@ -159,6 +162,18 @@ export default function Toolbar({
         </button>
       )}
 
+      {/* AI Chat */}
+      <button
+        onClick={() => setShowChat(true)}
+        className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] transition-colors"
+      >
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+          <path d="M8 1a7 7 0 110 14A7 7 0 018 1z" stroke="currentColor" strokeWidth="1.5"/>
+          <path d="M5.5 7.5l2 2 3-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+        </svg>
+        AI Chat
+      </button>
+
       {/* Divider */}
       <div className="w-px h-5 bg-[var(--color-bg-tertiary)]" />
 
@@ -197,6 +212,7 @@ export default function Toolbar({
       {showOpenFromPi && <OpenFromPiDialog onClose={() => setShowOpenFromPi(false)} />}
       {showApply && <ApplyDialog onClose={() => setShowApply(false)} />}
       {showRevert && <RevertDialog onClose={() => setShowRevert(false)} />}
+      {showChat && <ChatDialog open={showChat} onClose={() => setShowChat(false)} />}
     </div>
   );
 }

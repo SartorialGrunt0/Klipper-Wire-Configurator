@@ -370,3 +370,44 @@ export async function deleteNativeLayout(): Promise<{ status: string }> {
     method: 'DELETE',
   });
 }
+
+/* ── AI Chat ─────────────────────────────────────────── */
+
+export type AiChatRole = 'system' | 'user' | 'assistant';
+
+export interface AiChatRequest {
+  messages: Array<{ role: AiChatRole; content: string }>;
+  apiKey: string;
+  model?: string;
+  apiUrl?: string;
+  apiProvider?: string;
+}
+
+export interface AiChatResponse {
+  content?: string;
+  error?: string;
+}
+
+export interface ModelListResponse {
+  models: string[];
+  error?: string;
+}
+
+export async function listModels(apiUrl: string, apiKey: string = ''): Promise<ModelListResponse> {
+  const params = new URLSearchParams();
+  params.set('apiUrl', apiUrl);
+  if (apiKey) params.set('apiKey', apiKey);
+  const res = await fetch(`/ai/models?${params.toString()}`);
+  if (!res.ok) throw new Error(`Failed to list models: ${res.statusText}`);
+  return res.json();
+}
+
+export async function aiChat(req: AiChatRequest): Promise<AiChatResponse> {
+  const res = await fetch('/ai/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) throw new Error(`AI chat failed: ${res.statusText}`);
+  return res.json();
+}
