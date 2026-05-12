@@ -38,7 +38,7 @@ const PROVIDER_DEFAULTS: Record<AiProvider, ProviderInfo> = {
   },
   google: {
     label: 'Google (Gemini)',
-    defaultUrl: '',
+    defaultUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
     requiresKey: true,
     defaultHost: 'localhost',
     defaultPort: '1234',
@@ -52,7 +52,7 @@ const PROVIDER_DEFAULTS: Record<AiProvider, ProviderInfo> = {
   },
   github: {
     label: 'GitHub Copilot',
-    defaultUrl: 'https://api.github.com/copilot/internal/v1/chat/completions',
+    defaultUrl: 'https://models.github.ai/inference/chat/completions',
     requiresKey: true,
     defaultHost: 'localhost',
     defaultPort: '1234',

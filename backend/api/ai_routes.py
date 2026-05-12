@@ -258,34 +258,6 @@ def _prepare_messages(messages: list[dict]) -> list[dict]:
     return [{"role": "system", "content": "\n\n".join(system_parts)}] + prepared
 
 
-def _build_google_payload(messages: list[dict], model: str) -> dict:
-    system_parts: list[str] = []
-    contents: list[dict] = []
-
-    for msg in messages:
-        if msg["role"] == "system":
-            system_parts.append(msg["content"])
-            continue
-        contents.append(
-            {
-                "role": "model" if msg["role"] == "assistant" else "user",
-                "parts": [{"text": msg["content"]}],
-            }
-        )
-
-    payload = {
-        "contents": contents,
-        "generationConfig": {},
-    }
-    if model:
-        payload["model"] = model
-    if system_parts:
-        payload["systemInstruction"] = {
-            "parts": [{"text": "\n\n".join(system_parts)}],
-        }
-    return payload
-
-
 def _extract_api_error_message(data: dict) -> str | None:
     error = data.get("error")
     if error is None:
@@ -297,8 +269,6 @@ def _extract_api_error_message(data: dict) -> str | None:
 
 
 def _extract_provider_content(provider: str, data: dict) -> str:
-    if provider == "google":
-        return data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
     if provider == "anthropic":
         return data.get("content", [{}])[0].get("text", "")
     return data.get("choices", [{}])[0].get("message", {}).get("content", "")
@@ -535,11 +505,6 @@ async def chat_proxy(req: ChatRequest):
             "anthropic-version": "2023-06-01",
             "Content-Type": "application/json",
         }
-    elif req.apiProvider == "google":
-        # Google uses a different format entirely
-        headers = {
-            "Content-Type": "application/json",
-        }
     elif _is_local_provider(req.apiProvider):
         # LM Studio and Ollama: auth optional, include key if provided
         headers = {
@@ -548,16 +513,14 @@ async def chat_proxy(req: ChatRequest):
         if req.apiKey:
             headers["Authorization"] = f"Bearer {req.apiKey}"
     else:
-        # OpenAI, GitHub Copilot, and OpenAI Compatible all use Bearer token
+        # OpenAI, Gemini OpenAI-compat, GitHub Copilot, and OpenAI Compatible all use Bearer auth
         headers = {
             "Authorization": f"Bearer {req.apiKey}",
             "Content-Type": "application/json",
         }
 
     # Build payload based on provider
-    if req.apiProvider == "google":
-        payload = _build_google_payload(messages, req.model)
-    elif req.apiProvider == "anthropic":
+    if req.apiProvider == "anthropic":
         # Claude uses a different format - extract system message
         system = None
         filtered_messages = []
@@ -578,7 +541,7 @@ async def chat_proxy(req: ChatRequest):
                 "messages": filtered_messages,
             }
     else:
-        # OpenAI, GitHub, compatible: standard format
+        # OpenAI-compatible chat providers use the standard messages format
         payload = {
             "model": req.model,
             "messages": messages,
