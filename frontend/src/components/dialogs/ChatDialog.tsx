@@ -12,7 +12,7 @@ import { mergeAssistantSectionsIntoConfig, type AssistantDraftChange } from '../
 import { normalizeDiffText } from '../../utils/configDiff';
 import { buildProjectGraph } from '../../utils/graphBuilder';
 import type { LmStudioMcpStatus } from '../../types/ai';
-import type { ConfigFile } from '../../types/config';
+import type { ConfigFile, ConfigSection } from '../../types/config';
 
 interface ProviderInfo {
   label: string;
@@ -105,6 +105,7 @@ interface AttachedConfigFile {
 
 const CONTEXT_TRUNCATION_LIMIT = 40000;
 const CONFIG_CODE_LANGUAGES = new Set(['', 'cfg', 'conf', 'ini', 'klipper', 'printercfg']);
+const ASSISTANT_FILE_HINT_RE = /^[#;]\s*file\s*:\s*(.+?)\s*$/i;
 
 function truncateConfigContext(content: string): string {
   if (content.length <= CONTEXT_TRUNCATION_LIMIT) {
@@ -118,9 +119,10 @@ function buildConfigContextMessage(filename: string, content: string, label: str
   return `${label}: ${filename}\n\n\`\`\`cfg\n${truncateConfigContext(content)}\n\`\`\``;
 }
 
-function extractConfigCodeBlock(content: string): string | null {
+function extractConfigCodeBlocks(content: string): string[] {
   const codeBlockPattern = /```([^\n`]*)\n([\s\S]*?)```/g;
-  let fallback: string | null = null;
+  const configBlocks: string[] = [];
+  const fallbackBlocks: string[] = [];
 
   for (const match of content.matchAll(codeBlockPattern)) {
     const language = match[1].trim().toLowerCase();
@@ -128,15 +130,158 @@ function extractConfigCodeBlock(content: string): string | null {
     if (!block) {
       continue;
     }
-    if (fallback == null) {
-      fallback = block;
-    }
+
     if (CONFIG_CODE_LANGUAGES.has(language)) {
-      return block;
+      configBlocks.push(block);
+      continue;
+    }
+
+    fallbackBlocks.push(block);
+  }
+
+  if (configBlocks.length > 0) {
+    return configBlocks;
+  }
+
+  return fallbackBlocks.length > 0 ? [fallbackBlocks[0]] : [];
+}
+
+function extractConfigCodeBlock(content: string): string | null {
+  return extractConfigCodeBlocks(content)[0] ?? null;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function extractMentionedConfigFilenames(texts: string[], availableFilenames: string[]): string[] {
+  const matches: string[] = [];
+
+  for (const filename of availableFilenames) {
+    const pattern = new RegExp(`(^|[^A-Za-z0-9_.-])${escapeRegExp(filename)}(?=$|[^A-Za-z0-9_.-])`, 'i');
+    if (texts.some((text) => pattern.test(text))) {
+      matches.push(filename);
     }
   }
 
-  return fallback;
+  return matches;
+}
+
+function extractAssistantFileHint(
+  configBlock: string,
+  availableFilenames: string[],
+): { configText: string; fileHint: string | null } {
+  const availableByLower = new Map(availableFilenames.map((filename) => [filename.toLowerCase(), filename]));
+  const lines = configBlock.split(/\r?\n/);
+  let fileHint: string | null = null;
+  let fileHintLineIndex = -1;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const trimmed = lines[index].trim();
+
+    if (!trimmed) {
+      continue;
+    }
+
+    const hintMatch = ASSISTANT_FILE_HINT_RE.exec(trimmed);
+    if (hintMatch) {
+      fileHint = availableByLower.get(hintMatch[1].trim().toLowerCase()) ?? null;
+      fileHintLineIndex = index;
+    }
+
+    break;
+  }
+
+  if (fileHintLineIndex === -1) {
+    return { configText: configBlock, fileHint };
+  }
+
+  return {
+    configText: lines.filter((_, index) => index !== fileHintLineIndex).join('\n').trim(),
+    fileHint,
+  };
+}
+
+function scoreAssistantTargetFile(config: ConfigFile, assistantSections: ConfigSection[]): {
+  exactMatches: number;
+  sectionTypeMatches: number;
+} {
+  const fullHeaders = new Set(config.sections.map((section) => section.full_header));
+  const sectionTypes = new Set(config.sections.map((section) => section.section_type));
+  let exactMatches = 0;
+  let sectionTypeMatches = 0;
+
+  assistantSections.forEach((section) => {
+    if (fullHeaders.has(section.full_header)) {
+      exactMatches += 1;
+      return;
+    }
+
+    if (sectionTypes.has(section.section_type)) {
+      sectionTypeMatches += 1;
+    }
+  });
+
+  return { exactMatches, sectionTypeMatches };
+}
+
+function resolveAssistantTargetFile(
+  assistantConfig: ConfigFile,
+  configFiles: Record<string, ConfigFile>,
+  activeFile: string,
+  hintedFilenames: string[],
+): string | null {
+  const availableFilenames = Object.keys(configFiles);
+  if (availableFilenames.length === 0) {
+    return null;
+  }
+
+  const uniqueHints = Array.from(new Set(hintedFilenames.filter((filename) => Boolean(configFiles[filename]))));
+  if (uniqueHints.length === 1) {
+    return uniqueHints[0];
+  }
+
+  const scores = availableFilenames
+    .map((filename) => {
+      const { exactMatches, sectionTypeMatches } = scoreAssistantTargetFile(
+        configFiles[filename],
+        assistantConfig.sections,
+      );
+
+      return {
+        filename,
+        exactMatches,
+        sectionTypeMatches,
+        hinted: uniqueHints.includes(filename),
+        active: filename === activeFile,
+      };
+    })
+    .sort((left, right) => {
+      if (right.exactMatches !== left.exactMatches) {
+        return right.exactMatches - left.exactMatches;
+      }
+      if (right.hinted !== left.hinted) {
+        return Number(right.hinted) - Number(left.hinted);
+      }
+      if (right.sectionTypeMatches !== left.sectionTypeMatches) {
+        return right.sectionTypeMatches - left.sectionTypeMatches;
+      }
+      if (right.active !== left.active) {
+        return Number(right.active) - Number(left.active);
+      }
+      return left.filename.localeCompare(right.filename);
+    });
+
+  const bestScore = scores[0];
+  if (bestScore.exactMatches > 0 || bestScore.sectionTypeMatches > 0) {
+    return bestScore.filename;
+  }
+
+  if (configFiles[activeFile]) {
+    return activeFile;
+  }
+
+  return availableFilenames[0] ?? null;
 }
 
 function getLmStudioMcpStatusPresentation(status: LmStudioMcpStatus): {
@@ -183,13 +328,17 @@ interface ChatDialogProps {
   onClose: () => void;
 }
 
-interface AssistantDraftPreview {
+interface AssistantDraftFilePreview {
   filename: string;
   originalText: string;
   baseConfig: ConfigFile;
   assistantConfig: ConfigFile;
   mergedText: string;
   changes: AssistantDraftChange[];
+}
+
+interface AssistantDraftPreview {
+  filePreviews: AssistantDraftFilePreview[];
   selectedChangeIds: string[];
   previewUpdating: boolean;
 }
@@ -361,7 +510,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
 
     void (async () => {
       const availabilityEntries = await Promise.all(
-        assistantMessages.map(async ({ msg, index }) => [index, await canAssistantMessageAffectDraft(msg.content)] as const),
+        assistantMessages.map(async ({ msg, index }) => [index, await canAssistantMessageAffectDraft(msg.content, index)] as const),
       );
 
       if (cancelled) {
@@ -433,13 +582,13 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
     return getConfigText(activeFile);
   };
 
-  const getSelectedConfigContexts = async (): Promise<string[]> => {
-    if (selectedConfigContextFiles.length === 0) {
+  const getConfigContexts = async (filenames: string[]): Promise<string[]> => {
+    if (filenames.length === 0) {
       return [];
     }
 
     const contexts = await Promise.all(
-      Array.from(new Set(selectedConfigContextFiles)).map(async (filename) => {
+      Array.from(new Set(filenames)).map(async (filename) => {
         const configText = await getConfigText(filename);
         if (configText == null) {
           return null;
@@ -460,6 +609,8 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
     return contexts.filter((context): context is string => context != null);
   };
 
+  const getSelectedConfigContexts = async (): Promise<string[]> => getConfigContexts(selectedConfigContextFiles);
+
   const buildAssistantDraftMergedText = async (
     baseConfig: ConfigFile,
     assistantConfig: ConfigFile,
@@ -474,68 +625,155 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
     return api.exportConfig({ ...mergedConfig, raw_text: originalText });
   };
 
-  const prepareAssistantDraftPreview = async (content: string): Promise<AssistantDraftPreview> => {
-    if (!activeFile) {
-      throw new Error('No active config file is selected for review.');
+  const getAssistantMessageHintTexts = (content: string, messageIndex?: number): string[] => {
+    if (messageIndex == null) {
+      return [content];
     }
 
-    const configBlock = extractConfigCodeBlock(content);
-    if (!configBlock) {
+    const hintTexts = [content];
+
+    for (let index = messageIndex - 1; index >= 0; index -= 1) {
+      const candidate = messages[index];
+      if (candidate?.role === 'user') {
+        hintTexts.push(candidate.content);
+        break;
+      }
+    }
+
+    return hintTexts;
+  };
+
+  const flattenAssistantDraftChanges = (filePreviews: AssistantDraftFilePreview[]): AssistantDraftChange[] =>
+    filePreviews.flatMap((filePreview) => filePreview.changes);
+
+  const buildAssistantDraftTargetConfigs = async (
+    content: string,
+    messageIndex?: number,
+  ): Promise<ConfigFile[]> => {
+    const configBlocks = extractConfigCodeBlocks(content);
+    if (configBlocks.length === 0) {
       throw new Error('The assistant response did not include a config code block to review.');
     }
 
-    const baseText = await getActiveConfigText();
-    if (baseText == null) {
-      throw new Error(`Unable to load ${activeFile} for preview.`);
+    const hintTexts = getAssistantMessageHintTexts(content, messageIndex);
+    const mentionedFilenames = extractMentionedConfigFilenames(hintTexts, loadedConfigFilenames);
+    const groupedTargets = new Map<string, ConfigFile>();
+
+    for (const configBlock of configBlocks) {
+      const { configText, fileHint } = extractAssistantFileHint(configBlock, loadedConfigFilenames);
+      if (!configText.trim()) {
+        continue;
+      }
+
+      const assistantParseFilename = fileHint ?? mentionedFilenames[0] ?? activeFile ?? loadedConfigFilenames[0] ?? 'printer.cfg';
+      const assistantResult = await api.parseConfigText(configText, assistantParseFilename);
+
+      if (assistantResult.config.sections.length === 0) {
+        continue;
+      }
+
+      const targetFile = resolveAssistantTargetFile(
+        assistantResult.config,
+        configFiles,
+        activeFile,
+        fileHint ? [fileHint] : mentionedFilenames,
+      );
+
+      if (!targetFile) {
+        throw new Error('Unable to determine which config file should receive the assistant changes.');
+      }
+
+      const existingTarget = groupedTargets.get(targetFile);
+      if (existingTarget) {
+        groupedTargets.set(targetFile, {
+          ...existingTarget,
+          includes: Array.from(new Set([...existingTarget.includes, ...assistantResult.config.includes])),
+          header_comments: existingTarget.header_comments.length > 0
+            ? existingTarget.header_comments
+            : assistantResult.config.header_comments,
+          sections: [...existingTarget.sections, ...assistantResult.config.sections],
+        });
+        continue;
+      }
+
+      groupedTargets.set(targetFile, {
+        ...assistantResult.config,
+        filename: targetFile,
+        includes: [...assistantResult.config.includes],
+        header_comments: [...assistantResult.config.header_comments],
+        sections: [...assistantResult.config.sections],
+      });
     }
 
-    const [baseResult, assistantResult] = await Promise.all([
-      api.parseConfigText(baseText, activeFile),
-      api.parseConfigText(configBlock, activeFile),
-    ]);
-
-    if (assistantResult.config.sections.length === 0) {
+    if (groupedTargets.size === 0) {
       throw new Error('The assistant response did not include any complete config sections to merge.');
     }
 
-    const { mergedConfig, changes } = mergeAssistantSectionsIntoConfig(
-      { ...baseResult.config, raw_text: baseText },
-      assistantResult.config,
-    );
-    const mergedText = await api.exportConfig({ ...mergedConfig, raw_text: baseText });
-    const selectedChangeIds = changes.map((change) => change.id);
+    return Array.from(groupedTargets.values());
+  };
 
-    if (normalizeDiffText(baseText) === normalizeDiffText(mergedText)) {
+  const prepareAssistantDraftPreview = async (
+    content: string,
+    messageIndex?: number,
+  ): Promise<AssistantDraftPreview> => {
+    const assistantConfigs = await buildAssistantDraftTargetConfigs(content, messageIndex);
+    const filePreviews: AssistantDraftFilePreview[] = [];
+
+    for (const assistantConfig of assistantConfigs) {
+      const targetFile = assistantConfig.filename;
+      const baseText = await getConfigText(targetFile);
+      if (baseText == null) {
+        throw new Error(`Unable to load ${targetFile} for preview.`);
+      }
+
+      const baseResult = await api.parseConfigText(baseText, targetFile);
+      const baseConfig = { ...baseResult.config, raw_text: baseText };
+      const { mergedConfig, changes } = mergeAssistantSectionsIntoConfig(baseConfig, assistantConfig);
+      const mergedText = await api.exportConfig({ ...mergedConfig, raw_text: baseText });
+
+      if (normalizeDiffText(baseText) === normalizeDiffText(mergedText)) {
+        continue;
+      }
+
+      filePreviews.push({
+        filename: targetFile,
+        originalText: baseText,
+        baseConfig,
+        assistantConfig,
+        mergedText,
+        changes,
+      });
+    }
+
+    if (filePreviews.length === 0) {
       throw new Error('The assistant response does not change the current draft.');
     }
 
     return {
-      filename: activeFile,
-      originalText: baseText,
-      baseConfig: { ...baseResult.config, raw_text: baseText },
-      assistantConfig: assistantResult.config,
-      mergedText,
-      changes,
-      selectedChangeIds,
+      filePreviews,
+      selectedChangeIds: flattenAssistantDraftChanges(filePreviews).map((change) => change.id),
       previewUpdating: false,
     };
   };
 
-  const canAssistantMessageAffectDraft = async (content: string): Promise<boolean> => {
+  const canAssistantMessageAffectDraft = async (
+    content: string,
+    messageIndex?: number,
+  ): Promise<boolean> => {
     try {
-      await prepareAssistantDraftPreview(content);
+      await prepareAssistantDraftPreview(content, messageIndex);
       return true;
     } catch {
       return false;
     }
   };
 
-  const handleApplyAssistantEdit = async (content: string) => {
+  const handleApplyAssistantEdit = async (content: string, messageIndex?: number) => {
     setAssistantDraftPreviewLoading(content);
     setError(null);
 
     try {
-      setAssistantDraftPreview(await prepareAssistantDraftPreview(content));
+      setAssistantDraftPreview(await prepareAssistantDraftPreview(content, messageIndex));
     } catch (err: unknown) {
       setAssistantDraftPreview(null);
       setError(err instanceof Error ? err.message : 'Failed to prepare assistant changes.');
@@ -565,11 +803,16 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
     });
 
     try {
-      const mergedText = await buildAssistantDraftMergedText(
-        currentPreview.baseConfig,
-        currentPreview.assistantConfig,
-        currentPreview.originalText,
-        selectedChangeIds,
+      const filePreviews = await Promise.all(
+        currentPreview.filePreviews.map(async (filePreview) => ({
+          ...filePreview,
+          mergedText: await buildAssistantDraftMergedText(
+            filePreview.baseConfig,
+            filePreview.assistantConfig,
+            filePreview.originalText,
+            selectedChangeIds,
+          ),
+        })),
       );
 
       if (requestId !== assistantDraftPreviewRequestRef.current) {
@@ -584,7 +827,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
         return {
           ...preview,
           selectedChangeIds,
-          mergedText,
+          filePreviews,
           previewUpdating: false,
         };
       });
@@ -614,21 +857,42 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
     }
 
     try {
-      const { filename, mergedText } = assistantDraftPreview;
-      const result = await api.parseConfigText(mergedText, filename);
-      const updatedConfigs = {
-        ...configFiles,
-        [filename]: result.config,
-      };
-      const updatedValidation = {
-        ...validation,
-        [filename]: result.validation,
-      };
+      const selectedChangeIds = new Set(assistantDraftPreview.selectedChangeIds);
+      const updatedConfigs = { ...configFiles };
+      const updatedValidation = { ...validation };
+      const touchedFiles: string[] = [];
 
-      setConfigFile(filename, result.config);
-      setValidation(filename, result.validation);
-      clearTextDraft();
-      setTextEditorDirty(false);
+      for (const filePreview of assistantDraftPreview.filePreviews) {
+        const hasSelectedChanges = filePreview.changes.some((change) => selectedChangeIds.has(change.id));
+        if (!hasSelectedChanges) {
+          continue;
+        }
+
+        if (normalizeDiffText(filePreview.originalText) === normalizeDiffText(filePreview.mergedText)) {
+          continue;
+        }
+
+        const result = await api.parseConfigText(filePreview.mergedText, filePreview.filename);
+        updatedConfigs[filePreview.filename] = result.config;
+        updatedValidation[filePreview.filename] = result.validation;
+        touchedFiles.push(filePreview.filename);
+      }
+
+      if (touchedFiles.length === 0) {
+        setAssistantDraftPreview(null);
+        setError(null);
+        return;
+      }
+
+      touchedFiles.forEach((filename) => {
+        setConfigFile(filename, updatedConfigs[filename]);
+        setValidation(filename, updatedValidation[filename]);
+      });
+
+      if (textDraftFile && touchedFiles.includes(textDraftFile)) {
+        clearTextDraft();
+        setTextEditorDirty(false);
+      }
       markDirty();
 
       const graphStore = useGraphStore.getState();
@@ -668,7 +932,11 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
 
     try {
       const contextMessages: Array<{ role: 'system'; content: string }> = [];
-      const selectedConfigContexts = await getSelectedConfigContexts();
+      const mentionedConfigFiles = extractMentionedConfigFilenames([userMsg.content], loadedConfigFilenames);
+      const selectedConfigContexts = await getConfigContexts([
+        ...selectedConfigContextFiles,
+        ...mentionedConfigFiles,
+      ]);
 
       for (const configContext of selectedConfigContexts) {
         contextMessages.push({ role: 'system', content: configContext });
@@ -681,10 +949,15 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
         });
       }
 
-      if (activeFile) {
+      if (mentionedConfigFiles.length > 0) {
         contextMessages.push({
           role: 'system',
-          content: `If the user asks you to modify ${activeFile}, return only the changed or new sections for that file inside a single fenced code block labeled cfg. Include full section headers and the full contents of each changed section. Do not return the entire file unless the user explicitly asks for a full replacement.`,
+          content: `The user explicitly referenced these loaded config files: ${mentionedConfigFiles.join(', ')}. Apply requested edits to those files instead of defaulting to the active text-view file. When you return cfg sections for a specific file, add a first comment line exactly like "# file: <filename>" before the changed sections. If changes span multiple files, return one separate fenced cfg block per file.`,
+        });
+      } else if (activeFile) {
+        contextMessages.push({
+          role: 'system',
+          content: `If the user asks you to modify ${activeFile}, or does not name a different config file, return only the changed or new sections for ${activeFile} inside a single fenced code block labeled cfg. Include full section headers and the full contents of each changed section. If a different loaded config file is clearly requested, target that file instead and start that cfg block with a first comment line exactly like "# file: <filename>". If changes span multiple files, return one separate fenced cfg block per file. Do not return the entire file unless the user explicitly asks for a full replacement.`,
         });
       }
 
@@ -1239,11 +1512,11 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
                       <div className="mt-3 flex justify-end">
                         <button
                           onClick={() => {
-                            void handleApplyAssistantEdit(msg.content);
+                            void handleApplyAssistantEdit(msg.content, i);
                           }}
                           disabled={assistantDraftPreviewLoading === msg.content}
                           className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-[10px] font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-60"
-                          title={`Preview how the assistant sections would merge into ${activeFile}`}
+                          title="Preview how the assistant sections would merge into the matching config file"
                         >
                           {assistantDraftPreviewLoading === msg.content ? 'Preparing Review...' : 'Apply and Review Changes'}
                         </button>
@@ -1408,10 +1681,12 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
 
       {assistantDraftPreview && (
         <AiDraftPreviewDialog
-          filename={assistantDraftPreview.filename}
-          originalText={assistantDraftPreview.originalText}
-          mergedText={assistantDraftPreview.mergedText}
-          changes={assistantDraftPreview.changes}
+          filePreviews={assistantDraftPreview.filePreviews.map((filePreview) => ({
+            filename: filePreview.filename,
+            originalText: filePreview.originalText,
+            mergedText: filePreview.mergedText,
+          }))}
+          changes={flattenAssistantDraftChanges(assistantDraftPreview.filePreviews)}
           selectedChangeIds={assistantDraftPreview.selectedChangeIds}
           previewUpdating={assistantDraftPreview.previewUpdating}
           onSelectionChange={(selectedChangeIds) => {

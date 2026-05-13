@@ -2,10 +2,14 @@ import { useMemo } from 'react';
 import type { AssistantDraftChange } from '../../utils/assistantDraftMerge';
 import { createConfigPatch, parsePatch } from '../../utils/configDiff';
 
-interface AiDraftPreviewDialogProps {
+interface AiDraftPreviewFile {
   filename: string;
   originalText: string;
   mergedText: string;
+}
+
+interface AiDraftPreviewDialogProps {
+  filePreviews: AiDraftPreviewFile[];
   changes: AssistantDraftChange[];
   selectedChangeIds: string[];
   previewUpdating: boolean;
@@ -15,9 +19,7 @@ interface AiDraftPreviewDialogProps {
 }
 
 export default function AiDraftPreviewDialog({
-  filename,
-  originalText,
-  mergedText,
+  filePreviews,
   changes,
   selectedChangeIds,
   previewUpdating,
@@ -27,16 +29,36 @@ export default function AiDraftPreviewDialog({
 }: AiDraftPreviewDialogProps) {
   const selectedIdSet = useMemo(() => new Set(selectedChangeIds), [selectedChangeIds]);
   const selectedCount = selectedChangeIds.length;
-  const patch = useMemo(
-    () => createConfigPatch(filename, originalText, mergedText, 'current draft', 'assistant merge', 3),
-    [filename, mergedText, originalText],
+  const fileDiffs = useMemo(
+    () => filePreviews.map((filePreview) => {
+      const patch = createConfigPatch(
+        filePreview.filename,
+        filePreview.originalText,
+        filePreview.mergedText,
+        'current draft',
+        'assistant merge',
+        3,
+      );
+      const diffLines = parsePatch(patch);
+
+      return {
+        ...filePreview,
+        diffLines,
+        changedLineCount: diffLines.filter(
+          (line) => line.type === 'added' || line.type === 'removed',
+        ).length,
+      };
+    }),
+    [filePreviews],
   );
-  const diffLines = useMemo(() => parsePatch(patch), [patch]);
   const changedLineCount = useMemo(
-    () => diffLines.filter((line) => line.type === 'added' || line.type === 'removed').length,
-    [diffLines],
+    () => fileDiffs.reduce((total, fileDiff) => total + fileDiff.changedLineCount, 0),
+    [fileDiffs],
   );
-  const hasChanges = changedLineCount > 0;
+  const hasChanges = fileDiffs.some((fileDiff) => fileDiff.changedLineCount > 0);
+  const fileSummary = filePreviews.length === 1
+    ? filePreviews[0]?.filename ?? 'the selected config file'
+    : `${filePreviews.length} files`;
 
   const toggleChange = (changeId: string) => {
     if (selectedIdSet.has(changeId)) {
@@ -65,8 +87,13 @@ export default function AiDraftPreviewDialog({
           <div>
             <h2 className="text-sm font-semibold text-[var(--color-text-primary)]">Review AI Draft Changes</h2>
             <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
-              The assistant sections will be merged into {filename} before the config is applied.
+              The assistant sections will be merged into {fileSummary} before the config is applied.
             </p>
+            {filePreviews.length > 1 && (
+              <p className="mt-1 text-[11px] text-[var(--color-text-secondary)]">
+                {filePreviews.map((filePreview) => filePreview.filename).join(', ')}
+              </p>
+            )}
           </div>
           <button
             onClick={onClose}
@@ -142,6 +169,7 @@ export default function AiDraftPreviewDialog({
                 >
                   {change.mode === 'add' ? 'new' : 'update'}
                 </span>
+                <span className="text-[var(--color-text-secondary)]">{change.filename}</span>
                 <span>{change.fullHeader}</span>
               </button>
               );
@@ -163,28 +191,51 @@ export default function AiDraftPreviewDialog({
               The assistant output does not change the current draft.
             </p>
           ) : (
-            <div className="overflow-hidden rounded-lg border border-[var(--color-bg-tertiary)]">
-              <pre className="overflow-x-auto text-xs leading-5 font-mono">
-                {diffLines.map((line, index) => (
-                  <div
-                    key={index}
-                    className={
-                      line.type === 'added'
-                        ? 'bg-green-500/15 px-3 text-green-400'
-                        : line.type === 'removed'
-                          ? 'bg-red-500/15 px-3 text-red-400'
-                          : line.type === 'header'
-                            ? 'bg-blue-500/10 px-3 py-0.5 text-blue-400'
-                            : 'px-3 text-[var(--color-text-secondary)]'
-                    }
-                  >
-                    <span className="mr-2 select-none opacity-40">
-                      {line.type === 'added' ? '+' : line.type === 'removed' ? '-' : ' '}
+            <div className="space-y-4">
+              {fileDiffs.map((fileDiff) => (
+                <div
+                  key={fileDiff.filename}
+                  className="overflow-hidden rounded-lg border border-[var(--color-bg-tertiary)]"
+                >
+                  <div className="flex items-center justify-between border-b border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-3 py-2">
+                    <span className="text-[11px] font-semibold text-[var(--color-text-primary)]">
+                      {fileDiff.filename}
                     </span>
-                    {line.content || '\u00A0'}
+                    <span className="text-[10px] text-[var(--color-text-secondary)]">
+                      {fileDiff.changedLineCount > 0
+                        ? `${fileDiff.changedLineCount} diff line${fileDiff.changedLineCount === 1 ? '' : 's'}`
+                        : 'No selected changes for this file'}
+                    </span>
                   </div>
-                ))}
-              </pre>
+                  {fileDiff.changedLineCount === 0 ? (
+                    <p className="px-3 py-4 text-xs text-[var(--color-text-secondary)]">
+                      No selected changes remain for this file.
+                    </p>
+                  ) : (
+                    <pre className="overflow-x-auto text-xs leading-5 font-mono">
+                      {fileDiff.diffLines.map((line, index) => (
+                        <div
+                          key={`${fileDiff.filename}_${index}`}
+                          className={
+                            line.type === 'added'
+                              ? 'bg-green-500/15 px-3 text-green-400'
+                              : line.type === 'removed'
+                                ? 'bg-red-500/15 px-3 text-red-400'
+                                : line.type === 'header'
+                                  ? 'bg-blue-500/10 px-3 py-0.5 text-blue-400'
+                                  : 'px-3 text-[var(--color-text-secondary)]'
+                          }
+                        >
+                          <span className="mr-2 select-none opacity-40">
+                            {line.type === 'added' ? '+' : line.type === 'removed' ? '-' : ' '}
+                          </span>
+                          {line.content || '\u00A0'}
+                        </div>
+                      ))}
+                    </pre>
+                  )}
+                </div>
+              ))}
             </div>
           )}
         </div>
