@@ -6,12 +6,22 @@ param(
     [switch]$FakeNative
 )
 
+
 Write-Host 'Starting Klipper Wire Configurator...' -ForegroundColor Cyan
 
 $rootDir = $PSScriptRoot
 if (-not $rootDir) { $rootDir = Get-Location }
 $backendDir = Join-Path $rootDir 'backend'
 $frontendDir = Join-Path $rootDir 'frontend'
+
+# Optional: fake native (Raspberry Pi) environment for local dev.
+# When set, the backend will see the KWC_FAKE_NATIVE env var and report native features available.
+$oldKwcFake = $null
+if ($FakeNative) {
+    Write-Host 'Faking native device environment (KWC_FAKE_NATIVE=1).' -ForegroundColor Yellow
+    $oldKwcFake = $env:KWC_FAKE_NATIVE
+    $env:KWC_FAKE_NATIVE = '1'
+}
 
 function Get-ProcessDetails {
     param([int]$ProcessId)
@@ -239,6 +249,14 @@ finally {
     }
     if ($backendProcess) {
         Stop-ProcessTree -ProcessId $backendProcess.Id
+    }
+    if ($FakeNative) {
+        if ($null -ne $oldKwcFake) {
+            $env:KWC_FAKE_NATIVE = $oldKwcFake
+        }
+        else {
+            Remove-Item Env:\KWC_FAKE_NATIVE -ErrorAction SilentlyContinue
+        }
     }
     Write-Host 'Servers stopped.' -ForegroundColor Yellow
 }

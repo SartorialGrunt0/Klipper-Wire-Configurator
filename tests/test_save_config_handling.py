@@ -1,11 +1,11 @@
 import sys
+from pathlib import Path
 
-sys.path.insert(0, 'backend')
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'backend'))
 
 from parser.config_parser import parse_config, ConfigFile
 from parser.config_writer import smart_export
 from parser.validator import validate_config
-
 
 def test_required_param_can_come_from_save_config():
     config = parse_config(

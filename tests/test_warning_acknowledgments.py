@@ -1,8 +1,9 @@
 import os
 import sys
 import tempfile
+from pathlib import Path
 
-sys.path.insert(0, 'backend')
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'backend'))
 
 from parser.config_parser import parse_config
 from parser.validator import validate_config, validate_project_configs

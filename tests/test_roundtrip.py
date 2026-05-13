@@ -1,8 +1,10 @@
-﻿import sys, glob
-sys.path.insert(0, 'backend')
+import sys
+import glob
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'backend'))
 from parser.config_parser import parse_config
 from parser.config_writer import smart_export
-from pathlib import Path
 
 configs = glob.glob('reference/config/**/*.cfg', recursive=True)
 configs += glob.glob('reference/Trident_backup/**/*.cfg', recursive=True)

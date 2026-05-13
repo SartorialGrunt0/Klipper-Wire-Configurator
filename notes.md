@@ -110,8 +110,8 @@ python main.py
 From the repository root:
 
 ```bash
-python3 test_roundtrip.py
-python3 test_diff_roundtrip.py
+python3 tests/test_roundtrip.py
+python3 tests/test_diff_roundtrip.py
 cd frontend
 npm install
 npm run build

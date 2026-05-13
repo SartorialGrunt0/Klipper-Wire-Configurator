@@ -7,6 +7,13 @@ It runs directly on your SBC. The software is entirely free to use and licensed 
 
 Credit to the klipper, mainsail, moonraker, fluidd, and other teams whom which I borrowed and referenced alot from.
 
+## Table of contents
+
+- [Features](#features)
+- [Installing](#installing/uninstalling)
+- [Troubleshooting](#troubleshooting)
+- [Development](#development)
+
 ## Features
 
 - Graphical front end with cards and wires to show connections
@@ -19,6 +26,7 @@ Credit to the klipper, mainsail, moonraker, fluidd, and other teams whom which I
 - Manage USB, UART, or CAN communcations with ID detection.
 - Text View for traditonal configuration management, faster multi-file fuzzy search, and line referenced table of contents.
 - Macro Designer with easy modifications and simulation.
+- Build, download, and flash Klipper and Katapult firmware.
 
 ### Graphical UI
 
@@ -44,16 +52,21 @@ Credit to the klipper, mainsail, moonraker, fluidd, and other teams whom which I
 
 <img src="images/Macro_Designer.png" width="1000" height="660">
 
+### Firmware Flash Tool
+
+<img src="images/Flash_Tool.png" width="1000" height="660">
+
 ## Prerequisites
 
 - Raspberry Pi OS or another Debian-based distro, bookworm or newer.
 - Python 3.10+
 - Git and internet access for the initial install
-- A second device on the same network if you want to open the web UI remotely
+- Klipper
+- Katapult (optional)
 
 The Raspberry Pi installer handles Node.js setup and installs the systemd service.
 
-## Installing/Uninstalling on Raspberry Pi
+## Installing/Uninstalling
 
 ### Install
 
@@ -64,6 +77,19 @@ cd ~
 git clone https://github.com/SartorialGrunt0/Klipper-Wire-Configurator.git
 cd Klipper-Wire-Configurator
 bash scripts/install.sh
+```
+
+If you want to install or update a non-`main` branch, either check out that branch first and rerun the installer from that repo, or set `KWC_GIT_REF` explicitly:
+
+```bash
+cd ~/Klipper-Wire-Configurator
+git checkout your-branch
+git pull --ff-only
+bash scripts/install.sh
+```
+
+```bash
+KWC_GIT_REF=your-branch bash scripts/install.sh
 ```
 
 On 32-bit Raspberry Pi OS (`armv7` / `armhf`), the installer automatically uses the distro `nodejs` package. I havent tried 64-bit YMMV.
@@ -114,8 +140,9 @@ sudo journalctl -u klipper-wire-configurator -f
 - Use the exact repo directory name that exists on disk for uninstall commands, Moonraker paths, and manual installer reruns.
 - If Moonraker reports `Unit klipper-wire-configurator.service not found`, rerun the installer once from the repo root to migrate older user-service installs.
 - If Moonraker reports untracked files under `frontend/public/reference/` that would be overwritten, remove that directory once inside the installed repo and retry the update.
+- If the Flash dialog reports that it received HTML instead of JSON, the frontend bundle is newer than the backend service. Rerun the installer or restart the `klipper-wire-configurator` service from the updated repo.
 
-## Development setup
+## Development
 
 Use this when you want backend and frontend running in separate terminals.
 

@@ -1,14 +1,13 @@
 import sys
+from pathlib import Path
 
-sys.path.insert(0, 'backend')
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'backend'))
 
 from parser.config_parser import parse_config
 from parser.validator import validate_config
 
-
 def _validate(text: str):
     return validate_config(parse_config(text, 'printer.cfg'))
-
 
 def test_delta_round_bed_mesh_config_matches_reference():
     result = _validate(
@@ -39,7 +38,6 @@ fade_end: 0.0
     assert not result.has_errors
     assert not result.has_warnings
 
-
 def test_delta_printer_requires_delta_radius():
     result = _validate(
         '''
@@ -51,7 +49,6 @@ max_accel: 1200
     )
 
     assert any(error.param == 'delta_radius' for error in result.errors)
-
 
 def test_rectangular_bed_mesh_still_requires_mesh_min_and_mesh_max():
     result = _validate(
@@ -69,17 +66,16 @@ horizontal_move_z: 5
     assert ('bed_mesh', 'mesh_min') in missing
     assert ('bed_mesh', 'mesh_max') in missing
 
-
 def test_general_required_params_still_fail():
     result = _validate(
         '''
 [bltouch]
 sensor_pin: ^P1.27
+control_pin: P1.23
 '''
     )
 
     assert any(error.param == 'control_pin' for error in result.errors)
-
 
 def test_shared_tmc_uart_bus_does_not_warn():
     result = _validate(
@@ -118,7 +114,6 @@ run_current: 0.580
 
     assert not any('gpio9' in error.message or 'gpio8' in error.message for error in result.errors)
 
-
 def test_shared_stepper_enable_pin_does_not_warn():
     result = _validate(
         '''
@@ -147,7 +142,6 @@ rotation_distance: 40
 
     assert not any('PB10' in error.message and 'enable_pin' in error.message for error in result.errors)
 
-
 def test_bed_mesh_dependency_accepts_probe_family_sections():
     result = _validate(
         '''
@@ -160,7 +154,6 @@ mesh_radius: 50
     )
 
     assert not any('requires [probe]' in error.message for error in result.errors)
-
 
 def test_lpc_pin_formats_do_not_warn():
     result = _validate(

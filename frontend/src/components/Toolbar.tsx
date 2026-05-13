@@ -9,6 +9,7 @@ import OpenFromPiDialog from './dialogs/OpenFromPiDialog';
 import ApplyDialog from './dialogs/ApplyDialog';
 import RevertDialog from './dialogs/RevertDialog';
 import ChatDialog from './dialogs/ChatDialog';
+import FirmwareDialog from './dialogs/FirmwareDialog';
 
 interface ToolbarProps {
   showTextView: boolean;
@@ -31,6 +32,7 @@ export default function Toolbar({
   const [showRevert, setShowRevert] = useState(false);
   const [showChat, setShowChat] = useState(false);
   const aiConfigured = useAiStore((s) => s.isConfigured());
+  const [showFlash, setShowFlash] = useState(false);
   const hasOriginals = Object.keys(useConfigStore((s) => s.originalTexts)).length > 0;
   const isNative = useNativeStore((s) => s.isNative);
   const hasConfig = Object.keys(useConfigStore((s) => s.configFiles)).length > 0;
@@ -61,7 +63,7 @@ export default function Toolbar({
     return 'bg-green-600 text-white hover:bg-green-700';
   };
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex items-center gap-2 min-w-max">
       {/* Import */}
       <button
         onClick={() => setShowImport(true)}
@@ -86,30 +88,8 @@ export default function Toolbar({
         </button>
       )}
 
-      {/* + Component */}
-      {onToggleAddMenu && (
-        <button
-          onClick={onToggleAddMenu}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] transition-colors"
-        >
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-            <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
-          </svg>
-          Component
-        </button>
-      )}
-
-      {onOpenMacroDesigner && (
-        <button
-          onClick={onOpenMacroDesigner}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] transition-colors"
-        >
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-            <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
-          </svg>
-          Macro
-        </button>
-      )}
+      {/* Divider */}
+      <div className="w-px h-5 bg-[var(--color-bg-tertiary)]" />
 
       {/* Export */}
       <button
@@ -177,6 +157,49 @@ export default function Toolbar({
       {/* Divider */}
       <div className="w-px h-5 bg-[var(--color-bg-tertiary)]" />
 
+      {isNative && (
+        <button
+          onClick={() => setShowFlash(true)}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] transition-colors"
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <path d="M3 5.5h10M5 2.5h6M5 8.5h6M4.5 11.5h7M4 14h8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+          </svg>
+          Flash
+        </button>
+      )}
+
+      {/* Divider */}
+      <div className="w-px h-5 bg-[var(--color-bg-tertiary)]" />
+      
+      {/* + Component */}
+      {onToggleAddMenu && (
+        <button
+          onClick={onToggleAddMenu}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] transition-colors"
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+          </svg>
+          Component
+        </button>
+      )}
+
+      {onOpenMacroDesigner && (
+        <button
+          onClick={onOpenMacroDesigner}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] transition-colors"
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+          </svg>
+          Macro
+        </button>
+      )}
+
+      {/* Divider */}
+      <div className="w-px h-5 bg-[var(--color-bg-tertiary)]" />
+
       {/* Toggle text/graph view */}
       <button
         onClick={onToggleTextView}
@@ -211,6 +234,7 @@ export default function Toolbar({
       {showDiff && <DiffDialog onClose={() => setShowDiff(false)} />}
       {showOpenFromPi && <OpenFromPiDialog onClose={() => setShowOpenFromPi(false)} />}
       {showApply && <ApplyDialog onClose={() => setShowApply(false)} />}
+      {showFlash && <FirmwareDialog onClose={() => setShowFlash(false)} />}
       {showRevert && <RevertDialog onClose={() => setShowRevert(false)} />}
       {showChat && <ChatDialog open={showChat} onClose={() => setShowChat(false)} />}
     </div>

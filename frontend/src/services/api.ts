@@ -14,11 +14,30 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
     headers: { 'Content-Type': 'application/json' },
     ...options,
   });
+  const text = await res.text();
   if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`API error ${res.status}: ${err}`);
+    throw new Error(`API error ${res.status}: ${text}`);
   }
-  return res.json();
+
+  const contentType = res.headers.get('content-type') || '';
+  if (contentType.includes('application/json')) {
+    return JSON.parse(text) as T;
+  }
+
+  const trimmed = text.trimStart().toLowerCase();
+  if (trimmed.startsWith('<!doctype') || trimmed.startsWith('<html')) {
+    throw new Error(
+      'The frontend received HTML instead of JSON from the backend. '
+      + 'This usually means the backend service is older than the frontend bundle or the firmware API route is missing. '
+      + 'Update and restart the backend service, then refresh the page.',
+    );
+  }
+
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(`Invalid API response from ${url}`);
+  }
 }
 
 /* ── Import ──────────────────────────────────────────── */
@@ -352,6 +371,167 @@ export interface KlipperStatusResponse {
 
 export async function getKlipperStatus(): Promise<KlipperStatusResponse> {
   return request('/native/klipper/status');
+}
+
+export type FlashTargetKey = 'klipper' | 'katapult';
+
+export interface NativeFlashArtifact {
+  name: string;
+  path: string;
+  size: number;
+  modified: number;
+}
+
+export interface NativeFlashDeviceCandidate {
+  value: string;
+  label: string;
+}
+
+export interface NativeFlashChoiceOption {
+  symbol: string;
+  prompt: string;
+  selected: boolean;
+}
+
+export interface NativeFlashField {
+  id: string;
+  kind: 'bool' | 'tristate' | 'string' | 'int' | 'hex' | 'choice';
+  symbol: string | null;
+  prompt: string;
+  value: string;
+  help: string;
+  menu_path: string[];
+  assignable: string[];
+  options?: NativeFlashChoiceOption[];
+}
+
+export interface NativeFlashState {
+  target: FlashTargetKey;
+  display_name: string;
+  available: boolean;
+  error: string | null;
+  checkout_path: string;
+  config_path: string;
+  out_path: string;
+  config_exists: boolean;
+  fields: NativeFlashField[];
+  artifacts: NativeFlashArtifact[];
+  primary_artifact: NativeFlashArtifact | null;
+  flash_supported: boolean;
+  flash_reason: string | null;
+  flash_device_required: boolean;
+  flash_device_placeholder: string;
+  default_flash_device: string;
+  flash_device_candidates: NativeFlashDeviceCandidate[];
+  flash_help: string;
+}
+
+export interface NativeFlashCommandResult {
+  target: FlashTargetKey;
+  display_name: string;
+  success: boolean;
+  error: string | null;
+  log: string;
+  checkout_path: string;
+  out_path: string;
+  artifacts: NativeFlashArtifact[];
+  primary_artifact: NativeFlashArtifact | null;
+  flash_device: string;
+}
+
+export type NativeFirmwareArtifact = NativeFlashArtifact;
+export type NativeFirmwareChoiceOption = NativeFlashChoiceOption;
+export type NativeFirmwareField = NativeFlashField;
+export type NativeFirmwareState = NativeFlashState;
+export type NativeFirmwareBuildResult = NativeFlashCommandResult;
+
+export async function getNativeFlashState(
+  target: FlashTargetKey,
+  checkoutPath?: string,
+): Promise<NativeFlashState> {
+  const q = checkoutPath ? `?checkout_path=${encodeURIComponent(checkoutPath)}` : '';
+  return request(`/native/flash/${encodeURIComponent(target)}${q}`);
+}
+
+export async function previewNativeFlashConfig(
+  target: FlashTargetKey,
+  assignments: Array<{ symbol: string; value: string }>,
+  checkoutPath?: string,
+): Promise<NativeFlashState> {
+  return request(`/native/flash/${encodeURIComponent(target)}/preview`, {
+    method: 'POST',
+    body: JSON.stringify({ assignments, checkout_path: checkoutPath }),
+  });
+}
+
+export async function updateNativeFlashConfig(
+  target: FlashTargetKey,
+  assignments: Array<{ symbol: string; value: string }>,
+  checkoutPath?: string,
+): Promise<NativeFlashState> {
+  return request(`/native/flash/${encodeURIComponent(target)}/config`, {
+    method: 'PUT',
+    body: JSON.stringify({ assignments, checkout_path: checkoutPath }),
+  });
+}
+
+export async function buildNativeFlashTarget(
+  target: FlashTargetKey,
+  checkoutPath?: string,
+): Promise<NativeFlashCommandResult> {
+  return request(`/native/flash/${encodeURIComponent(target)}/build`, {
+    method: 'POST',
+    body: JSON.stringify({ checkout_path: checkoutPath }),
+  });
+}
+
+export async function flashNativeFlashTarget(
+  target: FlashTargetKey,
+  checkoutPath?: string,
+  flashDevice?: string,
+): Promise<NativeFlashCommandResult> {
+  return request(`/native/flash/${encodeURIComponent(target)}/flash`, {
+    method: 'POST',
+    body: JSON.stringify({ checkout_path: checkoutPath, flash_device: flashDevice }),
+  });
+}
+
+export async function downloadNativeFlashArtifact(
+  target: FlashTargetKey,
+  filename: string,
+  checkoutPath?: string,
+): Promise<Blob> {
+  const q = checkoutPath ? `?checkout_path=${encodeURIComponent(checkoutPath)}` : '';
+  const res = await fetch(
+    `${BASE_URL}/native/flash/${encodeURIComponent(target)}/artifacts/${encodeURIComponent(filename)}${q}`,
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Artifact download failed: ${err}`);
+  }
+  return res.blob();
+}
+
+export async function getNativeFirmwareState(klipperPath?: string): Promise<NativeFirmwareState> {
+  return getNativeFlashState('klipper', klipperPath);
+}
+
+export async function updateNativeFirmwareConfig(
+  assignments: Array<{ symbol: string; value: string }>,
+  klipperPath?: string,
+): Promise<NativeFirmwareState> {
+  return updateNativeFlashConfig('klipper', assignments, klipperPath);
+}
+
+export async function buildNativeFirmware(klipperPath?: string): Promise<NativeFirmwareBuildResult> {
+  return buildNativeFlashTarget('klipper', klipperPath);
+}
+
+export async function downloadNativeFirmwareArtifact(
+  filename: string,
+  klipperPath?: string,
+): Promise<Blob> {
+  return downloadNativeFlashArtifact('klipper', filename, klipperPath);
 }
 
 export async function loadNativeLayout(): Promise<{ layout: unknown | null }> {
