@@ -65,7 +65,7 @@ export default function AiDraftPreviewDialog({
           <div>
             <h2 className="text-sm font-semibold text-[var(--color-text-primary)]">Review AI Draft Changes</h2>
             <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
-              The assistant sections will be merged into {filename} before the draft is updated.
+              The assistant sections will be merged into {filename} before the config is applied.
             </p>
           </div>
           <button
@@ -191,7 +191,7 @@ export default function AiDraftPreviewDialog({
 
         <div className="flex items-center justify-between border-t border-[var(--color-bg-tertiary)] p-4">
           <p className="text-xs text-[var(--color-text-secondary)]">
-            Accepting updates the text draft only. You can still review or apply it from the editor afterward.
+            Accepting applies the selected updates immediately and makes them ready for Save to Pi.
           </p>
           <div className="flex items-center gap-2">
             <button

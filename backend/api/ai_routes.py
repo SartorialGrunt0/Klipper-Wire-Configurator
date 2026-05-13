@@ -75,7 +75,9 @@ LM_STUDIO_MCP_FALLBACK_HINTS = (
 
 SYSTEM_PROMPT = (
     "You are a klipper firmware and configuration expert who responds in clear, "
-    "short, and concise answers to help with klipper firmware questions. If you edit a configuration section, always show the whole section in your response"
+    "short, and concise answers to help with klipper firmware questions. If you edit a configuration section, always show the whole section in your response." \
+    "If you suggest a content change, site the reference documentation section you used, and quote the exact section header and parameter names from the docs. " \
+    "If you don't know the answer, say you don't know and suggest what to verify or ask next instead of guessing."
 )
 DOCS_GROUNDING_PROMPT = (
     "Ground all Klipper configuration guidance in documentation before answering. "

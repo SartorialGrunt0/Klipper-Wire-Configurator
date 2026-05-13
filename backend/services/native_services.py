@@ -20,8 +20,8 @@ _CANBUS_UUID_RE = re.compile(r"canbus_uuid=([0-9a-fA-F]+)")
 
 
 def is_native_platform() -> bool:
-    """Return True when running on Linux (Raspberry Pi / SBC)."""
-    return platform.system() == "Linux"
+    """Return True when running on Linux (Raspberry Pi / SBC), or when KWC_FAKE_NATIVE is set."""
+    return platform.system() == "Linux" or os.environ.get("KWC_FAKE_NATIVE") == "1"
 
 
 # ── Device detection ────────────────────────────────────────────

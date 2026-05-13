@@ -2,7 +2,8 @@
 # Starts both backend (FastAPI) and frontend (Vite) servers in parallel
 
 param(
-    [switch]$StopExisting
+    [switch]$StopExisting,
+    [switch]$FakeNative
 )
 
 Write-Host 'Starting Klipper Wire Configurator...' -ForegroundColor Cyan
@@ -187,7 +188,14 @@ try {
             Pop-Location
         }
     }
+    if ($FakeNative) {
+        Write-Host 'FakeNative mode enabled — backend will report as native platform.' -ForegroundColor Magenta
+        $env:KWC_FAKE_NATIVE = '1'
+    }
     $backendProcess = Start-Process -FilePath $venvPython -ArgumentList 'main.py' -WorkingDirectory $backendDir -WindowStyle Hidden -PassThru
+    if ($FakeNative) {
+        Remove-Item Env:KWC_FAKE_NATIVE -ErrorAction SilentlyContinue
+    }
 
     # Give backend a moment to start
     Start-Sleep -Seconds 2

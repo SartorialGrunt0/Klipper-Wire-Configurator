@@ -1,12 +1,16 @@
 import React, { useState, useRef, useEffect, type ComponentPropsWithoutRef } from 'react';
+import KeyboardArrowDownRounded from '@mui/icons-material/KeyboardArrowDownRounded';
+import UploadFileRounded from '@mui/icons-material/UploadFileRounded';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useAiStore, AiProvider, ChatMessage } from '../../stores/aiStore';
 import { useConfigStore } from '../../stores/configStore';
+import { useGraphStore } from '../../stores/graphStore';
 import * as api from '../../services/api';
 import AiDraftPreviewDialog from './AiDraftPreviewDialog';
 import { mergeAssistantSectionsIntoConfig, type AssistantDraftChange } from '../../utils/assistantDraftMerge';
 import { normalizeDiffText } from '../../utils/configDiff';
+import { buildProjectGraph } from '../../utils/graphBuilder';
 import type { LmStudioMcpStatus } from '../../types/ai';
 import type { ConfigFile } from '../../types/config';
 
@@ -195,20 +199,28 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
   const {
     configFiles,
     activeFile,
+    validation,
+    schemas,
     textEditorDirty,
     textDraftFile,
     textDraftText,
+    setConfigFile,
+    setValidation,
+    clearTextDraft,
     setTextDraft,
     setTextEditorDirty,
+    markDirty,
   } = useConfigStore();
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
-  const [includeActiveConfig, setIncludeActiveConfig] = useState(true);
+  const [selectedConfigContextFiles, setSelectedConfigContextFiles] = useState<string[]>(activeFile ? [activeFile] : []);
   const [attachedConfigFiles, setAttachedConfigFiles] = useState<AttachedConfigFile[]>([]);
   const [assistantDraftPreview, setAssistantDraftPreview] = useState<AssistantDraftPreview | null>(null);
   const [assistantDraftPreviewLoading, setAssistantDraftPreviewLoading] = useState<string | null>(null);
+  const [assistantDraftApplicableMessages, setAssistantDraftApplicableMessages] = useState<Record<number, boolean>>({});
+  const [includeFilesMenuOpen, setIncludeFilesMenuOpen] = useState(false);
 
   // Settings editing state
   const [editApiKey, setEditApiKey] = useState(settings.apiKey);
@@ -278,15 +290,99 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
     }
   }, [open, settings]);
 
+  useEffect(() => {
+    if (!open) {
+      setIncludeFilesMenuOpen(false);
+      return;
+    }
+
+    setSelectedConfigContextFiles((prev) => {
+      if (prev.length > 0 || !activeFile) {
+        return prev;
+      }
+
+      return [activeFile];
+    });
+  }, [open, activeFile]);
+
+  useEffect(() => {
+    const availableFiles = new Set(Object.keys(configFiles));
+
+    setSelectedConfigContextFiles((prev) => {
+      const next = prev.filter((filename) => availableFiles.has(filename));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [configFiles]);
+
+  useEffect(() => {
+    if (!includeFilesMenuOpen) {
+      return;
+    }
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (includeFilesMenuRef.current?.contains(event.target as Node)) {
+        return;
+      }
+
+      setIncludeFilesMenuOpen(false);
+    };
+
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+    };
+  }, [includeFilesMenuOpen]);
+
   // Auto-scroll to bottom
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!open || !activeFile) {
+      setAssistantDraftApplicableMessages({});
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const assistantMessages = messages
+      .map((msg, index) => ({ msg, index }))
+      .filter(({ msg }) => msg.role === 'assistant' && extractConfigCodeBlock(msg.content));
+
+    if (assistantMessages.length === 0) {
+      setAssistantDraftApplicableMessages({});
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    void (async () => {
+      const availabilityEntries = await Promise.all(
+        assistantMessages.map(async ({ msg, index }) => [index, await canAssistantMessageAffectDraft(msg.content)] as const),
+      );
+
+      if (cancelled) {
+        return;
+      }
+
+      setAssistantDraftApplicableMessages(Object.fromEntries(availabilityEntries));
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [open, messages, activeFile, configFiles, textDraftFile, textDraftText]);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const includeFilesMenuRef = useRef<HTMLDivElement>(null);
   const assistantDraftPreviewRequestRef = useRef(0);
+
+  const loadedConfigFilenames = Object.keys(configFiles);
 
   const handleAttachConfigFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
@@ -302,7 +398,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
       })));
       setAttachedConfigFiles((prev) => [...prev, ...loadedFiles]);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to attach config file.');
+      setError(err instanceof Error ? err.message : 'Failed to import config file.');
     } finally {
       e.target.value = '';
     }
@@ -312,40 +408,56 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
     setAttachedConfigFiles((prev) => prev.filter((file) => file.id !== id));
   };
 
+  const getConfigText = async (filename: string): Promise<string | null> => {
+    if (!filename) {
+      return null;
+    }
+
+    if (textDraftFile === filename) {
+      return textDraftText;
+    }
+
+    const config = configFiles[filename];
+    if (!config) {
+      return null;
+    }
+
+    return api.exportConfig(config);
+  };
+
   const getActiveConfigText = async (): Promise<string | null> => {
     if (!activeFile) {
       return null;
     }
 
-    if (textDraftFile === activeFile) {
-      return textDraftText;
-    }
-
-    const activeConfig = configFiles[activeFile];
-    if (!activeConfig) {
-      return null;
-    }
-
-    return api.exportConfig(activeConfig);
+    return getConfigText(activeFile);
   };
 
-  const getActiveConfigContext = async (): Promise<string | null> => {
-    if (!includeActiveConfig || !activeFile) {
-      return null;
+  const getSelectedConfigContexts = async (): Promise<string[]> => {
+    if (selectedConfigContextFiles.length === 0) {
+      return [];
     }
 
-    const activeConfigText = await getActiveConfigText();
-    if (activeConfigText == null) {
-      return null;
-    }
+    const contexts = await Promise.all(
+      Array.from(new Set(selectedConfigContextFiles)).map(async (filename) => {
+        const configText = await getConfigText(filename);
+        if (configText == null) {
+          return null;
+        }
 
-    return buildConfigContextMessage(
-      activeFile,
-      activeConfigText,
-      textDraftFile === activeFile && textEditorDirty
-        ? 'Active Klipper config draft with unapplied text-view changes'
-        : 'Active Klipper config draft',
+        const label = filename === activeFile
+          ? (
+            textDraftFile === activeFile && textEditorDirty
+              ? 'Active Klipper config draft with unapplied text-view changes'
+              : 'Active Klipper config draft'
+          )
+          : 'Loaded Klipper config file';
+
+        return buildConfigContextMessage(filename, configText, label);
+      }),
     );
+
+    return contexts.filter((context): context is string => context != null);
   };
 
   const buildAssistantDraftMergedText = async (
@@ -362,56 +474,68 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
     return api.exportConfig({ ...mergedConfig, raw_text: originalText });
   };
 
-  const handleApplyAssistantEdit = async (content: string) => {
+  const prepareAssistantDraftPreview = async (content: string): Promise<AssistantDraftPreview> => {
     if (!activeFile) {
-      return;
+      throw new Error('No active config file is selected for review.');
     }
 
     const configBlock = extractConfigCodeBlock(content);
     if (!configBlock) {
-      setError('The assistant response did not include a config code block to review.');
-      return;
+      throw new Error('The assistant response did not include a config code block to review.');
     }
 
+    const baseText = await getActiveConfigText();
+    if (baseText == null) {
+      throw new Error(`Unable to load ${activeFile} for preview.`);
+    }
+
+    const [baseResult, assistantResult] = await Promise.all([
+      api.parseConfigText(baseText, activeFile),
+      api.parseConfigText(configBlock, activeFile),
+    ]);
+
+    if (assistantResult.config.sections.length === 0) {
+      throw new Error('The assistant response did not include any complete config sections to merge.');
+    }
+
+    const { mergedConfig, changes } = mergeAssistantSectionsIntoConfig(
+      { ...baseResult.config, raw_text: baseText },
+      assistantResult.config,
+    );
+    const mergedText = await api.exportConfig({ ...mergedConfig, raw_text: baseText });
+    const selectedChangeIds = changes.map((change) => change.id);
+
+    if (normalizeDiffText(baseText) === normalizeDiffText(mergedText)) {
+      throw new Error('The assistant response does not change the current draft.');
+    }
+
+    return {
+      filename: activeFile,
+      originalText: baseText,
+      baseConfig: { ...baseResult.config, raw_text: baseText },
+      assistantConfig: assistantResult.config,
+      mergedText,
+      changes,
+      selectedChangeIds,
+      previewUpdating: false,
+    };
+  };
+
+  const canAssistantMessageAffectDraft = async (content: string): Promise<boolean> => {
+    try {
+      await prepareAssistantDraftPreview(content);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const handleApplyAssistantEdit = async (content: string) => {
     setAssistantDraftPreviewLoading(content);
     setError(null);
 
     try {
-      const baseText = await getActiveConfigText();
-      if (baseText == null) {
-        throw new Error(`Unable to load ${activeFile} for preview.`);
-      }
-
-      const [baseResult, assistantResult] = await Promise.all([
-        api.parseConfigText(baseText, activeFile),
-        api.parseConfigText(configBlock, activeFile),
-      ]);
-
-      if (assistantResult.config.sections.length === 0) {
-        throw new Error('The assistant response did not include any complete config sections to merge.');
-      }
-
-      const { mergedConfig, changes } = mergeAssistantSectionsIntoConfig(
-        { ...baseResult.config, raw_text: baseText },
-        assistantResult.config,
-      );
-      const mergedText = await api.exportConfig({ ...mergedConfig, raw_text: baseText });
-      const selectedChangeIds = changes.map((change) => change.id);
-
-      if (normalizeDiffText(baseText) === normalizeDiffText(mergedText)) {
-        throw new Error('The assistant response does not change the current draft.');
-      }
-
-      setAssistantDraftPreview({
-        filename: activeFile,
-        originalText: baseText,
-        baseConfig: { ...baseResult.config, raw_text: baseText },
-        assistantConfig: assistantResult.config,
-        mergedText,
-        changes,
-        selectedChangeIds,
-        previewUpdating: false,
-      });
+      setAssistantDraftPreview(await prepareAssistantDraftPreview(content));
     } catch (err: unknown) {
       setAssistantDraftPreview(null);
       setError(err instanceof Error ? err.message : 'Failed to prepare assistant changes.');
@@ -484,15 +608,38 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
     }
   };
 
-  const handleAcceptAssistantEdit = () => {
+  const handleAcceptAssistantEdit = async () => {
     if (!assistantDraftPreview) {
       return;
     }
 
-    setTextDraft(assistantDraftPreview.filename, assistantDraftPreview.mergedText);
-    setTextEditorDirty(true);
-    setAssistantDraftPreview(null);
-    setError(null);
+    try {
+      const { filename, mergedText } = assistantDraftPreview;
+      const result = await api.parseConfigText(mergedText, filename);
+      const updatedConfigs = {
+        ...configFiles,
+        [filename]: result.config,
+      };
+      const updatedValidation = {
+        ...validation,
+        [filename]: result.validation,
+      };
+
+      setConfigFile(filename, result.config);
+      setValidation(filename, result.validation);
+      clearTextDraft();
+      setTextEditorDirty(false);
+      markDirty();
+
+      const graphStore = useGraphStore.getState();
+      graphStore.clearGraph();
+      buildProjectGraph(updatedConfigs, graphStore, schemas, updatedValidation);
+
+      setAssistantDraftPreview(null);
+      setError(null);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to accept assistant changes.');
+    }
   };
 
   const handleNewChat = () => {
@@ -521,10 +668,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
 
     try {
       const contextMessages: Array<{ role: 'system'; content: string }> = [];
-      const activeConfigContext = await getActiveConfigContext();
+      const selectedConfigContexts = await getSelectedConfigContexts();
 
-      if (activeConfigContext) {
-        contextMessages.push({ role: 'system', content: activeConfigContext });
+      for (const configContext of selectedConfigContexts) {
+        contextMessages.push({ role: 'system', content: configContext });
       }
 
       for (const attachedFile of attachedConfigFiles) {
@@ -1010,6 +1157,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
           {messages.map((msg, i) => (
             (() => {
               const assistantConfigBlock = msg.role === 'assistant' ? extractConfigCodeBlock(msg.content) : null;
+              const hasApplicableAssistantDraft = assistantDraftApplicableMessages[i] === true;
               const lmStudioMcpStatus = msg.role === 'assistant' ? msg.lmStudioMcp : undefined;
               const lmStudioMcpPresentation = lmStudioMcpStatus ? getLmStudioMcpStatusPresentation(lmStudioMcpStatus) : null;
               return (
@@ -1087,7 +1235,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
                         </span>
                       </div>
                     )}
-                    {msg.role === 'assistant' && assistantConfigBlock && activeFile && (
+                    {msg.role === 'assistant' && assistantConfigBlock && activeFile && hasApplicableAssistantDraft && (
                       <div className="mt-3 flex justify-end">
                         <button
                           onClick={() => {
@@ -1097,7 +1245,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
                           className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-[10px] font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-60"
                           title={`Preview how the assistant sections would merge into ${activeFile}`}
                         >
-                          {assistantDraftPreviewLoading === msg.content ? 'Preparing Preview...' : `Replace ${activeFile} Draft`}
+                          {assistantDraftPreviewLoading === msg.content ? 'Preparing Review...' : 'Apply and Review Changes'}
                         </button>
                       </div>
                     )}
@@ -1137,22 +1285,83 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
         {/* Input bar */}
         <div className="border-t border-[var(--color-bg-tertiary)]">
           <div className="flex flex-wrap items-center gap-2 px-4 pt-3 pb-2 text-[10px] text-[var(--color-text-secondary)]">
-            <label className="inline-flex items-center gap-1.5 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={includeActiveConfig}
-                onChange={(e) => setIncludeActiveConfig(e.target.checked)}
-                className="rounded border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)]"
-                disabled={!activeFile}
-              />
-              Include active .cfg{activeFile ? ` (${activeFile})` : ''}
-            </label>
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 font-medium hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] transition-colors"
-            >
-              Attach local .cfg
-            </button>
+            <div className="relative" ref={includeFilesMenuRef}>
+              <button
+                type="button"
+                onClick={() => setIncludeFilesMenuOpen((prev) => !prev)}
+                className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 font-medium transition-colors ${
+                  includeFilesMenuOpen
+                    ? 'border-[var(--color-accent)] text-[var(--color-accent)]'
+                    : 'border-[var(--color-bg-tertiary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]'
+                }`}
+                title="Choose which loaded config files to include in chat context"
+              >
+                Include Files
+                <KeyboardArrowDownRounded
+                  sx={{ fontSize: 16 }}
+                  className={`transition-transform ${includeFilesMenuOpen ? 'rotate-180' : ''}`}
+                />
+              </button>
+              {includeFilesMenuOpen && (
+                <div className="absolute bottom-full left-0 z-20 mb-2 w-72 rounded-lg border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] p-2 shadow-2xl">
+                  <div className="mb-2 flex items-center justify-between gap-2 border-b border-[var(--color-bg-tertiary)] pb-2">
+                    <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-secondary)]">
+                      Loaded .cfg files
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      className="rounded-md border border-[var(--color-bg-tertiary)] p-1 text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+                      title="Import local .cfg files"
+                    >
+                      <UploadFileRounded sx={{ fontSize: 16 }} />
+                    </button>
+                  </div>
+                  {loadedConfigFilenames.length > 0 ? (
+                    <div className="max-h-56 space-y-1 overflow-y-auto pr-1">
+                      {loadedConfigFilenames.map((filename) => {
+                        const checked = selectedConfigContextFiles.includes(filename);
+                        const isActiveSelection = filename === activeFile;
+
+                        return (
+                          <label
+                            key={filename}
+                            className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-[var(--color-bg-primary)]"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={(e) => {
+                                setSelectedConfigContextFiles((prev) => {
+                                  if (e.target.checked) {
+                                    return prev.includes(filename) ? prev : [...prev, filename];
+                                  }
+
+                                  return prev.filter((value) => value !== filename);
+                                });
+                              }}
+                              className="rounded border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)]"
+                            />
+                            <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--color-text-primary)]">
+                              {filename}
+                            </span>
+                            {isActiveSelection && (
+                              <span className="rounded-full bg-[var(--color-bg-primary)] px-1.5 py-0.5 text-[9px] font-medium text-[var(--color-text-secondary)]">
+                                Active
+                              </span>
+                            )}
+                          </label>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <p className="px-2 py-3 text-[10px] text-[var(--color-text-secondary)]">
+                      No loaded .cfg files. Use the import button to attach local files.
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
           {attachedConfigFiles.length > 0 && (
             <div className="flex flex-wrap gap-2 px-4 pb-2">
@@ -1161,7 +1370,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
                   key={file.id}
                   onClick={() => handleRemoveAttachedFile(file.id)}
                   className="rounded-full border border-[var(--color-bg-tertiary)] px-2 py-1 text-[10px] text-[var(--color-text-secondary)] hover:border-[var(--color-error)] hover:text-[var(--color-error)] transition-colors"
-                  title="Remove attached file from chat context"
+                  title="Remove imported file from chat context"
                 >
                   {file.name} ×
                 </button>

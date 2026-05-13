@@ -51,6 +51,7 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
     setActiveFile,
     setConfigFile,
     setValidation,
+    markDirty,
     renameConfigFile,
     copyConfigFile,
     removeConfigFile,
@@ -361,6 +362,7 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
 
       setConfigFile(activeFile, result.config);
       setValidation(activeFile, result.validation);
+      markDirty();
       setTextEditorDirty(false);
       clearTextDraft();
 
@@ -373,7 +375,7 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
     } catch (err) {
       console.error('Parse error:', err);
     }
-  }, [activeFile, clearTextDraft, configFiles, editText, schemas, setConfigFile, setTextEditorDirty, setValidation, validation]);
+  }, [activeFile, clearTextDraft, configFiles, editText, markDirty, schemas, setConfigFile, setTextEditorDirty, setValidation, validation]);
 
   const handleApply = useCallback(async () => {
     // Check for active issues

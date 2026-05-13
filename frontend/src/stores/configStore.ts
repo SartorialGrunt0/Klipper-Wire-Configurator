@@ -163,6 +163,7 @@ interface ConfigState {
   removeInclude: (filename: string, includePath: string) => void;
 
   /* Dirty tracking */
+  markDirty: () => void;
   markClean: () => void;
   setTextEditorDirty: (dirty: boolean) => void;
   setTextDraft: (filename: string, text: string) => void;
@@ -559,6 +560,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     const cf = get().configFiles[filename];
     return cf?.sections.find((s) => matchesSectionIdentity(s, fullHeader, lineNumber));
   },
+
+  markDirty: () =>
+    set((s) => (s.isDirty ? s : { isDirty: true })),
 
   markClean: () => set({
     isDirty: false,
