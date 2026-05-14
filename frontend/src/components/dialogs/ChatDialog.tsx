@@ -106,6 +106,9 @@ interface AttachedConfigFile {
 const CONTEXT_TRUNCATION_LIMIT = 40000;
 const CONFIG_CODE_LANGUAGES = new Set(['', 'cfg', 'conf', 'ini', 'klipper', 'printercfg']);
 const ASSISTANT_FILE_HINT_RE = /^[#;]\s*file\s*:\s*(.+?)\s*$/i;
+const KLIPPER_DOC_FILENAME_RE = /(^|[^A-Za-z0-9_-])([A-Za-z0-9][A-Za-z0-9_-]*\.md)(?=$|[^A-Za-z0-9_.-])/g;
+const KLIPPER_DOC_REQUEST_RE = /\b(?:can you|could you|would you|please|provide|send|share|paste|show me|include|load|fetch|pull|give me|i need|i would need|i'd need)\b/i;
+const MAX_AUTO_FETCHED_KLIPPER_DOCS = 2;
 
 function truncateConfigContext(content: string): string {
   if (content.length <= CONTEXT_TRUNCATION_LIMIT) {
@@ -321,6 +324,37 @@ function getLmStudioMcpStatusPresentation(status: LmStudioMcpStatus): {
     className: 'border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]',
     title: `LM Studio enabled ${pluginText}, but the model answered without calling it.`,
   };
+}
+
+function extractRequestedKlipperDocFilenames(content: string): string[] {
+  const requestedDocs = new Set<string>();
+  const segments = content
+    .split(/\r?\n+/)
+    .flatMap((line) => line.split(/(?<=[.!?])\s+/))
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+
+  for (const segment of segments) {
+    if (!KLIPPER_DOC_REQUEST_RE.test(segment)) {
+      continue;
+    }
+
+    for (const match of segment.matchAll(KLIPPER_DOC_FILENAME_RE)) {
+      requestedDocs.add(match[2]);
+      if (requestedDocs.size >= MAX_AUTO_FETCHED_KLIPPER_DOCS) {
+        return Array.from(requestedDocs);
+      }
+    }
+  }
+
+  return Array.from(requestedDocs);
+}
+
+function buildAutoLoadedKlipperDocMessage(documents: api.KlipperDocResponse[]): string {
+  return [
+    'The app automatically fetched the full bundled Klipper markdown document(s) you requested. Answer the user\'s previous request directly now using these documents. Do not ask the user to paste the same documentation again unless you need a different source document.',
+    ...documents.map((document) => `Full bundled Klipper document: ${document.filename}\n\n${document.content}`),
+  ].join('\n\n---\n\n');
 }
 
 interface ChatDialogProps {
@@ -932,6 +966,13 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
 
     try {
       const contextMessages: Array<{ role: 'system'; content: string }> = [];
+      const chatRequestBase = {
+        apiKey: editApiKey,
+        model: editModel,
+        apiUrl: editApiUrl,
+        apiProvider: editApiProvider,
+        lmStudioMcpPluginId: editApiProvider === 'lm-studio' ? editLmStudioMcpPluginId : undefined,
+      };
       const mentionedConfigFiles = extractMentionedConfigFilenames([userMsg.content], loadedConfigFilenames);
       const selectedConfigContexts = await getConfigContexts([
         ...selectedConfigContextFiles,
@@ -962,11 +1003,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
       }
 
       const response = await api.aiChat({
-        apiKey: editApiKey,
-        model: editModel,
-        apiUrl: editApiUrl,
-        apiProvider: editApiProvider,
-        lmStudioMcpPluginId: editApiProvider === 'lm-studio' ? editLmStudioMcpPluginId : undefined,
+        ...chatRequestBase,
         messages: [
           ...contextMessages,
           ...newMessages.map((m) => ({ role: m.role, content: m.content })),
@@ -977,11 +1014,53 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
         throw new Error(response.error);
       }
 
-      const assistantMsg: ChatMessage = {
+      let assistantMsg: ChatMessage = {
         role: 'assistant',
         content: response.content || 'No response.',
         lmStudioMcp: response.lmStudioMcp,
       };
+
+      const requestedKlipperDocs = extractRequestedKlipperDocFilenames(assistantMsg.content);
+      if (requestedKlipperDocs.length > 0) {
+        try {
+          const docResults = await Promise.allSettled(
+            requestedKlipperDocs.map((filename) => api.getKlipperDoc(filename)),
+          );
+          const loadedDocs = docResults
+            .flatMap((result) => (result.status === 'fulfilled' ? [result.value] : []));
+
+          if (loadedDocs.length > 0) {
+            const followUpResponse = await api.aiChat({
+              ...chatRequestBase,
+              messages: [
+                ...contextMessages,
+                ...newMessages.map((m) => ({ role: m.role, content: m.content })),
+                { role: 'assistant', content: assistantMsg.content },
+                { role: 'user', content: buildAutoLoadedKlipperDocMessage(loadedDocs) },
+              ],
+            });
+
+            if (followUpResponse.error) {
+              throw new Error(followUpResponse.error);
+            }
+
+            assistantMsg = {
+              role: 'assistant',
+              content: followUpResponse.content || assistantMsg.content,
+              lmStudioMcp: followUpResponse.lmStudioMcp ?? assistantMsg.lmStudioMcp,
+              autoLoadedDocs: loadedDocs.map((document) => document.filename),
+            };
+          } else {
+            setError(`The assistant requested full Klipper docs (${requestedKlipperDocs.join(', ')}), but none of those bundled markdown files were available from the backend.`);
+          }
+        } catch (autoDocErr: unknown) {
+          const autoDocMessage = autoDocErr instanceof Error
+            ? autoDocErr.message
+            : 'Automatic Klipper doc loading failed.';
+          setError(`Automatic full-doc follow-up failed: ${autoDocMessage}`);
+        }
+      }
+
       setMessages([...newMessages, assistantMsg]);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Failed to get response.';
@@ -1505,6 +1584,16 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
                           title={lmStudioMcpPresentation.title}
                         >
                           {lmStudioMcpPresentation.label}
+                        </span>
+                      </div>
+                    )}
+                    {msg.role === 'assistant' && Array.isArray(msg.autoLoadedDocs) && msg.autoLoadedDocs.length > 0 && (
+                      <div className="mt-3 flex">
+                        <span
+                          className="inline-flex items-center rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-1 text-[10px] font-medium text-sky-300"
+                          title={`The app automatically fetched full Klipper docs for this answer: ${msg.autoLoadedDocs.join(', ')}`}
+                        >
+                          Auto-loaded docs: {msg.autoLoadedDocs.join(', ')}
                         </span>
                       </div>
                     )}

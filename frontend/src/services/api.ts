@@ -221,6 +221,15 @@ export async function getConfigReference(): Promise<{ content: string }> {
   return request('/reference/config-reference');
 }
 
+export interface KlipperDocResponse {
+  filename: string;
+  content: string;
+}
+
+export async function getKlipperDoc(filename: string): Promise<KlipperDocResponse> {
+  return request(`/reference/klipper-docs/${encodeURIComponent(filename)}`);
+}
+
 /* ── Schema ──────────────────────────────────────────── */
 
 export async function getSchema(): Promise<{ schemas: Record<string, SectionSchema> }> {

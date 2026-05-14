@@ -11,6 +11,7 @@ export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
   lmStudioMcp?: LmStudioMcpStatus;
+  autoLoadedDocs?: string[];
 }
 
 export interface AiSettings {
