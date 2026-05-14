@@ -11,8 +11,11 @@ from pydantic import BaseModel
 router = APIRouter()
 
 REFERENCE_DIR = Path(__file__).parent.parent.parent / "reference"
-CONFIG_REFERENCE_PATH = REFERENCE_DIR / "reference_docs" / "klipper_docs" / "Config_Reference.md"
+KLIPPER_DOCS_DIR = REFERENCE_DIR / "reference_docs" / "klipper_docs"
+CONFIG_REFERENCE_PATH = KLIPPER_DOCS_DIR / "Config_Reference.md"
+KLIPPER_DOCS_SUMMARY_PATH = KLIPPER_DOCS_DIR / "Klipper_Docs_AI_Summary.md"
 OFFICIAL_CONFIG_REFERENCE_URL = "https://www.klipper3d.org/Config_Reference.html"
+OFFICIAL_KLIPPER_DOC_URL_TEMPLATE = "https://www.klipper3d.org/{document_name}.html"
 QUERY_STOP_WORDS = {
     "a",
     "an",
@@ -53,10 +56,28 @@ QUERY_STOP_WORDS = {
 }
 MAX_CONFIG_REFERENCE_RESULTS = 3
 MAX_CONFIG_REFERENCE_SECTION_CHARS = 3200
+MAX_KLIPPER_DOCS_SUMMARY_RESULTS = 4
+MAX_KLIPPER_DOCS_SUMMARY_SECTION_CHARS = 2800
+MAX_FULL_KLIPPER_DOC_RESULTS = 2
 MAX_REFERENCE_LOOKBACK_USER_MESSAGES = 3
 MAX_REFERENCE_LOOKUP_QUERY_CHARS = 1800
 CONFIG_REFERENCE_SECTION_RE = re.compile(r"^### \[([^\]]+)\]\s*$", re.MULTILINE)
 CONFIG_REFERENCE_ALIAS_RE = re.compile(r"^\[([^\]]+)\]\s*$", re.MULTILINE)
+KLIPPER_DOCS_SUMMARY_SECTION_RE = re.compile(r"^## (?!#)(.+?)\s*$", re.MULTILINE)
+REFERENCE_ALIASES_RE = re.compile(r"^Aliases:\s*(.+)\s*$", re.MULTILINE)
+REFERENCE_SOURCE_DOCS_RE = re.compile(r"^Source docs:\s*(.+)\s*$", re.MULTILINE)
+FULL_DOC_REQUEST_WORDS = {"complete", "entire", "full", "raw"}
+FULL_DOC_TARGET_WORDS = {
+    "content",
+    "contents",
+    "doc",
+    "docs",
+    "document",
+    "markdown",
+    "reference",
+    "section",
+    "source",
+}
 LM_STUDIO_KLIPPER_DOCS_PLUGIN_ID = "mcp/klipper-docs"
 LM_STUDIO_MAX_INPUT_CHARS = 48000
 LM_STUDIO_MAX_HISTORY_MESSAGES = 16
@@ -84,12 +105,16 @@ DOCS_GROUNDING_PROMPT = (
     "If your runtime exposes a `klipper-docs` MCP server or tool, call it first for "
     "configuration questions. If the tool is unavailable or the tool call fails, use "
     f"the official Klipper Config Reference at {OFFICIAL_CONFIG_REFERENCE_URL}. "
-    "Treat any bundled Config_Reference excerpts included in this prompt as authoritative "
-    "offline reference material. Do not invent section names, parameters, defaults, "
-    "units, commands, or supported behavior. If the docs do not confirm a detail, say "
-    "that explicitly and ask one short clarifying question or state what must be verified. "
-    "When suggesting config changes, use the exact Klipper section headers and parameter "
-    "names from the docs and prefer minimal edits over full-file rewrites."
+    "Treat any bundled Klipper_Docs_AI_Summary excerpts as condensed routing notes and "
+    "any bundled Config_Reference excerpts included in this prompt as authoritative "
+    "offline reference material for section names and parameters. If the summary is not "
+    "enough, ask for the full Klipper source document by filename; if local markdown is "
+    "unavailable, use https://www.klipper3d.org/<document_name>.html. Do not invent "
+    "section names, parameters, defaults, units, commands, or supported behavior. If "
+    "the docs do not confirm a detail, say that explicitly and ask one short clarifying "
+    "question or state what must be verified. When suggesting config changes, use the "
+    "exact Klipper section headers and parameter names from the docs and prefer minimal "
+    "edits over full-file rewrites."
 )
 
 
@@ -117,24 +142,56 @@ def _tokenize_query(text: str) -> list[str]:
     return [token for token in tokens if token not in QUERY_STOP_WORDS]
 
 
+def _read_reference_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _extract_markdown_sections(content: str, section_re: re.Pattern[str]) -> list[tuple[str, str]]:
+    matches = list(section_re.finditer(content))
+    sections: list[tuple[str, str]] = []
+
+    for index, match in enumerate(matches):
+        header = match.group(1).strip()
+        start = match.start()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(content)
+        sections.append((header, content[start:end].strip()))
+
+    return sections
+
+
+def _split_reference_csv(value: str) -> tuple[str, ...]:
+    return tuple(item.strip() for item in value.split(",") if item.strip())
+
+
+def _build_doc_aliases(document_name: str) -> set[str]:
+    stem = Path(document_name).stem
+    spaced_stem = stem.replace("_", " ").replace("-", " ")
+    aliases = {
+        document_name,
+        stem,
+        spaced_stem,
+        spaced_stem.replace(" ", ""),
+    }
+    return {alias for alias in aliases if alias}
+
+
+def _build_official_klipper_doc_url(document_name: str) -> str:
+    return OFFICIAL_KLIPPER_DOC_URL_TEMPLATE.format(document_name=Path(document_name).stem)
+
+
 @lru_cache(maxsize=1)
 def _load_config_reference_sections() -> list[tuple[str, str, set[str]]]:
     if not CONFIG_REFERENCE_PATH.exists():
         return []
 
     try:
-        content = CONFIG_REFERENCE_PATH.read_text(encoding="utf-8", errors="replace")
+        content = _read_reference_text(CONFIG_REFERENCE_PATH)
     except OSError:
         return []
 
-    matches = list(CONFIG_REFERENCE_SECTION_RE.finditer(content))
     sections: list[tuple[str, str, set[str]]] = []
 
-    for index, match in enumerate(matches):
-        header = match.group(1).strip()
-        start = match.start()
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(content)
-        section_text = content[start:end].strip()
+    for header, section_text in _extract_markdown_sections(content, CONFIG_REFERENCE_SECTION_RE):
         aliases = {header}
         aliases.update(alias.strip() for alias in CONFIG_REFERENCE_ALIAS_RE.findall(section_text))
         sections.append((header, section_text, {alias for alias in aliases if alias}))
@@ -142,11 +199,55 @@ def _load_config_reference_sections() -> list[tuple[str, str, set[str]]]:
     return sections
 
 
+@lru_cache(maxsize=1)
+def _load_klipper_docs_summary_sections() -> list[tuple[str, str, set[str], tuple[str, ...]]]:
+    if not KLIPPER_DOCS_SUMMARY_PATH.exists():
+        return []
+
+    try:
+        content = _read_reference_text(KLIPPER_DOCS_SUMMARY_PATH)
+    except OSError:
+        return []
+
+    sections: list[tuple[str, str, set[str], tuple[str, ...]]] = []
+
+    for header, section_text in _extract_markdown_sections(content, KLIPPER_DOCS_SUMMARY_SECTION_RE):
+        aliases = {header}
+        alias_match = REFERENCE_ALIASES_RE.search(section_text)
+        if alias_match:
+            aliases.update(_split_reference_csv(alias_match.group(1)))
+
+        source_docs: tuple[str, ...] = ()
+        source_docs_match = REFERENCE_SOURCE_DOCS_RE.search(section_text)
+        if source_docs_match:
+            source_docs = _split_reference_csv(source_docs_match.group(1))
+            for document_name in source_docs:
+                aliases.update(_build_doc_aliases(document_name))
+
+        sections.append((header, section_text, {alias for alias in aliases if alias}, source_docs))
+
+    return sections
+
+
+@lru_cache(maxsize=1)
+def _load_klipper_doc_catalog() -> list[tuple[str, Path, set[str]]]:
+    if not KLIPPER_DOCS_DIR.exists():
+        return []
+
+    catalog: list[tuple[str, Path, set[str]]] = []
+    for path in sorted(KLIPPER_DOCS_DIR.glob("*.md")):
+        if path.name == KLIPPER_DOCS_SUMMARY_PATH.name:
+            continue
+        catalog.append((path.name, path, _build_doc_aliases(path.name)))
+
+    return catalog
+
+
 def _normalize_lookup_text(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
 
 
-def _score_config_reference_section(query_text: str, aliases: set[str]) -> int:
+def _score_reference_section(query_text: str, aliases: set[str]) -> int:
     query_words = set(query_text.split())
     score = 0
 
@@ -173,13 +274,13 @@ def _score_config_reference_section(query_text: str, aliases: set[str]) -> int:
     return score
 
 
-def _trim_config_reference_section(section_text: str) -> str:
-    if len(section_text) <= MAX_CONFIG_REFERENCE_SECTION_CHARS:
+def _trim_reference_section(section_text: str, max_chars: int) -> str:
+    if len(section_text) <= max_chars:
         return section_text
 
     return (
-        f"{section_text[:MAX_CONFIG_REFERENCE_SECTION_CHARS].rstrip()}\n\n"
-        f"[Section truncated after {MAX_CONFIG_REFERENCE_SECTION_CHARS} characters.]"
+        f"{section_text[:max_chars].rstrip()}\n\n"
+        f"[Section truncated after {max_chars} characters.]"
     )
 
 
@@ -191,14 +292,93 @@ def _get_config_reference_context(query: str, limit: int = MAX_CONFIG_REFERENCE_
     scored_sections: list[tuple[int, str]] = []
 
     for _header, section_text, aliases in _load_config_reference_sections():
-        score = _score_config_reference_section(query_text, aliases)
+        score = _score_reference_section(query_text, aliases)
         if score == 0:
             continue
 
-        scored_sections.append((score, _trim_config_reference_section(section_text)))
+        scored_sections.append((score, _trim_reference_section(section_text, MAX_CONFIG_REFERENCE_SECTION_CHARS)))
 
     scored_sections.sort(key=lambda item: item[0], reverse=True)
     return [section_text for _, section_text in scored_sections[:limit]]
+
+
+def _get_scored_klipper_docs_summary_sections(query: str) -> list[tuple[int, str, tuple[str, ...]]]:
+    query_text = _normalize_lookup_text(query)
+    if not query_text:
+        return []
+
+    scored_sections: list[tuple[int, str, tuple[str, ...]]] = []
+
+    for _header, section_text, aliases, source_docs in _load_klipper_docs_summary_sections():
+        score = _score_reference_section(query_text, aliases)
+        if score == 0:
+            continue
+        scored_sections.append((score, section_text, source_docs))
+
+    scored_sections.sort(key=lambda item: item[0], reverse=True)
+    return scored_sections
+
+
+def _get_klipper_docs_summary_context(query: str, limit: int = MAX_KLIPPER_DOCS_SUMMARY_RESULTS) -> list[str]:
+    return [
+        _trim_reference_section(section_text, MAX_KLIPPER_DOCS_SUMMARY_SECTION_CHARS)
+        for _score, section_text, _source_docs in _get_scored_klipper_docs_summary_sections(query)[:limit]
+    ]
+
+
+def _query_requests_full_doc(query: str) -> bool:
+    query_tokens = set(_tokenize_query(query))
+    return bool(query_tokens & FULL_DOC_REQUEST_WORDS) and bool(query_tokens & FULL_DOC_TARGET_WORDS)
+
+
+def _get_requested_klipper_doc_names(query: str, limit: int = MAX_FULL_KLIPPER_DOC_RESULTS) -> list[str]:
+    query_text = _normalize_lookup_text(query)
+    if not query_text:
+        return []
+
+    scored_docs: list[tuple[int, str]] = []
+    for document_name, _path, aliases in _load_klipper_doc_catalog():
+        score = _score_reference_section(query_text, aliases)
+        if score == 0:
+            continue
+        scored_docs.append((score, document_name))
+
+    scored_docs.sort(key=lambda item: (-item[0], item[1]))
+    return [document_name for _score, document_name in scored_docs[:limit]]
+
+
+def _get_full_klipper_docs_context(query: str, limit: int = MAX_FULL_KLIPPER_DOC_RESULTS) -> list[str]:
+    if not _query_requests_full_doc(query):
+        return []
+
+    document_names = _get_requested_klipper_doc_names(query, limit=limit)
+    if not document_names:
+        for _score, _section_text, source_docs in _get_scored_klipper_docs_summary_sections(query):
+            for document_name in source_docs:
+                if document_name in document_names:
+                    continue
+                document_names.append(document_name)
+                if len(document_names) >= limit:
+                    break
+            if len(document_names) >= limit:
+                break
+
+    contexts: list[str] = []
+    for document_name in document_names[:limit]:
+        document_path = KLIPPER_DOCS_DIR / document_name
+        if not document_path.exists():
+            continue
+        try:
+            document_text = _read_reference_text(document_path)
+        except OSError:
+            continue
+        contexts.append(
+            f"Full bundled Klipper document: {document_name}\n"
+            f"Official HTML mirror: {_build_official_klipper_doc_url(document_name)}\n\n"
+            f"{document_text}"
+        )
+
+    return contexts
 
 
 def _build_reference_lookup_query(messages: list[dict]) -> str:
@@ -232,15 +412,28 @@ def _is_local_provider(provider: str) -> bool:
 def _prepare_messages(messages: list[dict]) -> list[dict]:
     system_parts = [SYSTEM_PROMPT, DOCS_GROUNDING_PROMPT]
     reference_lookup_query = _build_reference_lookup_query(messages)
+    klipper_docs_summary_context = _get_klipper_docs_summary_context(reference_lookup_query)
     config_reference_context = _get_config_reference_context(reference_lookup_query)
+    full_klipper_docs_context = _get_full_klipper_docs_context(reference_lookup_query)
+    if klipper_docs_summary_context:
+        system_parts.append(
+            "Relevant sections from the bundled Klipper_Docs_AI_Summary.md for the recent user request(s):\n\n"
+            + "\n\n---\n\n".join(klipper_docs_summary_context)
+        )
     if config_reference_context:
         system_parts.append(
             "Relevant sections from the bundled Config_Reference.md for the recent user request(s):\n\n"
             + "\n\n---\n\n".join(config_reference_context)
         )
-    else:
+    if full_klipper_docs_context:
         system_parts.append(
-            "No bundled Config_Reference excerpts were matched for the recent user request(s). "
+            "Full bundled Klipper markdown document(s) requested explicitly by the user:\n\n"
+            + "\n\n---\n\n".join(full_klipper_docs_context)
+        )
+    if not klipper_docs_summary_context and not config_reference_context and not full_klipper_docs_context:
+        system_parts.append(
+            "No bundled Klipper docs summary, Config_Reference, or full-document excerpts were matched "
+            "for the recent user request(s). "
             f"If you cannot use `klipper-docs`, fall back to {OFFICIAL_CONFIG_REFERENCE_URL} "
             "and avoid guessing."
         )

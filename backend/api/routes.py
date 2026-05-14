@@ -40,6 +40,7 @@ from services.warning_acknowledgments import acknowledge_warning_for_section
 router = APIRouter()
 
 REFERENCE_DIR = Path(__file__).parent.parent.parent / "reference"
+KLIPPER_DOCS_DIR = REFERENCE_DIR / "reference_docs" / "klipper_docs"
 PROJECTS_DIR = Path(__file__).parent.parent / "projects"
 
 
@@ -56,6 +57,17 @@ def _resolve_config_path(filename: str) -> Path | None:
     if candidate.exists():
         return candidate
     return None
+
+
+def _resolve_klipper_doc_path(filename: str) -> Path:
+    if Path(filename).name != filename or not filename.endswith(".md"):
+        raise HTTPException(status_code=400, detail="Invalid doc filename")
+
+    doc_path = KLIPPER_DOCS_DIR / filename
+    if not doc_path.exists() or not doc_path.is_file():
+        raise HTTPException(status_code=404, detail=f"{filename} not found")
+
+    return doc_path
 
 
 # ── Import / Parse ──────────────────────────────────────────────
@@ -314,10 +326,20 @@ async def get_example(filename: str):
 @router.get("/reference/config-reference")
 async def get_config_reference():
     """Return the bundled Klipper Config_Reference.md document."""
-    config_ref = REFERENCE_DIR / "reference_docs" / "klipper_docs" / "Config_Reference.md"
+    config_ref = KLIPPER_DOCS_DIR / "Config_Reference.md"
     if not config_ref.exists():
         raise HTTPException(status_code=404, detail="Config_Reference.md not found")
     return {"content": config_ref.read_text(encoding="utf-8", errors="replace")}
+
+
+@router.get("/reference/klipper-docs/{filename}")
+async def get_klipper_doc(filename: str):
+    """Return a bundled Klipper markdown document by filename."""
+    doc_path = _resolve_klipper_doc_path(filename)
+    return {
+        "filename": doc_path.name,
+        "content": doc_path.read_text(encoding="utf-8", errors="replace"),
+    }
 
 
 # ── Schema ──────────────────────────────────────────────────────

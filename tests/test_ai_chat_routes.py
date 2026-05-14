@@ -140,6 +140,18 @@ def test_chat_proxy_injects_docs_grounding_and_reference_context(monkeypatch):
             '### [bed_mesh]\nhorizontal_move_z: The Z gap when traversing the mesh.'
         ],
     )
+    monkeypatch.setattr(
+        ai_routes,
+        '_get_klipper_docs_summary_context',
+        lambda query, limit=ai_routes.MAX_KLIPPER_DOCS_SUMMARY_RESULTS: [
+            '## Probes, leveling, and bed mesh\n- horizontal_move_z is a bed_mesh safety travel height.'
+        ],
+    )
+    monkeypatch.setattr(
+        ai_routes,
+        '_get_full_klipper_docs_context',
+        lambda query, limit=ai_routes.MAX_FULL_KLIPPER_DOC_RESULTS: [],
+    )
     monkeypatch.setattr(httpx, 'AsyncClient', lambda *args, **kwargs: FakeAsyncClient(post_handler=fake_post))
 
     response = client.post(
@@ -163,7 +175,9 @@ def test_chat_proxy_injects_docs_grounding_and_reference_context(monkeypatch):
     assert captured['payload']['model'] == 'gpt-4o'
     assert captured['payload']['messages'][0]['role'] == 'system'
     assert ai_routes.DOCS_GROUNDING_PROMPT in captured['payload']['messages'][0]['content']
+    assert 'Relevant sections from the bundled Klipper_Docs_AI_Summary.md' in captured['payload']['messages'][0]['content']
     assert 'Relevant sections from the bundled Config_Reference.md' in captured['payload']['messages'][0]['content']
+    assert '## Probes, leveling, and bed mesh' in captured['payload']['messages'][0]['content']
     assert '### [bed_mesh]' in captured['payload']['messages'][0]['content']
     assert captured['payload']['messages'][1:] == [
         {'role': 'user', 'content': 'What does [bed_mesh] horizontal_move_z do?'}
@@ -209,3 +223,32 @@ def test_chat_proxy_lm_studio_without_token_uses_openai_compatible_fallback(monk
     assert captured['headers'] == {'Content-Type': 'application/json'}
     assert captured['payload']['model'] == 'unsloth/qwen3.5-9b'
     assert captured['payload']['messages'][0]['role'] == 'system'
+
+
+def test_get_klipper_docs_summary_context_matches_macro_query():
+    sections = ai_routes._get_klipper_docs_summary_context(
+        'Help me write a gcode_macro that uses params, printer state, and delayed_gcode.'
+    )
+
+    assert sections
+    assert any('## Macros, templates, and delayed G-Code' in section for section in sections)
+
+
+def test_prepare_messages_injects_full_bed_mesh_doc_for_explicit_request():
+    prepared = ai_routes._prepare_messages([
+        {'role': 'user', 'content': 'Show me the full Bed_Mesh markdown document.'}
+    ])
+
+    system_prompt = prepared[0]['content']
+
+    assert 'Full bundled Klipper document: Bed_Mesh.md' in system_prompt
+    assert 'Official HTML mirror: https://www.klipper3d.org/Bed_Mesh.html' in system_prompt
+    assert '# Bed Mesh' in system_prompt
+
+
+def test_reference_route_returns_full_klipper_doc():
+    response = client.get('/api/reference/klipper-docs/Bed_Mesh.md')
+
+    assert response.status_code == 200
+    assert response.json()['filename'] == 'Bed_Mesh.md'
+    assert response.json()['content'].startswith('# Bed Mesh')
