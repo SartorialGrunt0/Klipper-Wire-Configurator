@@ -1,6 +1,6 @@
 # System Design
 
-Last reviewed: 2026-04-29
+Last reviewed: 2026-05-14
 
 This document is the repository-level source of truth for where the application's major features live, how data flows between the frontend and backend, and where to start when changing a specific behavior.
 
@@ -17,7 +17,7 @@ At a high level the runtime path is:
 
 ```text
 React UI -> frontend/src/services/api.ts -> FastAPI routes -> parser/services -> JSON/text response
-        -> Zustand stores (configStore/nativeStore/graphStore/macroDesignerStore) -> rendered UI
+        -> Zustand stores (configStore/nativeStore/graphStore/macroDesignerStore/aiStore) -> rendered UI
 ```
 
 ## 2. Boot and Initialization
@@ -57,6 +57,7 @@ These types are the main contracts that move across the app.
 | API request models such as `ConfigUpdate`, `ProjectSave`, `GenerateRequest` | Backend request/response payloads. | [backend/models/config_models.py](backend/models/config_models.py) |
 | Graph node/edge models | UI representation of hardware, features, grouping, and connection state. | [frontend/src/types/graph.ts](frontend/src/types/graph.ts), [frontend/src/stores/graphStore.ts](frontend/src/stores/graphStore.ts) |
 | Macro designer state | Draft macros, no-go zones, dock position, and rotation. | [frontend/src/types/macroDesigner.ts](frontend/src/types/macroDesigner.ts), [frontend/src/stores/macroDesignerStore.ts](frontend/src/stores/macroDesignerStore.ts) |
+| AI chat request/state models | Provider settings, chat history, LM Studio MCP status, and request/response payloads. | [backend/api/ai_routes.py](backend/api/ai_routes.py), [frontend/src/services/api.ts](frontend/src/services/api.ts), [frontend/src/stores/aiStore.ts](frontend/src/stores/aiStore.ts), [frontend/src/types/ai.ts](frontend/src/types/ai.ts) |
 
 ### Important design rule
 
@@ -81,6 +82,7 @@ The backend parser/exporter is the source of truth for config text. The graph an
 | `graphStore` | React Flow nodes/edges, graph mutations, history, grouping, drag/reparent behavior, and graph-driven config mutations. | [frontend/src/stores/graphStore.ts](frontend/src/stores/graphStore.ts) |
 | `nativeStore` | Native mode, config path, detected devices, and CAN UUID query state. | [frontend/src/stores/nativeStore.ts](frontend/src/stores/nativeStore.ts) |
 | `macroDesignerStore` | Persistent macro designer drafts and UI state. | [frontend/src/stores/macroDesignerStore.ts](frontend/src/stores/macroDesignerStore.ts) |
+| `aiStore` | Persistent AI provider settings, local-provider host/port state, and chat message history. | [frontend/src/stores/aiStore.ts](frontend/src/stores/aiStore.ts) |
 
 ### UI ownership map
 
@@ -93,6 +95,7 @@ The backend parser/exporter is the source of truth for config text. The graph an
 | Form editing | [frontend/src/components/SettingsPanel.tsx](frontend/src/components/SettingsPanel.tsx) |
 | Text editing | [frontend/src/components/TextEditor.tsx](frontend/src/components/TextEditor.tsx) |
 | Import/generate/export/diff/apply/revert | [frontend/src/components/dialogs](frontend/src/components/dialogs) |
+| AI chat and assistant draft preview | [frontend/src/components/dialogs/ChatDialog.tsx](frontend/src/components/dialogs/ChatDialog.tsx), [frontend/src/components/dialogs/AiDraftPreviewDialog.tsx](frontend/src/components/dialogs/AiDraftPreviewDialog.tsx) |
 | Macro designer | [frontend/src/components/dialogs/MacroDesignerDialog.tsx](frontend/src/components/dialogs/MacroDesignerDialog.tsx) |
 
 ## 5. Backend Architecture
@@ -107,6 +110,7 @@ The backend parser/exporter is the source of truth for config text. The graph an
 | --- | --- | --- |
 | Standard config API | Import, parse, validate, export, generate, examples, schema, and project save/load. | [backend/api/routes.py](backend/api/routes.py) |
 | Native API | Native status, filesystem access, devices, layout, Klipper control, firmware tooling. | [backend/api/native_routes.py](backend/api/native_routes.py) |
+| AI chat API | Provider proxying, model listing, docs grounding, and LM Studio MCP fallback handling. | [backend/api/ai_routes.py](backend/api/ai_routes.py) |
 
 ### Parser and validation engine
 
@@ -207,6 +211,15 @@ Key maintenance point:
 4. Motion simulation helpers live in [frontend/src/utils/gcodeSimulator.ts](frontend/src/utils/gcodeSimulator.ts).
 5. Native layout saves include serialized macro designer state from `App.tsx`.
 
+### 6.10 AI chat and assistant draft apply
+
+1. [frontend/src/components/Toolbar.tsx](frontend/src/components/Toolbar.tsx) opens [frontend/src/components/dialogs/ChatDialog.tsx](frontend/src/components/dialogs/ChatDialog.tsx).
+2. `ChatDialog.tsx` reads and persists provider settings plus message history through [frontend/src/stores/aiStore.ts](frontend/src/stores/aiStore.ts).
+3. Before sending, `ChatDialog.tsx` builds system context from the active file, explicitly mentioned loaded files, and optional user-attached local config files, then posts through `aiChat` in [frontend/src/services/api.ts](frontend/src/services/api.ts) to `/ai/chat`.
+4. [backend/api/ai_routes.py](backend/api/ai_routes.py) injects the system prompt, documentation-grounding instructions, and matching bundled `Config_Reference.md` excerpts, then converts the request into provider-specific payloads and auth headers.
+5. For LM Studio, [backend/api/ai_routes.py](backend/api/ai_routes.py) can call `/api/v1/chat` with the configured MCP plugin and falls back to the OpenAI-compatible route while returning tool/fallback metadata in the response.
+6. If the assistant returns fenced `cfg` blocks, `ChatDialog.tsx` maps them to target files using `# file:` hints, filename mentions, or section matching, previews the resulting per-file diffs in [frontend/src/components/dialogs/AiDraftPreviewDialog.tsx](frontend/src/components/dialogs/AiDraftPreviewDialog.tsx), merges accepted sections with [frontend/src/utils/assistantDraftMerge.ts](frontend/src/utils/assistantDraftMerge.ts), and rebuilds the project graph with [frontend/src/utils/graphBuilder.ts](frontend/src/utils/graphBuilder.ts).
+
 ## 7. File-by-Feature Change Guide
 
 If you need to change a specific area, start here.
@@ -219,6 +232,7 @@ If you need to change a specific area, start here.
 | Edge routing or bend behavior | [frontend/src/utils/edgeRouting.ts](frontend/src/utils/edgeRouting.ts), [frontend/src/utils/edgeBend.ts](frontend/src/utils/edgeBend.ts) | [frontend/src/components/edges](frontend/src/components/edges) |
 | Schema-driven form fields | [frontend/src/components/SettingsPanel.tsx](frontend/src/components/SettingsPanel.tsx) | [backend/parser/config_schema.py](backend/parser/config_schema.py), [frontend/src/stores/configStore.ts](frontend/src/stores/configStore.ts) |
 | Text editor behavior | [frontend/src/components/TextEditor.tsx](frontend/src/components/TextEditor.tsx) | [frontend/src/services/api.ts](frontend/src/services/api.ts), [frontend/src/utils/graphBuilder.ts](frontend/src/utils/graphBuilder.ts) |
+| AI chat behavior or provider routing | [frontend/src/components/dialogs/ChatDialog.tsx](frontend/src/components/dialogs/ChatDialog.tsx) | [frontend/src/stores/aiStore.ts](frontend/src/stores/aiStore.ts), [frontend/src/services/api.ts](frontend/src/services/api.ts), [backend/api/ai_routes.py](backend/api/ai_routes.py), [frontend/src/utils/assistantDraftMerge.ts](frontend/src/utils/assistantDraftMerge.ts) |
 | Import/export/diff/apply dialogs | [frontend/src/components/dialogs](frontend/src/components/dialogs) | [frontend/src/services/api.ts](frontend/src/services/api.ts), [backend/api/routes.py](backend/api/routes.py), [backend/api/native_routes.py](backend/api/native_routes.py) |
 | Parser fidelity or round-trip correctness | [backend/parser/config_parser.py](backend/parser/config_parser.py), [backend/parser/config_writer.py](backend/parser/config_writer.py) | [tests/test_roundtrip.py](tests/test_roundtrip.py), [tests/test_save_config_handling.py](tests/test_save_config_handling.py), [tests/test_diff_roundtrip.py](tests/test_diff_roundtrip.py) |
 | Validation rules | [backend/parser/validator.py](backend/parser/validator.py) | [backend/parser/config_schema.py](backend/parser/config_schema.py), [tests/test_delta_validation.py](tests/test_delta_validation.py), [tests/test_warning_acknowledgments.py](tests/test_warning_acknowledgments.py) |
@@ -230,6 +244,9 @@ If you need to change a specific area, start here.
 ## 8. Non-Obvious Boundaries
 
 - `buildProjectGraph` is the primary multi-file graph builder. Most import/open/revert paths end here.
+- AI routes are mounted at `/ai/*` from [backend/main.py](backend/main.py), not under `/api`, so the frontend correctly calls `/ai/chat` and `/ai/models` directly.
+- [frontend/src/components/dialogs/ChatDialog.tsx](frontend/src/components/dialogs/ChatDialog.tsx) is the owning surface for AI settings and draft-apply behavior; there is no separate primary AI settings dialog in the current UI.
+- Assistant draft application is section-merge based rather than whole-file replacement; target file resolution comes from an explicit `# file:` hint first, then filename mentions, then section matching across loaded files.
 - The current frontend does not call the backend project save/load/list API in [backend/api/routes.py](backend/api/routes.py); treat those endpoints as backend-ready, not user-visible.
 - Native layout persistence and warning acknowledgement persistence are separate concerns stored in different files under the native app state directory.
 - The existing `tests/test_roundtrip.py` and `tests/test_diff_roundtrip.py` files are useful diagnostics, but they are not strict assertion suites. Treat them as informational until converted.
