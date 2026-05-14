@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 
-import type { LmStudioMcpStatus } from '../types/ai';
+import type { LmStudioContextStatus, LmStudioMcpStatus } from '../types/ai';
 
 const STORAGE_KEY = 'klipper-wire-ai-state';
 const LEGACY_SETTINGS_KEY = 'klipper-wire-ai-settings';
@@ -11,6 +11,7 @@ export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
   lmStudioMcp?: LmStudioMcpStatus;
+  lmStudioContext?: LmStudioContextStatus;
   autoLoadedDocs?: string[];
 }
 

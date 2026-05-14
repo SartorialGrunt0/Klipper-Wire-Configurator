@@ -14,8 +14,13 @@ REFERENCE_DIR = Path(__file__).parent.parent.parent / "reference"
 KLIPPER_DOCS_DIR = REFERENCE_DIR / "reference_docs" / "klipper_docs"
 CONFIG_REFERENCE_PATH = KLIPPER_DOCS_DIR / "Config_Reference.md"
 KLIPPER_DOCS_SUMMARY_PATH = KLIPPER_DOCS_DIR / "Klipper_Docs_AI_Summary.md"
+KLIPPER_GCODE_MACRO_SUMMARY_PATH = KLIPPER_DOCS_DIR / "Klipper_GCode_Macro_AI_Summary.md"
 OFFICIAL_CONFIG_REFERENCE_URL = "https://www.klipper3d.org/Config_Reference.html"
 OFFICIAL_KLIPPER_DOC_URL_TEMPLATE = "https://www.klipper3d.org/{document_name}.html"
+SUMMARY_DOC_FILENAMES = {
+    KLIPPER_DOCS_SUMMARY_PATH.name,
+    KLIPPER_GCODE_MACRO_SUMMARY_PATH.name,
+}
 QUERY_STOP_WORDS = {
     "a",
     "an",
@@ -56,6 +61,7 @@ QUERY_STOP_WORDS = {
 }
 MAX_CONFIG_REFERENCE_RESULTS = 3
 MAX_CONFIG_REFERENCE_SECTION_CHARS = 3200
+MAX_KLIPPER_GCODE_MACRO_SUMMARY_CHARS = 12000
 MAX_KLIPPER_DOCS_SUMMARY_RESULTS = 4
 MAX_KLIPPER_DOCS_SUMMARY_SECTION_CHARS = 2800
 MAX_FULL_KLIPPER_DOC_RESULTS = 2
@@ -78,9 +84,19 @@ FULL_DOC_TARGET_WORDS = {
     "section",
     "source",
 }
+GCODE_MACRO_TRIGGER_WORDS = {
+    "delayed_gcode",
+    "g-code",
+    "gcode",
+    "gcode_macro",
+    "macro",
+    "macros",
+}
+GCODE_COMMAND_LIKE_RE = re.compile(r"\b(?:[GMTO]\d+|[A-Z][A-Z0-9]*_[A-Z0-9_]+)\b")
 LM_STUDIO_KLIPPER_DOCS_PLUGIN_ID = "mcp/klipper-docs"
 LM_STUDIO_MAX_INPUT_CHARS = 48000
 LM_STUDIO_MAX_HISTORY_MESSAGES = 16
+LM_STUDIO_ESTIMATED_CHARS_PER_TOKEN = 4
 LM_STUDIO_INPUT_TRUNCATED_NOTICE = (
     "[Conversation context truncated before sending to the LM Studio REST chat endpoint.]"
 )
@@ -95,26 +111,38 @@ LM_STUDIO_MCP_FALLBACK_HINTS = (
 )
 
 SYSTEM_PROMPT = (
-    "You are a klipper firmware and configuration expert who responds in clear, "
-    "short, and concise answers to help with klipper firmware questions. If you edit a configuration section, always show the whole section in your response." \
-    "If you suggest a content change, site the reference documentation section you used, and quote the exact section header and parameter names from the docs. " \
-    "If you don't know the answer, say you don't know and suggest what to verify or ask next instead of guessing."
+    "You are an expert Klipper firmware, configuration, and macro assistant. "
+    "Answer Klipper questions, edit existing configs, and draft macros without inventing details.\n\n"
+    "Keeps answers short and focused.\n\n"
+    "Operating rules:\n"
+    "1. Treat bundled Klipper docs, Config_Reference excerpts, tool output, and user-provided config text as the source of truth.\n"
+    "2. Never invent section names, parameter names, defaults, units, commands, or supported behavior. "
+    "If the docs in context do not confirm a detail, say that explicitly.\n"
+    "3. Separate verified facts from assumptions. If the request depends on unknown printer details such as kinematics, probe type, MCU, toolhead, bed size, macro names, or sensors, ask one short clarifying question unless the provided config already resolves it.\n"
+    "4. Prefer minimal targeted edits over rewrites. Preserve unrelated settings, comments, and file structure unless the user explicitly asks for a larger refactor.\n"
+    "5. When editing config, return only the changed or new Klipper sections inside fenced cfg code blocks. For each changed section, output the full final section using the exact Klipper section header and exact parameter names from the docs.\n"
+    "6. When the app asks for per-file output, keep each file in a separate fenced cfg block and include any required '# file: <filename>' hint line exactly as requested.\n"
+    "7. When drafting macros, produce valid Klipper syntax, keep motion and temperature behavior conservative, and make mode changes explicit. If a macro changes motion or extrusion state, preserve or restore that state unless the user clearly wants persistent changes.\n"
+    "8. Keep prose short. After config or macro code, briefly explain what changed, why, and cite the exact documentation section header and parameter or command names you relied on.\n"
+    "9. If no safe grounded answer is possible, say what must be verified next instead of guessing."
 )
 DOCS_GROUNDING_PROMPT = (
     "Ground all Klipper configuration guidance in documentation before answering. "
     "If your runtime exposes a `klipper-docs` MCP server or tool, call it first for "
     "configuration questions. If the tool is unavailable or the tool call fails, use "
     f"the official Klipper Config Reference at {OFFICIAL_CONFIG_REFERENCE_URL}. "
-    "Treat any bundled Klipper_Docs_AI_Summary excerpts as condensed routing notes and "
-    "any bundled Config_Reference excerpts included in this prompt as authoritative "
-    "offline reference material for section names and parameters. If the summary is not "
+    "Treat any bundled Klipper_GCode_Macro_AI_Summary excerpts as compact G-code and "
+    "macro grounding, any bundled Klipper_Docs_AI_Summary excerpts as condensed routing "
+    "notes, and any bundled Config_Reference excerpts included in this prompt as authoritative "
+    "offline reference material for section names and parameters. For macro requests, prefer "
+    "the macro summary first and then the supporting docs excerpts. If the summary is not "
     "enough, ask for the full Klipper source document by filename; if local markdown is "
     "unavailable, use https://www.klipper3d.org/<document_name>.html. Do not invent "
     "section names, parameters, defaults, units, commands, or supported behavior. If "
     "the docs do not confirm a detail, say that explicitly and ask one short clarifying "
     "question or state what must be verified. When suggesting config changes, use the "
-    "exact Klipper section headers and parameter names from the docs and prefer minimal "
-    "edits over full-file rewrites."
+    "exact Klipper section headers and parameter names from the docs, prefer minimal "
+    "edits over full-file rewrites, and keep macro state handling explicit and safe."
 )
 
 
@@ -180,6 +208,17 @@ def _build_official_klipper_doc_url(document_name: str) -> str:
 
 
 @lru_cache(maxsize=1)
+def _load_klipper_gcode_macro_summary() -> str:
+    if not KLIPPER_GCODE_MACRO_SUMMARY_PATH.exists():
+        return ""
+
+    try:
+        return _read_reference_text(KLIPPER_GCODE_MACRO_SUMMARY_PATH)
+    except OSError:
+        return ""
+
+
+@lru_cache(maxsize=1)
 def _load_config_reference_sections() -> list[tuple[str, str, set[str]]]:
     if not CONFIG_REFERENCE_PATH.exists():
         return []
@@ -236,7 +275,7 @@ def _load_klipper_doc_catalog() -> list[tuple[str, Path, set[str]]]:
 
     catalog: list[tuple[str, Path, set[str]]] = []
     for path in sorted(KLIPPER_DOCS_DIR.glob("*.md")):
-        if path.name == KLIPPER_DOCS_SUMMARY_PATH.name:
+        if path.name in SUMMARY_DOC_FILENAMES:
             continue
         catalog.append((path.name, path, _build_doc_aliases(path.name)))
 
@@ -326,6 +365,23 @@ def _get_klipper_docs_summary_context(query: str, limit: int = MAX_KLIPPER_DOCS_
     ]
 
 
+def _query_mentions_gcode_or_macro(query: str) -> bool:
+    return bool(set(_tokenize_query(query)) & GCODE_MACRO_TRIGGER_WORDS) or bool(
+        GCODE_COMMAND_LIKE_RE.search(query)
+    )
+
+
+def _get_klipper_gcode_macro_summary_context(query: str) -> str | None:
+    if not _query_mentions_gcode_or_macro(query):
+        return None
+
+    summary_text = _load_klipper_gcode_macro_summary().strip()
+    if not summary_text:
+        return None
+
+    return _trim_reference_section(summary_text, MAX_KLIPPER_GCODE_MACRO_SUMMARY_CHARS)
+
+
 def _query_requests_full_doc(query: str) -> bool:
     query_tokens = set(_tokenize_query(query))
     return bool(query_tokens & FULL_DOC_REQUEST_WORDS) and bool(query_tokens & FULL_DOC_TARGET_WORDS)
@@ -412,9 +468,15 @@ def _is_local_provider(provider: str) -> bool:
 def _prepare_messages(messages: list[dict]) -> list[dict]:
     system_parts = [SYSTEM_PROMPT, DOCS_GROUNDING_PROMPT]
     reference_lookup_query = _build_reference_lookup_query(messages)
+    klipper_gcode_macro_summary_context = _get_klipper_gcode_macro_summary_context(reference_lookup_query)
     klipper_docs_summary_context = _get_klipper_docs_summary_context(reference_lookup_query)
     config_reference_context = _get_config_reference_context(reference_lookup_query)
     full_klipper_docs_context = _get_full_klipper_docs_context(reference_lookup_query)
+    if klipper_gcode_macro_summary_context:
+        system_parts.append(
+            "Bundled Klipper_GCode_Macro_AI_Summary.md injected because the recent user request explicitly mentioned G-code or macros:\n\n"
+            + klipper_gcode_macro_summary_context
+        )
     if klipper_docs_summary_context:
         system_parts.append(
             "Relevant sections from the bundled Klipper_Docs_AI_Summary.md for the recent user request(s):\n\n"
@@ -430,7 +492,12 @@ def _prepare_messages(messages: list[dict]) -> list[dict]:
             "Full bundled Klipper markdown document(s) requested explicitly by the user:\n\n"
             + "\n\n---\n\n".join(full_klipper_docs_context)
         )
-    if not klipper_docs_summary_context and not config_reference_context and not full_klipper_docs_context:
+    if (
+        not klipper_gcode_macro_summary_context
+        and not klipper_docs_summary_context
+        and not config_reference_context
+        and not full_klipper_docs_context
+    ):
         system_parts.append(
             "No bundled Klipper docs summary, Config_Reference, or full-document excerpts were matched "
             "for the recent user request(s). "
@@ -551,6 +618,167 @@ def _build_lm_studio_chat_payload(messages: list[dict], model: str, mcp_plugin_i
         payload["integrations"] = [mcp_plugin_id]
 
     return payload
+
+
+def _extract_int_value(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        normalized = value.strip()
+        if normalized.isdigit():
+            return int(normalized)
+    return None
+
+
+def _extract_lm_studio_usage_metrics(data: dict) -> tuple[int | None, int | None, int | None]:
+    usage = data.get("usage")
+    if not isinstance(usage, dict):
+        return None, None, None
+
+    prompt_tokens = _extract_int_value(usage.get("prompt_tokens"))
+    completion_tokens = _extract_int_value(usage.get("completion_tokens"))
+    total_tokens = _extract_int_value(usage.get("total_tokens"))
+    if total_tokens is None and prompt_tokens is not None and completion_tokens is not None:
+        total_tokens = prompt_tokens + completion_tokens
+
+    return prompt_tokens, completion_tokens, total_tokens
+
+
+def _extract_lm_studio_context_window_from_model(model_data: dict) -> int | None:
+    for key in (
+        "context_length",
+        "max_context_length",
+        "contextLength",
+        "maxContextLength",
+        "n_ctx",
+    ):
+        value = _extract_int_value(model_data.get(key))
+        if value is not None and value > 0:
+            return value
+
+    model_info = model_data.get("model_info")
+    if isinstance(model_info, dict):
+        for key in (
+            "context_length",
+            "max_context_length",
+            "contextLength",
+            "maxContextLength",
+            "n_ctx",
+        ):
+            value = _extract_int_value(model_info.get(key))
+            if value is not None and value > 0:
+                return value
+
+    return None
+
+
+def _extract_lm_studio_context_window(data: dict) -> int | None:
+    return _extract_lm_studio_context_window_from_model(data)
+
+
+def _count_message_chars(messages: list[dict]) -> int:
+    total = 0
+    for msg in messages:
+        content = str(msg.get("content", "")).strip()
+        if content:
+            total += len(content)
+    return total
+
+
+def _count_lm_studio_payload_chars(payload: dict) -> int:
+    input_text = str(payload.get("input", ""))
+    system_prompt = str(payload.get("system_prompt", ""))
+    return len(input_text) + len(system_prompt)
+
+
+def _lm_studio_payload_truncated(payload: dict) -> bool:
+    return str(payload.get("input", "")).startswith(LM_STUDIO_INPUT_TRUNCATED_NOTICE)
+
+
+async def _fetch_lm_studio_model_context_window(client, api_url: str, headers: dict, model: str) -> int | None:
+    if not model:
+        return None
+
+    base_url = _build_api_base_url(api_url)
+    model_urls = (
+        f"{base_url}/api/v1/models",
+        f"{base_url}/api/v0/models",
+        f"{base_url}/v1/models",
+    )
+
+    for model_url in model_urls:
+        try:
+            resp = await client.get(model_url, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception:
+            continue
+
+        model_items = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(model_items, list):
+            continue
+
+        for item in model_items:
+            if not isinstance(item, dict) or str(item.get("id", "")).strip() != model:
+                continue
+
+            context_window = _extract_lm_studio_context_window_from_model(item)
+            if context_window is not None:
+                return context_window
+
+    return None
+
+
+async def _resolve_lm_studio_context_window(client, api_url: str, headers: dict, model: str, data: dict) -> int | None:
+    context_window = _extract_lm_studio_context_window(data)
+    if context_window is not None:
+        return context_window
+
+    return await _fetch_lm_studio_model_context_window(client, api_url, headers, model)
+
+
+def _build_lm_studio_context_metadata(
+    data: dict,
+    *,
+    request_chars: int,
+    truncated: bool,
+    context_window: int | None = None,
+) -> dict:
+    if context_window is None:
+        context_window = _extract_lm_studio_context_window(data)
+
+    prompt_tokens, completion_tokens, total_tokens = _extract_lm_studio_usage_metrics(data)
+    estimated_prompt_tokens = None
+    if prompt_tokens is None and request_chars > 0:
+        estimated_prompt_tokens = (
+            request_chars + LM_STUDIO_ESTIMATED_CHARS_PER_TOKEN - 1
+        ) // LM_STUDIO_ESTIMATED_CHARS_PER_TOKEN
+
+    used_tokens = total_tokens
+    if used_tokens is None:
+        used_tokens = prompt_tokens
+    if used_tokens is None:
+        used_tokens = estimated_prompt_tokens
+
+    utilization = None
+    if context_window is not None and context_window > 0 and used_tokens is not None:
+        utilization = round(min(used_tokens / context_window, 1.0), 4)
+
+    return {
+        "requestChars": request_chars,
+        "truncated": truncated,
+        "promptTokens": prompt_tokens,
+        "completionTokens": completion_tokens,
+        "totalTokens": total_tokens,
+        "estimatedPromptTokens": estimated_prompt_tokens,
+        "contextWindow": context_window,
+        "usedTokens": used_tokens,
+        "utilization": utilization,
+    }
 
 
 def _extract_lm_studio_message_content(data: dict) -> str:
@@ -749,10 +977,24 @@ async def chat_proxy(req: ChatRequest):
             if req.apiProvider == "lm-studio":
                 lm_studio_mcp_plugin_id = _normalize_lm_studio_mcp_plugin_id(req.lmStudioMcpPluginId)
                 lm_studio_mcp_metadata: dict
+                lm_studio_context_metadata: dict
 
                 if lm_studio_mcp_plugin_id:
                     if not req.apiKey:
                         data, content = await _post_openai_compatible_chat(client, req.apiUrl, headers, payload)
+                        context_window = await _resolve_lm_studio_context_window(
+                            client,
+                            req.apiUrl,
+                            headers,
+                            req.model,
+                            data,
+                        )
+                        lm_studio_context_metadata = _build_lm_studio_context_metadata(
+                            data,
+                            request_chars=_count_message_chars(messages),
+                            truncated=False,
+                            context_window=context_window,
+                        )
                         lm_studio_mcp_metadata = _build_lm_studio_mcp_metadata(
                             lm_studio_mcp_plugin_id,
                             "openai-compatible",
@@ -777,12 +1019,38 @@ async def chat_proxy(req: ChatRequest):
                             if not content and _lm_studio_response_needs_fallback(data):
                                 fallback_reason = "LM Studio returned invalid MCP tool output, so the proxy retried on the OpenAI-compatible endpoint."
                                 data, content = await _post_openai_compatible_chat(client, req.apiUrl, headers, payload)
+                                context_window = await _resolve_lm_studio_context_window(
+                                    client,
+                                    req.apiUrl,
+                                    headers,
+                                    req.model,
+                                    data,
+                                )
+                                lm_studio_context_metadata = _build_lm_studio_context_metadata(
+                                    data,
+                                    request_chars=_count_message_chars(messages),
+                                    truncated=False,
+                                    context_window=context_window,
+                                )
                                 lm_studio_mcp_metadata = _build_lm_studio_mcp_metadata(
                                     lm_studio_mcp_plugin_id,
                                     "openai-compatible",
                                     fallback_reason=fallback_reason,
                                 )
                             else:
+                                context_window = await _resolve_lm_studio_context_window(
+                                    client,
+                                    req.apiUrl,
+                                    headers,
+                                    req.model,
+                                    data,
+                                )
+                                lm_studio_context_metadata = _build_lm_studio_context_metadata(
+                                    data,
+                                    request_chars=_count_lm_studio_payload_chars(lm_studio_payload),
+                                    truncated=_lm_studio_payload_truncated(lm_studio_payload),
+                                    context_window=context_window,
+                                )
                                 lm_studio_mcp_metadata = _build_lm_studio_mcp_metadata(
                                     lm_studio_mcp_plugin_id,
                                     "api-v1-chat",
@@ -798,6 +1066,19 @@ async def chat_proxy(req: ChatRequest):
                                 response_text,
                             )
                             data, content = await _post_openai_compatible_chat(client, req.apiUrl, headers, payload)
+                            context_window = await _resolve_lm_studio_context_window(
+                                client,
+                                req.apiUrl,
+                                headers,
+                                req.model,
+                                data,
+                            )
+                            lm_studio_context_metadata = _build_lm_studio_context_metadata(
+                                data,
+                                request_chars=_count_message_chars(messages),
+                                truncated=False,
+                                context_window=context_window,
+                            )
                             lm_studio_mcp_metadata = _build_lm_studio_mcp_metadata(
                                 lm_studio_mcp_plugin_id,
                                 "openai-compatible",
@@ -805,6 +1086,19 @@ async def chat_proxy(req: ChatRequest):
                             )
                         except httpx.TimeoutException:
                             data, content = await _post_openai_compatible_chat(client, req.apiUrl, headers, payload)
+                            context_window = await _resolve_lm_studio_context_window(
+                                client,
+                                req.apiUrl,
+                                headers,
+                                req.model,
+                                data,
+                            )
+                            lm_studio_context_metadata = _build_lm_studio_context_metadata(
+                                data,
+                                request_chars=_count_message_chars(messages),
+                                truncated=False,
+                                context_window=context_window,
+                            )
                             lm_studio_mcp_metadata = _build_lm_studio_mcp_metadata(
                                 lm_studio_mcp_plugin_id,
                                 "openai-compatible",
@@ -814,6 +1108,19 @@ async def chat_proxy(req: ChatRequest):
                             )
                 else:
                     data, content = await _post_openai_compatible_chat(client, req.apiUrl, headers, payload)
+                    context_window = await _resolve_lm_studio_context_window(
+                        client,
+                        req.apiUrl,
+                        headers,
+                        req.model,
+                        data,
+                    )
+                    lm_studio_context_metadata = _build_lm_studio_context_metadata(
+                        data,
+                        request_chars=_count_message_chars(messages),
+                        truncated=False,
+                        context_window=context_window,
+                    )
                     lm_studio_mcp_metadata = _build_lm_studio_mcp_metadata(None, "openai-compatible")
             else:
                 resp = await client.post(req.apiUrl, headers=headers, json=payload)
@@ -830,7 +1137,11 @@ async def chat_proxy(req: ChatRequest):
                 return {"error": "Empty response from API. Make sure a model is loaded in your local server."}
 
             if req.apiProvider == "lm-studio":
-                return {"content": content, "lmStudioMcp": lm_studio_mcp_metadata}
+                return {
+                    "content": content,
+                    "lmStudioMcp": lm_studio_mcp_metadata,
+                    "lmStudioContext": lm_studio_context_metadata,
+                }
 
             return {"content": content}
         except ValueError as e:

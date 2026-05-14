@@ -11,8 +11,8 @@ import AiDraftPreviewDialog from './AiDraftPreviewDialog';
 import { mergeAssistantSectionsIntoConfig, type AssistantDraftChange } from '../../utils/assistantDraftMerge';
 import { normalizeDiffText } from '../../utils/configDiff';
 import { buildProjectGraph } from '../../utils/graphBuilder';
-import type { LmStudioMcpStatus } from '../../types/ai';
-import type { ConfigFile, ConfigSection } from '../../types/config';
+import type { LmStudioContextStatus, LmStudioMcpStatus } from '../../types/ai';
+import type { ConfigFile, ConfigSection, ValidationError, ValidationResult } from '../../types/config';
 
 interface ProviderInfo {
   label: string;
@@ -86,6 +86,29 @@ const PROVIDER_DEFAULTS: Record<AiProvider, ProviderInfo> = {
 
 const isLocalProvider = (provider: AiProvider) => provider === 'lm-studio' || provider === 'ollama';
 
+function buildLocalProviderApiUrl(host: string, port: string): string {
+  return `http://${host}:${port}/v1/chat/completions`;
+}
+
+function resolveProviderApiUrl(
+  provider: AiProvider,
+  apiUrl: string,
+  lmStudioHost: string,
+  lmStudioPort: string,
+  ollamaHost: string,
+  ollamaPort: string,
+): string {
+  if (provider === 'lm-studio') {
+    return buildLocalProviderApiUrl(lmStudioHost, lmStudioPort);
+  }
+
+  if (provider === 'ollama') {
+    return buildLocalProviderApiUrl(ollamaHost, ollamaPort);
+  }
+
+  return apiUrl;
+}
+
 type ParagraphProps = ComponentPropsWithoutRef<'p'>;
 type ListProps = ComponentPropsWithoutRef<'ul'>;
 type OrderedListProps = ComponentPropsWithoutRef<'ol'>;
@@ -109,6 +132,8 @@ const ASSISTANT_FILE_HINT_RE = /^[#;]\s*file\s*:\s*(.+?)\s*$/i;
 const KLIPPER_DOC_FILENAME_RE = /(^|[^A-Za-z0-9_-])([A-Za-z0-9][A-Za-z0-9_-]*\.md)(?=$|[^A-Za-z0-9_.-])/g;
 const KLIPPER_DOC_REQUEST_RE = /\b(?:can you|could you|would you|please|provide|send|share|paste|show me|include|load|fetch|pull|give me|i need|i would need|i'd need)\b/i;
 const MAX_AUTO_FETCHED_KLIPPER_DOCS = 2;
+const MAX_ASSISTANT_DRAFT_VALIDATION_ATTEMPTS = 3;
+const MAX_ASSISTANT_HINT_USER_MESSAGES = 3;
 
 function truncateConfigContext(content: string): string {
   if (content.length <= CONTEXT_TRUNCATION_LIMIT) {
@@ -326,6 +351,123 @@ function getLmStudioMcpStatusPresentation(status: LmStudioMcpStatus): {
   };
 }
 
+function formatCompactCount(value: number): string {
+  if (value >= 1_000_000) {
+    return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1).replace(/\.0$/, '')}M`;
+  }
+
+  if (value >= 1_000) {
+    return `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1).replace(/\.0$/, '')}k`;
+  }
+
+  return String(value);
+}
+
+function formatCount(value: number): string {
+  return value.toLocaleString();
+}
+
+function getLmStudioContextPresentation(status: LmStudioContextStatus): {
+  label: string;
+  className: string;
+  title: string;
+  fillRatio: number | null;
+} {
+  const fillRatio = typeof status.utilization === 'number'
+    ? Math.max(0, Math.min(status.utilization, 1))
+    : null;
+
+  let className = 'border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]';
+  if (status.truncated || (fillRatio !== null && fillRatio >= 0.9)) {
+    className = 'border-rose-500/30 bg-rose-500/10 text-rose-300';
+  } else if (fillRatio !== null && fillRatio >= 0.75) {
+    className = 'border-amber-500/30 bg-amber-500/10 text-amber-300';
+  } else if (fillRatio !== null && fillRatio >= 0.5) {
+    className = 'border-sky-500/30 bg-sky-500/10 text-sky-300';
+  } else if (fillRatio !== null) {
+    className = 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300';
+  }
+
+  const lines: string[] = [];
+  if (status.usedTokens !== null && status.contextWindow !== null && fillRatio !== null) {
+    lines.push(
+      `LM Studio context used for this turn: ${formatCount(status.usedTokens)} / ${formatCount(status.contextWindow)} tokens (${(fillRatio * 100).toFixed(1)}%).`,
+    );
+  } else if (status.usedTokens !== null) {
+    const basis = status.totalTokens !== null
+      ? 'total turn tokens'
+      : status.promptTokens !== null
+        ? 'prompt tokens'
+        : 'estimated prompt tokens';
+    lines.push(`LM Studio reported ${basis}: ${formatCount(status.usedTokens)}.`);
+    if (status.contextWindow === null) {
+      lines.push('LM Studio did not expose the model context window for this request, so this is not a true max-context percentage.');
+    }
+  } else {
+    lines.push(`LM Studio request size: ${formatCount(status.requestChars)} characters.`);
+    lines.push('LM Studio did not report token usage for this request.');
+  }
+
+  if (status.promptTokens !== null || status.completionTokens !== null || status.totalTokens !== null) {
+    const usageParts: string[] = [];
+    if (status.promptTokens !== null) {
+      usageParts.push(`prompt ${formatCount(status.promptTokens)}`);
+    }
+    if (status.completionTokens !== null) {
+      usageParts.push(`completion ${formatCount(status.completionTokens)}`);
+    }
+    if (status.totalTokens !== null) {
+      usageParts.push(`total ${formatCount(status.totalTokens)}`);
+    }
+    if (usageParts.length > 0) {
+      lines.push(`Usage: ${usageParts.join(', ')}.`);
+    }
+  }
+
+  if (status.estimatedPromptTokens !== null && status.promptTokens === null) {
+    lines.push('Prompt tokens are estimated from request size because LM Studio did not return usage stats for this route.');
+  }
+
+  lines.push(`Request text sent from the app: ${formatCount(status.requestChars)} characters.`);
+  if (status.truncated) {
+    lines.push('The app truncated the LM Studio request text before sending it.');
+  }
+
+  if (status.truncated) {
+    return {
+      label: 'Context capped',
+      className,
+      title: lines.join(' '),
+      fillRatio: fillRatio ?? 1,
+    };
+  }
+
+  if (fillRatio !== null) {
+    return {
+      label: `Context ${Math.round(fillRatio * 100)}%`,
+      className,
+      title: lines.join(' '),
+      fillRatio,
+    };
+  }
+
+  if (status.usedTokens !== null) {
+    return {
+      label: `Context ${formatCompactCount(status.usedTokens)} tok`,
+      className,
+      title: lines.join(' '),
+      fillRatio: null,
+    };
+  }
+
+  return {
+    label: 'Context size',
+    className,
+    title: lines.join(' '),
+    fillRatio: null,
+  };
+}
+
 function extractRequestedKlipperDocFilenames(content: string): string[] {
   const requestedDocs = new Set<string>();
   const segments = content
@@ -377,6 +519,173 @@ interface AssistantDraftPreview {
   previewUpdating: boolean;
 }
 
+interface AssistantReplyAttempt {
+  assistantMessage: ChatMessage;
+  conversationMessages: ChatMessage[];
+  warningMessage: string | null;
+}
+
+interface AssistantDraftValidationIssueGroup {
+  filename: string;
+  errors: ValidationError[];
+}
+
+interface AssistantDraftValidationOutcome {
+  applicable: boolean;
+  blockingIssues: AssistantDraftValidationIssueGroup[];
+  failureReason: string | null;
+}
+
+const RETRY_EXEMPT_DUPLICATE_SECTION_RE = /^Section \[[^\]]+\] (?:can only be defined once(?: across active included config files)?\.|is reused across active included config files\.)(?: Also defined in: .+)?$/;
+const RETRY_EXEMPT_SHARED_PIN_RE = /^Pin '.*' is used by multiple sections: .+$/;
+
+function isBlockingAssistantValidationIssue(error: ValidationError): boolean {
+  return error.severity === 'error' || error.severity === 'warning';
+}
+
+function isRetryExemptAssistantValidationIssue(error: ValidationError): boolean {
+  return RETRY_EXEMPT_DUPLICATE_SECTION_RE.test(error.message)
+    || RETRY_EXEMPT_SHARED_PIN_RE.test(error.message);
+}
+
+function hasOnlyRetryExemptAssistantValidationIssues(
+  blockingIssues: AssistantDraftValidationIssueGroup[],
+): boolean {
+  const issues = blockingIssues.flatMap((group) => group.errors);
+  return issues.length > 0 && issues.every((error) => isRetryExemptAssistantValidationIssue(error));
+}
+
+function shouldRetryAssistantValidation(
+  validationOutcome: AssistantDraftValidationOutcome,
+  attemptsUsed: number,
+): boolean {
+  if (validationOutcome.applicable) {
+    if (validationOutcome.blockingIssues.length === 0) {
+      return false;
+    }
+
+    return !(attemptsUsed > 1 && hasOnlyRetryExemptAssistantValidationIssues(validationOutcome.blockingIssues));
+  }
+
+  return attemptsUsed > 1 && Boolean(validationOutcome.failureReason);
+}
+
+function buildValidationErrorKey(filename: string, error: ValidationError): string {
+  return [filename, error.severity, error.section, error.param, error.message].join('::');
+}
+
+function collectNewValidationErrors(
+  baselineValidations: Record<string, ValidationResult>,
+  candidateValidations: Record<string, ValidationResult>,
+): AssistantDraftValidationIssueGroup[] {
+  const baselineCounts = new Map<string, number>();
+
+  Object.entries(baselineValidations).forEach(([filename, result]) => {
+    result.errors.forEach((error) => {
+      if (!isBlockingAssistantValidationIssue(error)) {
+        return;
+      }
+
+      const key = buildValidationErrorKey(filename, error);
+      baselineCounts.set(key, (baselineCounts.get(key) ?? 0) + 1);
+    });
+  });
+
+  const blockingByFile = new Map<string, ValidationError[]>();
+
+  Object.entries(candidateValidations)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .forEach(([filename, result]) => {
+      result.errors.forEach((error) => {
+        if (!isBlockingAssistantValidationIssue(error)) {
+          return;
+        }
+
+        const key = buildValidationErrorKey(filename, error);
+        const remainingBaselineCount = baselineCounts.get(key) ?? 0;
+        if (remainingBaselineCount > 0) {
+          baselineCounts.set(key, remainingBaselineCount - 1);
+          return;
+        }
+
+        const existing = blockingByFile.get(filename);
+        if (existing) {
+          existing.push(error);
+          return;
+        }
+
+        blockingByFile.set(filename, [error]);
+      });
+    });
+
+  return Array.from(blockingByFile.entries()).map(([filename, errors]) => ({ filename, errors }));
+}
+
+function formatAssistantDraftValidationIssues(
+  blockingIssues: AssistantDraftValidationIssueGroup[],
+  failureReason: string | null,
+): string {
+  const lines: string[] = [];
+
+  if (failureReason) {
+    lines.push(`- ${failureReason}`);
+  }
+
+  blockingIssues.forEach(({ filename, errors }) => {
+    lines.push(`File: ${filename}`);
+    errors.forEach((error) => {
+      const location = error.param
+        ? `[${error.section}] ${error.param}`
+        : `[${error.section}]`;
+      lines.push(`- ${location}: ${error.message}`);
+    });
+  });
+
+  return lines.join('\n');
+}
+
+function buildAssistantDraftValidationFeedback(
+  blockingIssues: AssistantDraftValidationIssueGroup[],
+  invalidContent: string,
+  failureReason: string | null,
+  allowExplanationOnly = false,
+): string {
+  const formattedIssues = formatAssistantDraftValidationIssues(blockingIssues, failureReason)
+    || '- The previous reply did not include a complete applicable cfg draft.';
+
+  return [
+    'Your previous assistant reply included cfg changes that failed the app validation after being merged into the current Klipper config project.',
+    'Return a corrected replacement reply that fixes every problem below and still satisfies the user request.',
+    'If you return config changes, return only complete changed sections inside fenced cfg code blocks and keep any required "# file: <filename>" hint.',
+    allowExplanationOnly
+      ? 'If the remaining problems are duplicate sections or reused pins and you cannot resolve them safely from the current config, do not return another invalid cfg block. Instead, clearly explain the conflict, mention the exact section or pin involved, and say what must change before a valid config can be produced.'
+      : 'Do not ask the user to apply manual fixes for these validation issues.',
+    '',
+    'Validation problems to fix:',
+    formattedIssues,
+    '',
+    'Previous invalid reply:',
+    '````text',
+    invalidContent.trim() || 'No content returned.',
+    '````',
+  ].join('\n');
+}
+
+function buildAssistantDraftValidationErrorMessage(
+  blockingIssues: AssistantDraftValidationIssueGroup[],
+  failureReason: string | null,
+  attempts: number,
+): string {
+  const formattedIssues = formatAssistantDraftValidationIssues(blockingIssues, failureReason);
+  const attemptLabel = attempts === 1 ? 'attempt' : 'attempts';
+
+  if (!formattedIssues) {
+    return `AI draft failed validation after ${attempts} ${attemptLabel}.`;
+  }
+
+  return `AI draft failed validation after ${attempts} ${attemptLabel}.\n${formattedIssues}`;
+}
+
 const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
   const { settings, setSettings, isConfigured, messages, setMessages, clearMessages } = useAiStore();
   const {
@@ -420,11 +729,19 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState<string | null>(null);
+  const resolvedEditApiUrl = resolveProviderApiUrl(
+    editApiProvider,
+    editApiUrl,
+    editLmStudioHost,
+    editLmStudioPort,
+    editOllamaHost,
+    editOllamaPort,
+  );
 
   // Fetch available models from local server
   const fetchAvailableModels = async (
     provider: AiProvider = editApiProvider,
-    apiUrl: string = editApiUrl,
+    apiUrl: string = resolvedEditApiUrl,
     apiKey: string = editApiKey,
   ) => {
     if (!isLocalProvider(provider)) {
@@ -448,11 +765,11 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
   // Fetch models when local provider settings change
   useEffect(() => {
     if (isLocalProvider(editApiProvider)) {
-      void fetchAvailableModels(editApiProvider, editApiUrl, editApiKey);
+      void fetchAvailableModels(editApiProvider, resolvedEditApiUrl, editApiKey);
     } else {
       setAvailableModels([]);
     }
-  }, [editApiProvider, editApiUrl]);
+  }, [editApiProvider, resolvedEditApiUrl, editApiKey]);
 
   // Sync when settings change
   useEffect(() => {
@@ -468,7 +785,18 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
       setEditOllamaPort(settings.ollamaPort);
       setError(null);
       if (isLocalProvider(settings.apiProvider)) {
-        void fetchAvailableModels(settings.apiProvider, settings.apiUrl, settings.apiKey);
+        void fetchAvailableModels(
+          settings.apiProvider,
+          resolveProviderApiUrl(
+            settings.apiProvider,
+            settings.apiUrl,
+            settings.lmStudioHost,
+            settings.lmStudioPort,
+            settings.ollamaHost,
+            settings.ollamaPort,
+          ),
+          settings.apiKey,
+        );
       }
     }
   }, [open, settings]);
@@ -659,18 +987,26 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
     return api.exportConfig({ ...mergedConfig, raw_text: originalText });
   };
 
-  const getAssistantMessageHintTexts = (content: string, messageIndex?: number): string[] => {
+  const getAssistantMessageHintTexts = (
+    content: string,
+    messageIndex?: number,
+    messageHistory: ChatMessage[] = messages,
+  ): string[] => {
     if (messageIndex == null) {
       return [content];
     }
 
     const hintTexts = [content];
+    let collectedUserMessages = 0;
 
     for (let index = messageIndex - 1; index >= 0; index -= 1) {
-      const candidate = messages[index];
+      const candidate = messageHistory[index];
       if (candidate?.role === 'user') {
         hintTexts.push(candidate.content);
-        break;
+        collectedUserMessages += 1;
+        if (collectedUserMessages >= MAX_ASSISTANT_HINT_USER_MESSAGES) {
+          break;
+        }
       }
     }
 
@@ -683,13 +1019,14 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
   const buildAssistantDraftTargetConfigs = async (
     content: string,
     messageIndex?: number,
+    messageHistory: ChatMessage[] = messages,
   ): Promise<ConfigFile[]> => {
     const configBlocks = extractConfigCodeBlocks(content);
     if (configBlocks.length === 0) {
       throw new Error('The assistant response did not include a config code block to review.');
     }
 
-    const hintTexts = getAssistantMessageHintTexts(content, messageIndex);
+    const hintTexts = getAssistantMessageHintTexts(content, messageIndex, messageHistory);
     const mentionedFilenames = extractMentionedConfigFilenames(hintTexts, loadedConfigFilenames);
     const groupedTargets = new Map<string, ConfigFile>();
 
@@ -749,8 +1086,9 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
   const prepareAssistantDraftPreview = async (
     content: string,
     messageIndex?: number,
+    messageHistory: ChatMessage[] = messages,
   ): Promise<AssistantDraftPreview> => {
-    const assistantConfigs = await buildAssistantDraftTargetConfigs(content, messageIndex);
+    const assistantConfigs = await buildAssistantDraftTargetConfigs(content, messageIndex, messageHistory);
     const filePreviews: AssistantDraftFilePreview[] = [];
 
     for (const assistantConfig of assistantConfigs) {
@@ -793,13 +1131,186 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
   const canAssistantMessageAffectDraft = async (
     content: string,
     messageIndex?: number,
+    messageHistory: ChatMessage[] = messages,
   ): Promise<boolean> => {
     try {
-      await prepareAssistantDraftPreview(content, messageIndex);
+      await prepareAssistantDraftPreview(content, messageIndex, messageHistory);
       return true;
     } catch {
       return false;
     }
+  };
+
+  const buildCurrentProjectConfigsForValidation = async (): Promise<Record<string, ConfigFile>> => {
+    const currentProjectConfigs: Record<string, ConfigFile> = { ...configFiles };
+
+    if (!textDraftFile) {
+      return currentProjectConfigs;
+    }
+
+    const draftResult = await api.parseConfigText(textDraftText, textDraftFile);
+    currentProjectConfigs[textDraftFile] = {
+      ...draftResult.config,
+      raw_text: textDraftText,
+    };
+
+    return currentProjectConfigs;
+  };
+
+  const getAssistantDraftValidationOutcome = async (
+    content: string,
+    messageIndex?: number,
+    messageHistory: ChatMessage[] = messages,
+    requireApplicable = false,
+  ): Promise<AssistantDraftValidationOutcome> => {
+    let preview: AssistantDraftPreview;
+
+    try {
+      preview = await prepareAssistantDraftPreview(content, messageIndex, messageHistory);
+    } catch (err: unknown) {
+      if (!requireApplicable) {
+        return {
+          applicable: false,
+          blockingIssues: [],
+          failureReason: null,
+        };
+      }
+
+      return {
+        applicable: false,
+        blockingIssues: [],
+        failureReason: err instanceof Error
+          ? err.message
+          : 'The reply did not include a complete applicable cfg draft.',
+      };
+    }
+
+    const baselineProjectConfigs = await buildCurrentProjectConfigsForValidation();
+    preview.filePreviews.forEach((filePreview) => {
+      baselineProjectConfigs[filePreview.filename] = filePreview.baseConfig;
+    });
+
+    const candidateProjectConfigs = { ...baselineProjectConfigs };
+    const mergedConfigs = await Promise.all(
+      preview.filePreviews.map(async (filePreview) => {
+        const result = await api.parseConfigText(filePreview.mergedText, filePreview.filename);
+        return [
+          filePreview.filename,
+          {
+            ...result.config,
+            raw_text: filePreview.mergedText,
+          },
+        ] as const;
+      }),
+    );
+
+    mergedConfigs.forEach(([filename, config]) => {
+      candidateProjectConfigs[filename] = config;
+    });
+
+    const [baselineValidations, candidateValidations] = await Promise.all([
+      api.validateProject(baselineProjectConfigs),
+      api.validateProject(candidateProjectConfigs),
+    ]);
+
+    return {
+      applicable: true,
+      blockingIssues: collectNewValidationErrors(baselineValidations, candidateValidations),
+      failureReason: null,
+    };
+  };
+
+  const requestAssistantMessage = async (
+    chatRequestBase: {
+      apiKey: string;
+      model: string;
+      apiUrl: string;
+      apiProvider: AiProvider;
+      lmStudioMcpPluginId?: string;
+    },
+    conversationMessages: Array<{ role: api.AiChatRole; content: string }>,
+  ): Promise<AssistantReplyAttempt> => {
+    const response = await api.aiChat({
+      ...chatRequestBase,
+      messages: conversationMessages,
+    });
+
+    if (response.error) {
+      throw new Error(response.error);
+    }
+
+    let assistantMessage: ChatMessage = {
+      role: 'assistant',
+      content: response.content || 'No response.',
+      lmStudioMcp: response.lmStudioMcp,
+      lmStudioContext: response.lmStudioContext,
+    };
+    let conversationTrail: ChatMessage[] = [{ role: 'assistant', content: assistantMessage.content }];
+    let warningMessage: string | null = null;
+
+    const requestedKlipperDocs = extractRequestedKlipperDocFilenames(assistantMessage.content);
+    if (requestedKlipperDocs.length === 0) {
+      return {
+        assistantMessage,
+        conversationMessages: conversationTrail,
+        warningMessage,
+      };
+    }
+
+    try {
+      const docResults = await Promise.allSettled(
+        requestedKlipperDocs.map((filename) => api.getKlipperDoc(filename)),
+      );
+      const loadedDocs = docResults
+        .flatMap((result) => (result.status === 'fulfilled' ? [result.value] : []));
+
+      if (loadedDocs.length === 0) {
+        warningMessage = `The assistant requested full Klipper docs (${requestedKlipperDocs.join(', ')}), but none of those bundled markdown files were available from the backend.`;
+        return {
+          assistantMessage,
+          conversationMessages: conversationTrail,
+          warningMessage,
+        };
+      }
+
+      const autoLoadedDocsMessage = buildAutoLoadedKlipperDocMessage(loadedDocs);
+      const followUpResponse = await api.aiChat({
+        ...chatRequestBase,
+        messages: [
+          ...conversationMessages,
+          ...conversationTrail.map((message) => ({ role: message.role, content: message.content })),
+          { role: 'user', content: autoLoadedDocsMessage },
+        ],
+      });
+
+      if (followUpResponse.error) {
+        throw new Error(followUpResponse.error);
+      }
+
+      assistantMessage = {
+        role: 'assistant',
+        content: followUpResponse.content || assistantMessage.content,
+        lmStudioMcp: followUpResponse.lmStudioMcp ?? assistantMessage.lmStudioMcp,
+        lmStudioContext: followUpResponse.lmStudioContext ?? assistantMessage.lmStudioContext,
+        autoLoadedDocs: loadedDocs.map((document) => document.filename),
+      };
+      conversationTrail = [
+        ...conversationTrail,
+        { role: 'user', content: autoLoadedDocsMessage },
+        { role: 'assistant', content: assistantMessage.content },
+      ];
+    } catch (autoDocErr: unknown) {
+      const autoDocMessage = autoDocErr instanceof Error
+        ? autoDocErr.message
+        : 'Automatic Klipper doc loading failed.';
+      warningMessage = `Automatic full-doc follow-up failed: ${autoDocMessage}`;
+    }
+
+    return {
+      assistantMessage,
+      conversationMessages: conversationTrail,
+      warningMessage,
+    };
   };
 
   const handleApplyAssistantEdit = async (content: string, messageIndex?: number) => {
@@ -969,7 +1480,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
       const chatRequestBase = {
         apiKey: editApiKey,
         model: editModel,
-        apiUrl: editApiUrl,
+        apiUrl: resolvedEditApiUrl,
         apiProvider: editApiProvider,
         lmStudioMcpPluginId: editApiProvider === 'lm-studio' ? editLmStudioMcpPluginId : undefined,
       };
@@ -1002,66 +1513,89 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
         });
       }
 
-      const response = await api.aiChat({
-        ...chatRequestBase,
-        messages: [
-          ...contextMessages,
-          ...newMessages.map((m) => ({ role: m.role, content: m.content })),
-        ],
-      });
+      let requestConversation: Array<{ role: api.AiChatRole; content: string }> = [
+        ...contextMessages,
+        ...newMessages.map((message) => ({ role: message.role, content: message.content })),
+      ];
+      let validationConversation: ChatMessage[] = [...newMessages];
+      let assistantAttempt = await requestAssistantMessage(chatRequestBase, requestConversation);
+      let pendingWarningMessage = assistantAttempt.warningMessage;
+      let candidateConversation = [...validationConversation, ...assistantAttempt.conversationMessages];
+      let validationOutcome = await getAssistantDraftValidationOutcome(
+        assistantAttempt.assistantMessage.content,
+        candidateConversation.length - 1,
+        candidateConversation,
+        false,
+      );
+      let attemptsUsed = 1;
 
-      if (response.error) {
-        throw new Error(response.error);
-      }
-
-      let assistantMsg: ChatMessage = {
-        role: 'assistant',
-        content: response.content || 'No response.',
-        lmStudioMcp: response.lmStudioMcp,
-      };
-
-      const requestedKlipperDocs = extractRequestedKlipperDocFilenames(assistantMsg.content);
-      if (requestedKlipperDocs.length > 0) {
-        try {
-          const docResults = await Promise.allSettled(
-            requestedKlipperDocs.map((filename) => api.getKlipperDoc(filename)),
+      while (shouldRetryAssistantValidation(validationOutcome, attemptsUsed)) {
+        if (attemptsUsed >= MAX_ASSISTANT_DRAFT_VALIDATION_ATTEMPTS) {
+          throw new Error(
+            buildAssistantDraftValidationErrorMessage(
+              validationOutcome.blockingIssues,
+              validationOutcome.failureReason,
+              attemptsUsed,
+            ),
           );
-          const loadedDocs = docResults
-            .flatMap((result) => (result.status === 'fulfilled' ? [result.value] : []));
-
-          if (loadedDocs.length > 0) {
-            const followUpResponse = await api.aiChat({
-              ...chatRequestBase,
-              messages: [
-                ...contextMessages,
-                ...newMessages.map((m) => ({ role: m.role, content: m.content })),
-                { role: 'assistant', content: assistantMsg.content },
-                { role: 'user', content: buildAutoLoadedKlipperDocMessage(loadedDocs) },
-              ],
-            });
-
-            if (followUpResponse.error) {
-              throw new Error(followUpResponse.error);
-            }
-
-            assistantMsg = {
-              role: 'assistant',
-              content: followUpResponse.content || assistantMsg.content,
-              lmStudioMcp: followUpResponse.lmStudioMcp ?? assistantMsg.lmStudioMcp,
-              autoLoadedDocs: loadedDocs.map((document) => document.filename),
-            };
-          } else {
-            setError(`The assistant requested full Klipper docs (${requestedKlipperDocs.join(', ')}), but none of those bundled markdown files were available from the backend.`);
-          }
-        } catch (autoDocErr: unknown) {
-          const autoDocMessage = autoDocErr instanceof Error
-            ? autoDocErr.message
-            : 'Automatic Klipper doc loading failed.';
-          setError(`Automatic full-doc follow-up failed: ${autoDocMessage}`);
         }
+
+        const allowExplanationOnly = hasOnlyRetryExemptAssistantValidationIssues(validationOutcome.blockingIssues);
+
+        const validationFeedback = buildAssistantDraftValidationFeedback(
+          validationOutcome.blockingIssues,
+          assistantAttempt.assistantMessage.content,
+          validationOutcome.failureReason,
+          allowExplanationOnly,
+        );
+
+        requestConversation = [
+          ...requestConversation,
+          ...assistantAttempt.conversationMessages.map((message) => ({ role: message.role, content: message.content })),
+          { role: 'user', content: validationFeedback },
+        ];
+        validationConversation = [...candidateConversation, { role: 'user', content: validationFeedback }];
+        assistantAttempt = await requestAssistantMessage(chatRequestBase, requestConversation);
+        pendingWarningMessage = assistantAttempt.warningMessage ?? pendingWarningMessage;
+        candidateConversation = [...validationConversation, ...assistantAttempt.conversationMessages];
+        attemptsUsed += 1;
+        validationOutcome = await getAssistantDraftValidationOutcome(
+          assistantAttempt.assistantMessage.content,
+          candidateConversation.length - 1,
+          candidateConversation,
+          !allowExplanationOnly,
+        );
       }
 
-      setMessages([...newMessages, assistantMsg]);
+      if (
+        validationOutcome.applicable
+        && validationOutcome.blockingIssues.length > 0
+        && hasOnlyRetryExemptAssistantValidationIssues(validationOutcome.blockingIssues)
+      ) {
+        const advisoryWarning = [
+          `AI draft still has duplicate section or pin-conflict validation issues after ${attemptsUsed} attempts. The assistant response was returned so it can explain the conflict.`,
+          formatAssistantDraftValidationIssues(validationOutcome.blockingIssues, null),
+        ].join('\n');
+        pendingWarningMessage = pendingWarningMessage
+          ? `${pendingWarningMessage}\n${advisoryWarning}`
+          : advisoryWarning;
+      }
+
+      if (!validationOutcome.applicable && validationOutcome.failureReason) {
+        throw new Error(
+          buildAssistantDraftValidationErrorMessage(
+            validationOutcome.blockingIssues,
+            validationOutcome.failureReason,
+            attemptsUsed,
+          ),
+        );
+      }
+
+      if (pendingWarningMessage) {
+        setError(pendingWarningMessage);
+      }
+
+      setMessages([...newMessages, assistantAttempt.assistantMessage]);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Failed to get response.';
       setError(message);
@@ -1083,7 +1617,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
     setSettings({
       apiKey: editApiKey,
       model: editModel,
-      apiUrl: editApiUrl,
+      apiUrl: resolvedEditApiUrl,
       apiProvider: editApiProvider,
       lmStudioHost: editLmStudioHost,
       lmStudioPort: editLmStudioPort,
@@ -1092,7 +1626,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
       ollamaPort: editOllamaPort,
     });
     if (isLocalProvider(editApiProvider)) {
-      void fetchAvailableModels(editApiProvider, editApiUrl, editApiKey);
+      void fetchAvailableModels(editApiProvider, resolvedEditApiUrl, editApiKey);
     }
     setShowSettings(false);
   };
@@ -1109,21 +1643,8 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
   const handleProviderChange = (provider: AiProvider) => {
     setEditApiProvider(provider);
     const defaults = PROVIDER_DEFAULTS[provider];
-    if (isLocalProvider(provider)) {
-      // Build URL from host/port
-      const url = `http://${defaults.defaultHost}:${defaults.defaultPort}/v1/chat/completions`;
-      setEditApiUrl(url);
-    } else {
+    if (!isLocalProvider(provider)) {
       setEditApiUrl(defaults.defaultUrl);
-    }
-  };
-
-  // Update URL when host/port changes for local providers
-  const updateLocalUrl = () => {
-    if (isLocalProvider(editApiProvider)) {
-      const host = editApiProvider === 'lm-studio' ? editLmStudioHost : editOllamaHost;
-      const port = editApiProvider === 'lm-studio' ? editLmStudioPort : editOllamaPort;
-      setEditApiUrl(`http://${host}:${port}/v1/chat/completions`);
     }
   };
 
@@ -1190,19 +1711,20 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
                 />
               </div>
 
-              {/* API URL */}
-              <div>
-                <label className="block text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-1.5">
-                  API URL
-                </label>
-                <input
-                  type="text"
-                  className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-                  value={editApiUrl}
-                  onChange={(e) => setEditApiUrl(e.target.value)}
-                  placeholder="https://api.openai.com/v1/chat/completions"
-                />
-              </div>
+              {!showLocalFields && (
+                <div>
+                  <label className="block text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-1.5">
+                    API URL
+                  </label>
+                  <input
+                    type="text"
+                    className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
+                    value={editApiUrl}
+                    onChange={(e) => setEditApiUrl(e.target.value)}
+                    placeholder="https://api.openai.com/v1/chat/completions"
+                  />
+                </div>
+              )}
 
               {/* Local server host/port fields */}
               {showLocalFields && (
@@ -1217,10 +1739,8 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
                       value={editApiProvider === 'lm-studio' ? editLmStudioHost : editOllamaHost}
                       onChange={(e) => {
                         const newHost = e.target.value;
-                        const port = editApiProvider === 'lm-studio' ? editLmStudioPort : editOllamaPort;
                         if (editApiProvider === 'lm-studio') setEditLmStudioHost(newHost);
                         else setEditOllamaHost(newHost);
-                        setEditApiUrl(`http://${newHost}:${port}/v1/chat/completions`);
                       }}
                       placeholder="localhost"
                     />
@@ -1235,15 +1755,19 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
                       value={editApiProvider === 'lm-studio' ? editLmStudioPort : editOllamaPort}
                       onChange={(e) => {
                         const newPort = e.target.value;
-                        const host = editApiProvider === 'lm-studio' ? editLmStudioHost : editOllamaHost;
                         if (editApiProvider === 'lm-studio') setEditLmStudioPort(newPort);
                         else setEditOllamaPort(newPort);
-                        setEditApiUrl(`http://${host}:${newPort}/v1/chat/completions`);
                       }}
                       placeholder="1234"
                     />
                   </div>
                 </div>
+              )}
+
+              {showLocalFields && (
+                <p className="text-[10px] text-[var(--color-text-secondary)]">
+                  Chat requests use {resolvedEditApiUrl} and model discovery uses the same host and port.
+                </p>
               )}
 
               {showLmStudioMcpField && (
@@ -1327,14 +1851,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
             >
               New Chat
             </button>
-            {/* Model name (text input) */}
-            <input
-              type="text"
-              className="w-36 px-2 py-1 rounded text-[10px] font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-              value={editModel}
-              onChange={(e) => setEditModel(e.target.value)}
-              placeholder="Model name"
-            />
             {/* Settings toggle */}
             <button
               onClick={() => setShowSettings(!showSettings)}
@@ -1419,16 +1935,17 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
                 {modelsError && (
                   <p className="text-[10px] text-[var(--color-error)]">Error: {modelsError}</p>
                 )}
-                {/* API URL */}
-                <div>
-                  <label className="block text-[10px] text-[var(--color-text-secondary)] mb-1">API URL</label>
-                  <input
-                    type="text"
-                    className="w-full px-3 py-1.5 rounded text-xs font-mono bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-                    value={editApiUrl}
-                    onChange={(e) => setEditApiUrl(e.target.value)}
-                  />
-                </div>
+                {!isLocalProvider(editApiProvider) && (
+                  <div>
+                    <label className="block text-[10px] text-[var(--color-text-secondary)] mb-1">API URL</label>
+                    <input
+                      type="text"
+                      className="w-full px-3 py-1.5 rounded text-xs font-mono bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
+                      value={editApiUrl}
+                      onChange={(e) => setEditApiUrl(e.target.value)}
+                    />
+                  </div>
+                )}
                 {/* Local server host/port */}
                 {isLocalProvider(editApiProvider) && (
                   <div className="flex gap-2">
@@ -1440,10 +1957,8 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
                         value={editApiProvider === 'lm-studio' ? editLmStudioHost : editOllamaHost}
                         onChange={(e) => {
                           const newHost = e.target.value;
-                          const port = editApiProvider === 'lm-studio' ? editLmStudioPort : editOllamaPort;
                           if (editApiProvider === 'lm-studio') setEditLmStudioHost(newHost);
                           else setEditOllamaHost(newHost);
-                          setEditApiUrl(`http://${newHost}:${port}/v1/chat/completions`);
                         }}
                         placeholder="localhost"
                       />
@@ -1456,15 +1971,18 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
                         value={editApiProvider === 'lm-studio' ? editLmStudioPort : editOllamaPort}
                         onChange={(e) => {
                           const newPort = e.target.value;
-                          const host = editApiProvider === 'lm-studio' ? editLmStudioHost : editOllamaHost;
                           if (editApiProvider === 'lm-studio') setEditLmStudioPort(newPort);
                           else setEditOllamaPort(newPort);
-                          setEditApiUrl(`http://${host}:${newPort}/v1/chat/completions`);
                         }}
                         placeholder="1234"
                       />
                     </div>
                   </div>
+                )}
+                {isLocalProvider(editApiProvider) && (
+                  <p className="text-[10px] text-[var(--color-text-secondary)]">
+                    Chat requests use {resolvedEditApiUrl} and model discovery uses the same host and port.
+                  </p>
                 )}
                 {editApiProvider === 'lm-studio' && (
                   <div>
@@ -1511,7 +2029,9 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
               const assistantConfigBlock = msg.role === 'assistant' ? extractConfigCodeBlock(msg.content) : null;
               const hasApplicableAssistantDraft = assistantDraftApplicableMessages[i] === true;
               const lmStudioMcpStatus = msg.role === 'assistant' ? msg.lmStudioMcp : undefined;
+              const lmStudioContextStatus = msg.role === 'assistant' ? msg.lmStudioContext : undefined;
               const lmStudioMcpPresentation = lmStudioMcpStatus ? getLmStudioMcpStatusPresentation(lmStudioMcpStatus) : null;
+              const lmStudioContextPresentation = lmStudioContextStatus ? getLmStudioContextPresentation(lmStudioContextStatus) : null;
               return (
                 <div
                   key={i}
@@ -1577,14 +2097,35 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
                     ) : (
                       <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
                     )}
-                    {msg.role === 'assistant' && lmStudioMcpPresentation && (
-                      <div className="mt-3 flex">
-                        <span
-                          className={`inline-flex items-center rounded-full border px-2 py-1 text-[10px] font-medium ${lmStudioMcpPresentation.className}`}
-                          title={lmStudioMcpPresentation.title}
-                        >
-                          {lmStudioMcpPresentation.label}
-                        </span>
+                    {msg.role === 'assistant' && (lmStudioMcpPresentation || lmStudioContextPresentation) && (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {lmStudioMcpPresentation && (
+                          <span
+                            className={`inline-flex items-center rounded-full border px-2 py-1 text-[10px] font-medium ${lmStudioMcpPresentation.className}`}
+                            title={lmStudioMcpPresentation.title}
+                          >
+                            {lmStudioMcpPresentation.label}
+                          </span>
+                        )}
+                        {lmStudioContextPresentation && (
+                          <span
+                            className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-1 text-[10px] font-medium ${lmStudioContextPresentation.className}`}
+                            title={lmStudioContextPresentation.title}
+                          >
+                            <span className="relative h-3 w-3 shrink-0 rounded-full" aria-hidden="true">
+                              <span className="absolute inset-0 rounded-full bg-current opacity-15" />
+                              {lmStudioContextPresentation.fillRatio !== null && lmStudioContextPresentation.fillRatio > 0 && (
+                                <span
+                                  className="absolute inset-0 rounded-full"
+                                  style={{
+                                    background: `conic-gradient(currentColor ${Math.max(lmStudioContextPresentation.fillRatio * 360, 6)}deg, transparent 0deg)`,
+                                  }}
+                                />
+                              )}
+                            </span>
+                            {lmStudioContextPresentation.label}
+                          </span>
+                        )}
                       </div>
                     )}
                     {msg.role === 'assistant' && Array.isArray(msg.autoLoadedDocs) && msg.autoLoadedDocs.length > 0 && (

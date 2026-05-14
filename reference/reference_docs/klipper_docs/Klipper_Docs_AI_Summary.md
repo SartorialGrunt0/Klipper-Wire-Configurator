@@ -47,6 +47,7 @@ Source docs: Config_Reference.md, Probe_Calibrate.md, Bed_Level.md, Bed_Mesh.md,
 - Calibrate probe offsets before depending on bed mesh results. Probe X or Y alignment and probe Z offset directly affect mesh usefulness.
 - Bed leveling and bed mesh solve different problems: first decide whether the printer needs manual leveling, screw adjustment, gantry alignment, probe calibration, or surface compensation.
 - Common runtime commands in this area include PROBE_CALIBRATE, BED_MESH_CALIBRATE, BED_MESH_PROFILE, BED_MESH_CLEAR, and BED_MESH_OUTPUT.
+- Bed mesh runtime behavior matters: `BED_MESH_CALIBRATE` makes the mesh active immediately and stores it to the named profile or `default`; `BED_MESH_PROFILE SAVE` or `REMOVE` needs `SAVE_CONFIG` to persist; `BED_MESH_PROFILE LOAD=default` is typically called from `START_PRINT` or a `[delayed_gcode]` if you are not recalibrating there; `BED_MESH_OUTPUT PGP=1` prints generated points; `BED_MESH_OFFSET ZFADE=...` compensates for tool or Z-offset changes during mesh fade.
 - horizontal_move_z is a bed_mesh safety travel height used during probing or mesh traversal; adjust it conservatively when clearance is uncertain.
 - BLTouch-style devices have extra wiring, mode, and clone-specific caveats, so hardware-specific advice should cite BLTouch.md and the related config section.
 
