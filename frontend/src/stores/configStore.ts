@@ -111,6 +111,8 @@ interface ConfigState {
   originalTexts: Record<string, string>; // original exported text at import time
   isDirty: boolean; // true when config has unsaved changes
   textEditorDirty: boolean; // true when the text editor has unapplied draft changes
+  textDraftFile: string | null;
+  textDraftText: string;
 
   /* ── Actions ──────────────────────────────────────── */
   setConfigFile: (filename: string, config: ConfigFile) => void;
@@ -161,8 +163,11 @@ interface ConfigState {
   removeInclude: (filename: string, includePath: string) => void;
 
   /* Dirty tracking */
+  markDirty: () => void;
   markClean: () => void;
   setTextEditorDirty: (dirty: boolean) => void;
+  setTextDraft: (filename: string, text: string) => void;
+  clearTextDraft: () => void;
 
   /* Helpers */
   getSection: (filename: string, fullHeader: string, lineNumber?: number) => ConfigSection | undefined;
@@ -179,6 +184,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   originalTexts: {},
   isDirty: false,
   textEditorDirty: false,
+  textDraftFile: null,
+  textDraftText: '',
 
   setConfigFile: (filename, config) =>
     set((s) => ({
@@ -202,6 +209,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         validation: nextValidation,
         activeFile: s.activeFile === filename ? remainingFiles[0] || 'printer.cfg' : s.activeFile,
         selectedSection: s.activeFile === filename ? null : s.selectedSection,
+        textDraftFile: s.textDraftFile === filename ? null : s.textDraftFile,
+        textDraftText: s.textDraftFile === filename ? '' : s.textDraftText,
       };
     }),
 
@@ -405,6 +414,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       originalTexts: {},
       isDirty: false,
       textEditorDirty: false,
+      textDraftFile: null,
+      textDraftText: '',
     }),
 
   loadConfigs: (configs) =>
@@ -413,6 +424,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       activeFile: Object.keys(configs)[0] || 'printer.cfg',
       isDirty: false,
       textEditorDirty: false,
+      textDraftFile: null,
+      textDraftText: '',
     }),
 
   setOriginalText: (filename, text) =>
@@ -450,6 +463,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         activeFile: s.activeFile === oldName ? newName : s.activeFile,
         validation: nextValidation,
         originalTexts: nextOriginals,
+        textDraftFile: s.textDraftFile === oldName ? newName : s.textDraftFile,
       };
     }),
 
@@ -547,10 +561,40 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     return cf?.sections.find((s) => matchesSectionIdentity(s, fullHeader, lineNumber));
   },
 
-  markClean: () => set({ isDirty: false, textEditorDirty: false }),
+  markDirty: () =>
+    set((s) => (s.isDirty ? s : { isDirty: true })),
+
+  markClean: () => set({
+    isDirty: false,
+    textEditorDirty: false,
+    textDraftFile: null,
+    textDraftText: '',
+  }),
 
   setTextEditorDirty: (dirty) =>
     set((s) => (s.textEditorDirty === dirty ? s : { textEditorDirty: dirty })),
+
+  setTextDraft: (filename, text) =>
+    set((s) => {
+      if (s.textDraftFile === filename && s.textDraftText === text) {
+        return s;
+      }
+      return {
+        textDraftFile: filename,
+        textDraftText: text,
+      };
+    }),
+
+  clearTextDraft: () =>
+    set((s) => {
+      if (s.textDraftFile == null && s.textDraftText === '') {
+        return s;
+      }
+      return {
+        textDraftFile: null,
+        textDraftText: '',
+      };
+    }),
 
   getSectionErrors: (fullHeader) => {
     const state = get();

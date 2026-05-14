@@ -1,12 +1,12 @@
 # Klipper Wire Configurator Requirements Specification
 
-Last reviewed: 2026-04-29
+Last reviewed: 2026-05-14
 
 This document reflects the capabilities implemented in the current repository. It is intentionally descriptive of the shipped product state, including native-only behavior and backend capabilities that are present even when not yet exposed by the main frontend toolbar.
 
 ## Scope
 
-Klipper Wire Configurator is a browser-based editor for Klipper configuration projects. It combines a React single-page application with a FastAPI backend to import, validate, generate, edit, export, diff, and optionally apply Klipper `.cfg` files. In native Linux/SBC mode it also interacts with the local filesystem, Klipper's Unix socket API, connected devices, and firmware build trees.
+Klipper Wire Configurator is a browser-based editor for Klipper configuration projects. It combines a React single-page application with a FastAPI backend to import, validate, generate, edit, export, diff, and optionally apply Klipper `.cfg` files. It also includes an AI chat workflow for documentation-grounded Klipper assistance and draft config edits. In native Linux/SBC mode it also interacts with the local filesystem, Klipper's Unix socket API, connected devices, and firmware build trees.
 
 ## Supported Operating Modes
 
@@ -63,6 +63,16 @@ Klipper Wire Configurator is a browser-based editor for Klipper configuration pr
 | REQ-EDIT-04 | Applying text edits shall reparse the changed file through the backend, update config state, and rebuild the graph from the parsed project model. | UI | [frontend/src/components/TextEditor.tsx](frontend/src/components/TextEditor.tsx), [frontend/src/utils/graphBuilder.ts](frontend/src/utils/graphBuilder.ts), [backend/api/routes.py](backend/api/routes.py) |
 | REQ-EDIT-05 | Unknown-section warnings shall be acknowledgeable so the validator can suppress accepted custom/plugin sections on later parses. | UI | [frontend/src/components/TextEditor.tsx](frontend/src/components/TextEditor.tsx), [backend/api/routes.py](backend/api/routes.py), [backend/services/warning_acknowledgments.py](backend/services/warning_acknowledgments.py) |
 
+### AI Assistance
+
+| ID | Requirement | Surface | Primary implementation |
+| --- | --- | --- | --- |
+| REQ-AI-01 | The UI shall expose an AI Chat dialog from the toolbar, persist provider settings and conversation history in local storage, and support provider defaults for OpenAI, Gemini, Anthropic, GitHub Models, OpenAI-compatible endpoints, LM Studio, and Ollama. | UI | [frontend/src/components/Toolbar.tsx](frontend/src/components/Toolbar.tsx), [frontend/src/components/dialogs/ChatDialog.tsx](frontend/src/components/dialogs/ChatDialog.tsx), [frontend/src/stores/aiStore.ts](frontend/src/stores/aiStore.ts), [frontend/src/types/ai.ts](frontend/src/types/ai.ts) |
+| REQ-AI-02 | The frontend and backend shall proxy AI chat and model-list requests through `/ai/chat` and `/ai/models`, derive local model-list URLs from the configured chat endpoint, and require API keys only for non-local providers. | UI | [frontend/src/services/api.ts](frontend/src/services/api.ts), [backend/api/ai_routes.py](backend/api/ai_routes.py), [frontend/src/stores/aiStore.ts](frontend/src/stores/aiStore.ts) |
+| REQ-AI-03 | The chat proxy shall prepend fixed system guidance plus relevant bundled Klipper `Config_Reference.md` excerpts selected from recent user messages so provider responses are grounded in documentation. | UI | [backend/api/ai_routes.py](backend/api/ai_routes.py), [reference/reference_docs/klipper_docs](reference/reference_docs/klipper_docs) |
+| REQ-AI-04 | When LM Studio is selected with an MCP plugin enabled, the backend shall attempt LM Studio's `/api/v1/chat` route, report MCP tool and fallback metadata, and retry on the OpenAI-compatible endpoint when plugin routing is unavailable, invalid, timed out, or requires token-based fallback. | UI | [backend/api/ai_routes.py](backend/api/ai_routes.py), [frontend/src/components/dialogs/ChatDialog.tsx](frontend/src/components/dialogs/ChatDialog.tsx), [frontend/src/types/ai.ts](frontend/src/types/ai.ts) |
+| REQ-AI-05 | The AI chat workflow shall allow attaching loaded or local config files as context, target assistant cfg edits to specific files via `# file:` hints or filename mentions, preview multi-file draft changes, merge changed sections without replacing untouched content, and rebuild project graph/config state after apply. | UI | [frontend/src/components/dialogs/ChatDialog.tsx](frontend/src/components/dialogs/ChatDialog.tsx), [frontend/src/components/dialogs/AiDraftPreviewDialog.tsx](frontend/src/components/dialogs/AiDraftPreviewDialog.tsx), [frontend/src/utils/assistantDraftMerge.ts](frontend/src/utils/assistantDraftMerge.ts), [frontend/src/utils/graphBuilder.ts](frontend/src/utils/graphBuilder.ts) |
+
 ### Validation, Diff, and Export
 
 | ID | Requirement | Surface | Primary implementation |
@@ -118,4 +128,4 @@ Klipper Wire Configurator is a browser-based editor for Klipper configuration pr
 ## Current Gaps and Notes
 
 - Project save/load endpoints exist in the backend but are not currently wired to the main toolbar or startup workflow.
-- Automated test coverage is strongest for parser, validator, save-config, and firmware route/service behavior. UI interaction paths and physical hardware flashing still require manual functional verification.
+- Automated test coverage is strongest for parser, validator, save-config, firmware route/service behavior, and AI chat backend routing. Browser-level AI draft-apply flows, other UI interaction paths, and physical hardware flashing still require manual functional verification.

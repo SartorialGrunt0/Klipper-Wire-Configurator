@@ -27,6 +27,7 @@ Credit to the klipper, mainsail, moonraker, fluidd, and other teams whom which I
 - Text View for traditonal configuration management, faster multi-file fuzzy search, and line referenced table of contents.
 - Macro Designer with easy modifications and simulation.
 - Build, download, and flash Klipper and Katapult firmware.
+- Integrated Klipper AI agent to mange configs and macros with kliper docs referenced context, error checking, and controlled approval of changes.
 
 ### Graphical UI
 
@@ -55,6 +56,10 @@ Credit to the klipper, mainsail, moonraker, fluidd, and other teams whom which I
 ### Firmware Flash Tool
 
 <img src="images/Flash_Tool.png" width="1000" height="660">
+
+### AI Chat
+
+<img src="images/AI_Chat.png" width="1000" height="660">
 
 ## Prerequisites
 

@@ -1,6 +1,6 @@
 # Functional Test Plan
 
-Last reviewed: 2026-04-29
+Last reviewed: 2026-05-14
 
 This plan verifies the requirements captured in [requirements-specifications](requirements-specifications). It separates strict automated suites, informational automation that produces diagnostics without hard assertions, and manual scenarios that still require a running UI or real hardware.
 
@@ -26,6 +26,7 @@ python scripts/run_functional_tests.py
 | --- | --- | --- | --- | --- |
 | FTA-001 | REQ-CONF-03, REQ-EDIT-05, REQ-VAL-01, REQ-VAL-02, REQ-VAL-03, REQ-OUT-01 | Validate parser, validator, save-config handling, cross-file validation, shared-pin allowances, and warning acknowledgement behavior. | Strict pass/fail | [tests/test_delta_validation.py](tests/test_delta_validation.py), [tests/test_warning_acknowledgments.py](tests/test_warning_acknowledgments.py), [tests/test_save_config_handling.py](tests/test_save_config_handling.py) |
 | FTA-002 | REQ-FW-01, REQ-FW-02, REQ-FW-03, REQ-FW-04, REQ-NATIVE-06 | Validate firmware and flash-target API contract forwarding, artifact selection, and flash-device candidate logic. | Strict pass/fail | [tests/test_native_firmware_routes.py](tests/test_native_firmware_routes.py), [tests/test_flash_target_routes.py](tests/test_flash_target_routes.py), [tests/test_flash_target_service.py](tests/test_flash_target_service.py), [tests/test_klipper_firmware_service.py](tests/test_klipper_firmware_service.py) |
+| FTA-003 | REQ-AI-02, REQ-AI-03, REQ-AI-04 | Validate AI model listing, provider key gating, docs-grounded prompt preparation, and LM Studio MCP fallback metadata on the backend proxy. | Strict pass/fail | [tests/test_ai_chat_routes.py](tests/test_ai_chat_routes.py) |
 | FTI-001 | REQ-CONF-01, REQ-CONF-02, REQ-CONF-03, REQ-OUT-01 | Exercise corpus-wide parse/export round-tripping across bundled reference configs and backups. | Informational automation | [tests/test_roundtrip.py](tests/test_roundtrip.py) |
 | FTI-002 | REQ-CONF-03, REQ-EDIT-04, REQ-OUT-01, REQ-OUT-02 | Exercise the parse -> API model -> smart export path against the Trident backup sample and report diff counts. | Informational automation | [tests/test_diff_roundtrip.py](tests/test_diff_roundtrip.py) |
 
@@ -167,8 +168,30 @@ Expected result:
 2. Simulation feedback responds to macro content and bounds.
 3. Native layout saves include macro designer payloads.
 
+### FTM-009 AI chat grounding and draft-apply workflow
+
+Requirements: REQ-AI-01, REQ-AI-05
+
+Preconditions:
+1. Load a single-file or multi-file config project in the UI.
+2. Configure at least one AI provider or local server endpoint.
+
+Procedure:
+1. Open AI Chat from the toolbar.
+2. Verify provider settings, switch between a hosted and local provider if available, and save the configuration.
+3. Ask a documentation-grounded Klipper question that references a specific section or parameter.
+4. Attach at least one local config file or reference one or more loaded config files by name.
+5. Request a config edit that targets the active file and, for multi-file projects, a second named file.
+6. Review the draft preview and apply the suggested changes.
+
+Expected result:
+1. Provider settings and message history persist across closing and reopening the dialog.
+2. The response arrives through the proxy or returns a clear provider error without corrupting the stored conversation history.
+3. Draft preview groups changes by target file before apply.
+4. Applied changes preserve untouched comments and unrelated section content while rebuilding graph/config state from the accepted draft.
+
 ## Result Interpretation
 
-- A passing automated run means the strict backend/service regression suite is currently green.
+- A passing automated run means the strict backend/service regression suite, including AI chat backend routing, is currently green.
 - Informational suites should be reviewed for drift trends even when they do not fail the run.
-- Manual scenarios remain required before release because the current automated suite does not exercise browser interaction fidelity or physical hardware behavior.
+- Manual scenarios remain required before release because the current automated suite does not exercise browser interaction fidelity, AI draft-apply UX, external provider connectivity, or physical hardware behavior.

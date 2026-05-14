@@ -80,6 +80,20 @@ AUTOMATED_SUITES = (
             "tests/test_klipper_firmware_service.py",
         ),
     ),
+    SuiteDefinition(
+        suite_id="FTA-003",
+        title="AI chat backend regression suite",
+        kind="pytest",
+        requirement_ids=(
+            "REQ-AI-02",
+            "REQ-AI-03",
+            "REQ-AI-04",
+        ),
+        description="Strict pass/fail validation of AI model listing, docs-grounded prompt preparation, and LM Studio MCP fallback behavior.",
+        selectors=(
+            "tests/test_ai_chat_routes.py",
+        ),
+    ),
 )
 
 
@@ -160,6 +174,12 @@ MANUAL_CASES = (
         "test_id": "FTM-008",
         "title": "Macro designer workflow",
         "requirement_ids": ["REQ-MACRO-01", "REQ-MACRO-02", "REQ-MACRO-03"],
+        "status": "manual_required",
+    },
+    {
+        "test_id": "FTM-009",
+        "title": "AI chat grounding and draft-apply workflow",
+        "requirement_ids": ["REQ-AI-01", "REQ-AI-05"],
         "status": "manual_required",
     },
 )
