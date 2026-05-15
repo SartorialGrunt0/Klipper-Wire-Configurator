@@ -19,6 +19,8 @@ const CLEARANCE = 28;
 const CORNER_R = 10;
 /** Distance to extend from handle before routing */
 const STUB_LEN = 20;
+/** Prefer endpoint-local bends over midpoint doglegs for almost-straight runs */
+const STRAIGHT_RUN_BIAS_THRESHOLD = 16;
 
 type Point = [number, number];
 
@@ -216,40 +218,54 @@ export function getAvoidancePath(
   const srcHoriz = isHorizontalSide(sourceSide);
   const tgtHoriz = isHorizontalSide(targetSide);
 
+  const candidates: Point[][] = [];
+  const addCandidate = (middle: Point[]) => {
+    candidates.push(simplifyWaypoints(
+      [[sx, sy], exit, ...middle, entry, [tx, ty]],
+    ));
+  };
+
   // Route between exit and entry points based on handle orientations
-  let middle: Point[];
   if (srcHoriz && tgtHoriz) {
     // Both horizontal handles: H → V → H
+    const laneDelta = Math.abs(exit[1] - entry[1]);
+    if (laneDelta <= STRAIGHT_RUN_BIAS_THRESHOLD) {
+      addCandidate([[entry[0], exit[1]]]);
+      addCandidate([[exit[0], entry[1]]]);
+    }
     const midX = (exit[0] + entry[0]) / 2;
-    middle = [[midX, exit[1]], [midX, entry[1]]];
+    addCandidate([[midX, exit[1]], [midX, entry[1]]]);
   } else if (!srcHoriz && !tgtHoriz) {
     // Both vertical handles: V → H → V
+    const laneDelta = Math.abs(exit[0] - entry[0]);
+    if (laneDelta <= STRAIGHT_RUN_BIAS_THRESHOLD) {
+      addCandidate([[exit[0], entry[1]]]);
+      addCandidate([[entry[0], exit[1]]]);
+    }
     const midY = (exit[1] + entry[1]) / 2;
-    middle = [[exit[0], midY], [entry[0], midY]];
+    addCandidate([[exit[0], midY], [entry[0], midY]]);
   } else if (srcHoriz) {
     // Source horizontal, target vertical: route through corner
-    middle = [[entry[0], exit[1]]];
+    addCandidate([[entry[0], exit[1]]]);
   } else {
     // Source vertical, target horizontal: route through corner
-    middle = [[exit[0], entry[1]]];
+    addCandidate([[exit[0], entry[1]]]);
   }
 
-  let waypoints: Point[] = simplifyWaypoints(
-    [[sx, sy], exit, ...middle, entry, [tx, ty]],
-  );
-
-  // Check for obstacles along proposed path
-  const blocking = obstacles.filter((r) => pathIntersectsRect(waypoints, r));
-
-  if (blocking.length === 0) {
-    const [labelX, labelY] = getPathMidpoint(waypoints);
-    return {
-      path: buildOrthogonalPath(waypoints),
-      labelX,
-      labelY,
-      waypoints: waypoints as [number, number][],
-    };
+  for (const waypoints of candidates) {
+    const blocking = obstacles.filter((r) => pathIntersectsRect(waypoints, r));
+    if (blocking.length === 0) {
+      const [labelX, labelY] = getPathMidpoint(waypoints);
+      return {
+        path: buildOrthogonalPath(waypoints),
+        labelX,
+        labelY,
+        waypoints: waypoints as [number, number][],
+      };
+    }
   }
+
+  const blocking = obstacles.filter((rect) => candidates.some((pts) => pathIntersectsRect(pts, rect)));
 
   // Avoidance: route above or below the union of blocking obstacles
   const unionTop = Math.min(...blocking.map((r) => r.y)) - CLEARANCE;

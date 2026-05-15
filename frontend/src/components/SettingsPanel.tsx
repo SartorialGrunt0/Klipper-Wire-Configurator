@@ -3,7 +3,7 @@ import { useConfigStore } from '../stores/configStore';
 import { useGraphStore } from '../stores/graphStore';
 import { useNativeStore } from '../stores/nativeStore';
 import type { ParamSchema, ConfigParam, ConfigSection, HardwareType, SectionSchema } from '../types/config';
-import type { HardwareNodeData, SubComponentNodeData, FeatureNodeData, AppNode, AppEdge, ValidationStatus } from '../types/graph';
+import type { HardwareNodeData, SubComponentNodeData, FeatureNodeData, GroupChildItem, AppNode, AppEdge, ValidationStatus } from '../types/graph';
 import { applyBoardTypeMarkerToMcuSections } from '../utils/boardTypeMarker';
 import { updateAllSectionPins } from '../utils/pinUtils';
 import { buildUniqueSectionDraft } from '../utils/sectionNaming';
@@ -763,6 +763,35 @@ export default function SettingsPanel() {
           sectionType: nextSection.section_type,
           label,
         } as Partial<AppNode['data']>);
+      } else if (selectedNodeId && selectedNode?.type === 'group' && selectedSection) {
+        const displayName = schemas[nextSection.section_type]?.display_name || nextSection.section_type;
+        const label = nextSection.section_name ? `${displayName}: ${nextSection.section_name}` : displayName;
+        const sectionParams = nextSection.params.filter((param) => param.key !== '_comment_');
+        const realParams = sectionParams.filter((param) => !param.is_commented_out);
+        const nextSuppressed = sectionParams.length > 0 && sectionParams.every((param) => param.is_commented_out);
+        const groupChildren = ((selectedNode.data as Record<string, unknown>).children as GroupChildItem[] | undefined) || [];
+        let updatedChild = false;
+
+        const nextChildren = groupChildren.map((child) => {
+          if (updatedChild || child.sectionHeader !== selectedSection) {
+            return child;
+          }
+
+          updatedChild = true;
+          return {
+            ...child,
+            label,
+            sectionType: nextSection.section_type,
+            sectionHeader: nextSection.full_header,
+            sectionLineNumber: nextSection.line_number,
+            params: realParams,
+            isSuppressed: nextSuppressed,
+          };
+        });
+
+        if (updatedChild) {
+          updateNodeData(selectedNodeId, { children: nextChildren } as Partial<AppNode['data']>);
+        }
       }
 
       setSelectedSection(nextSection.full_header);
@@ -772,7 +801,7 @@ export default function SettingsPanel() {
     } catch (err) {
       console.error('Parse error:', err);
     }
-  }, [sectionEditText, activeFile, sectionHeader, sectionConfigFile, configFiles, nodeSectionLineNumber, setConfigFile, selectedNodeId, selectedNode, schemas, updateNodeData, setSelectedSection, revalidateFile]);
+  }, [sectionEditText, activeFile, sectionHeader, sectionConfigFile, configFiles, nodeSectionLineNumber, setConfigFile, selectedNodeId, selectedNode, selectedSection, schemas, updateNodeData, setSelectedSection, revalidateFile]);
 
   const handleAcknowledgeWarning = useCallback(async () => {
     if (!section || !sectionConfigFile) return;

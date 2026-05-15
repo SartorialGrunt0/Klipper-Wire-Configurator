@@ -1,14 +1,17 @@
+import type { ConfigFile } from '../types/config';
 import type { MacroSourceItem } from '../types/macroDesigner';
 import type {
   MachineProfile,
   MacroRuntimeState,
   ParsedGcodeCommand,
+  RuntimeBedMeshState,
   RuntimeLedState,
   SimulationBuildResult,
+  SimulationPoint,
   SimulationStep,
   SimulationTickResult,
 } from '../types/macroDesigner';
-import { findPathZoneHit, findZoneHit, isPointInBounds, isPointInMoveBounds } from './macroDesigner';
+import { findPathZoneHit, findZoneHit, isPointInBounds, isPointInMoveBounds, parseMacroVariables } from './macroDesigner';
 
 function parseParams(tokens: string[]): Record<string, string> {
   const params: Record<string, string> = {};
@@ -80,6 +83,20 @@ function cloneLedState(state: RuntimeLedState): RuntimeLedState {
   return { ...state };
 }
 
+function createInitialBedMeshState(): RuntimeBedMeshState {
+  return {
+    active: false,
+    profile: null,
+    method: null,
+    adaptive: false,
+    offsets: {
+      x: 0,
+      y: 0,
+      zFade: 0,
+    },
+  };
+}
+
 export function createInitialRuntimeState(profile: MachineProfile, macroName: string): MacroRuntimeState {
   return {
     x: profile.centerX,
@@ -95,6 +112,9 @@ export function createInitialRuntimeState(profile: MachineProfile, macroName: st
     bed: { current: 25, target: 0 },
     nozzle: { current: 25, target: 0 },
     fanSpeed: 0,
+    activeExtruder: DEFAULT_EXTRUDER_NAME,
+    isPaused: false,
+    bedMesh: createInitialBedMeshState(),
     displayText: '',
     messages: [],
     ledStates: {},
@@ -114,6 +134,311 @@ function asNumber(value: string | undefined): number | null {
 
 function normalizeMessage(raw: string): string {
   return raw.replace(/^"|"$/g, '');
+}
+
+function getConfigSections(configFiles?: Record<string, ConfigFile>): ConfigFile['sections'] {
+  return configFiles ? Object.values(configFiles).flatMap((configFile) => configFile.sections) : [];
+}
+
+function getConfigParamValue(section: ConfigFile['sections'][number] | undefined, key: string): string | undefined {
+  return section?.params.find((param) => !param.is_commented_out && param.key.toUpperCase() === key.toUpperCase())?.value;
+}
+
+function parsePairValue(value: string | undefined): [number, number] | null {
+  if (!value) return null;
+  const parts = value.split(',').map((part) => Number(part.trim()));
+  if (parts.length < 2 || parts.some((part) => !Number.isFinite(part))) {
+    return null;
+  }
+  return [parts[0], parts[1]];
+}
+
+function parseCountPair(value: string | undefined): [number, number] | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (trimmed.includes(',')) {
+    return parsePairValue(trimmed);
+  }
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) && parsed > 0 ? [parsed, parsed] : null;
+}
+
+function parsePositiveInteger(value: string | undefined): number | null {
+  if (!value) return null;
+  const parsed = Number(value.trim());
+  return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : null;
+}
+
+function buildRectangularBedMeshPoints(
+  meshMin: [number, number],
+  meshMax: [number, number],
+  probeCount: [number, number],
+): SimulationPoint[] {
+  const xCount = Math.max(1, Math.round(probeCount[0]));
+  const yCount = Math.max(1, Math.round(probeCount[1]));
+  const points: SimulationPoint[] = [];
+
+  for (let yIndex = 0; yIndex < yCount; yIndex += 1) {
+    const y = yCount === 1
+      ? meshMin[1]
+      : meshMin[1] + ((meshMax[1] - meshMin[1]) * yIndex) / (yCount - 1);
+    const reversed = yIndex % 2 !== 0;
+
+    for (let i = 0; i < xCount; i += 1) {
+      const xIndex = reversed ? (xCount - 1 - i) : i;
+      const x = xCount === 1
+        ? meshMin[0]
+        : meshMin[0] + ((meshMax[0] - meshMin[0]) * xIndex) / (xCount - 1);
+      points.push({
+        x: Math.round(x * 1000) / 1000,
+        y: Math.round(y * 1000) / 1000,
+        label: `${xIndex + 1},${yIndex + 1}`,
+      });
+    }
+  }
+
+  return points;
+}
+
+function buildRoundBedMeshPoints(
+  meshRadius: number,
+  meshOrigin: [number, number],
+  roundProbeCount: number,
+): SimulationPoint[] {
+  const baseCount = Math.max(1, Math.round(roundProbeCount));
+  const normalizedCount = baseCount % 2 === 0 ? baseCount + 1 : baseCount;
+  const step = normalizedCount === 1 ? 0 : (meshRadius * 2) / (normalizedCount - 1);
+  const points: SimulationPoint[] = [];
+
+  for (let yIndex = 0; yIndex < normalizedCount; yIndex += 1) {
+    const y = meshOrigin[1] - meshRadius + (step * yIndex);
+    const row: SimulationPoint[] = [];
+
+    for (let xIndex = 0; xIndex < normalizedCount; xIndex += 1) {
+      const x = meshOrigin[0] - meshRadius + (step * xIndex);
+      const dx = x - meshOrigin[0];
+      const dy = y - meshOrigin[1];
+      if (Math.sqrt(dx * dx + dy * dy) > meshRadius + 1e-6) {
+        continue;
+      }
+      row.push({
+        x: Math.round(x * 1000) / 1000,
+        y: Math.round(y * 1000) / 1000,
+        label: `${xIndex + 1},${yIndex + 1}`,
+      });
+    }
+
+    if (yIndex % 2 !== 0) {
+      row.reverse();
+    }
+    points.push(...row);
+  }
+
+  return points;
+}
+
+function getBedMeshCalibrationMethod(
+  command: ParsedGcodeCommand,
+  profile: MachineProfile,
+): NonNullable<RuntimeBedMeshState['method']> {
+  const rawMethod = (command.params.METHOD || (profile.hasProbe ? 'automatic' : 'manual')).trim().toLowerCase();
+  return rawMethod === 'manual' || rawMethod === 'automatic' || rawMethod === 'scan' || rawMethod === 'rapid_scan'
+    ? rawMethod
+    : (profile.hasProbe ? 'automatic' : 'manual');
+}
+
+function getBedMeshProfileName(command: ParsedGcodeCommand): string {
+  const requestedProfile = command.params.PROFILE?.trim() || 'default';
+  if (command.params.ADAPTIVE === '1' && !requestedProfile.toLowerCase().startsWith('adaptive-')) {
+    return `adaptive-${requestedProfile}`;
+  }
+  return requestedProfile;
+}
+
+function getProbeMoveConfigSection(command: ParsedGcodeCommand, configFiles?: Record<string, ConfigFile>) {
+  const sectionTypeByCommand: Partial<Record<string, string>> = {
+    Z_TILT_ADJUST: 'z_tilt',
+    QUAD_GANTRY_LEVEL: 'quad_gantry_level',
+    BED_TILT_CALIBRATE: 'bed_tilt',
+    DELTA_CALIBRATE: 'delta_calibrate',
+    SCREWS_TILT_CALCULATE: 'screws_tilt_adjust',
+  };
+  const sectionType = sectionTypeByCommand[command.command];
+  return sectionType
+    ? getConfigSections(configFiles).find((section) => section.section_type === sectionType)
+    : undefined;
+}
+
+function getProbeTravelHeight(
+  command: ParsedGcodeCommand,
+  profile: MachineProfile,
+  configFiles?: Record<string, ConfigFile>,
+): number {
+  const section = getProbeMoveConfigSection(command, configFiles);
+  return asNumber(command.params.HORIZONTAL_MOVE_Z)
+    ?? asNumber(getConfigParamValue(section, 'horizontal_move_z'))
+    ?? profile.horizontalMoveZ;
+}
+
+function getBedMeshCalibrationPlan(
+  command: ParsedGcodeCommand,
+  profile: MachineProfile,
+  configFiles?: Record<string, ConfigFile>,
+): {
+  points: SimulationPoint[];
+  moveZ: number;
+  method: NonNullable<RuntimeBedMeshState['method']>;
+  adaptive: boolean;
+  profileName: string;
+} {
+  const method = getBedMeshCalibrationMethod(command, profile);
+  const bedMeshSection = getConfigSections(configFiles).find((section) => section.section_type === 'bed_mesh');
+  const moveZ = asNumber(command.params.HORIZONTAL_MOVE_Z)
+    ?? asNumber(getConfigParamValue(bedMeshSection, 'horizontal_move_z'))
+    ?? profile.horizontalMoveZ;
+  const adaptive = command.params.ADAPTIVE === '1';
+  const profileName = getBedMeshProfileName(command);
+
+  if (profile.shape === 'round') {
+    const meshRadius = asNumber(command.params.MESH_RADIUS)
+      ?? asNumber(getConfigParamValue(bedMeshSection, 'mesh_radius'));
+    const meshOriginOffset = parsePairValue(command.params.MESH_ORIGIN)
+      ?? parsePairValue(getConfigParamValue(bedMeshSection, 'mesh_origin'))
+      ?? [0, 0];
+    const roundProbeCount = parsePositiveInteger(command.params.ROUND_PROBE_COUNT)
+      ?? parsePositiveInteger(getConfigParamValue(bedMeshSection, 'round_probe_count'))
+      ?? 5;
+
+    return {
+      points: meshRadius !== null
+        ? buildRoundBedMeshPoints(
+            meshRadius,
+            [profile.centerX + meshOriginOffset[0], profile.centerY + meshOriginOffset[1]],
+            roundProbeCount,
+          )
+        : (profile.featurePoints.BED_MESH_CALIBRATE || []),
+      moveZ,
+      method,
+      adaptive,
+      profileName,
+    };
+  }
+
+  const meshMin = parsePairValue(command.params.MESH_MIN)
+    ?? parsePairValue(getConfigParamValue(bedMeshSection, 'mesh_min'));
+  const meshMax = parsePairValue(command.params.MESH_MAX)
+    ?? parsePairValue(getConfigParamValue(bedMeshSection, 'mesh_max'));
+  const probeCount = parseCountPair(command.params.PROBE_COUNT)
+    ?? parseCountPair(getConfigParamValue(bedMeshSection, 'probe_count'));
+
+  return {
+    points: meshMin && meshMax && probeCount
+      ? buildRectangularBedMeshPoints(meshMin, meshMax, probeCount)
+      : (profile.featurePoints.BED_MESH_CALIBRATE || []),
+    moveZ,
+    method,
+    adaptive,
+    profileName,
+  };
+}
+
+function getProbeSamplingPlan(command: ParsedGcodeCommand, profile: MachineProfile): ProbeSamplingPlan {
+  const defaultSampleCount = command.command === 'PROBE_ACCURACY' ? 10 : profile.probeSamples;
+  const overrideSampleCount = parsePositiveInteger(command.params.SAMPLES);
+  const sampleCount = Math.max(1, overrideSampleCount ?? defaultSampleCount);
+  const sampleRetractDist = Math.max(0, asNumber(command.params.SAMPLE_RETRACT_DIST) ?? profile.probeSampleRetractDist);
+  const liftSpeed = asNumber(command.params.LIFT_SPEED) ?? profile.probeLiftSpeed;
+
+  return {
+    sampleCount,
+    sampleRetractDist,
+    liftFeedRate: liftSpeed !== null && liftSpeed > 0 ? liftSpeed * 60 : null,
+  };
+}
+
+function buildProbeSampleSteps(
+  probeX: number,
+  probeY: number,
+  nozzleX: number,
+  nozzleY: number,
+  sampleZ: number,
+  maxZ: number,
+  label: string,
+  sourceName: string,
+  lineNumber: number,
+  samplingPlan: ProbeSamplingPlan,
+  rawBase = 'probe',
+): SimulationStep[] {
+  const steps: SimulationStep[] = [];
+
+  for (let index = 0; index < samplingPlan.sampleCount; index += 1) {
+    const suffix = samplingPlan.sampleCount > 1 ? ` sample ${index + 1}/${samplingPlan.sampleCount}` : '';
+    steps.push({
+      kind: 'probe' as const,
+      x: probeX,
+      y: probeY,
+      label: `${label}${suffix}`,
+      raw: `${rawBase} at ${probeX.toFixed(3)},${probeY.toFixed(3)}${suffix} is z=0.000`,
+      sourceName,
+      lineNumber,
+    });
+
+    if (index >= samplingPlan.sampleCount - 1 || samplingPlan.sampleRetractDist <= 0) {
+      continue;
+    }
+
+    const retractZ = Math.min(maxZ, sampleZ + samplingPlan.sampleRetractDist);
+    const nextSuffix = samplingPlan.sampleCount > 1 ? ` sample ${index + 2}/${samplingPlan.sampleCount}` : '';
+    steps.push({
+      kind: 'move' as const,
+      x: nozzleX,
+      y: nozzleY,
+      z: retractZ,
+      feedRate: samplingPlan.liftFeedRate ?? undefined,
+      label: `Lift for ${label}${suffix}`,
+      raw: `sample retract ${label}${suffix}`,
+      sourceName,
+      lineNumber,
+    });
+    steps.push({
+      kind: 'move' as const,
+      x: nozzleX,
+      y: nozzleY,
+      z: sampleZ,
+      feedRate: samplingPlan.liftFeedRate ?? undefined,
+      label: `Return for ${label}${nextSuffix}`,
+      raw: `sample return ${label}${nextSuffix}`,
+      sourceName,
+      lineNumber,
+    });
+  }
+
+  return steps;
+}
+
+function formatDocumentedCommandSummary(command: ParsedGcodeCommand): string {
+  switch (command.command) {
+    case 'SET_DISPLAY_GROUP':
+      return command.params.GROUP ? `Set display group ${command.params.GROUP}` : 'Set display group';
+    case 'SET_PRINT_STATS_INFO':
+      return 'Update print stats';
+    case 'SET_TEMPERATURE_FAN_TARGET':
+      return command.params.TARGET ? `Set temperature fan target ${command.params.TARGET}C` : 'Set temperature fan target';
+    case 'SET_Z_THERMAL_ADJUST':
+      return command.params.ENABLE === '0' ? 'Disable Z thermal adjust' : 'Update Z thermal adjust';
+    default:
+      return command.command;
+  }
+}
+
+function isExtruderHeater(heaterName: string | undefined, activeExtruder: string): boolean {
+  if (!heaterName) return true;
+  const normalized = heaterName.trim().toLowerCase();
+  return normalized === 'extruder' || normalized === activeExtruder.trim().toLowerCase() || normalized.startsWith('extruder');
+}
+
+function isBedHeater(heaterName: string | undefined): boolean {
+  return typeof heaterName === 'string' && heaterName.trim().toLowerCase().includes('bed');
 }
 
 export interface TrapezoidalProfile {
@@ -204,9 +529,236 @@ function getRequestedAxes(params: Record<string, string>): Array<'X' | 'Y' | 'Z'
   return Array.from(axes);
 }
 
+type PlannerSavedState = {
+  absoluteMoves: boolean;
+  absoluteExtrusion: boolean;
+};
+
 type PlannerState = {
   homedAxes: Set<'X' | 'Y' | 'Z'>;
+  absoluteMoves: boolean;
+  absoluteExtrusion: boolean;
+  nozzleCurrent: number;
+  nozzleTarget: number;
+  activeExtruder: string;
+  isPaused: boolean;
+  savedStates: Record<string, PlannerSavedState>;
+  macroVariables: Record<string, Record<string, unknown>>;
 };
+
+type MacroInvocationContext = {
+  params: Record<string, string>;
+  rawparams: string;
+  locals: Record<string, unknown>;
+};
+
+type ProbeSamplingPlan = {
+  sampleCount: number;
+  sampleRetractDist: number;
+  liftFeedRate: number | null;
+};
+
+type TemplateStaticContext = {
+  printerObjects: Record<string, unknown>;
+  configSections: Record<string, unknown>;
+};
+
+type TemplateLineSegment =
+  | { kind: 'text'; text: string }
+  | { kind: 'directive'; directive: string };
+
+const TEMPLATE_UNRESOLVED = Symbol('template-unresolved');
+const HOT_EXTRUDER_THRESHOLD_C = 170;
+const DEFAULT_EXTRUDER_NAME = 'extruder';
+const DOCUMENTED_GCODE_PASSTHROUGH_COMMANDS = new Set([
+  'ACCELEROMETER_DEBUG_READ',
+  'ACCELEROMETER_DEBUG_WRITE',
+  'ACCELEROMETER_MEASURE',
+  'ACCELEROMETER_QUERY',
+  'ANGLE_CALIBRATE',
+  'ANGLE_CHIP_CALIBRATE',
+  'ANGLE_DEBUG_READ',
+  'ANGLE_DEBUG_WRITE',
+  'BLTOUCH_DEBUG',
+  'BLTOUCH_STORE',
+  'CALC_MEASURED_SKEW',
+  'DELTA_ANALYZE',
+  'DISABLE_FILAMENT_WIDTH_LOG',
+  'DISABLE_FILAMENT_WIDTH_SENSOR',
+  'DUMP_TMC',
+  'ENABLE_FILAMENT_WIDTH_LOG',
+  'ENABLE_FILAMENT_WIDTH_SENSOR',
+  'ENDSTOP_PHASE_CALIBRATE',
+  'GET_CURRENT_SKEW',
+  'GET_RETRACTION',
+  'HELP',
+  'INIT_TMC',
+  'LDC_CALIBRATE_DRIVE_CURRENT',
+  'MANUAL_STEPPER',
+  'MEASURE_AXES_NOISE',
+  'PALETTE_CLEAR',
+  'PALETTE_CONNECT',
+  'PALETTE_CUT',
+  'PALETTE_DISCONNECT',
+  'PALETTE_SMART_LOAD',
+  'PROBE_EDDY_CURRENT_CALIBRATE',
+  'QUERY_ADC',
+  'QUERY_FILAMENT_SENSOR',
+  'QUERY_FILAMENT_WIDTH',
+  'QUERY_RAW_FILAMENT_WIDTH',
+  'RESET_FILAMENT_WIDTH_SENSOR',
+  'RESET_SMART_EFFECTOR',
+  'RESTORE_DUAL_CARRIAGE_STATE',
+  'SAVE_DUAL_CARRIAGE_STATE',
+  'SDCARD_LOOP_BEGIN',
+  'SDCARD_LOOP_DESIST',
+  'SDCARD_LOOP_END',
+  'SDCARD_PRINT_FILE',
+  'SDCARD_RESET_FILE',
+  'SET_DIGIPOT',
+  'SET_DISPLAY_GROUP',
+  'SET_DUAL_CARRIAGE',
+  'SET_EXTRUDER_ROTATION_DISTANCE',
+  'SET_FILAMENT_SENSOR',
+  'SET_LED_TEMPLATE',
+  'SET_PRINT_STATS_INFO',
+  'SET_SKEW',
+  'SET_SMART_EFFECTOR',
+  'SET_STEPPER_CARRIAGES',
+  'SET_TEMPERATURE_FAN_TARGET',
+  'SET_Z_THERMAL_ADJUST',
+  'SHAPER_CALIBRATE',
+  'SKEW_PROFILE',
+  'STEPPER_BUZZ',
+  'SYNC_EXTRUDER_MOTION',
+  'TEMPERATURE_PROBE_CALIBRATE',
+  'TEMPERATURE_PROBE_COMPLETE',
+  'TEMPERATURE_PROBE_NEXT',
+  'TEST_RESONANCES',
+  'Z_OFFSET_APPLY_ENDSTOP',
+  'Z_OFFSET_APPLY_PROBE',
+]);
+
+function isUnresolved(value: unknown): value is typeof TEMPLATE_UNRESOLVED {
+  return value === TEMPLATE_UNRESOLVED;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function setContextVariants(target: Record<string, unknown>, key: string, value: unknown) {
+  if (!key) return;
+  target[key] = value;
+  const lower = key.toLowerCase();
+  const upper = key.toUpperCase();
+  if (!(lower in target)) {
+    target[lower] = value;
+  }
+  if (!(upper in target)) {
+    target[upper] = value;
+  }
+}
+
+function parseConfiguredValue(value: string): unknown {
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+    return trimmed.slice(1, -1);
+  }
+  if (/^(true|false)$/i.test(trimmed)) {
+    return trimmed.toLowerCase() === 'true';
+  }
+  if (/^(none|null)$/i.test(trimmed)) {
+    return null;
+  }
+  const numeric = Number(trimmed);
+  if (Number.isFinite(numeric)) {
+    return numeric;
+  }
+  return trimmed;
+}
+
+function buildMacroVariableContext(variables: string): Record<string, unknown> {
+  return parseMacroVariables(variables).reduce<Record<string, unknown>>((context, param) => {
+    if (param.is_commented_out || !param.key.startsWith('variable_')) {
+      return context;
+    }
+    const variableName = param.key.slice('variable_'.length);
+    if (!variableName) {
+      return context;
+    }
+    setContextVariants(context, variableName, parseConfiguredValue(param.value));
+    return context;
+  }, {});
+}
+
+function buildConfigSectionContext(section: ConfigFile['sections'][number]): Record<string, unknown> {
+  return section.params.reduce<Record<string, unknown>>((context, param) => {
+    if (param.is_commented_out || param.key === '_comment_') {
+      return context;
+    }
+    setContextVariants(context, param.key, parseConfiguredValue(param.value));
+    return context;
+  }, {});
+}
+
+function buildTemplateStaticContext(
+  allMacros: MacroSourceItem[],
+  configFiles?: Record<string, ConfigFile>,
+): TemplateStaticContext {
+  const printerObjects: Record<string, unknown> = {};
+  const configSections: Record<string, unknown> = {};
+
+  if (configFiles) {
+    Object.values(configFiles).forEach((configFile) => {
+      configFile.sections.forEach((section) => {
+        const sectionContext = buildConfigSectionContext(section);
+        setContextVariants(configSections, section.full_header, sectionContext);
+        setContextVariants(printerObjects, section.full_header, sectionContext);
+        if (!(section.section_type in printerObjects)) {
+          setContextVariants(printerObjects, section.section_type, sectionContext);
+        }
+      });
+    });
+  }
+
+  allMacros.forEach((macro) => {
+    const macroKey = `gcode_macro ${macro.title}`;
+    const macroContext = {
+      ...asRecord(printerObjects[macroKey]),
+      ...buildMacroVariableContext(macro.variables),
+    };
+    setContextVariants(printerObjects, macroKey, macroContext);
+    setContextVariants(configSections, macroKey, {
+      ...asRecord(configSections[macroKey]),
+      ...macroContext,
+    });
+  });
+
+  return { printerObjects, configSections };
+}
+
+function createInitialPlannerState(allMacros: MacroSourceItem[]): PlannerState {
+  const macroVariables = allMacros.reduce<Record<string, Record<string, unknown>>>((context, macro) => {
+    context[`gcode_macro ${macro.title}`] = buildMacroVariableContext(macro.variables);
+    return context;
+  }, {});
+
+  return {
+    homedAxes: new Set<'X' | 'Y' | 'Z'>(),
+    absoluteMoves: true,
+    absoluteExtrusion: true,
+    nozzleCurrent: 25,
+    nozzleTarget: 0,
+    activeExtruder: DEFAULT_EXTRUDER_NAME,
+    isPaused: false,
+    savedStates: {},
+    macroVariables,
+  };
+}
 
 const HOMING_AXES: Array<'X' | 'Y' | 'Z'> = ['X', 'Y', 'Z'];
 
@@ -229,6 +781,78 @@ function applyPlannerCommandEffects(command: ParsedGcodeCommand, plannerState: P
       }
       break;
     }
+    case 'G90':
+      plannerState.absoluteMoves = true;
+      break;
+    case 'G91':
+      plannerState.absoluteMoves = false;
+      break;
+    case 'M82':
+      plannerState.absoluteExtrusion = true;
+      break;
+    case 'M83':
+      plannerState.absoluteExtrusion = false;
+      break;
+    case 'M104': {
+      const target = asNumber(command.params.S);
+      if (target !== null) {
+        plannerState.nozzleTarget = target;
+      }
+      break;
+    }
+    case 'M109': {
+      const target = asNumber(command.params.S);
+      if (target !== null) {
+        plannerState.nozzleTarget = target;
+        plannerState.nozzleCurrent = target;
+      }
+      break;
+    }
+    case 'TURN_OFF_HEATERS':
+      plannerState.nozzleTarget = 0;
+      break;
+    case 'SAVE_GCODE_STATE': {
+      const name = command.params.NAME || 'default';
+      plannerState.savedStates[name] = {
+        absoluteMoves: plannerState.absoluteMoves,
+        absoluteExtrusion: plannerState.absoluteExtrusion,
+      };
+      break;
+    }
+    case 'RESTORE_GCODE_STATE': {
+      const name = command.params.NAME || 'default';
+      const savedState = plannerState.savedStates[name];
+      if (savedState) {
+        plannerState.absoluteMoves = savedState.absoluteMoves;
+        plannerState.absoluteExtrusion = savedState.absoluteExtrusion;
+      }
+      break;
+    }
+    case 'SET_GCODE_VARIABLE': {
+      const macroName = command.params.MACRO?.trim();
+      const variableName = command.params.VARIABLE?.trim();
+      if (!macroName || !variableName) {
+        break;
+      }
+      const header = `gcode_macro ${macroName}`;
+      const nextMacroVariables = {
+        ...asRecord(plannerState.macroVariables[header]),
+      };
+      setContextVariants(nextMacroVariables, variableName, parseConfiguredValue(command.params.VALUE || ''));
+      plannerState.macroVariables[header] = nextMacroVariables;
+      break;
+    }
+    case 'PAUSE':
+      plannerState.isPaused = true;
+      break;
+    case 'CLEAR_PAUSE':
+    case 'RESUME':
+    case 'CANCEL_PRINT':
+      plannerState.isPaused = false;
+      break;
+    case 'ACTIVATE_EXTRUDER':
+      plannerState.activeExtruder = command.params.EXTRUDER || command.params.NAME || plannerState.activeExtruder;
+      break;
     case 'SET_KINEMATIC_POSITION': {
       const requestedAxes = getRequestedAxes(command.params);
       for (const axis of requestedAxes) {
@@ -239,68 +863,684 @@ function applyPlannerCommandEffects(command: ParsedGcodeCommand, plannerState: P
     case 'FIRMWARE_RESTART':
     case 'RESTART':
       plannerState.homedAxes.clear();
+      plannerState.absoluteMoves = true;
+      plannerState.absoluteExtrusion = true;
+      plannerState.nozzleCurrent = 25;
+      plannerState.nozzleTarget = 0;
+      plannerState.activeExtruder = DEFAULT_EXTRUDER_NAME;
+      plannerState.isPaused = false;
+      plannerState.savedStates = {};
       break;
     default:
       break;
   }
 }
 
-function evaluateHomedAxesExpression(expression: string, homedAxes: Set<'X' | 'Y' | 'Z'>): boolean | null {
-  const trimmed = expression.trim().replace(/^\((.*)\)$/u, '$1').trim();
+function isWordBoundary(char: string | undefined): boolean {
+  return !char || /[^A-Za-z0-9_]/.test(char);
+}
 
-  const andParts = trimmed.split(/\s+and\s+/i);
-  if (andParts.length > 1) {
-    const values = andParts.map((part) => evaluateHomedAxesExpression(part, homedAxes));
-    return values.every((value) => value !== null) ? values.every(Boolean) : null;
+function stripEnclosingParens(expression: string): string {
+  let trimmed = expression.trim();
+  while (trimmed.startsWith('(') && trimmed.endsWith(')')) {
+    let depth = 0;
+    let inSingleQuote = false;
+    let inDoubleQuote = false;
+    let closesAtEnd = true;
+
+    for (let index = 0; index < trimmed.length; index += 1) {
+      const char = trimmed[index];
+      if (char === "'" && !inDoubleQuote) {
+        inSingleQuote = !inSingleQuote;
+        continue;
+      }
+      if (char === '"' && !inSingleQuote) {
+        inDoubleQuote = !inDoubleQuote;
+        continue;
+      }
+      if (inSingleQuote || inDoubleQuote) {
+        continue;
+      }
+      if (char === '(') depth += 1;
+      if (char === ')') {
+        depth -= 1;
+        if (depth === 0 && index < trimmed.length - 1) {
+          closesAtEnd = false;
+          break;
+        }
+      }
+    }
+
+    if (!closesAtEnd || depth !== 0) {
+      break;
+    }
+    trimmed = trimmed.slice(1, -1).trim();
+  }
+  return trimmed;
+}
+
+function splitTopLevelByKeyword(expression: string, keyword: 'and' | 'or'): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  let depthParen = 0;
+  let depthBracket = 0;
+  let depthBrace = 0;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+
+  for (let index = 0; index < expression.length; index += 1) {
+    const char = expression[index];
+    if (char === "'" && !inDoubleQuote) {
+      inSingleQuote = !inSingleQuote;
+      continue;
+    }
+    if (char === '"' && !inSingleQuote) {
+      inDoubleQuote = !inDoubleQuote;
+      continue;
+    }
+    if (inSingleQuote || inDoubleQuote) {
+      continue;
+    }
+
+    if (char === '(') depthParen += 1;
+    if (char === ')') depthParen -= 1;
+    if (char === '[') depthBracket += 1;
+    if (char === ']') depthBracket -= 1;
+    if (char === '{') depthBrace += 1;
+    if (char === '}') depthBrace -= 1;
+
+    if (depthParen !== 0 || depthBracket !== 0 || depthBrace !== 0) {
+      continue;
+    }
+
+    if (
+      expression.slice(index, index + keyword.length).toLowerCase() === keyword
+      && isWordBoundary(expression[index - 1])
+      && isWordBoundary(expression[index + keyword.length])
+    ) {
+      parts.push(expression.slice(start, index).trim());
+      start = index + keyword.length;
+      index += keyword.length - 1;
+    }
   }
 
-  const orParts = trimmed.split(/\s+or\s+/i);
-  if (orParts.length > 1) {
-    const values = orParts.map((part) => evaluateHomedAxesExpression(part, homedAxes));
-    return values.every((value) => value !== null) ? values.some(Boolean) : null;
+  if (parts.length === 0) {
+    return [expression.trim()];
   }
 
-  const notMatch = trimmed.match(/^not\s+(.+)$/i);
-  if (notMatch) {
-    const value = evaluateHomedAxesExpression(notMatch[1], homedAxes);
-    return value == null ? null : !value;
+  parts.push(expression.slice(start).trim());
+  return parts;
+}
+
+function splitTopLevelByCharacter(expression: string, separator: string): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  let depthParen = 0;
+  let depthBracket = 0;
+  let depthBrace = 0;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+
+  for (let index = 0; index < expression.length; index += 1) {
+    const char = expression[index];
+    if (char === "'" && !inDoubleQuote) {
+      inSingleQuote = !inSingleQuote;
+      continue;
+    }
+    if (char === '"' && !inSingleQuote) {
+      inDoubleQuote = !inDoubleQuote;
+      continue;
+    }
+    if (inSingleQuote || inDoubleQuote) {
+      continue;
+    }
+
+    if (char === '(') depthParen += 1;
+    if (char === ')') depthParen -= 1;
+    if (char === '[') depthBracket += 1;
+    if (char === ']') depthBracket -= 1;
+    if (char === '{') depthBrace += 1;
+    if (char === '}') depthBrace -= 1;
+
+    if (depthParen === 0 && depthBracket === 0 && depthBrace === 0 && char === separator) {
+      parts.push(expression.slice(start, index).trim());
+      start = index + 1;
+    }
   }
 
-  const membershipMatch = trimmed.match(/^['\"]([xyz]+)['\"]\s+(not\s+)?in\s+printer\.toolhead\.(?:homed_axes|home_axes)$/i);
-  if (membershipMatch) {
-    const wantedAxes = membershipMatch[1].toLowerCase();
-    const isNegated = Boolean(membershipMatch[2]);
-    const homed = getHomedAxesString(homedAxes);
-    const value = homed.includes(wantedAxes);
-    return isNegated ? !value : value;
+  if (parts.length === 0) {
+    return [expression.trim()];
   }
 
-  const equalityMatch = trimmed.match(/^printer\.toolhead\.(?:homed_axes|home_axes)\s*([=!]=)\s*['\"]([xyz]+)['\"]$/i);
-  if (equalityMatch) {
-    const homed = getHomedAxesString(homedAxes);
-    return equalityMatch[1] === '==' ? homed === equalityMatch[2].toLowerCase() : homed !== equalityMatch[2].toLowerCase();
+  parts.push(expression.slice(start).trim());
+  return parts;
+}
+
+function findTopLevelOperator(expression: string, operators: string[]): { index: number; operator: string } | null {
+  let depthParen = 0;
+  let depthBracket = 0;
+  let depthBrace = 0;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+
+  for (let index = 0; index < expression.length; index += 1) {
+    const char = expression[index];
+    if (char === "'" && !inDoubleQuote) {
+      inSingleQuote = !inSingleQuote;
+      continue;
+    }
+    if (char === '"' && !inSingleQuote) {
+      inDoubleQuote = !inDoubleQuote;
+      continue;
+    }
+    if (inSingleQuote || inDoubleQuote) {
+      continue;
+    }
+
+    if (char === '(') depthParen += 1;
+    if (char === ')') depthParen -= 1;
+    if (char === '[') depthBracket += 1;
+    if (char === ']') depthBracket -= 1;
+    if (char === '{') depthBrace += 1;
+    if (char === '}') depthBrace -= 1;
+
+    if (depthParen !== 0 || depthBracket !== 0 || depthBrace !== 0) {
+      continue;
+    }
+
+    const match = operators.find((operator) => expression.slice(index, index + operator.length) === operator);
+    if (match) {
+      return { index, operator: match };
+    }
   }
 
   return null;
 }
 
-function parseTemplateControlDirective(
-  line: string,
-  homedAxes: Set<'X' | 'Y' | 'Z'>,
-): { kind: 'if' | 'elif' | 'else' | 'endif'; result?: boolean | null } | null {
-  const trimmed = line.trim();
-  const match = trimmed.match(/^\{%\s*(if|elif|else|endif)(.*?)%\}$/i);
-  if (!match) return null;
+function coerceBoolean(value: unknown): boolean | null {
+  if (isUnresolved(value)) {
+    return null;
+  }
+  return Boolean(value);
+}
 
-  const kind = match[1].toLowerCase() as 'if' | 'elif' | 'else' | 'endif';
-  if (kind === 'else' || kind === 'endif') {
-    return { kind };
+function asComparableNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'boolean') {
+    return value ? 1 : 0;
+  }
+  if (typeof value === 'string' && value.trim() !== '') {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : null;
+  }
+  return null;
+}
+
+function compareTemplateValues(left: unknown, right: unknown, operator: string): boolean {
+  const leftNumeric = asComparableNumber(left);
+  const rightNumeric = asComparableNumber(right);
+
+  if (leftNumeric !== null && rightNumeric !== null) {
+    switch (operator) {
+      case '==':
+        return leftNumeric === rightNumeric;
+      case '!=':
+        return leftNumeric !== rightNumeric;
+      case '>=':
+        return leftNumeric >= rightNumeric;
+      case '<=':
+        return leftNumeric <= rightNumeric;
+      case '>':
+        return leftNumeric > rightNumeric;
+      case '<':
+        return leftNumeric < rightNumeric;
+      default:
+        return false;
+    }
+  }
+
+  const leftValue = String(left ?? '');
+  const rightValue = String(right ?? '');
+  switch (operator) {
+    case '==':
+      return leftValue === rightValue;
+    case '!=':
+      return leftValue !== rightValue;
+    case '>=':
+      return leftValue >= rightValue;
+    case '<=':
+      return leftValue <= rightValue;
+    case '>':
+      return leftValue > rightValue;
+    case '<':
+      return leftValue < rightValue;
+    default:
+      return false;
+  }
+}
+
+function evaluateMembership(left: unknown, right: unknown): boolean | null {
+  if (isUnresolved(left) || isUnresolved(right) || right == null) {
+    return null;
+  }
+  if (typeof right === 'string') {
+    return right.includes(String(left));
+  }
+  if (Array.isArray(right)) {
+    return right.some((entry) => entry === left || String(entry) === String(left));
+  }
+  if (typeof right === 'object' && typeof left === 'string') {
+    return Object.prototype.hasOwnProperty.call(right, left)
+      || Object.prototype.hasOwnProperty.call(right, left.toLowerCase())
+      || Object.prototype.hasOwnProperty.call(right, left.toUpperCase());
+  }
+  return null;
+}
+
+function extractBracketExpression(expression: string, startIndex: number): { content: string; nextIndex: number } | null {
+  let depth = 0;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+
+  for (let index = startIndex; index < expression.length; index += 1) {
+    const char = expression[index];
+    if (char === "'" && !inDoubleQuote) {
+      inSingleQuote = !inSingleQuote;
+      continue;
+    }
+    if (char === '"' && !inSingleQuote) {
+      inDoubleQuote = !inDoubleQuote;
+      continue;
+    }
+    if (inSingleQuote || inDoubleQuote) {
+      continue;
+    }
+
+    if (char === '[') {
+      depth += 1;
+    } else if (char === ']') {
+      depth -= 1;
+      if (depth === 0) {
+        return {
+          content: expression.slice(startIndex + 1, index),
+          nextIndex: index + 1,
+        };
+      }
+    }
+  }
+
+  return null;
+}
+
+function buildTemplatePrinterContext(
+  plannerState: PlannerState,
+  staticContext: TemplateStaticContext,
+): Record<string, unknown> {
+  const printer = {
+    ...staticContext.printerObjects,
+  };
+
+  setContextVariants(printer, 'toolhead', {
+    ...asRecord(printer.toolhead),
+    homed_axes: getHomedAxesString(plannerState.homedAxes),
+    home_axes: getHomedAxesString(plannerState.homedAxes),
+    extruder: plannerState.activeExtruder,
+  });
+  setContextVariants(printer, 'gcode_move', {
+    ...asRecord(printer.gcode_move),
+    absolute_coordinates: plannerState.absoluteMoves,
+    absolute_extrude: plannerState.absoluteExtrusion,
+  });
+  setContextVariants(printer, 'pause_resume', {
+    ...asRecord(printer.pause_resume),
+    is_paused: plannerState.isPaused,
+  });
+  setContextVariants(printer, 'configfile', {
+    ...asRecord(printer.configfile),
+    config: staticContext.configSections,
+  });
+
+  if (plannerState.activeExtruder) {
+    setContextVariants(printer, plannerState.activeExtruder, {
+      ...asRecord(printer[plannerState.activeExtruder]),
+      can_extrude: plannerState.nozzleCurrent >= HOT_EXTRUDER_THRESHOLD_C,
+      target: plannerState.nozzleTarget,
+      temperature: plannerState.nozzleCurrent,
+    });
+  }
+
+  Object.entries(plannerState.macroVariables).forEach(([macroKey, values]) => {
+    setContextVariants(printer, macroKey, {
+      ...asRecord(printer[macroKey]),
+      ...values,
+    });
+  });
+
+  return printer;
+}
+
+function getPropertyValue(container: unknown, key: string | number): unknown {
+  if (isUnresolved(container) || container == null) {
+    return TEMPLATE_UNRESOLVED;
+  }
+  if (Array.isArray(container)) {
+    const index = typeof key === 'number' ? key : Number(key);
+    return Number.isInteger(index) && index >= 0 && index < container.length
+      ? container[index]
+      : TEMPLATE_UNRESOLVED;
+  }
+  if (typeof container !== 'object') {
+    return TEMPLATE_UNRESOLVED;
+  }
+
+  const record = container as Record<string, unknown>;
+  const exactKey = String(key);
+  if (Object.prototype.hasOwnProperty.call(record, exactKey)) {
+    return record[exactKey];
+  }
+  const upperKey = exactKey.toUpperCase();
+  if (Object.prototype.hasOwnProperty.call(record, upperKey)) {
+    return record[upperKey];
+  }
+  const lowerKey = exactKey.toLowerCase();
+  if (Object.prototype.hasOwnProperty.call(record, lowerKey)) {
+    return record[lowerKey];
+  }
+  return TEMPLATE_UNRESOLVED;
+}
+
+function resolveReference(
+  expression: string,
+  invocation: MacroInvocationContext,
+  plannerState: PlannerState,
+  staticContext: TemplateStaticContext,
+): unknown {
+  const rootMatch = expression.match(/^([A-Za-z_][A-Za-z0-9_]*)/);
+  if (!rootMatch) {
+    return TEMPLATE_UNRESOLVED;
+  }
+
+  const rootName = rootMatch[1];
+  let current: unknown;
+  if (Object.prototype.hasOwnProperty.call(invocation.locals, rootName)) {
+    current = invocation.locals[rootName];
+  } else if (rootName === 'params') {
+    current = invocation.params;
+  } else if (rootName === 'rawparams') {
+    current = invocation.rawparams;
+  } else if (rootName === 'printer') {
+    current = buildTemplatePrinterContext(plannerState, staticContext);
+  } else {
+    return TEMPLATE_UNRESOLVED;
+  }
+
+  let index = rootMatch[0].length;
+  while (index < expression.length) {
+    const char = expression[index];
+    if (/\s/.test(char)) {
+      index += 1;
+      continue;
+    }
+    if (char === '.') {
+      const propertyMatch = expression.slice(index + 1).match(/^([A-Za-z_][A-Za-z0-9_]*)/);
+      if (!propertyMatch) {
+        return TEMPLATE_UNRESOLVED;
+      }
+      current = getPropertyValue(current, propertyMatch[1]);
+      index += 1 + propertyMatch[1].length;
+      continue;
+    }
+    if (char === '[') {
+      const bracket = extractBracketExpression(expression, index);
+      if (!bracket) {
+        return TEMPLATE_UNRESOLVED;
+      }
+      const key = evaluateTemplateExpression(bracket.content, invocation, plannerState, staticContext);
+      if (isUnresolved(key)) {
+        return TEMPLATE_UNRESOLVED;
+      }
+      current = getPropertyValue(current, typeof key === 'number' ? key : String(key));
+      index = bracket.nextIndex;
+      continue;
+    }
+    return TEMPLATE_UNRESOLVED;
+  }
+
+  return current;
+}
+
+function applyTemplateFilter(
+  value: unknown,
+  filterExpression: string,
+  invocation: MacroInvocationContext,
+  plannerState: PlannerState,
+  staticContext: TemplateStaticContext,
+): unknown {
+  const match = filterExpression.match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\((.*)\))?$/);
+  if (!match) {
+    return value;
+  }
+
+  const [, filterName, rawArgs] = match;
+  switch (filterName) {
+    case 'default': {
+      if (!isUnresolved(value) && value !== undefined && value !== null && value !== '') {
+        return value;
+      }
+      if (!rawArgs) {
+        return value;
+      }
+      return evaluateTemplateExpression(rawArgs.trim(), invocation, plannerState, staticContext);
+    }
+    case 'int': {
+      const numeric = Number.parseInt(String(isUnresolved(value) ? '' : value), 10);
+      return Number.isFinite(numeric) ? numeric : 0;
+    }
+    case 'float': {
+      const numeric = Number.parseFloat(String(isUnresolved(value) ? '' : value));
+      return Number.isFinite(numeric) ? numeric : 0;
+    }
+    case 'lower':
+      return String(isUnresolved(value) ? '' : value).toLowerCase();
+    case 'upper':
+      return String(isUnresolved(value) ? '' : value).toUpperCase();
+    case 'abs': {
+      const numeric = Number(isUnresolved(value) ? NaN : value);
+      return Number.isFinite(numeric) ? Math.abs(numeric) : value;
+    }
+    default:
+      return value;
+  }
+}
+
+function evaluateValueExpression(
+  expression: string,
+  invocation: MacroInvocationContext,
+  plannerState: PlannerState,
+  staticContext: TemplateStaticContext,
+): unknown {
+  const parts = splitTopLevelByCharacter(stripEnclosingParens(expression), '|');
+  const baseExpression = parts[0];
+  let value: unknown;
+
+  if (baseExpression === '{}') {
+    value = {};
+  } else if (baseExpression === '[]') {
+    value = [];
+  } else if ((baseExpression.startsWith('"') && baseExpression.endsWith('"')) || (baseExpression.startsWith("'") && baseExpression.endsWith("'"))) {
+    value = baseExpression.slice(1, -1);
+  } else if (/^-?\d+(?:\.\d+)?$/.test(baseExpression)) {
+    value = Number(baseExpression);
+  } else if (/^(true|false)$/i.test(baseExpression)) {
+    value = baseExpression.toLowerCase() === 'true';
+  } else if (/^(none|null)$/i.test(baseExpression)) {
+    value = null;
+  } else {
+    value = resolveReference(baseExpression, invocation, plannerState, staticContext);
+  }
+
+  return parts.slice(1).reduce<unknown>((current, filterExpression) => (
+    applyTemplateFilter(current, filterExpression, invocation, plannerState, staticContext)
+  ), value);
+}
+
+function evaluateTemplateExpression(
+  expression: string,
+  invocation: MacroInvocationContext,
+  plannerState: PlannerState,
+  staticContext: TemplateStaticContext,
+): unknown {
+  const trimmed = stripEnclosingParens(expression);
+  if (!trimmed) {
+    return TEMPLATE_UNRESOLVED;
+  }
+
+  const orParts = splitTopLevelByKeyword(trimmed, 'or');
+  if (orParts.length > 1) {
+    let hasUnresolvedBranch = false;
+    for (const part of orParts) {
+      const value = evaluateTemplateExpression(part, invocation, plannerState, staticContext);
+      const booleanValue = coerceBoolean(value);
+      if (booleanValue === true) {
+        return true;
+      }
+      if (booleanValue === null) {
+        hasUnresolvedBranch = true;
+      }
+    }
+    return hasUnresolvedBranch ? TEMPLATE_UNRESOLVED : false;
+  }
+
+  const andParts = splitTopLevelByKeyword(trimmed, 'and');
+  if (andParts.length > 1) {
+    let hasUnresolvedBranch = false;
+    for (const part of andParts) {
+      const value = evaluateTemplateExpression(part, invocation, plannerState, staticContext);
+      const booleanValue = coerceBoolean(value);
+      if (booleanValue === false) {
+        return false;
+      }
+      if (booleanValue === null) {
+        hasUnresolvedBranch = true;
+      }
+    }
+    return hasUnresolvedBranch ? TEMPLATE_UNRESOLVED : true;
+  }
+
+  const definedOperator = findTopLevelOperator(trimmed, [' is not defined', ' is defined']);
+  if (definedOperator) {
+    const left = evaluateValueExpression(trimmed.slice(0, definedOperator.index).trim(), invocation, plannerState, staticContext);
+    const isDefined = !isUnresolved(left);
+    return definedOperator.operator.includes('not') ? !isDefined : isDefined;
+  }
+
+  const membershipOperator = findTopLevelOperator(trimmed, [' not in ', ' in ']);
+  if (membershipOperator) {
+    const left = evaluateTemplateExpression(trimmed.slice(0, membershipOperator.index).trim(), invocation, plannerState, staticContext);
+    const right = evaluateTemplateExpression(trimmed.slice(membershipOperator.index + membershipOperator.operator.length).trim(), invocation, plannerState, staticContext);
+    const result = evaluateMembership(left, right);
+    if (result === null) {
+      return TEMPLATE_UNRESOLVED;
+    }
+    return membershipOperator.operator.includes('not') ? !result : result;
+  }
+
+  const comparisonOperator = findTopLevelOperator(trimmed, ['==', '!=', '>=', '<=', '>', '<']);
+  if (comparisonOperator) {
+    const left = evaluateTemplateExpression(trimmed.slice(0, comparisonOperator.index).trim(), invocation, plannerState, staticContext);
+    const right = evaluateTemplateExpression(trimmed.slice(comparisonOperator.index + comparisonOperator.operator.length).trim(), invocation, plannerState, staticContext);
+    if (isUnresolved(left) || isUnresolved(right)) {
+      return TEMPLATE_UNRESOLVED;
+    }
+    return compareTemplateValues(left, right, comparisonOperator.operator);
+  }
+
+  if (/^not\s+/i.test(trimmed)) {
+    const value = evaluateTemplateExpression(trimmed.replace(/^not\s+/i, ''), invocation, plannerState, staticContext);
+    const booleanValue = coerceBoolean(value);
+    return booleanValue === null ? TEMPLATE_UNRESOLVED : !booleanValue;
+  }
+
+  return evaluateValueExpression(trimmed, invocation, plannerState, staticContext);
+}
+
+function evaluateTemplateCondition(
+  expression: string,
+  invocation: MacroInvocationContext,
+  plannerState: PlannerState,
+  staticContext: TemplateStaticContext,
+): boolean | null {
+  const value = evaluateTemplateExpression(expression, invocation, plannerState, staticContext);
+  return coerceBoolean(value);
+}
+
+function parseTemplateDirective(
+  directive: string,
+  invocation: MacroInvocationContext,
+  plannerState: PlannerState,
+  staticContext: TemplateStaticContext,
+): { kind: 'if' | 'elif' | 'else' | 'endif' | 'set'; result?: boolean | null; name?: string; value?: unknown } | null {
+  const trimmed = directive.trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (/^else$/i.test(trimmed)) {
+    return { kind: 'else' };
+  }
+  if (/^endif$/i.test(trimmed)) {
+    return { kind: 'endif' };
+  }
+
+  const setMatch = trimmed.match(/^set\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/i);
+  if (setMatch) {
+    return {
+      kind: 'set',
+      name: setMatch[1],
+      value: evaluateTemplateExpression(setMatch[2].trim(), invocation, plannerState, staticContext),
+    };
+  }
+
+  const controlMatch = trimmed.match(/^(if|elif)\s+(.+)$/i);
+  if (!controlMatch) {
+    return null;
   }
 
   return {
-    kind,
-    result: evaluateHomedAxesExpression(match[2].trim(), homedAxes),
+    kind: controlMatch[1].toLowerCase() as 'if' | 'elif',
+    result: evaluateTemplateCondition(controlMatch[2].trim(), invocation, plannerState, staticContext),
   };
+}
+
+function tokenizeTemplateLine(line: string): TemplateLineSegment[] {
+  const trimmed = line.trimStart();
+  if (trimmed.startsWith('#') || trimmed.startsWith(';')) {
+    return [{ kind: 'text', text: line }];
+  }
+
+  const segments: TemplateLineSegment[] = [];
+  const pattern = /\{%([\s\S]*?)%\}/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(line)) !== null) {
+    if (match.index > lastIndex) {
+      segments.push({ kind: 'text', text: line.slice(lastIndex, match.index) });
+    }
+    segments.push({ kind: 'directive', directive: match[1] });
+    lastIndex = pattern.lastIndex;
+  }
+
+  if (lastIndex < line.length) {
+    segments.push({ kind: 'text', text: line.slice(lastIndex) });
+  }
+
+  return segments.length > 0 ? segments : [{ kind: 'text', text: line }];
+}
+
+function extractRawParams(commandRaw: string, commandName: string): string {
+  return commandRaw.slice(commandName.length).trim();
 }
 
 // Commands where featurePoints are probe coordinates — nozzle = point - probeOffset
@@ -310,13 +1550,85 @@ const PROBE_COORD_COMMANDS = new Set([
 ]);
 // Commands where featurePoints are nozzle coordinates — probe = point + probeOffset
 const NOZZLE_COORD_PROBE_COMMANDS = new Set(['SCREWS_TILT_CALCULATE']);
+const CURRENT_POSITION_PROBE_COMMANDS = new Set(['PROBE', 'PROBE_ACCURACY', 'PROBE_CALIBRATE']);
 // Commands where the nozzle moves directly with no probe involvement
 const NOZZLE_DIRECT_COMMANDS = new Set(['BED_SCREWS_ADJUST']);
 
-function expandCommandToSteps(command: ParsedGcodeCommand, profile: MachineProfile): SimulationStep[] {
+function expandCommandToSteps(
+  command: ParsedGcodeCommand,
+  profile: MachineProfile,
+  configFiles?: Record<string, ConfigFile>,
+  currentState?: Pick<MacroRuntimeState, 'x' | 'y' | 'z'>,
+): SimulationStep[] {
+  if (command.command === 'BED_MESH_CALIBRATE') {
+    const calibrationPlan = getBedMeshCalibrationPlan(command, profile, configFiles);
+    const samplingPlan = getProbeSamplingPlan(command, profile);
+    const initialStep: SimulationStep = { kind: 'command', command };
+    if (!calibrationPlan.points.length) {
+      return [initialStep];
+    }
+
+    const useToolCoordinates = calibrationPlan.method === 'manual';
+    return [
+      initialStep,
+      ...calibrationPlan.points.flatMap((point) => ([
+        {
+          kind: 'move' as const,
+          x: useToolCoordinates ? point.x : point.x - profile.probeOffsetX,
+          y: useToolCoordinates ? point.y : point.y - profile.probeOffsetY,
+          z: calibrationPlan.moveZ,
+          label: `${useToolCoordinates ? 'Travel to manual point' : 'Travel to'} ${point.label || ''}`.trim(),
+          raw: `${useToolCoordinates ? 'travel to manual point' : 'travel to'} ${point.label || ''}`.trim(),
+          sourceName: command.sourceName,
+          lineNumber: command.lineNumber,
+        },
+        ...buildProbeSampleSteps(
+          point.x,
+          point.y,
+          useToolCoordinates ? point.x : point.x - profile.probeOffsetX,
+          useToolCoordinates ? point.y : point.y - profile.probeOffsetY,
+          calibrationPlan.moveZ,
+          profile.maxZ,
+          `${useToolCoordinates ? 'Manual probe' : 'Probe'} ${point.label || ''}`.trim(),
+          command.sourceName,
+          command.lineNumber,
+          samplingPlan,
+          useToolCoordinates ? 'manual probe' : 'probe',
+        ),
+      ])),
+    ];
+  }
+
+  if (CURRENT_POSITION_PROBE_COMMANDS.has(command.command) && currentState) {
+    const samplingPlan = getProbeSamplingPlan(command, profile);
+    const label = command.command === 'PROBE_ACCURACY'
+      ? 'Probe accuracy'
+      : command.command === 'PROBE_CALIBRATE'
+        ? 'Probe calibrate'
+        : 'Probe';
+    return [
+      { kind: 'command', command },
+      ...buildProbeSampleSteps(
+        currentState.x + profile.probeOffsetX,
+        currentState.y + profile.probeOffsetY,
+        currentState.x,
+        currentState.y,
+        currentState.z,
+        profile.maxZ,
+        label,
+        command.sourceName,
+        command.lineNumber,
+        samplingPlan,
+        command.command.toLowerCase(),
+      ),
+    ];
+  }
+
   const points = profile.featurePoints[command.command] || [];
 
   if (PROBE_COORD_COMMANDS.has(command.command) && points.length) {
+    const samplingPlan = getProbeSamplingPlan(command, profile);
+    const moveZ = getProbeTravelHeight(command, profile, configFiles);
     const initialStep: SimulationStep = { kind: 'command', command };
     return [
       initialStep,
@@ -325,21 +1637,24 @@ function expandCommandToSteps(command: ParsedGcodeCommand, profile: MachineProfi
           kind: 'move' as const,
           x: point.x - profile.probeOffsetX,
           y: point.y - profile.probeOffsetY,
-          z: profile.horizontalMoveZ,
+          z: moveZ,
           label: `Travel to ${point.label || ''}`.trim(),
-          raw: command.raw,
+          raw: `travel to ${point.label || ''}`.trim(),
           sourceName: command.sourceName,
           lineNumber: command.lineNumber,
         },
-        {
-          kind: 'probe' as const,
-          x: point.x,
-          y: point.y,
-          label: `Probe ${point.label || ''}`.trim(),
-          raw: `probe at ${point.x.toFixed(3)},${point.y.toFixed(3)} is z=0.000`,
-          sourceName: command.sourceName,
-          lineNumber: command.lineNumber,
-        },
+        ...buildProbeSampleSteps(
+          point.x,
+          point.y,
+          point.x - profile.probeOffsetX,
+          point.y - profile.probeOffsetY,
+          moveZ,
+          profile.maxZ,
+          `Probe ${point.label || ''}`.trim(),
+          command.sourceName,
+          command.lineNumber,
+          samplingPlan,
+        ),
       ])),
     ];
   }
@@ -347,6 +1662,8 @@ function expandCommandToSteps(command: ParsedGcodeCommand, profile: MachineProfi
   if (NOZZLE_COORD_PROBE_COMMANDS.has(command.command) && points.length) {
     const calculateProbeX = (point: { x: number; y: number }) => point.x + profile.probeOffsetX;
     const calculateProbeY = (point: { x: number; y: number }) => point.y + profile.probeOffsetY;
+    const samplingPlan = getProbeSamplingPlan(command, profile);
+    const moveZ = getProbeTravelHeight(command, profile, configFiles);
     const initialStep: SimulationStep = { kind: 'command', command };
     return [
       initialStep,
@@ -355,21 +1672,24 @@ function expandCommandToSteps(command: ParsedGcodeCommand, profile: MachineProfi
           kind: 'move' as const,
           x: point.x,
           y: point.y,
-          z: profile.horizontalMoveZ,
+          z: moveZ,
           label: `Travel to ${point.label || ''}`.trim(),
-          raw: command.raw,
+          raw: `travel to ${point.label || ''}`.trim(),
           sourceName: command.sourceName,
           lineNumber: command.lineNumber,
         },
-        {
-          kind: 'probe' as const,
-          x: calculateProbeX(point),
-          y: calculateProbeY(point),
-          label: `Probe ${point.label || ''}`.trim(),
-          raw: `probe at ${calculateProbeX(point).toFixed(3)},${calculateProbeY(point).toFixed(3)} is z=0.000`,
-          sourceName: command.sourceName,
-          lineNumber: command.lineNumber,
-        },
+        ...buildProbeSampleSteps(
+          calculateProbeX(point),
+          calculateProbeY(point),
+          point.x,
+          point.y,
+          moveZ,
+          profile.maxZ,
+          `Probe ${point.label || ''}`.trim(),
+          command.sourceName,
+          command.lineNumber,
+          samplingPlan,
+        ),
       ])),
     ];
   }
@@ -398,12 +1718,26 @@ export function buildSimulationSteps(
   root: MacroSourceItem,
   allMacros: MacroSourceItem[],
   profile: MachineProfile,
+  configFiles?: Record<string, ConfigFile>,
 ): SimulationBuildResult {
   const macroLookup = buildMacroLookup(allMacros);
   const warnings: string[] = [];
   const steps: SimulationStep[] = [];
   const stack: string[] = [];
-  const plannerState: PlannerState = { homedAxes: new Set<'X' | 'Y' | 'Z'>() };
+  const plannerState = createInitialPlannerState(allMacros);
+  let previewState = createInitialRuntimeState(profile, root.title);
+  const staticContext = buildTemplateStaticContext(allMacros, configFiles);
+  let visit: (macro: MacroSourceItem, allowHomingOverride?: boolean, invocation?: MacroInvocationContext) => void;
+
+  const appendSimulationSteps = (nextSteps: SimulationStep[]) => {
+    if (!nextSteps.length) {
+      return;
+    }
+    steps.push(...nextSteps);
+    nextSteps.forEach((step) => {
+      previewState = executeSimulationStep(previewState, step, profile).nextState;
+    });
+  };
 
   // Build a reverse map: rename_existing value → original command name.
   // e.g. if [gcode_macro BED_MESH_CALIBRATE] has rename_existing: _BED_MESH_CALIBRATE,
@@ -415,7 +1749,7 @@ export function buildSimulationSteps(
     }
   }
 
-  const appendHomingOverrideSteps = (parsed: ParsedGcodeCommand, appendParsedCommand: (command: ParsedGcodeCommand, currentMacro: MacroSourceItem | null, allowHomingOverride: boolean) => void) => {
+  const appendHomingOverrideSteps = (parsed: ParsedGcodeCommand) => {
     if (parsed.command !== 'G28' || !profile.homingOverride?.gcode.trim()) return false;
 
     // If the homing override gcode would call a macro that is already in the
@@ -444,7 +1778,7 @@ export function buildSimulationSteps(
     }, {});
 
     if (Object.keys(preHomeParams).length > 0) {
-      steps.push({
+      appendSimulationSteps([{
         kind: 'command',
         command: {
           command: 'G92',
@@ -453,13 +1787,22 @@ export function buildSimulationSteps(
           lineNumber: parsed.lineNumber,
           sourceName: 'homing_override',
         },
-      });
+      }]);
     }
 
-    profile.homingOverride.gcode.split(/\r?\n/).forEach((line, index) => {
-      const overrideCommand = parseGcodeLine(line, index + 1, 'homing_override');
-      if (!overrideCommand) return;
-      appendParsedCommand(overrideCommand, null, false);
+    visit({
+      key: '__homing_override__',
+      source: 'builtin',
+      title: 'homing_override',
+      renameExisting: '',
+      description: '',
+      variables: '',
+      gcode: profile.homingOverride.gcode,
+      readOnly: true,
+    }, false, {
+      params: parsed.params,
+      rawparams: extractRawParams(parsed.raw, parsed.command),
+      locals: {},
     });
 
     return true;
@@ -470,13 +1813,17 @@ export function buildSimulationSteps(
     currentMacro: MacroSourceItem | null,
     allowHomingOverride = true,
   ) => {
-    if (allowHomingOverride && appendHomingOverrideSteps(parsed, appendParsedCommand)) {
+    if (allowHomingOverride && appendHomingOverrideSteps(parsed)) {
       return;
     }
 
     const nested = macroLookup.get(parsed.command);
     if (nested && (!currentMacro || nested.key !== currentMacro.key)) {
-      visit(nested, allowHomingOverride);
+      visit(nested, allowHomingOverride, {
+        params: parsed.params,
+        rawparams: extractRawParams(parsed.raw, parsed.command),
+        locals: {},
+      });
       return;
     }
 
@@ -484,16 +1831,16 @@ export function buildSimulationSteps(
     if (originalCommand) {
       const rawRest = parsed.raw.slice(parsed.command.length);
       const rewritten: ParsedGcodeCommand = { ...parsed, command: originalCommand, raw: `${originalCommand}${rawRest}` };
-      steps.push(...expandCommandToSteps(rewritten, profile));
+      appendSimulationSteps(expandCommandToSteps(rewritten, profile, configFiles, previewState));
       applyPlannerCommandEffects(rewritten, plannerState);
       return;
     }
 
-    steps.push(...expandCommandToSteps(parsed, profile));
+    appendSimulationSteps(expandCommandToSteps(parsed, profile, configFiles, previewState));
     applyPlannerCommandEffects(parsed, plannerState);
   };
 
-  const visit = (macro: MacroSourceItem, allowHomingOverride = true) => {
+  visit = (macro: MacroSourceItem, allowHomingOverride = true, invocation = { params: {}, rawparams: '', locals: {} }) => {
     const title = macro.title.toUpperCase();
     if (stack.includes(title)) {
       warnings.push(`Macro loop detected: ${[...stack, title].join(' -> ')}`);
@@ -505,55 +1852,64 @@ export function buildSimulationSteps(
     const isBranchActive = () => conditionalStack.every((entry) => entry.active);
 
     lines.forEach((line, index) => {
-      const templateControl = parseTemplateControlDirective(line, plannerState.homedAxes);
-      if (templateControl) {
-        switch (templateControl.kind) {
-          case 'if': {
-            const parentActive = isBranchActive();
-            // Treat unknown (null) conditions as true so that template-guarded blocks
-            // (e.g. homing_override sections using `params`) are included in the simulation.
-            const conditionMatched = templateControl.result !== false;
-            conditionalStack.push({
-              parentActive,
-              branchTaken: conditionMatched,
-              active: parentActive && conditionMatched,
-            });
+      tokenizeTemplateLine(line).forEach((segment) => {
+        if (segment.kind === 'directive') {
+          const templateControl = parseTemplateDirective(segment.directive, invocation, plannerState, staticContext);
+          if (!templateControl) {
             return;
           }
-          case 'elif': {
-            const current = conditionalStack[conditionalStack.length - 1];
-            if (!current) return;
-            // Treat unknown (null) conditions as true for the same reason as 'if'.
-            const conditionMatched = templateControl.result !== false;
-            current.active = current.parentActive && !current.branchTaken && conditionMatched;
-            current.branchTaken = current.branchTaken || conditionMatched;
-            return;
+          switch (templateControl.kind) {
+            case 'set':
+              if (isBranchActive() && templateControl.name && !isUnresolved(templateControl.value)) {
+                invocation.locals[templateControl.name] = templateControl.value;
+              }
+              return;
+            case 'if': {
+              const parentActive = isBranchActive();
+              // Preserve the existing fallback for unresolved conditions, but now
+              // only after checking params/rawparams/local/printer state first.
+              const conditionMatched = templateControl.result !== false;
+              conditionalStack.push({
+                parentActive,
+                branchTaken: conditionMatched,
+                active: parentActive && conditionMatched,
+              });
+              return;
+            }
+            case 'elif': {
+              const current = conditionalStack[conditionalStack.length - 1];
+              if (!current) return;
+              const conditionMatched = templateControl.result !== false;
+              current.active = current.parentActive && !current.branchTaken && conditionMatched;
+              current.branchTaken = current.branchTaken || conditionMatched;
+              return;
+            }
+            case 'else': {
+              const current = conditionalStack[conditionalStack.length - 1];
+              if (!current) return;
+              current.active = current.parentActive && !current.branchTaken;
+              current.branchTaken = true;
+              return;
+            }
+            case 'endif':
+              conditionalStack.pop();
+              return;
           }
-          case 'else': {
-            const current = conditionalStack[conditionalStack.length - 1];
-            if (!current) return;
-            current.active = current.parentActive && !current.branchTaken;
-            current.branchTaken = true;
-            return;
-          }
-          case 'endif':
-            conditionalStack.pop();
-            return;
         }
-      }
 
-      if (!isBranchActive()) {
-        return;
-      }
+        if (!isBranchActive()) {
+          return;
+        }
 
-      const parsed = parseGcodeLine(line, index + 1, macro.title);
-      if (!parsed) return;
-      appendParsedCommand(parsed, macro, allowHomingOverride);
+        const parsed = parseGcodeLine(segment.text, index + 1, macro.title);
+        if (!parsed) return;
+        appendParsedCommand(parsed, macro, allowHomingOverride);
+      });
     });
     stack.pop();
   };
 
-  visit(root);
+  visit(root, true, { params: {}, rawparams: '', locals: {} });
   return { steps, warnings };
 }
 
@@ -671,7 +2027,8 @@ export function executeSimulationStep(
     const zone = findPathZoneHit(profile, state.x, state.y, step.x, step.y);
     if (zone) warnings.push(`${step.label} path crosses no-go zone \"${zone.name}\".`);
     const distance = Math.sqrt((step.x - state.x) ** 2 + (step.y - state.y) ** 2);
-    const moveTime = estimateMoveTime(distance, state.feedRate, profile.maxVelocity, profile.maxAccel);
+    const effectiveFeedRate = step.feedRate ?? state.feedRate;
+    const moveTime = estimateMoveTime(distance, effectiveFeedRate, profile.maxVelocity, profile.maxAccel);
     return {
       nextState: {
         ...state,
@@ -829,6 +2186,7 @@ export function executeSimulationStep(
       nextState = { ...nextState, fanSpeed: 0 };
       eventSummary = 'Fan off';
       break;
+    case 'M18':
     case 'M84':
       eventSummary = 'Disable steppers';
       break;
@@ -955,20 +2313,128 @@ export function executeSimulationStep(
     case 'G4':
       eventSummary = `Dwell ${command.params.P || '0'}ms`;
       break;
+    case 'PAUSE':
+      nextState = { ...nextState, isPaused: true };
+      eventSummary = 'Pause print';
+      break;
+    case 'CLEAR_PAUSE':
+      nextState = { ...nextState, isPaused: false };
+      eventSummary = 'Clear pause';
+      break;
+    case 'RESUME':
+      nextState = { ...nextState, isPaused: false };
+      eventSummary = 'Resume print';
+      break;
+    case 'CANCEL_PRINT':
+      nextState = { ...nextState, isPaused: false };
+      eventSummary = 'Cancel print';
+      break;
+    case 'ACTIVATE_EXTRUDER': {
+      const extruderName = command.params.EXTRUDER || command.params.NAME || nextState.activeExtruder;
+      nextState = { ...nextState, activeExtruder: extruderName };
+      eventSummary = `Activate extruder ${extruderName}`;
+      break;
+    }
+    case 'TEMPERATURE_WAIT': {
+      const sensor = command.params.SENSOR || command.params.HEATER || nextState.activeExtruder;
+      eventSummary = sensor ? `Wait for ${sensor} temperature` : 'Wait for temperature';
+      break;
+    }
+    case 'BED_MESH_PROFILE': {
+      if (command.params.LOAD) {
+        nextState = {
+          ...nextState,
+          bedMesh: {
+            ...nextState.bedMesh,
+            active: true,
+            profile: command.params.LOAD,
+          },
+        };
+        eventSummary = `Load bed mesh profile ${command.params.LOAD}`;
+        break;
+      }
+      if (command.params.SAVE) {
+        if (!nextState.bedMesh.active) {
+          warnings.push('BED_MESH_PROFILE SAVE was issued without an active mesh loaded or calibrated.');
+        }
+        nextState = {
+          ...nextState,
+          bedMesh: {
+            ...nextState.bedMesh,
+            profile: nextState.bedMesh.active ? command.params.SAVE : nextState.bedMesh.profile,
+          },
+        };
+        eventSummary = `Save bed mesh profile ${command.params.SAVE}`;
+        break;
+      }
+      if (command.params.REMOVE) {
+        eventSummary = `Remove bed mesh profile ${command.params.REMOVE}`;
+        break;
+      }
+      eventSummary = 'Manage bed mesh profiles';
+      break;
+    }
+    case 'BED_MESH_CLEAR':
+      nextState = {
+        ...nextState,
+        bedMesh: {
+          ...nextState.bedMesh,
+          active: false,
+          profile: null,
+          method: null,
+          adaptive: false,
+        },
+        activeBuiltInCommand: null,
+        activeProbePoint: null,
+      };
+      eventSummary = 'Clear bed mesh';
+      break;
+    case 'BED_MESH_OUTPUT':
+      eventSummary = command.params.PGP === '1'
+        ? `Output bed mesh${nextState.bedMesh.profile ? ` ${nextState.bedMesh.profile}` : ''} with generated points`
+        : `Output bed mesh${nextState.bedMesh.profile ? ` ${nextState.bedMesh.profile}` : ''}`;
+      break;
+    case 'BED_MESH_MAP':
+      eventSummary = `Output bed mesh map${nextState.bedMesh.profile ? ` ${nextState.bedMesh.profile}` : ''}`;
+      break;
+    case 'BED_MESH_OFFSET': {
+      nextState = {
+        ...nextState,
+        bedMesh: {
+          ...nextState.bedMesh,
+          offsets: {
+            x: asNumber(command.params.X) ?? nextState.bedMesh.offsets.x,
+            y: asNumber(command.params.Y) ?? nextState.bedMesh.offsets.y,
+            zFade: asNumber(command.params.ZFADE) ?? nextState.bedMesh.offsets.zFade,
+          },
+        },
+      };
+      eventSummary = `Set bed mesh offset X${nextState.bedMesh.offsets.x.toFixed(2)} Y${nextState.bedMesh.offsets.y.toFixed(2)} ZFADE${nextState.bedMesh.offsets.zFade.toFixed(2)}`;
+      break;
+    }
+    case 'SET_HEATER_TEMPERATURE': {
+      const heaterName = command.params.HEATER || command.params.HEATER_NAME;
+      const target = asNumber(command.params.TARGET) ?? asNumber(command.params.S);
+      if (target !== null) {
+        if (isBedHeater(heaterName)) {
+          nextState = { ...nextState, bed: { ...nextState.bed, target } };
+        } else if (isExtruderHeater(heaterName, nextState.activeExtruder)) {
+          nextState = { ...nextState, nozzle: { ...nextState.nozzle, target } };
+        }
+      }
+      eventSummary = heaterName
+        ? `Set heater ${heaterName} target ${target ?? 0}C`
+        : 'Set heater temperature';
+      break;
+    }
     case 'RESET_ACCEL':
     case 'SET_GCODE_VARIABLE':
     case 'SAVE_VARIABLE':
     case 'UPDATE_DELAYED_GCODE':
-    case 'ACTIVATE_EXTRUDER':
-    case 'TEMPERATURE_WAIT':
     case 'QUERY_PROBE':
     case 'QUERY_ENDSTOPS':
-    case 'PAUSE':
-    case 'RESUME':
-    case 'CANCEL_PRINT':
     case 'M220':
     case 'M221':
-    case 'BED_MESH_PROFILE':
     case 'SET_VELOCITY_LIMIT':
     case 'SET_IDLE_TIMEOUT':
     case 'EXCLUDE_OBJECT_DEFINE':
@@ -976,7 +2442,6 @@ export function executeSimulationStep(
     case 'SET_PRESSURE_ADVANCE':
     case 'SET_INPUT_SHAPER':
     case 'SET_RETRACTION':
-    case 'SET_HEATER_TEMPERATURE':
     case 'SET_STEPPER_ENABLE':
     case 'SET_TMC_FIELD':
     case 'SET_TMC_CURRENT':
@@ -990,7 +2455,13 @@ export function executeSimulationStep(
       break;
     case 'FIRMWARE_RESTART':
     case 'RESTART':
-      nextState = { ...nextState, homedAxes: [] };
+      nextState = {
+        ...nextState,
+        homedAxes: [],
+        activeExtruder: DEFAULT_EXTRUDER_NAME,
+        isPaused: false,
+        bedMesh: createInitialBedMeshState(),
+      };
       eventSummary = command.command;
       break;
     case 'STATUS':
@@ -1004,9 +2475,6 @@ export function executeSimulationStep(
     case 'M115':
     case 'M118':
     case 'FORCE_MOVE':
-    case 'BED_MESH_CLEAR':
-    case 'BED_MESH_OUTPUT':
-    case 'BED_MESH_MAP':
     case 'ACCEPT':
     case 'ABORT':
     case 'TESTZ':
@@ -1014,7 +2482,23 @@ export function executeSimulationStep(
     case 'PID_CALIBRATE':
       eventSummary = command.command;
       break;
-    case 'BED_MESH_CALIBRATE':
+    case 'BED_MESH_CALIBRATE': {
+      const method = getBedMeshCalibrationMethod(command, profile);
+      const profileName = getBedMeshProfileName(command);
+      nextState = {
+        ...nextState,
+        bedMesh: {
+          ...nextState.bedMesh,
+          active: true,
+          profile: profileName,
+          method,
+          adaptive: command.params.ADAPTIVE === '1',
+        },
+        activeBuiltInCommand: command.command,
+      };
+      eventSummary = `Calibrate bed mesh ${profileName} (${method})`;
+      break;
+    }
     case 'QUAD_GANTRY_LEVEL':
     case 'Z_TILT_ADJUST':
     case 'SCREWS_TILT_CALCULATE':
@@ -1041,6 +2525,10 @@ export function executeSimulationStep(
       break;
     }
     default:
+      if (DOCUMENTED_GCODE_PASSTHROUGH_COMMANDS.has(command.command)) {
+        eventSummary = formatDocumentedCommandSummary(command);
+        break;
+      }
       warnings.push(`Unsupported command ${command.command} was displayed but not fully simulated.`);
       break;
   }

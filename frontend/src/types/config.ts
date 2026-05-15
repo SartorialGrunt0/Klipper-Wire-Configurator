@@ -82,6 +82,7 @@ export interface ExampleConfig {
   filename: string;
   name: string;
   category: 'example' | 'generic' | 'printer' | 'sample' | 'kit' | 'other';
+  board_type?: HardwareType;
   tags: string[];
   path?: string;
 }

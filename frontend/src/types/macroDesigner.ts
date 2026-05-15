@@ -32,7 +32,7 @@ export interface MacroDesignerPersistedState {
 
 export interface MacroSourceItem {
   key: string;
-  source: 'draft' | 'config' | 'builtin';
+  source: 'draft' | 'config' | 'builtin' | 'playback';
   title: string;
   renameExisting: string;
   description: string;
@@ -77,6 +77,10 @@ export interface MachineProfile {
   hasProbe: boolean;
   probeOffsetX: number;
   probeOffsetY: number;
+  probeSamples: number;
+  probeSpeed: number;
+  probeLiftSpeed: number;
+  probeSampleRetractDist: number;
   horizontalMoveZ: number;
   nozzleMaxTemp: number;
   bedMaxTemp: number;
@@ -109,6 +113,7 @@ export interface SimulationStepMove {
   x: number;
   y: number;
   z?: number;
+  feedRate?: number;
   label: string;
   raw: string;
   sourceName: string;
@@ -149,6 +154,18 @@ export interface RuntimeLedState {
   white: number;
 }
 
+export interface RuntimeBedMeshState {
+  active: boolean;
+  profile: string | null;
+  method: 'manual' | 'automatic' | 'scan' | 'rapid_scan' | null;
+  adaptive: boolean;
+  offsets: {
+    x: number;
+    y: number;
+    zFade: number;
+  };
+}
+
 export interface MacroRuntimeState {
   x: number;
   y: number;
@@ -163,6 +180,9 @@ export interface MacroRuntimeState {
   bed: RuntimeTemperatureState;
   nozzle: RuntimeTemperatureState;
   fanSpeed: number;
+  activeExtruder: string;
+  isPaused: boolean;
+  bedMesh: RuntimeBedMeshState;
   displayText: string;
   messages: string[];
   ledStates: Record<string, RuntimeLedState>;
