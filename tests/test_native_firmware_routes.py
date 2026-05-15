@@ -78,3 +78,27 @@ def test_build_klipper_firmware_route_returns_service_result(monkeypatch):
 
     assert response.status_code == 200
     assert response.json() == payload
+
+
+def test_klippy_log_excerpt_route_returns_service_result(monkeypatch):
+    payload = {
+        'status': 'ok',
+        'log_path': '/home/pi/printer_data/logs/klippy.log',
+        'excerpt': 'Config error\nTraceback...',
+        'matched_on': 'mcu ebbcan',
+    }
+
+    monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
+    monkeypatch.setattr(native_routes, 'get_klippy_log_excerpt', lambda section_name=None, error_text=None, context_lines=40: payload)
+
+    response = client.post(
+        '/api/native/klipper/log-excerpt',
+        json={
+            'section_name': 'mcu ebbcan',
+            'error_text': "Option 'baud' is not valid in section 'mcu ebbcan'",
+            'context_lines': 20,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == payload

@@ -12,11 +12,15 @@ from parser.config_writer import smart_export
 from parser.validator import validate_project_configs
 from services.board_detector import detect_board_from_config
 from services.native_services import (
+    delete_flash_profile,
     firmware_restart_klipper,
     get_all_devices,
     get_default_config_path,
+    get_klippy_log_excerpt,
     is_native_platform,
+    list_flash_profiles,
     list_config_files,
+    load_flash_profile,
     query_canbus_uuids,
     read_config_file,
     write_config_file,
@@ -24,6 +28,7 @@ from services.native_services import (
     load_layout,
     delete_layout,
     load_settings,
+    save_flash_profile,
     query_klipper_status,
     save_settings,
 )
@@ -37,6 +42,7 @@ from services.klipper_firmware import (
 )
 from services.flash_targets import (
     build_flash_target,
+    delete_flash_target_artifact,
     flash_flash_target,
     get_flash_target_artifact_path,
     get_flash_target_state,
@@ -277,6 +283,27 @@ async def klipper_status():
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+class KlippyLogExcerptRequest(BaseModel):
+    section_name: str | None = None
+    error_text: str | None = None
+    context_lines: int = 40
+
+
+@router.post("/klipper/log-excerpt")
+async def klipper_log_excerpt(data: KlippyLogExcerptRequest):
+    """Get a targeted klippy.log excerpt for a restart failure analysis request."""
+    if not is_native_platform():
+        raise HTTPException(status_code=501, detail="Only available on Pi")
+    try:
+        return get_klippy_log_excerpt(
+            section_name=data.section_name,
+            error_text=data.error_text,
+            context_lines=data.context_lines,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 class FirmwareAssignment(BaseModel):
     symbol: str
     value: str
@@ -299,6 +326,15 @@ class FlashTargetConfigUpdate(BaseModel):
 class FlashTargetCommandRequest(BaseModel):
     checkout_path: str | None = None
     flash_device: str | None = None
+    flash_method: str | None = None
+
+
+class FlashProfileSaveRequest(BaseModel):
+    name: str
+    checkout_path: str | None = None
+    flash_device: str | None = None
+    flash_method: str | None = None
+    assignments: list[FirmwareAssignment] = []
 
 
 def _validated_target(target: str) -> str:
@@ -344,10 +380,10 @@ async def build_flash_target_api(target: str, data: FlashTargetCommandRequest):
 
 @router.post("/flash/{target}/flash")
 async def flash_target_api(target: str, data: FlashTargetCommandRequest):
-    """Run `make flash` for a local flash target checkout."""
+    """Run the selected flash method for a local flash target checkout."""
     if not is_native_platform():
         raise HTTPException(status_code=501, detail="Only available on Pi")
-    return flash_flash_target(_validated_target(target), data.checkout_path, data.flash_device)
+    return flash_flash_target(_validated_target(target), data.checkout_path, data.flash_device, data.flash_method)
 
 
 @router.get("/flash/{target}/artifacts/{filename}")
@@ -367,6 +403,79 @@ async def download_flash_target_artifact(target: str, filename: str, checkout_pa
         media_type="application/octet-stream",
         filename=Path(artifact_path).name,
     )
+
+
+@router.delete("/flash/{target}/artifacts/{filename}")
+async def delete_saved_flash_target_artifact(target: str, filename: str, checkout_path: str | None = None):
+    """Delete a generated build artifact from a target's out directory."""
+    if not is_native_platform():
+        raise HTTPException(status_code=501, detail="Only available on Pi")
+    try:
+        return delete_flash_target_artifact(_validated_target(target), filename, checkout_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/flash/{target}/profiles")
+async def list_saved_flash_profiles(target: str):
+    """List saved flash profiles for a target."""
+    if not is_native_platform():
+        raise HTTPException(status_code=501, detail="Only available on Pi")
+    try:
+        return {"profiles": list_flash_profiles(_validated_target(target))}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/flash/{target}/profiles/{name}")
+async def load_saved_flash_profile_api(target: str, name: str):
+    """Load a saved flash profile for a target."""
+    if not is_native_platform():
+        raise HTTPException(status_code=501, detail="Only available on Pi")
+    try:
+        return load_flash_profile(_validated_target(target), name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/flash/{target}/profiles")
+async def save_flash_profile_api(target: str, data: FlashProfileSaveRequest):
+    """Save a named flash profile for a target."""
+    if not is_native_platform():
+        raise HTTPException(status_code=501, detail="Only available on Pi")
+    try:
+        return save_flash_profile(
+            _validated_target(target),
+            data.name,
+            {
+                "checkout_path": data.checkout_path,
+                "flash_device": data.flash_device,
+                "flash_method": data.flash_method,
+                "assignments": [{"symbol": item.symbol, "value": item.value} for item in data.assignments],
+            },
+        )
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/flash/{target}/profiles/{name}")
+async def delete_saved_flash_profile_api(target: str, name: str):
+    """Delete a saved flash profile for a target."""
+    if not is_native_platform():
+        raise HTTPException(status_code=501, detail="Only available on Pi")
+    try:
+        deleted = delete_flash_profile(_validated_target(target), name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Flash profile not found: {name}")
+    return {"status": "deleted", "name": name}
 
 
 @router.get("/firmware")
@@ -405,10 +514,10 @@ async def build_klipper_firmware_api(data: FirmwareBuildRequest):
 
 @router.post("/firmware/flash")
 async def flash_klipper_firmware_api(data: FlashTargetCommandRequest):
-    """Run `make flash` in the active Klipper checkout."""
+    """Run the selected flash method in the active Klipper checkout."""
     if not is_native_platform():
         raise HTTPException(status_code=501, detail="Only available on Pi")
-    return flash_klipper_firmware(data.checkout_path, data.flash_device)
+    return flash_klipper_firmware(data.checkout_path, data.flash_device, data.flash_method)
 
 
 @router.get("/firmware/artifacts/{filename}")
