@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useConfigStore } from '../stores/configStore';
 import { useNativeStore } from '../stores/nativeStore';
 import { useAiStore } from '../stores/aiStore';
+import type { PendingAiChatRequest } from '../types/ai';
 import ImportDialog from './dialogs/ImportDialog';
 import ExportDialog from './dialogs/ExportDialog';
 import DiffDialog from './dialogs/DiffDialog';
@@ -102,6 +103,7 @@ export default function Toolbar({
   const [showApply, setShowApply] = useState(false);
   const [showRevert, setShowRevert] = useState(false);
   const [showChat, setShowChat] = useState(false);
+  const [pendingAiRequest, setPendingAiRequest] = useState<PendingAiChatRequest | null>(null);
   const [hiddenItems, setHiddenItems] = useState<ToolbarHiddenState>(() => loadHiddenItems());
   const [showVisibilityMenu, setShowVisibilityMenu] = useState(false);
   const [visibilityMenuPosition, setVisibilityMenuPosition] = useState({ top: 0, left: 0 });
@@ -136,6 +138,18 @@ export default function Toolbar({
   const showAnyOptionalGroup =
     showFileGroup || showProjectGroup || showAiGroup || showBuilderGroup;
   const hasHiddenItems = Object.values(hiddenItems).some(Boolean);
+
+  const queueAiAnalyzeRequest = (prompt: string) => {
+    const requestId = typeof window !== 'undefined' && window.crypto && 'randomUUID' in window.crypto
+      ? window.crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+    setPendingAiRequest({
+      id: requestId,
+      prompt,
+    });
+    setShowChat(true);
+  };
 
   const updateVisibilityMenuPosition = () => {
     const rect = settingsButtonRef.current?.getBoundingClientRect();
@@ -502,10 +516,26 @@ export default function Toolbar({
       {showExport && <ExportDialog onClose={() => setShowExport(false)} />}
       {showDiff && <DiffDialog onClose={() => setShowDiff(false)} />}
       {showOpenFromPi && <OpenFromPiDialog onClose={() => setShowOpenFromPi(false)} />}
-      {showApply && <ApplyDialog onClose={() => setShowApply(false)} />}
+      {showApply && (
+        <ApplyDialog
+          onClose={() => setShowApply(false)}
+          canAnalyzeWithAi={aiConfigured && showAiChatButton}
+          onAnalyzeWithAi={queueAiAnalyzeRequest}
+        />
+      )}
       {showFlash && <FirmwareDialog onClose={() => setShowFlash(false)} />}
       {showRevert && <RevertDialog onClose={() => setShowRevert(false)} />}
-      {showChat && <ChatDialog open={showChat} onClose={() => setShowChat(false)} />}
+      {showChat && (
+        <ChatDialog
+          open={showChat}
+          onClose={() => {
+            setShowChat(false);
+            setPendingAiRequest(null);
+          }}
+          pendingRequest={pendingAiRequest}
+          onPendingRequestHandled={() => setPendingAiRequest(null)}
+        />
+      )}
     </div>
   );
 }

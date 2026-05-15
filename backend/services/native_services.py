@@ -11,9 +11,12 @@ import socket
 import subprocess
 from pathlib import Path
 from typing import Any, TypedDict
+from urllib.parse import quote, unquote
 
 # Regex for extracting CAN bus UUIDs from canbus_query.py output
 _CANBUS_UUID_RE = re.compile(r"canbus_uuid=([0-9a-fA-F]+)")
+_KLIPPY_SECTION_RE = re.compile(r"section ['\"]?([^'\"]+)['\"]?", re.IGNORECASE)
+_KLIPPY_OPTION_RE = re.compile(r"option ['\"]?([^'\"]+)['\"]?", re.IGNORECASE)
 
 
 # ── Platform detection ──────────────────────────────────────────
@@ -329,6 +332,142 @@ def save_settings(data: dict) -> None:
     _settings_file().write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
+# ── Flash profile persistence ─────────────────────────────────
+
+
+def _validated_flash_profile_target(target: str) -> str:
+    normalized = str(target).strip().lower()
+    if normalized not in {"klipper", "katapult"}:
+        raise ValueError(f"Unsupported flash profile target: {target}")
+    return normalized
+
+
+def _normalize_flash_profile_name(name: str) -> str:
+    normalized = str(name).strip()
+    if not normalized:
+        raise ValueError("Flash profile name cannot be empty")
+    if len(normalized) > 120:
+        raise ValueError("Flash profile name must be 120 characters or fewer")
+    return normalized
+
+
+def _flash_profiles_dir(target: str | None = None) -> Path:
+    base = _LAYOUT_DIR / "flash_profiles"
+    base.mkdir(parents=True, exist_ok=True)
+    if target is None:
+        return base
+    target_dir = base / _validated_flash_profile_target(target)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    return target_dir
+
+
+def _flash_profile_file(target: str, name: str) -> Path:
+    normalized_name = _normalize_flash_profile_name(name)
+    filename = f"{quote(normalized_name, safe='')}.json"
+    return _flash_profiles_dir(target) / filename
+
+
+def _normalize_flash_profile_assignments(assignments: Any) -> list[dict[str, str]]:
+    if not isinstance(assignments, list):
+        return []
+
+    result: list[dict[str, str]] = []
+    for item in assignments:
+        if not isinstance(item, dict):
+            continue
+        symbol = item.get("symbol")
+        value = item.get("value")
+        if not isinstance(symbol, str) or not isinstance(value, str):
+            continue
+        normalized_symbol = symbol.strip()
+        if not normalized_symbol:
+            continue
+        result.append({
+            "symbol": normalized_symbol,
+            "value": value,
+        })
+    return result
+
+
+def _flash_profile_payload(target: str, name: str, data: dict[str, Any]) -> dict[str, Any]:
+    normalized_target = _validated_flash_profile_target(target)
+    normalized_name = _normalize_flash_profile_name(name)
+    return {
+        "version": 1,
+        "name": normalized_name,
+        "target": normalized_target,
+        "checkout_path": str(data.get("checkout_path") or ""),
+        "flash_device": str(data.get("flash_device") or ""),
+        "flash_method": str(data.get("flash_method") or ""),
+        "assignments": _normalize_flash_profile_assignments(data.get("assignments")),
+    }
+
+
+def load_flash_profile(target: str, name: str) -> dict[str, Any]:
+    normalized_target = _validated_flash_profile_target(target)
+    profile_path = _flash_profile_file(normalized_target, name)
+    if not profile_path.is_file():
+        raise FileNotFoundError(f"Flash profile not found: {name}")
+
+    try:
+        raw_data = json.loads(profile_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise ValueError(f"Flash profile is invalid: {name}") from exc
+
+    if not isinstance(raw_data, dict):
+        raise ValueError(f"Flash profile is invalid: {name}")
+
+    payload = _flash_profile_payload(normalized_target, str(raw_data.get("name") or unquote(profile_path.stem)), raw_data)
+    stat = profile_path.stat()
+    return {
+        **payload,
+        "created": stat.st_ctime,
+        "modified": stat.st_mtime,
+    }
+
+
+def list_flash_profiles(target: str) -> list[dict[str, Any]]:
+    normalized_target = _validated_flash_profile_target(target)
+    profiles: list[dict[str, Any]] = []
+    for profile_path in _flash_profiles_dir(normalized_target).glob("*.json"):
+        try:
+            payload = load_flash_profile(normalized_target, unquote(profile_path.stem))
+        except (FileNotFoundError, ValueError, OSError):
+            continue
+        profiles.append({
+            "name": payload["name"],
+            "target": normalized_target,
+            "checkout_path": payload["checkout_path"],
+            "flash_device": payload["flash_device"],
+            "flash_method": payload["flash_method"],
+            "assignment_count": len(payload["assignments"]),
+            "created": payload["created"],
+            "modified": payload["modified"],
+        })
+
+    profiles.sort(key=lambda item: (-item["modified"], item["name"].lower()))
+    return profiles
+
+
+def save_flash_profile(target: str, name: str, data: dict[str, Any]) -> dict[str, Any]:
+    normalized_target = _validated_flash_profile_target(target)
+    payload = _flash_profile_payload(normalized_target, name, data)
+    profile_path = _flash_profile_file(normalized_target, payload["name"])
+    if profile_path.exists():
+        raise FileExistsError(f"Flash profile already exists: {payload['name']}")
+    profile_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return load_flash_profile(normalized_target, payload["name"])
+
+
+def delete_flash_profile(target: str, name: str) -> bool:
+    normalized_target = _validated_flash_profile_target(target)
+    profile_path = _flash_profile_file(normalized_target, name)
+    if not profile_path.exists():
+        return False
+    profile_path.unlink()
+    return True
+
+
 # ── Klipper API helpers ───────────────────────────────────────
 
 
@@ -481,6 +620,129 @@ def _get_recent_klippy_errors(max_entries: int = 12) -> tuple[list[str], str | N
         except OSError:
             continue
     return [], None
+
+
+def _build_klippy_log_search_terms(section_name: str | None = None, error_text: str | None = None) -> list[str]:
+    """Build a small list of useful search fragments for a klippy log excerpt."""
+    terms: list[str] = []
+
+    def add_term(value: str | None) -> None:
+        if not value:
+            return
+        normalized = value.strip().lower()
+        if not normalized or normalized in terms:
+            return
+        terms.append(normalized)
+
+    add_term(section_name)
+    if section_name:
+        add_term(f"[{section_name}]")
+        add_term(f"section '{section_name}'")
+
+    if error_text:
+        for raw_line in error_text.splitlines():
+            cleaned = raw_line.strip()
+            if not cleaned:
+                continue
+            if ":" in cleaned and cleaned.lower().startswith("restart failed"):
+                cleaned = cleaned.split(":", 1)[1].strip()
+            add_term(cleaned)
+
+            option_match = _KLIPPY_OPTION_RE.search(cleaned)
+            if option_match:
+                option_name = option_match.group(1).strip()
+                add_term(option_name)
+                add_term(f"option '{option_name}'")
+
+            section_match = _KLIPPY_SECTION_RE.search(cleaned)
+            if section_match:
+                matched_section = section_match.group(1).strip()
+                add_term(matched_section)
+                add_term(f"[{matched_section}]")
+                add_term(f"section '{matched_section}'")
+
+    return terms
+
+
+def _extract_klippy_log_excerpt(
+    log_text: str,
+    search_terms: list[str],
+    context_lines: int = 40,
+    fallback_lines: int = 80,
+) -> tuple[str, str | None]:
+    """Return a relevant log excerpt and the matched search term, if any."""
+    lines = log_text.splitlines()
+    if not lines:
+        return "", None
+
+    normalized_context_lines = max(5, min(context_lines, 200))
+    normalized_fallback_lines = max(normalized_context_lines, min(fallback_lines, 200))
+    matched_index: int | None = None
+    matched_term: str | None = None
+
+    for index in range(len(lines) - 1, -1, -1):
+        lowered = lines[index].lower()
+        for term in search_terms:
+            if term and term in lowered:
+                matched_index = index
+                matched_term = term
+                break
+        if matched_index is not None:
+            break
+
+    if matched_index is None:
+        fallback_matcher = re.compile(
+            r"\b(config\s+error|traceback|error|shutdown|unable\s+to|unknown\s+option|unknown\s+command)\b",
+            re.IGNORECASE,
+        )
+        for index in range(len(lines) - 1, -1, -1):
+            if fallback_matcher.search(lines[index]):
+                matched_index = index
+                break
+
+    if matched_index is None:
+        excerpt_lines = lines[-normalized_fallback_lines:]
+        return "\n".join(excerpt_lines).strip(), matched_term
+
+    start = max(0, matched_index - normalized_context_lines)
+    end = min(len(lines), matched_index + normalized_context_lines + 1)
+    excerpt_lines = lines[start:end]
+    return "\n".join(excerpt_lines).strip(), matched_term
+
+
+def get_klippy_log_excerpt(
+    section_name: str | None = None,
+    error_text: str | None = None,
+    context_lines: int = 40,
+) -> dict[str, Any]:
+    """Return a targeted klippy.log excerpt for a restart failure analysis request."""
+    search_terms = _build_klippy_log_search_terms(section_name, error_text)
+
+    for path in _klippy_log_candidates():
+        if not path.is_file():
+            continue
+        try:
+            tail = _read_log_tail(path)
+            excerpt, matched_on = _extract_klippy_log_excerpt(
+                tail,
+                search_terms,
+                context_lines=context_lines,
+            )
+            return {
+                "status": "ok",
+                "log_path": str(path),
+                "excerpt": excerpt,
+                "matched_on": matched_on,
+            }
+        except OSError:
+            continue
+
+    return {
+        "status": "ok",
+        "log_path": None,
+        "excerpt": "",
+        "matched_on": None,
+    }
 
 
 def query_klipper_status() -> dict:

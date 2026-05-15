@@ -5,7 +5,12 @@ import type {
   FlashTargetKey,
   NativeFlashArtifact,
   NativeFlashCommandResult,
+  NativeFlashDeviceCandidate,
   NativeFlashField,
+  NativeFlashMethodCandidate,
+  NativeFlashProfile,
+  NativeFlashProfileAssignment,
+  NativeFlashProfileSummary,
   NativeFlashState,
 } from '../../services/api';
 
@@ -13,9 +18,25 @@ interface FirmwareDialogProps {
   onClose: () => void;
 }
 
-interface FlashDeviceCandidate {
-  value: string;
-  label: string;
+type FlashDeviceCandidate = NativeFlashDeviceCandidate;
+
+interface SavedFlashTargetProfile {
+  name: string;
+  checkoutPath: string;
+  flashDevice: string;
+  flashMethod: string;
+  assignments: NativeFlashProfileAssignment[];
+}
+
+interface FlashProfileDialogState {
+  mode: 'load' | 'save';
+  target: FlashTargetKey;
+  profiles: NativeFlashProfileSummary[];
+  name: string;
+  error: string;
+  loading: boolean;
+  saving: boolean;
+  deletingName: string | null;
 }
 
 type DialogStatus = 'idle' | 'loading' | 'previewing' | 'saving' | 'building' | 'flashing';
@@ -28,6 +49,8 @@ interface FlashPanelState {
   loaded: boolean;
   checkoutPath: string;
   flashDevice: string;
+  flashMethod: string;
+  stickyAssignments: NativeFlashProfileAssignment[];
   flashState: NativeFlashState | null;
   fields: NativeFlashField[];
   knownFields: Record<string, NativeFlashField>;
@@ -38,16 +61,123 @@ interface FlashPanelState {
 
 const TARGETS: FlashTargetKey[] = ['klipper', 'katapult'];
 
-const FLASH_WORKFLOW_HELP = 'Changes update the visible menuconfig fields immediately. Save writes the active .config file. Build runs make olddefconfig followed by make. Flash runs make flash with NOSUDO=1 and uses the flash device field when the selected target requires one.';
-const ARTIFACTS_HELP = 'Generated files stay on the SBC under the active out directory and can also be downloaded directly from here.';
+const FLASH_WORKFLOW_HELP = 'Changes update the visible menuconfig fields immediately. Use the settings gear to override the Klipper and Katapult checkout paths and refresh detected flash devices. Save writes the active .config file and then lets you store the current flash setup under a unique host-side profile name. Load opens the active config or any saved host-side flash profile for the current target. Flash auto-matches the selected device to a supported method when possible, while still letting you override the method manually.';
+const ARTIFACTS_HELP = 'Generated files stay on the SBC under the active out directory. You can download them directly here or delete stale artifacts you no longer need.';
 const COMMAND_LOG_HELP = 'The latest output from the most recent build or flash command.';
 const HELP_POPOVER_WIDTH = 288;
 const HELP_POPOVER_MARGIN = 12;
 const HELP_POPOVER_OFFSET = 8;
+const STALE_ASSIGNMENT_PREVIEW_LIMIT = 6;
+const USB_ID_PATTERN = /^[0-9a-fA-F]{4}:[0-9a-fA-F]{4}$/;
+const CAN_UUID_PATTERN = /^(?:[A-Za-z0-9_-]+:)?[0-9a-fA-F]{12}$/;
 
 interface HelpPopoverPosition {
   top: number;
   left: number;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isFlashTargetKey(value: unknown): value is FlashTargetKey {
+  return value === 'klipper' || value === 'katapult';
+}
+
+function normalizeProfileAssignments(assignments: NativeFlashProfileAssignment[]): NativeFlashProfileAssignment[] {
+  const normalized: NativeFlashProfileAssignment[] = [];
+  for (const assignment of assignments) {
+    const symbol = assignment.symbol.trim();
+    if (!symbol) {
+      continue;
+    }
+    normalized.push({
+      symbol,
+      value: assignment.value,
+    });
+  }
+  return normalized;
+}
+
+function buildPanelAssignments(
+  assignmentValues: Record<string, string>,
+  knownFields: Record<string, NativeFlashField>,
+  stickyAssignments: NativeFlashProfileAssignment[],
+): Array<{ symbol: string; value: string }> {
+  const merged = new Map<string, string>();
+  for (const assignment of normalizeProfileAssignments(stickyAssignments)) {
+    merged.set(assignment.symbol, assignment.value);
+  }
+  for (const assignment of buildAssignments(assignmentValues, knownFields)) {
+    merged.set(assignment.symbol, assignment.value);
+  }
+  return Array.from(merged.entries()).map(([symbol, value]) => ({ symbol, value }));
+}
+
+function flashMethodRecord(
+  state: NativeFlashState | null,
+  methodValue: string,
+): NativeFlashMethodCandidate | null {
+  if (!state || !methodValue) {
+    return null;
+  }
+  return state.flash_method_candidates.find((candidate) => candidate.value === methodValue) || null;
+}
+
+function resolveMethodDefaultDevice(state: NativeFlashState | null, methodValue: string): string {
+  return flashMethodRecord(state, methodValue)?.default_device || state?.default_flash_device || '';
+}
+
+function inferFlashMethodForDevice(value: string, state: NativeFlashState | null): string {
+  const trimmedValue = value.trim();
+  if (!state || !trimmedValue) {
+    return '';
+  }
+
+  const exactCandidate = state.flash_device_candidates.find((candidate) => candidate.value === trimmedValue);
+  if (exactCandidate?.preferred_flash_method && flashMethodRecord(state, exactCandidate.preferred_flash_method)) {
+    return exactCandidate.preferred_flash_method;
+  }
+
+  const supportedMethods = new Set(state.flash_method_candidates.map((candidate) => candidate.value));
+  if (CAN_UUID_PATTERN.test(trimmedValue) && supportedMethods.has('flashtool')) {
+    return 'flashtool';
+  }
+  if (trimmedValue.startsWith('/dev/')) {
+    if (supportedMethods.has('flashtool')) {
+      return 'flashtool';
+    }
+    if (supportedMethods.has('make_flash')) {
+      return 'make_flash';
+    }
+  }
+  if (trimmedValue === 'first' && supportedMethods.has('make_flash')) {
+    return 'make_flash';
+  }
+  if (USB_ID_PATTERN.test(trimmedValue)) {
+    if (supportedMethods.has('dfu_util')) {
+      return 'dfu_util';
+    }
+    if (supportedMethods.has('make_flash')) {
+      return 'make_flash';
+    }
+  }
+  return '';
+}
+
+function resolveFlashMethod(previous: FlashPanelState, nextState: NativeFlashState, resetToDefault: boolean): string {
+  const currentDefault = previous.flashState?.default_flash_method || '';
+  const nextDefault = nextState.default_flash_method || '';
+  if (resetToDefault) {
+    if (previous.flashMethod && previous.flashMethod !== currentDefault) {
+      return previous.flashMethod;
+    }
+    return nextDefault;
+  }
+  if (!previous.flashMethod || previous.flashMethod === currentDefault) {
+    return nextDefault;
+  }
+  return previous.flashMethod;
 }
 
 function cloneField(field: NativeFlashField): NativeFlashField {
@@ -102,6 +232,51 @@ function buildAssignments(
   return assignments;
 }
 
+function collectVisibleFieldSymbols(fields: NativeFlashField[]): Set<string> {
+  const symbols = new Set<string>();
+  for (const field of fields) {
+    if (field.kind === 'choice') {
+      for (const option of field.options || []) {
+        if (option.symbol) {
+          symbols.add(option.symbol);
+        }
+      }
+      continue;
+    }
+    if (field.symbol) {
+      symbols.add(field.symbol);
+    }
+  }
+  return symbols;
+}
+
+function collectStaleAssignments(
+  fields: NativeFlashField[],
+  stickyAssignments: NativeFlashProfileAssignment[],
+): NativeFlashProfileAssignment[] {
+  if (stickyAssignments.length === 0) {
+    return [];
+  }
+
+  const visibleSymbols = collectVisibleFieldSymbols(fields);
+  const dedupedAssignments = new Map<string, string>();
+  for (const assignment of normalizeProfileAssignments(stickyAssignments)) {
+    dedupedAssignments.set(assignment.symbol, assignment.value);
+  }
+
+  const staleAssignments: NativeFlashProfileAssignment[] = [];
+  for (const [symbol, value] of dedupedAssignments.entries()) {
+    if (!visibleSymbols.has(symbol)) {
+      staleAssignments.push({ symbol, value });
+    }
+  }
+  return staleAssignments;
+}
+
+function formatAssignmentLabel(assignment: NativeFlashProfileAssignment): string {
+  return `${assignment.symbol}=${assignment.value}`;
+}
+
 function applyFieldValue(fields: NativeFlashField[], fieldId: string, value: string): NativeFlashField[] {
   return fields.map((field) => {
     if (field.id !== fieldId) {
@@ -133,6 +308,8 @@ function createEmptyPanelState(target: FlashTargetKey): FlashPanelState {
     loaded: false,
     checkoutPath: '',
     flashDevice: '',
+    flashMethod: '',
+    stickyAssignments: [],
     flashState: null,
     fields: [],
     knownFields: {},
@@ -152,9 +329,15 @@ function formatModified(timestamp: number): string {
   return new Date(timestamp * 1000).toLocaleString();
 }
 
-function resolveFlashDevice(previous: FlashPanelState, nextState: NativeFlashState, resetToDefault: boolean): string {
-  const currentDefault = previous.flashState?.default_flash_device || '';
-  const nextDefault = nextState.default_flash_device || '';
+function resolveFlashDevice(
+  previous: FlashPanelState,
+  nextState: NativeFlashState,
+  nextMethod: string,
+  resetToDefault: boolean,
+): string {
+  const currentMethod = previous.flashMethod || previous.flashState?.default_flash_method || '';
+  const currentDefault = resolveMethodDefaultDevice(previous.flashState, currentMethod);
+  const nextDefault = resolveMethodDefaultDevice(nextState, nextMethod);
   if (resetToDefault) {
     if (previous.flashDevice && previous.flashDevice !== currentDefault) {
       return previous.flashDevice;
@@ -177,6 +360,7 @@ function createLoadedPanel(
   },
 ): FlashPanelState {
   const fields = cloneFields(result.fields);
+  const flashMethod = resolveFlashMethod(previous, result, true);
   return {
     ...previous,
     status: 'idle',
@@ -184,7 +368,9 @@ function createLoadedPanel(
     messageTone: options.messageTone,
     loaded: true,
     checkoutPath: result.checkout_path || previous.checkoutPath,
-    flashDevice: resolveFlashDevice(previous, result, true),
+    flashMethod,
+    flashDevice: resolveFlashDevice(previous, result, flashMethod, true),
+    stickyAssignments: [],
     flashState: result,
     fields,
     knownFields: fieldRecord(fields),
@@ -220,7 +406,8 @@ function mergePreviewPanel(previous: FlashPanelState, result: NativeFlashState):
     status: 'idle',
     loaded: true,
     checkoutPath: result.checkout_path || previous.checkoutPath,
-    flashDevice: resolveFlashDevice(previous, result, false),
+    flashMethod: resolveFlashMethod(previous, result, false),
+    flashDevice: resolveFlashDevice(previous, result, resolveFlashMethod(previous, result, false), false),
     flashState: result,
     fields,
     knownFields: nextKnownFields,
@@ -422,48 +609,50 @@ function FlashDeviceField({
         value={value}
         onChange={(event) => onChange(event.target.value)}
         placeholder={placeholder}
-        className={`w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-3 py-2 text-xs font-mono text-[var(--color-text-primary)] ${candidates.length > 0 ? 'pr-12' : ''}`}
+        className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-3 py-2 pr-12 text-xs font-mono text-[var(--color-text-primary)]"
       />
-      {candidates.length > 0 && (
-        <>
-          <button
-            type="button"
-            onClick={() => setOpen((current) => !current)}
-            className="absolute inset-y-[1px] right-[1px] flex w-10 items-center justify-center rounded-r-md border-l border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] text-[var(--color-text-secondary)] transition-colors hover:text-[var(--color-text-primary)]"
-            aria-label="Select detected flash device"
-            aria-expanded={open}
-          >
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 16 16"
-              fill="none"
-              className={`transition-transform ${open ? 'rotate-180' : ''}`}
+      <button
+        type="button"
+        onClick={() => {
+          if (candidates.length > 0) {
+            setOpen((current) => !current);
+          }
+        }}
+        disabled={candidates.length === 0}
+        title={candidates.length > 0 ? 'Select a detected flash device' : 'No detected flash devices are available yet'}
+        className="absolute inset-y-[1px] right-[1px] flex w-10 items-center justify-center rounded-r-md border-l border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] text-[var(--color-text-secondary)] transition-colors hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:text-[var(--color-text-secondary)]"
+        aria-label="Select detected flash device"
+        aria-expanded={open}
+      >
+        <svg
+          width="14"
+          height="14"
+          viewBox="0 0 16 16"
+          fill="none"
+          className={`transition-transform ${open ? 'rotate-180' : ''}`}
+        >
+          <path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+      {open && candidates.length > 0 && (
+        <div className="absolute right-0 top-[calc(100%+0.5rem)] z-30 max-h-64 w-full overflow-auto rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] shadow-xl">
+          {candidates.map((candidate) => (
+            <button
+              key={`${candidate.value}:${candidate.label}`}
+              type="button"
+              onClick={() => {
+                onChange(candidate.value);
+                setOpen(false);
+              }}
+              className={`block w-full px-3 py-2 text-left transition-colors hover:bg-[var(--color-bg-primary)] ${value === candidate.value ? 'bg-[var(--color-bg-primary)]/70' : ''}`}
             >
-              <path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          </button>
-          {open && (
-            <div className="absolute right-0 top-[calc(100%+0.5rem)] z-30 max-h-64 w-full overflow-auto rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] shadow-xl">
-              {candidates.map((candidate) => (
-                <button
-                  key={`${candidate.value}:${candidate.label}`}
-                  type="button"
-                  onClick={() => {
-                    onChange(candidate.value);
-                    setOpen(false);
-                  }}
-                  className={`block w-full px-3 py-2 text-left transition-colors hover:bg-[var(--color-bg-primary)] ${value === candidate.value ? 'bg-[var(--color-bg-primary)]/70' : ''}`}
-                >
-                  <p className="truncate text-xs font-mono text-[var(--color-text-primary)]">{candidate.value}</p>
-                  {candidate.label !== candidate.value && (
-                    <p className="mt-1 text-[10px] text-[var(--color-text-secondary)]">{candidate.label}</p>
-                  )}
-                </button>
-              ))}
-            </div>
-          )}
-        </>
+              <p className="truncate text-xs font-mono text-[var(--color-text-primary)]">{candidate.value}</p>
+              {candidate.label !== candidate.value && (
+                <p className="mt-1 text-[10px] text-[var(--color-text-secondary)]">{candidate.label}</p>
+              )}
+            </button>
+          ))}
+        </div>
       )}
     </div>
   );
@@ -475,6 +664,8 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
     klipper: createEmptyPanelState('klipper'),
     katapult: createEmptyPanelState('katapult'),
   });
+  const [profileDialog, setProfileDialog] = useState<FlashProfileDialogState | null>(null);
+  const [showTargetSettings, setShowTargetSettings] = useState(false);
 
   const buildDots = useAnimatedDots(panels[activeTarget].status === 'building');
   const flashDots = useAnimatedDots(panels[activeTarget].status === 'flashing');
@@ -484,6 +675,30 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
       ...previous,
       [target]: updater(previous[target]),
     }));
+  }
+
+  function setPanelMessage(target: FlashTargetKey, message: string, messageTone: MessageTone) {
+    updatePanel(target, (panel) => ({
+      ...panel,
+      message,
+      messageTone,
+    }));
+  }
+
+  function handleCheckoutPathChange(target: FlashTargetKey, checkoutPath: string) {
+    updatePanel(target, (panel) => ({
+      ...panel,
+      checkoutPath,
+    }));
+  }
+
+  async function applyCheckoutSettings() {
+    const requestedPaths: Record<FlashTargetKey, string> = {
+      klipper: panels.klipper.checkoutPath.trim(),
+      katapult: panels.katapult.checkoutPath.trim(),
+    };
+    setShowTargetSettings(false);
+    await Promise.all(TARGETS.map((target) => loadState(target, requestedPaths[target] || undefined)));
   }
 
   async function loadState(target: FlashTargetKey, overridePath?: string) {
@@ -530,6 +745,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
     target: FlashTargetKey,
     assignmentValues: Record<string, string>,
     knownFields: Record<string, NativeFlashField>,
+    stickyAssignments: NativeFlashProfileAssignment[],
     checkoutPath: string,
   ) {
     updatePanel(target, (panel) => ({
@@ -540,7 +756,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
     try {
       const result = await api.previewNativeFlashConfig(
         target,
-        buildAssignments(assignmentValues, knownFields),
+        buildPanelAssignments(assignmentValues, knownFields, stickyAssignments),
         checkoutPath.trim() || undefined,
       );
       updatePanel(target, (panel) => mergePreviewPanel(panel, result));
@@ -575,7 +791,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
     try {
       const result = await api.updateNativeFlashConfig(
         target,
-        buildAssignments(panel.assignmentValues, panel.knownFields),
+        buildPanelAssignments(panel.assignmentValues, panel.knownFields, panel.stickyAssignments),
         panel.checkoutPath.trim() || undefined,
       );
 
@@ -670,6 +886,8 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
 
   async function handleFlash(target: FlashTargetKey) {
     const panel = panels[target];
+    const selectedMethod = panel.flashMethod || panel.flashState?.default_flash_method || '';
+    const selectedMethodState = flashMethodRecord(panel.flashState, selectedMethod);
     if (!panel.flashState?.available) {
       updatePanel(target, (current) => ({
         ...current,
@@ -686,6 +904,14 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
       }));
       return;
     }
+    if (!selectedMethodState) {
+      updatePanel(target, (current) => ({
+        ...current,
+        message: 'Select a supported flash method before flashing.',
+        messageTone: 'error',
+      }));
+      return;
+    }
 
     if (panel.isDirty) {
       const saved = await persistConfig(target, false);
@@ -697,7 +923,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
     updatePanel(target, (current) => ({
       ...current,
       status: 'flashing',
-      message: `Running make flash in ${current.flashState?.display_name || 'the active checkout'}...`,
+      message: `Running ${selectedMethodState.label} in ${current.flashState?.display_name || 'the active checkout'}...`,
       messageTone: 'info',
     }));
 
@@ -706,11 +932,13 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
         target,
         panel.checkoutPath.trim() || undefined,
         panel.flashDevice.trim() || undefined,
+        selectedMethod,
       );
       updatePanel(target, (current) => ({
         ...current,
         status: 'idle',
         checkoutPath: result.checkout_path || current.checkoutPath,
+        flashMethod: result.flash_method || current.flashMethod,
         commandResult: result,
         flashState: current.flashState
           ? {
@@ -722,7 +950,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
             }
           : current.flashState,
         message: result.success
-          ? `Flash completed${result.flash_device ? ` using ${result.flash_device}` : ''}.`
+          ? `${flashMethodRecord(current.flashState, result.flash_method || selectedMethod)?.label || 'Flash'} completed${result.flash_device ? ` using ${result.flash_device}` : ''}.`
           : result.error || `${result.display_name} flash failed.`,
         messageTone: result.success ? 'success' : 'error',
       }));
@@ -767,6 +995,65 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
     }
   }
 
+  async function handleDeleteArtifact(target: FlashTargetKey, artifact: NativeFlashArtifact) {
+    const panel = panels[target];
+    if (!window.confirm(`Delete ${artifact.name} from ${panel.flashState?.out_path || panel.commandResult?.out_path || 'the output directory'}?`)) {
+      return;
+    }
+
+    try {
+      updatePanel(target, (current) => ({
+        ...current,
+        message: `Deleting ${artifact.name}...`,
+        messageTone: 'info',
+      }));
+      const result = await api.deleteNativeFlashArtifact(target, artifact.name, panel.checkoutPath.trim() || undefined);
+      updatePanel(target, (current) => ({
+        ...current,
+        commandResult: current.commandResult
+          ? {
+              ...current.commandResult,
+              checkout_path: result.checkout_path,
+              out_path: result.out_path,
+              artifacts: result.artifacts,
+              primary_artifact: result.primary_artifact,
+            }
+          : current.commandResult,
+        flashState: current.flashState
+          ? {
+              ...current.flashState,
+              checkout_path: result.checkout_path,
+              out_path: result.out_path,
+              artifacts: result.artifacts,
+              primary_artifact: result.primary_artifact,
+            }
+          : current.flashState,
+        message: `Deleted ${artifact.name}`,
+        messageTone: 'success',
+      }));
+    } catch (error) {
+      updatePanel(target, (current) => ({
+        ...current,
+        message: error instanceof Error ? error.message : 'Failed to delete the artifact.',
+        messageTone: 'error',
+      }));
+    }
+  }
+
+  function handleFlashDeviceChange(target: FlashTargetKey, value: string) {
+    updatePanel(target, (current) => {
+      const inferredMethod = inferFlashMethodForDevice(value, current.flashState);
+      const fallbackMethod = !value.trim()
+        ? current.flashState?.default_flash_method || current.flashMethod
+        : current.flashMethod;
+      return {
+        ...current,
+        flashDevice: value,
+        flashMethod: inferredMethod || fallbackMethod,
+      };
+    });
+  }
+
   function handleFieldChange(target: FlashTargetKey, fieldId: string, value: string, previewImmediately: boolean) {
     const panel = panels[target];
     const nextFields = applyFieldValue(panel.fields, fieldId, value);
@@ -789,42 +1076,284 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
     }));
 
     if (previewImmediately) {
-      void previewConfig(target, nextAssignments, nextKnownFields, panel.checkoutPath);
+      void previewConfig(target, nextAssignments, nextKnownFields, panel.stickyAssignments, panel.checkoutPath);
     }
   }
 
   useEffect(() => {
-    const panel = panels[activeTarget];
-    if (!panel.loaded && panel.status === 'idle') {
-      void loadState(activeTarget);
+    for (const target of TARGETS) {
+      void loadState(target);
     }
-  }, [activeTarget, panels]);
+  }, []);
+
+  async function applySavedTargetProfile(target: FlashTargetKey, savedProfile: SavedFlashTargetProfile, sourceLabel: string) {
+    const requestedPath = savedProfile.checkoutPath.trim();
+    const normalizedAssignments = normalizeProfileAssignments(savedProfile.assignments);
+    updatePanel(target, (current) => ({
+      ...current,
+      status: 'loading',
+      checkoutPath: requestedPath || current.checkoutPath,
+      message: `Loading saved ${target === 'klipper' ? 'Klipper' : 'Katapult'} flash profile from ${sourceLabel}...`,
+      messageTone: 'info',
+    }));
+
+    try {
+      const baseState = await api.getNativeFlashState(target, requestedPath || undefined);
+      if (!baseState.available) {
+        updatePanel(target, (current) => createLoadedPanel(current, baseState, {
+          message: baseState.error || `${baseState.display_name} is not available on this SBC.`,
+          messageTone: 'error',
+        }));
+        return;
+      }
+
+      let resultState = baseState;
+      if (normalizedAssignments.length > 0) {
+        resultState = await api.previewNativeFlashConfig(
+          target,
+          normalizedAssignments,
+          requestedPath || undefined,
+        );
+      }
+
+      updatePanel(target, (current) => {
+        const inferredMethod = inferFlashMethodForDevice(savedProfile.flashDevice, resultState);
+        const seededPanel: FlashPanelState = {
+          ...current,
+          flashMethod: inferredMethod || savedProfile.flashMethod || current.flashMethod,
+          flashDevice: savedProfile.flashDevice || current.flashDevice,
+          stickyAssignments: normalizedAssignments,
+        };
+        const loadedPanel = createLoadedPanel(seededPanel, resultState, {
+          message: resultState.error
+            ? resultState.error
+            : `Loaded ${resultState.display_name} flash profile from ${sourceLabel}`,
+          messageTone: resultState.error ? 'error' : 'success',
+        });
+        const preferredMethod = inferredMethod
+          || (savedProfile.flashMethod && flashMethodRecord(resultState, savedProfile.flashMethod)
+            ? savedProfile.flashMethod
+            : loadedPanel.flashMethod);
+        const preferredDevice = savedProfile.flashDevice || resolveMethodDefaultDevice(resultState, preferredMethod);
+        return {
+          ...loadedPanel,
+          flashMethod: preferredMethod,
+          flashDevice: preferredDevice || loadedPanel.flashDevice,
+          stickyAssignments: normalizedAssignments,
+          isDirty: true,
+        };
+      });
+    } catch (error) {
+      updatePanel(target, (current) => ({
+        ...current,
+        status: 'idle',
+        message: error instanceof Error ? error.message : 'Failed to load the selected flash profile.',
+        messageTone: 'error',
+      }));
+    }
+  }
+
+  function closeProfileDialog() {
+    setProfileDialog(null);
+  }
+
+  async function openLoadDialog(target: FlashTargetKey) {
+    setProfileDialog({
+      mode: 'load',
+      target,
+      profiles: [],
+      name: '',
+      error: '',
+      loading: true,
+      saving: false,
+      deletingName: null,
+    });
+
+    try {
+      const profiles = await api.listNativeFlashProfiles(target);
+      setProfileDialog((current) => current && current.mode === 'load' && current.target === target
+        ? { ...current, profiles, loading: false }
+        : current);
+    } catch (error) {
+      setProfileDialog((current) => current && current.mode === 'load' && current.target === target
+        ? {
+            ...current,
+            loading: false,
+            error: error instanceof Error ? error.message : 'Failed to load saved flash profiles.',
+          }
+        : current);
+    }
+  }
+
+  async function handleSaveAction(target: FlashTargetKey) {
+    const saved = await persistConfig(target, true);
+    if (!saved) {
+      return;
+    }
+
+    try {
+      const profiles = await api.listNativeFlashProfiles(target);
+      setProfileDialog({
+        mode: 'save',
+        target,
+        profiles,
+        name: '',
+        error: '',
+        loading: false,
+        saving: false,
+        deletingName: null,
+      });
+    } catch (error) {
+      setProfileDialog({
+        mode: 'save',
+        target,
+        profiles: [],
+        name: '',
+        error: error instanceof Error ? error.message : 'Failed to load saved flash profiles.',
+        loading: false,
+        saving: false,
+        deletingName: null,
+      });
+    }
+  }
+
+  async function handleSaveNamedProfile() {
+    if (!profileDialog || profileDialog.mode !== 'save') {
+      return;
+    }
+
+    const name = profileDialog.name.trim();
+    if (!name) {
+      setProfileDialog((current) => current ? { ...current, error: 'Enter a unique profile name.' } : current);
+      return;
+    }
+
+    const target = profileDialog.target;
+    const panel = panels[target];
+    setProfileDialog((current) => current ? { ...current, saving: true, error: '' } : current);
+
+    try {
+      await api.saveNativeFlashProfile(target, {
+        name,
+        checkoutPath: panel.checkoutPath.trim() || undefined,
+        flashDevice: panel.flashDevice.trim() || undefined,
+        flashMethod: panel.flashMethod || panel.flashState?.default_flash_method || undefined,
+        assignments: buildPanelAssignments(panel.assignmentValues, panel.knownFields, panel.stickyAssignments),
+      });
+      setPanelMessage(target, `Saved flash profile "${name}" on the host.`, 'success');
+      setProfileDialog(null);
+    } catch (error) {
+      setProfileDialog((current) => current ? {
+        ...current,
+        saving: false,
+        error: error instanceof Error ? error.message : 'Failed to save the flash profile.',
+      } : current);
+    }
+  }
+
+  async function handleLoadSavedProfile(name: string) {
+    if (!profileDialog) {
+      return;
+    }
+
+    const target = profileDialog.target;
+    setProfileDialog((current) => current ? { ...current, loading: true, error: '' } : current);
+    try {
+      const loadedProfile = await api.loadNativeFlashProfile(target, name);
+      const savedProfile: SavedFlashTargetProfile = {
+        name: loadedProfile.name,
+        checkoutPath: loadedProfile.checkout_path,
+        flashDevice: loadedProfile.flash_device,
+        flashMethod: loadedProfile.flash_method,
+        assignments: loadedProfile.assignments,
+      };
+      await applySavedTargetProfile(target, savedProfile, loadedProfile.name);
+      setActiveTarget(target);
+      setProfileDialog(null);
+    } catch (error) {
+      setProfileDialog((current) => current ? {
+        ...current,
+        loading: false,
+        error: error instanceof Error ? error.message : 'Failed to load the selected flash profile.',
+      } : current);
+    }
+  }
+
+  async function handleLoadActiveConfig(target: FlashTargetKey) {
+    setProfileDialog((current) => current ? { ...current, loading: true, error: '' } : current);
+    await loadState(target, panels[target].checkoutPath);
+    setActiveTarget(target);
+    setProfileDialog(null);
+  }
+
+  async function handleDeleteSavedProfile(name: string) {
+    if (!profileDialog) {
+      return;
+    }
+    if (!window.confirm(`Delete flash profile "${name}" from the host?`)) {
+      return;
+    }
+
+    const target = profileDialog.target;
+    setProfileDialog((current) => current ? { ...current, deletingName: name, error: '' } : current);
+    try {
+      await api.deleteNativeFlashProfile(target, name);
+      const profiles = await api.listNativeFlashProfiles(target);
+      setProfileDialog((current) => current ? {
+        ...current,
+        profiles,
+        deletingName: null,
+      } : current);
+      setPanelMessage(target, `Deleted flash profile "${name}".`, 'success');
+    } catch (error) {
+      setProfileDialog((current) => current ? {
+        ...current,
+        deletingName: null,
+        error: error instanceof Error ? error.message : 'Failed to delete the flash profile.',
+      } : current);
+    }
+  }
+
+  const visibleTargets = TARGETS.filter((target) => target === 'klipper' || panels[target].flashState?.available);
+
+  useEffect(() => {
+    if (visibleTargets.length > 0 && !visibleTargets.includes(activeTarget)) {
+      setActiveTarget(visibleTargets[0]);
+    }
+  }, [activeTarget, visibleTargets]);
 
   const panel = panels[activeTarget];
   const fieldGroups = groupedFields(panel.fields);
   const artifacts = panel.commandResult?.artifacts || panel.flashState?.artifacts || [];
   const primaryArtifact = panel.commandResult?.primary_artifact || panel.flashState?.primary_artifact || null;
+  const anyPanelBusy = TARGETS.some((target) => panels[target].status !== 'idle');
   const actionBusy = panel.status !== 'idle';
   const buildLabel = panel.status === 'building' ? `Build${buildDots}` : 'Build';
   const flashLabel = panel.status === 'flashing' ? `Flash${flashDots}` : 'Flash';
-  const loadLabel = panel.status === 'loading' ? 'Loading...' : 'Load';
-  const saveLabel = panel.status === 'saving' ? 'Saving...' : 'Save .config';
+  const saveLabel = panel.status === 'saving' ? 'Saving...' : 'Save';
+  const flashMethodCandidates = panel.flashState?.flash_method_candidates || [];
+  const selectedFlashMethod = panel.flashMethod || panel.flashState?.default_flash_method || '';
+  const selectedFlashMethodState = flashMethodRecord(panel.flashState, selectedFlashMethod);
   const trimmedFlashDevice = panel.flashDevice.trim();
   const flashDeviceCandidates = panel.flashState?.flash_device_candidates || [];
+  const staleAssignments = collectStaleAssignments(panel.fields, panel.stickyAssignments);
+  const staleAssignmentPreview = staleAssignments.slice(0, STALE_ASSIGNMENT_PREVIEW_LIMIT);
+  const profileDialogPanel = profileDialog ? panels[profileDialog.target] : null;
   const showFlashDevice = Boolean(
-    panel.flashState?.flash_supported
+    selectedFlashMethodState
       && (
-        panel.flashState.flash_device_required
-        || panel.flashState.flash_device_placeholder
-        || panel.flashState.default_flash_device
+        selectedFlashMethodState.device_required
+        || selectedFlashMethodState.device_placeholder
+        || selectedFlashMethodState.default_device
         || flashDeviceCandidates.length > 0
       ),
   );
-  const flashDeviceRequired = Boolean(panel.flashState?.flash_device_required);
+  const flashDeviceRequired = Boolean(selectedFlashMethodState?.device_required);
   const flashButtonDisabled = Boolean(
     actionBusy
       || !panel.flashState?.available
       || !panel.flashState?.flash_supported
+      || !selectedFlashMethodState
       || (flashDeviceRequired && !trimmedFlashDevice),
   );
 
@@ -841,22 +1370,114 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
               <HelpPopover text={FLASH_WORKFLOW_HELP} />
             </div>
             <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">
-              Preview menuconfig changes live, save the active .config, build firmware locally, and run make flash when the target supports it.
+              Preview menuconfig changes live, save the active .config, build firmware locally, auto-match the flash method to the selected device, and manage saved flash configs on the host.
             </p>
           </div>
-          <button
-            onClick={onClose}
-            className="rounded p-1 text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)]"
-          >
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-              <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-            </svg>
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setShowTargetSettings((current) => !current)}
+              title="Flash checkout settings"
+              className={`rounded p-1 transition-colors ${
+                showTargetSettings
+                  ? 'bg-[var(--color-accent)] text-[var(--color-bg-primary)]'
+                  : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text-primary)]'
+              }`}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.5" />
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+            <button
+              onClick={onClose}
+              className="rounded p-1 text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)]"
+            >
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+              </svg>
+            </button>
+          </div>
         </div>
+
+        {showTargetSettings && (
+          <div className="border-b border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)]/70 px-4 py-4">
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <p className="text-xs font-semibold text-[var(--color-text-primary)]">Checkout Paths</p>
+                  <p className="mt-0.5 text-[11px] text-[var(--color-text-secondary)]">
+                    Leave a path blank to auto-detect the checkout. Applying paths reloads both targets and refreshes detected flash devices.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void applyCheckoutSettings()}
+                  disabled={anyPanelBusy}
+                  className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-xs font-semibold text-[var(--color-bg-primary)] transition-colors hover:opacity-90 disabled:opacity-50"
+                >
+                  Apply Paths
+                </button>
+              </div>
+
+              <div className="grid gap-3 xl:grid-cols-2">
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-[var(--color-text-secondary)]">Klipper Checkout</label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={panels.klipper.checkoutPath}
+                      onChange={(event) => handleCheckoutPathChange('klipper', event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          void applyCheckoutSettings();
+                        }
+                      }}
+                      placeholder="Auto-detect ~/klipper or enter another checkout path"
+                      className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-3 py-2 text-xs font-mono text-[var(--color-text-primary)]"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => handleCheckoutPathChange('klipper', '')}
+                      className="rounded-md bg-[var(--color-bg-tertiary)] px-3 py-2 text-[11px] font-medium text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-secondary)]"
+                    >
+                      Auto
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-[var(--color-text-secondary)]">Katapult Checkout</label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={panels.katapult.checkoutPath}
+                      onChange={(event) => handleCheckoutPathChange('katapult', event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          void applyCheckoutSettings();
+                        }
+                      }}
+                      placeholder="Auto-detect ~/katapult or enter another checkout path"
+                      className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-3 py-2 text-xs font-mono text-[var(--color-text-primary)]"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => handleCheckoutPathChange('katapult', '')}
+                      className="rounded-md bg-[var(--color-bg-tertiary)] px-3 py-2 text-[11px] font-medium text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-secondary)]"
+                    >
+                      Auto
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         <div className="border-b border-[var(--color-bg-tertiary)] px-4 pt-4">
           <div className="flex gap-2">
-            {TARGETS.map((target) => {
+            {visibleTargets.map((target) => {
               const targetPanel = panels[target];
               const selected = activeTarget === target;
               const label = target === 'klipper' ? 'Klipper' : 'Katapult';
@@ -879,53 +1500,77 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
           </div>
         </div>
 
-        <div className="space-y-3 border-b border-[var(--color-bg-tertiary)] px-4 py-4">
-          <div className="flex flex-col gap-3 xl:flex-row xl:items-end">
-            <div className="min-w-0 flex-1">
-              <label className="mb-1 block text-xs font-medium text-[var(--color-text-secondary)]">
-                {activeTarget === 'klipper' ? 'Klipper Checkout' : 'Katapult Checkout'}
-              </label>
-              <input
-                type="text"
-                value={panel.checkoutPath}
-                onChange={(event) => updatePanel(activeTarget, (current) => ({ ...current, checkoutPath: event.target.value }))}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') {
-                    void loadState(activeTarget, panel.checkoutPath);
-                  }
-                }}
-                placeholder={activeTarget === 'klipper'
-                  ? 'Auto-detect ~/klipper or enter another checkout path'
-                  : 'Auto-detect ~/katapult or enter another checkout path'}
-                className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-3 py-2 text-xs font-mono text-[var(--color-text-primary)]"
-              />
-            </div>
-
+        <div className="border-b border-[var(--color-bg-tertiary)] px-4 py-3">
+          <div className="flex flex-wrap items-center gap-3 xl:flex-nowrap">
             {showFlashDevice && (
-              <div className="min-w-0 xl:w-[320px]">
-                <label className="mb-1 block text-xs font-medium text-[var(--color-text-secondary)]">
-                  Flash Device{panel.flashState?.flash_device_required ? ' *' : ''}
-                </label>
-                <FlashDeviceField
-                  value={panel.flashDevice}
-                  onChange={(value) => updatePanel(activeTarget, (current) => ({ ...current, flashDevice: value }))}
-                  placeholder={panel.flashState?.flash_device_placeholder || 'Optional flash device override'}
-                  candidates={flashDeviceCandidates}
-                />
+              <div className="flex min-w-0 flex-1 items-center gap-2">
+                <span className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
+                  Device{flashDeviceRequired ? ' *' : ''}
+                </span>
+                <div className="min-w-[18rem] flex-1">
+                  <FlashDeviceField
+                    value={panel.flashDevice}
+                    onChange={(value) => handleFlashDeviceChange(activeTarget, value)}
+                    placeholder={selectedFlashMethodState?.device_placeholder || 'Optional flash device override'}
+                    candidates={flashDeviceCandidates}
+                  />
+                </div>
               </div>
             )}
 
-            <div className="flex shrink-0 flex-wrap gap-2">
-              <button
-                onClick={() => void loadState(activeTarget, panel.checkoutPath)}
+            <div className="flex shrink-0 items-center gap-2">
+              <span className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
+                Method
+              </span>
+              <div className="w-[190px]">
+                <select
+                  value={selectedFlashMethod}
+                  onChange={(event) => {
+                    const nextMethod = event.target.value;
+                    updatePanel(activeTarget, (current) => {
+                      const currentMethod = current.flashMethod || current.flashState?.default_flash_method || '';
+                      const currentMethodState = flashMethodRecord(current.flashState, currentMethod);
+                      const nextMethodState = flashMethodRecord(current.flashState, nextMethod);
+                      const currentDefaultDevice = currentMethodState?.default_device || '';
+                      const nextDefaultDevice = nextMethodState?.default_device || '';
+                      const nextFlashDevice = !current.flashDevice || current.flashDevice === currentDefaultDevice
+                        ? nextDefaultDevice
+                        : current.flashDevice;
+                      return {
+                        ...current,
+                        flashMethod: nextMethod,
+                        flashDevice: nextFlashDevice,
+                      };
+                    });
+                  }}
+                  disabled={actionBusy || flashMethodCandidates.length === 0}
+                  className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-3 py-2 text-xs text-[var(--color-text-primary)] disabled:opacity-50"
+                >
+                  {flashMethodCandidates.length === 0 ? (
+                    <option value="">No supported flash method</option>
+                  ) : (
+                    flashMethodCandidates.map((candidate) => (
+                      <option key={candidate.value} value={candidate.value}>
+                        {candidate.label}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </div>
+              {selectedFlashMethodState && <HelpPopover text={selectedFlashMethodState.description} />}
+            </div>
+
+            <div className="ml-auto flex shrink-0 flex-wrap items-center gap-2">
+            <button
+                onClick={() => void openLoadDialog(activeTarget)}
                 disabled={actionBusy}
                 className="rounded-md bg-[var(--color-bg-tertiary)] px-4 py-2 text-xs font-medium text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-primary)] disabled:opacity-50"
               >
-                {loadLabel}
+                Load
               </button>
               <button
-                onClick={() => void persistConfig(activeTarget, true)}
-                disabled={actionBusy || !panel.flashState?.available || !panel.isDirty}
+                onClick={() => void handleSaveAction(activeTarget)}
+                disabled={actionBusy || !panel.flashState?.available}
                 className="rounded-md bg-[var(--color-bg-tertiary)] px-4 py-2 text-xs font-medium text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] disabled:opacity-50"
               >
                 {saveLabel}
@@ -946,7 +1591,6 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
               </button>
             </div>
           </div>
-
         </div>
 
         <div className="flex min-h-0 flex-1 flex-col xl:flex-row">
@@ -965,6 +1609,32 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                   <p className="text-sm text-amber-100">
                     No existing .config file was found. Saving or building will generate one from the selected options.
                   </p>
+                </div>
+              )}
+
+              {staleAssignments.length > 0 && (
+                <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4">
+                  <p className="text-sm font-semibold text-amber-100">Saved profile may be stale</p>
+                  <p className="mt-1 text-sm leading-5 text-amber-100">
+                    {staleAssignments.length === 1
+                      ? 'One saved assignment is no longer visible in the current menuconfig preview. It may come from an older upstream checkout or from options that are no longer reachable through the current dependency graph.'
+                      : `${staleAssignments.length} saved assignments are no longer visible in the current menuconfig preview. They may come from an older upstream checkout or from options that are no longer reachable through the current dependency graph.`}
+                  </p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {staleAssignmentPreview.map((assignment) => (
+                      <span
+                        key={`${assignment.symbol}:${assignment.value}`}
+                        className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-[11px] font-mono text-amber-100"
+                      >
+                        {formatAssignmentLabel(assignment)}
+                      </span>
+                    ))}
+                  </div>
+                  {staleAssignments.length > staleAssignmentPreview.length && (
+                    <p className="mt-2 text-[11px] text-amber-100/80">
+                      And {staleAssignments.length - staleAssignmentPreview.length} more saved assignments that are still carried with this profile.
+                    </p>
+                  )}
                 </div>
               )}
 
@@ -1033,7 +1703,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                               type="text"
                               value={field.value}
                               onChange={(event) => handleFieldChange(activeTarget, field.id, event.target.value, false)}
-                              onBlur={() => void previewConfig(activeTarget, panel.assignmentValues, panel.knownFields, panel.checkoutPath)}
+                              onBlur={() => void previewConfig(activeTarget, panel.assignmentValues, panel.knownFields, panel.stickyAssignments, panel.checkoutPath)}
                               onKeyDown={(event) => {
                                 if (event.key === 'Enter') {
                                   event.currentTarget.blur();
@@ -1068,8 +1738,10 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
               <div className="rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)]/60 p-3 md:col-span-2">
                 <p className="mb-1 text-[11px] uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">Flash Support</p>
                 <p className="text-xs leading-5 text-[var(--color-text-primary)]">
-                  {panel.flashState?.flash_supported
-                    ? panel.flashState.flash_help || 'make flash is available for the current target.'
+                  {selectedFlashMethodState
+                    ? selectedFlashMethodState.help
+                    : panel.flashState?.flash_supported
+                      ? panel.flashState.flash_help || 'A supported flash method is available for the current target.'
                     : panel.flashState?.flash_reason || 'Load a target to see its flashing capabilities.'}
                 </p>
               </div>
@@ -1105,12 +1777,20 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                           {formatBytes(artifact.size)} • {formatModified(artifact.modified)}
                         </p>
                       </div>
-                      <button
-                        onClick={() => void handleDownload(activeTarget, artifact)}
-                        className="rounded-md bg-[var(--color-bg-tertiary)] px-3 py-1.5 text-xs font-medium text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)]"
-                      >
-                        Download
-                      </button>
+                      <div className="flex shrink-0 items-center gap-2">
+                        <button
+                          onClick={() => void handleDeleteArtifact(activeTarget, artifact)}
+                          className="rounded-md bg-red-500/15 px-3 py-1.5 text-xs font-medium text-red-200 transition-colors hover:bg-red-500/25"
+                        >
+                          Delete
+                        </button>
+                        <button
+                          onClick={() => void handleDownload(activeTarget, artifact)}
+                          className="rounded-md bg-[var(--color-bg-tertiary)] px-3 py-1.5 text-xs font-medium text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)]"
+                        >
+                          Download
+                        </button>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -1153,6 +1833,182 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
           </button>
         </div>
       </div>
+      {profileDialog && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60" onClick={closeProfileDialog}>
+          <div
+            className="flex max-h-[80vh] w-[760px] max-w-[92vw] flex-col overflow-hidden rounded-2xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-start justify-between border-b border-[var(--color-bg-tertiary)] px-4 py-4">
+              <div>
+                <h3 className="text-base font-semibold text-[var(--color-text-primary)]">
+                  {profileDialog.mode === 'load'
+                    ? `Load ${profileDialog.target === 'klipper' ? 'Klipper' : 'Katapult'} Flash Config`
+                    : `Save ${profileDialog.target === 'klipper' ? 'Klipper' : 'Katapult'} Flash Config`}
+                </h3>
+                <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
+                  {profileDialog.mode === 'load'
+                    ? 'Load the active checkout config or a saved flash profile from the host, and remove old saved profiles here.'
+                    : 'The active .config has been saved. Give this flash configuration a unique name to store it on the host for later reuse.'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closeProfileDialog}
+                className="rounded p-1 text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)]"
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                  <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                </svg>
+              </button>
+            </div>
+
+            <div className="flex-1 space-y-4 overflow-y-auto p-4">
+              {profileDialog.error && (
+                <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
+                  {profileDialog.error}
+                </div>
+              )}
+
+              {profileDialog.mode === 'load' ? (
+                <>
+                  <section className="overflow-hidden rounded-xl border border-[var(--color-bg-tertiary)]">
+                    <div className="border-b border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)]/70 px-4 py-3">
+                      <h4 className="text-sm font-semibold text-[var(--color-text-primary)]">Active Config</h4>
+                    </div>
+                    <div className="p-4">
+                      <div className="flex flex-col gap-3 rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)]/50 px-4 py-3 md:flex-row md:items-center md:justify-between">
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium text-[var(--color-text-primary)]">Current checkout state</p>
+                          <p className="mt-1 break-all text-xs font-mono text-[var(--color-text-secondary)]">
+                            {profileDialogPanel?.flashState?.config_path || profileDialogPanel?.checkoutPath || 'Auto-detect the active checkout'}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => void handleLoadActiveConfig(profileDialog.target)}
+                          disabled={profileDialog.loading}
+                          className="rounded-md bg-[var(--color-bg-tertiary)] px-4 py-2 text-xs font-medium text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] disabled:opacity-50"
+                        >
+                          {profileDialog.loading ? 'Loading...' : 'Load Active Config'}
+                        </button>
+                      </div>
+                    </div>
+                  </section>
+
+                  <section className="overflow-hidden rounded-xl border border-[var(--color-bg-tertiary)]">
+                    <div className="border-b border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)]/70 px-4 py-3">
+                      <h4 className="text-sm font-semibold text-[var(--color-text-primary)]">Saved Profiles</h4>
+                    </div>
+                    <div className="space-y-3 p-4">
+                      {profileDialog.loading && profileDialog.profiles.length === 0 && (
+                        <p className="text-sm text-[var(--color-text-secondary)]">Loading saved profiles...</p>
+                      )}
+                      {!profileDialog.loading && profileDialog.profiles.length === 0 && (
+                        <p className="text-sm text-[var(--color-text-secondary)]">No saved profiles exist for this target yet.</p>
+                      )}
+                      {profileDialog.profiles.map((profile) => (
+                        <div
+                          key={profile.name}
+                          className="flex flex-col gap-3 rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)]/50 px-4 py-3 md:flex-row md:items-center md:justify-between"
+                        >
+                          <div className="min-w-0">
+                            <p className="text-sm font-medium text-[var(--color-text-primary)]">{profile.name}</p>
+                            <p className="mt-1 text-[11px] text-[var(--color-text-secondary)]">
+                              {profile.assignment_count} assignment{profile.assignment_count === 1 ? '' : 's'} • saved {formatModified(profile.modified)}
+                            </p>
+                            <p className="mt-1 break-all text-[11px] font-mono text-[var(--color-text-secondary)]">
+                              {profile.checkout_path || 'Auto-detected checkout'}
+                            </p>
+                          </div>
+                          <div className="flex shrink-0 items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => void handleDeleteSavedProfile(profile.name)}
+                              disabled={profileDialog.deletingName === profile.name || profileDialog.loading}
+                              className="rounded-md bg-red-500/15 px-3 py-2 text-xs font-medium text-red-200 transition-colors hover:bg-red-500/25 disabled:opacity-50"
+                            >
+                              {profileDialog.deletingName === profile.name ? 'Deleting...' : 'Delete'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void handleLoadSavedProfile(profile.name)}
+                              disabled={profileDialog.loading}
+                              className="rounded-md bg-[var(--color-bg-tertiary)] px-4 py-2 text-xs font-medium text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] disabled:opacity-50"
+                            >
+                              {profileDialog.loading ? 'Loading...' : 'Load'}
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                </>
+              ) : (
+                <section className="space-y-4 rounded-xl border border-[var(--color-bg-tertiary)] p-4">
+                  <div className="rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)]/50 p-3">
+                    <p className="text-sm font-medium text-[var(--color-text-primary)]">Active config saved</p>
+                    <p className="mt-1 break-all text-xs font-mono text-[var(--color-text-secondary)]">
+                      {profileDialogPanel?.flashState?.config_path || profileDialogPanel?.checkoutPath || 'Active checkout'}
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-[var(--color-text-secondary)]">Profile Name</label>
+                    <input
+                      type="text"
+                      value={profileDialog.name}
+                      onChange={(event) => setProfileDialog((current) => current ? { ...current, name: event.target.value, error: '' } : current)}
+                      placeholder="Enter a unique profile name"
+                      className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-3 py-2 text-sm text-[var(--color-text-primary)]"
+                    />
+                  </div>
+
+                  <div>
+                    <p className="mb-2 text-xs font-medium text-[var(--color-text-secondary)]">Existing Saved Profiles</p>
+                    {profileDialog.loading ? (
+                      <p className="text-sm text-[var(--color-text-secondary)]">Loading existing profile names...</p>
+                    ) : profileDialog.profiles.length === 0 ? (
+                      <p className="text-sm text-[var(--color-text-secondary)]">No saved profiles exist for this target yet.</p>
+                    ) : (
+                      <div className="flex flex-wrap gap-2">
+                        {profileDialog.profiles.map((profile) => (
+                          <span
+                            key={profile.name}
+                            className="rounded-full border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)]/50 px-3 py-1 text-xs text-[var(--color-text-secondary)]"
+                          >
+                            {profile.name}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </section>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 border-t border-[var(--color-bg-tertiary)] px-4 py-3">
+              <button
+                type="button"
+                onClick={closeProfileDialog}
+                className="rounded-md bg-[var(--color-bg-tertiary)] px-4 py-2 text-xs font-medium text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-primary)]"
+              >
+                Close
+              </button>
+              {profileDialog.mode === 'save' && (
+                <button
+                  type="button"
+                  onClick={() => void handleSaveNamedProfile()}
+                  disabled={profileDialog.saving || profileDialog.loading}
+                  className="rounded-md bg-[var(--color-accent)] px-4 py-2 text-xs font-semibold text-[var(--color-bg-primary)] transition-colors hover:opacity-90 disabled:opacity-50"
+                >
+                  {profileDialog.saving ? 'Saving...' : 'Save Named Profile'}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

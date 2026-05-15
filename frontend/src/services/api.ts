@@ -382,6 +382,28 @@ export async function getKlipperStatus(): Promise<KlipperStatusResponse> {
   return request('/native/klipper/status');
 }
 
+export interface KlippyLogExcerptResponse {
+  status: string;
+  log_path: string | null;
+  excerpt: string;
+  matched_on: string | null;
+}
+
+export async function getKlippyLogExcerpt(
+  sectionName?: string,
+  errorText?: string,
+  contextLines = 40,
+): Promise<KlippyLogExcerptResponse> {
+  return request('/native/klipper/log-excerpt', {
+    method: 'POST',
+    body: JSON.stringify({
+      section_name: sectionName ?? null,
+      error_text: errorText ?? null,
+      context_lines: contextLines,
+    }),
+  });
+}
+
 export type FlashTargetKey = 'klipper' | 'katapult';
 
 export interface NativeFlashArtifact {
@@ -394,6 +416,59 @@ export interface NativeFlashArtifact {
 export interface NativeFlashDeviceCandidate {
   value: string;
   label: string;
+  transport?: 'serial' | 'usb_id' | 'can_uuid' | 'mass_storage';
+  interface?: string;
+  preferred_flash_method?: string;
+}
+
+export interface NativeFlashProfileAssignment {
+  symbol: string;
+  value: string;
+}
+
+export interface NativeFlashProfileSummary {
+  name: string;
+  target: FlashTargetKey;
+  checkout_path: string;
+  flash_device: string;
+  flash_method: string;
+  assignment_count: number;
+  created: number;
+  modified: number;
+}
+
+export interface NativeFlashProfile {
+  name: string;
+  target: FlashTargetKey;
+  checkout_path: string;
+  flash_device: string;
+  flash_method: string;
+  assignments: NativeFlashProfileAssignment[];
+  created: number;
+  modified: number;
+}
+
+export interface NativeFlashArtifactDeleteResult {
+  status: string;
+  target: FlashTargetKey;
+  display_name: string;
+  filename: string;
+  checkout_path: string;
+  out_path: string;
+  artifacts: NativeFlashArtifact[];
+  primary_artifact: NativeFlashArtifact | null;
+}
+
+export interface NativeFlashMethodCandidate {
+  value: string;
+  label: string;
+  description: string;
+  supported: boolean;
+  reason: string | null;
+  device_required: boolean;
+  device_placeholder: string;
+  default_device: string;
+  help: string;
 }
 
 export interface NativeFlashChoiceOption {
@@ -432,6 +507,8 @@ export interface NativeFlashState {
   flash_device_placeholder: string;
   default_flash_device: string;
   flash_device_candidates: NativeFlashDeviceCandidate[];
+  flash_method_candidates: NativeFlashMethodCandidate[];
+  default_flash_method: string;
   flash_help: string;
 }
 
@@ -446,6 +523,7 @@ export interface NativeFlashCommandResult {
   artifacts: NativeFlashArtifact[];
   primary_artifact: NativeFlashArtifact | null;
   flash_device: string;
+  flash_method: string;
 }
 
 export type NativeFirmwareArtifact = NativeFlashArtifact;
@@ -498,10 +576,11 @@ export async function flashNativeFlashTarget(
   target: FlashTargetKey,
   checkoutPath?: string,
   flashDevice?: string,
+  flashMethod?: string,
 ): Promise<NativeFlashCommandResult> {
   return request(`/native/flash/${encodeURIComponent(target)}/flash`, {
     method: 'POST',
-    body: JSON.stringify({ checkout_path: checkoutPath, flash_device: flashDevice }),
+    body: JSON.stringify({ checkout_path: checkoutPath, flash_device: flashDevice, flash_method: flashMethod }),
   });
 }
 
@@ -519,6 +598,54 @@ export async function downloadNativeFlashArtifact(
     throw new Error(`Artifact download failed: ${err}`);
   }
   return res.blob();
+}
+
+export async function deleteNativeFlashArtifact(
+  target: FlashTargetKey,
+  filename: string,
+  checkoutPath?: string,
+): Promise<NativeFlashArtifactDeleteResult> {
+  const q = checkoutPath ? `?checkout_path=${encodeURIComponent(checkoutPath)}` : '';
+  return request(`/native/flash/${encodeURIComponent(target)}/artifacts/${encodeURIComponent(filename)}${q}`, {
+    method: 'DELETE',
+  });
+}
+
+export async function listNativeFlashProfiles(target: FlashTargetKey): Promise<NativeFlashProfileSummary[]> {
+  const result = await request<{ profiles: NativeFlashProfileSummary[] }>(`/native/flash/${encodeURIComponent(target)}/profiles`);
+  return result.profiles;
+}
+
+export async function loadNativeFlashProfile(target: FlashTargetKey, name: string): Promise<NativeFlashProfile> {
+  return request(`/native/flash/${encodeURIComponent(target)}/profiles/${encodeURIComponent(name)}`);
+}
+
+export async function saveNativeFlashProfile(
+  target: FlashTargetKey,
+  profile: {
+    name: string;
+    checkoutPath?: string;
+    flashDevice?: string;
+    flashMethod?: string;
+    assignments: NativeFlashProfileAssignment[];
+  },
+): Promise<NativeFlashProfile> {
+  return request(`/native/flash/${encodeURIComponent(target)}/profiles`, {
+    method: 'POST',
+    body: JSON.stringify({
+      name: profile.name,
+      checkout_path: profile.checkoutPath,
+      flash_device: profile.flashDevice,
+      flash_method: profile.flashMethod,
+      assignments: profile.assignments,
+    }),
+  });
+}
+
+export async function deleteNativeFlashProfile(target: FlashTargetKey, name: string): Promise<{ status: string; name: string }> {
+  return request(`/native/flash/${encodeURIComponent(target)}/profiles/${encodeURIComponent(name)}`, {
+    method: 'DELETE',
+  });
 }
 
 export async function getNativeFirmwareState(klipperPath?: string): Promise<NativeFirmwareState> {

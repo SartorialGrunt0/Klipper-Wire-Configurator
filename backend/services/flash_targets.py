@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import subprocess
 import tempfile
 from contextlib import contextmanager
@@ -78,11 +79,23 @@ _TRISTATE_VALUE_NAMES = {
     2: "y",
 }
 
+_FLASH_METHOD_MAKE_FLASH = "make_flash"
+_FLASH_METHOD_DFU_UTIL = "dfu_util"
+_FLASH_METHOD_FLASHTOOL = "flashtool"
+
 _DFU_UTIL_USB_ID_RE = re.compile(r"\[([0-9a-fA-F]{4}:[0-9a-fA-F]{4})\]")
 _DFU_UTIL_NAME_RE = re.compile(r'name="([^"]+)"')
 _DFU_UTIL_SERIAL_RE = re.compile(r'serial="([^"]+)"')
 _LSUSB_ENTRY_RE = re.compile(r"ID\s+([0-9a-fA-F]{4}:[0-9a-fA-F]{4})\s+(.+)$")
 _DFU_HINT_RE = re.compile(r"\b(dfu|bootloader)\b", re.IGNORECASE)
+_RP2_BOOT_HINT_RE = re.compile(r"\brp2\s+boot\b", re.IGNORECASE)
+_STM32_DFU_HINT_RE = re.compile(r"\bstm device in dfu mode\b", re.IGNORECASE)
+_USB_ID_RE = re.compile(r"^[0-9a-fA-F]{4}:[0-9a-fA-F]{4}$")
+_CAN_UUID_RE = re.compile(r"^(?:(?P<interface>[A-Za-z0-9_-]+):)?(?P<uuid>[0-9a-fA-F]{12})$")
+_KATAPULT_QUERY_UUID_RE = re.compile(
+    r"Detected UUID:\s*([0-9a-fA-F]{12})(?:,\s*Application:\s*([^,]+))?",
+    re.IGNORECASE,
+)
 
 
 def _require_supported_target(target: str) -> str:
@@ -434,15 +447,49 @@ def _append_flash_device_candidate(
     seen_values: set[str],
     value: str,
     label: str,
+    *,
+    transport: str | None = None,
+    interface: str | None = None,
+    preferred_flash_method: str | None = None,
 ) -> None:
     normalized_value = value.strip()
     if not normalized_value or normalized_value in seen_values:
         return
     seen_values.add(normalized_value)
-    candidates.append({
+    candidate = {
         "value": normalized_value,
         "label": label.strip() or normalized_value,
-    })
+    }
+    if transport:
+        candidate["transport"] = transport
+    if interface:
+        candidate["interface"] = interface.strip()
+    if preferred_flash_method:
+        candidate["preferred_flash_method"] = preferred_flash_method
+    candidates.append(candidate)
+
+
+def _first_device_candidate(candidates: list[dict[str, str]], transport: str | None = None) -> str:
+    for candidate in candidates:
+        if transport is not None and candidate.get("transport") != transport:
+            continue
+        value = candidate.get("value", "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _parse_can_flash_device(value: str, default_interface: str = "can0") -> tuple[str, str] | None:
+    match = _CAN_UUID_RE.fullmatch(value.strip())
+    if match is None:
+        return None
+    interface = (match.group("interface") or default_interface).strip() or default_interface
+    uuid = match.group("uuid").lower()
+    return interface, uuid
+
+
+def _is_usb_id(value: str) -> bool:
+    return _USB_ID_RE.fullmatch(value.strip()) is not None
 
 
 def _serial_flash_device_candidates() -> list[dict[str, str]]:
@@ -459,14 +506,28 @@ def _serial_flash_device_candidates() -> list[dict[str, str]]:
         label = f"USB serial: {description}"
         if device_path and device_path != device_value:
             label = f"{label} ({device_path})"
-        _append_flash_device_candidate(candidates, seen_values, device_value, label)
+        _append_flash_device_candidate(
+            candidates,
+            seen_values,
+            device_value,
+            label,
+            transport="serial",
+            preferred_flash_method=_FLASH_METHOD_FLASHTOOL,
+        )
 
     for device in list_uart_devices():
         device_path = str(device.get("path", "")).strip()
         if not device_path or device_path in represented_paths:
             continue
         description = str(device.get("description") or Path(device_path).name).strip()
-        _append_flash_device_candidate(candidates, seen_values, device_path, f"Serial: {description}")
+        _append_flash_device_candidate(
+            candidates,
+            seen_values,
+            device_path,
+            f"Serial: {description}",
+            transport="serial",
+            preferred_flash_method=_FLASH_METHOD_FLASHTOOL,
+        )
 
     return candidates
 
@@ -508,7 +569,14 @@ def _parse_dfu_util_flash_candidates(output: str) -> list[dict[str, str]]:
         if details:
             label = f"{label} ({', '.join(details)})"
 
-        _append_flash_device_candidate(candidates, seen_values, value, label)
+        _append_flash_device_candidate(
+            candidates,
+            seen_values,
+            value,
+            label,
+            transport="usb_id",
+            preferred_flash_method=_FLASH_METHOD_DFU_UTIL,
+        )
     return candidates
 
 
@@ -525,24 +593,145 @@ def _parse_lsusb_flash_candidates(output: str) -> list[dict[str, str]]:
 
         value = match.group(1).lower()
         description = match.group(2).strip()
-        if description and not _DFU_HINT_RE.search(description):
+        description_lower = description.lower()
+        is_rp2040_boot = _RP2_BOOT_HINT_RE.search(description) is not None
+        is_stm32_dfu = _STM32_DFU_HINT_RE.search(description_lower) is not None
+        if description and not (is_rp2040_boot or is_stm32_dfu or _DFU_HINT_RE.search(description)):
             continue
 
-        label = f"USB DFU candidate: {value}"
+        if is_rp2040_boot:
+            label = f"RP2040 bootloader: {value}"
+        elif is_stm32_dfu:
+            label = f"STM32 DFU device: {value}"
+        else:
+            label = f"USB DFU candidate: {value}"
         if description:
             label = f"{label} ({description})"
-        _append_flash_device_candidate(candidates, seen_values, value, label)
+        _append_flash_device_candidate(
+            candidates,
+            seen_values,
+            value,
+            label,
+            transport="usb_id",
+            preferred_flash_method=_FLASH_METHOD_MAKE_FLASH if is_rp2040_boot else _FLASH_METHOD_DFU_UTIL,
+        )
     return candidates
+
+
+def _dfu_candidates_from_lsusb() -> list[dict[str, str]]:
+    return [
+        candidate
+        for candidate in _parse_lsusb_flash_candidates(_run_optional_text_command(["lsusb"]))
+        if _RP2_BOOT_HINT_RE.search(candidate.get("label", "")) is None
+    ]
+
+
+def _rp2040_usb_flash_device_candidates() -> list[dict[str, str]]:
+    return [
+        candidate
+        for candidate in _parse_lsusb_flash_candidates(_run_optional_text_command(["lsusb"]))
+        if _RP2_BOOT_HINT_RE.search(candidate.get("label", "")) is not None
+    ]
 
 
 def _dfu_flash_device_candidates() -> list[dict[str, str]]:
     candidates = _parse_dfu_util_flash_candidates(_run_optional_text_command(["dfu-util", "-l"]))
     if candidates:
         return candidates
-    return _parse_lsusb_flash_candidates(_run_optional_text_command(["lsusb"]))
+    return _dfu_candidates_from_lsusb()
 
 
-def _flash_device_candidates(target: str, kconf) -> list[dict[str, str]]:
+def _katapult_flashtool_path(target: str, checkout_path: Path) -> Path | None:
+    normalized_target = _require_supported_target(target)
+    if normalized_target == "katapult":
+        candidate = checkout_path / "scripts" / "flashtool.py"
+        return candidate if candidate.is_file() else None
+
+    katapult_path, _ = resolve_flash_target_checkout("katapult")
+    if katapult_path is None:
+        return None
+    candidate = katapult_path / "scripts" / "flashtool.py"
+    return candidate if candidate.is_file() else None
+
+
+def _katapult_can_flash_device_candidates(script_path: Path, interface: str = "can0") -> list[dict[str, str]]:
+    output = _run_optional_text_command([
+        "python3",
+        str(script_path),
+        "-i",
+        interface,
+        "-q",
+    ], timeout=10)
+    if not output:
+        return []
+
+    candidates: list[dict[str, str]] = []
+    seen_values: set[str] = set()
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = _KATAPULT_QUERY_UUID_RE.search(line)
+        if match is None:
+            continue
+        uuid = match.group(1).lower()
+        application = (match.group(2) or "Katapult").strip()
+        label = f"CAN UUID: {uuid} ({interface}, {application})"
+        _append_flash_device_candidate(
+            candidates,
+            seen_values,
+            uuid,
+            label,
+            transport="can_uuid",
+            interface=interface,
+            preferred_flash_method=_FLASH_METHOD_FLASHTOOL,
+        )
+    return candidates
+
+
+def _preferred_flash_method_for_device(
+    flash_device: str,
+    method_candidates: list[dict[str, Any]],
+    device_candidates: list[dict[str, str]],
+) -> str:
+    resolved_device = flash_device.strip()
+    if not resolved_device or not method_candidates:
+        return ""
+
+    supported_methods = {candidate["value"] for candidate in method_candidates}
+    exact_candidate = next(
+        (candidate for candidate in device_candidates if candidate.get("value", "").strip() == resolved_device),
+        None,
+    )
+    if exact_candidate is not None:
+        preferred_method = str(exact_candidate.get("preferred_flash_method") or "").strip()
+        if preferred_method in supported_methods:
+            return preferred_method
+
+    if _parse_can_flash_device(resolved_device) is not None and _FLASH_METHOD_FLASHTOOL in supported_methods:
+        return _FLASH_METHOD_FLASHTOOL
+
+    if resolved_device.startswith("/dev/"):
+        if _FLASH_METHOD_FLASHTOOL in supported_methods:
+            return _FLASH_METHOD_FLASHTOOL
+        if _FLASH_METHOD_MAKE_FLASH in supported_methods:
+            return _FLASH_METHOD_MAKE_FLASH
+
+    if resolved_device == "first" and _FLASH_METHOD_MAKE_FLASH in supported_methods:
+        return _FLASH_METHOD_MAKE_FLASH
+
+    if _is_usb_id(resolved_device):
+        if _FLASH_METHOD_DFU_UTIL in supported_methods:
+            return _FLASH_METHOD_DFU_UTIL
+        if _FLASH_METHOD_MAKE_FLASH in supported_methods:
+            return _FLASH_METHOD_MAKE_FLASH
+
+    if _FLASH_METHOD_MAKE_FLASH in supported_methods:
+        return _FLASH_METHOD_MAKE_FLASH
+    return method_candidates[0]["value"]
+
+
+def _flash_device_candidates(target: str, kconf, katapult_script_path: Path | None) -> list[dict[str, str]]:
     normalized_target = _require_supported_target(target)
     machine_symbols = _enabled_machine_symbols(kconf)
     candidates: list[dict[str, str]] = []
@@ -554,15 +743,50 @@ def _flash_device_candidates(target: str, kconf) -> list[dict[str, str]]:
             seen_values,
             "first",
             "Auto-detect the first RP2040 mass-storage target",
+            transport="mass_storage",
         )
+        for candidate in _rp2040_usb_flash_device_candidates():
+            _append_flash_device_candidate(
+                candidates,
+                seen_values,
+                candidate["value"],
+                candidate["label"],
+                transport=candidate.get("transport") or "usb_id",
+                interface=candidate.get("interface"),
+            )
 
     if "MACH_STM32" in machine_symbols:
         for candidate in _dfu_flash_device_candidates():
-            _append_flash_device_candidate(candidates, seen_values, candidate["value"], candidate["label"])
+            _append_flash_device_candidate(
+                candidates,
+                seen_values,
+                candidate["value"],
+                candidate["label"],
+                transport=candidate.get("transport") or "usb_id",
+                interface=candidate.get("interface"),
+            )
+
+    if katapult_script_path is not None:
+        for candidate in _katapult_can_flash_device_candidates(katapult_script_path):
+            _append_flash_device_candidate(
+                candidates,
+                seen_values,
+                candidate["value"],
+                candidate["label"],
+                transport=candidate.get("transport") or "can_uuid",
+                interface=candidate.get("interface") or "can0",
+            )
 
     if machine_symbols & {"MACH_ATSAM", "MACH_ATSAMD", "MACH_AVR", "MACH_LPC176X", "MACH_STM32"}:
         for candidate in _serial_flash_device_candidates():
-            _append_flash_device_candidate(candidates, seen_values, candidate["value"], candidate["label"])
+            _append_flash_device_candidate(
+                candidates,
+                seen_values,
+                candidate["value"],
+                candidate["label"],
+                transport=candidate.get("transport") or "serial",
+                interface=candidate.get("interface"),
+            )
 
     return candidates
 
@@ -641,6 +865,124 @@ def _flash_capabilities(target: str, kconf) -> dict[str, Any]:
     return _katapult_flash_capabilities(kconf)
 
 
+def _dfu_util_flash_capabilities(kconf, device_candidates: list[dict[str, str]]) -> dict[str, Any]:
+    if _current_symbol_value(kconf, "MACH_STM32") != "y":
+        return {
+            "supported": False,
+            "reason": "dfu-util is only available for STM32 DFU targets.",
+            "device_required": True,
+            "device_placeholder": "USB VID:PID, e.g. 0483:df11",
+            "default_device": "",
+            "help": "Direct dfu-util flashing is only applicable to STM32 targets in DFU mode.",
+        }
+
+    default_device = _first_device_candidate(device_candidates, "usb_id")
+    return {
+        "supported": True,
+        "reason": None,
+        "device_required": True,
+        "device_placeholder": "USB VID:PID, e.g. 0483:df11",
+        "default_device": default_device,
+        "help": "Runs the resolved `dfu-util` command for the active target using the selected USB VID:PID.",
+    }
+
+
+def _flashtool_flash_capabilities(
+    kconf,
+    katapult_script_path: Path | None,
+    device_candidates: list[dict[str, str]],
+) -> dict[str, Any]:
+    supported_symbols = {"MACH_RPXXXX", "MACH_ATSAM", "MACH_ATSAMD", "MACH_LPC176X", "MACH_STM32"}
+    if katapult_script_path is None:
+        return {
+            "supported": False,
+            "reason": "Katapult is not installed on this SBC, so flashtool.py is unavailable.",
+            "device_required": True,
+            "device_placeholder": "/dev/serial/by-id/... or can0:<uuid>",
+            "default_device": "",
+            "help": "Install Katapult on this SBC to use flashtool.py flashing.",
+        }
+    if not (_enabled_machine_symbols(kconf) & supported_symbols):
+        return {
+            "supported": False,
+            "reason": "flashtool.py is intended for Katapult-capable USB serial or CAN workflows.",
+            "device_required": True,
+            "device_placeholder": "/dev/serial/by-id/... or can0:<uuid>",
+            "default_device": "",
+            "help": "Use flashtool.py with a serial device path or a CAN UUID on can0.",
+        }
+
+    default_device = _first_device_candidate(device_candidates, "can_uuid") or _first_device_candidate(device_candidates, "serial")
+    return {
+        "supported": True,
+        "reason": None,
+        "device_required": True,
+        "device_placeholder": "/dev/serial/by-id/... or can0:<uuid>",
+        "default_device": default_device,
+        "help": "Runs `python3 .../katapult/scripts/flashtool.py` with `-d` for serial devices or `-i can0 -u <uuid>` for CAN devices.",
+    }
+
+
+def _flash_method_candidates(
+    target: str,
+    kconf,
+    device_candidates: list[dict[str, str]],
+    katapult_script_path: Path | None,
+) -> list[dict[str, Any]]:
+    make_capabilities = _flash_capabilities(target, kconf)
+    dfu_capabilities = _dfu_util_flash_capabilities(kconf, device_candidates)
+    flashtool_capabilities = _flashtool_flash_capabilities(kconf, katapult_script_path, device_candidates)
+
+    candidates: list[dict[str, Any]] = []
+    if make_capabilities["supported"]:
+        candidates.append({
+            "value": _FLASH_METHOD_MAKE_FLASH,
+            "label": "make flash",
+            "description": "Use the target Makefile's configured flash workflow.",
+            **make_capabilities,
+        })
+    if dfu_capabilities["supported"]:
+        candidates.append({
+            "value": _FLASH_METHOD_DFU_UTIL,
+            "label": "dfu-util",
+            "description": "Run dfu-util directly for STM32 DFU targets.",
+            **dfu_capabilities,
+        })
+    if flashtool_capabilities["supported"]:
+        candidates.append({
+            "value": _FLASH_METHOD_FLASHTOOL,
+            "label": "flashtool.py",
+            "description": "Run Katapult's flashtool over serial or CAN.",
+            **flashtool_capabilities,
+        })
+    return candidates
+
+
+def _default_flash_method(method_candidates: list[dict[str, Any]], device_candidates: list[dict[str, str]]) -> str:
+    if not method_candidates:
+        return ""
+
+    for candidate in device_candidates:
+        preferred_method = _preferred_flash_method_for_device(
+            candidate.get("value", ""),
+            method_candidates,
+            device_candidates,
+        )
+        if preferred_method:
+            return preferred_method
+
+    values = {candidate["value"] for candidate in method_candidates}
+    if _FLASH_METHOD_MAKE_FLASH in values:
+        return _FLASH_METHOD_MAKE_FLASH
+    return method_candidates[0]["value"]
+
+
+def _flash_reason(method_candidates: list[dict[str, Any]], make_capabilities: dict[str, Any]) -> str | None:
+    if method_candidates:
+        return None
+    return make_capabilities.get("reason") or "No supported flash methods are available for the current target."
+
+
 def _empty_flash_target_state(target: str, requested_path: str | None, error: str | None) -> dict[str, Any]:
     normalized_target = _require_supported_target(target)
     return {
@@ -661,6 +1003,8 @@ def _empty_flash_target_state(target: str, requested_path: str | None, error: st
         "flash_device_placeholder": "",
         "default_flash_device": "",
         "flash_device_candidates": [],
+        "flash_method_candidates": [],
+        "default_flash_method": "",
         "flash_help": "",
     }
 
@@ -724,6 +1068,19 @@ def get_flash_target_state(
     issues = _apply_assignments_to_kconfig(kconfiglib, kconf, assignments or [])
     artifacts = list_flash_target_artifacts(normalized_target, resolved_path)
     flash_capabilities = _flash_capabilities(normalized_target, kconf)
+    katapult_script_path = _katapult_flashtool_path(normalized_target, resolved_path)
+    flash_device_candidates = _flash_device_candidates(normalized_target, kconf, katapult_script_path)
+    flash_method_candidates = _flash_method_candidates(
+        normalized_target,
+        kconf,
+        flash_device_candidates,
+        katapult_script_path,
+    )
+    default_flash_method = _default_flash_method(flash_method_candidates, flash_device_candidates)
+    default_method_state = next(
+        (candidate for candidate in flash_method_candidates if candidate["value"] == default_flash_method),
+        None,
+    )
 
     state = {
         "target": normalized_target,
@@ -737,13 +1094,15 @@ def get_flash_target_state(
         "fields": _serialize_kconfig_fields(kconfiglib, kconf),
         "artifacts": artifacts,
         "primary_artifact": pick_primary_flash_target_artifact(normalized_target, artifacts),
-        "flash_supported": flash_capabilities["supported"],
-        "flash_reason": flash_capabilities["reason"],
-        "flash_device_required": flash_capabilities["device_required"],
-        "flash_device_placeholder": flash_capabilities["device_placeholder"],
-        "default_flash_device": flash_capabilities["default_device"],
-        "flash_device_candidates": _flash_device_candidates(normalized_target, kconf),
-        "flash_help": flash_capabilities["help"],
+        "flash_supported": bool(flash_method_candidates),
+        "flash_reason": _flash_reason(flash_method_candidates, flash_capabilities),
+        "flash_device_required": bool(default_method_state and default_method_state["device_required"]),
+        "flash_device_placeholder": default_method_state["device_placeholder"] if default_method_state else "",
+        "default_flash_device": default_method_state["default_device"] if default_method_state else "",
+        "flash_device_candidates": flash_device_candidates,
+        "flash_method_candidates": flash_method_candidates,
+        "default_flash_method": default_flash_method,
+        "flash_help": default_method_state["help"] if default_method_state else flash_capabilities["help"],
     }
     if issues:
         state["error"] = "; ".join(issues)
@@ -795,6 +1154,7 @@ def _command_result(
     log: str,
     checkout_path: Path | str,
     flash_device: str | None = None,
+    flash_method: str | None = None,
 ) -> dict[str, Any]:
     normalized_target = _require_supported_target(target)
     path = Path(checkout_path)
@@ -810,7 +1170,78 @@ def _command_result(
         "artifacts": artifacts,
         "primary_artifact": pick_primary_flash_target_artifact(normalized_target, artifacts),
         "flash_device": flash_device or "",
+        "flash_method": flash_method or "",
     }
+
+
+def _build_artifact_path(target: str, checkout_path: Path) -> Path | None:
+    normalized_target = _require_supported_target(target)
+    artifacts = list_flash_target_artifacts(normalized_target, checkout_path)
+    for artifact in artifacts:
+        artifact_path = Path(artifact["path"])
+        if artifact_path.suffix.lower() == ".bin" and artifact_path.is_file():
+            return artifact_path
+    primary_artifact = pick_primary_flash_target_artifact(normalized_target, artifacts)
+    if primary_artifact is None:
+        return None
+    artifact_path = Path(primary_artifact["path"])
+    return artifact_path if artifact_path.is_file() else None
+
+
+def _resolve_dfu_util_flash_command(checkout_path: Path, flash_device: str) -> tuple[list[str] | None, str | None, str]:
+    preview_command = ["make", "-n", "flash", "NOSUDO=1", f"FLASH_DEVICE={flash_device}"]
+    try:
+        completed = subprocess.run(
+            preview_command,
+            cwd=checkout_path,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except FileNotFoundError:
+        return None, "The `make` command is not available on this SBC.", ""
+    except subprocess.TimeoutExpired:
+        return None, "Timed out while resolving the dfu-util flash command.", ""
+
+    log = _command_log(preview_command, completed)
+    if completed.returncode != 0:
+        return None, f"Unable to resolve a dfu-util flash command (exit code {completed.returncode}).", log
+
+    output = "\n".join(chunk for chunk in (completed.stdout, completed.stderr) if chunk)
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if "dfu-util" not in line:
+            continue
+        start = line.find("dfu-util")
+        if start < 0:
+            continue
+        try:
+            tokens = shlex.split(line[start:], posix=True)
+        except ValueError:
+            continue
+        if tokens and tokens[0] == "dfu-util":
+            return tokens, None, log
+
+    return None, "The current target does not resolve to a dfu-util flash command.", log
+
+
+def _run_direct_flash_commands(
+    target: str,
+    checkout_path: Path,
+    flash_command: list[str],
+    timeout: int = 900,
+) -> dict[str, Any]:
+    return _run_commands(
+        target,
+        checkout_path,
+        [
+            ["make", "olddefconfig"],
+            ["make", f"-j{max(1, os.cpu_count() or 1)}"],
+            flash_command,
+        ],
+        timeout=timeout,
+    )
 
 
 def _run_commands(target: str, checkout_path: Path, commands: list[list[str]], timeout: int) -> dict[str, Any]:
@@ -888,11 +1319,12 @@ def flash_flash_target(
     target: str,
     checkout_path: str | None = None,
     flash_device: str | None = None,
+    flash_method: str | None = None,
 ) -> dict[str, Any]:
     normalized_target = _require_supported_target(target)
     resolved_path, error = resolve_flash_target_checkout(normalized_target, checkout_path)
     if resolved_path is None:
-        return _command_result(normalized_target, False, error, "", checkout_path or ".", flash_device)
+        return _command_result(normalized_target, False, error, "", checkout_path or ".", flash_device, flash_method)
 
     state = get_flash_target_state(normalized_target, str(resolved_path))
     if not state["flash_supported"]:
@@ -903,10 +1335,35 @@ def flash_flash_target(
             "",
             resolved_path,
             flash_device,
+            flash_method,
         )
 
-    resolved_device = (flash_device or "").strip() or state.get("default_flash_device", "")
-    if state["flash_device_required"] and not resolved_device:
+    method_candidates_list = state.get("flash_method_candidates", [])
+    method_candidates = {
+        candidate["value"]: candidate
+        for candidate in method_candidates_list
+    }
+    initial_device = (flash_device or "").strip() or state.get("default_flash_device", "")
+    requested_method = (flash_method or "").strip()
+    resolved_method = requested_method or _preferred_flash_method_for_device(
+        initial_device,
+        method_candidates_list,
+        state.get("flash_device_candidates", []),
+    ) or state.get("default_flash_method", "")
+    method_state = method_candidates.get(resolved_method)
+    if method_state is None:
+        return _command_result(
+            normalized_target,
+            False,
+            "A supported flash method must be selected for the current target.",
+            "",
+            resolved_path,
+            flash_device,
+            flash_method,
+        )
+
+    resolved_device = (flash_device or "").strip() or method_state.get("default_device", "") or state.get("default_flash_device", "")
+    if method_state["device_required"] and not resolved_device:
         return _command_result(
             normalized_target,
             False,
@@ -914,22 +1371,105 @@ def flash_flash_target(
             "",
             resolved_path,
             flash_device,
+            resolved_method,
         )
 
-    flash_command = ["make", "flash", "NOSUDO=1"]
-    if resolved_device:
-        flash_command.append(f"FLASH_DEVICE={resolved_device}")
+    if resolved_method == _FLASH_METHOD_DFU_UTIL:
+        if not _is_usb_id(resolved_device):
+            return _command_result(
+                normalized_target,
+                False,
+                "dfu-util requires a USB VID:PID flash device such as 0483:df11.",
+                "",
+                resolved_path,
+                resolved_device,
+                resolved_method,
+            )
+        flash_command, resolve_error, resolve_log = _resolve_dfu_util_flash_command(resolved_path, resolved_device)
+        if flash_command is None:
+            return _command_result(
+                normalized_target,
+                False,
+                resolve_error,
+                resolve_log,
+                resolved_path,
+                resolved_device,
+                resolved_method,
+            )
+        result = _run_direct_flash_commands(normalized_target, resolved_path, flash_command)
+    elif resolved_method == _FLASH_METHOD_FLASHTOOL:
+        katapult_script_path = _katapult_flashtool_path(normalized_target, resolved_path)
+        if katapult_script_path is None:
+            return _command_result(
+                normalized_target,
+                False,
+                "Katapult is not installed on this SBC, so flashtool.py is unavailable.",
+                "",
+                resolved_path,
+                resolved_device,
+                resolved_method,
+            )
+        artifact_path = _build_artifact_path(normalized_target, resolved_path)
+        if artifact_path is None:
+            return _command_result(
+                normalized_target,
+                False,
+                "No flashable build artifact was found. Build the target before flashing with flashtool.py.",
+                "",
+                resolved_path,
+                resolved_device,
+                resolved_method,
+            )
+        can_device = _parse_can_flash_device(resolved_device)
+        if can_device is not None:
+            interface, uuid = can_device
+            flash_command = [
+                "python3",
+                str(katapult_script_path),
+                "-i",
+                interface,
+                "-f",
+                str(artifact_path),
+                "-u",
+                uuid,
+            ]
+        elif _is_usb_id(resolved_device):
+            return _command_result(
+                normalized_target,
+                False,
+                "flashtool.py requires a serial device path or a CAN UUID, not a USB VID:PID.",
+                "",
+                resolved_path,
+                resolved_device,
+                resolved_method,
+            )
+        else:
+            flash_command = [
+                "python3",
+                str(katapult_script_path),
+                "-d",
+                resolved_device,
+                "-f",
+                str(artifact_path),
+            ]
+        result = _run_direct_flash_commands(normalized_target, resolved_path, flash_command)
+    else:
+        flash_command = ["make", "flash", "NOSUDO=1"]
+        if resolved_device:
+            flash_command.append(f"FLASH_DEVICE={resolved_device}")
 
-    result = _run_commands(
-        normalized_target,
-        resolved_path,
-        [
-            ["make", "olddefconfig"],
-            flash_command,
-        ],
-        timeout=900,
-    )
+        result = _run_commands(
+            normalized_target,
+            resolved_path,
+            [
+                ["make", "olddefconfig"],
+                flash_command,
+            ],
+            timeout=900,
+        )
+
     result["flash_device"] = resolved_device
+    result["flash_method"] = resolved_method
     return result
 
 
@@ -946,3 +1486,21 @@ def get_flash_target_artifact_path(target: str, filename: str, checkout_path: st
     if not _is_flash_target_artifact(normalized_target, artifact_path):
         raise FileNotFoundError(f"Artifact not found: {filename}")
     return artifact_path
+
+
+def delete_flash_target_artifact(target: str, filename: str, checkout_path: str | None = None) -> dict[str, Any]:
+    normalized_target = _require_supported_target(target)
+    artifact_path = get_flash_target_artifact_path(normalized_target, filename, checkout_path)
+    checkout_root = artifact_path.parent.parent
+    artifact_path.unlink()
+    artifacts = list_flash_target_artifacts(normalized_target, checkout_root)
+    return {
+        "status": "deleted",
+        "target": normalized_target,
+        "display_name": _target_display_name(normalized_target),
+        "filename": filename,
+        "checkout_path": str(checkout_root),
+        "out_path": str(checkout_root / "out"),
+        "artifacts": artifacts,
+        "primary_artifact": pick_primary_flash_target_artifact(normalized_target, artifacts),
+    }

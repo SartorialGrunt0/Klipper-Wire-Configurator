@@ -19,3 +19,8 @@ export interface LmStudioContextStatus {
   usedTokens: number | null;
   utilization: number | null;
 }
+
+export interface PendingAiChatRequest {
+  id: string;
+  prompt: string;
+}

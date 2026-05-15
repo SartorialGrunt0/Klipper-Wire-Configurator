@@ -61,8 +61,12 @@ def build_klipper_firmware(klipper_path: str | None = None) -> dict[str, Any]:
     return _legacy_result_keys(build_flash_target("klipper", klipper_path))
 
 
-def flash_klipper_firmware(klipper_path: str | None = None, flash_device: str | None = None) -> dict[str, Any]:
-    return _legacy_result_keys(flash_flash_target("klipper", klipper_path, flash_device))
+def flash_klipper_firmware(
+    klipper_path: str | None = None,
+    flash_device: str | None = None,
+    flash_method: str | None = None,
+) -> dict[str, Any]:
+    return _legacy_result_keys(flash_flash_target("klipper", klipper_path, flash_device, flash_method))
 
 
 def get_klipper_firmware_artifact_path(filename: str, klipper_path: str | None = None) -> Path:

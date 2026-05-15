@@ -7,6 +7,8 @@ import type { ConfigFile } from '../../types/config';
 
 interface ApplyDialogProps {
   onClose: () => void;
+  canAnalyzeWithAi?: boolean;
+  onAnalyzeWithAi?: (prompt: string) => void;
 }
 
 interface DiffLine {
@@ -34,7 +36,141 @@ async function exportConfigText(cf: ConfigFile): Promise<string> {
   return api.exportConfig(cf);
 }
 
-export default function ApplyDialog({ onClose }: ApplyDialogProps) {
+const ERROR_SECTION_RE = /section ['"]([^'"]+)['"]/i;
+const AI_CONTEXT_CHAR_LIMIT = 40_000;
+
+function truncateAiContext(content: string, limit = AI_CONTEXT_CHAR_LIMIT): string {
+  if (content.length <= limit) {
+    return content;
+  }
+
+  return `${content.slice(0, limit)}\n\n# Context truncated after ${limit} characters.`;
+}
+
+function normalizeSectionHeader(value: string): string {
+  return value
+    .trim()
+    .replace(/^\[/, '')
+    .replace(/\]$/, '')
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+}
+
+function findPrinterConfigFilename(filenames: string[]): string | null {
+  return filenames.find((filename) => filename.toLowerCase() === 'printer.cfg')
+    ?? filenames.find((filename) => filename.toLowerCase().endsWith('/printer.cfg'))
+    ?? null;
+}
+
+function extractSectionNameFromRestartFailure(restartMessage: string, restartErrors: string[]): string | null {
+  for (const candidate of [restartMessage, ...restartErrors]) {
+    const match = ERROR_SECTION_RE.exec(candidate);
+    if (match?.[1]) {
+      return match[1].trim();
+    }
+  }
+
+  return null;
+}
+
+function findSectionLocation(
+  configFiles: Record<string, ConfigFile>,
+  sectionName: string,
+): { filename: string; sectionIndex: number } | null {
+  const normalizedTarget = normalizeSectionHeader(sectionName);
+
+  for (const [filename, configFile] of Object.entries(configFiles)) {
+    for (let sectionIndex = 0; sectionIndex < configFile.sections.length; sectionIndex += 1) {
+      const section = configFile.sections[sectionIndex];
+      const normalizedCandidates = [
+        section.full_header,
+        `[${section.full_header}]`,
+        section.section_name ? `${section.section_type} ${section.section_name}` : section.section_type,
+      ].map(normalizeSectionHeader);
+
+      if (normalizedCandidates.includes(normalizedTarget)) {
+        return { filename, sectionIndex };
+      }
+    }
+  }
+
+  return null;
+}
+
+function extractSectionSnippet(fileText: string, configFile: ConfigFile, sectionIndex: number): string | null {
+  const section = configFile.sections[sectionIndex];
+  if (!section) {
+    return null;
+  }
+
+  const lines = fileText.split(/\r?\n/);
+  const startLine = Math.max(section.line_number - 1, 0);
+  const nextSection = configFile.sections[sectionIndex + 1];
+  const endLine = nextSection
+    ? Math.max(nextSection.line_number - 1, startLine + 1)
+    : lines.length;
+  const snippet = lines.slice(startLine, endLine).join('\n').trim();
+
+  return snippet || null;
+}
+
+function buildRestartAnalysisPrompt(args: {
+  restartMessage: string;
+  restartErrors: string[];
+  logPath: string | null;
+  logExcerpt: string;
+  printerConfigFilename: string | null;
+  printerConfigText: string | null;
+  sectionName: string | null;
+  sectionFilename: string | null;
+  sectionText: string | null;
+}): string {
+  const sections: string[] = [
+    'A Klipper FIRMWARE_RESTART failed immediately after saving the current config. Diagnose the root cause and provide the minimal config fix.',
+    'Return only the changed Klipper sections inside fenced cfg code blocks. If the fix belongs in a file other than printer.cfg, start that cfg block with a first comment line exactly like "# file: <filename>". After the cfg block, briefly explain the fix.',
+    `Restart result:\n${args.restartMessage}`,
+  ];
+
+  if (args.restartErrors.length > 0) {
+    sections.push([
+      'Recent Klipper error lines:',
+      '```text',
+      args.restartErrors.join('\n'),
+      '```',
+    ].join('\n'));
+  }
+
+  if (args.logExcerpt.trim()) {
+    sections.push([
+      `Relevant klippy.log excerpt${args.logPath ? ` from ${args.logPath}` : ''}:`,
+      '```text',
+      args.logExcerpt,
+      '```',
+    ].join('\n'));
+  }
+
+  if (args.printerConfigFilename && args.printerConfigText) {
+    sections.push([
+      `Current ${args.printerConfigFilename}:`,
+      '```cfg',
+      truncateAiContext(args.printerConfigText),
+      '```',
+    ].join('\n'));
+  }
+
+  if (args.sectionName && args.sectionText) {
+    sections.push([
+      `Config section mentioned by the error${args.sectionFilename ? ` in ${args.sectionFilename}` : ''}:`,
+      '```cfg',
+      args.sectionText,
+      '```',
+    ].join('\n'));
+  }
+
+  return sections.join('\n\n');
+}
+
+export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnalyzeWithAi }: ApplyDialogProps) {
   const storeSnapshot = useRef(useConfigStore.getState());
   const { configFiles, originalTexts } = storeSnapshot.current;
   const { configPath } = useNativeStore();
@@ -48,6 +184,7 @@ export default function ApplyDialog({ onClose }: ApplyDialogProps) {
   const [restartMessage, setRestartMessage] = useState('');
   const [restartErrors, setRestartErrors] = useState<string[]>([]);
   const [restartLogPath, setRestartLogPath] = useState<string | null>(null);
+  const [aiAnalyzeLoading, setAiAnalyzeLoading] = useState(false);
 
   // Diff state
   const [currentTexts, setCurrentTexts] = useState<Record<string, string>>({});
@@ -171,6 +308,7 @@ export default function ApplyDialog({ onClose }: ApplyDialogProps) {
   const handleFirmwareRestart = useCallback(async () => {
     setRestartErrors([]);
     setRestartLogPath(null);
+    setAiAnalyzeLoading(false);
     setRestartStatus('restarting');
     setRestartMessage('Sending FIRMWARE_RESTART to Klipper...');
     try {
@@ -193,6 +331,73 @@ export default function ApplyDialog({ onClose }: ApplyDialogProps) {
       setRestartMessage(err instanceof Error ? err.message : 'Firmware restart failed');
     }
   }, [pollKlipperStatusAfterRestart]);
+
+  const handleAiAnalyze = useCallback(async () => {
+    if (!canAnalyzeWithAi || !onAnalyzeWithAi) {
+      return;
+    }
+
+    setAiAnalyzeLoading(true);
+    try {
+      const readConfigText = async (filename: string | null): Promise<string | null> => {
+        if (!filename) {
+          return null;
+        }
+
+        const existingText = currentTexts[filename];
+        if (typeof existingText === 'string') {
+          return existingText;
+        }
+
+        const configFile = configFiles[filename];
+        if (!configFile) {
+          return null;
+        }
+
+        return exportConfigText(configFile);
+      };
+
+      const sectionName = extractSectionNameFromRestartFailure(restartMessage, restartErrors);
+      const printerConfigFilename = findPrinterConfigFilename(filenames);
+      const printerConfigText = await readConfigText(printerConfigFilename);
+      const sectionLocation = sectionName ? findSectionLocation(configFiles, sectionName) : null;
+      const sectionFile = sectionLocation ? configFiles[sectionLocation.filename] : null;
+      const sectionFileText = sectionLocation ? await readConfigText(sectionLocation.filename) : null;
+      const sectionText = sectionLocation && sectionFile && sectionFileText
+        ? extractSectionSnippet(sectionFileText, sectionFile, sectionLocation.sectionIndex)
+        : null;
+
+      let logExcerpt = restartErrors.join('\n');
+      let logPath = restartLogPath;
+      try {
+        const excerptResult = await api.getKlippyLogExcerpt(
+          sectionName ?? undefined,
+          [restartMessage, ...restartErrors].filter(Boolean).join('\n'),
+          20,
+        );
+        if (excerptResult.excerpt.trim()) {
+          logExcerpt = excerptResult.excerpt;
+          logPath = excerptResult.log_path;
+        }
+      } catch {
+        // Fall back to the already-fetched recent error lines.
+      }
+
+      onAnalyzeWithAi(buildRestartAnalysisPrompt({
+        restartMessage,
+        restartErrors,
+        logPath,
+        logExcerpt,
+        printerConfigFilename,
+        printerConfigText,
+        sectionName,
+        sectionFilename: sectionLocation?.filename ?? null,
+        sectionText,
+      }));
+    } finally {
+      setAiAnalyzeLoading(false);
+    }
+  }, [canAnalyzeWithAi, configFiles, currentTexts, filenames, onAnalyzeWithAi, restartErrors, restartLogPath, restartMessage]);
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
@@ -385,6 +590,19 @@ export default function ApplyDialog({ onClose }: ApplyDialogProps) {
             >
               {status === 'exporting' ? 'Exporting...' : status === 'applying' ? 'Writing...' : 'Save Changes'}
             </button>
+          )}
+          {status === 'success' && (
+            canAnalyzeWithAi && restartStatus === 'error' && (
+              <button
+                onClick={() => {
+                  void handleAiAnalyze();
+                }}
+                disabled={aiAnalyzeLoading}
+                className="px-4 py-1.5 rounded-md text-xs font-medium bg-[var(--color-accent)] text-white hover:opacity-90 transition-opacity disabled:opacity-50"
+              >
+                {aiAnalyzeLoading ? 'Analyzing...' : 'AI Analyze'}
+              </button>
+            )
           )}
           {status === 'success' && (
             <button

@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, type ComponentPropsWithoutRef } from 'react';
+import React, { useState, useRef, useEffect, useCallback, type ComponentPropsWithoutRef } from 'react';
 import KeyboardArrowDownRounded from '@mui/icons-material/KeyboardArrowDownRounded';
 import UploadFileRounded from '@mui/icons-material/UploadFileRounded';
 import ReactMarkdown from 'react-markdown';
@@ -11,7 +11,7 @@ import AiDraftPreviewDialog from './AiDraftPreviewDialog';
 import { mergeAssistantSectionsIntoConfig, type AssistantDraftChange } from '../../utils/assistantDraftMerge';
 import { normalizeDiffText } from '../../utils/configDiff';
 import { buildProjectGraph } from '../../utils/graphBuilder';
-import type { LmStudioContextStatus, LmStudioMcpStatus } from '../../types/ai';
+import type { LmStudioContextStatus, LmStudioMcpStatus, PendingAiChatRequest } from '../../types/ai';
 import type { ConfigFile, ConfigSection, ValidationError, ValidationResult } from '../../types/config';
 
 interface ProviderInfo {
@@ -502,6 +502,8 @@ function buildAutoLoadedKlipperDocMessage(documents: api.KlipperDocResponse[]): 
 interface ChatDialogProps {
   open: boolean;
   onClose: () => void;
+  pendingRequest?: PendingAiChatRequest | null;
+  onPendingRequestHandled?: () => void;
 }
 
 interface AssistantDraftFilePreview {
@@ -686,7 +688,12 @@ function buildAssistantDraftValidationErrorMessage(
   return `AI draft failed validation after ${attempts} ${attemptLabel}.\n${formattedIssues}`;
 }
 
-const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
+const ChatDialog: React.FC<ChatDialogProps> = ({
+  open,
+  onClose,
+  pendingRequest = null,
+  onPendingRequestHandled,
+}) => {
   const { settings, setSettings, isConfigured, messages, setMessages, clearMessages } = useAiStore();
   const {
     configFiles,
@@ -892,6 +899,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const includeFilesMenuRef = useRef<HTMLDivElement>(null);
   const assistantDraftPreviewRequestRef = useRef(0);
+  const handledPendingRequestIdRef = useRef<string | null>(null);
 
   const loadedConfigFilenames = Object.keys(configFiles);
 
@@ -1461,11 +1469,14 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
     }
   };
 
-  const handleSend = async () => {
-    if (!input.trim() || loading) return;
+  const submitMessage = useCallback(async (messageText: string) => {
+    const trimmedMessage = messageText.trim();
+    if (!trimmedMessage || loading) {
+      return;
+    }
 
     const previousMessages = messages;
-    const userMsg: ChatMessage = { role: 'user', content: input.trim() };
+    const userMsg: ChatMessage = { role: 'user', content: trimmedMessage };
     const newMessages = [...previousMessages, userMsg];
     setMessages(newMessages);
     setInput('');
@@ -1604,7 +1615,44 @@ const ChatDialog: React.FC<ChatDialogProps> = ({ open, onClose }) => {
     } finally {
       setLoading(false);
     }
+  }, [
+    activeFile,
+    attachedConfigFiles,
+    clearMessages,
+    configFiles,
+    editApiKey,
+    editApiProvider,
+    editLmStudioMcpPluginId,
+    editModel,
+    getAssistantDraftValidationOutcome,
+    getConfigContexts,
+    inputRef,
+    loadedConfigFilenames,
+    loading,
+    messages,
+    requestAssistantMessage,
+    resolvedEditApiUrl,
+    selectedConfigContextFiles,
+    setMessages,
+  ]);
+
+  const handleSend = () => {
+    void submitMessage(input);
   };
+
+  useEffect(() => {
+    if (!open || !pendingRequest || loading || !isConfigured()) {
+      return;
+    }
+
+    if (handledPendingRequestIdRef.current === pendingRequest.id) {
+      return;
+    }
+
+    handledPendingRequestIdRef.current = pendingRequest.id;
+    onPendingRequestHandled?.();
+    void submitMessage(pendingRequest.prompt);
+  }, [isConfigured, loading, onPendingRequestHandled, open, pendingRequest, submitMessage]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
