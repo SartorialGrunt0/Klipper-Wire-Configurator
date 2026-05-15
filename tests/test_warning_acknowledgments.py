@@ -163,6 +163,94 @@ def test_temperature_sensor_common_spi_params_are_valid():
     assert not result.has_errors
 
 
+def test_mcu_baud_is_invalid_with_canbus_uuid():
+    result = _validate(
+        '[mcu EBBCan]\n'
+        'canbus_uuid: abc123\n'
+        'baud: 250000\n'
+    )
+
+    assert any(
+        error.param == 'baud'
+        and "Cannot specify 'baud' when 'canbus_uuid' is set" in error.message
+        for error in result.errors
+    )
+
+
+def test_temperature_host_sensor_type_must_be_unique():
+    result = _validate(
+        '[temperature_sensor host_cpu]\n'
+        'sensor_type: temperature_host\n\n'
+        '[temperature_sensor host_soc]\n'
+        'sensor_type: temperature_host\n'
+    )
+
+    assert any(
+        error.param == 'sensor_type'
+        and "Only one [temperature_sensor] may use 'temperature_host'" in error.message
+        for error in result.errors
+    )
+
+
+def test_temperature_mcu_sensor_type_must_be_unique_per_mcu():
+    result = _validate(
+        '[temperature_sensor main_mcu_1]\n'
+        'sensor_type: temperature_mcu\n\n'
+        '[temperature_sensor main_mcu_2]\n'
+        'sensor_type: temperature_mcu\n'
+    )
+
+    assert any(
+        error.param == 'sensor_type'
+        and "Only one [temperature_sensor] may use 'temperature_mcu' for MCU 'mcu'" in error.message
+        for error in result.errors
+    )
+
+
+def test_temperature_mcu_sensor_type_allows_distinct_target_mcus():
+    result = _validate(
+        '[mcu]\n'
+        'serial: /dev/ttyACM0\n\n'
+        '[mcu toolhead]\n'
+        'canbus_uuid: abc123\n\n'
+        '[temperature_sensor main_mcu]\n'
+        'sensor_type: temperature_mcu\n\n'
+        '[temperature_sensor toolhead_mcu]\n'
+        'sensor_type: temperature_mcu\n'
+        'sensor_mcu: toolhead\n'
+    )
+
+    assert not any(
+        "Only one [temperature_sensor] may use 'temperature_mcu'" in error.message
+        for error in result.errors
+    )
+
+
+def test_temperature_host_sensor_type_must_be_unique_across_active_project_files():
+    results = _validate_project({
+        'printer.cfg': (
+            '[include extras.cfg]\n\n'
+            '[temperature_sensor host_cpu]\n'
+            'sensor_type: temperature_host\n'
+        ),
+        'extras.cfg': (
+            '[temperature_sensor host_soc]\n'
+            'sensor_type: temperature_host\n'
+        ),
+    })
+
+    assert any(
+        error.param == 'sensor_type'
+        and "Only one [temperature_sensor] may use 'temperature_host'" in error.message
+        for error in results['printer.cfg'].errors
+    )
+    assert any(
+        error.param == 'sensor_type'
+        and "Only one [temperature_sensor] may use 'temperature_host'" in error.message
+        for error in results['extras.cfg'].errors
+    )
+
+
 def test_adc_scaled_pins_are_valid():
     result = _validate('[adc_scaled duet]\nvref_pin: gpio1\nvssa_pin: gpio2\n')
     assert not result.has_warnings

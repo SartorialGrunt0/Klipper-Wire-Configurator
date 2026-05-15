@@ -53,6 +53,16 @@ const FEATURE_TYPES = [
   { group: 'gcode', label: 'G-Code Features', types: ['virtual_sdcard', 'pause_resume', 'firmware_retraction', 'force_move', 'idle_timeout', 'gcode_macro', 'delayed_gcode', 'gcode_arcs', 'respond', 'exclude_object', 'save_variables'] },
 ];
 
+const TEMPLATE_CATEGORIES = new Set<ExampleConfig['category']>(['generic', 'example', 'sample', 'kit']);
+
+function templateMatchesHardwareType(template: ExampleConfig, hwType: HardwareType): boolean {
+  if (template.board_type) {
+    return template.board_type === hwType;
+  }
+
+  return TEMPLATE_CATEGORIES.has(template.category);
+}
+
 function detectCommunicationType(mcuSection?: ConfigSection): CommunicationType {
   if (!mcuSection) return 'usb';
 
@@ -129,7 +139,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
   );
 
   // Board types that support template selection
-  const TEMPLATE_TYPES = new Set<HardwareType>(['mainboard', 'toolhead', 'expander']);
+  const TEMPLATE_TYPES = new Set<HardwareType>(['mainboard', 'toolhead', 'expander', 'probe', 'accelerometer', 'other']);
 
   // Load templates when search changes and picker is open
   useEffect(() => {
@@ -141,9 +151,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
           // Filter to generic/board configs (not printer-specific ones)
           const filtered = (res as { examples?: ExampleConfig[]; results?: ExampleConfig[] }).results
             || (res as { examples: ExampleConfig[] }).examples || [];
-          setTemplates(filtered.filter((e) =>
-            e.category === 'generic' || e.category === 'example' || e.category === 'sample' || e.category === 'kit'
-          ));
+          setTemplates(filtered.filter((template) => templateMatchesHardwareType(template, hwPickerStep.hwType)));
         })
         .catch(() => setTemplates([]));
     }, 200);
@@ -517,7 +525,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
                 </label>
                 <input
                   type="text"
-                  placeholder="Search board templates..."
+                  placeholder="Search reference templates..."
                   value={templateSearch}
                   onChange={(e) => setTemplateSearch(e.target.value)}
                   className="w-full px-3 py-2 rounded-lg text-sm bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)]"

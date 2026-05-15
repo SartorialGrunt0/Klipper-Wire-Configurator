@@ -89,6 +89,14 @@ REQUIREMENT_COMPONENT_GROUPS: dict[str, set[str]] = {
 }
 
 
+@dataclass(frozen=True)
+class SpecialTemperatureSensorUse:
+    filename: str
+    section: ConfigSection
+    sensor_type: str
+    sensor_target: str
+
+
 def _basename(filename: str) -> str:
     return filename.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
 
@@ -163,6 +171,132 @@ def _is_suppressed_for_validation(section: ConfigSection, category: str | None) 
         return True
     real_params = [p for p in section.params if p.key != "_comment_"]
     return bool(real_params) and all(p.is_commented_out for p in real_params)
+
+
+def _collect_special_temperature_sensor_uses(
+    configs: dict[str, ConfigFile],
+    *,
+    active_files: set[str] | None = None,
+) -> list[SpecialTemperatureSensorUse]:
+    uses: list[SpecialTemperatureSensorUse] = []
+
+    for filename, config in configs.items():
+        if active_files is not None and filename not in active_files:
+            continue
+
+        for section in config.sections:
+            if section.section_type != "temperature_sensor" or section.is_commented_out:
+                continue
+
+            sec_def = get_section_def(section.section_type)
+            if _is_suppressed_for_validation(section, sec_def.category if sec_def else None):
+                continue
+
+            sensor_type = section.get_value("sensor_type").strip()
+            if sensor_type == "temperature_host":
+                uses.append(SpecialTemperatureSensorUse(
+                    filename=filename,
+                    section=section,
+                    sensor_type=sensor_type,
+                    sensor_target="host",
+                ))
+            elif sensor_type == "temperature_mcu":
+                uses.append(SpecialTemperatureSensorUse(
+                    filename=filename,
+                    section=section,
+                    sensor_type=sensor_type,
+                    sensor_target=section.get_value("sensor_mcu", "mcu").strip() or "mcu",
+                ))
+
+    return uses
+
+
+def _format_special_temperature_sensor_conflicts(
+    uses: list[SpecialTemperatureSensorUse],
+    current: SpecialTemperatureSensorUse,
+) -> str:
+    multi_file = len({use.filename for use in uses}) > 1
+    references: list[str] = []
+
+    for use in uses:
+        if (
+            use.filename == current.filename
+            and use.section.full_header == current.section.full_header
+            and use.section.line_number == current.section.line_number
+        ):
+            continue
+
+        if multi_file:
+            references.append(f"{use.filename}:[{use.section.full_header}]")
+        else:
+            references.append(f"[{use.section.full_header}]")
+
+    return ", ".join(references)
+
+
+def _append_special_temperature_sensor_errors(
+    results_by_file: dict[str, ValidationResult],
+    uses: list[SpecialTemperatureSensorUse],
+    *,
+    require_multiple_files: bool = False,
+):
+    host_uses = [use for use in uses if use.sensor_type == "temperature_host"]
+    if len(host_uses) > 1 and (not require_multiple_files or len({use.filename for use in host_uses}) > 1):
+        for use in host_uses:
+            message = "Only one [temperature_sensor] may use 'temperature_host'."
+            conflicts = _format_special_temperature_sensor_conflicts(host_uses, use)
+            if conflicts:
+                message += f" Also defined in: {conflicts}."
+
+            result = results_by_file[use.filename]
+            if not any(
+                error.severity == "error"
+                and error.section == use.section.full_header
+                and error.param == "sensor_type"
+                and error.message == message
+                for error in result.errors
+            ):
+                result.errors.append(ValidationError(
+                    severity="error",
+                    section=use.section.full_header,
+                    param="sensor_type",
+                    message=message,
+                    line_number=use.section.line_number,
+                ))
+
+    mcu_uses_by_target: dict[str, list[SpecialTemperatureSensorUse]] = {}
+    for use in uses:
+        if use.sensor_type != "temperature_mcu":
+            continue
+        mcu_uses_by_target.setdefault(use.sensor_target, []).append(use)
+
+    for sensor_target, target_uses in mcu_uses_by_target.items():
+        if len(target_uses) <= 1:
+            continue
+        if require_multiple_files and len({use.filename for use in target_uses}) <= 1:
+            continue
+
+        for use in target_uses:
+            message = f"Only one [temperature_sensor] may use 'temperature_mcu' for MCU '{sensor_target}'."
+            conflicts = _format_special_temperature_sensor_conflicts(target_uses, use)
+            if conflicts:
+                message += f" Also defined in: {conflicts}."
+
+            result = results_by_file[use.filename]
+            if not any(
+                error.severity == "error"
+                and error.section == use.section.full_header
+                and error.param == "sensor_type"
+                and error.message == message
+                for error in result.errors
+            ):
+                result.errors.append(ValidationError(
+                    severity="error",
+                    section=use.section.full_header,
+                    param="sensor_type",
+                    message=message,
+                    line_number=use.section.line_number,
+                ))
 
 
 def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> ValidationResult:
@@ -256,6 +390,7 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
         # MCU-specific: validate communication method (serial XOR canbus_uuid)
         if sec_type == "mcu":
             has_serial = "serial" in active_params
+            has_baud = "baud" in active_params
             has_canbus = "canbus_uuid" in active_params
             if has_serial and has_canbus:
                 result.errors.append(ValidationError(
@@ -271,6 +406,14 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
                     section=section.full_header,
                     param="serial",
                     message="MCU requires either 'serial' (USB/UART) or 'canbus_uuid' (CAN bus) to be set.",
+                    line_number=section.line_number,
+                ))
+            if has_canbus and has_baud:
+                result.errors.append(ValidationError(
+                    severity="error",
+                    section=section.full_header,
+                    param="baud",
+                    message="Cannot specify 'baud' when 'canbus_uuid' is set. Baud only applies to serial connections.",
                     line_number=section.line_number,
                 ))
 
@@ -322,6 +465,11 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
                     ))
 
     # Check for required sections
+    _append_special_temperature_sensor_errors(
+        {config.filename: result},
+        _collect_special_temperature_sensor_uses({config.filename: config}),
+    )
+
     _check_dependencies(
         config,
         defined_sections,
@@ -398,6 +546,12 @@ def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, Valida
                 message=message,
                 line_number=section.line_number,
             ))
+
+    _append_special_temperature_sensor_errors(
+        results,
+        _collect_special_temperature_sensor_uses(configs, active_files=active_files),
+        require_multiple_files=True,
+    )
 
     return results
 

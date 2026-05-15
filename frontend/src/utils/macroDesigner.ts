@@ -122,6 +122,15 @@ export function normalizeMacroGcodeForEditor(value: string): string {
   return normalized.startsWith('\n') ? normalized.slice(1) : normalized;
 }
 
+export function parseMacroGcodeFromEditorView(value: string): string {
+  return normalizeMacroGcodeForEditor(stripLeadingGcodeDirective(value));
+}
+
+export function formatMacroGcodeForEditorView(value: string): string {
+  const body = parseMacroGcodeFromEditorView(value).replace(/\n+$/, '');
+  return body ? `gcode:\n${body}` : 'gcode:\n';
+}
+
 export function normalizeMacroGcodeForConfig(value: string): string {
   const stripped = stripLeadingGcodeDirective(value).replace(/\r\n?/g, '\n');
   const trimmed = stripped.replace(/^\n+/, '').replace(/\n+$/, '');

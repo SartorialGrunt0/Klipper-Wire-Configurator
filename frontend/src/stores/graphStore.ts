@@ -123,6 +123,19 @@ const SELECTED_PARENT_Z_INDEX = 100;
 const CHILD_NODE_Z_INDEX = 200;
 /** Selected child cards stay above sibling cards and action overlays */
 const ACTIVE_CHILD_Z_INDEX = 300;
+/** Shared canvas snap size for manual placement and auto-arrange anchors */
+const GRID_SIZE = 20;
+
+function snapToGrid(value: number): number {
+  return Math.round(value / GRID_SIZE) * GRID_SIZE;
+}
+
+function normalizeAxisComponent(value: number): number {
+  if (Math.abs(value) < 1e-9) return 0;
+  if (Math.abs(value - 1) < 1e-9) return 1;
+  if (Math.abs(value + 1) < 1e-9) return -1;
+  return value;
+}
 
 function getNodeSlotHeight(node: AppNode, selectedId: string | null): number {
   if (node.type === 'group' && node.id === selectedId) {
@@ -2074,8 +2087,8 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       const radius = Math.max(minRadius, radiusFromCircum, 300);
 
       // Place center node
-      const cx = radius + maxNodeDim;
-      const cy = radius + maxNodeDim;
+      const cx = snapToGrid(radius + maxNodeDim);
+      const cy = snapToGrid(radius + maxNodeDim);
       const centerIdx = newNodes.findIndex((n) => n.id === centerNode.id);
       if (centerIdx >= 0) {
         newNodes[centerIdx] = {
@@ -2091,8 +2104,10 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       for (let i = 0; i < satellites.length; i++) {
         const sat = satellites[i];
         const angle = startAngle + i * angleStep;
-        const sx = cx + radius * Math.cos(angle) - nodeW(sat) / 2;
-        const sy = cy + radius * Math.sin(angle) - nodeH(sat) / 2;
+        const cos = normalizeAxisComponent(Math.cos(angle));
+        const sin = normalizeAxisComponent(Math.sin(angle));
+        const sx = cx + radius * cos - nodeW(sat) / 2;
+        const sy = cy + radius * sin - nodeH(sat) / 2;
 
         const idx = newNodes.findIndex((n) => n.id === sat.id);
         if (idx >= 0) {
