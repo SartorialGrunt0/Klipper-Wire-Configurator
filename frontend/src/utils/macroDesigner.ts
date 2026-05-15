@@ -378,6 +378,11 @@ export function createMachineProfile(
   const homeZ = asNumber(getParamValue(stepperZ, 'position_endstop'), minZ);
 
   const probeSection = sections.find((section) => ['probe', 'bltouch', 'smart_effector', 'probe_eddy_current'].includes(section.section_type));
+  const probeSpeed = Math.max(0.1, asNumber(getParamValue(probeSection, 'speed'), 5));
+  const configuredProbeLiftSpeed = asOptionalNumber(getParamValue(probeSection, 'lift_speed'));
+  const probeLiftSpeed = configuredProbeLiftSpeed !== null && configuredProbeLiftSpeed > 0
+    ? configuredProbeLiftSpeed
+    : probeSpeed;
   const extruder = sections.find((section) => section.section_type === 'extruder');
   const heaterBed = sections.find((section) => section.section_type === 'heater_bed');
   const bedMesh = sections.find((section) => section.section_type === 'bed_mesh');
@@ -447,6 +452,10 @@ export function createMachineProfile(
     hasProbe: Boolean(probeSection),
     probeOffsetX: asNumber(getParamValue(probeSection, 'x_offset'), 0),
     probeOffsetY: asNumber(getParamValue(probeSection, 'y_offset'), 0),
+    probeSamples: Math.max(1, Math.round(asNumber(getParamValue(probeSection, 'samples'), 1))),
+    probeSpeed,
+    probeLiftSpeed,
+    probeSampleRetractDist: Math.max(0, asNumber(getParamValue(probeSection, 'sample_retract_dist'), 2)),
     horizontalMoveZ: asNumber(getParamValue(bedMesh, 'horizontal_move_z'), 5),
     nozzleMaxTemp: asNumber(getParamValue(extruder, 'max_temp'), 350),
     bedMaxTemp: asNumber(getParamValue(heaterBed, 'max_temp'), 130),

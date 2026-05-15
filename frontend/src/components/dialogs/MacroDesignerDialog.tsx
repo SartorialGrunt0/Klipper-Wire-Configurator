@@ -9,6 +9,7 @@ import type {
   MacroRuntimeState,
   MacroSourceItem,
   SimulationStep,
+  SimulationTickResult,
 } from '../../types/macroDesigner';
 import {
   createMachineProfile,
@@ -113,6 +114,13 @@ interface SupportedGcodeCommand {
   description: string;
 }
 
+interface SimulationTimelineState {
+  states: MacroRuntimeState[];
+  logs: SimulationLogEntry[];
+  lastTraceByStep: Array<MovementTrace | null>;
+  zIndicatorByStep: Array<'up' | 'down' | null>;
+}
+
 const AXIS_LABELS: Record<number, { tl: string; tr: string; bl: string; br: string }> = {
   0:   { tl: '+Y', tr: '+X', bl: '-X', br: '-Y' },
   90:  { tl: '+X', tr: '-Y', bl: '+Y', br: '-X' },
@@ -140,12 +148,20 @@ const SUPPORTED_GCODE_COMMANDS: SupportedGcodeCommand[] = [
   { command: 'SET_LED', format: 'SET_LED LED=name RED=r GREEN=g BLUE=b', description: 'Set LED color.' },
   { command: 'SET_FAN_SPEED', format: 'SET_FAN_SPEED FAN=name SPEED=0..1', description: 'Set named fan speed.' },
   { command: 'SET_GCODE_OFFSET', format: 'SET_GCODE_OFFSET X= Y= Z=', description: 'Adjust gcode offset.' },
+  { command: 'BED_MESH_CALIBRATE', format: 'BED_MESH_CALIBRATE [PROFILE=name] [METHOD=automatic|manual|scan|rapid_scan]', description: 'Probe and activate a bed mesh using configured or overridden mesh bounds.' },
+  { command: 'BED_MESH_PROFILE', format: 'BED_MESH_PROFILE LOAD=name|SAVE=name|REMOVE=name', description: 'Load, save, or remove a saved bed mesh profile.' },
+  { command: 'BED_MESH_OUTPUT', format: 'BED_MESH_OUTPUT PGP=0|1', description: 'Print the current mesh and optionally the generated probe points.' },
+  { command: 'BED_MESH_MAP', format: 'BED_MESH_MAP', description: 'Serialize the current mesh in JSON form.' },
+  { command: 'BED_MESH_CLEAR', format: 'BED_MESH_CLEAR', description: 'Clear the active bed mesh and remove z adjustment.' },
+  { command: 'BED_MESH_OFFSET', format: 'BED_MESH_OFFSET X= Y= ZFADE=', description: 'Apply mesh lookup offsets for tool changes and fade compensation.' },
   { command: 'SAVE_GCODE_STATE', format: 'SAVE_GCODE_STATE NAME=name', description: 'Save current gcode state.' },
   { command: 'RESTORE_GCODE_STATE', format: 'RESTORE_GCODE_STATE NAME=name', description: 'Restore saved gcode state.' },
   { command: 'TURN_OFF_HEATERS', format: 'TURN_OFF_HEATERS', description: 'Disable all heaters.' },
   { command: 'FIRMWARE_RESTART', format: 'FIRMWARE_RESTART', description: 'Restart firmware.' },
   { command: 'RESTART', format: 'RESTART', description: 'Restart host and firmware.' },
 ];
+
+const PLAYBACK_ITEM_KEY = 'playback:loaded';
 
 function createGcodeMacroSection(item: MacroSourceItem): ConfigSection {
   const params = [];
@@ -257,6 +273,25 @@ function getStepSource(step: SimulationStep): { raw: string; sourceName: string;
   };
 }
 
+function createSimulationLogEntry(
+  step: SimulationStep,
+  currentStepIndex: number,
+  result: SimulationTickResult,
+): SimulationLogEntry | null {
+  if (step.kind === 'move' && /^(travel to|sample retract|sample return)/i.test(step.raw)) {
+    return null;
+  }
+  const source = getStepSource(step);
+  return {
+    id: `${currentStepIndex}-${source.sourceName}-${source.lineNumber}`,
+    raw: source.raw,
+    sourceName: source.sourceName,
+    lineNumber: source.lineNumber,
+    summary: result.eventSummary,
+    warnings: result.warnings,
+  };
+}
+
 export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProps) {
   const configFiles = useConfigStore((state) => state.configFiles);
   const activeFile = useConfigStore((state) => state.activeFile);
@@ -279,8 +314,10 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
   const setDockPosition = useMacroDesignerStore((state) => state.setDockPosition);
 
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [playbackItem, setPlaybackItem] = useState<MacroSourceItem | null>(null);
   const [search, setSearch] = useState('');
   const [showBuiltIns, setShowBuiltIns] = useState(true);
+  const [showTimeline, setShowTimeline] = useState(true);
   const [editMode, setEditMode] = useState(false);
   const [savedConfigFiles, setSavedConfigFiles] = useState<Record<string, ConfigFile>>({});
   const [workingCopies, setWorkingCopies] = useState<WorkingCopies>({});
@@ -320,7 +357,9 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
   const [selectedZoneId, setSelectedZoneId] = useState<string | null>(null);
   const [isDockSelected, setIsDockSelected] = useState(false);
   const [exactPositionDialog, setExactPositionDialog] = useState<ExactPositionDialogState | null>(null);
+  const playbackFileInputRef = useRef<HTMLInputElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
+  const executionOutputRef = useRef<HTMLDivElement>(null);
   const toolheadPositionRef = useRef<ToolheadPosition | null>(null);
   const zWheelStartRef = useRef<ToolheadPosition | null>(null);
   const zWheelTimeoutRef = useRef<number | null>(null);
@@ -386,7 +425,12 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
     ),
     [commandSearch],
   );
-  const allMacroItems = useMemo(() => [...draftItems, ...configMacroItems, ...builtInItems], [builtInItems, configMacroItems, draftItems]);
+  const allMacroItems = useMemo(
+    () => (playbackItem
+      ? [playbackItem, ...draftItems, ...configMacroItems, ...builtInItems]
+      : [...draftItems, ...configMacroItems, ...builtInItems]),
+    [builtInItems, configMacroItems, draftItems, playbackItem],
+  );
 
   const selectedItem = useMemo(() => {
     if (!selectedKey) return null;
@@ -430,8 +474,59 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
     if (!selectedItem) {
       return { steps: [], warnings: [] };
     }
-    return buildSimulationSteps(selectedItem, allMacroItems, machineProfile);
-  }, [allMacroItems, machineProfile, selectedItem]);
+    return buildSimulationSteps(selectedItem, allMacroItems, machineProfile, configFiles);
+  }, [allMacroItems, configFiles, machineProfile, selectedItem]);
+
+  const simulationTimeline = useMemo<SimulationTimelineState>(() => {
+    if (!selectedItem) {
+      return {
+        states: [],
+        logs: [],
+        lastTraceByStep: [null],
+        zIndicatorByStep: [null],
+      };
+    }
+
+    const initialRuntime = createInitialRuntimeState(machineProfile, selectedItem.title);
+    const states: MacroRuntimeState[] = [initialRuntime];
+    const logs: SimulationLogEntry[] = [];
+    const lastTraceByStep: Array<MovementTrace | null> = [null];
+    const zIndicatorByStep: Array<'up' | 'down' | null> = [null];
+    let currentRuntime = initialRuntime;
+    let lastTrace: MovementTrace | null = null;
+
+    simulationPlan.steps.forEach((step, index) => {
+      const result = executeSimulationStep(currentRuntime, step, machineProfile);
+      const xyMoved = Math.abs(result.nextState.x - currentRuntime.x) > 1e-6 || Math.abs(result.nextState.y - currentRuntime.y) > 1e-6;
+      const zDelta = result.nextState.z - currentRuntime.z;
+      const zIndicator: 'up' | 'down' | null = zDelta > 1e-6 ? 'up' : zDelta < -1e-6 ? 'down' : null;
+
+      if (xyMoved) {
+        lastTrace = {
+          fromX: currentRuntime.x,
+          fromY: currentRuntime.y,
+          toX: result.nextState.x,
+          toY: result.nextState.y,
+        };
+      }
+
+      const logEntry = createSimulationLogEntry(step, index, result);
+      if (logEntry) {
+        logs.push(logEntry);
+      }
+      currentRuntime = result.nextState;
+      states.push(currentRuntime);
+      lastTraceByStep.push(lastTrace);
+      zIndicatorByStep.push(zIndicator);
+    });
+
+    return {
+      states,
+      logs,
+      lastTraceByStep,
+      zIndicatorByStep,
+    };
+  }, [machineProfile, selectedItem, simulationPlan.steps]);
 
   const cancelAnimation = useCallback((skipCompletion = false) => {
     if (animFrameRef.current !== null) {
@@ -448,10 +543,35 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
     }
   }, []);
 
+  const syncSimulationPosition = useCallback((requestedStepIndex: number) => {
+    cancelAnimation(true);
+    setIsRunning(false);
+    setToolheadDragPos(null);
+    setSelectedLogWarning(null);
+
+    if (!selectedItem || simulationTimeline.states.length === 0) {
+      setRuntime(null);
+      setRuntimeHistory([]);
+      setSimulationLog([]);
+      setLastMovementTrace(null);
+      setSimulationZIndicator(null);
+      setStepIndex(0);
+      return;
+    }
+
+    const boundedStepIndex = Math.max(0, Math.min(simulationPlan.steps.length, Math.round(requestedStepIndex)));
+    setRuntime(simulationTimeline.states[boundedStepIndex] || simulationTimeline.states[0] || null);
+    setRuntimeHistory(simulationTimeline.states.slice(0, boundedStepIndex));
+    setSimulationLog(simulationTimeline.logs.slice(0, boundedStepIndex));
+    setLastMovementTrace(simulationTimeline.lastTraceByStep[boundedStepIndex] || null);
+    setSimulationZIndicator(simulationTimeline.zIndicatorByStep[boundedStepIndex] || null);
+    setStepIndex(boundedStepIndex);
+  }, [cancelAnimation, selectedItem, simulationPlan.steps.length, simulationTimeline]);
+
   useEffect(() => {
     cancelAnimation(true);
     setPlanWarnings(simulationPlan.warnings);
-    setRuntime(selectedItem ? createInitialRuntimeState(machineProfile, selectedItem.title) : null);
+    setRuntime(selectedItem ? (simulationTimeline.states[0] || createInitialRuntimeState(machineProfile, selectedItem.title)) : null);
     setRuntimeHistory([]);
     setSimulationLog([]);
     setLastMovementTrace(null);
@@ -459,7 +579,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
     setSelectedLogWarning(null);
     setStepIndex(0);
     setIsRunning(false);
-  }, [cancelAnimation, machineProfile, selectedItem, simulationPlan.warnings]);
+  }, [cancelAnimation, machineProfile, selectedItem, simulationPlan.warnings, simulationTimeline.states]);
 
   useEffect(() => {
     setToolheadDragPos(null);
@@ -481,6 +601,12 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
     if (!selectedZoneId || noGoZones.some((zone) => zone.id === selectedZoneId)) return;
     setSelectedZoneId(noGoZones[0]?.id || null);
   }, [noGoZones, selectedZoneId]);
+
+  useEffect(() => {
+    const output = executionOutputRef.current;
+    if (!output) return;
+    output.scrollTop = output.scrollHeight;
+  }, [simulationLog]);
 
   useEffect(() => {
     if (selectedZoneId) {
@@ -539,16 +665,8 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
     const result = executeSimulationStep(currentRuntime, step, machineProfile);
     const xyMoved = Math.abs(result.nextState.x - currentRuntime.x) > 1e-6 || Math.abs(result.nextState.y - currentRuntime.y) > 1e-6;
     const zDelta = result.nextState.z - currentRuntime.z;
-    const source = getStepSource(step);
     const zIndicator: 'up' | 'down' | null = zDelta > 1e-6 ? 'up' : zDelta < -1e-6 ? 'down' : null;
-    const logEntry: SimulationLogEntry = {
-      id: `${currentStepIndex}-${source.sourceName}-${source.lineNumber}`,
-      raw: source.raw,
-      sourceName: source.sourceName,
-      lineNumber: source.lineNumber,
-      summary: result.eventSummary,
-      warnings: result.warnings,
-    };
+    const logEntry = createSimulationLogEntry(step, currentStepIndex, result);
     const trace: MovementTrace | null = xyMoved ? {
       fromX: currentRuntime.x,
       fromY: currentRuntime.y,
@@ -559,7 +677,9 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
     const applyFinalState = () => {
       setRuntimeHistory((prev) => [...prev, currentRuntime]);
       setRuntime(result.nextState);
-      setSimulationLog((prev) => [...prev, logEntry]);
+      if (logEntry) {
+        setSimulationLog((prev) => [...prev, logEntry]);
+      }
       if (trace) setLastMovementTrace(trace);
       setSimulationZIndicator(zIndicator);
       setStepIndex(currentStepIndex + 1);
@@ -667,7 +787,13 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
   }, [existingTargetSection, selectedItem, selectedMacroSection]);
 
   const addToConfigurationState = useMemo(() => {
-    if (!selectedItem || selectedItem.source === 'builtin' || !targetFile || !selectedMacroSection) {
+    if (!selectedItem || !targetFile || !selectedMacroSection) {
+      return { disabled: true, label: 'Add to configuration' };
+    }
+    if (selectedItem.source === 'playback') {
+      return { disabled: true, label: 'Playback only' };
+    }
+    if (selectedItem.source === 'builtin') {
       return { disabled: true, label: 'Add to configuration' };
     }
     if (!existingTargetSection) {
@@ -713,6 +839,10 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
 
   const handleToggleEdit = () => {
     if (!selectedItem) return;
+    if (selectedItem.source === 'playback') {
+      setMessage('Loaded G-code files are playback-only. Copy them to a draft if you want to edit them.');
+      return;
+    }
     if (editMode) {
       handleSaveEdit();
       return;
@@ -847,10 +977,60 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
 
   const handleRename = (itemKey?: string) => {
     const key = itemKey || selectedKey;
-    if (key) {
-      setSelectedKey(key);
-      setEditMode(true);
+    if (!key) return;
+    const item = allMacroItems.find((entry) => entry.key === key);
+    if (item?.source === 'playback') {
+      setMessage('Loaded G-code files are playback-only.');
+      return;
     }
+    setSelectedKey(key);
+    setEditMode(true);
+  };
+
+  const handleLoadPlaybackClick = () => {
+    playbackFileInputRef.current?.click();
+  };
+
+  const handleLoadPlaybackFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const rawText = await file.text();
+      const normalizedText = rawText.replace(/\r\n?/g, '\n').trim();
+      if (!normalizedText) {
+        setMessage(`${file.name} is empty.`);
+        return;
+      }
+
+      setPlaybackItem({
+        key: PLAYBACK_ITEM_KEY,
+        source: 'playback',
+        title: file.name.replace(/\.[^.]+$/, '') || file.name,
+        renameExisting: '',
+        description: `Loaded from ${file.name} for playback only.`,
+        variables: '',
+        gcode: normalizedText,
+        readOnly: true,
+      });
+      setSelectedKey(PLAYBACK_ITEM_KEY);
+      setShowTimeline(true);
+      setEditMode(false);
+      setEditDraft(null);
+      setMessage(`Loaded ${file.name} for playback.`);
+    } catch {
+      setMessage(`Failed to read ${file.name}.`);
+    } finally {
+      event.target.value = '';
+    }
+  };
+
+  const handleRemovePlayback = () => {
+    setPlaybackItem(null);
+    setSelectedKey((current) => (current === PLAYBACK_ITEM_KEY ? null : current));
+    setEditMode(false);
+    setEditDraft(null);
+    setMessage('Playback file removed.');
   };
 
   const handleStep = () => {
@@ -862,31 +1042,17 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
   };
 
   const handleStepBack = () => {
-    if (!runtimeHistory.length) return;
-    cancelAnimation();
-    setIsRunning(false);
-    setToolheadDragPos(null);
-    setSimulationZIndicator(null);
-    const previousRuntime = runtimeHistory[runtimeHistory.length - 1];
-    setRuntime(previousRuntime);
-    setRuntimeHistory((prev) => prev.slice(0, -1));
-    setSimulationLog((prev) => prev.slice(0, -1));
-    setSelectedLogWarning(null);
-    setStepIndex((prev) => Math.max(0, prev - 1));
+    if (stepIndex === 0) return;
+    syncSimulationPosition(stepIndex - 1);
   };
 
   const handleReset = () => {
     if (!selectedItem) return;
-    cancelAnimation(true);
-    setRuntime(createInitialRuntimeState(machineProfile, selectedItem.title));
-    setStepIndex(0);
-    setIsRunning(false);
-    setToolheadDragPos(null);
-    setLastMovementTrace(null);
-    setSimulationZIndicator(null);
-    setRuntimeHistory([]);
-    setSimulationLog([]);
-    setSelectedLogWarning(null);
+    syncSimulationPosition(0);
+  };
+
+  const handleTimelineScrub = (event: React.ChangeEvent<HTMLInputElement>) => {
+    syncSimulationPosition(Number(event.target.value));
   };
 
   const handleGoTo = () => {
@@ -1519,6 +1685,13 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55" onClick={onClose}>
       <div className="h-[min(92vh,980px)] w-[min(98vw,1680px)] overflow-hidden rounded-2xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] shadow-2xl" onClick={(event) => event.stopPropagation()}>
+        <input
+          ref={playbackFileInputRef}
+          type="file"
+          accept=".gcode,.gc,.g,.ngc,.txt,text/plain"
+          onChange={handleLoadPlaybackFile}
+          className="hidden"
+        />
         <div className="flex items-center justify-between border-b border-[var(--color-bg-tertiary)] px-5 py-4">
           <div>
             <h2 className="text-sm font-semibold text-[var(--color-text-primary)]">G-Code Macro Designer</h2>
@@ -1541,11 +1714,28 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
             <div className="mb-3 flex items-center gap-2">
               <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search macros" className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-3 py-2 text-xs text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none" />
             </div>
-            <div className="mb-3">
+            <div className="mb-3 grid grid-cols-2 gap-2">
               <button onClick={handleCreateDraft} className="w-full rounded-md bg-[var(--color-accent)] px-3 py-2 text-xs font-semibold text-[var(--color-bg-primary)]">New</button>
+              <button onClick={handleLoadPlaybackClick} className="w-full rounded-md border border-[var(--color-bg-tertiary)] px-3 py-2 text-xs font-semibold text-[var(--color-text-primary)] hover:border-[var(--color-accent)]">Load G-code</button>
             </div>
 
             <div className="flex-1 overflow-y-auto pr-1">
+              {playbackItem && (
+                <div className="pb-3">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--color-text-secondary)]">Playback file</p>
+                    <button onClick={handleRemovePlayback} className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-[10px] text-[var(--color-text-primary)] hover:border-red-400/60 hover:text-red-300">Unload</button>
+                  </div>
+                  <button
+                    onClick={() => setSelectedKey(playbackItem.key)}
+                    onContextMenu={(event) => handleContextMenu(event, playbackItem)}
+                    className={`w-full rounded-lg border px-3 py-2 text-left transition-colors ${selectedKey === playbackItem.key ? 'border-[var(--color-accent)] bg-[var(--color-bg-primary)]' : 'border-[var(--color-bg-tertiary)] hover:border-[var(--color-accent)]/60'}`}
+                  >
+                    <div className="truncate text-xs font-medium text-[var(--color-text-primary)]">{playbackItem.title}</div>
+                    <p className="mt-1 text-[11px] text-[var(--color-text-secondary)]">Playback only</p>
+                  </button>
+                </div>
+              )}
               <div>
                 <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--color-text-secondary)]">Your macros</p>
                 <div className="space-y-1.5">
@@ -1830,7 +2020,12 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                 <div className="rounded-lg border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] p-2">
                   <div className="mb-2 flex items-center justify-between">
                     <span className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-text-secondary)]">Simulation</span>
-                    <span className="text-[11px] text-[var(--color-text-secondary)]">Step {Math.min(stepIndex, simulationPlan.steps.length)} / {simulationPlan.steps.length}</span>
+                    <div className="flex items-center gap-3">
+                      <button onClick={() => setShowTimeline((current) => !current)} className={`rounded-md border px-2 py-1 text-[10px] font-semibold ${showTimeline ? 'border-[var(--color-accent)] text-[var(--color-accent)]' : 'border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]'}`}>
+                        Timeline {showTimeline ? 'On' : 'Off'}
+                      </button>
+                      <span className="text-[11px] text-[var(--color-text-secondary)]">Step {Math.min(stepIndex, simulationPlan.steps.length)} / {simulationPlan.steps.length}</span>
+                    </div>
                   </div>
                   <div className="flex items-center gap-2">
                     <button onClick={() => { if (isRunning) { setIsRunning(false); cancelAnimation(); } else { setIsRunning(true); setToolheadDragPos(null); } }} disabled={!simulationPlan.steps.length || stepIndex >= simulationPlan.steps.length} className="flex h-8 w-8 items-center justify-center rounded-md border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] disabled:opacity-40" title={isRunning ? 'Pause' : 'Play'}>
@@ -1851,13 +2046,41 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                     </button>
                     <div className="ml-auto text-[10px] text-[var(--color-text-secondary)]">Max {formatNumber(machineProfile.maxVelocity)} mm/s | Accel {formatNumber(machineProfile.maxAccel)} mm/s²</div>
                   </div>
+                  {showTimeline && (
+                    <div className="mt-3 rounded-lg border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-3 py-2">
+                      <div className="mb-2 flex items-center justify-between gap-3 text-[10px] uppercase tracking-[0.16em] text-[var(--color-text-secondary)]">
+                        <span>Timeline scrubber</span>
+                        <span className="normal-case tracking-normal text-[var(--color-text-primary)]">
+                          {stepIndex === 0
+                            ? 'At start'
+                            : stepIndex >= simulationPlan.steps.length
+                              ? 'At end'
+                              : `Next: ${getStepSource(simulationPlan.steps[stepIndex]).raw}`}
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={simulationPlan.steps.length}
+                        value={stepIndex}
+                        onChange={handleTimelineScrub}
+                        disabled={!simulationPlan.steps.length}
+                        className="w-full accent-[var(--color-accent)] disabled:opacity-40"
+                      />
+                      <div className="mt-1 flex items-center justify-between text-[10px] text-[var(--color-text-secondary)]">
+                        <span>Start</span>
+                        <span>{stepIndex > 0 ? `L${simulationLog[simulationLog.length - 1]?.lineNumber ?? 0}` : 'No line selected'}</span>
+                        <span>End</span>
+                      </div>
+                    </div>
+                  )}
                 </div>
                 <div className="min-h-0 flex-1 rounded-lg border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] p-2">
                   <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-text-secondary)]">Execution output</div>
                   {planWarnings.length > 0 && (
                     <div className="mb-2 rounded-md border border-amber-400/25 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-100">{planWarnings.join(' ')}</div>
                   )}
-                  <div className="h-[120px] overflow-y-auto rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1 font-mono text-[11px]">
+                  <div ref={executionOutputRef} className="h-[120px] overflow-y-auto rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1 font-mono text-[11px]">
                     {simulationLog.length === 0 ? (
                       <div className="text-[var(--color-text-secondary)]">No commands executed.</div>
                     ) : simulationLog.map((entry) => (
@@ -1884,11 +2107,16 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
             {selectedItem ? (
               <div className="flex flex-col gap-4">
                 <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
-                  <button onClick={handleToggleEdit} className={`rounded-md px-3 py-2 text-xs font-semibold ${editMode ? 'bg-[var(--color-accent)] text-[var(--color-bg-primary)]' : 'border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)]'}`}>{editMode ? 'Save' : 'Edit'}</button>
+                  <button onClick={handleToggleEdit} disabled={selectedItem.source === 'playback'} className={`rounded-md px-3 py-2 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-40 ${editMode ? 'bg-[var(--color-accent)] text-[var(--color-bg-primary)]' : 'border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)]'}`}>{editMode ? 'Save' : 'Edit'}</button>
                   <button onClick={handleCancelEdit} disabled={!editMode} className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-2 text-xs text-[var(--color-text-primary)] disabled:opacity-40">Cancel</button>
                 </div>
                 <div>
                   <div className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-text-secondary)]">Macro</div>
+                  {selectedItem.source === 'playback' && (
+                    <div className="mb-2 rounded-lg border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-3 py-2 text-[11px] text-[var(--color-text-secondary)]">
+                      Loaded G-code files stay in-memory for simulation only and are not added to your configuration.
+                    </div>
+                  )}
                   <input value={displayedItem?.title || ''} disabled={!editMode} onChange={(event) => updateEditedItem({ title: event.target.value })} className="mb-2 w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-3 py-2 text-sm text-[var(--color-text-primary)] disabled:opacity-70" />
                   <input value={displayedItem?.renameExisting || ''} disabled={!editMode} onChange={(event) => updateEditedItem({ renameExisting: event.target.value })} placeholder="rename_existing" className="mb-2 w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-3 py-2 text-xs text-[var(--color-text-primary)] disabled:opacity-50" />
                   <textarea
@@ -2279,10 +2507,12 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
               onClick={() => { handleCopy(contextMenu.itemKey); setContextMenu(null); }}
               className="w-full px-4 py-2 text-left text-xs text-[var(--color-text-primary)] hover:bg-[var(--color-bg-primary)]"
             >Copy</button>
-            <button
-              onClick={() => { handleRename(contextMenu.itemKey); setContextMenu(null); }}
-              className="w-full px-4 py-2 text-left text-xs text-[var(--color-text-primary)] hover:bg-[var(--color-bg-primary)]"
-            >Rename</button>
+            {contextMenu.itemSource !== 'playback' && (
+              <button
+                onClick={() => { handleRename(contextMenu.itemKey); setContextMenu(null); }}
+                className="w-full px-4 py-2 text-left text-xs text-[var(--color-text-primary)] hover:bg-[var(--color-bg-primary)]"
+              >Rename</button>
+            )}
             {contextMenu.draftId && (
               <button
                 onClick={() => { handleDelete(contextMenu.draftId!); setContextMenu(null); }}
