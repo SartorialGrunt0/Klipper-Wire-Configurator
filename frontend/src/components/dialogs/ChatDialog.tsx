@@ -538,6 +538,10 @@ interface AssistantDraftValidationOutcome {
   failureReason: string | null;
 }
 
+interface SubmitMessageOptions {
+  hiddenFromUser?: boolean;
+}
+
 const RETRY_EXEMPT_DUPLICATE_SECTION_RE = /^Section \[[^\]]+\] (?:can only be defined once(?: across active included config files)?\.|is reused across active included config files\.)(?: Also defined in: .+)?$/;
 const RETRY_EXEMPT_SHARED_PIN_RE = /^Pin '.*' is used by multiple sections: .+$/;
 
@@ -1469,14 +1473,18 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     }
   };
 
-  const submitMessage = useCallback(async (messageText: string) => {
+  const submitMessage = useCallback(async (messageText: string, options?: SubmitMessageOptions) => {
     const trimmedMessage = messageText.trim();
     if (!trimmedMessage || loading) {
       return;
     }
 
     const previousMessages = messages;
-    const userMsg: ChatMessage = { role: 'user', content: trimmedMessage };
+    const userMsg: ChatMessage = {
+      role: 'user',
+      content: trimmedMessage,
+      hiddenFromUser: options?.hiddenFromUser === true,
+    };
     const newMessages = [...previousMessages, userMsg];
     setMessages(newMessages);
     setInput('');
@@ -1651,7 +1659,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
 
     handledPendingRequestIdRef.current = pendingRequest.id;
     onPendingRequestHandled?.();
-    void submitMessage(pendingRequest.prompt);
+    void submitMessage(pendingRequest.prompt, { hiddenFromUser: pendingRequest.hiddenFromUser });
   }, [isConfigured, loading, onPendingRequestHandled, open, pendingRequest, submitMessage]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -2074,6 +2082,9 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           )}
           {messages.map((msg, i) => (
             (() => {
+              if (msg.role === 'user' && msg.hiddenFromUser) {
+                return null;
+              }
               const assistantConfigBlock = msg.role === 'assistant' ? extractConfigCodeBlock(msg.content) : null;
               const hasApplicableAssistantDraft = assistantDraftApplicableMessages[i] === true;
               const lmStudioMcpStatus = msg.role === 'assistant' ? msg.lmStudioMcp : undefined;

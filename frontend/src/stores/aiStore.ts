@@ -10,6 +10,7 @@ export type AiProvider = 'google' | 'chatgpt' | 'anthropic' | 'github' | 'openai
 export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
+  hiddenFromUser?: boolean;
   lmStudioMcp?: LmStudioMcpStatus;
   lmStudioContext?: LmStudioContextStatus;
   autoLoadedDocs?: string[];
