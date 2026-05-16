@@ -496,29 +496,28 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const existingIdx = cf.sections.findIndex(
         (sec) => sec.section_type === 'include' && sec.section_name === includePath,
       );
-      const includeInsertIndex = cf.sections.findIndex((sec) => sec.section_type !== 'include');
-      const nextIncludeSection = existingIdx !== -1
-        ? { ...cf.sections[existingIdx], is_commented_out: false }
-        : {
-            section_type: 'include',
-            section_name: includePath,
-            full_header: includeHeader,
-            line_number: 0,
-            params: [],
-            header_comments: [],
-            trailing_comments: [],
-            is_commented_out: false,
-          } as ConfigSection;
 
-      let updatedSections = cf.sections.filter((_, i) => i !== existingIdx);
-      const insertAt = includeInsertIndex === -1
-        ? updatedSections.length
-        : Math.min(includeInsertIndex, updatedSections.length);
+      let updatedSections: ConfigSection[];
       if (existingIdx !== -1) {
-        updatedSections.splice(insertAt, 0, nextIncludeSection);
+        // Re-activate the commented-out include in-place — don't move it
+        updatedSections = cf.sections.map((sec, i) =>
+          i === existingIdx ? { ...sec, is_commented_out: false } : sec,
+        );
       } else {
-        updatedSections.splice(insertAt, 0, nextIncludeSection);
+        // New include: insert at the very top so it appears before all other sections
+        const newIncludeSection: ConfigSection = {
+          section_type: 'include',
+          section_name: includePath,
+          full_header: includeHeader,
+          line_number: 0,
+          params: [],
+          header_comments: [],
+          trailing_comments: [],
+          is_commented_out: false,
+        };
+        updatedSections = [newIncludeSection, ...cf.sections];
       }
+
       return {
         isDirty: true,
         configFiles: {

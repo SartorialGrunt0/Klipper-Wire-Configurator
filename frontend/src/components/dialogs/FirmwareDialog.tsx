@@ -57,9 +57,32 @@ interface FlashPanelState {
   assignmentValues: Record<string, string>;
   isDirty: boolean;
   commandResult: NativeFlashCommandResult | null;
+  scannedDeviceCandidates: NativeFlashDeviceCandidate[];
+  devicesScanning: boolean;
 }
 
 const TARGETS: FlashTargetKey[] = ['klipper', 'katapult'];
+const CHECKOUT_PATHS_STORAGE_KEY = 'klipper-wire-firmware-checkout-paths';
+
+function loadPersistedCheckoutPaths(): Record<FlashTargetKey, string> {
+  try {
+    const raw = localStorage.getItem(CHECKOUT_PATHS_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<Record<FlashTargetKey, string>>;
+      return {
+        klipper: typeof parsed.klipper === 'string' ? parsed.klipper : '',
+        katapult: typeof parsed.katapult === 'string' ? parsed.katapult : '',
+      };
+    }
+  } catch { /* ignore */ }
+  return { klipper: '', katapult: '' };
+}
+
+function savePersistedCheckoutPaths(paths: Record<FlashTargetKey, string>): void {
+  try {
+    localStorage.setItem(CHECKOUT_PATHS_STORAGE_KEY, JSON.stringify(paths));
+  } catch { /* ignore */ }
+}
 
 const FLASH_WORKFLOW_HELP = 'Changes update the visible menuconfig fields immediately. Use the settings gear to override the Klipper and Katapult checkout paths and refresh detected flash devices. Save writes the active .config file and then lets you store the current flash setup under a unique host-side profile name. Load opens the active config or any saved host-side flash profile for the current target. Flash auto-matches the selected device to a supported method when possible, while still letting you override the method manually.';
 const ARTIFACTS_HELP = 'Generated files stay on the SBC under the active out directory. You can download them directly here or delete stale artifacts you no longer need.';
@@ -254,14 +277,14 @@ function applyFieldValue(fields: NativeFlashField[], fieldId: string, value: str
   });
 }
 
-function createEmptyPanelState(target: FlashTargetKey): FlashPanelState {
+function createEmptyPanelState(target: FlashTargetKey, checkoutPath = ''): FlashPanelState {
   const displayName = target === 'klipper' ? 'Klipper' : 'Katapult';
   return {
     status: 'idle',
     message: `Load the active ${displayName} build configuration from this SBC.`,
     messageTone: 'info',
     loaded: false,
-    checkoutPath: '',
+    checkoutPath,
     flashDevice: '',
     flashMethod: '',
     stickyAssignments: [],
@@ -271,6 +294,8 @@ function createEmptyPanelState(target: FlashTargetKey): FlashPanelState {
     assignmentValues: {},
     isDirty: false,
     commandResult: null,
+    scannedDeviceCandidates: [],
+    devicesScanning: false,
   };
 }
 
@@ -282,6 +307,16 @@ function formatBytes(size: number): string {
 
 function formatModified(timestamp: number): string {
   return new Date(timestamp * 1000).toLocaleString();
+}
+
+/** Merge static (config-driven) candidates with dynamically scanned ones, deduplicating by value. */
+function mergeDeviceCandidates(
+  staticCandidates: NativeFlashDeviceCandidate[],
+  scannedCandidates: NativeFlashDeviceCandidate[],
+): NativeFlashDeviceCandidate[] {
+  const seen = new Set(staticCandidates.map((c) => c.value));
+  const extras = scannedCandidates.filter((c) => !seen.has(c.value));
+  return [...staticCandidates, ...extras];
 }
 
 function resolveFlashDevice(
@@ -615,9 +650,12 @@ function FlashDeviceField({
 
 export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
   const [activeTarget, setActiveTarget] = useState<FlashTargetKey>('klipper');
-  const [panels, setPanels] = useState<Record<FlashTargetKey, FlashPanelState>>({
-    klipper: createEmptyPanelState('klipper'),
-    katapult: createEmptyPanelState('katapult'),
+  const [panels, setPanels] = useState<Record<FlashTargetKey, FlashPanelState>>(() => {
+    const persistedPaths = loadPersistedCheckoutPaths();
+    return {
+      klipper: createEmptyPanelState('klipper', persistedPaths.klipper),
+      katapult: createEmptyPanelState('katapult', persistedPaths.katapult),
+    };
   });
   const [profileDialog, setProfileDialog] = useState<FlashProfileDialogState | null>(null);
   const [showTargetSettings, setShowTargetSettings] = useState(false);
@@ -662,8 +700,11 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
       klipper: panels.klipper.checkoutPath.trim(),
       katapult: panels.katapult.checkoutPath.trim(),
     };
+    savePersistedCheckoutPaths(requestedPaths);
     setShowTargetSettings(false);
     await Promise.all(TARGETS.map((target) => loadState(target, requestedPaths[target] || undefined)));
+    // Kick off a fresh device scan now that checkout paths may have changed.
+    void Promise.all(TARGETS.map((target) => scanDevices(target, true)));
   }
 
   async function loadState(target: FlashTargetKey, overridePath?: string) {
@@ -703,6 +744,21 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
         message: error instanceof Error ? error.message : 'Failed to load the flash target configuration.',
         messageTone: 'error',
       }));
+    }
+  }
+
+  async function scanDevices(target: FlashTargetKey, forceRefresh = false) {
+    const checkoutPath = panelsRef.current[target].checkoutPath.trim() || undefined;
+    updatePanel(target, (panel) => ({ ...panel, devicesScanning: true }));
+    try {
+      const result = await api.scanNativeFlashDevices(target, checkoutPath, forceRefresh);
+      updatePanel(target, (panel) => ({
+        ...panel,
+        devicesScanning: false,
+        scannedDeviceCandidates: result.candidates,
+      }));
+    } catch {
+      updatePanel(target, (panel) => ({ ...panel, devicesScanning: false }));
     }
   }
 
@@ -1077,9 +1133,16 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
   }
 
   useEffect(() => {
-    const activePanel = panels[activeTarget];
-    if (!activePanel.loaded && activePanel.status === 'idle') {
-      void loadState(activeTarget);
+    for (const target of TARGETS) {
+      const panel = panels[target];
+      if (!panel.loaded && panel.status === 'idle') {
+        // loadState sets loaded=true; when it completes the panel transitions
+        // from idle+!loaded → idle+loaded, which prevents re-entry here.
+        // After the state loads we kick off a non-blocking device scan.
+        void loadState(target).then(() => {
+          void scanDevices(target);
+        });
+      }
     }
   }, [activeTarget, panels]);
 
@@ -1350,7 +1413,10 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
   const selectedFlashMethod = panel.flashMethod || panel.flashState?.default_flash_method || '';
   const selectedFlashMethodState = flashMethodRecord(panel.flashState, selectedFlashMethod);
   const trimmedFlashDevice = panel.flashDevice.trim();
-  const flashDeviceCandidates = panel.flashState?.flash_device_candidates || [];
+  const flashDeviceCandidates = mergeDeviceCandidates(
+    panel.flashState?.flash_device_candidates || [],
+    panel.scannedDeviceCandidates,
+  );
   const profileDialogPanel = profileDialog ? panels[profileDialog.target] : null;
   const showFlashDevice = Boolean(
     selectedFlashMethodState
@@ -1528,6 +1594,30 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                     candidates={flashDeviceCandidates}
                   />
                 </div>
+                <button
+                  type="button"
+                  onClick={() => void scanDevices(activeTarget, true)}
+                  disabled={actionBusy || panel.devicesScanning}
+                  title="Refresh detected flash devices (USB DFU, serial, CAN UUIDs)"
+                  className="shrink-0 rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] p-2 text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-50"
+                  aria-label="Refresh detected flash devices"
+                >
+                  <svg
+                    width="13"
+                    height="13"
+                    viewBox="0 0 16 16"
+                    fill="none"
+                    className={panel.devicesScanning ? 'animate-spin' : ''}
+                  >
+                    <path
+                      d="M13.5 8A5.5 5.5 0 1 1 8 2.5a5.48 5.48 0 0 1 3.889 1.611"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinecap="round"
+                    />
+                    <path d="M12 1v3h-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </button>
               </div>
             )}
 

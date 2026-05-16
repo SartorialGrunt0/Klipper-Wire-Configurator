@@ -1479,12 +1479,14 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       return;
     }
 
-    const previousMessages = messages;
     const userMsg: ChatMessage = {
       role: 'user',
       content: trimmedMessage,
       hiddenFromUser: options?.hiddenFromUser === true,
     };
+    // Hidden (auto-submitted) requests start a fresh session so stale history from
+    // prior sessions doesn't interfere with draft applicability checks.
+    const previousMessages = options?.hiddenFromUser ? [] : messages;
     const newMessages = [...previousMessages, userMsg];
     setMessages(newMessages);
     setInput('');
