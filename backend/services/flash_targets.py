@@ -10,6 +10,7 @@ import re
 import shlex
 import subprocess
 import tempfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -96,6 +97,11 @@ _KATAPULT_QUERY_UUID_RE = re.compile(
     r"Detected UUID:\s*([0-9a-fA-F]{12})(?:,\s*Application:\s*([^,]+))?",
     re.IGNORECASE,
 )
+
+# In-memory cache for device scan results.  Key: (target, resolved_checkout_path).
+# Each entry: {"candidates": list[dict], "timestamp": float}.
+_DEVICE_SCAN_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
+_DEVICE_SCAN_CACHE_TTL = 30  # seconds
 
 
 def _require_supported_target(target: str) -> str:
@@ -661,7 +667,7 @@ def _katapult_can_flash_device_candidates(script_path: Path, interface: str = "c
         "-i",
         interface,
         "-q",
-    ], timeout=2)
+    ], timeout=10)
     if not output:
         return []
 
@@ -732,6 +738,12 @@ def _preferred_flash_method_for_device(
 
 
 def _flash_device_candidates(target: str, kconf, katapult_script_path: Path | None) -> list[dict[str, str]]:
+    """Return the static (config-driven) flash device candidates for a target.
+
+    Slow device discovery (USB DFU, serial ports, CAN UUIDs) is performed
+    separately via ``scan_flash_target_devices`` so it never blocks the initial
+    state load.
+    """
     normalized_target = _require_supported_target(target)
     machine_symbols = _enabled_machine_symbols(kconf)
     candidates: list[dict[str, str]] = []
@@ -745,48 +757,6 @@ def _flash_device_candidates(target: str, kconf, katapult_script_path: Path | No
             "Auto-detect the first RP2040 mass-storage target",
             transport="mass_storage",
         )
-        for candidate in _rp2040_usb_flash_device_candidates():
-            _append_flash_device_candidate(
-                candidates,
-                seen_values,
-                candidate["value"],
-                candidate["label"],
-                transport=candidate.get("transport") or "usb_id",
-                interface=candidate.get("interface"),
-            )
-
-    if "MACH_STM32" in machine_symbols:
-        for candidate in _dfu_flash_device_candidates():
-            _append_flash_device_candidate(
-                candidates,
-                seen_values,
-                candidate["value"],
-                candidate["label"],
-                transport=candidate.get("transport") or "usb_id",
-                interface=candidate.get("interface"),
-            )
-
-    if katapult_script_path is not None:
-        for candidate in _katapult_can_flash_device_candidates(katapult_script_path):
-            _append_flash_device_candidate(
-                candidates,
-                seen_values,
-                candidate["value"],
-                candidate["label"],
-                transport=candidate.get("transport") or "can_uuid",
-                interface=candidate.get("interface") or "can0",
-            )
-
-    if machine_symbols & {"MACH_ATSAM", "MACH_ATSAMD", "MACH_AVR", "MACH_LPC176X", "MACH_STM32"}:
-        for candidate in _serial_flash_device_candidates():
-            _append_flash_device_candidate(
-                candidates,
-                seen_values,
-                candidate["value"],
-                candidate["label"],
-                transport=candidate.get("transport") or "serial",
-                interface=candidate.get("interface"),
-            )
 
     return candidates
 
@@ -1134,6 +1104,86 @@ def save_flash_target_config(
     if issues:
         state["error"] = "; ".join(issues)
     return state
+
+
+def scan_flash_target_devices(
+    target: str,
+    checkout_path: str | None = None,
+    force_refresh: bool = False,
+) -> dict[str, Any]:
+    """Run slow device discovery (USB DFU, serial, CAN) and return candidates.
+
+    Results are cached in-process for ``_DEVICE_SCAN_CACHE_TTL`` seconds so
+    repeated calls while the dialog is open are instant.  Pass
+    ``force_refresh=True`` to bypass the cache (e.g. from the Refresh button).
+    """
+    normalized_target = _require_supported_target(target)
+    resolved_path, error = resolve_flash_target_checkout(normalized_target, checkout_path)
+    if resolved_path is None:
+        return {"target": normalized_target, "candidates": [], "error": error, "cached": False}
+
+    cache_key = (normalized_target, str(resolved_path))
+    now = time.monotonic()
+    if not force_refresh:
+        cached = _DEVICE_SCAN_CACHE.get(cache_key)
+        if cached is not None and now - cached["timestamp"] < _DEVICE_SCAN_CACHE_TTL:
+            return {
+                "target": normalized_target,
+                "candidates": cached["candidates"],
+                "error": None,
+                "cached": True,
+            }
+
+    kconfiglib, kconf, _config_path = _load_target_kconfig_state(normalized_target, resolved_path)
+    machine_symbols = _enabled_machine_symbols(kconf)
+    katapult_script_path = _katapult_flashtool_path(normalized_target, resolved_path)
+
+    candidates: list[dict[str, str]] = []
+    seen_values: set[str] = set()
+
+    # RP2040 USB bootloader devices (lsusb, fast)
+    if normalized_target in {"klipper", "katapult"} and "MACH_RPXXXX" in machine_symbols:
+        for candidate in _rp2040_usb_flash_device_candidates():
+            _append_flash_device_candidate(
+                candidates, seen_values,
+                candidate["value"], candidate["label"],
+                transport=candidate.get("transport") or "usb_id",
+                interface=candidate.get("interface"),
+            )
+
+    # STM32 DFU devices (dfu-util -l or lsusb, fast)
+    if "MACH_STM32" in machine_symbols:
+        for candidate in _dfu_flash_device_candidates():
+            _append_flash_device_candidate(
+                candidates, seen_values,
+                candidate["value"], candidate["label"],
+                transport=candidate.get("transport") or "usb_id",
+                interface=candidate.get("interface"),
+            )
+
+    # Katapult CAN bus UUIDs (flashtool.py -q, potentially slow)
+    if katapult_script_path is not None:
+        for candidate in _katapult_can_flash_device_candidates(katapult_script_path):
+            _append_flash_device_candidate(
+                candidates, seen_values,
+                candidate["value"], candidate["label"],
+                transport=candidate.get("transport") or "can_uuid",
+                interface=candidate.get("interface") or "can0",
+                preferred_flash_method=candidate.get("preferred_flash_method"),
+            )
+
+    # Serial / UART devices (fast filesystem scan)
+    if machine_symbols & {"MACH_ATSAM", "MACH_ATSAMD", "MACH_AVR", "MACH_LPC176X", "MACH_STM32"}:
+        for candidate in _serial_flash_device_candidates():
+            _append_flash_device_candidate(
+                candidates, seen_values,
+                candidate["value"], candidate["label"],
+                transport=candidate.get("transport") or "serial",
+                interface=candidate.get("interface"),
+            )
+
+    _DEVICE_SCAN_CACHE[cache_key] = {"candidates": candidates, "timestamp": now}
+    return {"target": normalized_target, "candidates": candidates, "error": None, "cached": False}
 
 
 def _command_log(command: list[str], completed: subprocess.CompletedProcess[str]) -> str:

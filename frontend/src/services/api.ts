@@ -540,6 +540,29 @@ export async function getNativeFlashState(
   return request(`/native/flash/${encodeURIComponent(target)}${q}`);
 }
 
+export interface NativeFlashDeviceScanResult {
+  target: FlashTargetKey;
+  candidates: NativeFlashDeviceCandidate[];
+  error: string | null;
+  cached: boolean;
+}
+
+export async function scanNativeFlashDevices(
+  target: FlashTargetKey,
+  checkoutPath?: string,
+  forceRefresh = false,
+): Promise<NativeFlashDeviceScanResult> {
+  const params = new URLSearchParams();
+  if (checkoutPath) {
+    params.set('checkout_path', checkoutPath);
+  }
+  if (forceRefresh) {
+    params.set('force_refresh', 'true');
+  }
+  const q = params.toString() ? `?${params.toString()}` : '';
+  return request(`/native/flash/${encodeURIComponent(target)}/scan-devices${q}`);
+}
+
 export async function previewNativeFlashConfig(
   target: FlashTargetKey,
   assignments: Array<{ symbol: string; value: string }>,

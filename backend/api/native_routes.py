@@ -48,6 +48,7 @@ from services.flash_targets import (
     get_flash_target_state,
     preview_flash_target_config,
     save_flash_target_config,
+    scan_flash_target_devices,
 )
 
 router = APIRouter()
@@ -350,6 +351,24 @@ async def flash_target_state(target: str, checkout_path: str | None = None):
     if not is_native_platform():
         raise HTTPException(status_code=501, detail="Only available on Pi")
     return get_flash_target_state(_validated_target(target), checkout_path)
+
+
+@router.get("/flash/{target}/scan-devices")
+async def scan_flash_target_devices_api(
+    target: str,
+    checkout_path: str | None = None,
+    force_refresh: bool = False,
+):
+    """Scan for connected flash devices (USB DFU, serial, CAN UUIDs).
+
+    This runs slow hardware discovery asynchronously so the main state load is
+    not blocked.  Results are cached for 30 seconds; pass ``force_refresh=true``
+    to bypass the cache.
+    """
+    if not is_native_platform():
+        raise HTTPException(status_code=501, detail="Only available on Pi")
+    return scan_flash_target_devices(_validated_target(target), checkout_path, force_refresh)
+
 
 
 @router.post("/flash/{target}/preview")
