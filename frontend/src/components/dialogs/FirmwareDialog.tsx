@@ -67,7 +67,7 @@ const COMMAND_LOG_HELP = 'The latest output from the most recent build or flash 
 const HELP_POPOVER_WIDTH = 288;
 const HELP_POPOVER_MARGIN = 12;
 const HELP_POPOVER_OFFSET = 8;
-const STALE_ASSIGNMENT_PREVIEW_LIMIT = 6;
+const PREVIEW_DEBOUNCE_MS = 180;
 const USB_ID_PATTERN = /^[0-9a-fA-F]{4}:[0-9a-fA-F]{4}$/;
 const CAN_UUID_PATTERN = /^(?:[A-Za-z0-9_-]+:)?[0-9a-fA-F]{12}$/;
 
@@ -230,51 +230,6 @@ function buildAssignments(
     }
   }
   return assignments;
-}
-
-function collectVisibleFieldSymbols(fields: NativeFlashField[]): Set<string> {
-  const symbols = new Set<string>();
-  for (const field of fields) {
-    if (field.kind === 'choice') {
-      for (const option of field.options || []) {
-        if (option.symbol) {
-          symbols.add(option.symbol);
-        }
-      }
-      continue;
-    }
-    if (field.symbol) {
-      symbols.add(field.symbol);
-    }
-  }
-  return symbols;
-}
-
-function collectStaleAssignments(
-  fields: NativeFlashField[],
-  stickyAssignments: NativeFlashProfileAssignment[],
-): NativeFlashProfileAssignment[] {
-  if (stickyAssignments.length === 0) {
-    return [];
-  }
-
-  const visibleSymbols = collectVisibleFieldSymbols(fields);
-  const dedupedAssignments = new Map<string, string>();
-  for (const assignment of normalizeProfileAssignments(stickyAssignments)) {
-    dedupedAssignments.set(assignment.symbol, assignment.value);
-  }
-
-  const staleAssignments: NativeFlashProfileAssignment[] = [];
-  for (const [symbol, value] of dedupedAssignments.entries()) {
-    if (!visibleSymbols.has(symbol)) {
-      staleAssignments.push({ symbol, value });
-    }
-  }
-  return staleAssignments;
-}
-
-function formatAssignmentLabel(assignment: NativeFlashProfileAssignment): string {
-  return `${assignment.symbol}=${assignment.value}`;
 }
 
 function applyFieldValue(fields: NativeFlashField[], fieldId: string, value: string): NativeFlashField[] {
@@ -666,9 +621,19 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
   });
   const [profileDialog, setProfileDialog] = useState<FlashProfileDialogState | null>(null);
   const [showTargetSettings, setShowTargetSettings] = useState(false);
+  const panelsRef = useRef(panels);
+  const previewTimeoutsRef = useRef<Partial<Record<FlashTargetKey, number>>>({});
+  const previewRequestIdsRef = useRef<Record<FlashTargetKey, number>>({
+    klipper: 0,
+    katapult: 0,
+  });
 
   const buildDots = useAnimatedDots(panels[activeTarget].status === 'building');
   const flashDots = useAnimatedDots(panels[activeTarget].status === 'flashing');
+
+  useEffect(() => {
+    panelsRef.current = panels;
+  }, [panels]);
 
   function updatePanel(target: FlashTargetKey, updater: (panel: FlashPanelState) => FlashPanelState) {
     setPanels((previous) => ({
@@ -748,6 +713,8 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
     stickyAssignments: NativeFlashProfileAssignment[],
     checkoutPath: string,
   ) {
+    const requestId = previewRequestIdsRef.current[target] + 1;
+    previewRequestIdsRef.current[target] = requestId;
     updatePanel(target, (panel) => ({
       ...panel,
       status: 'previewing',
@@ -759,8 +726,14 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
         buildPanelAssignments(assignmentValues, knownFields, stickyAssignments),
         checkoutPath.trim() || undefined,
       );
+      if (previewRequestIdsRef.current[target] !== requestId) {
+        return;
+      }
       updatePanel(target, (panel) => mergePreviewPanel(panel, result));
     } catch (error) {
+      if (previewRequestIdsRef.current[target] !== requestId) {
+        return;
+      }
       updatePanel(target, (panel) => ({
         ...panel,
         status: 'idle',
@@ -768,6 +741,29 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
         messageTone: 'error',
       }));
     }
+  }
+
+  function clearScheduledPreview(target: FlashTargetKey) {
+    const timeoutId = previewTimeoutsRef.current[target];
+    if (timeoutId !== undefined) {
+      window.clearTimeout(timeoutId);
+      delete previewTimeoutsRef.current[target];
+    }
+  }
+
+  function schedulePreview(
+    target: FlashTargetKey,
+    assignmentValues: Record<string, string>,
+    knownFields: Record<string, NativeFlashField>,
+    stickyAssignments: NativeFlashProfileAssignment[],
+    checkoutPath: string,
+    delay = PREVIEW_DEBOUNCE_MS,
+  ) {
+    clearScheduledPreview(target);
+    previewTimeoutsRef.current[target] = window.setTimeout(() => {
+      delete previewTimeoutsRef.current[target];
+      void previewConfig(target, assignmentValues, knownFields, stickyAssignments, checkoutPath);
+    }, delay);
   }
 
   async function persistConfig(target: FlashTargetKey, showSuccessMessage: boolean): Promise<boolean> {
@@ -1076,15 +1072,34 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
     }));
 
     if (previewImmediately) {
-      void previewConfig(target, nextAssignments, nextKnownFields, panel.stickyAssignments, panel.checkoutPath);
+      schedulePreview(target, nextAssignments, nextKnownFields, panel.stickyAssignments, panel.checkoutPath);
     }
   }
 
   useEffect(() => {
+    const activePanel = panels[activeTarget];
+    if (!activePanel.loaded && activePanel.status === 'idle') {
+      void loadState(activeTarget);
+    }
+  }, [activeTarget, panels]);
+
+  useEffect(() => () => {
     for (const target of TARGETS) {
-      void loadState(target);
+      clearScheduledPreview(target);
     }
   }, []);
+
+  function handleFieldBlur(target: FlashTargetKey) {
+    const panel = panelsRef.current[target];
+    clearScheduledPreview(target);
+    void previewConfig(
+      target,
+      panel.assignmentValues,
+      panel.knownFields,
+      panel.stickyAssignments,
+      panel.checkoutPath,
+    );
+  }
 
   async function applySavedTargetProfile(target: FlashTargetKey, savedProfile: SavedFlashTargetProfile, sourceLabel: string) {
     const requestedPath = savedProfile.checkoutPath.trim();
@@ -1336,8 +1351,6 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
   const selectedFlashMethodState = flashMethodRecord(panel.flashState, selectedFlashMethod);
   const trimmedFlashDevice = panel.flashDevice.trim();
   const flashDeviceCandidates = panel.flashState?.flash_device_candidates || [];
-  const staleAssignments = collectStaleAssignments(panel.fields, panel.stickyAssignments);
-  const staleAssignmentPreview = staleAssignments.slice(0, STALE_ASSIGNMENT_PREVIEW_LIMIT);
   const profileDialogPanel = profileDialog ? panels[profileDialog.target] : null;
   const showFlashDevice = Boolean(
     selectedFlashMethodState
@@ -1612,32 +1625,6 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                 </div>
               )}
 
-              {staleAssignments.length > 0 && (
-                <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4">
-                  <p className="text-sm font-semibold text-amber-100">Saved profile may be stale</p>
-                  <p className="mt-1 text-sm leading-5 text-amber-100">
-                    {staleAssignments.length === 1
-                      ? 'One saved assignment is no longer visible in the current menuconfig preview. It may come from an older upstream checkout or from options that are no longer reachable through the current dependency graph.'
-                      : `${staleAssignments.length} saved assignments are no longer visible in the current menuconfig preview. They may come from an older upstream checkout or from options that are no longer reachable through the current dependency graph.`}
-                  </p>
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    {staleAssignmentPreview.map((assignment) => (
-                      <span
-                        key={`${assignment.symbol}:${assignment.value}`}
-                        className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-[11px] font-mono text-amber-100"
-                      >
-                        {formatAssignmentLabel(assignment)}
-                      </span>
-                    ))}
-                  </div>
-                  {staleAssignments.length > staleAssignmentPreview.length && (
-                    <p className="mt-2 text-[11px] text-amber-100/80">
-                      And {staleAssignments.length - staleAssignmentPreview.length} more saved assignments that are still carried with this profile.
-                    </p>
-                  )}
-                </div>
-              )}
-
               {panel.flashState?.available && fieldGroups.size === 0 && (
                 <div className="rounded-xl border border-[var(--color-bg-tertiary)] p-4 text-sm text-[var(--color-text-secondary)]">
                   No visible menuconfig options are available for the current selection.
@@ -1703,7 +1690,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                               type="text"
                               value={field.value}
                               onChange={(event) => handleFieldChange(activeTarget, field.id, event.target.value, false)}
-                              onBlur={() => void previewConfig(activeTarget, panel.assignmentValues, panel.knownFields, panel.stickyAssignments, panel.checkoutPath)}
+                              onBlur={() => handleFieldBlur(activeTarget)}
                               onKeyDown={(event) => {
                                 if (event.key === 'Enter') {
                                   event.currentTarget.blur();

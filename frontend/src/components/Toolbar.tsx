@@ -147,6 +147,7 @@ export default function Toolbar({
     setPendingAiRequest({
       id: requestId,
       prompt,
+      hiddenFromUser: true,
     });
     setShowChat(true);
   };
