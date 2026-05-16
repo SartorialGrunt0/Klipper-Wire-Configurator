@@ -661,7 +661,7 @@ def _katapult_can_flash_device_candidates(script_path: Path, interface: str = "c
         "-i",
         interface,
         "-q",
-    ], timeout=10)
+    ], timeout=2)
     if not output:
         return []
 
