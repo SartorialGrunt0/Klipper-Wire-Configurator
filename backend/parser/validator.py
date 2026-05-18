@@ -387,6 +387,10 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
         elif sec_type == "bed_mesh":
             _validate_bed_mesh_requirements(section, active_params, result)
 
+        # Sensorless homing warning: diag_pin or driver_SGTHRS with homing_retract_dist != 0
+        if sec_type.startswith("stepper") or sec_type.startswith("extruder"):
+            _check_sensorless_homing_warning(section, result, config)
+
         # MCU-specific: validate communication method (serial XOR canbus_uuid)
         if sec_type == "mcu":
             has_serial = "serial" in active_params
@@ -553,7 +557,68 @@ def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, Valida
         require_multiple_files=True,
     )
 
+    # Check for z_virtual_endstop without a probe section
+    virtual_endstop_warnings = _check_virtual_endstop_without_probe(configs, active_files=active_files)
+    for filename, warning in virtual_endstop_warnings:
+        # Avoid duplicate warnings
+        if any(
+            error.severity == warning.severity
+            and error.section == warning.section
+            and error.param == warning.param
+            and error.message == warning.message
+            for error in results[filename].errors
+        ):
+            continue
+        results[filename].errors.append(warning)
+
+    # Check for cross-file dependency issues (e.g., bed_mesh requiring probe in another file)
+    cross_file_warnings = _check_cross_file_dependencies(configs, active_files=active_files)
+    for filename, warning in cross_file_warnings:
+        # Avoid duplicate warnings
+        if any(
+            error.severity == warning.severity
+            and error.section == warning.section
+            and error.message == warning.message
+            for error in results[filename].errors
+        ):
+            continue
+        results[filename].errors.append(warning)
+
+    # Remove false single-file "requires probe" warnings when probe exists in another file.
+    # The _check_dependencies function only checks within a single file, so if [bed_mesh] is
+    # in one file and [probe] is in another, it incorrectly shows "requires [probe]".
+    # The cross-file check above already handles this correctly, so we remove the false warnings.
+    _remove_false_single_file_probe_warnings(results, cross_file_warnings)
+
     return results
+
+
+def _remove_false_single_file_probe_warnings(
+    results: dict[str, ValidationResult],
+    cross_file_warnings: list[tuple[str, ValidationError]],
+) -> None:
+    """Remove false 'requires [probe]' warnings that are resolved by cross-file probe detection.
+    
+    When [bed_mesh] is in one file and [probe] is in another, the single-file
+    _check_dependencies function incorrectly shows "requires [probe] which is not defined."
+    The cross-file check above already handles this correctly, so we remove the false warnings.
+    """
+    for filename, cfg in results.items():
+        filtered_errors = []
+        for error in cfg.errors:
+            # If this is a "requires [probe]" warning for bed_mesh, keep it only if
+            # there's also a cross-file warning for the same section (meaning no probe exists)
+            if "requires [probe]" in error.message and error.section.startswith("bed_mesh"):
+                # Check if there's a cross-file warning for this same section
+                has_cross_file_warning = any(
+                    w.section == error.section and "not defined" in w.message
+                    for _, w in cross_file_warnings
+                )
+                if not has_cross_file_warning:
+                    # Probe exists somewhere — this single-file warning is false
+                    continue
+            filtered_errors.append(error)
+        cfg.errors = filtered_errors
 
 
 def _validate_param_value(param, param_def, section, result):
@@ -790,3 +855,302 @@ def _is_allowed_shared_display_button_pin(users: list[PinUse]) -> bool:
     shared_params = {"up_pin", "down_pin", "click_pin", "back_pin", "kill_pin"}
     section = users[0].section
     return all(user.section_type == "display" and user.section == section and user.param in shared_params for user in users)
+
+
+def _is_probe_section(section: ConfigSection) -> bool:
+    """Check if a section is a probe-related section.
+
+    Includes:
+    - [probe] (top-level)
+    - [bltouch] (top-level)
+    - Named sections whose type starts with 'probe' (e.g., probe_eddy_current, probe_rr, probe_4in1, temperature_probe)
+    """
+    if section.section_type == "probe" or section.section_type == "bltouch":
+        return True
+    if section.section_type.startswith("probe"):
+        return True
+    return False
+
+
+def _extract_virtual_endstop_value(raw_value: str) -> str | None:
+    """Extract the base pin value from a Klipper pin expression.
+
+    Handles:
+    - Pin modifiers: ! (invert), ^ (pull-up), ~ (PWM)
+    - MCU prefix: mcu:pin
+    - z_virtual_endstop and manually_set_z_virtual_endstop
+    """
+    value = raw_value.strip()
+    # Strip pin modifiers
+    value = value.lstrip("!^~")
+    # Strip MCU prefix if present (e.g., "mcu:z_virtual_endstop")
+    if ":" in value:
+        value = value.split(":", 1)[1]
+    # Strip macro references (e.g., "<z_virtual_endstop>")
+    value = value.strip("<>")
+    return value.lower() if value else None
+
+
+def _check_virtual_endstop_without_probe(
+    configs: dict[str, ConfigFile],
+    active_files: set[str] | None = None,
+) -> list[tuple[str, ValidationError]]:
+    """Check for endstop_pin = z_virtual_endstop without a probe section.
+
+    In Klipper, using z_virtual_endstop as an endstop_pin requires a probe
+    section (BLTouch, bed probe, eddy current probe, temperature_probe, etc.)
+    to be defined for Z-offset management. This warning is only valid when
+    checking multiple config files as a project.
+
+    Only probe sections in active (included) files are considered, because
+    probes in non-included files won't actually be loaded by Klipper.
+
+    Returns a list of (filename, ValidationError) tuples so the caller can
+    attach the warning to the correct file's results.
+    """
+    results: list[tuple[str, ValidationError]] = []
+
+    # Collect all probe section headers across active files only.
+    # Note: save_config_sections (lines prefixed with #*#) are Klipper's
+    # auto-generated saved configuration output — they should NOT count as
+    # real probe definitions since they're just the saved output, not actual
+    # probe hardware.
+    probe_sections: set[str] = set()
+    if active_files:
+        for filename, cfg in configs.items():
+            if filename not in active_files:
+                continue
+            for section in cfg.sections:
+                if section.is_commented_out:
+                    continue
+                if _is_probe_section(section):
+                    probe_sections.add(section.full_header)
+    else:
+        # No active_files specified — check all files (single-file mode)
+        for filename, cfg in configs.items():
+            for section in cfg.sections:
+                if section.is_commented_out:
+                    continue
+                if _is_probe_section(section):
+                    probe_sections.add(section.full_header)
+
+    if probe_sections:
+        return results
+
+    # No probe found — check each ACTIVE file for z_virtual_endstop usage.
+    # Only active (included) files are checked because Klipper won't load
+    # sections from non-included files.
+    for filename, cfg in configs.items():
+        if active_files is not None and filename not in active_files:
+            continue
+        for section in cfg.sections:
+            if section.is_commented_out:
+                continue
+            for param in section.params:
+                if param.is_commented_out or param.key != "endstop_pin":
+                    continue
+                base_value = _extract_virtual_endstop_value(param.value)
+                if base_value in ("z_virtual_endstop", "manually_set_z_virtual_endstop"):
+                    results.append((filename, ValidationError(
+                        severity="warning",
+                        section=section.full_header,
+                        param="endstop_pin",
+                        message=(
+                            f"Section [{section.section_type}] uses 'z_virtual_endstop' "
+                            "as the endstop_pin, but no probe section (BLTouch, probe, "
+                            "scanner, etc.) is defined. A probe is required for "
+                            "z_virtual_endstop to work."
+                        ),
+                        line_number=param.line_number,
+                    )))
+
+    return results
+
+
+def _get_probe_section_types() -> set[str]:
+    """Get all section types that are considered probe sections.
+    
+    Includes:
+    - [probe] (top-level)
+    - [bltouch] (top-level)
+    - Named sections whose type starts with 'probe' (e.g., probe_eddy_current, probe_rr, probe_4in1)
+    """
+    types = {"probe", "bltouch"}
+    for sec_def in SECTION_DEFS.values():
+        if sec_def.section_type.startswith("probe"):
+            types.add(sec_def.section_type)
+    return types
+
+
+def _check_cross_file_dependencies(
+    configs: dict[str, ConfigFile],
+    active_files: set[str] | None = None,
+) -> list[tuple[str, ValidationError]]:
+    """Check for sections that require dependencies (like bed_mesh requiring probe)
+    across all config files in the project.
+    
+    This resolves the issue where [bed_mesh] in one file and [probe] in another
+    would incorrectly show "requires [probe] which is not defined."
+    
+    Only probe sections in active (included) files are considered, because
+    probes in non-included files won't actually be loaded by Klipper.
+    
+    Note: save_config_sections (lines prefixed with #*#) are Klipper's
+    auto-generated saved configuration output — they should NOT count as
+    real probe definitions since they're just the saved output, not actual
+    probe hardware.
+    
+    Returns a list of (filename, ValidationError) tuples for files that have
+    missing dependencies.
+    """
+    results: list[tuple[str, ValidationError]] = []
+    
+    # Get all probe-related section types
+    probe_types = _get_probe_section_types()
+    
+    # Collect all probe section headers across active files only.
+    # save_config_sections are intentionally excluded (they're auto-generated).
+    probe_sections: set[str] = set()
+    if active_files:
+        for filename, cfg in configs.items():
+            if filename not in active_files:
+                continue
+            for section in cfg.sections:
+                if section.is_commented_out:
+                    continue
+                if section.section_type in probe_types or section.section_type.startswith("probe"):
+                    probe_sections.add(section.full_header)
+    else:
+        # No active_files specified — check all files (single-file mode)
+        for filename, cfg in configs.items():
+            for section in cfg.sections:
+                if section.is_commented_out:
+                    continue
+                if section.section_type in probe_types or section.section_type.startswith("probe"):
+                    probe_sections.add(section.full_header)
+    
+    # Check each file for sections that require probe
+    for filename, cfg in configs.items():
+        for section in cfg.sections:
+            if section.is_commented_out:
+                continue
+            sec_def = get_section_def(section.section_type)
+            if sec_def is None:
+                continue
+            # Check if this section requires probe
+            if "probe" not in sec_def.requires:
+                continue
+            # Check if probe exists in any active file
+            if probe_sections:
+                continue
+            # No probe found — this is a genuine missing dependency
+            results.append((filename, ValidationError(
+                severity="warning",
+                section=section.full_header,
+                param="",
+                message=(
+                    f"Section [{section.section_type}] requires [probe] which is not defined "
+                    "in any configuration file. A probe section (BLTouch, probe, "
+                    "probe_eddy_current, etc.) is needed for bed_mesh to work correctly."
+                ),
+                line_number=section.line_number,
+            )))
+    
+    return results
+
+
+def _check_sensorless_homing_warning(
+    section: ConfigSection,
+    result: ValidationResult,
+    config: ConfigFile | None = None,
+) -> None:
+    """Warn when sensorless homing is detected with a non-zero homing_retract_dist.
+
+    Sensorless homing is identified by the presence of:
+    - driver_SGTHRS (TMC2209 StallGuard threshold)
+    - driver_SGT (TMC2130/TMC5160 StallGuard threshold)
+    - diag_pin / diag0_pin / diag1_pin (diagnostic pin for stall detection)
+
+    These parameters are looked up in the corresponding TMC driver section
+    (e.g., [tmc2209 stepper_x]), not the stepper section itself.
+
+    When sensorless homing is used, homing_retract_dist must be 0 (or omitted)
+    because the homing move must continue through the endstop without retracting.
+    """
+    has_sgthrs = False
+    has_diag = False
+
+    # Check the corresponding TMC driver section(s)
+    # In Klipper, TMC drivers are configured in sections like [tmc2209 stepper_x]
+    sec_type = section.section_type
+
+    # Only process stepper and extruder sections
+    if sec_type.startswith("stepper_") or sec_type.startswith("extruder"):
+        # Look for TMC driver sections that configure this stepper
+        # Common TMC driver types: tmc2130, tmc2208, tmc2209, tmc2660, tmc2240, tmc5160, tmc5200
+        tmc_driver_types = {"tmc2130", "tmc2208", "tmc2209", "tmc2660", "tmc2240", "tmc5160", "tmc5200"}
+        if config is not None:
+            for tmc_type in tmc_driver_types:
+                tmc_section_header = f"{tmc_type} {sec_type}"
+                tmc_section = config.get_section(tmc_section_header)
+                if tmc_section is not None:
+                    # Check for sensorless homing indicators in the TMC section
+                    tmc_active_params = {
+                        p.key.lower()
+                        for p in tmc_section.params
+                        if not p.is_commented_out and p.key != "_comment_"
+                    }
+                    if "driver_sgthrs" in tmc_active_params or "driver_sgt" in tmc_active_params:
+                        has_sgthrs = True
+                    if any(p in tmc_active_params for p in ("diag_pin", "diag0_pin", "diag1_pin")):
+                        has_diag = True
+                    if has_sgthrs and has_diag:
+                        break  # Found both, no need to check more TMC sections
+
+    if not (has_sgthrs or has_diag):
+        return
+
+    # Check homing_retract_dist value
+    # Klipper defaults homing_retract_dist to 5.0 if not specified,
+    # which breaks sensorless homing (the homing move pulls away from
+    # the endstop before it is triggered).
+    homing_retract_dist_val = section.get_value("homing_retract_dist", "").strip()
+
+    should_warn = False
+    warning_param = "homing_retract_dist"
+    warning_message: str | None = None
+
+    if not homing_retract_dist_val:
+        # Parameter not defined - Klipper will default to 5.0
+        should_warn = True
+        warning_param = ""  # Warn at section level, not param level
+        warning_message = (
+            "Sensorless homing detected (via driver_SGTHRS or diag_pin in the TMC driver section). "
+            "homing_retract_dist is not defined and will default to 5mm in Klipper, "
+            "which will break sensorless homing. Set homing_retract_dist to 0 "
+            "so the homing move continues through the endstop without retracting."
+        )
+    elif homing_retract_dist_val != "0":
+        # Parameter explicitly set to non-zero value
+        try:
+            retract_val = float(homing_retract_dist_val)
+            if retract_val != 0:
+                should_warn = True
+                warning_message = (
+                    "Sensorless homing detected (via driver_SGTHRS or diag_pin in the TMC driver section). "
+                    "homing_retract_dist is set to {} which will break sensorless homing. "
+                    "Set homing_retract_dist to 0 so the homing move continues through "
+                    "the endstop without retracting.".format(homing_retract_dist_val)
+                )
+        except ValueError:
+            # If it's a formula or reference, skip numeric check
+            pass
+
+    if should_warn and warning_message:
+        result.errors.append(ValidationError(
+            severity="warning",
+            section=section.full_header,
+            param=warning_param,
+            message=warning_message,
+            line_number=section.line_number,
+        ))
