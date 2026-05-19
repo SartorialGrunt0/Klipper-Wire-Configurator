@@ -84,6 +84,7 @@ export interface MachineProfile {
   horizontalMoveZ: number;
   nozzleMaxTemp: number;
   bedMaxTemp: number;
+  maxExtrudeCrossSection: number;
   maxVelocity: number;
   maxAccel: number;
   noGoZones: NoGoZone[];

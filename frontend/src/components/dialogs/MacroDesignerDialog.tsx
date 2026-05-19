@@ -17,7 +17,6 @@ import {
   deriveCurrentMacroItems,
   findPathZoneHit,
   findZoneHit,
-  formatMacroGcodeForEditorView,
   fuzzyFilterItems,
   isPointInMoveBounds,
   normalizeMacroGcodeForConfig,
@@ -168,14 +167,20 @@ const PLAYBACK_ITEM_KEY = 'playback:loaded';
 
 function createGcodeMacroSection(item: MacroSourceItem): ConfigSection {
   const params = [];
-  if (item.renameExisting.trim()) {
-    params.push({ key: 'rename_existing', value: item.renameExisting.trim(), comment: '', is_commented_out: false });
-  }
   if (item.description.trim()) {
-    params.push({ key: 'description', value: item.description.trim(), comment: '', is_commented_out: false });
+    params.push({ key: 'description', value: item.description.trim(), comment: '', is_commented_out: false, separator: ':' });
+  }
+  if (item.renameExisting.trim()) {
+    params.push({ key: 'rename_existing', value: item.renameExisting.trim(), comment: '', is_commented_out: false, separator: ':' });
   }
   params.push(...parseMacroVariables(item.variables));
-  params.push({ key: 'gcode', value: normalizeMacroGcodeForConfig(item.gcode), comment: '', is_commented_out: false });
+  params.push({
+    key: 'gcode',
+    value: normalizeMacroGcodeForConfig(item.gcode) || '\n',
+    comment: '',
+    is_commented_out: false,
+    separator: ':',
+  });
   return {
     section_type: 'gcode_macro',
     section_name: sanitizeMacroName(item.title),
@@ -2187,8 +2192,9 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                     className="mb-2 w-full resize-y overflow-y-auto rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-3 py-3 font-mono text-xs leading-5 text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none disabled:opacity-70"
                     style={{ minHeight: '72px', maxHeight: '180px' }}
                   />
+                  <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--color-text-secondary)]">gcode:</div>
                   <textarea
-                    value={formatMacroGcodeForEditorView(displayedItem?.gcode || '')}
+                    value={displayedItem?.gcode || ''}
                     disabled={!editMode}
                     onChange={(event) => updateEditedItem({ gcode: parseMacroGcodeFromEditorView(event.target.value) })}
                     rows={12}

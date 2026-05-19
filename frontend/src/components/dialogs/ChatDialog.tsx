@@ -109,6 +109,26 @@ function resolveProviderApiUrl(
   return apiUrl;
 }
 
+function getProviderModel(
+  provider: AiProvider,
+  providerModels: Partial<Record<AiProvider, string>>,
+  fallbackModel = '',
+  fallbackProvider?: AiProvider,
+): string {
+  const providerModel = providerModels[provider]?.trim();
+  if (providerModel) {
+    return providerModel;
+  }
+  if (fallbackProvider === provider && fallbackModel.trim()) {
+    return fallbackModel;
+  }
+  return '';
+}
+
+function providerRequiresApiKey(provider: AiProvider): boolean {
+  return PROVIDER_DEFAULTS[provider].requiresKey;
+}
+
 type ParagraphProps = ComponentPropsWithoutRef<'p'>;
 type ListProps = ComponentPropsWithoutRef<'ul'>;
 type OrderedListProps = ComponentPropsWithoutRef<'ol'>;
@@ -176,6 +196,36 @@ function extractConfigCodeBlocks(content: string): string[] {
 
 function extractConfigCodeBlock(content: string): string | null {
   return extractConfigCodeBlocks(content)[0] ?? null;
+}
+
+function extractEqualsSeparatedConfigLines(content: string): string[] {
+  const matches = extractConfigCodeBlocks(content)
+    .flatMap((block) => block.split(/\r?\n/))
+    .map((line) => line.trim())
+    .filter((line) => /^#?\s*[A-Za-z0-9_][A-Za-z0-9_-]*\s*=.*$/.test(line));
+
+  return Array.from(new Set(matches));
+}
+
+function buildConfigSeparatorRewritePrompt(offendingLines: string[]): string {
+  const examples = offendingLines
+    .slice(0, 5)
+    .map((line) => `- ${line}`)
+    .join('\n');
+
+  return [
+    'Rewrite your previous reply so every cfg parameter assignment uses a colon separator instead of an equals sign.',
+    'Keep the exact same files, section headers, parameter names, values, ordering, comments, and surrounding explanation.',
+    'Do not change gcode command arguments inside multiline values. Only change cfg parameter lines from `key = value` to `key: value`.',
+    'Return the full replacement reply.',
+    '',
+    'Examples that must be rewritten with colons:',
+    examples,
+  ].join('\n');
+}
+
+function appendWarningMessage(current: string | null, next: string): string {
+  return current ? `${current}\n${next}` : next;
 }
 
 function escapeRegExp(value: string): string {
@@ -705,13 +755,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     validation,
     schemas,
     textEditorDirty,
-    textDraftFile,
-    textDraftText,
+    textDrafts,
     setConfigFile,
     setValidation,
     clearTextDraft,
-    setTextDraft,
-    setTextEditorDirty,
     markDirty,
   } = useConfigStore();
   const [input, setInput] = useState('');
@@ -727,7 +774,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
 
   // Settings editing state
   const [editApiKey, setEditApiKey] = useState(settings.apiKey);
-  const [editModel, setEditModel] = useState(settings.model);
+  const [editProviderModels, setEditProviderModels] = useState(settings.providerModels);
+  const [editModel, setEditModel] = useState(() => (
+    getProviderModel(settings.apiProvider, settings.providerModels, settings.model, settings.apiProvider)
+  ));
   const [editApiUrl, setEditApiUrl] = useState(settings.apiUrl);
   const [editApiProvider, setEditApiProvider] = useState<AiProvider>(settings.apiProvider);
   const [editLmStudioHost, setEditLmStudioHost] = useState(settings.lmStudioHost);
@@ -748,6 +798,14 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     editOllamaHost,
     editOllamaPort,
   );
+
+  const handleModelChange = useCallback((nextModel: string) => {
+    setEditModel(nextModel);
+    setEditProviderModels((prev) => ({
+      ...prev,
+      [editApiProvider]: nextModel,
+    }));
+  }, [editApiProvider]);
 
   // Fetch available models from local server
   const fetchAvailableModels = async (
@@ -786,7 +844,13 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   useEffect(() => {
     if (open) {
       setEditApiKey(settings.apiKey);
-      setEditModel(settings.model);
+      setEditProviderModels(settings.providerModels);
+      setEditModel(getProviderModel(
+        settings.apiProvider,
+        settings.providerModels,
+        settings.model,
+        settings.apiProvider,
+      ));
       setEditApiUrl(settings.apiUrl);
       setEditApiProvider(settings.apiProvider);
       setEditLmStudioHost(settings.lmStudioHost);
@@ -896,7 +960,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [open, messages, activeFile, configFiles, textDraftFile, textDraftText]);
+  }, [open, messages, activeFile, configFiles, textDrafts]);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLDivElement>(null);
@@ -936,8 +1000,9 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       return null;
     }
 
-    if (textDraftFile === filename) {
-      return textDraftText;
+    const draftText = textDrafts[filename];
+    if (typeof draftText === 'string') {
+      return draftText;
     }
 
     const config = configFiles[filename];
@@ -970,7 +1035,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
 
         const label = filename === activeFile
           ? (
-            textDraftFile === activeFile && textEditorDirty
+            typeof textDrafts[activeFile] === 'string' && textEditorDirty
               ? 'Active Klipper config draft with unapplied text-view changes'
               : 'Active Klipper config draft'
           )
@@ -1155,16 +1220,25 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
 
   const buildCurrentProjectConfigsForValidation = async (): Promise<Record<string, ConfigFile>> => {
     const currentProjectConfigs: Record<string, ConfigFile> = { ...configFiles };
+    const draftEntries = Object.entries(textDrafts);
 
-    if (!textDraftFile) {
+    if (draftEntries.length === 0) {
       return currentProjectConfigs;
     }
 
-    const draftResult = await api.parseConfigText(textDraftText, textDraftFile);
-    currentProjectConfigs[textDraftFile] = {
-      ...draftResult.config,
-      raw_text: textDraftText,
-    };
+    const draftResults = await Promise.all(
+      draftEntries.map(async ([filename, draftText]) => {
+        const result = await api.parseConfigText(draftText, filename);
+        return [filename, draftText, result] as const;
+      }),
+    );
+
+    draftResults.forEach(([filename, draftText, draftResult]) => {
+      currentProjectConfigs[filename] = {
+        ...draftResult.config,
+        raw_text: draftText,
+      };
+    });
 
     return currentProjectConfigs;
   };
@@ -1318,6 +1392,54 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       warningMessage = `Automatic full-doc follow-up failed: ${autoDocMessage}`;
     }
 
+    const equalsSeparatedLines = extractEqualsSeparatedConfigLines(assistantMessage.content);
+    if (equalsSeparatedLines.length > 0) {
+      const rewritePrompt = buildConfigSeparatorRewritePrompt(equalsSeparatedLines);
+
+      try {
+        const rewriteResponse = await api.aiChat({
+          ...chatRequestBase,
+          messages: [
+            ...conversationMessages,
+            ...conversationTrail.map((message) => ({ role: message.role, content: message.content })),
+            { role: 'user', content: rewritePrompt },
+          ],
+        });
+
+        if (rewriteResponse.error) {
+          throw new Error(rewriteResponse.error);
+        }
+
+        assistantMessage = {
+          role: 'assistant',
+          content: rewriteResponse.content || assistantMessage.content,
+          lmStudioMcp: rewriteResponse.lmStudioMcp ?? assistantMessage.lmStudioMcp,
+          lmStudioContext: rewriteResponse.lmStudioContext ?? assistantMessage.lmStudioContext,
+          autoLoadedDocs: assistantMessage.autoLoadedDocs,
+        };
+        conversationTrail = [
+          ...conversationTrail,
+          { role: 'user', content: rewritePrompt },
+          { role: 'assistant', content: assistantMessage.content },
+        ];
+
+        if (extractEqualsSeparatedConfigLines(assistantMessage.content).length > 0) {
+          warningMessage = appendWarningMessage(
+            warningMessage,
+            'The assistant was asked to rewrite cfg assignments with colons, but the replacement reply still included equals-sign separators.',
+          );
+        }
+      } catch (rewriteErr: unknown) {
+        const rewriteMessage = rewriteErr instanceof Error
+          ? rewriteErr.message
+          : 'Automatic cfg separator rewrite failed.';
+        warningMessage = appendWarningMessage(
+          warningMessage,
+          `Automatic cfg separator rewrite failed: ${rewriteMessage}`,
+        );
+      }
+    }
+
     return {
       assistantMessage,
       conversationMessages: conversationTrail,
@@ -1446,10 +1568,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         setValidation(filename, updatedValidation[filename]);
       });
 
-      if (textDraftFile && touchedFiles.includes(textDraftFile)) {
-        clearTextDraft();
-        setTextEditorDirty(false);
-      }
+      touchedFiles.forEach((filename) => clearTextDraft(filename));
       markDirty();
 
       const graphStore = useGraphStore.getState();
@@ -1672,9 +1791,14 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   };
 
   const handleSaveSettings = () => {
+    const nextProviderModels = {
+      ...editProviderModels,
+      [editApiProvider]: editModel,
+    };
     setSettings({
       apiKey: editApiKey,
       model: editModel,
+      providerModels: nextProviderModels,
       apiUrl: resolvedEditApiUrl,
       apiProvider: editApiProvider,
       lmStudioHost: editLmStudioHost,
@@ -1691,7 +1815,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
 
   // Compute whether the save button should be enabled
   const isSaveEnabled = (() => {
-    if (isLocalProvider(editApiProvider)) {
+    if (!editModel.trim()) {
+      return false;
+    }
+    if (!providerRequiresApiKey(editApiProvider)) {
       return true;
     }
     return !!editApiKey.trim();
@@ -1699,7 +1826,14 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
 
   // Update URL when provider changes
   const handleProviderChange = (provider: AiProvider) => {
+    const nextProviderModels = {
+      ...editProviderModels,
+      [editApiProvider]: editModel,
+    };
+
+    setEditProviderModels(nextProviderModels);
     setEditApiProvider(provider);
+    setEditModel(getProviderModel(provider, nextProviderModels, settings.model, settings.apiProvider));
     const defaults = PROVIDER_DEFAULTS[provider];
     if (!isLocalProvider(provider)) {
       setEditApiUrl(defaults.defaultUrl);
@@ -1764,7 +1898,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
                   type="text"
                   className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
                   value={editModel}
-                  onChange={(e) => setEditModel(e.target.value)}
+                  onChange={(e) => handleModelChange(e.target.value)}
                   placeholder="e.g. gpt-4o, llama3.1, phi3"
                 />
               </div>
@@ -1955,38 +2089,48 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
                   </select>
                 </div>
                 {/* Model selector */}
-                {isLocalProvider(editApiProvider) && (
-                  <div>
-                    <label className="block text-[10px] text-[var(--color-text-secondary)] mb-1">Model</label>
-                    {availableModels.length > 0 ? (
-                      <select
-                        className="w-full px-3 py-1.5 rounded text-xs font-mono bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-                        value={editModel}
-                        onChange={(e) => setEditModel(e.target.value)}
+                <div>
+                  <label className="block text-[10px] text-[var(--color-text-secondary)] mb-1">Model</label>
+                  {isLocalProvider(editApiProvider) ? (
+                    <>
+                      {availableModels.length > 0 ? (
+                        <select
+                          className="w-full px-3 py-1.5 rounded text-xs font-mono bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
+                          value={editModel}
+                          onChange={(e) => handleModelChange(e.target.value)}
+                        >
+                          {availableModels.map((m) => (
+                            <option key={m} value={m}>{m}</option>
+                          ))}
+                        </select>
+                      ) : (
+                        <input
+                          type="text"
+                          className="w-full px-3 py-1.5 rounded text-xs font-mono bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
+                          value={editModel}
+                          onChange={(e) => handleModelChange(e.target.value)}
+                          placeholder="Model name"
+                        />
+                      )}
+                      <button
+                        onClick={() => {
+                          void fetchAvailableModels(editApiProvider, resolvedEditApiUrl, editApiKey);
+                        }}
+                        className="mt-1 text-[10px] text-[var(--color-accent)] hover:underline"
                       >
-                        {availableModels.map((m) => (
-                          <option key={m} value={m}>{m}</option>
-                        ))}
-                      </select>
-                    ) : (
-                      <input
-                        type="text"
-                        className="w-full px-3 py-1.5 rounded text-xs font-mono bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-                        value={editModel}
-                        onChange={(e) => setEditModel(e.target.value)}
-                        placeholder="Model name"
-                      />
-                    )}
-                    <button
-                      onClick={() => {
-                        void fetchAvailableModels(editApiProvider, editApiUrl, editApiKey);
-                      }}
-                      className="mt-1 text-[10px] text-[var(--color-accent)] hover:underline"
-                    >
-                      Refresh models
-                    </button>
-                  </div>
-                )}
+                        Refresh models
+                      </button>
+                    </>
+                  ) : (
+                    <input
+                      type="text"
+                      className="w-full px-3 py-1.5 rounded text-xs font-mono bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
+                      value={editModel}
+                      onChange={(e) => handleModelChange(e.target.value)}
+                      placeholder="e.g. gemini-2.5-pro, claude-sonnet-4, gpt-4o"
+                    />
+                  )}
+                </div>
                 {isLocalProvider(editApiProvider) && modelsLoading && (
                   <p className="text-[10px] text-[var(--color-text-secondary)]">Loading models...</p>
                 )}

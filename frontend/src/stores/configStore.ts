@@ -111,8 +111,7 @@ interface ConfigState {
   originalTexts: Record<string, string>; // original exported text at import time
   isDirty: boolean; // true when config has unsaved changes
   textEditorDirty: boolean; // true when the text editor has unapplied draft changes
-  textDraftFile: string | null;
-  textDraftText: string;
+  textDrafts: Record<string, string>;
 
   /* ── Actions ──────────────────────────────────────── */
   setConfigFile: (filename: string, config: ConfigFile) => void;
@@ -167,7 +166,7 @@ interface ConfigState {
   markClean: () => void;
   setTextEditorDirty: (dirty: boolean) => void;
   setTextDraft: (filename: string, text: string) => void;
-  clearTextDraft: () => void;
+  clearTextDraft: (filename?: string) => void;
 
   /* Helpers */
   getSection: (filename: string, fullHeader: string, lineNumber?: number) => ConfigSection | undefined;
@@ -184,8 +183,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   originalTexts: {},
   isDirty: false,
   textEditorDirty: false,
-  textDraftFile: null,
-  textDraftText: '',
+  textDrafts: {},
 
   setConfigFile: (filename, config) =>
     set((s) => ({
@@ -201,6 +199,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const nextValidation = { ...s.validation };
       delete nextValidation[filename];
 
+      const nextTextDrafts = { ...s.textDrafts };
+      delete nextTextDrafts[filename];
+
       const remainingFiles = Object.keys(nextConfigFiles);
 
       return {
@@ -209,8 +210,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         validation: nextValidation,
         activeFile: s.activeFile === filename ? remainingFiles[0] || 'printer.cfg' : s.activeFile,
         selectedSection: s.activeFile === filename ? null : s.selectedSection,
-        textDraftFile: s.textDraftFile === filename ? null : s.textDraftFile,
-        textDraftText: s.textDraftFile === filename ? '' : s.textDraftText,
+        textDrafts: nextTextDrafts,
+        textEditorDirty: Object.keys(nextTextDrafts).length > 0,
       };
     }),
 
@@ -414,8 +415,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       originalTexts: {},
       isDirty: false,
       textEditorDirty: false,
-      textDraftFile: null,
-      textDraftText: '',
+      textDrafts: {},
     }),
 
   loadConfigs: (configs) =>
@@ -424,8 +424,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       activeFile: Object.keys(configs)[0] || 'printer.cfg',
       isDirty: false,
       textEditorDirty: false,
-      textDraftFile: null,
-      textDraftText: '',
+      textDrafts: {},
     }),
 
   setOriginalText: (filename, text) =>
@@ -451,6 +450,11 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         nextOriginals[newName] = nextOriginals[oldName];
         delete nextOriginals[oldName];
       }
+      const nextTextDrafts = { ...s.textDrafts };
+      if (oldName in nextTextDrafts) {
+        nextTextDrafts[newName] = nextTextDrafts[oldName];
+        delete nextTextDrafts[oldName];
+      }
       // Update include directives in other files that reference the old name
       for (const [fn, cf] of Object.entries(next)) {
         if (cf.includes.includes(oldName)) {
@@ -463,7 +467,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         activeFile: s.activeFile === oldName ? newName : s.activeFile,
         validation: nextValidation,
         originalTexts: nextOriginals,
-        textDraftFile: s.textDraftFile === oldName ? newName : s.textDraftFile,
+        textDrafts: nextTextDrafts,
+        textEditorDirty: Object.keys(nextTextDrafts).length > 0,
       };
     }),
 
@@ -566,32 +571,49 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   markClean: () => set({
     isDirty: false,
     textEditorDirty: false,
-    textDraftFile: null,
-    textDraftText: '',
+    textDrafts: {},
   }),
 
   setTextEditorDirty: (dirty) =>
-    set((s) => (s.textEditorDirty === dirty ? s : { textEditorDirty: dirty })),
+    set((s) => {
+      const hasDrafts = Object.keys(s.textDrafts).length > 0;
+      const nextDirty = dirty ? true : hasDrafts;
+      return s.textEditorDirty === nextDirty ? s : { textEditorDirty: nextDirty };
+    }),
 
   setTextDraft: (filename, text) =>
     set((s) => {
-      if (s.textDraftFile === filename && s.textDraftText === text) {
+      if (s.textDrafts[filename] === text) {
         return s;
       }
+      const nextTextDrafts = { ...s.textDrafts, [filename]: text };
       return {
-        textDraftFile: filename,
-        textDraftText: text,
+        textDrafts: nextTextDrafts,
+        textEditorDirty: true,
       };
     }),
 
-  clearTextDraft: () =>
+  clearTextDraft: (filename) =>
     set((s) => {
-      if (s.textDraftFile == null && s.textDraftText === '') {
+      if (filename == null) {
+        if (Object.keys(s.textDrafts).length === 0) {
+          return s;
+        }
+        return {
+          textDrafts: {},
+          textEditorDirty: false,
+        };
+      }
+
+      if (!(filename in s.textDrafts)) {
         return s;
       }
+
+      const nextTextDrafts = { ...s.textDrafts };
+      delete nextTextDrafts[filename];
       return {
-        textDraftFile: null,
-        textDraftText: '',
+        textDrafts: nextTextDrafts,
+        textEditorDirty: Object.keys(nextTextDrafts).length > 0,
       };
     }),
 

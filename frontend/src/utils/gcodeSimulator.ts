@@ -1972,6 +1972,12 @@ function applyLinearMove(
   }
 
   const distance = Math.sqrt((nextX - state.x) ** 2 + (nextY - state.y) ** 2 + (nextZ - state.z) ** 2);
+  const extrudeDelta = nextE - state.e;
+  if (distance < 1e-6 && extrudeDelta > profile.maxExtrudeCrossSection) {
+    warnings.push(
+      `Extrude-only move E${extrudeDelta.toFixed(2)} exceeds max_extrude_cross_section ${profile.maxExtrudeCrossSection.toFixed(2)}.`,
+    );
+  }
   const effectiveFeedRate = fValue ?? state.feedRate;
   const moveTime = estimateMoveTime(distance, effectiveFeedRate, profile.maxVelocity, profile.maxAccel);
   if (effectiveFeedRate / 60 > profile.maxVelocity) {

@@ -468,6 +468,7 @@ export function createMachineProfile(
     horizontalMoveZ: asNumber(getParamValue(bedMesh, 'horizontal_move_z'), 5),
     nozzleMaxTemp: asNumber(getParamValue(extruder, 'max_temp'), 350),
     bedMaxTemp: asNumber(getParamValue(heaterBed, 'max_temp'), 130),
+    maxExtrudeCrossSection: Math.max(0, asNumber(getParamValue(extruder, 'max_extrude_cross_section'), 50)),
     maxVelocity: asNumber(getParamValue(printer, 'max_velocity'), 300),
     maxAccel: asNumber(getParamValue(printer, 'max_accel'), 3000),
     noGoZones,
