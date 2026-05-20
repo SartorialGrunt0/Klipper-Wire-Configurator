@@ -103,6 +103,10 @@ function getParamValue(section: ConfigSection | undefined, key: string): string 
   return getParam(section, key)?.value;
 }
 
+export function buildConfigMacroItemKey(filename: string, fullHeader: string, lineNumber?: number): string {
+  return `config:${filename}:${fullHeader}:${lineNumber ?? 0}`;
+}
+
 function formatMacroParam(param: ConfigParam): string {
   if (param.key === '_comment_') return param.value;
   const prefix = param.is_commented_out ? '#' : '';
@@ -276,7 +280,7 @@ export function deriveCurrentMacroItems(configFiles: Record<string, ConfigFile>)
     config.sections
       .filter((section) => section.section_type === 'gcode_macro' && !section.is_commented_out)
       .map((section) => ({
-        key: `config:${filename}:${section.full_header}`,
+        key: buildConfigMacroItemKey(filename, section.full_header, section.line_number),
         source: 'config' as const,
         title: section.section_name || section.full_header.replace(/^gcode_macro\s+/i, ''),
         renameExisting: getParamValue(section, 'rename_existing') || '',
@@ -285,6 +289,7 @@ export function deriveCurrentMacroItems(configFiles: Record<string, ConfigFile>)
         gcode: normalizeMacroGcodeForEditor(getParamValue(section, 'gcode') || ''),
         sourceFile: filename,
         sourceHeader: section.full_header,
+        sourceLine: section.line_number,
       }))
   ));
 }
@@ -468,6 +473,7 @@ export function createMachineProfile(
     horizontalMoveZ: asNumber(getParamValue(bedMesh, 'horizontal_move_z'), 5),
     nozzleMaxTemp: asNumber(getParamValue(extruder, 'max_temp'), 350),
     bedMaxTemp: asNumber(getParamValue(heaterBed, 'max_temp'), 130),
+    maxExtrudeCrossSection: Math.max(0, asNumber(getParamValue(extruder, 'max_extrude_cross_section'), 50)),
     maxVelocity: asNumber(getParamValue(printer, 'max_velocity'), 300),
     maxAccel: asNumber(getParamValue(printer, 'max_accel'), 3000),
     noGoZones,

@@ -5,6 +5,7 @@ import { createDefaultDraft, useMacroDesignerStore } from '../../stores/macroDes
 import * as api from '../../services/api';
 import type { ConfigFile, ConfigSection } from '../../types/config';
 import type {
+  MacroDraft,
   MachineProfile,
   MacroRuntimeState,
   MacroSourceItem,
@@ -12,12 +13,12 @@ import type {
   SimulationTickResult,
 } from '../../types/macroDesigner';
 import {
+  buildConfigMacroItemKey,
   createMachineProfile,
   deriveAvailableBuiltInMacros,
   deriveCurrentMacroItems,
   findPathZoneHit,
   findZoneHit,
-  formatMacroGcodeForEditorView,
   fuzzyFilterItems,
   isPointInMoveBounds,
   normalizeMacroGcodeForConfig,
@@ -37,10 +38,6 @@ import type { TrapezoidalProfile } from '../../utils/gcodeSimulator';
 
 interface MacroDesignerDialogProps {
   onClose: () => void;
-}
-
-interface WorkingCopies {
-  [key: string]: MacroSourceItem;
 }
 
 interface ToolheadPosition {
@@ -168,19 +165,25 @@ const PLAYBACK_ITEM_KEY = 'playback:loaded';
 
 function createGcodeMacroSection(item: MacroSourceItem): ConfigSection {
   const params = [];
-  if (item.renameExisting.trim()) {
-    params.push({ key: 'rename_existing', value: item.renameExisting.trim(), comment: '', is_commented_out: false });
-  }
   if (item.description.trim()) {
-    params.push({ key: 'description', value: item.description.trim(), comment: '', is_commented_out: false });
+    params.push({ key: 'description', value: item.description.trim(), comment: '', is_commented_out: false, separator: ':' });
+  }
+  if (item.renameExisting.trim()) {
+    params.push({ key: 'rename_existing', value: item.renameExisting.trim(), comment: '', is_commented_out: false, separator: ':' });
   }
   params.push(...parseMacroVariables(item.variables));
-  params.push({ key: 'gcode', value: normalizeMacroGcodeForConfig(item.gcode), comment: '', is_commented_out: false });
+  params.push({
+    key: 'gcode',
+    value: normalizeMacroGcodeForConfig(item.gcode) || '\n',
+    comment: '',
+    is_commented_out: false,
+    separator: ':',
+  });
   return {
     section_type: 'gcode_macro',
     section_name: sanitizeMacroName(item.title),
     full_header: `gcode_macro ${sanitizeMacroName(item.title)}`,
-    line_number: 0,
+    line_number: item.sourceLine ?? 0,
     params,
     header_comments: [],
     trailing_comments: [],
@@ -194,6 +197,47 @@ function getSectionParamValue(section: ConfigSection | undefined, key: string): 
 
 function normalizePlainText(value: string): string {
   return value.replace(/\r\n?/g, '\n').trim();
+}
+
+function areEquivalentMacroItems(left: MacroSourceItem, right: MacroSourceItem): boolean {
+  return (
+    sanitizeMacroName(left.title) === sanitizeMacroName(right.title)
+    && normalizePlainText(left.renameExisting) === normalizePlainText(right.renameExisting)
+    && normalizePlainText(left.description) === normalizePlainText(right.description)
+    && normalizePlainText(left.variables) === normalizePlainText(right.variables)
+    && normalizeMacroGcodeForConfig(left.gcode) === normalizeMacroGcodeForConfig(right.gcode)
+  );
+}
+
+function createStandaloneDraftItem(draft: MacroDraft): MacroSourceItem {
+  return {
+    key: `draft:${draft.id}`,
+    source: 'draft',
+    title: draft.title,
+    renameExisting: draft.renameExisting,
+    description: draft.description,
+    variables: draft.variables,
+    gcode: draft.gcode,
+    draftId: draft.id,
+    isDraft: true,
+  };
+}
+
+function getMacroItemBadges(item: MacroSourceItem): string[] {
+  const badges: string[] = [];
+  if (item.isDraft || item.source === 'draft') {
+    badges.push('Draft');
+  }
+  if (item.source === 'config') {
+    if (item.sourceFile && typeof item.sourceLine === 'number' && item.sourceLine > 0) {
+      badges.push(`${item.sourceFile}:${item.sourceLine}`);
+    } else if (item.sourceFile) {
+      badges.push(item.sourceFile);
+    } else {
+      badges.push('Config');
+    }
+  }
+  return badges;
 }
 
 function formatNumber(value: number): string {
@@ -312,6 +356,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
   const noGoZones = useMacroDesignerStore((state) => state.noGoZones);
   const dockPosition = useMacroDesignerStore((state) => state.dockPosition);
   const createDraft = useMacroDesignerStore((state) => state.createDraft);
+  const upsertDraftForSourceKey = useMacroDesignerStore((state) => state.upsertDraftForSourceKey);
   const updateDraft = useMacroDesignerStore((state) => state.updateDraft);
   const duplicateDraft = useMacroDesignerStore((state) => state.duplicateDraft);
   const deleteDraft = useMacroDesignerStore((state) => state.deleteDraft);
@@ -327,7 +372,6 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
   const [showBuiltIns, setShowBuiltIns] = useState(true);
   const [editMode, setEditMode] = useState(false);
   const [savedConfigFiles, setSavedConfigFiles] = useState<Record<string, ConfigFile>>({});
-  const [workingCopies, setWorkingCopies] = useState<WorkingCopies>({});
   const [targetFile, setTargetFile] = useState(() => (configFiles['printer.cfg'] ? 'printer.cfg' : activeFile));
   const [message, setMessage] = useState<string | null>(null);
   const [runtime, setRuntime] = useState<MacroRuntimeState | null>(null);
@@ -403,14 +447,47 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
     };
   }, [configFiles, originalTexts]);
 
+  const baseConfigMacroItems = useMemo(() => deriveCurrentMacroItems(configFiles), [configFiles]);
+  const standaloneDraftItems = useMemo<MacroSourceItem[]>(
+    () => drafts.filter((draft) => !draft.sourceKey).map((draft) => createStandaloneDraftItem(draft)),
+    [drafts],
+  );
+  const draftOverlaysBySourceKey = useMemo(
+    () => drafts.reduce<Map<string, MacroDraft>>((map, draft) => {
+      if (draft.sourceKey) {
+        map.set(draft.sourceKey, draft);
+      }
+      return map;
+    }, new Map()),
+    [drafts],
+  );
+  const configMacroItems = useMemo(
+    () => baseConfigMacroItems.map((item) => {
+      const draft = draftOverlaysBySourceKey.get(item.key);
+      if (!draft) return item;
+      return {
+        ...item,
+        title: draft.title,
+        renameExisting: draft.renameExisting,
+        description: draft.description,
+        variables: draft.variables,
+        gcode: draft.gcode,
+        draftId: draft.id,
+        isDraft: true,
+      } satisfies MacroSourceItem;
+    }),
+    [baseConfigMacroItems, draftOverlaysBySourceKey],
+  );
+  const builtInItems = useMemo(() => deriveAvailableBuiltInMacros(savedConfigFiles), [savedConfigFiles]);
+
   useEffect(() => {
     if (!selectedKey) {
-      const firstDraft = drafts[0];
-      const firstConfigMacro = deriveCurrentMacroItems(configFiles)[0];
-      const first = firstDraft ? `draft:${firstDraft.id}` : firstConfigMacro?.key || null;
+      const firstDraft = standaloneDraftItems[0];
+      const firstConfigMacro = configMacroItems[0];
+      const first = firstDraft ? firstDraft.key : firstConfigMacro?.key || null;
       setSelectedKey(first);
     }
-  }, [configFiles, drafts, selectedKey]);
+  }, [configMacroItems, selectedKey, standaloneDraftItems]);
 
   useEffect(() => {
     if (!editMode) {
@@ -418,19 +495,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
     }
   }, [editMode, runtimeMoveMode]);
 
-  const configMacroItems = useMemo(() => deriveCurrentMacroItems(configFiles), [configFiles]);
-  const draftItems = useMemo<MacroSourceItem[]>(() => drafts.map((draft) => ({
-    key: `draft:${draft.id}`,
-    source: 'draft',
-    title: draft.title,
-    renameExisting: draft.renameExisting,
-    description: draft.description,
-    variables: draft.variables,
-    gcode: draft.gcode,
-  })), [drafts]);
-  const builtInItems = useMemo(() => deriveAvailableBuiltInMacros(savedConfigFiles), [savedConfigFiles]);
-
-  const visibleDraftItems = useMemo(() => fuzzyFilterItems(draftItems, search), [draftItems, search]);
+  const visibleDraftItems = useMemo(() => fuzzyFilterItems(standaloneDraftItems, search), [search, standaloneDraftItems]);
   const visibleConfigItems = useMemo(() => fuzzyFilterItems(configMacroItems, search), [configMacroItems, search]);
   const visibleBuiltIns = useMemo(() => fuzzyFilterItems(builtInItems, search), [builtInItems, search]);
   const visibleSupportedCommands = useMemo(
@@ -442,17 +507,20 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
   );
   const allMacroItems = useMemo(
     () => (playbackItem
-      ? [playbackItem, ...draftItems, ...configMacroItems, ...builtInItems]
-      : [...draftItems, ...configMacroItems, ...builtInItems]),
-    [builtInItems, configMacroItems, draftItems, playbackItem],
+      ? [playbackItem, ...standaloneDraftItems, ...configMacroItems, ...builtInItems]
+      : [...standaloneDraftItems, ...configMacroItems, ...builtInItems]),
+    [builtInItems, configMacroItems, playbackItem, standaloneDraftItems],
   );
 
   const selectedItem = useMemo(() => {
     if (!selectedKey) return null;
-    const directMatch = allMacroItems.find((item) => item.key === selectedKey);
-    if (directMatch?.source === 'draft') return directMatch;
-    return workingCopies[selectedKey] || directMatch || null;
-  }, [allMacroItems, selectedKey, workingCopies]);
+    return allMacroItems.find((item) => item.key === selectedKey) || null;
+  }, [allMacroItems, selectedKey]);
+
+  const baseSelectedConfigItem = useMemo(
+    () => (selectedKey ? baseConfigMacroItems.find((item) => item.key === selectedKey) || null : null),
+    [baseConfigMacroItems, selectedKey],
+  );
 
   const displayedItem = editMode && editDraft ? editDraft : selectedItem;
 
@@ -778,7 +846,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
     return () => window.removeEventListener('click', handler);
   }, [canvasContextMenu]);
 
-  const selectedDraftId = selectedItem?.source === 'draft' ? selectedItem.key.replace(/^draft:/, '') : null;
+  const selectedDraftId = selectedItem?.draftId || (selectedItem?.source === 'draft' ? selectedItem.key.replace(/^draft:/, '') : null);
 
   const selectedMacroSection = useMemo(() => (
     selectedItem ? createGcodeMacroSection(selectedItem) : null
@@ -786,7 +854,10 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
 
   const existingTargetSection = useMemo(() => {
     if (!selectedMacroSection || !targetFile) return null;
-    return configFiles[targetFile]?.sections.find((candidate) => candidate.full_header === selectedMacroSection.full_header) || null;
+    return configFiles[targetFile]?.sections.find((candidate) => (
+      candidate.full_header === selectedMacroSection.full_header
+      && (selectedMacroSection.line_number <= 0 || candidate.line_number === selectedMacroSection.line_number)
+    )) || null;
   }, [configFiles, selectedMacroSection, targetFile]);
 
   const isTargetSectionUnchanged = useMemo(() => {
@@ -835,11 +906,29 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
         variables: editDraft.variables,
         gcode: editDraft.gcode,
       });
+    } else if (selectedItem.source === 'config') {
+      if (baseSelectedConfigItem && areEquivalentMacroItems(editDraft, baseSelectedConfigItem)) {
+        if (selectedDraftId) {
+          deleteDraft(selectedDraftId);
+        }
+      } else {
+        upsertDraftForSourceKey(selectedKey, {
+          title: editDraft.title,
+          renameExisting: editDraft.renameExisting,
+          description: editDraft.description,
+          variables: editDraft.variables,
+          gcode: editDraft.gcode,
+        });
+      }
     } else {
-      setWorkingCopies((current) => ({
-        ...current,
-        [selectedKey]: editDraft,
-      }));
+      const draft = createDraft(editDraft.title, {
+        title: editDraft.title,
+        renameExisting: editDraft.renameExisting,
+        description: editDraft.description,
+        variables: editDraft.variables,
+        gcode: editDraft.gcode,
+      });
+      setSelectedKey(`draft:${draft.id}`);
     }
     setEditMode(false);
     setEditDraft(null);
@@ -965,6 +1054,8 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
       description: draft.description,
       variables: draft.variables,
       gcode: draft.gcode,
+      draftId: draft.id,
+      isDraft: true,
     });
   };
 
@@ -994,7 +1085,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
     const id = draftId || selectedDraftId;
     if (!id) return;
     deleteDraft(id);
-    if (selectedDraftId === id) {
+    if (selectedDraftId === id && selectedItem?.source === 'draft') {
       setSelectedKey(null);
     }
   };
@@ -1207,13 +1298,19 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
 
     if (existingTargetSection && sameHeader) {
       if (structuralChanged || existingGcode !== selectedGcode) {
-        upsertSection(targetFile, selectedMacroSection, existingTargetSection.full_header);
+        upsertSection(
+          targetFile,
+          selectedMacroSection,
+          existingTargetSection.full_header,
+          existingTargetSection.line_number,
+        );
       }
     } else {
       upsertSection(
         targetFile,
         selectedMacroSection,
         existingTargetSection?.full_header,
+        existingTargetSection?.line_number,
       );
     }
 
@@ -1269,6 +1366,10 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
         graphStore.reflowParentChildren(parent.id);
       }
     }
+    if (selectedDraftId) {
+      deleteDraft(selectedDraftId);
+      setSelectedKey(buildConfigMacroItemKey(targetFile, selectedMacroSection.full_header, selectedMacroSection.line_number));
+    }
     setMessage(existingTargetSection
       ? `Applied changes to ${selectedMacroSection.section_name} in ${targetFile}.`
       : `Macro ${selectedMacroSection.section_name} added to ${targetFile}.`);
@@ -1277,7 +1378,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
   const handleContextMenu = (event: React.MouseEvent, item: MacroSourceItem) => {
     event.preventDefault();
     event.stopPropagation();
-    const draftId = item.source === 'draft' ? item.key.replace(/^draft:/, '') : null;
+    const draftId = item.draftId || (item.source === 'draft' ? item.key.replace(/^draft:/, '') : null);
     setContextMenu({
       x: event.clientX,
       y: event.clientY,
@@ -1765,24 +1866,65 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                   </button>
                 </div>
               )}
-              <div>
-                <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--color-text-secondary)]">Your macros</p>
-                <div className="space-y-1.5">
-                  {[...visibleDraftItems, ...visibleConfigItems].map((item) => (
-                    <button
-                      key={item.key}
-                      onClick={() => setSelectedKey(item.key)}
-                      onContextMenu={(event) => handleContextMenu(event, item)}
-                      className={`w-full rounded-lg border px-3 py-2 text-left transition-colors ${selectedKey === item.key ? 'border-[var(--color-accent)] bg-[var(--color-bg-primary)]' : 'border-[var(--color-bg-tertiary)] hover:border-[var(--color-accent)]/60'}`}
-                    >
-                      <div className="truncate text-xs font-medium text-[var(--color-text-primary)]">{item.title}</div>
-                      {item.description.trim() && (
-                        <p className="mt-1 truncate text-[11px] text-[var(--color-text-secondary)]">{item.description}</p>
-                      )}
-                    </button>
-                  ))}
-                </div>
-              </div>
+                  {visibleDraftItems.length > 0 && (
+                    <div className="pb-3">
+                      <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--color-text-secondary)]">Drafts</p>
+                      <div className="space-y-1.5">
+                        {visibleDraftItems.map((item) => {
+                          const badges = getMacroItemBadges(item);
+                          return (
+                            <button
+                              key={item.key}
+                              onClick={() => setSelectedKey(item.key)}
+                              onContextMenu={(event) => handleContextMenu(event, item)}
+                              className={`w-full rounded-lg border px-3 py-2 text-left transition-colors ${selectedKey === item.key ? 'border-[var(--color-accent)] bg-[var(--color-bg-primary)]' : 'border-[var(--color-bg-tertiary)] hover:border-[var(--color-accent)]/60'}`}
+                            >
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="truncate text-xs font-medium text-[var(--color-text-primary)]">{item.title}</div>
+                                <div className="flex shrink-0 flex-wrap justify-end gap-1">
+                                  {badges.map((badge) => (
+                                    <span key={`${item.key}-${badge}`} className="rounded-full border border-[var(--color-bg-tertiary)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">{badge}</span>
+                                  ))}
+                                </div>
+                              </div>
+                              {item.description.trim() && (
+                                <p className="mt-1 truncate text-[11px] text-[var(--color-text-secondary)]">{item.description}</p>
+                              )}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  <div>
+                    <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--color-text-secondary)]">{visibleDraftItems.length > 0 ? 'Configured macros' : 'Your macros'}</p>
+                    <div className="space-y-1.5">
+                      {visibleConfigItems.map((item) => {
+                        const badges = getMacroItemBadges(item);
+                        return (
+                          <button
+                            key={item.key}
+                            onClick={() => setSelectedKey(item.key)}
+                            onContextMenu={(event) => handleContextMenu(event, item)}
+                            className={`w-full rounded-lg border px-3 py-2 text-left transition-colors ${selectedKey === item.key ? 'border-[var(--color-accent)] bg-[var(--color-bg-primary)]' : 'border-[var(--color-bg-tertiary)] hover:border-[var(--color-accent)]/60'}`}
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="truncate text-xs font-medium text-[var(--color-text-primary)]">{item.title}</div>
+                              <div className="flex shrink-0 flex-wrap justify-end gap-1">
+                                {badges.map((badge) => (
+                                  <span key={`${item.key}-${badge}`} className="rounded-full border border-[var(--color-bg-tertiary)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">{badge}</span>
+                                ))}
+                              </div>
+                            </div>
+                            {item.description.trim() && (
+                              <p className="mt-1 truncate text-[11px] text-[var(--color-text-secondary)]">{item.description}</p>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
 
               <div className="pt-3">
                 <button onClick={() => setShowBuiltIns((current) => !current)} className="mb-2 flex w-full items-center justify-between rounded-lg border border-[var(--color-bg-tertiary)] px-3 py-2 text-left text-xs font-semibold text-[var(--color-text-primary)] hover:border-[var(--color-accent)]/60">
@@ -2187,8 +2329,9 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                     className="mb-2 w-full resize-y overflow-y-auto rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-3 py-3 font-mono text-xs leading-5 text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none disabled:opacity-70"
                     style={{ minHeight: '72px', maxHeight: '180px' }}
                   />
+                  <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--color-text-secondary)]">gcode:</div>
                   <textarea
-                    value={formatMacroGcodeForEditorView(displayedItem?.gcode || '')}
+                    value={displayedItem?.gcode || ''}
                     disabled={!editMode}
                     onChange={(event) => updateEditedItem({ gcode: parseMacroGcodeFromEditorView(event.target.value) })}
                     rows={12}

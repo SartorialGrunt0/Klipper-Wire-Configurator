@@ -73,9 +73,14 @@ interface MacroDesignerState extends MacroDesignerPersistedState {
   hydratePersistedState: (state: Partial<MacroDesignerPersistedState>) => void;
   exportPersistedState: () => MacroDesignerPersistedState;
   createDraft: (name?: string, seed?: Partial<MacroDraft>) => MacroDraft;
+  upsertDraftForSourceKey: (
+    sourceKey: string,
+    seed: Pick<MacroDraft, 'title' | 'renameExisting' | 'description' | 'variables' | 'gcode'>,
+  ) => MacroDraft;
   updateDraft: (id: string, updates: Partial<Omit<MacroDraft, 'id' | 'createdAt'>>) => void;
   duplicateDraft: (id: string) => MacroDraft | null;
   deleteDraft: (id: string) => void;
+  clearPersistedState: () => void;
   setRotation: (rotation: 0 | 90 | 180 | 270) => void;
   addNoGoZone: (zone?: Partial<NoGoZone>) => NoGoZone;
   updateNoGoZone: (id: string, updates: Partial<NoGoZone>) => void;
@@ -130,6 +135,51 @@ export const useMacroDesignerStore = create<MacroDesignerState>((set, get) => ({
     return draft;
   },
 
+  upsertDraftForSourceKey: (sourceKey, seed) => {
+    const stamp = now();
+    let nextDraft: MacroDraft | null = null;
+
+    set((state) => {
+      const existingIndex = state.drafts.findIndex((draft) => draft.sourceKey === sourceKey);
+      let drafts: MacroDraft[];
+
+      if (existingIndex !== -1) {
+        drafts = [...state.drafts];
+        const existing = drafts[existingIndex];
+        nextDraft = {
+          ...existing,
+          ...seed,
+          sourceKey,
+          id: existing.id,
+          createdAt: existing.createdAt,
+          updatedAt: stamp,
+        };
+        drafts[existingIndex] = nextDraft;
+      } else {
+        const base = createDefaultDraft(seed.title);
+        nextDraft = {
+          ...base,
+          ...seed,
+          sourceKey,
+          id: base.id,
+          createdAt: base.createdAt,
+          updatedAt: stamp,
+        };
+        drafts = [...state.drafts, nextDraft];
+      }
+
+      persistState({
+        drafts,
+        noGoZones: state.noGoZones,
+        dockPosition: state.dockPosition,
+        rotation: state.rotation,
+      });
+      return { drafts };
+    });
+
+    return nextDraft!;
+  },
+
   updateDraft: (id, updates) => set((state) => {
     const drafts = state.drafts.map((draft) => (
       draft.id === id
@@ -153,6 +203,7 @@ export const useMacroDesignerStore = create<MacroDesignerState>((set, get) => ({
       description: source.description,
       variables: source.variables,
       gcode: source.gcode,
+      sourceKey: undefined,
     });
   },
 
@@ -165,6 +216,17 @@ export const useMacroDesignerStore = create<MacroDesignerState>((set, get) => ({
       rotation: state.rotation,
     });
     return { drafts };
+  }),
+
+  clearPersistedState: () => set(() => {
+    const next: MacroDesignerPersistedState = {
+      drafts: [],
+      noGoZones: [],
+      dockPosition: null,
+      rotation: 0,
+    };
+    persistState(next);
+    return next;
   }),
 
   setRotation: (rotation) => set((state) => {

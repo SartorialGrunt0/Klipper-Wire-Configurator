@@ -5,6 +5,7 @@ export interface MacroDraft {
   description: string;
   variables: string;
   gcode: string;
+  sourceKey?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -38,8 +39,11 @@ export interface MacroSourceItem {
   description: string;
   variables: string;
   gcode: string;
+  draftId?: string;
+  isDraft?: boolean;
   sourceFile?: string;
   sourceHeader?: string;
+  sourceLine?: number;
   readOnly?: boolean;
 }
 
@@ -84,6 +88,7 @@ export interface MachineProfile {
   horizontalMoveZ: number;
   nozzleMaxTemp: number;
   bedMaxTemp: number;
+  maxExtrudeCrossSection: number;
   maxVelocity: number;
   maxAccel: number;
   noGoZones: NoGoZone[];

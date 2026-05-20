@@ -166,6 +166,7 @@ export default function App() {
   const [showMacroDesigner, setShowMacroDesigner] = useState(false);
   const [showUnsavedDialog, setShowUnsavedDialog] = useState(false);
   const textEditorRef = useRef<TextEditorHandle>(null);
+  const clearTextDraft = useConfigStore((state) => state.clearTextDraft);
   const dragHoverHardwareIdRef = useRef<string | null>(null);
 
   // Load section schemas on mount
@@ -992,11 +993,16 @@ export default function App() {
       {showUnsavedDialog && (
         <UnsavedChangesDialog
           onApply={async () => {
-            await textEditorRef.current?.applyChanges();
-            setShowUnsavedDialog(false);
-            setShowTextView(false);
+            try {
+              await textEditorRef.current?.applyChanges();
+              setShowUnsavedDialog(false);
+              setShowTextView(false);
+            } catch (error) {
+              console.error('Failed to apply text-view changes before leaving text view:', error);
+            }
           }}
           onDiscard={() => {
+            clearTextDraft();
             setShowUnsavedDialog(false);
             setShowTextView(false);
           }}

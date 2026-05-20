@@ -4,8 +4,10 @@ import type { LmStudioContextStatus, LmStudioMcpStatus } from '../types/ai';
 
 const STORAGE_KEY = 'klipper-wire-ai-state';
 const LEGACY_SETTINGS_KEY = 'klipper-wire-ai-settings';
+const DEFAULT_PROVIDER: AiProvider = 'chatgpt';
 
 export type AiProvider = 'google' | 'chatgpt' | 'anthropic' | 'github' | 'openai-compatible' | 'lm-studio' | 'ollama';
+type ProviderModels = Partial<Record<AiProvider, string>>;
 
 export interface ChatMessage {
   role: 'user' | 'assistant';
@@ -19,6 +21,7 @@ export interface ChatMessage {
 export interface AiSettings {
   apiKey: string;
   model: string;
+  providerModels: ProviderModels;
   apiUrl: string;
   apiProvider: AiProvider;
   lmStudioHost: string;
@@ -82,6 +85,45 @@ function persistState(settings: AiSettings, messages: ChatMessage[]): void {
   localStorage.setItem(LEGACY_SETTINGS_KEY, JSON.stringify(settings));
 }
 
+const DEFAULT_PROVIDER_MODELS: ProviderModels = {
+  chatgpt: 'gpt-4o',
+  google: '',
+  anthropic: '',
+  github: '',
+  'openai-compatible': '',
+  'lm-studio': '',
+  ollama: '',
+};
+
+function normalizeProviderModels(settings: Partial<AiSettings>): ProviderModels {
+  const mergedProviderModels: ProviderModels = {
+    ...DEFAULT_PROVIDER_MODELS,
+    ...(settings.providerModels ?? {}),
+  };
+  const activeProvider = settings.apiProvider ?? DEFAULT_PROVIDER;
+  const activeModel = typeof settings.model === 'string' ? settings.model.trim() : '';
+
+  if (activeModel && !mergedProviderModels[activeProvider]?.trim()) {
+    mergedProviderModels[activeProvider] = activeModel;
+  }
+
+  return mergedProviderModels;
+}
+
+function buildAiSettings(settings: Partial<AiSettings>): AiSettings {
+  const merged = { ...DEFAULT_SETTINGS, ...settings };
+  const providerModels = normalizeProviderModels(merged);
+  return {
+    ...merged,
+    providerModels,
+    model: providerModels[merged.apiProvider] ?? '',
+  };
+}
+
+function providerRequiresApiKey(provider: AiProvider): boolean {
+  return !['openai-compatible', 'lm-studio', 'ollama'].includes(provider);
+}
+
 interface AiState {
   settings: AiSettings;
   messages: ChatMessage[];
@@ -94,8 +136,9 @@ interface AiState {
 const DEFAULT_SETTINGS: AiSettings = {
   apiKey: '',
   model: 'gpt-4o',
+  providerModels: { ...DEFAULT_PROVIDER_MODELS },
   apiUrl: 'https://api.openai.com/v1/chat/completions',
-  apiProvider: 'chatgpt',
+  apiProvider: DEFAULT_PROVIDER,
   lmStudioHost: 'localhost',
   lmStudioPort: '1234',
   lmStudioMcpPluginId: 'mcp/klipper-docs',
@@ -107,11 +150,26 @@ export const useAiStore = create<AiState>()((set, get) => {
   const persisted = loadPersistedState();
 
   return {
-    settings: { ...DEFAULT_SETTINGS, ...persisted.settings },
+    settings: buildAiSettings(persisted.settings),
     messages: persisted.messages,
     setSettings: (partial) =>
       set((state) => {
-        const newSettings = { ...state.settings, ...partial };
+        const nextProvider = partial.apiProvider ?? state.settings.apiProvider;
+        const nextProviderModels: ProviderModels = {
+          ...state.settings.providerModels,
+          ...(partial.providerModels ?? {}),
+        };
+
+        if (typeof partial.model === 'string') {
+          nextProviderModels[nextProvider] = partial.model;
+        }
+
+        const newSettings = buildAiSettings({
+          ...state.settings,
+          ...partial,
+          apiProvider: nextProvider,
+          providerModels: nextProviderModels,
+        });
         persistState(newSettings, state.messages);
         return { settings: newSettings };
       }),
@@ -127,8 +185,10 @@ export const useAiStore = create<AiState>()((set, get) => {
       }),
     isConfigured: () => {
       const s = get().settings;
-      // Local providers (LM Studio, Ollama) don't require an API key
-      if (s.apiProvider === 'lm-studio' || s.apiProvider === 'ollama') {
+      if (!s.model.trim()) {
+        return false;
+      }
+      if (!providerRequiresApiKey(s.apiProvider)) {
         return true;
       }
       return !!s.apiKey.trim();
