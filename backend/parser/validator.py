@@ -1110,6 +1110,10 @@ def _check_sensorless_homing_warning(
     if not (has_sgthrs or has_diag):
         return
 
+    endstop_pin_value = section.get_value("endstop_pin", "").strip()
+    if _extract_virtual_endstop_value(endstop_pin_value) != "virtual_endstop":
+        return
+
     # Check homing_retract_dist value
     # Klipper defaults homing_retract_dist to 5.0 if not specified,
     # which breaks sensorless homing (the homing move pulls away from

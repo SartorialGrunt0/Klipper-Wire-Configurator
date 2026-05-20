@@ -71,7 +71,6 @@ def test_general_required_params_still_fail():
         '''
 [bltouch]
 sensor_pin: ^P1.27
-control_pin: P1.23
 '''
     )
 

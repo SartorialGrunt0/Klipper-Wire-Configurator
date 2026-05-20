@@ -88,6 +88,28 @@ def test_tmc2130_diag1_pin_and_driver_sgt_are_valid():
     assert not result.has_errors
 
 
+def test_sensorless_homing_warns_when_virtual_endstop_defaults_retract_distance():
+    result = _validate(
+        '[stepper_x]\n'
+        'step_pin: gpio11\n'
+        'dir_pin: !gpio10\n'
+        'microsteps: 16\n'
+        'rotation_distance: 40\n'
+        'endstop_pin: tmc2130_stepper_x:virtual_endstop\n'
+        'position_endstop: 0\n'
+        'position_max: 235\n\n'
+        '[tmc2130 stepper_x]\n'
+        'cs_pin: gpio9\n'
+        'diag1_pin: ^!gpio3\n'
+        'driver_SGT: -64\n'
+        'run_current: 0.580\n'
+    )
+
+    assert result.has_warnings
+    assert any(error.param == '' and 'homing_retract_dist' in error.message for error in result.errors)
+    assert not result.has_errors
+
+
 def test_mcp4018_software_i2c_and_wiper_are_valid():
     result = _validate(
         '[mcp4018 my_digipot]\n'

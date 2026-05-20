@@ -12,6 +12,7 @@ from services.flash_targets import (  # noqa: E402
     flash_flash_target,
     list_flash_target_artifacts,
     pick_primary_flash_target_artifact,
+    scan_flash_target_devices,
 )
 
 
@@ -38,7 +39,7 @@ def test_list_flash_target_artifacts_prefers_katapult_primary_names(tmp_path):
     assert pick_primary_flash_target_artifact('katapult', artifacts)['name'] == 'katapult.uf2'
 
 
-def test_get_flash_target_state_surfaces_serial_flash_candidates(monkeypatch, tmp_path):
+def test_get_flash_target_state_keeps_dynamic_serial_candidates_in_scan_results(monkeypatch, tmp_path):
     config_path = tmp_path / '.config'
     config_path.write_text('CONFIG_MACH_AVR=y\n', encoding='utf-8')
 
@@ -66,9 +67,16 @@ def test_get_flash_target_state_surfaces_serial_flash_candidates(monkeypatch, tm
     monkeypatch.setattr('services.flash_targets._dfu_flash_device_candidates', lambda: [])
 
     state = get_flash_target_state('klipper', str(tmp_path))
+    scan_result = scan_flash_target_devices('klipper', str(tmp_path))
 
     assert state['flash_supported'] is True
-    assert state['flash_device_candidates'] == [
+    assert state['flash_device_candidates'] == []
+    assert [candidate['value'] for candidate in state['flash_method_candidates']] == [_FLASH_METHOD_MAKE_FLASH]
+    assert state['default_flash_method'] == _FLASH_METHOD_MAKE_FLASH
+
+    assert scan_result == {
+        'target': 'klipper',
+        'candidates': [
         {
             'value': '/dev/serial/by-id/usb-Klipper_atmega32u4-if00',
             'label': 'USB serial: usb-Klipper_atmega32u4-if00 (/dev/ttyACM0)',
@@ -79,12 +87,13 @@ def test_get_flash_target_state_surfaces_serial_flash_candidates(monkeypatch, tm
             'label': 'Serial: ttyS0',
             'transport': 'serial',
         },
-    ]
-    assert [candidate['value'] for candidate in state['flash_method_candidates']] == [_FLASH_METHOD_MAKE_FLASH]
-    assert state['default_flash_method'] == _FLASH_METHOD_MAKE_FLASH
+        ],
+        'error': None,
+        'cached': False,
+    }
 
 
-def test_get_flash_target_state_surfaces_dfu_candidates(monkeypatch, tmp_path):
+def test_get_flash_target_state_keeps_dynamic_dfu_candidates_in_scan_results(monkeypatch, tmp_path):
     monkeypatch.setattr(
         'services.flash_targets.resolve_flash_target_checkout',
         lambda target, checkout_path=None: (tmp_path, None),
@@ -102,20 +111,28 @@ def test_get_flash_target_state_surfaces_dfu_candidates(monkeypatch, tmp_path):
     monkeypatch.setattr('services.flash_targets.list_uart_devices', lambda: [])
 
     state = get_flash_target_state('katapult', str(tmp_path))
+    scan_result = scan_flash_target_devices('katapult', str(tmp_path))
 
     assert state['flash_supported'] is True
-    assert state['flash_device_candidates'] == [
-        {
-            'value': '0483:df11',
-            'label': 'DFU device: 0483:df11 (STM32 DFU mode)',
-            'transport': 'usb_id',
-        },
-    ]
+    assert state['flash_device_candidates'] == []
     assert [candidate['value'] for candidate in state['flash_method_candidates']] == [
         _FLASH_METHOD_MAKE_FLASH,
         _FLASH_METHOD_DFU_UTIL,
     ]
-    assert state['default_flash_method'] == _FLASH_METHOD_DFU_UTIL
+    assert state['default_flash_method'] == _FLASH_METHOD_MAKE_FLASH
+
+    assert scan_result == {
+        'target': 'katapult',
+        'candidates': [
+            {
+                'value': '0483:df11',
+                'label': 'DFU device: 0483:df11 (STM32 DFU mode)',
+                'transport': 'usb_id',
+            },
+        ],
+        'error': None,
+        'cached': False,
+    }
 
 
 def test_get_flash_target_state_surfaces_rp2040_candidates_for_katapult(monkeypatch, tmp_path):
@@ -146,7 +163,7 @@ def test_get_flash_target_state_surfaces_rp2040_candidates_for_katapult(monkeypa
     assert state['default_flash_method'] == _FLASH_METHOD_MAKE_FLASH
 
 
-def test_get_flash_target_state_surfaces_can_candidates_and_flashtool(monkeypatch, tmp_path):
+def test_get_flash_target_state_keeps_dynamic_can_candidates_in_scan_results(monkeypatch, tmp_path):
     script_path = tmp_path / 'scripts' / 'flashtool.py'
     script_path.parent.mkdir()
     script_path.write_text('#!/usr/bin/env python3\n', encoding='utf-8')
@@ -174,22 +191,30 @@ def test_get_flash_target_state_surfaces_can_candidates_and_flashtool(monkeypatc
     )
 
     state = get_flash_target_state('klipper', str(tmp_path))
+    scan_result = scan_flash_target_devices('klipper', str(tmp_path))
 
-    assert state['flash_device_candidates'] == [
-        {
-            'value': 'aabbccddeeff',
-            'label': 'CAN UUID: aabbccddeeff (can0, Katapult)',
-            'transport': 'can_uuid',
-            'interface': 'can0',
-        },
-    ]
+    assert state['flash_device_candidates'] == []
     assert [candidate['value'] for candidate in state['flash_method_candidates']] == [
         _FLASH_METHOD_MAKE_FLASH,
         _FLASH_METHOD_DFU_UTIL,
         _FLASH_METHOD_FLASHTOOL,
     ]
-    assert state['default_flash_method'] == _FLASH_METHOD_FLASHTOOL
-    assert state['default_flash_device'] == 'aabbccddeeff'
+    assert state['default_flash_method'] == _FLASH_METHOD_MAKE_FLASH
+    assert state['default_flash_device'] == ''
+
+    assert scan_result == {
+        'target': 'klipper',
+        'candidates': [
+            {
+                'value': 'aabbccddeeff',
+                'label': 'CAN UUID: aabbccddeeff (can0, Katapult)',
+                'transport': 'can_uuid',
+                'interface': 'can0',
+            },
+        ],
+        'error': None,
+        'cached': False,
+    }
 
 
 def test_flash_target_uses_flashtool_for_can_uuid(monkeypatch, tmp_path):
