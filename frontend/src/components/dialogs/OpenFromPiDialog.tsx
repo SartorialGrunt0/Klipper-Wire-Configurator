@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useConfigStore } from '../../stores/configStore';
 import { useGraphStore } from '../../stores/graphStore';
+import { useMacroDesignerStore } from '../../stores/macroDesignerStore';
 import { useNativeStore } from '../../stores/nativeStore';
 import * as api from '../../services/api';
 import { buildProjectGraph } from '../../utils/graphBuilder';
@@ -11,15 +12,29 @@ interface OpenFromPiDialogProps {
 }
 
 export default function OpenFromPiDialog({ onClose }: OpenFromPiDialogProps) {
-  const { configPath, setConfigPath } = useNativeStore();
+  const { configPath, setConfigPath, isNative } = useNativeStore();
   const [pathInput, setPathInput] = useState(configPath);
   const [files, setFiles] = useState<api.NativeConfigFile[]>([]);
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   const [status, setStatus] = useState<'loading' | 'idle' | 'importing' | 'success' | 'error'>('loading');
   const [message, setMessage] = useState('');
   const [clearExisting, setClearExisting] = useState(true);
+  const [clearMacroDesignerState, setClearMacroDesignerState] = useState(true);
 
   const { setConfigFile, setValidation } = useConfigStore();
+
+  const persistClearedMacroDesignerState = useCallback(async () => {
+    const macroDesignerStore = useMacroDesignerStore.getState();
+    macroDesignerStore.clearPersistedState();
+    if (!isNative) return;
+
+    const graphState = useGraphStore.getState();
+    await api.saveNativeLayout({
+      graphNodes: graphState.nodes,
+      graphEdges: graphState.edges,
+      macroDesigner: macroDesignerStore.exportPersistedState(),
+    }).catch(() => {});
+  }, [isNative]);
 
   const loadFiles = useCallback(async (path: string) => {
     setStatus('loading');
@@ -113,6 +128,10 @@ export default function OpenFromPiDialog({ onClose }: OpenFromPiDialogProps) {
       const graphStore = useGraphStore.getState();
       buildProjectGraph(allConfigs, graphStore, schemas, allValidations);
 
+      if (clearMacroDesignerState) {
+        await persistClearedMacroDesignerState();
+      }
+
       setStatus('success');
       setMessage(
         `Loaded ${Object.keys(result.files).length} file${Object.keys(result.files).length > 1 ? 's' : ''} ` +
@@ -122,7 +141,7 @@ export default function OpenFromPiDialog({ onClose }: OpenFromPiDialogProps) {
       setStatus('error');
       setMessage(err instanceof Error ? err.message : 'Import failed');
     }
-  }, [selected, pathInput, clearExisting, setConfigFile, setValidation]);
+  }, [selected, pathInput, clearExisting, clearMacroDesignerState, persistClearedMacroDesignerState, setConfigFile, setValidation]);
 
   const toggleFile = (name: string) => {
     setSelected((prev) => ({ ...prev, [name]: !prev[name] }));
@@ -245,16 +264,27 @@ export default function OpenFromPiDialog({ onClose }: OpenFromPiDialogProps) {
         )}
 
         {/* Footer */}
-        <div className="p-4 border-t border-[var(--color-bg-tertiary)] flex items-center justify-between">
-          <label className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)] cursor-pointer">
-            <input
-              type="checkbox"
-              checked={clearExisting}
-              onChange={(e) => setClearExisting(e.target.checked)}
-              className="rounded"
-            />
-            Clear existing config
-          </label>
+        <div className="p-4 border-t border-[var(--color-bg-tertiary)] flex items-center justify-between gap-4">
+          <div className="space-y-2">
+            <label className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={clearExisting}
+                onChange={(e) => setClearExisting(e.target.checked)}
+                className="rounded"
+              />
+              Clear existing config
+            </label>
+            <label className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={clearMacroDesignerState}
+                onChange={(event) => setClearMacroDesignerState(event.target.checked)}
+                className="rounded"
+              />
+              Clear Macro Designer drafts/layout
+            </label>
+          </div>
           <div className="flex gap-2">
             <button
               onClick={onClose}

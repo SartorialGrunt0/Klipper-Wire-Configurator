@@ -1,6 +1,7 @@
 import { useState, useCallback } from 'react';
 import { useConfigStore } from '../../stores/configStore';
 import { useGraphStore } from '../../stores/graphStore';
+import { useMacroDesignerStore } from '../../stores/macroDesignerStore';
 import { useNativeStore } from '../../stores/nativeStore';
 import * as api from '../../services/api';
 import { buildProjectGraph } from '../../utils/graphBuilder';
@@ -15,6 +16,20 @@ export default function RevertDialog({ onClose }: RevertDialogProps) {
   const configPath = useNativeStore((s) => s.configPath);
   const [status, setStatus] = useState<'idle' | 'reverting' | 'success' | 'error'>('idle');
   const [message, setMessage] = useState('');
+  const [clearMacroDesignerState, setClearMacroDesignerState] = useState(true);
+
+  const persistClearedMacroDesignerState = useCallback(async () => {
+    const macroDesignerStore = useMacroDesignerStore.getState();
+    macroDesignerStore.clearPersistedState();
+    if (!isNative) return;
+
+    const graphState = useGraphStore.getState();
+    await api.saveNativeLayout({
+      graphNodes: graphState.nodes,
+      graphEdges: graphState.edges,
+      macroDesigner: macroDesignerStore.exportPersistedState(),
+    }).catch(() => {});
+  }, [isNative]);
 
   const handleRevert = useCallback(async () => {
     setStatus('reverting');
@@ -87,6 +102,10 @@ export default function RevertDialog({ onClose }: RevertDialogProps) {
         buildProjectGraph(allConfigs, graphStore, schemas, allValidations);
       }
 
+      if (clearMacroDesignerState) {
+        await persistClearedMacroDesignerState();
+      }
+
       configStore.markClean();
       setStatus('success');
       setMessage('Changes reverted successfully.');
@@ -95,7 +114,7 @@ export default function RevertDialog({ onClose }: RevertDialogProps) {
       setStatus('error');
       setMessage(err instanceof Error ? err.message : 'Revert failed');
     }
-  }, [isNative, configPath, onClose]);
+  }, [clearMacroDesignerState, configPath, isNative, onClose, persistClearedMacroDesignerState]);
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
@@ -125,6 +144,15 @@ export default function RevertDialog({ onClose }: RevertDialogProps) {
               <p className="text-xs text-[var(--color-text-secondary)]">
                 Are you sure you want to revert?
               </p>
+              <label className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)] cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={clearMacroDesignerState}
+                  onChange={(event) => setClearMacroDesignerState(event.target.checked)}
+                  className="rounded"
+                />
+                Clear Macro Designer drafts/layout
+              </label>
             </div>
           )}
 

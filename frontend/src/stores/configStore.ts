@@ -123,7 +123,12 @@ interface ConfigState {
 
   /* Section operations */
   addSection: (filename: string, section: ConfigSection) => void;
-  upsertSection: (filename: string, section: ConfigSection, previousFullHeader?: string) => void;
+  upsertSection: (
+    filename: string,
+    section: ConfigSection,
+    previousFullHeader?: string,
+    previousLineNumber?: number,
+  ) => void;
   removeSection: (filename: string, fullHeader: string, lineNumber?: number) => void;
   updateSectionParam: (
     filename: string,
@@ -250,15 +255,15 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     scheduleRevalidation(get, set);
   },
 
-  upsertSection: (filename, section, previousFullHeader) => {
+  upsertSection: (filename, section, previousFullHeader, previousLineNumber) => {
     set((s) => {
       const cf = s.configFiles[filename];
       if (!cf) return s;
       const sections = [...cf.sections];
       const previousIndex = previousFullHeader
-        ? sections.findIndex((candidate) => candidate.full_header === previousFullHeader)
+        ? sections.findIndex((candidate) => matchesSectionIdentity(candidate, previousFullHeader, previousLineNumber))
         : -1;
-      const existingIndex = sections.findIndex((candidate) => candidate.full_header === section.full_header);
+      const existingIndex = sections.findIndex((candidate) => matchesSectionIdentity(candidate, section.full_header, section.line_number));
 
       if (previousIndex !== -1) {
         sections[previousIndex] = section;
