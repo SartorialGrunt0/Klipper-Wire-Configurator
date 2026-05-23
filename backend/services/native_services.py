@@ -9,6 +9,7 @@ import re
 import platform
 import socket
 import subprocess
+import httpx
 from pathlib import Path
 from typing import Any, TypedDict
 from urllib.parse import quote, unquote
@@ -622,6 +623,60 @@ def _get_recent_klippy_errors(max_entries: int = 12) -> tuple[list[str], str | N
     return [], None
 
 
+def _moonraker_base_urls() -> list[str]:
+    env_url = os.environ.get("KWC_MOONRAKER_URL")
+    candidates = [
+        env_url,
+        "http://127.0.0.1:7125",
+        "http://localhost:7125",
+    ]
+    urls: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        normalized = candidate.rstrip("/")
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        urls.append(normalized)
+    return urls
+
+
+def _query_moonraker_print_status(timeout: float = 2.0) -> dict[str, Any]:
+    """Query Moonraker for the active print state."""
+    fallback = {
+        "is_printing": False,
+        "print_state": None,
+        "print_filename": None,
+    }
+
+    for base_url in _moonraker_base_urls():
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                response = client.get(f"{base_url}/printer/objects/query?print_stats")
+                response.raise_for_status()
+            payload = response.json()
+            result = payload.get("result", {}) if isinstance(payload, dict) else {}
+            status = result.get("status", {}) if isinstance(result, dict) else {}
+            print_stats = status.get("print_stats", {}) if isinstance(status, dict) else {}
+            if not isinstance(print_stats, dict):
+                continue
+
+            raw_state = print_stats.get("state")
+            print_state = str(raw_state).strip().lower() if raw_state is not None else None
+            filename = print_stats.get("filename")
+            return {
+                "is_printing": print_state in {"printing", "paused"},
+                "print_state": print_state or None,
+                "print_filename": str(filename).strip() or None if filename is not None else None,
+            }
+        except (httpx.HTTPError, ValueError, TypeError):
+            continue
+
+    return fallback
+
+
 def _build_klippy_log_search_terms(section_name: str | None = None, error_text: str | None = None) -> list[str]:
     """Build a small list of useful search fragments for a klippy log excerpt."""
     terms: list[str] = []
@@ -762,11 +817,16 @@ def query_klipper_status() -> dict:
         "state_message": state_message,
         "recent_errors": [],
         "log_path": None,
+        "is_printing": False,
+        "print_state": None,
+        "print_filename": None,
     }
 
     if state != "ready":
         recent_errors, log_path = _get_recent_klippy_errors()
         payload["recent_errors"] = recent_errors
         payload["log_path"] = log_path
+
+    payload.update(_query_moonraker_print_status())
 
     return payload

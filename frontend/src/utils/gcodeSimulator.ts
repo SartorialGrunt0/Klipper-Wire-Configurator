@@ -144,6 +144,27 @@ function getConfigParamValue(section: ConfigFile['sections'][number] | undefined
   return section?.params.find((param) => !param.is_commented_out && param.key.toUpperCase() === key.toUpperCase())?.value;
 }
 
+function isTruthyConfigValue(value: string | undefined): boolean {
+  return typeof value === 'string' && /^(1|true|yes|on)$/i.test(value.trim());
+}
+
+function isForceMoveEnabled(configFiles?: Record<string, ConfigFile>): boolean {
+  if (!configFiles) {
+    return false;
+  }
+
+  const forceMoveSection = getConfigSections(configFiles).find((section) => section.section_type === 'force_move');
+  return isTruthyConfigValue(getConfigParamValue(forceMoveSection, 'enable_force_move'));
+}
+
+function getSetKinematicPositionWarning(configFiles?: Record<string, ConfigFile>): string | null {
+  if (!configFiles || isForceMoveEnabled(configFiles)) {
+    return null;
+  }
+
+  return 'SET_KINEMATIC_POSITION requires [force_move] enable_force_move: True.';
+}
+
 function parsePairValue(value: string | undefined): [number, number] | null {
   if (!value) return null;
   const parts = value.split(',').map((part) => Number(part.trim()));
@@ -1831,9 +1852,22 @@ export function buildSimulationSteps(
     if (originalCommand) {
       const rawRest = parsed.raw.slice(parsed.command.length);
       const rewritten: ParsedGcodeCommand = { ...parsed, command: originalCommand, raw: `${originalCommand}${rawRest}` };
+      const rewrittenWarning = rewritten.command === 'SET_KINEMATIC_POSITION'
+        ? getSetKinematicPositionWarning(configFiles)
+        : null;
+      if (rewrittenWarning && !warnings.includes(rewrittenWarning)) {
+        warnings.push(rewrittenWarning);
+      }
       appendSimulationSteps(expandCommandToSteps(rewritten, profile, configFiles, previewState));
       applyPlannerCommandEffects(rewritten, plannerState);
       return;
+    }
+
+    const commandWarning = parsed.command === 'SET_KINEMATIC_POSITION'
+      ? getSetKinematicPositionWarning(configFiles)
+      : null;
+    if (commandWarning && !warnings.includes(commandWarning)) {
+      warnings.push(commandWarning);
     }
 
     appendSimulationSteps(expandCommandToSteps(parsed, profile, configFiles, previewState));
@@ -2024,6 +2058,7 @@ export function executeSimulationStep(
   state: MacroRuntimeState,
   step: SimulationStep,
   profile: MachineProfile,
+  configFiles?: Record<string, ConfigFile>,
 ): SimulationTickResult {
   if (step.kind === 'move') {
     const warnings: string[] = [];
@@ -2259,6 +2294,10 @@ export function executeSimulationStep(
       break;
     }
     case 'SET_KINEMATIC_POSITION': {
+      const forceMoveWarning = getSetKinematicPositionWarning(configFiles);
+      if (forceMoveWarning) {
+        warnings.push(forceMoveWarning);
+      }
       const requestedAxes = getRequestedAxes(command.params);
       nextState = {
         ...nextState,

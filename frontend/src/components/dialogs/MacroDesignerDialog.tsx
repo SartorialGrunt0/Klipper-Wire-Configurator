@@ -579,7 +579,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
     let lastTrace: MovementTrace | null = null;
 
     simulationPlan.steps.forEach((step, index) => {
-      const result = executeSimulationStep(currentRuntime, step, machineProfile);
+      const result = executeSimulationStep(currentRuntime, step, machineProfile, configFiles);
       const xyMoved = Math.abs(result.nextState.x - currentRuntime.x) > 1e-6 || Math.abs(result.nextState.y - currentRuntime.y) > 1e-6;
       const zDelta = result.nextState.z - currentRuntime.z;
       const zIndicator: 'up' | 'down' | null = zDelta > 1e-6 ? 'up' : zDelta < -1e-6 ? 'down' : null;
@@ -745,7 +745,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
       setIsRunning(false);
       return;
     }
-    const result = executeSimulationStep(currentRuntime, step, machineProfile);
+    const result = executeSimulationStep(currentRuntime, step, machineProfile, configFiles);
     const xyMoved = Math.abs(result.nextState.x - currentRuntime.x) > 1e-6 || Math.abs(result.nextState.y - currentRuntime.y) > 1e-6;
     const zDelta = result.nextState.z - currentRuntime.z;
     const zIndicator: 'up' | 'down' | null = zDelta > 1e-6 ? 'up' : zDelta < -1e-6 ? 'down' : null;
@@ -1879,9 +1879,9 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                               onContextMenu={(event) => handleContextMenu(event, item)}
                               className={`w-full rounded-lg border px-3 py-2 text-left transition-colors ${selectedKey === item.key ? 'border-[var(--color-accent)] bg-[var(--color-bg-primary)]' : 'border-[var(--color-bg-tertiary)] hover:border-[var(--color-accent)]/60'}`}
                             >
-                              <div className="flex items-start justify-between gap-2">
+                              <div className="min-w-0 space-y-1">
                                 <div className="truncate text-xs font-medium text-[var(--color-text-primary)]">{item.title}</div>
-                                <div className="flex shrink-0 flex-wrap justify-end gap-1">
+                                <div className="flex flex-wrap gap-1">
                                   {badges.map((badge) => (
                                     <span key={`${item.key}-${badge}`} className="rounded-full border border-[var(--color-bg-tertiary)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">{badge}</span>
                                   ))}
@@ -1909,9 +1909,9 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                             onContextMenu={(event) => handleContextMenu(event, item)}
                             className={`w-full rounded-lg border px-3 py-2 text-left transition-colors ${selectedKey === item.key ? 'border-[var(--color-accent)] bg-[var(--color-bg-primary)]' : 'border-[var(--color-bg-tertiary)] hover:border-[var(--color-accent)]/60'}`}
                           >
-                            <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0 space-y-1">
                               <div className="truncate text-xs font-medium text-[var(--color-text-primary)]">{item.title}</div>
-                              <div className="flex shrink-0 flex-wrap justify-end gap-1">
+                              <div className="flex flex-wrap gap-1">
                                 {badges.map((badge) => (
                                   <span key={`${item.key}-${badge}`} className="rounded-full border border-[var(--color-bg-tertiary)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">{badge}</span>
                                 ))}

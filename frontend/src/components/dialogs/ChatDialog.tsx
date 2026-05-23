@@ -3,6 +3,8 @@ import KeyboardArrowDownRounded from '@mui/icons-material/KeyboardArrowDownRound
 import UploadFileRounded from '@mui/icons-material/UploadFileRounded';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
 import { useAiStore, AiProvider, ChatMessage } from '../../stores/aiStore';
 import { useConfigStore } from '../../stores/configStore';
 import { useGraphStore } from '../../stores/graphStore';
@@ -138,7 +140,85 @@ type BlockquoteProps = ComponentPropsWithoutRef<'blockquote'>;
 type TableProps = ComponentPropsWithoutRef<'table'>;
 type TableCellProps = ComponentPropsWithoutRef<'th'>;
 type TableDataCellProps = ComponentPropsWithoutRef<'td'>;
-type CodeProps = ComponentPropsWithoutRef<'code'>;
+type CodeProps = ComponentPropsWithoutRef<'code'> & {
+  children?: React.ReactNode;
+  className?: string;
+  inline?: boolean;
+  node?: unknown;
+};
+
+function MarkdownCode({ children, className, inline }: CodeProps) {
+  const content = String(children ?? '').replace(/\n$/, '');
+  const language = className?.match(/language-([^\s]+)/)?.[1] ?? '';
+  const isBlock = inline === false || Boolean(className) || content.includes('\n');
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle');
+  const resetTimerRef = useRef<number | null>(null);
+
+  useEffect(() => () => {
+    if (resetTimerRef.current !== null) {
+      window.clearTimeout(resetTimerRef.current);
+    }
+  }, []);
+
+  if (!isBlock) {
+    return (
+      <code className="rounded bg-[var(--color-bg-secondary)] px-1 py-0.5 font-mono text-[11px]">
+        {content}
+      </code>
+    );
+  }
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopyState('copied');
+    } catch {
+      setCopyState('error');
+    } finally {
+      if (resetTimerRef.current !== null) {
+        window.clearTimeout(resetTimerRef.current);
+      }
+      resetTimerRef.current = window.setTimeout(() => {
+        setCopyState('idle');
+      }, 2000);
+    }
+  };
+
+  const buttonLabel = copyState === 'copied' ? 'Copied' : copyState === 'error' ? 'Copy failed' : 'Copy code';
+
+  return (
+    <div className="my-2 overflow-hidden rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)]">
+      <div className="flex items-center justify-between gap-2 border-b border-[var(--color-bg-tertiary)] px-3 py-1.5">
+        <span className="text-[10px] font-medium uppercase tracking-[0.16em] text-[var(--color-text-secondary)]">
+          {language || 'code'}
+        </span>
+        <button
+          type="button"
+          onClick={() => {
+            void handleCopy();
+          }}
+          className="rounded p-1 text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-primary)] hover:text-[var(--color-text-primary)]"
+          aria-label={buttonLabel}
+          title={buttonLabel}
+        >
+          {copyState === 'copied' ? (
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M3 8.5l3 3 7-7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          ) : (
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <rect x="5" y="3" width="8" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
+              <path d="M3.5 10.5H3A1.5 1.5 0 011.5 9V3A1.5 1.5 0 013 1.5h6A1.5 1.5 0 0110.5 3v0.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+            </svg>
+          )}
+        </button>
+      </div>
+      <pre className="overflow-x-auto p-3">
+        <code className="font-mono text-[11px]">{content}</code>
+      </pre>
+    </div>
+  );
+}
 
 interface AttachedConfigFile {
   id: string;
@@ -1791,13 +1871,15 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   };
 
   const handleSaveSettings = () => {
+    const nextModel = editModel.trim();
+    const hadEnabledChat = isConfigured();
     const nextProviderModels = {
       ...editProviderModels,
-      [editApiProvider]: editModel,
+      [editApiProvider]: nextModel,
     };
     setSettings({
       apiKey: editApiKey,
-      model: editModel,
+      model: nextModel,
       providerModels: nextProviderModels,
       apiUrl: resolvedEditApiUrl,
       apiProvider: editApiProvider,
@@ -1810,14 +1892,17 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     if (isLocalProvider(editApiProvider)) {
       void fetchAvailableModels(editApiProvider, resolvedEditApiUrl, editApiKey);
     }
+    if (!nextModel && !hadEnabledChat) {
+      onClose();
+      return;
+    }
     setShowSettings(false);
   };
 
+  const hasSelectedModel = !!editModel.trim();
+
   // Compute whether the save button should be enabled
   const isSaveEnabled = (() => {
-    if (!editModel.trim()) {
-      return false;
-    }
     if (!providerRequiresApiKey(editApiProvider)) {
       return true;
     }
@@ -2011,7 +2096,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
               disabled={!isSaveEnabled}
               className="px-4 py-2 rounded-lg text-xs font-medium bg-[var(--color-accent)] text-white hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              Save & Enable Chat
+              {hasSelectedModel ? 'Save & Enable Chat' : 'Save Settings'}
             </button>
           </div>
         </div>
@@ -2252,7 +2337,8 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
                   >
                     {msg.role === 'assistant' ? (
                       <ReactMarkdown
-                        remarkPlugins={[remarkGfm]}
+                        remarkPlugins={[remarkMath, remarkGfm]}
+                        rehypePlugins={[rehypeKatex]}
                         components={{
                           p: ({ children }: ParagraphProps) => <p className="mb-2 last:mb-0">{children}</p>,
                           ul: ({ children }: ListProps) => <ul className="mb-2 list-disc pl-5 last:mb-0">{children}</ul>,
@@ -2279,22 +2365,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
                           td: ({ children }: TableDataCellProps) => (
                             <td className="border border-[var(--color-bg-tertiary)] px-2 py-1 align-top">{children}</td>
                           ),
-                          code: ({ children, className }: CodeProps) => {
-                            const content = String(children).replace(/\n$/, '');
-                            const isBlock = Boolean(className) || content.includes('\n');
-                            if (!isBlock) {
-                              return (
-                                <code className="rounded bg-[var(--color-bg-secondary)] px-1 py-0.5 font-mono text-[11px]">
-                                  {content}
-                                </code>
-                              );
-                            }
-                            return (
-                              <pre className="my-2 overflow-x-auto rounded-md bg-[var(--color-bg-secondary)] p-3">
-                                <code className="font-mono text-[11px]">{content}</code>
-                              </pre>
-                            );
-                          },
+                          code: MarkdownCode,
                         }}
                       >
                         {msg.content}
