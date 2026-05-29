@@ -488,7 +488,7 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
                 {filenames.map((fn) => (
                   <label
                     key={fn}
-                    className={`flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer ${
+                    className={`group flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer ${
                       appliedFiles.includes(fn) ? 'bg-green-500/10' : 'hover:bg-[var(--color-bg-primary)]'
                     }`}
                   >
@@ -499,9 +499,14 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
                       disabled={status === 'applying' || status === 'success'}
                       className="rounded"
                     />
-                    <span className="text-xs font-mono text-[var(--color-text-primary)] flex-1">{fn}</span>
+                    <div className="kwc-marquee-shell flex-1 min-w-0">
+                      <div className="kwc-marquee-track">
+                        <span className="kwc-marquee-text text-xs font-mono text-[var(--color-text-primary)]">{fn}</span>
+                        <span aria-hidden="true" className="kwc-marquee-text text-xs font-mono text-[var(--color-text-primary)]">{fn}</span>
+                      </div>
+                    </div>
                     {appliedFiles.includes(fn) && (
-                      <span className="text-xs text-green-400">Saved</span>
+                      <span className="w-11 shrink-0 text-right text-xs text-green-400">Saved</span>
                     )}
                   </label>
                 ))}

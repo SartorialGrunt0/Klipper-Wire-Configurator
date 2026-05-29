@@ -50,12 +50,14 @@ function HardwareNode({ data, selected, id }: NodeProps) {
   const isSbc = nodeData.hardwareType === 'sbc';
   const showLabel = !(isSbc && !isMcu) && !(nodeData.hardwareType === 'mainboard' && isPrimary);
 
-  const { toggleHardwareCollapse, nodes, selectedNodeId, dragHoverHardwareId } = useGraphStore();
+  const { toggleHardwareCollapse, nodes, selectedNodeId, dragHoverHardwareId, removeNode } = useGraphStore();
 
   const [isHovered, setIsHovered] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   // Show handles on all nodes while any connection drag is in progress
   const { inProgress: isConnecting } = useConnection();
   const showHandles = isHovered || isConnecting;
+  const hidePrimaryLabel = isPrimary && isHovered && collapsed;
 
   // True when a direct child of this hardware node is selected
   const childSelected = !!selectedNodeId && nodes.some(
@@ -100,6 +102,34 @@ function HardwareNode({ data, selected, id }: NodeProps) {
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
     >
+
+      {showDeleteConfirm && (
+        <div
+          className="absolute right-2 top-12 z-40 w-56 rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] p-3 shadow-2xl"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <p className="text-[11px] leading-5 text-[var(--color-text-primary)]">
+            Delete {nodeData.label || hardwareTypeLabel} and all attached configuration sections?
+          </p>
+          <div className="mt-3 flex justify-end gap-2">
+            <button
+              onClick={() => setShowDeleteConfirm(false)}
+              className="rounded-md border border-[var(--color-bg-tertiary)] px-2.5 py-1 text-[11px] text-[var(--color-text-primary)] hover:border-[var(--color-accent)]"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => {
+                setShowDeleteConfirm(false);
+                removeNode(id);
+              }}
+              className="rounded-md bg-[var(--color-error)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-bg-primary)] hover:opacity-90"
+            >
+              Delete
+            </button>
+          </div>
+        </div>
+      )}
 
       {previewExpanded && (
         <div
@@ -200,7 +230,7 @@ function HardwareNode({ data, selected, id }: NodeProps) {
           <div className="min-w-0 flex flex-col leading-tight">
             {showLabel && <span className="truncate" style={{ color }}>{nodeData.label}</span>}
             {isPrimary && (
-              <span className="kwc-primary-label">
+              <span className="kwc-primary-label" style={{ opacity: hidePrimaryLabel ? 0 : 1 }}>
                 PRIMARY
               </span>
             )}
@@ -209,7 +239,11 @@ function HardwareNode({ data, selected, id }: NodeProps) {
         {/* Actions — visible on hover */}
         {isHovered && (
           <div className="shrink-0">
-            <NodeActions nodeId={id} color={color} />
+            <NodeActions
+              nodeId={id}
+              color={color}
+              onDeleteRequested={() => setShowDeleteConfirm(true)}
+            />
           </div>
         )}
       </div>

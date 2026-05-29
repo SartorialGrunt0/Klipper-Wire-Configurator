@@ -88,6 +88,8 @@ REQUIREMENT_COMPONENT_GROUPS: dict[str, set[str]] = {
     "adxl345": {"accelerometer"},
 }
 
+PROBE_PLUGIN_SECTION_TYPES = {"beacon"}
+
 
 @dataclass(frozen=True)
 class SpecialTemperatureSensorUse:
@@ -318,10 +320,8 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
             if not param.is_commented_out and param.key != "_comment_"
         })
         defined_sections.add(save_section.full_header)
-        save_config_section_types.add(save_section.section_type)
-        sec_def = get_section_def(save_section.section_type)
-        if sec_def:
-            save_config_component_groups.add(sec_def.component_group)
+        # SAVE_CONFIG sections contribute persisted values for existing sections,
+        # but they should not satisfy cross-section hardware dependencies.
 
     for section in config.sections:
         if section.section_type == "include" or section.is_commented_out:
@@ -863,13 +863,28 @@ def _is_probe_section(section: ConfigSection) -> bool:
     Includes:
     - [probe] (top-level)
     - [bltouch] (top-level)
-    - Named sections whose type starts with 'probe' (e.g., probe_eddy_current, probe_rr, probe_4in1, temperature_probe)
+    - Schema probe components (for example smart_effector)
+    - Probe plugins such as [beacon] and scanner-style sections
+    - Named sections whose type starts with 'probe' or ends with '_probe'
     """
-    if section.section_type == "probe" or section.section_type == "bltouch":
+    return _is_probe_like_section_type(section.section_type)
+
+
+def _is_probe_like_section_type(section_type: str) -> bool:
+    lowered = section_type.strip().lower()
+    if not lowered:
+        return False
+
+    sec_def = get_section_def(lowered)
+    if sec_def and sec_def.component_group == "probe":
         return True
-    if section.section_type.startswith("probe"):
-        return True
-    return False
+
+    return (
+        lowered in PROBE_PLUGIN_SECTION_TYPES
+        or lowered.startswith("probe")
+        or lowered.endswith("_probe")
+        or "scanner" in lowered
+    )
 
 
 def _extract_virtual_endstop_value(raw_value: str) -> str | None:
@@ -885,9 +900,10 @@ def _extract_virtual_endstop_value(raw_value: str) -> str | None:
     value = value.lstrip("!^~")
     # Strip MCU prefix if present (e.g., "mcu:z_virtual_endstop")
     if ":" in value:
-        value = value.split(":", 1)[1]
+        value = value.split(":", 1)[1].strip()
+        value = value.lstrip("!^~")
     # Strip macro references (e.g., "<z_virtual_endstop>")
-    value = value.strip("<>")
+    value = value.strip().strip("<>").strip()
     return value.lower() if value else None
 
 
@@ -975,9 +991,9 @@ def _get_probe_section_types() -> set[str]:
     - [bltouch] (top-level)
     - Named sections whose type starts with 'probe' (e.g., probe_eddy_current, probe_rr, probe_4in1)
     """
-    types = {"probe", "bltouch"}
+    types = set(PROBE_PLUGIN_SECTION_TYPES)
     for sec_def in SECTION_DEFS.values():
-        if sec_def.section_type.startswith("probe"):
+        if _is_probe_like_section_type(sec_def.section_type):
             types.add(sec_def.section_type)
     return types
 
@@ -1018,7 +1034,7 @@ def _check_cross_file_dependencies(
             for section in cfg.sections:
                 if section.is_commented_out:
                     continue
-                if section.section_type in probe_types or section.section_type.startswith("probe"):
+                if section.section_type in probe_types or _is_probe_section(section):
                     probe_sections.add(section.full_header)
     else:
         # No active_files specified — check all files (single-file mode)
@@ -1026,11 +1042,13 @@ def _check_cross_file_dependencies(
             for section in cfg.sections:
                 if section.is_commented_out:
                     continue
-                if section.section_type in probe_types or section.section_type.startswith("probe"):
+                if section.section_type in probe_types or _is_probe_section(section):
                     probe_sections.add(section.full_header)
     
     # Check each file for sections that require probe
     for filename, cfg in configs.items():
+        if active_files is not None and filename not in active_files:
+            continue
         for section in cfg.sections:
             if section.is_commented_out:
                 continue

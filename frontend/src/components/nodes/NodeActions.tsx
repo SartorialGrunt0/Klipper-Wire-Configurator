@@ -4,9 +4,10 @@ import { useGraphStore } from '../../stores/graphStore';
 interface NodeActionsProps {
   nodeId: string;
   color: string;
+  onDeleteRequested?: () => void;
 }
 
-function NodeActions({ nodeId, color }: NodeActionsProps) {
+function NodeActions({ nodeId, color, onDeleteRequested }: NodeActionsProps) {
   const { removeNode, duplicateNode } = useGraphStore();
 
   const handleCopy = useCallback((e: React.MouseEvent) => {
@@ -16,8 +17,12 @@ function NodeActions({ nodeId, color }: NodeActionsProps) {
 
   const handleDelete = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
+    if (onDeleteRequested) {
+      onDeleteRequested();
+      return;
+    }
     removeNode(nodeId);
-  }, [nodeId, removeNode]);
+  }, [nodeId, onDeleteRequested, removeNode]);
 
   return (
     <div className="flex items-center gap-0.5 ml-auto shrink-0">
