@@ -81,6 +81,8 @@ PIN_RE = re.compile(
     r"^[!^~]*(?:[A-Za-z0-9_][A-Za-z0-9_-]*:\s*)?(?:<[^>]+>|[A-Za-z0-9_]+(?:[./][A-Za-z0-9_]+)*)$",
     re.IGNORECASE,
 )
+LETTERED_STEPPER_RE = re.compile(r"^stepper_([a-w])$", re.IGNORECASE)
+SCREW_PARAM_RE = re.compile(r"^screw\d+$", re.IGNORECASE)
 
 
 REQUIREMENT_COMPONENT_GROUPS: dict[str, set[str]] = {
@@ -101,6 +103,23 @@ class SpecialTemperatureSensorUse:
 
 def _basename(filename: str) -> str:
     return filename.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+
+
+def _get_printer_kinematics(config: ConfigFile) -> str | None:
+    printer = config.get_section("printer")
+    if printer is None or printer.is_commented_out:
+        return None
+    kinematics = printer.get_value("kinematics").strip().lower()
+    return kinematics or None
+
+
+def _normalize_pin_values(value: str) -> list[str]:
+    pins: list[str] = []
+    for raw_pin in value.split(","):
+        clean_pin = re.sub(r"\s*:\s*", ":", raw_pin.lstrip("!^~").strip())
+        if clean_pin and not clean_pin.startswith("<"):
+            pins.append(clean_pin)
+    return pins
 
 
 def _find_main_project_file(configs: dict[str, ConfigFile]) -> str | None:
@@ -305,6 +324,7 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
     """Validate a full configuration file."""
     result = ValidationResult()
     acknowledged_sections = load_acknowledged_warning_sections()
+    printer_kinematics = _get_printer_kinematics(config)
 
     section_counts: dict[str, int] = {}
     used_pins: dict[str, list[PinUse]] = {}
@@ -387,6 +407,12 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
         elif sec_type == "bed_mesh":
             _validate_bed_mesh_requirements(section, active_params, result)
 
+        if LETTERED_STEPPER_RE.match(sec_type):
+            _validate_lettered_stepper_requirements(section, active_params, printer_kinematics, result)
+
+        if sec_type in {"bed_screws", "screws_tilt_adjust"}:
+            _validate_minimum_screw_count(section, active_params, result)
+
         # Sensorless homing warning: diag_pin or driver_SGTHRS with homing_retract_dist != 0
         if sec_type.startswith("stepper") or sec_type.startswith("extruder"):
             _check_sensorless_homing_warning(section, result, config)
@@ -457,8 +483,7 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
 
             # Track pin usage
             if param_def.param_type == ParamType.PIN and param.value:
-                clean_pin = re.sub(r"\s*:\s*", ":", param.value.lstrip("!^~").strip())
-                if clean_pin and not clean_pin.startswith("<"):
+                for clean_pin in _normalize_pin_values(param.value):
                     if clean_pin not in used_pins:
                         used_pins[clean_pin] = []
                     used_pins[clean_pin].append(PinUse(
@@ -736,6 +761,70 @@ def _validate_bed_mesh_requirements(section: ConfigSection, active_params: set[s
             message=f"Required parameter '{param_name}' is missing.",
             line_number=section.line_number,
         ))
+
+
+def _validate_lettered_stepper_requirements(
+    section: ConfigSection,
+    active_params: set[str],
+    printer_kinematics: str | None,
+    result: ValidationResult,
+) -> None:
+    match = LETTERED_STEPPER_RE.match(section.section_type)
+    if match is None or printer_kinematics is None:
+        return
+
+    stepper_letter = match.group(1).lower()
+    required_params: list[str] = []
+
+    if printer_kinematics == "delta":
+        required_params.append("rotation_distance")
+        if stepper_letter == "a":
+            required_params.extend(["position_endstop", "arm_length"])
+    elif printer_kinematics == "rotary_delta":
+        required_params.append("gear_ratio")
+        if "rotation_distance" in active_params:
+            result.errors.append(ValidationError(
+                severity="error",
+                section=section.full_header,
+                param="rotation_distance",
+                message="Parameter 'rotation_distance' is not valid for rotary_delta stepper sections; use 'gear_ratio' instead.",
+                line_number=section.line_number,
+            ))
+        if stepper_letter == "a":
+            required_params.extend(["position_endstop", "upper_arm_length", "lower_arm_length"])
+    elif printer_kinematics == "winch":
+        required_params.extend(["rotation_distance", "anchor_x", "anchor_y", "anchor_z"])
+    else:
+        return
+
+    for param_name in required_params:
+        if param_name in active_params:
+            continue
+        result.errors.append(ValidationError(
+            severity="error",
+            section=section.full_header,
+            param=param_name,
+            message=f"Required parameter '{param_name}' is missing.",
+            line_number=section.line_number,
+        ))
+
+
+def _validate_minimum_screw_count(
+    section: ConfigSection,
+    active_params: set[str],
+    result: ValidationResult,
+) -> None:
+    screw_count = sum(1 for param_name in active_params if SCREW_PARAM_RE.fullmatch(param_name))
+    if screw_count >= 3:
+        return
+
+    result.errors.append(ValidationError(
+        severity="error",
+        section=section.full_header,
+        param="",
+        message=f"{section.section_type}: Must have at least three screws",
+        line_number=section.line_number,
+    ))
 
 
 def _check_dependencies(

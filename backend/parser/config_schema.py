@@ -274,18 +274,45 @@ for axis in ["x", "y", "z"]:
             ],
         ))
 
-# Delta steppers
-for tower in ["stepper_a", "stepper_b", "stepper_c"]:
+# Lettered steppers are overloaded by kinematics such as delta,
+# rotary_delta, and winch.
+LETTERED_STEPPER_PARAMS = [
+    _float("step_distance", "Distance per step in mm", default=""),
+    _float("rotation_distance", "Distance per full rotation in mm"),
+    _int("microsteps", "Microsteps per full step", required=True),
+    _int("full_steps_per_rotation", "Steps per full motor rotation", default="200"),
+    _str("gear_ratio", "Gear ratio (for geared rotary_delta steppers)"),
+    _float("step_pulse_duration", "Step pulse duration"),
+    _pin("step_pin", "Step GPIO pin", required=True),
+    _pin("dir_pin", "Direction GPIO pin", required=True),
+    _pin("enable_pin", "Enable GPIO pin"),
+    _pin("endstop_pin", "Endstop switch detection pin"),
+    _float("position_min", "Minimum position", default="0", unit="mm"),
+    _float("position_endstop", "Endstop position", unit="mm"),
+    _float("position_max", "Maximum position", unit="mm"),
+    _float("homing_speed", "Homing speed", default="5", unit="mm/s"),
+    _float("homing_retract_dist", "Retract distance after homing", default="5", unit="mm"),
+    _float("homing_retract_speed", "Retract speed after homing", default="homing_speed", unit="mm/s"),
+    _float("second_homing_speed", "Second homing speed", default="homing_speed/2", unit="mm/s"),
+    _bool("homing_positive_dir", "Home in positive direction"),
+    _float("arm_length", "Delta arm length", unit="mm"),
+    _float("angle", "Tower or arm angle", unit="degrees"),
+    _float("upper_arm_length", "Rotary delta upper arm length", unit="mm"),
+    _float("lower_arm_length", "Rotary delta lower arm length", unit="mm"),
+    _float("anchor_x", "Winch anchor X coordinate", unit="mm"),
+    _float("anchor_y", "Winch anchor Y coordinate", unit="mm"),
+    _float("anchor_z", "Winch anchor Z coordinate", unit="mm"),
+]
+
+for tower_name in [chr(tower_ord) for tower_ord in range(ord("a"), ord("z") + 1) if chr(tower_ord) not in {"x", "y", "z"}]:
+    tower = f"stepper_{tower_name}"
     _register(SectionDef(
         section_type=tower,
-        display_name=f"Stepper {tower[-1].upper()} (Delta)",
+        display_name=f"Stepper {tower[-1].upper()}",
         category="sub_component",
         component_group="stepper",
-        description=f"Delta tower {tower[-1].upper()} stepper",
-        params=STEPPER_PARAMS[:] + [
-            _float("arm_length", "Delta arm length", unit="mm"),
-            _float("angle", "Tower angle", unit="degrees"),
-        ],
+        description=f"Lettered kinematics stepper {tower[-1].upper()}",
+        params=LETTERED_STEPPER_PARAMS[:],
     ))
 
 # ── Extruder ──
@@ -441,7 +468,7 @@ _register(SectionDef(
     description="TMC2660 stepper driver (SPI)",
     params=[
         _pin("cs_pin", "SPI chip select pin", required=True),
-        _pin("spi_bus", "SPI bus"),
+        _str("spi_bus", "SPI bus"),
         _str("spi_speed", "SPI speed", default="4000000"),
         _pin("spi_software_sclk_pin", "Software SPI clock"),
         _pin("spi_software_mosi_pin", "Software SPI MOSI"),
@@ -726,9 +753,11 @@ _register(SectionDef(
         _str("screw3_name", "Third screw name"),
         _str("screw4", "Fourth screw X,Y position"),
         _str("screw4_name", "Fourth screw name"),
+        _str("screw*_name", "Additional screw name"),
         _float("speed", "Travel speed", default="50", unit="mm/s"),
         _float("horizontal_move_z", "Z height", default="5", unit="mm"),
         _enum("screw_thread", ["CW-M3", "CCW-M3", "CW-M4", "CCW-M4", "CW-M5", "CCW-M5"], "Screw thread type", default="CW-M3"),
+        _str("screw*", "Additional screw X,Y position"),
     ],
 ))
 
@@ -748,6 +777,9 @@ _register(SectionDef(
         _str("screw3_name", "Screw 3 name"),
         _str("screw4", "Screw 4 X,Y position"),
         _str("screw4_name", "Screw 4 name"),
+        _str("screw*_fine_adjust", "Additional screw fine adjust X,Y"),
+        _str("screw*_name", "Additional screw name"),
+        _str("screw*", "Additional screw X,Y position"),
         _float("speed", "Travel speed", default="50", unit="mm/s"),
         _float("horizontal_move_z", "Z height for moves", default="5", unit="mm"),
         _float("probe_height", "Probe height", default="0"),
