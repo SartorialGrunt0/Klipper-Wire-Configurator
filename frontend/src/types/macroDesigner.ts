@@ -195,6 +195,7 @@ export interface MacroRuntimeState {
   activeBuiltInCommand: string | null;
   activeMacro: string;
   elapsedTimeS: number;
+  saveVariables: Record<string, unknown>;
   savedStates: Record<string, {
     x: number;
     y: number;
