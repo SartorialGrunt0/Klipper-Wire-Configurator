@@ -16,18 +16,18 @@ Credit to the klipper, mainsail, moonraker, fluidd, and other teams whom which I
 
 ## Features
 
-- Graphical front end with cards and wires to show connections
+- View your configuration in a Graphical frontend with cards and wires to show connections.
 - Add components and features directly from the configuration reference.
 - Add configurations directly from the klipper configuration examples and others.
-- Delete, modify, or move components with simple UI elements and actions
-- Live configuration checks with warnings and errors based on the klipper configuration reference.
+- Delete, modify, or move components with simple UI interactions.
+- View live configuration checks with warnings and errors based on the klipper configuration reference to catch errors before runtime.
 - Diff configuration changes before exporting or applying changes.
 - Apply changes directly to your configuration and firmware restart directly.
-- Manage USB, UART, or CAN communcations with ID detection.
-- Text View for traditonal configuration management, faster multi-file fuzzy search, and line referenced table of contents.
-- Macro Designer with easy modifications and simulation.
+- Manage USB, UART, or CAN communcations with serial and canbus ID detection.
+- Modify files in Text View for traditonal configuration management, faster multi-file fuzzy search, and per-line error checking.
+- Use Macro Designer for easy macro modifications and simulation.
 - Build, download, and flash Klipper and Katapult firmware.
-- Integrated Klipper AI agent to mange configs and macros with kliper docs referenced context, error checking, and controlled approval of changes.
+- Integrated AI chat to edit .cfg files and diagnose configuration errors with klipper referenced context with controlled approval of changes.
 
 ### Graphical UI
 
@@ -63,13 +63,11 @@ Credit to the klipper, mainsail, moonraker, fluidd, and other teams whom which I
 
 ## Prerequisites
 
-- Raspberry Pi OS or another Debian-based distro, bookworm or newer.
+- Raspberry Pi OS or another Debian-based distrox Must be bookworm or newer.
 - Python 3.10+
-- Git and internet access for the initial install
+- Git and internet access for the initial install.
 - Klipper
 - Katapult (optional)
-
-The Raspberry Pi installer handles Node.js setup and installs the systemd service.
 
 ## Installing/Uninstalling
 
@@ -84,24 +82,10 @@ cd Klipper-Wire-Configurator
 bash scripts/install.sh
 ```
 
-If you want to install or update a non-`main` branch, either check out that branch first and rerun the installer from that repo, or set `KWC_GIT_REF` explicitly:
-
-```bash
-cd ~/Klipper-Wire-Configurator
-git checkout your-branch
-git pull --ff-only
-bash scripts/install.sh
-```
-
-```bash
-KWC_GIT_REF=your-branch bash scripts/install.sh
-```
-
-On 32-bit Raspberry Pi OS (`armv7` / `armhf`), the installer automatically uses the distro `nodejs` package. I havent tried 64-bit YMMV.
+Note: On 32-bit Raspberry Pi OS (`armv7` / `armhf`), the installer automatically uses the distro `nodejs` package. I havent tried 64-bit YMMV.
+A successful install ends by checking the service health and printing the installer log path under `/tmp/klipper-wire-configurator-install-*.log`.
 
 After install, proceed to http://{your_ip_here}:8099
-
-A successful install ends by checking the service health and printing the installer log path under `/tmp/klipper-wire-configurator-install-*.log`.
 
 ### Moonraker update_manager
 
@@ -129,8 +113,6 @@ If you installed into `~/Klipper-Wire-Configurator`:
 bash ~/Klipper-Wire-Configurator/scripts/install.sh --uninstall
 ```
 
-If your repo lives at `~/klipper-wire-configurator`, use that exact lower-case path instead.
-
 ## Troubleshooting
 
 ### Service checks
@@ -150,6 +132,19 @@ sudo journalctl -u klipper-wire-configurator -f
 ## Development
 
 Use this when you want backend and frontend running in separate terminals.
+
+If you want to install or update a non-`main` branch, either check out that branch first and rerun the installer from that repo, or set `KWC_GIT_REF` explicitly:
+
+```bash
+cd ~/Klipper-Wire-Configurator
+git checkout your-branch
+git pull --ff-only
+bash scripts/install.sh
+```
+
+```bash
+KWC_GIT_REF=your-branch bash scripts/install.sh
+```
 
 ### Backend
 
