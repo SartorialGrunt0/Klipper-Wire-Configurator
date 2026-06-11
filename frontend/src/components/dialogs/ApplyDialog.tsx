@@ -185,6 +185,10 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
   const [restartErrors, setRestartErrors] = useState<string[]>([]);
   const [restartLogPath, setRestartLogPath] = useState<string | null>(null);
   const [aiAnalyzeLoading, setAiAnalyzeLoading] = useState(false);
+  const [printerStatusLoading, setPrinterStatusLoading] = useState(false);
+  const [printerIsPrinting, setPrinterIsPrinting] = useState(false);
+  const [printerPrintState, setPrinterPrintState] = useState<string | null>(null);
+  const [printerPrintFilename, setPrinterPrintFilename] = useState<string | null>(null);
 
   // Diff state
   const [currentTexts, setCurrentTexts] = useState<Record<string, string>>({});
@@ -213,6 +217,48 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // intentionally empty — snapshot via ref
+
+  useEffect(() => {
+    if (status !== 'success') {
+      setPrinterStatusLoading(false);
+      setPrinterIsPrinting(false);
+      setPrinterPrintState(null);
+      setPrinterPrintFilename(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    async function fetchPrinterActivity() {
+      setPrinterStatusLoading(true);
+      try {
+        const printerStatus = await api.getKlipperStatus();
+        if (cancelled) {
+          return;
+        }
+        setPrinterIsPrinting(printerStatus.is_printing);
+        setPrinterPrintState(printerStatus.print_state);
+        setPrinterPrintFilename(printerStatus.print_filename);
+      } catch {
+        if (cancelled) {
+          return;
+        }
+        setPrinterIsPrinting(false);
+        setPrinterPrintState(null);
+        setPrinterPrintFilename(null);
+      } finally {
+        if (!cancelled) {
+          setPrinterStatusLoading(false);
+        }
+      }
+    }
+
+    void fetchPrinterActivity();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [status]);
 
   const toggleFile = (fn: string) => {
     setSelectedFiles((prev) => {
@@ -442,7 +488,7 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
                 {filenames.map((fn) => (
                   <label
                     key={fn}
-                    className={`flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer ${
+                    className={`group flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer ${
                       appliedFiles.includes(fn) ? 'bg-green-500/10' : 'hover:bg-[var(--color-bg-primary)]'
                     }`}
                   >
@@ -453,9 +499,14 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
                       disabled={status === 'applying' || status === 'success'}
                       className="rounded"
                     />
-                    <span className="text-xs font-mono text-[var(--color-text-primary)] flex-1">{fn}</span>
+                    <div className="kwc-marquee-shell flex-1 min-w-0">
+                      <div className="kwc-marquee-track">
+                        <span className="kwc-marquee-text text-xs font-mono text-[var(--color-text-primary)]">{fn}</span>
+                        <span aria-hidden="true" className="kwc-marquee-text text-xs font-mono text-[var(--color-text-primary)]">{fn}</span>
+                      </div>
+                    </div>
                     {appliedFiles.includes(fn) && (
-                      <span className="text-xs text-green-400">Saved</span>
+                      <span className="w-11 shrink-0 text-right text-xs text-green-400">Saved</span>
                     )}
                   </label>
                 ))}
@@ -561,6 +612,13 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
           </div>
         )}
 
+        {status === 'success' && printerIsPrinting && (
+          <div className="px-4 pb-2 text-xs text-amber-300">
+            Moonraker reports an active print job{printerPrintState ? ` (${printerPrintState})` : ''}
+            {printerPrintFilename ? ` for ${printerPrintFilename}` : ''}. Firmware restart is disabled until it finishes.
+          </div>
+        )}
+
         {restartErrors.length > 0 && (
           <div className="mx-4 mb-3 p-3 rounded-lg border border-red-500/30 bg-red-500/10">
             <p className="text-xs text-red-300 mb-2">
@@ -607,10 +665,14 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
           {status === 'success' && (
             <button
               onClick={handleFirmwareRestart}
-              disabled={restartStatus === 'restarting' || restartStatus === 'success'}
+              disabled={restartStatus === 'restarting' || restartStatus === 'success' || printerStatusLoading || printerIsPrinting}
               className="px-4 py-1.5 rounded-md text-xs font-medium bg-amber-500 text-black hover:bg-amber-600 transition-colors disabled:opacity-50"
             >
-              {restartStatus === 'restarting'
+              {printerStatusLoading
+                ? 'Checking printer...'
+                : printerIsPrinting
+                  ? 'Firmware Restart Disabled'
+                  : restartStatus === 'restarting'
                 ? 'Restarting...'
                 : restartStatus === 'success'
                   ? 'Restart Sent'

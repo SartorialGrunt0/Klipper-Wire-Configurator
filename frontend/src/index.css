@@ -111,6 +111,38 @@ body {
   font-weight: 700;
   letter-spacing: 0.04em;
   line-height: 1.1;
+  transition: opacity 0.15s ease;
+}
+
+@keyframes kwc-marquee-scroll {
+  0%, 12% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(calc(-50% - 0.75rem));
+  }
+}
+
+.kwc-marquee-shell {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.kwc-marquee-track {
+  display: inline-flex;
+  align-items: center;
+  gap: 1.5rem;
+  min-width: 100%;
+  will-change: transform;
+}
+
+.kwc-marquee-text {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.group:hover .kwc-marquee-track {
+  animation: kwc-marquee-scroll 9s linear infinite;
 }
 
 /* Compact tile styles for sub-components and features */

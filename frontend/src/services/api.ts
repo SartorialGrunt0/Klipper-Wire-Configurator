@@ -376,6 +376,9 @@ export interface KlipperStatusResponse {
   state_message: string;
   recent_errors: string[];
   log_path: string | null;
+  is_printing: boolean;
+  print_state: string | null;
+  print_filename: string | null;
 }
 
 export async function getKlipperStatus(): Promise<KlipperStatusResponse> {

@@ -81,12 +81,16 @@ PIN_RE = re.compile(
     r"^[!^~]*(?:[A-Za-z0-9_][A-Za-z0-9_-]*:\s*)?(?:<[^>]+>|[A-Za-z0-9_]+(?:[./][A-Za-z0-9_]+)*)$",
     re.IGNORECASE,
 )
+LETTERED_STEPPER_RE = re.compile(r"^stepper_([a-w])$", re.IGNORECASE)
+SCREW_PARAM_RE = re.compile(r"^screw\d+$", re.IGNORECASE)
 
 
 REQUIREMENT_COMPONENT_GROUPS: dict[str, set[str]] = {
     "probe": {"probe"},
     "adxl345": {"accelerometer"},
 }
+
+PROBE_PLUGIN_SECTION_TYPES = {"beacon"}
 
 
 @dataclass(frozen=True)
@@ -99,6 +103,23 @@ class SpecialTemperatureSensorUse:
 
 def _basename(filename: str) -> str:
     return filename.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+
+
+def _get_printer_kinematics(config: ConfigFile) -> str | None:
+    printer = config.get_section("printer")
+    if printer is None or printer.is_commented_out:
+        return None
+    kinematics = printer.get_value("kinematics").strip().lower()
+    return kinematics or None
+
+
+def _normalize_pin_values(value: str) -> list[str]:
+    pins: list[str] = []
+    for raw_pin in value.split(","):
+        clean_pin = re.sub(r"\s*:\s*", ":", raw_pin.lstrip("!^~").strip())
+        if clean_pin and not clean_pin.startswith("<"):
+            pins.append(clean_pin)
+    return pins
 
 
 def _find_main_project_file(configs: dict[str, ConfigFile]) -> str | None:
@@ -303,6 +324,7 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
     """Validate a full configuration file."""
     result = ValidationResult()
     acknowledged_sections = load_acknowledged_warning_sections()
+    printer_kinematics = _get_printer_kinematics(config)
 
     section_counts: dict[str, int] = {}
     used_pins: dict[str, list[PinUse]] = {}
@@ -318,10 +340,8 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
             if not param.is_commented_out and param.key != "_comment_"
         })
         defined_sections.add(save_section.full_header)
-        save_config_section_types.add(save_section.section_type)
-        sec_def = get_section_def(save_section.section_type)
-        if sec_def:
-            save_config_component_groups.add(sec_def.component_group)
+        # SAVE_CONFIG sections contribute persisted values for existing sections,
+        # but they should not satisfy cross-section hardware dependencies.
 
     for section in config.sections:
         if section.section_type == "include" or section.is_commented_out:
@@ -386,6 +406,12 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
             _validate_printer_requirements(section, active_params, result)
         elif sec_type == "bed_mesh":
             _validate_bed_mesh_requirements(section, active_params, result)
+
+        if LETTERED_STEPPER_RE.match(sec_type):
+            _validate_lettered_stepper_requirements(section, active_params, printer_kinematics, result)
+
+        if sec_type in {"bed_screws", "screws_tilt_adjust"}:
+            _validate_minimum_screw_count(section, active_params, result)
 
         # Sensorless homing warning: diag_pin or driver_SGTHRS with homing_retract_dist != 0
         if sec_type.startswith("stepper") or sec_type.startswith("extruder"):
@@ -457,8 +483,7 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
 
             # Track pin usage
             if param_def.param_type == ParamType.PIN and param.value:
-                clean_pin = re.sub(r"\s*:\s*", ":", param.value.lstrip("!^~").strip())
-                if clean_pin and not clean_pin.startswith("<"):
+                for clean_pin in _normalize_pin_values(param.value):
                     if clean_pin not in used_pins:
                         used_pins[clean_pin] = []
                     used_pins[clean_pin].append(PinUse(
@@ -738,6 +763,70 @@ def _validate_bed_mesh_requirements(section: ConfigSection, active_params: set[s
         ))
 
 
+def _validate_lettered_stepper_requirements(
+    section: ConfigSection,
+    active_params: set[str],
+    printer_kinematics: str | None,
+    result: ValidationResult,
+) -> None:
+    match = LETTERED_STEPPER_RE.match(section.section_type)
+    if match is None or printer_kinematics is None:
+        return
+
+    stepper_letter = match.group(1).lower()
+    required_params: list[str] = []
+
+    if printer_kinematics == "delta":
+        required_params.append("rotation_distance")
+        if stepper_letter == "a":
+            required_params.extend(["position_endstop", "arm_length"])
+    elif printer_kinematics == "rotary_delta":
+        required_params.append("gear_ratio")
+        if "rotation_distance" in active_params:
+            result.errors.append(ValidationError(
+                severity="error",
+                section=section.full_header,
+                param="rotation_distance",
+                message="Parameter 'rotation_distance' is not valid for rotary_delta stepper sections; use 'gear_ratio' instead.",
+                line_number=section.line_number,
+            ))
+        if stepper_letter == "a":
+            required_params.extend(["position_endstop", "upper_arm_length", "lower_arm_length"])
+    elif printer_kinematics == "winch":
+        required_params.extend(["rotation_distance", "anchor_x", "anchor_y", "anchor_z"])
+    else:
+        return
+
+    for param_name in required_params:
+        if param_name in active_params:
+            continue
+        result.errors.append(ValidationError(
+            severity="error",
+            section=section.full_header,
+            param=param_name,
+            message=f"Required parameter '{param_name}' is missing.",
+            line_number=section.line_number,
+        ))
+
+
+def _validate_minimum_screw_count(
+    section: ConfigSection,
+    active_params: set[str],
+    result: ValidationResult,
+) -> None:
+    screw_count = sum(1 for param_name in active_params if SCREW_PARAM_RE.fullmatch(param_name))
+    if screw_count >= 3:
+        return
+
+    result.errors.append(ValidationError(
+        severity="error",
+        section=section.full_header,
+        param="",
+        message=f"{section.section_type}: Must have at least three screws",
+        line_number=section.line_number,
+    ))
+
+
 def _check_dependencies(
     config: ConfigFile,
     defined_sections: set[str],
@@ -863,13 +952,28 @@ def _is_probe_section(section: ConfigSection) -> bool:
     Includes:
     - [probe] (top-level)
     - [bltouch] (top-level)
-    - Named sections whose type starts with 'probe' (e.g., probe_eddy_current, probe_rr, probe_4in1, temperature_probe)
+    - Schema probe components (for example smart_effector)
+    - Probe plugins such as [beacon] and scanner-style sections
+    - Named sections whose type starts with 'probe' or ends with '_probe'
     """
-    if section.section_type == "probe" or section.section_type == "bltouch":
+    return _is_probe_like_section_type(section.section_type)
+
+
+def _is_probe_like_section_type(section_type: str) -> bool:
+    lowered = section_type.strip().lower()
+    if not lowered:
+        return False
+
+    sec_def = get_section_def(lowered)
+    if sec_def and sec_def.component_group == "probe":
         return True
-    if section.section_type.startswith("probe"):
-        return True
-    return False
+
+    return (
+        lowered in PROBE_PLUGIN_SECTION_TYPES
+        or lowered.startswith("probe")
+        or lowered.endswith("_probe")
+        or "scanner" in lowered
+    )
 
 
 def _extract_virtual_endstop_value(raw_value: str) -> str | None:
@@ -885,9 +989,10 @@ def _extract_virtual_endstop_value(raw_value: str) -> str | None:
     value = value.lstrip("!^~")
     # Strip MCU prefix if present (e.g., "mcu:z_virtual_endstop")
     if ":" in value:
-        value = value.split(":", 1)[1]
+        value = value.split(":", 1)[1].strip()
+        value = value.lstrip("!^~")
     # Strip macro references (e.g., "<z_virtual_endstop>")
-    value = value.strip("<>")
+    value = value.strip().strip("<>").strip()
     return value.lower() if value else None
 
 
@@ -975,9 +1080,9 @@ def _get_probe_section_types() -> set[str]:
     - [bltouch] (top-level)
     - Named sections whose type starts with 'probe' (e.g., probe_eddy_current, probe_rr, probe_4in1)
     """
-    types = {"probe", "bltouch"}
+    types = set(PROBE_PLUGIN_SECTION_TYPES)
     for sec_def in SECTION_DEFS.values():
-        if sec_def.section_type.startswith("probe"):
+        if _is_probe_like_section_type(sec_def.section_type):
             types.add(sec_def.section_type)
     return types
 
@@ -1018,7 +1123,7 @@ def _check_cross_file_dependencies(
             for section in cfg.sections:
                 if section.is_commented_out:
                     continue
-                if section.section_type in probe_types or section.section_type.startswith("probe"):
+                if section.section_type in probe_types or _is_probe_section(section):
                     probe_sections.add(section.full_header)
     else:
         # No active_files specified — check all files (single-file mode)
@@ -1026,11 +1131,13 @@ def _check_cross_file_dependencies(
             for section in cfg.sections:
                 if section.is_commented_out:
                     continue
-                if section.section_type in probe_types or section.section_type.startswith("probe"):
+                if section.section_type in probe_types or _is_probe_section(section):
                     probe_sections.add(section.full_header)
     
     # Check each file for sections that require probe
     for filename, cfg in configs.items():
+        if active_files is not None and filename not in active_files:
+            continue
         for section in cfg.sections:
             if section.is_commented_out:
                 continue

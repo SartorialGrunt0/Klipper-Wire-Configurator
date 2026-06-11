@@ -49,14 +49,9 @@ function extractActionMessage(raw: string): string {
 export function parseGcodeLine(line: string, lineNumber: number, sourceName: string): ParsedGcodeCommand | null {
   const trimmed = line.trim();
   if (!trimmed || trimmed.startsWith('#')) return null;
-  if (/^\{\s*action_respond_info\(/i.test(trimmed)) {
-    return { command: 'ACTION_RESPOND_INFO', raw: trimmed, params: { MSG: extractActionMessage(trimmed) }, lineNumber, sourceName };
-  }
-  if (/^\{\s*action_raise_error\(/i.test(trimmed)) {
-    return { command: 'ACTION_RAISE_ERROR', raw: trimmed, params: { MSG: extractActionMessage(trimmed) }, lineNumber, sourceName };
-  }
-  if (/^\{\s*action_emergency_stop/i.test(trimmed)) {
-    return { command: 'ACTION_EMERGENCY_STOP', raw: trimmed, params: { MSG: extractActionMessage(trimmed) }, lineNumber, sourceName };
+  const actionCommand = parseActionLine(trimmed, lineNumber, sourceName);
+  if (actionCommand) {
+    return actionCommand;
   }
   if (isTemplateDirective(trimmed)) {
     return { command: '__TEMPLATE__', raw: trimmed, params: {}, lineNumber, sourceName };
@@ -72,7 +67,7 @@ export function parseGcodeLine(line: string, lineNumber: number, sourceName: str
   if (!commandToken) return null;
   return {
     command: commandToken.toUpperCase(),
-    raw: withoutComment,
+    raw: trimmed,
     params: parseParams(paramTokens),
     lineNumber,
     sourceName,
@@ -122,6 +117,7 @@ export function createInitialRuntimeState(profile: MachineProfile, macroName: st
     activeBuiltInCommand: null,
     activeMacro: macroName,
     elapsedTimeS: 0,
+    saveVariables: {},
     savedStates: {},
   };
 }
@@ -142,6 +138,27 @@ function getConfigSections(configFiles?: Record<string, ConfigFile>): ConfigFile
 
 function getConfigParamValue(section: ConfigFile['sections'][number] | undefined, key: string): string | undefined {
   return section?.params.find((param) => !param.is_commented_out && param.key.toUpperCase() === key.toUpperCase())?.value;
+}
+
+function isTruthyConfigValue(value: string | undefined): boolean {
+  return typeof value === 'string' && /^(1|true|yes|on)$/i.test(value.trim());
+}
+
+function isForceMoveEnabled(configFiles?: Record<string, ConfigFile>): boolean {
+  if (!configFiles) {
+    return false;
+  }
+
+  const forceMoveSection = getConfigSections(configFiles).find((section) => section.section_type === 'force_move');
+  return isTruthyConfigValue(getConfigParamValue(forceMoveSection, 'enable_force_move'));
+}
+
+function getSetKinematicPositionWarning(configFiles?: Record<string, ConfigFile>): string | null {
+  if (!configFiles || isForceMoveEnabled(configFiles)) {
+    return null;
+  }
+
+  return 'SET_KINEMATIC_POSITION requires [force_move] enable_force_move: True.';
 }
 
 function parsePairValue(value: string | undefined): [number, number] | null {
@@ -538,12 +555,16 @@ type PlannerState = {
   homedAxes: Set<'X' | 'Y' | 'Z'>;
   absoluteMoves: boolean;
   absoluteExtrusion: boolean;
+  bedCurrent: number;
+  bedTarget: number;
+  fanSpeed: number;
   nozzleCurrent: number;
   nozzleTarget: number;
   activeExtruder: string;
   isPaused: boolean;
   savedStates: Record<string, PlannerSavedState>;
   macroVariables: Record<string, Record<string, unknown>>;
+  saveVariables: Record<string, unknown>;
 };
 
 type MacroInvocationContext = {
@@ -566,6 +587,11 @@ type TemplateStaticContext = {
 type TemplateLineSegment =
   | { kind: 'text'; text: string }
   | { kind: 'directive'; directive: string };
+
+type NumberedTemplateLine = {
+  text: string;
+  lineNumber: number;
+};
 
 const TEMPLATE_UNRESOLVED = Symbol('template-unresolved');
 const HOT_EXTRUDER_THRESHOLD_C = 170;
@@ -751,12 +777,16 @@ function createInitialPlannerState(allMacros: MacroSourceItem[]): PlannerState {
     homedAxes: new Set<'X' | 'Y' | 'Z'>(),
     absoluteMoves: true,
     absoluteExtrusion: true,
+    bedCurrent: 25,
+    bedTarget: 0,
+    fanSpeed: 0,
     nozzleCurrent: 25,
     nozzleTarget: 0,
     activeExtruder: DEFAULT_EXTRUDER_NAME,
     isPaused: false,
     savedStates: {},
     macroVariables,
+    saveVariables: {},
   };
 }
 
@@ -808,7 +838,36 @@ function applyPlannerCommandEffects(command: ParsedGcodeCommand, plannerState: P
       }
       break;
     }
+    case 'M140': {
+      const target = asNumber(command.params.S);
+      if (target !== null) {
+        plannerState.bedTarget = target;
+      }
+      break;
+    }
+    case 'M190': {
+      const target = asNumber(command.params.S);
+      if (target !== null) {
+        plannerState.bedTarget = target;
+        plannerState.bedCurrent = target;
+      }
+      break;
+    }
+    case 'M106': {
+      const value = Math.max(0, Math.min(255, asNumber(command.params.S) ?? 255));
+      plannerState.fanSpeed = value / 255;
+      break;
+    }
+    case 'M107':
+      plannerState.fanSpeed = 0;
+      break;
+    case 'SET_FAN_SPEED': {
+      const speed = Math.max(0, Math.min(1, Number(command.params.SPEED) || 0));
+      plannerState.fanSpeed = speed;
+      break;
+    }
     case 'TURN_OFF_HEATERS':
+      plannerState.bedTarget = 0;
       plannerState.nozzleTarget = 0;
       break;
     case 'SAVE_GCODE_STATE': {
@@ -842,6 +901,17 @@ function applyPlannerCommandEffects(command: ParsedGcodeCommand, plannerState: P
       plannerState.macroVariables[header] = nextMacroVariables;
       break;
     }
+    case 'SAVE_VARIABLE': {
+      const variableName = command.params.VARIABLE?.trim();
+      if (!variableName) {
+        break;
+      }
+      plannerState.saveVariables = {
+        ...plannerState.saveVariables,
+        [variableName]: parseConfiguredValue(command.params.VALUE || ''),
+      };
+      break;
+    }
     case 'PAUSE':
       plannerState.isPaused = true;
       break;
@@ -853,6 +923,19 @@ function applyPlannerCommandEffects(command: ParsedGcodeCommand, plannerState: P
     case 'ACTIVATE_EXTRUDER':
       plannerState.activeExtruder = command.params.EXTRUDER || command.params.NAME || plannerState.activeExtruder;
       break;
+    case 'SET_HEATER_TEMPERATURE': {
+      const heaterName = command.params.HEATER || command.params.HEATER_NAME;
+      const target = asNumber(command.params.TARGET) ?? asNumber(command.params.S);
+      if (target === null) {
+        break;
+      }
+      if (isBedHeater(heaterName)) {
+        plannerState.bedTarget = target;
+      } else if (isExtruderHeater(heaterName, plannerState.activeExtruder)) {
+        plannerState.nozzleTarget = target;
+      }
+      break;
+    }
     case 'SET_KINEMATIC_POSITION': {
       const requestedAxes = getRequestedAxes(command.params);
       for (const axis of requestedAxes) {
@@ -865,6 +948,9 @@ function applyPlannerCommandEffects(command: ParsedGcodeCommand, plannerState: P
       plannerState.homedAxes.clear();
       plannerState.absoluteMoves = true;
       plannerState.absoluteExtrusion = true;
+      plannerState.bedCurrent = 25;
+      plannerState.bedTarget = 0;
+      plannerState.fanSpeed = 0;
       plannerState.nozzleCurrent = 25;
       plannerState.nozzleTarget = 0;
       plannerState.activeExtruder = DEFAULT_EXTRUDER_NAME;
@@ -1014,6 +1100,53 @@ function splitTopLevelByCharacter(expression: string, separator: string): string
 
   parts.push(expression.slice(start).trim());
   return parts;
+}
+
+function findTopLevelBinaryCharacter(expression: string, operators: string[]): { index: number; operator: string } | null {
+  let depthParen = 0;
+  let depthBracket = 0;
+  let depthBrace = 0;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+
+  for (let index = expression.length - 1; index >= 0; index -= 1) {
+    const char = expression[index];
+    if (char === "'" && !inDoubleQuote) {
+      inSingleQuote = !inSingleQuote;
+      continue;
+    }
+    if (char === '"' && !inSingleQuote) {
+      inDoubleQuote = !inDoubleQuote;
+      continue;
+    }
+    if (inSingleQuote || inDoubleQuote) {
+      continue;
+    }
+
+    if (char === ')') depthParen += 1;
+    if (char === '(') depthParen -= 1;
+    if (char === ']') depthBracket += 1;
+    if (char === '[') depthBracket -= 1;
+    if (char === '}') depthBrace += 1;
+    if (char === '{') depthBrace -= 1;
+
+    if (depthParen !== 0 || depthBracket !== 0 || depthBrace !== 0 || !operators.includes(char)) {
+      continue;
+    }
+
+    if (index === 0) {
+      continue;
+    }
+
+    const previous = expression.slice(0, index).trimEnd().slice(-1);
+    if (!previous || '([{,+-*/%<>=:'.includes(previous)) {
+      continue;
+    }
+
+    return { index, operator: char };
+  }
+
+  return null;
 }
 
 function findTopLevelOperator(expression: string, operators: string[]): { index: number; operator: string } | null {
@@ -1193,9 +1326,25 @@ function buildTemplatePrinterContext(
     absolute_coordinates: plannerState.absoluteMoves,
     absolute_extrude: plannerState.absoluteExtrusion,
   });
+  setContextVariants(printer, 'fan', {
+    ...asRecord(printer.fan),
+    speed: plannerState.fanSpeed,
+  });
+  setContextVariants(printer, 'heater_bed', {
+    ...asRecord(printer.heater_bed),
+    target: plannerState.bedTarget,
+    temperature: plannerState.bedCurrent,
+  });
   setContextVariants(printer, 'pause_resume', {
     ...asRecord(printer.pause_resume),
     is_paused: plannerState.isPaused,
+  });
+  setContextVariants(printer, 'save_variables', {
+    ...asRecord(printer.save_variables),
+    variables: {
+      ...asRecord(asRecord(printer.save_variables).variables),
+      ...plannerState.saveVariables,
+    },
   });
   setContextVariants(printer, 'configfile', {
     ...asRecord(printer.configfile),
@@ -1203,12 +1352,19 @@ function buildTemplatePrinterContext(
   });
 
   if (plannerState.activeExtruder) {
-    setContextVariants(printer, plannerState.activeExtruder, {
+    const activeExtruderState = {
       ...asRecord(printer[plannerState.activeExtruder]),
       can_extrude: plannerState.nozzleCurrent >= HOT_EXTRUDER_THRESHOLD_C,
       target: plannerState.nozzleTarget,
       temperature: plannerState.nozzleCurrent,
-    });
+    };
+    setContextVariants(printer, plannerState.activeExtruder, activeExtruderState);
+    if (plannerState.activeExtruder === DEFAULT_EXTRUDER_NAME) {
+      setContextVariants(printer, 'extruder0', {
+        ...asRecord(printer.extruder0),
+        ...activeExtruderState,
+      });
+    }
   }
 
   Object.entries(plannerState.macroVariables).forEach(([macroKey, values]) => {
@@ -1361,7 +1517,7 @@ function evaluateValueExpression(
   plannerState: PlannerState,
   staticContext: TemplateStaticContext,
 ): unknown {
-  const parts = splitTopLevelByCharacter(stripEnclosingParens(expression), '|');
+  const parts = splitTopLevelByCharacter(expression.trim(), '|');
   const baseExpression = parts[0];
   let value: unknown;
 
@@ -1369,6 +1525,16 @@ function evaluateValueExpression(
     value = {};
   } else if (baseExpression === '[]') {
     value = [];
+  } else if (baseExpression.startsWith('[') && baseExpression.endsWith(']')) {
+    const inner = baseExpression.slice(1, -1).trim();
+    value = inner
+      ? splitTopLevelByCharacter(inner, ',').map((part) => evaluateTemplateExpression(part, invocation, plannerState, staticContext))
+      : [];
+  } else if (baseExpression.startsWith('(') && baseExpression.endsWith(')') && splitTopLevelByCharacter(baseExpression.slice(1, -1), ',').length > 1) {
+    const inner = baseExpression.slice(1, -1).trim();
+    value = inner
+      ? splitTopLevelByCharacter(inner, ',').map((part) => evaluateTemplateExpression(part, invocation, plannerState, staticContext))
+      : [];
   } else if ((baseExpression.startsWith('"') && baseExpression.endsWith('"')) || (baseExpression.startsWith("'") && baseExpression.endsWith("'"))) {
     value = baseExpression.slice(1, -1);
   } else if (/^-?\d+(?:\.\d+)?$/.test(baseExpression)) {
@@ -1378,7 +1544,10 @@ function evaluateValueExpression(
   } else if (/^(none|null)$/i.test(baseExpression)) {
     value = null;
   } else {
-    value = resolveReference(baseExpression, invocation, plannerState, staticContext);
+    const functionMatch = baseExpression.match(/^([A-Za-z_][A-Za-z0-9_]*)\((.*)\)$/);
+    value = functionMatch && isBalancedCallExpression(baseExpression)
+      ? evaluateTemplateCall(functionMatch[1], functionMatch[2], invocation, plannerState, staticContext)
+      : resolveReference(baseExpression, invocation, plannerState, staticContext);
   }
 
   return parts.slice(1).reduce<unknown>((current, filterExpression) => (
@@ -1392,7 +1561,12 @@ function evaluateTemplateExpression(
   plannerState: PlannerState,
   staticContext: TemplateStaticContext,
 ): unknown {
-  const trimmed = stripEnclosingParens(expression);
+  const originalTrimmed = expression.trim();
+  const trimmed = originalTrimmed.startsWith('(')
+    && originalTrimmed.endsWith(')')
+    && splitTopLevelByCharacter(originalTrimmed.slice(1, -1), ',').length > 1
+    ? originalTrimmed
+    : stripEnclosingParens(originalTrimmed);
   if (!trimmed) {
     return TEMPLATE_UNRESOLVED;
   }
@@ -1463,6 +1637,33 @@ function evaluateTemplateExpression(
     return booleanValue === null ? TEMPLATE_UNRESOLVED : !booleanValue;
   }
 
+  const additiveOperator = findTopLevelBinaryCharacter(trimmed, ['+', '-']);
+  if (additiveOperator) {
+    const left = evaluateTemplateExpression(trimmed.slice(0, additiveOperator.index).trim(), invocation, plannerState, staticContext);
+    const right = evaluateTemplateExpression(trimmed.slice(additiveOperator.index + 1).trim(), invocation, plannerState, staticContext);
+    return applyTemplateBinaryOperator(left, right, additiveOperator.operator);
+  }
+
+  const multiplicativeOperator = findTopLevelBinaryCharacter(trimmed, ['*', '/', '%']);
+  if (multiplicativeOperator) {
+    const left = evaluateTemplateExpression(trimmed.slice(0, multiplicativeOperator.index).trim(), invocation, plannerState, staticContext);
+    const right = evaluateTemplateExpression(trimmed.slice(multiplicativeOperator.index + 1).trim(), invocation, plannerState, staticContext);
+    return applyTemplateBinaryOperator(left, right, multiplicativeOperator.operator);
+  }
+
+  if (/^[+-]\s*/.test(trimmed)) {
+    const operator = trimmed[0];
+    const value = evaluateTemplateExpression(trimmed.slice(1).trim(), invocation, plannerState, staticContext);
+    if (isUnresolved(value)) {
+      return TEMPLATE_UNRESOLVED;
+    }
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+      return TEMPLATE_UNRESOLVED;
+    }
+    return operator === '-' ? -numeric : numeric;
+  }
+
   return evaluateValueExpression(trimmed, invocation, plannerState, staticContext);
 }
 
@@ -1481,7 +1682,7 @@ function parseTemplateDirective(
   invocation: MacroInvocationContext,
   plannerState: PlannerState,
   staticContext: TemplateStaticContext,
-): { kind: 'if' | 'elif' | 'else' | 'endif' | 'set'; result?: boolean | null; name?: string; value?: unknown } | null {
+): { kind: 'if' | 'elif' | 'else' | 'endif' | 'set' | 'for' | 'endfor'; result?: boolean | null; name?: string; value?: unknown; loopVariables?: string[]; iterable?: unknown } | null {
   const trimmed = directive.trim();
   if (!trimmed) {
     return null;
@@ -1492,6 +1693,9 @@ function parseTemplateDirective(
   if (/^endif$/i.test(trimmed)) {
     return { kind: 'endif' };
   }
+  if (/^endfor$/i.test(trimmed)) {
+    return { kind: 'endfor' };
+  }
 
   const setMatch = trimmed.match(/^set\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/i);
   if (setMatch) {
@@ -1499,6 +1703,15 @@ function parseTemplateDirective(
       kind: 'set',
       name: setMatch[1],
       value: evaluateTemplateExpression(setMatch[2].trim(), invocation, plannerState, staticContext),
+    };
+  }
+
+  const forMatch = trimmed.match(/^for\s+(.+?)\s+in\s+(.+)$/i);
+  if (forMatch) {
+    return {
+      kind: 'for',
+      loopVariables: forMatch[1].split(',').map((name) => name.trim()).filter(Boolean),
+      iterable: evaluateTemplateExpression(forMatch[2].trim(), invocation, plannerState, staticContext),
     };
   }
 
@@ -1539,8 +1752,381 @@ function tokenizeTemplateLine(line: string): TemplateLineSegment[] {
   return segments.length > 0 ? segments : [{ kind: 'text', text: line }];
 }
 
+function extractWholeLineTemplateDirective(line: string): string | null {
+  const match = line.trim().match(/^\{%\s*([\s\S]*?)\s*%\}$/);
+  return match?.[1] ?? null;
+}
+
+function collectTemplateLoopBody(lines: NumberedTemplateLine[], startIndex: number): { body: NumberedTemplateLine[]; endIndex: number } {
+  const body: NumberedTemplateLine[] = [];
+  let depth = 0;
+
+  for (let index = startIndex + 1; index < lines.length; index += 1) {
+    const directive = extractWholeLineTemplateDirective(lines[index].text);
+    if (directive) {
+      const trimmed = directive.trim();
+      if (/^for\b/i.test(trimmed)) {
+        depth += 1;
+      } else if (/^endfor$/i.test(trimmed)) {
+        if (depth === 0) {
+          return { body, endIndex: index };
+        }
+        depth -= 1;
+      }
+    }
+    body.push(lines[index]);
+  }
+
+  return { body, endIndex: lines.length };
+}
+
+function coerceTemplateIterable(value: unknown): unknown[] {
+  if (isUnresolved(value) || value == null) {
+    return [];
+  }
+  if (Array.isArray(value)) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    return value.split('');
+  }
+  if (typeof value === 'object') {
+    return Object.keys(value as Record<string, unknown>);
+  }
+  return [];
+}
+
+function assignLoopVariables(target: Record<string, unknown>, names: string[], value: unknown) {
+  if (names.length === 0) {
+    return;
+  }
+  if (names.length === 1) {
+    target[names[0]] = value;
+    return;
+  }
+
+  const values = Array.isArray(value) ? value : [value];
+  names.forEach((name, index) => {
+    target[name] = values[index];
+  });
+}
+
+function findTemplateExpressionEnd(line: string, startIndex: number): number {
+  let depthParen = 0;
+  let depthBracket = 0;
+  let depthBrace = 0;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+
+  for (let index = startIndex; index < line.length; index += 1) {
+    const char = line[index];
+    if (char === "'" && !inDoubleQuote) {
+      inSingleQuote = !inSingleQuote;
+      continue;
+    }
+    if (char === '"' && !inSingleQuote) {
+      inDoubleQuote = !inDoubleQuote;
+      continue;
+    }
+    if (inSingleQuote || inDoubleQuote) {
+      continue;
+    }
+
+    if (char === '(') depthParen += 1;
+    if (char === ')') depthParen -= 1;
+    if (char === '[') depthBracket += 1;
+    if (char === ']') depthBracket -= 1;
+    if (char === '{') depthBrace += 1;
+    if (char === '}') {
+      if (depthBrace === 0 && depthParen === 0 && depthBracket === 0) {
+        return index;
+      }
+      depthBrace -= 1;
+    }
+  }
+
+  return -1;
+}
+
+function stringifyTemplateValue(value: unknown): string {
+  if (value == null || isUnresolved(value)) {
+    return '';
+  }
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => stringifyTemplateValue(entry)).join(', ');
+  }
+  return JSON.stringify(value);
+}
+
+function renderInlineTemplateExpressions(
+  line: string,
+  invocation: MacroInvocationContext,
+  plannerState: PlannerState,
+  staticContext: TemplateStaticContext,
+): string {
+  if (!line.includes('{')) {
+    return line;
+  }
+
+  let rendered = '';
+  let index = 0;
+
+  while (index < line.length) {
+    const openIndex = line.indexOf('{', index);
+    if (openIndex === -1) {
+      rendered += line.slice(index);
+      break;
+    }
+
+    const nextChar = line[openIndex + 1];
+    if (nextChar === '%' || nextChar === '#') {
+      rendered += line.slice(index, openIndex + 1);
+      index = openIndex + 1;
+      continue;
+    }
+
+    const closeIndex = findTemplateExpressionEnd(line, openIndex + 1);
+    if (closeIndex === -1) {
+      rendered += line.slice(index);
+      break;
+    }
+
+    rendered += line.slice(index, openIndex);
+    const expression = line.slice(openIndex + 1, closeIndex).trim();
+    const value = evaluateTemplateExpression(expression, invocation, plannerState, staticContext);
+    rendered += isUnresolved(value) ? line.slice(openIndex, closeIndex + 1) : stringifyTemplateValue(value);
+    index = closeIndex + 1;
+  }
+
+  return rendered;
+}
+
+function parseTemplateAwareGcodeLine(
+  line: string,
+  lineNumber: number,
+  sourceName: string,
+  invocation: MacroInvocationContext,
+  plannerState: PlannerState,
+  staticContext: TemplateStaticContext,
+): ParsedGcodeCommand | null {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const actionCommand = parseActionLine(trimmed, lineNumber, sourceName, (expression) => (
+    evaluateTemplateExpression(expression, invocation, plannerState, staticContext)
+  ));
+  if (actionCommand) {
+    return actionCommand;
+  }
+
+  return parseGcodeLine(renderInlineTemplateExpressions(line, invocation, plannerState, staticContext), lineNumber, sourceName);
+}
+
 function extractRawParams(commandRaw: string, commandName: string): string {
   return commandRaw.slice(commandName.length).trim();
+}
+
+function isBalancedCallExpression(expression: string): boolean {
+  let depth = 0;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+
+  for (let index = 0; index < expression.length; index += 1) {
+    const char = expression[index];
+    if (char === "'" && !inDoubleQuote) {
+      inSingleQuote = !inSingleQuote;
+      continue;
+    }
+    if (char === '"' && !inSingleQuote) {
+      inDoubleQuote = !inDoubleQuote;
+      continue;
+    }
+    if (inSingleQuote || inDoubleQuote) {
+      continue;
+    }
+    if (char === '(') depth += 1;
+    if (char === ')') {
+      depth -= 1;
+      if (depth === 0 && index < expression.length - 1) {
+        return false;
+      }
+    }
+  }
+
+  return depth === 0;
+}
+
+function evaluateTemplateCall(
+  name: string,
+  rawArgs: string,
+  invocation: MacroInvocationContext,
+  plannerState: PlannerState,
+  staticContext: TemplateStaticContext,
+): unknown {
+  const args = rawArgs.trim()
+    ? splitTopLevelByCharacter(rawArgs, ',').map((arg) => evaluateTemplateExpression(arg, invocation, plannerState, staticContext))
+    : [];
+
+  switch (name.toLowerCase()) {
+    case 'range': {
+      const numericArgs = args.map((arg) => Number(arg));
+      if (numericArgs.length === 0 || numericArgs.some((arg) => !Number.isFinite(arg)) || numericArgs.length > 3) {
+        return TEMPLATE_UNRESOLVED;
+      }
+      const [start, stop, step] = numericArgs.length === 1
+        ? [0, numericArgs[0], 1]
+        : numericArgs.length === 2
+          ? [numericArgs[0], numericArgs[1], 1]
+          : [numericArgs[0], numericArgs[1], numericArgs[2]];
+      if (step === 0) {
+        return TEMPLATE_UNRESOLVED;
+      }
+      const values: number[] = [];
+      if (step > 0) {
+        for (let value = start; value < stop; value += step) {
+          values.push(value);
+        }
+      } else {
+        for (let value = start; value > stop; value += step) {
+          values.push(value);
+        }
+      }
+      return values;
+    }
+    default:
+      return TEMPLATE_UNRESOLVED;
+  }
+}
+
+function formatPrintfValue(specifier: string, precision: number | null, value: unknown): string {
+  switch (specifier) {
+    case 'd':
+    case 'i':
+      return `${Math.trunc(Number(value) || 0)}`;
+    case 'f': {
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric)) {
+        return '0';
+      }
+      return precision === null ? `${numeric}` : numeric.toFixed(precision);
+    }
+    case 's':
+    default:
+      return stringifyTemplateValue(value);
+  }
+}
+
+function formatTemplateString(format: string, value: unknown): string {
+  const values = Array.isArray(value) ? value : [value];
+  let valueIndex = 0;
+
+  return format.replace(/%%|%(?:\.(\d+))?([disf])/g, (match, rawPrecision, specifier: string) => {
+    if (match === '%%') {
+      return '%';
+    }
+    const nextValue = valueIndex < values.length ? values[valueIndex] : '';
+    valueIndex += 1;
+    const precision = rawPrecision !== undefined ? Number(rawPrecision) : null;
+    return formatPrintfValue(specifier, Number.isFinite(precision ?? NaN) ? precision : null, nextValue);
+  });
+}
+
+function applyTemplateBinaryOperator(left: unknown, right: unknown, operator: string): unknown {
+  if (isUnresolved(left) || isUnresolved(right)) {
+    return TEMPLATE_UNRESOLVED;
+  }
+
+  if (operator === '+' && (typeof left === 'string' || typeof right === 'string')) {
+    return `${stringifyTemplateValue(left)}${stringifyTemplateValue(right)}`;
+  }
+
+  if (operator === '%' && typeof left === 'string') {
+    return formatTemplateString(left, right);
+  }
+
+  const leftNumeric = Number(left);
+  const rightNumeric = Number(right);
+  if (!Number.isFinite(leftNumeric) || !Number.isFinite(rightNumeric)) {
+    return TEMPLATE_UNRESOLVED;
+  }
+
+  switch (operator) {
+    case '+':
+      return leftNumeric + rightNumeric;
+    case '-':
+      return leftNumeric - rightNumeric;
+    case '*':
+      return leftNumeric * rightNumeric;
+    case '/':
+      return rightNumeric === 0 ? TEMPLATE_UNRESOLVED : leftNumeric / rightNumeric;
+    case '%':
+      return rightNumeric === 0 ? TEMPLATE_UNRESOLVED : leftNumeric % rightNumeric;
+    default:
+      return TEMPLATE_UNRESOLVED;
+  }
+}
+
+function parseActionLine(
+  raw: string,
+  lineNumber: number,
+  sourceName: string,
+  evaluator?: (expression: string) => unknown,
+): ParsedGcodeCommand | null {
+  const match = raw.match(/^\{\s*(action_[A-Za-z_][A-Za-z0-9_]*)\((.*)\)\s*\}$/i);
+  if (!match) {
+    return null;
+  }
+
+  const actionName = match[1].toUpperCase();
+  const args = match[2].trim() ? splitTopLevelByCharacter(match[2], ',') : [];
+  const evaluateArg = (expression: string): unknown => (
+    evaluator ? evaluator(expression.trim()) : normalizeMessage(expression.trim())
+  );
+
+  if (actionName === 'ACTION_RESPOND_INFO' || actionName === 'ACTION_RAISE_ERROR' || actionName === 'ACTION_EMERGENCY_STOP') {
+    const firstArg = args[0] ?? '';
+    return {
+      command: actionName,
+      raw,
+      params: { MSG: firstArg ? stringifyTemplateValue(evaluateArg(firstArg)) : '' },
+      lineNumber,
+      sourceName,
+    };
+  }
+
+  if (actionName === 'ACTION_CALL_REMOTE_METHOD') {
+    const params: Record<string, string> = {};
+    const firstArg = args[0] ?? '';
+    if (firstArg) {
+      params.METHOD = stringifyTemplateValue(evaluateArg(firstArg));
+    }
+    args.slice(1).forEach((part) => {
+      const separatorIndex = part.indexOf('=');
+      if (separatorIndex === -1) {
+        return;
+      }
+      const key = part.slice(0, separatorIndex).trim().toUpperCase();
+      const valueExpression = part.slice(separatorIndex + 1).trim();
+      if (!key) {
+        return;
+      }
+      params[key] = stringifyTemplateValue(evaluateArg(valueExpression));
+    });
+    return {
+      command: actionName,
+      raw,
+      params,
+      lineNumber,
+      sourceName,
+    };
+  }
+
+  return null;
 }
 
 // Commands where featurePoints are probe coordinates — nozzle = point - probeOffset
@@ -1735,7 +2321,7 @@ export function buildSimulationSteps(
     }
     steps.push(...nextSteps);
     nextSteps.forEach((step) => {
-      previewState = executeSimulationStep(previewState, step, profile).nextState;
+      previewState = executeSimulationStep(previewState, step, profile, configFiles).nextState;
     });
   };
 
@@ -1831,9 +2417,22 @@ export function buildSimulationSteps(
     if (originalCommand) {
       const rawRest = parsed.raw.slice(parsed.command.length);
       const rewritten: ParsedGcodeCommand = { ...parsed, command: originalCommand, raw: `${originalCommand}${rawRest}` };
+      const rewrittenWarning = rewritten.command === 'SET_KINEMATIC_POSITION'
+        ? getSetKinematicPositionWarning(configFiles)
+        : null;
+      if (rewrittenWarning && !warnings.includes(rewrittenWarning)) {
+        warnings.push(rewrittenWarning);
+      }
       appendSimulationSteps(expandCommandToSteps(rewritten, profile, configFiles, previewState));
       applyPlannerCommandEffects(rewritten, plannerState);
       return;
+    }
+
+    const commandWarning = parsed.command === 'SET_KINEMATIC_POSITION'
+      ? getSetKinematicPositionWarning(configFiles)
+      : null;
+    if (commandWarning && !warnings.includes(commandWarning)) {
+      warnings.push(commandWarning);
     }
 
     appendSimulationSteps(expandCommandToSteps(parsed, profile, configFiles, previewState));
@@ -1847,65 +2446,100 @@ export function buildSimulationSteps(
       return;
     }
     stack.push(title);
-    const lines = macro.gcode.split(/\r?\n/);
+    const lines: NumberedTemplateLine[] = macro.gcode.split(/\r?\n/).map((text, index) => ({ text, lineNumber: index + 1 }));
     const conditionalStack: Array<{ parentActive: boolean; branchTaken: boolean; active: boolean }> = [];
     const isBranchActive = () => conditionalStack.every((entry) => entry.active);
 
-    lines.forEach((line, index) => {
-      tokenizeTemplateLine(line).forEach((segment) => {
-        if (segment.kind === 'directive') {
-          const templateControl = parseTemplateDirective(segment.directive, invocation, plannerState, staticContext);
+    const visitLines = (templateLines: NumberedTemplateLine[]) => {
+      for (let lineIndex = 0; lineIndex < templateLines.length; lineIndex += 1) {
+        const line = templateLines[lineIndex];
+        const wholeLineDirective = extractWholeLineTemplateDirective(line.text);
+        if (wholeLineDirective) {
+          const templateControl = parseTemplateDirective(wholeLineDirective, invocation, plannerState, staticContext);
           if (!templateControl) {
-            return;
+            continue;
           }
           switch (templateControl.kind) {
             case 'set':
               if (isBranchActive() && templateControl.name && !isUnresolved(templateControl.value)) {
                 invocation.locals[templateControl.name] = templateControl.value;
               }
-              return;
+              continue;
             case 'if': {
               const parentActive = isBranchActive();
-              // Preserve the existing fallback for unresolved conditions, but now
-              // only after checking params/rawparams/local/printer state first.
               const conditionMatched = templateControl.result !== false;
               conditionalStack.push({
                 parentActive,
                 branchTaken: conditionMatched,
                 active: parentActive && conditionMatched,
               });
-              return;
+              continue;
             }
             case 'elif': {
               const current = conditionalStack[conditionalStack.length - 1];
-              if (!current) return;
+              if (!current) {
+                continue;
+              }
               const conditionMatched = templateControl.result !== false;
               current.active = current.parentActive && !current.branchTaken && conditionMatched;
               current.branchTaken = current.branchTaken || conditionMatched;
-              return;
+              continue;
             }
             case 'else': {
               const current = conditionalStack[conditionalStack.length - 1];
-              if (!current) return;
+              if (!current) {
+                continue;
+              }
               current.active = current.parentActive && !current.branchTaken;
               current.branchTaken = true;
-              return;
+              continue;
             }
             case 'endif':
               conditionalStack.pop();
-              return;
+              continue;
+            case 'for': {
+              const { body, endIndex } = collectTemplateLoopBody(templateLines, lineIndex);
+              if (isBranchActive()) {
+                const iterable = coerceTemplateIterable(templateControl.iterable);
+                const loopVariables = templateControl.loopVariables || [];
+                const savedValues = loopVariables.map((name) => ({
+                  name,
+                  hasValue: Object.prototype.hasOwnProperty.call(invocation.locals, name),
+                  value: invocation.locals[name],
+                }));
+                iterable.forEach((entry) => {
+                  assignLoopVariables(invocation.locals, loopVariables, entry);
+                  visitLines(body);
+                });
+                savedValues.forEach(({ name, hasValue, value }) => {
+                  if (hasValue) {
+                    invocation.locals[name] = value;
+                  } else {
+                    delete invocation.locals[name];
+                  }
+                });
+              }
+              lineIndex = endIndex;
+              continue;
+            }
+            case 'endfor':
+              continue;
           }
         }
 
         if (!isBranchActive()) {
-          return;
+          continue;
         }
 
-        const parsed = parseGcodeLine(segment.text, index + 1, macro.title);
-        if (!parsed) return;
+        const parsed = parseTemplateAwareGcodeLine(line.text, line.lineNumber, macro.title, invocation, plannerState, staticContext);
+        if (!parsed) {
+          continue;
+        }
         appendParsedCommand(parsed, macro, allowHomingOverride);
-      });
-    });
+      }
+    };
+
+    visitLines(lines);
     stack.pop();
   };
 
@@ -2024,6 +2658,7 @@ export function executeSimulationStep(
   state: MacroRuntimeState,
   step: SimulationStep,
   profile: MachineProfile,
+  configFiles?: Record<string, ConfigFile>,
 ): SimulationTickResult {
   if (step.kind === 'move') {
     const warnings: string[] = [];
@@ -2243,6 +2878,18 @@ export function executeSimulationStep(
       eventSummary = 'Emergency stop';
       break;
     }
+    case 'ACTION_CALL_REMOTE_METHOD': {
+      const methodName = command.params.METHOD || 'remote_method';
+      const argumentEntries = Object.entries(command.params)
+        .filter(([key]) => key !== 'METHOD')
+        .map(([key, value]) => `${key.toLowerCase()}=${value}`);
+      const summary = argumentEntries.length > 0
+        ? `Remote method ${methodName}(${argumentEntries.join(', ')})`
+        : `Remote method ${methodName}`;
+      nextState = { ...nextState, messages: [...nextState.messages, summary] };
+      eventSummary = summary;
+      break;
+    }
     case '__TEMPLATE__':
       eventSummary = 'Template directive';
       break;
@@ -2259,6 +2906,10 @@ export function executeSimulationStep(
       break;
     }
     case 'SET_KINEMATIC_POSITION': {
+      const forceMoveWarning = getSetKinematicPositionWarning(configFiles);
+      if (forceMoveWarning) {
+        warnings.push(forceMoveWarning);
+      }
       const requestedAxes = getRequestedAxes(command.params);
       nextState = {
         ...nextState,
@@ -2433,10 +3084,30 @@ export function executeSimulationStep(
         : 'Set heater temperature';
       break;
     }
+    case 'SAVE_VARIABLE': {
+      const variableName = command.params.VARIABLE?.trim();
+      const nextSaveVariables = variableName
+        ? {
+          ...nextState.saveVariables,
+          [variableName]: parseConfiguredValue(command.params.VALUE || ''),
+        }
+        : nextState.saveVariables;
+      nextState = { ...nextState, saveVariables: nextSaveVariables };
+      eventSummary = variableName ? `Save variable ${variableName}` : 'Save variable';
+      break;
+    }
+    case 'UPDATE_DELAYED_GCODE': {
+      const identifier = command.params.ID || command.params.GCODE || 'delayed_gcode';
+      const duration = asNumber(command.params.DURATION);
+      eventSummary = duration === 0
+        ? `Cancel delayed_gcode ${identifier}`
+        : duration !== null
+          ? `Schedule delayed_gcode ${identifier} in ${duration}s`
+          : `Update delayed_gcode ${identifier}`;
+      break;
+    }
     case 'RESET_ACCEL':
     case 'SET_GCODE_VARIABLE':
-    case 'SAVE_VARIABLE':
-    case 'UPDATE_DELAYED_GCODE':
     case 'QUERY_PROBE':
     case 'QUERY_ENDSTOPS':
     case 'M220':

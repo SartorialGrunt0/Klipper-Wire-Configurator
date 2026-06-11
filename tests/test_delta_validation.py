@@ -178,3 +178,169 @@ control_pin: P1.23
     )
 
     assert not any(error.message.startswith("Pin format '") for error in result.errors)
+
+
+def test_bed_screws_supports_additional_numbered_screws():
+    result = _validate(
+        '''
+[bed_screws]
+screw1: 0, 0
+screw2: 100, 0
+screw3: 100, 100
+screw4: 0, 100
+screw5: 50, 50
+screw5_name: center
+screw5_fine_adjust: 55, 55
+'''
+    )
+
+    assert not result.has_errors
+    assert not any(error.param == 'screw5' for error in result.errors)
+    assert not any(error.param == 'screw5_name' for error in result.errors)
+    assert not any(error.param == 'screw5_fine_adjust' for error in result.errors)
+
+
+def test_bed_screws_requires_at_least_three_screws():
+    result = _validate(
+        '''
+[bed_screws]
+screw1: 0, 0
+screw2: 100, 0
+'''
+    )
+
+    assert any(error.message == 'bed_screws: Must have at least three screws' for error in result.errors)
+
+
+def test_screws_tilt_adjust_supports_additional_numbered_screws():
+    result = _validate(
+        '''
+[probe]
+pin: gpio1
+
+[screws_tilt_adjust]
+screw1: 0, 0
+screw2: 100, 0
+screw3: 100, 100
+screw4: 0, 100
+screw5: 50, 50
+screw5_name: center
+'''
+    )
+
+    assert not result.has_errors
+    assert not any(error.param == 'screw5' for error in result.errors)
+    assert not any(error.param == 'screw5_name' for error in result.errors)
+
+
+def test_screws_tilt_adjust_requires_at_least_three_screws():
+    result = _validate(
+        '''
+[probe]
+pin: gpio1
+
+[screws_tilt_adjust]
+screw1: 0, 0
+screw2: 100, 0
+'''
+    )
+
+    assert any(error.message == 'screws_tilt_adjust: Must have at least three screws' for error in result.errors)
+
+
+def test_rotary_delta_lettered_steppers_accept_rotary_delta_parameters():
+    result = _validate(
+        '''
+[printer]
+kinematics: rotary_delta
+max_velocity: 300
+max_accel: 3000
+shoulder_radius: 33.900
+shoulder_height: 412.900
+
+[stepper_a]
+step_pin: PF0
+dir_pin: PF1
+microsteps: 16
+gear_ratio: 107.000:16, 60:16
+position_endstop: 252
+upper_arm_length: 170.000
+lower_arm_length: 320.000
+
+[stepper_b]
+step_pin: PF6
+dir_pin: PF7
+microsteps: 16
+gear_ratio: 107.000:16, 60:16
+
+[stepper_c]
+step_pin: PL3
+dir_pin: PL1
+microsteps: 16
+gear_ratio: 107.000:16, 60:16
+'''
+    )
+
+    assert not result.has_errors
+    assert not result.has_warnings
+
+
+def test_winch_lettered_stepper_sections_are_recognized_beyond_stepper_c():
+    result = _validate(
+        '''
+[printer]
+kinematics: winch
+max_velocity: 300
+max_accel: 3000
+
+[stepper_d]
+step_pin: PC1
+dir_pin: PC3
+microsteps: 16
+rotation_distance: 40
+anchor_x: 0
+anchor_y: 0
+anchor_z: 3000
+'''
+    )
+
+    assert not result.has_errors
+    assert not result.has_warnings
+
+
+def test_tmc2660_spi_bus_is_not_treated_as_a_gpio_pin():
+    result = _validate(
+        '''
+[stepper_x]
+step_pin: gpio11
+dir_pin: !gpio10
+microsteps: 16
+rotation_distance: 40
+endstop_pin: ^gpio4
+position_endstop: 0
+position_max: 235
+
+[tmc2660 stepper_x]
+cs_pin: gpio9
+spi_bus: usart1
+run_current: 0.580
+sense_resistor: 0.110
+
+[stepper_y]
+step_pin: gpio6
+dir_pin: !gpio5
+microsteps: 16
+rotation_distance: 40
+endstop_pin: ^gpio3
+position_endstop: 0
+position_max: 235
+
+[tmc2660 stepper_y]
+cs_pin: gpio8
+spi_bus: usart1
+run_current: 0.580
+sense_resistor: 0.110
+'''
+    )
+
+    assert not any('usart1' in error.message for error in result.errors)

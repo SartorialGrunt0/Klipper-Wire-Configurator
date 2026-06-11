@@ -607,6 +607,51 @@ def test_stepper_z_and_stepper_z1_across_files_are_valid():
     assert not results['stepper-z1.cfg'].has_errors
 
 
+def test_virtual_z_endstop_accepts_probe_prefix_spacing_when_probe_exists_in_other_file():
+    results = _validate_project({
+        'printer.cfg': (
+            '[include z.cfg]\n'
+            '[include probe.cfg]\n'
+        ),
+        'z.cfg': (
+            '[stepper_z]\n'
+            'step_pin: gpio11\n'
+            'dir_pin: gpio10\n'
+            'microsteps: 16\n'
+            'rotation_distance: 40\n'
+            'endstop_pin: probe: z_virtual_endstop\n'
+        ),
+        'probe.cfg': (
+            '[beacon]\n'
+            'serial: /dev/serial/by-id/usb-Beacon\n'
+        ),
+    })
+
+    assert not any(
+        error.param == 'endstop_pin' and 'z_virtual_endstop' in error.message
+        for error in results['z.cfg'].errors
+    )
+
+
+def test_bed_mesh_requires_probe_even_when_save_config_contains_probe_section():
+    result = _validate(
+        '[bed_mesh]\n'
+        'mesh_min: 0, 0\n'
+        'mesh_max: 200, 200\n'
+        'probe_count: 3, 3\n'
+        '#*# <SAVE_CONFIG>\n'
+        '#*# [probe]\n'
+        '#*# z_offset = 1.234\n'
+    )
+
+    assert any(
+        error.severity == 'warning'
+        and error.section == 'bed_mesh'
+        and 'requires [probe]' in error.message
+        for error in result.errors
+    )
+
+
 def test_duplicate_reused_section_in_orphan_file_is_ignored():
     results = _validate_project({
         'printer.cfg': '[include active-z.cfg]\n',
