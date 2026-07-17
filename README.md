@@ -45,12 +45,12 @@ Credit to the Klipper, Mainsail, Moonraker, Fluidd, and other teams from whom I 
 #### Side Menu
 
 <img src="images/Side_Menu.png" width="100%">
-<div style="height: 67%;"></div>
+<div style="height: 50%;"></div>
 
 #### Live Errors
 
 <img src="images/Live_Errors.png" width="100%">
-<div style="height: 67%;"></div>
+<div style="height: 50%;"></div>
 
 #### Diff Checking
 
