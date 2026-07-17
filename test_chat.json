@@ -1,6 +1,6 @@
 {
   "apiKey": "sk-lm-FAKE_API_KEY_DO_NOT_USE",
-  "model": "unsloth/qwen3.5-9b",
+  "model": "generic-model",
   "apiUrl": "http://127.0.0.1:1234/v1/chat/completions",
   "apiProvider": "lm-studio",
   "messages": [
