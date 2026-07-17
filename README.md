@@ -1,11 +1,18 @@
 # Klipper Wire Configurator
 
+<style>
+img {
+  max-width: 100%;
+  height: auto;
+}
+</style>
+
 ## Introduction
 
 Klipper Wire Configurator is a web app for inspecting, creating, and editing Klipper `printer.cfg` files in a graphical frontend. It aims to make creating and managing your klipper configuration easier.
 It runs directly on your SBC. The software is entirely free to use and licensed under GPL3.
 
-Credit to the klipper, mainsail, moonraker, fluidd, and other teams whom which I borrowed and referenced alot from.
+Credit to the Klipper, Mainsail, Moonraker, Fluidd, and other teams from whom I borrowed and referenced a lot.
 
 ## Table of contents
 
@@ -23,47 +30,55 @@ Credit to the klipper, mainsail, moonraker, fluidd, and other teams whom which I
 - View live configuration checks with warnings and errors based on the klipper configuration reference to catch errors before runtime.
 - Diff configuration changes before exporting or applying changes.
 - Apply changes directly to your configuration and firmware restart directly.
-- Manage USB, UART, or CAN communcations with serial and canbus ID detection.
-- Modify files in Text View for traditonal configuration management, faster multi-file fuzzy search, and per-line error checking.
+- Manage USB, UART, or CAN communications with serial and canbus ID detection.
+- Modify files in Text View for traditional configuration management, faster multi-file fuzzy search, and per-line error checking.
 - Use Macro Designer for easy macro modifications and simulation.
 - Build, download, and flash Klipper and Katapult firmware.
 - Integrated AI chat to edit .cfg files and diagnose configuration errors with klipper referenced context with controlled approval of changes.
 
 ### Graphical UI
 
-<img src="images/Graph_UI.png" width="1000" height="660">
+<img src="images/Graph_UI.png" width="100%">
+<div style="height: 45%;"></div>
 
 #### Side Menu
 
-<img src="images/Side_Menu.png" width="330" height="495">
+<img src="images/Side_Menu.png" width="100%">
+<div style="height: 67%;"></div>
 
 #### Live Errors
 
-<img src="images/Live_Errors.png" width="495" height="330">
+<img src="images/Live_Errors.png" width="100%">
+<div style="height: 67%;"></div>
 
 #### Diff Checking
 
-<img src="images/Diff_Menu.png" width="495" height="330">
+<img src="images/Diff_Menu.png" width="100%">
+<div style="height: 67%;"></div>
 
 ### Text UI
 
-<img src="images/Text_UI.png" width="1000" height="660">
+<img src="images/Text_UI.png" width="100%">
+<div style="height: 45%;"></div>
 
 ### Macro Designer
 
-<img src="images/Macro_Designer.png" width="1000" height="660">
+<img src="images/Macro_Designer.png" width="100%">
+<div style="height: 45%;"></div>
 
 ### Firmware Flash Tool
 
-<img src="images/Flash_Tool.png" width="1000" height="660">
+<img src="images/Flash_Tool.png" width="100%">
+<div style="height: 45%;"></div>
 
 ### AI Chat
 
-<img src="images/AI_Chat.png" width="1000" height="660">
+<img src="images/AI_Chat.png" width="100%">
+<div style="height: 45%;"></div>
 
 ## Prerequisites
 
-- Raspberry Pi OS or another Debian-based distrox Must be bookworm or newer.
+- Raspberry Pi OS or another Debian-based distribution. Must be bookworm or newer.
 - Python 3.10+
 - Git and internet access for the initial install.
 - Klipper
@@ -82,7 +97,7 @@ cd Klipper-Wire-Configurator
 bash scripts/install.sh
 ```
 
-Note: On 32-bit Raspberry Pi OS (`armv7` / `armhf`), the installer automatically uses the distro `nodejs` package. I havent tried 64-bit YMMV.
+Note: On 32-bit Raspberry Pi OS (`armv7` / `armhf`), the installer automatically uses the distro `nodejs` package. I haven't tried 64-bit, YMMV.
 A successful install ends by checking the service health and printing the installer log path under `/tmp/klipper-wire-configurator-install-*.log`.
 
 After install, proceed to http://{your_ip_here}:8099
