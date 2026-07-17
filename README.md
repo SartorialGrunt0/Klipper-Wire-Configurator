@@ -2,10 +2,11 @@
 
 ## Introduction
 
-Klipper Wire Configurator is a web app for inspecting, creating, and editing Klipper `printer.cfg` files in a graphical frontend. It aims to make creating and managing your klipper configuration easier.
-It runs directly on your SBC. The software is entirely free to use and licensed under GPL3.
+Klipper Wire Configurator is a web-based tool for inspecting, creating, and editing Klipper `printer.cfg` files with an intuitive graphical interface. It simplifies configuration management by providing visual tools to view connections, add components from the official reference, validate settings in real-time, and apply changes directly to your printer.
 
-Credit to the Klipper, Mainsail, Moonraker, Fluidd, and other teams from whom I borrowed and referenced a lot.
+The software runs locally on your SBC and is completely free under the GPL3 license.
+
+Special thanks to the Klipper, Mainsail, Moonraker, Fluidd, and other teams whose work inspired this project.
 
 ## Table of contents
 
@@ -18,24 +19,24 @@ Credit to the Klipper, Mainsail, Moonraker, Fluidd, and other teams from whom I 
 
 ### Visual Tools
 
-- View your configuration in a Graphical frontend with cards and wires to show connections.
-- Add components and features directly from the configuration reference.
-- Add configurations directly from the Klipper configuration examples and others.
-- Delete, modify, or move components with simple UI interactions.
-- Manage USB, UART, or CAN communications with serial and canbus ID detection.
+- View your printer's hardware as interactive cards and wires—MCUs, steppers, heaters, probes, and more.
+- Add any Klipper component directly from the official Config Reference documentation.
+- Import example configurations organized by board type (Mainboard, Toolhead, Probe, Expander) with fuzzy search.
+- Delete, modify, or reposition components using drag-and-drop interactions.
+- Auto-detect MCU chips (STM32, RP2040, LPC1768) and CAN bus UUIDs from your config.
 
 ### Configuration Management
 
-- View live configuration checks with warnings and errors based on the Klipper configuration reference to catch errors before runtime.
-- Diff configuration changes before exporting or applying changes.
-- Apply changes directly to your configuration and firmware restart directly.
-- Modify files in Text View for traditional configuration management, multi-file fuzzy search, and per-line error checking.
+- See validation warnings and errors in real-time as you edit—catch mistakes before they cause runtime failures.
+- Review a side-by-side diff of your changes before exporting or applying them to your printer.
+- Save and apply configuration updates directly, then manually restart Klipper when ready.
+- Edit files in Text View with multi-file fuzzy search, per-line error highlighting, and traditional config management.
 
 ### Advanced Features
 
-- Use Macro Designer for easy macro modifications and simulation.
-- Build, download, and flash Klipper and Katapult firmware.
-- Integrated AI chat to edit .cfg files and diagnose configuration errors with Klipper-referenced context and controlled approval of changes.
+- Edit macros directly in the Text View or use the integrated AI assistant for macro creation and debugging.
+- The AI assistant grounds all suggestions in official Klipper documentation, Config Reference excerpts, and your current config—changes require your explicit approval before applying.
+- Build, download, and flash Katapult firmware (Klipper build tool) directly from the app.
 
 ### Graphical UI
 
