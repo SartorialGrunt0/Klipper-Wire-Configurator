@@ -1,8 +1,8 @@
 {
-  "apiKey": "sk-lm-FAKE_API_KEY_DO_NOT_USE",
-  "model": "generic-model",
-  "apiUrl": "http://127.0.0.1:1234/v1/chat/completions",
-  "apiProvider": "lm-studio",
+  "apiKey": "your-api-key-here",
+  "model": "your-model-here",
+  "apiUrl": "http://ipaddress:port/v1/chat/completions",
+  "apiProvider": "your-api-provider-here",
   "messages": [
     {"role": "user", "content": "test"}
   ]
