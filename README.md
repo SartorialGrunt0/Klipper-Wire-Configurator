@@ -44,32 +44,32 @@ Credit to the Klipper, Mainsail, Moonraker, Fluidd, and other teams from whom I 
 
 #### Side Menu
 
-<img src="images/Side_Menu.png" width="100%">
+<img src="images/Side_Menu.png" width="25%">
 <div style="height: 25%;"></div>
 
 #### Live Errors
 
-<img src="images/Live_Errors.png" width="100%">
+<img src="images/Live_Errors.png" width="25%">
 <div style="height: 25%;"></div>
 
 #### Diff Checking
 
-<img src="images/Diff_Menu.png" width="100%">
+<img src="images/Diff_Menu.png" width="67%">
 <div style="height: 67%;"></div>
 
 ### Text UI
 
-<img src="images/Text_UI.png" width="100%">
+<img src="images/Text_UI.png" width="45%">
 <div style="height: 45%;"></div>
 
 ### Macro Designer
 
-<img src="images/Macro_Designer.png" width="100%">
+<img src="images/Macro_Designer.png" width="65%">
 <div style="height: 45%;"></div>
 
 ### Firmware Flash Tool
 
-<img src="images/Flash_Tool.png" width="100%">
+<img src="images/Flash_Tool.png" width="65%">
 <div style="height: 45%;"></div>
 
 ### AI Chat
