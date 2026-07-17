@@ -34,4 +34,8 @@ venv/
 # Logs
 *.log
 npm-debug.log*
-reports/functional-test-results/
+reports/
+!reports/functional-test-results/
+
+# IDE & Editor
+.vscode/settings.json

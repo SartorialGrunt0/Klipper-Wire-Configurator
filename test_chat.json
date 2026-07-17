@@ -1,8 +1,8 @@
 {
-  "apiKey": "sk-lm-Rg47YUST:R15ICHRrVFdz4mX2UsHA",
-  "model": "unsloth/qwen3.5-9b",
-  "apiUrl": "http://192.168.1.145:1234/v1/chat/completions",
-  "apiProvider": "lm-studio",
+  "apiKey": "your-api-key-here",
+  "model": "your-model-here",
+  "apiUrl": "http://ipaddress:port/v1/chat/completions",
+  "apiProvider": "your-api-provider-here",
   "messages": [
     {"role": "user", "content": "test"}
   ]
