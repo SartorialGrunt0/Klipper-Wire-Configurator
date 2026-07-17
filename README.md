@@ -1,12 +1,5 @@
 # Klipper Wire Configurator
 
-<style>
-img {
-  max-width: 100%;
-  height: auto;
-}
-</style>
-
 ## Introduction
 
 Klipper Wire Configurator is a web app for inspecting, creating, and editing Klipper `printer.cfg` files in a graphical frontend. It aims to make creating and managing your klipper configuration easier.
@@ -23,18 +16,26 @@ Credit to the Klipper, Mainsail, Moonraker, Fluidd, and other teams from whom I 
 
 ## Features
 
+### Visual Tools
+
 - View your configuration in a Graphical frontend with cards and wires to show connections.
 - Add components and features directly from the configuration reference.
-- Add configurations directly from the klipper configuration examples and others.
+- Add configurations directly from the Klipper configuration examples and others.
 - Delete, modify, or move components with simple UI interactions.
-- View live configuration checks with warnings and errors based on the klipper configuration reference to catch errors before runtime.
+- Manage USB, UART, or CAN communications with serial and canbus ID detection.
+
+### Configuration Management
+
+- View live configuration checks with warnings and errors based on the Klipper configuration reference to catch errors before runtime.
 - Diff configuration changes before exporting or applying changes.
 - Apply changes directly to your configuration and firmware restart directly.
-- Manage USB, UART, or CAN communications with serial and canbus ID detection.
-- Modify files in Text View for traditional configuration management, faster multi-file fuzzy search, and per-line error checking.
+- Modify files in Text View for traditional configuration management, multi-file fuzzy search, and per-line error checking.
+
+### Advanced Features
+
 - Use Macro Designer for easy macro modifications and simulation.
 - Build, download, and flash Klipper and Katapult firmware.
-- Integrated AI chat to edit .cfg files and diagnose configuration errors with klipper referenced context with controlled approval of changes.
+- Integrated AI chat to edit .cfg files and diagnose configuration errors with Klipper-referenced context and controlled approval of changes.
 
 ### Graphical UI
 
