@@ -22,6 +22,7 @@ interface ProviderInfo {
   requiresKey: boolean;
   defaultHost: string;
   defaultPort: string;
+  defaultModel: string;
 }
 
 const PROVIDER_OPTIONS: Array<{ value: AiProvider; label: string }> = [
@@ -41,6 +42,7 @@ const PROVIDER_DEFAULTS: Record<AiProvider, ProviderInfo> = {
     requiresKey: true,
     defaultHost: 'localhost',
     defaultPort: '1234',
+    defaultModel: 'gpt-4o',
   },
   google: {
     label: 'Google (Gemini)',
@@ -48,6 +50,7 @@ const PROVIDER_DEFAULTS: Record<AiProvider, ProviderInfo> = {
     requiresKey: true,
     defaultHost: 'localhost',
     defaultPort: '1234',
+    defaultModel: 'gemini-1.5-pro',
   },
   anthropic: {
     label: 'Anthropic (Claude)',
@@ -55,6 +58,7 @@ const PROVIDER_DEFAULTS: Record<AiProvider, ProviderInfo> = {
     requiresKey: true,
     defaultHost: 'localhost',
     defaultPort: '1234',
+    defaultModel: 'claude-3-5-sonnet',
   },
   github: {
     label: 'GitHub Copilot',
@@ -62,31 +66,35 @@ const PROVIDER_DEFAULTS: Record<AiProvider, ProviderInfo> = {
     requiresKey: true,
     defaultHost: 'localhost',
     defaultPort: '1234',
+    defaultModel: 'gpt-4o',
   },
   'openai-compatible': {
     label: 'OpenAI Compatible',
-    defaultUrl: 'http://localhost:1234/v1/chat/completions',
-    requiresKey: false,
+    defaultUrl: 'http://localhost:11434/api/chat',
+    requiresKey: true,
     defaultHost: 'localhost',
-    defaultPort: '1234',
+    defaultPort: '11434',
+    defaultModel: 'gpt-4o',
   },
   'lm-studio': {
     label: 'LM Studio (Local)',
     defaultUrl: '',
-    requiresKey: false,
+    requiresKey: true,
     defaultHost: 'localhost',
     defaultPort: '1234',
+    defaultModel: '',
   },
   ollama: {
     label: 'Ollama (Local)',
     defaultUrl: '',
-    requiresKey: false,
+    requiresKey: true,
     defaultHost: 'localhost',
     defaultPort: '11434',
+    defaultModel: '',
   },
 };
 
-const isLocalProvider = (provider: AiProvider) => provider === 'lm-studio' || provider === 'ollama';
+const isLocalProvider = (provider: AiProvider) => provider === 'lm-studio' || provider === 'ollama' || provider === 'openai-compatible';
 
 function buildLocalProviderApiUrl(host: string, port: string): string {
   return `http://${host}:${port}/v1/chat/completions`;
@@ -106,6 +114,11 @@ function resolveProviderApiUrl(
 
   if (provider === 'ollama') {
     return buildLocalProviderApiUrl(ollamaHost, ollamaPort);
+  }
+
+  // For openai-compatible, use the provided URL or default to Ollama
+  if (provider === 'openai-compatible') {
+    return apiUrl || buildLocalProviderApiUrl(ollamaHost, ollamaPort);
   }
 
   return apiUrl;
@@ -885,7 +898,11 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       ...prev,
       [editApiProvider]: nextModel,
     }));
-  }, [editApiProvider]);
+    // If this provider is local, refresh models
+    if (isLocalProvider(editApiProvider)) {
+      void fetchAvailableModels(editApiProvider, resolvedEditApiUrl, editApiKey);
+    }
+  }, [editApiProvider, resolvedEditApiUrl, editApiKey]);
 
   // Fetch available models from local server
   const fetchAvailableModels = async (
@@ -900,9 +917,12 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     setModelsLoading(true);
     setModelsError(null);
     try {
-      const result = await api.listModels(apiUrl, apiKey);
-      setAvailableModels(result.models || []);
-      if (result.error) setModelsError(result.error);
+      // Use listLocalModels for local providers
+      const result = await api.listLocalModels(apiUrl, apiKey, provider);
+      setAvailableModels(result);
+      if (result.length === 0) {
+        setModelsError('No models found at this endpoint. Make sure a model is loaded.');
+      }
     } catch (err: unknown) {
       setModelsError(err instanceof Error ? err.message : 'Failed to fetch models');
       setAvailableModels([]);
@@ -917,6 +937,12 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       void fetchAvailableModels(editApiProvider, resolvedEditApiUrl, editApiKey);
     } else {
       setAvailableModels([]);
+    }
+  }, [editApiProvider, resolvedEditApiUrl, editApiKey]);
+
+  const handleRefreshModels = useCallback(() => {
+    if (isLocalProvider(editApiProvider)) {
+      void fetchAvailableModels(editApiProvider, resolvedEditApiUrl, editApiKey);
     }
   }, [editApiProvider, resolvedEditApiUrl, editApiKey]);
 
@@ -1410,6 +1436,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       content: response.content || 'No response.',
       lmStudioMcp: response.lmStudioMcp,
       lmStudioContext: response.lmStudioContext,
+      mcpToolNames: response.mcpToolNames,
     };
     let conversationTrail: ChatMessage[] = [{ role: 'assistant', content: assistantMessage.content }];
     let warningMessage: string | null = null;
@@ -1459,6 +1486,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         lmStudioMcp: followUpResponse.lmStudioMcp ?? assistantMessage.lmStudioMcp,
         lmStudioContext: followUpResponse.lmStudioContext ?? assistantMessage.lmStudioContext,
         autoLoadedDocs: loadedDocs.map((document) => document.filename),
+        mcpToolNames: followUpResponse.mcpToolNames ?? assistantMessage.mcpToolNames,
       };
       conversationTrail = [
         ...conversationTrail,
@@ -1496,6 +1524,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           lmStudioMcp: rewriteResponse.lmStudioMcp ?? assistantMessage.lmStudioMcp,
           lmStudioContext: rewriteResponse.lmStudioContext ?? assistantMessage.lmStudioContext,
           autoLoadedDocs: assistantMessage.autoLoadedDocs,
+          mcpToolNames: rewriteResponse.mcpToolNames ?? assistantMessage.mcpToolNames,
         };
         conversationTrail = [
           ...conversationTrail,
@@ -1890,6 +1919,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       ollamaPort: editOllamaPort,
     });
     if (isLocalProvider(editApiProvider)) {
+      // Fetch models after saving, so we have the correct URL
       void fetchAvailableModels(editApiProvider, resolvedEditApiUrl, editApiKey);
     }
     if (!nextModel && !hadEnabledChat) {
@@ -1906,6 +1936,9 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     if (!providerRequiresApiKey(editApiProvider)) {
       return true;
     }
+    if (['openai-compatible', 'lm-studio', 'ollama'].includes(editApiProvider)) {
+      return true; // Allow empty for these providers
+    }
     return !!editApiKey.trim();
   })();
 
@@ -1918,7 +1951,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
 
     setEditProviderModels(nextProviderModels);
     setEditApiProvider(provider);
-    setEditModel(getProviderModel(provider, nextProviderModels, settings.model, settings.apiProvider));
+    // Use the provider's default model if the current model is empty
+    const providerDefaultModel = PROVIDER_DEFAULTS[provider]?.defaultModel;
+    const modelToUse = editModel.trim() || providerDefaultModel || settings.model;
+    setEditModel(modelToUse);
     const defaults = PROVIDER_DEFAULTS[provider];
     if (!isLocalProvider(provider)) {
       setEditApiUrl(defaults.defaultUrl);
@@ -1933,7 +1969,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
         <div
-          className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[520px] overflow-hidden"
+          className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[600px] overflow-hidden"
           onClick={(e) => e.stopPropagation()}
         >
           <div className="flex items-center justify-between p-4 border-b border-[var(--color-bg-tertiary)]">
@@ -1979,13 +2015,26 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
                 <label className="block text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-1.5">
                   Model
                 </label>
-                <input
-                  type="text"
-                  className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-                  value={editModel}
-                  onChange={(e) => handleModelChange(e.target.value)}
-                  placeholder="e.g. gpt-4o, llama3.1, phi3"
-                />
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    className="flex-1 px-3 py-2 rounded-lg text-xs font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
+                    value={editModel}
+                    onChange={(e) => handleModelChange(e.target.value)}
+                    placeholder="e.g. gpt-4o, llama3.1, phi3"
+                  />
+                  {isLocalProvider(editApiProvider) && (
+                    <button
+                      type="button"
+                      onClick={() => void fetchAvailableModels(editApiProvider, resolvedEditApiUrl, editApiKey)}
+                      disabled={modelsLoading}
+                      className="px-3 py-2 rounded-lg text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-primary)] hover:text-[var(--color-text-primary)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                      title="Refresh available models from the server"
+                    >
+                      {modelsLoading ? 'Loading...' : 'Refresh models'}
+                    </button>
+                  )}
+                </div>
               </div>
 
               {!showLocalFields && (
@@ -2065,22 +2114,24 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
                 </div>
               )}
 
-              {/* API Key (always shown) */}
-              <div>
-                <label className="block text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-1.5">
-                  API Key
-                </label>
-                <input
-                  type="password"
-                  className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-                  value={editApiKey}
-                  onChange={(e) => setEditApiKey(e.target.value)}
-                  placeholder={showLocalFields ? "Leave blank if no auth required" : "sk-..."}
-                />
-                <p className="text-[10px] text-[var(--color-text-secondary)] mt-1">
-                  Your API key is stored only in your browser
-                </p>
-              </div>
+              {/* API Key (only shown for providers that require it) */}
+              {providerRequiresApiKey(editApiProvider) && (
+                <div>
+                  <label className="block text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-1.5">
+                    API Key
+                  </label>
+                  <input
+                    type="password"
+                    className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
+                    value={editApiKey}
+                    onChange={(e) => setEditApiKey(e.target.value)}
+                    placeholder="sk-..."
+                  />
+                  <p className="text-[10px] text-[var(--color-text-secondary)] mt-1">
+                    Your API key is stored only in your browser
+                  </p>
+                </div>
+              )}
             </div>
           </div>
 
@@ -2108,7 +2159,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
       <div
-        className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[560px] overflow-hidden flex flex-col"
+        className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[620px] overflow-hidden flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Title bar */}
@@ -2177,10 +2228,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
                 <div>
                   <label className="block text-[10px] text-[var(--color-text-secondary)] mb-1">Model</label>
                   {isLocalProvider(editApiProvider) ? (
-                    <>
+                    <div className="flex gap-2">
                       {availableModels.length > 0 ? (
                         <select
-                          className="w-full px-3 py-1.5 rounded text-xs font-mono bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
+                          className="flex-1 px-3 py-1.5 rounded text-xs font-mono bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
                           value={editModel}
                           onChange={(e) => handleModelChange(e.target.value)}
                         >
@@ -2191,21 +2242,24 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
                       ) : (
                         <input
                           type="text"
-                          className="w-full px-3 py-1.5 rounded text-xs font-mono bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
+                          className="flex-1 px-3 py-1.5 rounded text-xs font-mono bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
                           value={editModel}
                           onChange={(e) => handleModelChange(e.target.value)}
                           placeholder="Model name"
                         />
                       )}
                       <button
+                        type="button"
                         onClick={() => {
                           void fetchAvailableModels(editApiProvider, resolvedEditApiUrl, editApiKey);
                         }}
-                        className="mt-1 text-[10px] text-[var(--color-accent)] hover:underline"
+                        disabled={modelsLoading}
+                        className="px-3 py-1.5 rounded text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-primary)] hover:text-[var(--color-text-primary)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                        title="Refresh available models from the server"
                       >
-                        Refresh models
+                        {modelsLoading ? 'Loading...' : 'Refresh'}
                       </button>
-                    </>
+                    </div>
                   ) : (
                     <input
                       type="text"
@@ -2286,17 +2340,19 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
                     </p>
                   </div>
                 )}
-                {/* API Key (always shown) */}
-                <div>
-                  <label className="block text-[10px] text-[var(--color-text-secondary)] mb-1">API Key</label>
-                  <input
-                    type="password"
-                    className="w-full px-3 py-1.5 rounded text-xs font-mono bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-                    value={editApiKey}
-                    onChange={(e) => setEditApiKey(e.target.value)}
-                    placeholder={isLocalProvider(editApiProvider) ? "Leave blank if no auth required" : "sk-..."}
-                  />
-                </div>
+                {/* API Key (only shown for providers that require it) */}
+                {providerRequiresApiKey(editApiProvider) && (
+                  <div>
+                    <label className="block text-[10px] text-[var(--color-text-secondary)] mb-1">API Key</label>
+                    <input
+                      type="password"
+                      className="w-full px-3 py-1.5 rounded text-xs font-mono bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
+                      value={editApiKey}
+                      onChange={(e) => setEditApiKey(e.target.value)}
+                      placeholder="sk-..."
+                    />
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -2402,6 +2458,20 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
                             {lmStudioContextPresentation.label}
                           </span>
                         )}
+                      </div>
+                    )}
+                    {msg.role === 'assistant' && Array.isArray(msg.mcpToolNames) && msg.mcpToolNames.length > 0 && (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <span
+                          className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[10px] font-medium text-emerald-300"
+                          title={`The assistant used MCP tools from the application to answer this: ${msg.mcpToolNames.join(', ')}`}
+                        >
+                          <svg width="10" height="10" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                            <path d="M8 1V3M8 13V15M3 8H1M15 8H13M4.5 4.5L3 3M12.5 12.5L14 14M4.5 12.5L3 14M12.5 4.5L14 3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+                            <circle cx="8" cy="8" r="2.5" stroke="currentColor" strokeWidth="1.3"/>
+                          </svg>
+                          Tools: {msg.mcpToolNames.join(', ')}
+                        </span>
                       </div>
                     )}
                     {msg.role === 'assistant' && Array.isArray(msg.autoLoadedDocs) && msg.autoLoadedDocs.length > 0 && (

@@ -1,0 +1,919 @@
+"""
+Embedded Model Context Protocol (MCP) server for Klipper-Wire-Configurator.
+
+Provides AI agents with tools to search/read Klipper documentation, validate
+config snippets, look up section schemas, detect boards, and more.
+
+Two usage modes:
+  1. Embedded inside the FastAPI process (default) — zero extra RAM.
+     Call handle_jsonrpc() directly or post to /api/mcp.
+  2. Standalone stdio server for external MCP clients:
+         python -m backend.mcp_server
+     (Claude Desktop, pi, VS Code, etc. connect via subprocess.)
+
+No extra dependencies. No ML. No git clone. Docs are read from the bundled
+reference directory.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sys
+from collections import Counter
+from pathlib import Path
+from typing import Any
+
+# ── Paths ────────────────────────────────────────────────────────────
+
+BACKEND_DIR = Path(__file__).parent
+REFERENCE_DIR = BACKEND_DIR.parent / "reference"
+KLIPPER_DOCS_DIR = REFERENCE_DIR / "reference_docs" / "klipper_docs"
+DOC_CATALOG_PATH = KLIPPER_DOCS_DIR
+CONFIG_REFERENCE_PATH = KLIPPER_DOCS_DIR / "Config_Reference.md"
+GCODE_MACRO_SUMMARY_PATH = KLIPPER_DOCS_DIR / "Klipper_GCode_Macro_AI_Summary.md"
+DOCS_SUMMARY_PATH = KLIPPER_DOCS_DIR / "Klipper_Docs_AI_Summary.md"
+
+# ── Constants ─────────────────────────────────────────────────────────
+
+MCP_PROTOCOL_VERSION = "2024-11-05"
+SERVER_NAME = "klipper-wire-configurator"
+SERVER_VERSION = "1.0.0"
+MAX_SEARCH_RESULTS = 10
+MAX_READ_CHARS = 16_000
+SNIPPET_CHARS = 300
+STOP_WORDS = frozenset({
+    "a", "an", "and", "are", "as", "at", "be", "by", "can", "cfg",
+    "config", "configuration", "do", "for", "from", "has", "have",
+    "help", "how", "i", "if", "in", "is", "it", "its", "klipper",
+    "me", "my", "not", "of", "on", "or", "please", "printer", "set",
+    "settings", "show", "so", "tell", "that", "the", "this", "to",
+    "use", "was", "what", "when", "where", "which", "who", "will",
+    "with", "would", "you", "your",
+})
+
+CONFIG_SECTION_HEADER_RE = re.compile(r"^### \[([^\]]+)\]\s*$", re.MULTILINE)
+CONFIG_ALIAS_RE = re.compile(r"^\[([^\]]+)\]\s*$", re.MULTILINE)
+HEADING_RE = re.compile(r"^##?\s+(.+)$", re.MULTILINE)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  Search Engine
+# ══════════════════════════════════════════════════════════════════════
+
+class DocIndex:
+    """Lightweight full-text index over bundled Klipper markdown docs."""
+
+    def __init__(self, docs_dir: Path = DOC_CATALOG_PATH) -> None:
+        self.docs_dir = docs_dir
+        self._docs: dict[str, str] = {}          # filename stem → full content
+        self._headings: dict[str, list[str]] = {}  # filename stem → heading texts
+        self._inverted: dict[str, list[tuple[str, int]]] = {}  # word → [(stem, count)]
+        self._ready = False
+
+    def load(self) -> None:
+        """Scan the docs directory and build the index."""
+        self._docs.clear()
+        self._headings.clear()
+        self._inverted.clear()
+
+        if not self.docs_dir.is_dir():
+            return
+
+        for path in sorted(self.docs_dir.glob("*.md")):
+            stem = path.stem
+            try:
+                content = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            self._docs[stem] = content
+
+            # Extract headings
+            self._headings[stem] = [
+                m.group(1).strip() for m in HEADING_RE.finditer(content)
+            ]
+
+            # Build inverted index
+            tokens = self._tokenize(content)
+            for word, count in Counter(tokens).most_common():
+                self._inverted.setdefault(word, []).append((stem, count))
+
+        self._ready = True
+
+    def is_ready(self) -> bool:
+        return self._ready
+
+    def get_doc_count(self) -> int:
+        return len(self._docs)
+
+    def list_docs(self) -> list[dict[str, Any]]:
+        """Return metadata for all indexed docs."""
+        result: list[dict[str, Any]] = []
+        for stem, content in self._docs.items():
+            headings = self._headings.get(stem, [])
+            result.append({
+                "id": stem,
+                "filename": f"{stem}.md",
+                "headings": headings[:20],
+                "size_bytes": len(content),
+                "has_config_sections": any(
+                    CONFIG_SECTION_HEADER_RE.findall(content)
+                ),
+            })
+        return result
+
+    def get_doc(self, stem: str) -> str | None:
+        """Return full doc content by filename stem."""
+        return self._docs.get(stem)
+
+    def read_doc(self, stem: str, offset: int = 0, limit: int = MAX_READ_CHARS) -> dict[str, Any] | None:
+        """Return a slice of a document."""
+        content = self.get_doc(stem)
+        if content is None:
+            return None
+        total = len(content)
+        return {
+            "id": stem,
+            "filename": f"{stem}.md",
+            "content": content[offset:offset + limit],
+            "offset": offset,
+            "total_chars": total,
+            "truncated": (offset + limit) < total,
+        }
+
+    def search(self, query: str, limit: int = MAX_SEARCH_RESULTS) -> list[dict[str, Any]]:
+        """Search indexed docs by query text. Returns ranked results with snippets."""
+        if not self._ready or not query.strip():
+            return []
+
+        query_tokens = set(self._tokenize(query))
+        if not query_tokens:
+            return []
+
+        # Score documents by word overlap
+        scores: dict[str, float] = {}
+        for word in query_tokens:
+            for stem, count in self._inverted.get(word, []):
+                # log-scaled TF, capped
+                scores[stem] = scores.get(stem, 0.0) + min(1.0 + (count / 5.0), 5.0)
+
+        # Boost filename matches (exact or substring)
+        query_lower = query.lower().replace(" ", "_").replace("-", "_")
+        for stem in self._docs:
+            stem_lower = stem.lower()
+            if stem_lower == query_lower:
+                scores[stem] = scores.get(stem, 0.0) + 100.0
+            elif query_lower in stem_lower or stem_lower in query_lower:
+                scores[stem] = scores.get(stem, 0.0) + 20.0
+
+        # Boost heading matches
+        query_words = set(query_lower.split("_"))
+        for stem, headings in self._headings.items():
+            heading_text = " ".join(headings).lower()
+            heading_hits = sum(1 for w in query_words if w in heading_text)
+            if heading_hits:
+                scores[stem] = scores.get(stem, 0.0) + heading_hits * 10.0
+
+        if not scores:
+            return []
+
+        # Sort by score descending
+        ranked = sorted(scores.items(), key=lambda x: -x[1])
+
+        results: list[dict[str, Any]] = []
+        for stem, score in ranked[:limit]:
+            content = self._docs[stem]
+            snippet = self._make_snippet(content, query)
+            results.append({
+                "id": stem,
+                "filename": f"{stem}.md",
+                "score": round(score, 1),
+                "snippet": snippet,
+                "size_bytes": len(content),
+            })
+
+        return results
+
+    def get_config_reference_section(self, section_name: str) -> dict[str, Any] | None:
+        """Extract a named section from Config_Reference.md."""
+        content = self._docs.get("Config_Reference")
+        if content is None:
+            return None
+
+        # Normalise the section name
+        name_variants = {
+            section_name.lower(),
+            section_name.lower().replace("_", " "),
+            section_name.lower().replace(" ", "_"),
+            section_name.lower().replace("-", "_"),
+        }
+
+        sections = list(CONFIG_SECTION_HEADER_RE.finditer(content))
+        for idx, match in enumerate(sections):
+            header_name = match.group(1).strip()
+            if header_name.lower() in name_variants:
+                start = match.start()
+                end = sections[idx + 1].start() if idx + 1 < len(sections) else len(content)
+                section_text = content[start:end].strip()
+
+                # Extract aliases from the section body
+                aliases = [header_name]
+                aliases.extend(
+                    m.group(1).strip()
+                    for m in CONFIG_ALIAS_RE.finditer(section_text)
+                )
+
+                return {
+                    "section": header_name,
+                    "content": section_text,
+                    "aliases": aliases,
+                }
+
+        return None
+
+    def _tokenize(self, text: str) -> list[str]:
+        """Split text into lowercase alphanumeric tokens, filtering stop words."""
+        return [
+            t for t in re.findall(r"[a-z0-9_\-]{2,}", text.lower())
+            if t not in STOP_WORDS and not t.isdigit()
+        ]
+
+    def _make_snippet(self, content: str, query: str) -> str:
+        """Extract a relevant snippet around the first query match."""
+        query_lower = query.lower()
+        pos = content.lower().find(query_lower)
+        if pos < 0:
+            # Fall back to first meaningful paragraph
+            for word in self._tokenize(query):
+                pos = content.lower().find(word)
+                if pos >= 0:
+                    break
+
+        if pos < 0:
+            return content[:SNIPPET_CHARS].strip() + ("..." if len(content) > SNIPPET_CHARS else "")
+
+        start = max(0, pos - SNIPPET_CHARS // 2)
+        end = min(len(content), pos + len(query) + SNIPPET_CHARS // 2)
+
+        snippet = content[start:end].strip()
+        if start > 0:
+            snippet = "..." + snippet
+        if end < len(content):
+            snippet = snippet + "..."
+        return snippet
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  Global index singleton
+# ══════════════════════════════════════════════════════════════════════
+
+_index: DocIndex | None = None
+
+
+def get_index() -> DocIndex:
+    """Get or create the shared DocIndex singleton."""
+    global _index
+    if _index is None:
+        _index = DocIndex()
+        _index.load()
+    return _index
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  MCP Server
+# ══════════════════════════════════════════════════════════════════════
+
+class McpServer:
+    """
+    Minimal MCP server exposing Klipper documentation and config tools.
+
+    Implements the JSON-RPC 2.0 subset required by the Model Context Protocol.
+    """
+
+    def __init__(self, index: DocIndex | None = None) -> None:
+        self.index = index or get_index()
+        self._initialized = False
+        self._client_capabilities: dict[str, Any] = {}
+
+    # ── Tool Definitions ──────────────────────────────────────────
+
+    def _list_tools(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": "search_klipper_docs",
+                "description": (
+                    "Search all bundled Klipper documentation by query. "
+                    "Returns up to 10 results with filenames, relevance scores, and snippets. "
+                    "Matches filenames, section headings, and document content."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query — keywords, section names, or natural language",
+                        },
+                        "limit": {
+                            "type": "number",
+                            "description": "Max results (default 10)",
+                            "default": 10,
+                        },
+                    },
+                    "required": ["query"],
+                },
+            },
+            {
+                "name": "read_klipper_doc",
+                "description": (
+                    "Read the full content of a Klipper documentation file by filename "
+                    "(with or without .md extension). Supports pagination via offset/limit."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "filename": {
+                            "type": "string",
+                            "description": "Document filename (e.g. 'Config_Reference.md', 'Bed_Mesh', 'G-Codes.md')",
+                        },
+                        "offset": {
+                            "type": "number",
+                            "description": "Character offset to start reading from (default 0)",
+                            "default": 0,
+                        },
+                        "limit": {
+                            "type": "number",
+                            "description": "Max characters to return (default 16000)",
+                            "default": MAX_READ_CHARS,
+                        },
+                    },
+                    "required": ["filename"],
+                },
+            },
+            {
+                "name": "list_klipper_docs",
+                "description": "List all available Klipper documentation files with their headings and metadata.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            {
+                "name": "get_config_reference_section",
+                "description": (
+                    "Extract a specific configuration section from Config_Reference.md by section name. "
+                    "Returns the full section text with all parameters, defaults, and aliases. "
+                    "Example section names: 'bed_mesh', 'extruder', 'stepper_x', 'probe', 'heater_fan'"
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "section_name": {
+                            "type": "string",
+                            "description": "Klipper config section name (e.g. 'bed_mesh', 'extruder', 'stepper_x')",
+                        },
+                    },
+                    "required": ["section_name"],
+                },
+            },
+            {
+                "name": "validate_klipper_config",
+                "description": (
+                    "Parse and validate a Klipper config snippet. "
+                    "Returns structured results: parsed sections with their parameters, "
+                    "any errors or warnings, and the raw config text."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "config_text": {
+                            "type": "string",
+                            "description": "Klipper config text (one or more sections with parameters)",
+                        },
+                        "filename": {
+                            "type": "string",
+                            "description": "Config filename hint (default: 'printer.cfg')",
+                            "default": "printer.cfg",
+                        },
+                    },
+                    "required": ["config_text"],
+                },
+            },
+            {
+                "name": "get_section_schema",
+                "description": (
+                    "Get the supported parameters, types, defaults, and descriptions "
+                    "for a Klipper config section type. Use this to find exactly which "
+                    "parameters a section supports and what values are valid."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "section_type": {
+                            "type": "string",
+                            "description": "Section type name (e.g. 'extruder', 'bed_mesh', 'heater_fan', 'temperature_sensor')",
+                        },
+                    },
+                    "required": ["section_type"],
+                },
+            },
+            {
+                "name": "search_example_configs",
+                "description": (
+                    "Search bundled example Klipper configurations by board, printer, or feature keyword. "
+                    "Returns matching example filenames and their metadata."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query (e.g. 'voron', 'ender3', 'skr mini', 'bltouch')",
+                        },
+                        "limit": {
+                            "type": "number",
+                            "description": "Max results (default 5)",
+                            "default": 5,
+                        },
+                    },
+                    "required": ["query"],
+                },
+            },
+            {
+                "name": "detect_board",
+                "description": (
+                    "Analyse a Klipper config snippet and detect the likely printer "
+                    "board type and MCU family from common pin names, MCU definitions, "
+                    "and section patterns."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "config_text": {
+                            "type": "string",
+                            "description": "Klipper config text containing [mcu] or pin definitions",
+                        },
+                    },
+                    "required": ["config_text"],
+                },
+            },
+        ]
+
+    # ── Tool Handlers ─────────────────────────────────────────────
+
+    def _call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Route a tool call to the appropriate handler."""
+        handlers: dict[str, Any] = {
+            "search_klipper_docs": self._handle_search,
+            "read_klipper_doc": self._handle_read,
+            "list_klipper_docs": self._handle_list_docs,
+            "get_config_reference_section": self._handle_config_section,
+            "validate_klipper_config": self._handle_validate,
+            "get_section_schema": self._handle_schema,
+            "search_example_configs": self._handle_search_examples,
+            "detect_board": self._handle_detect_board,
+        }
+
+        handler = handlers.get(name)
+        if handler is None:
+            return self._error(-32601, f"Unknown tool: {name}")
+
+        try:
+            result = handler(arguments)
+            return self._text_result(result)
+        except Exception as exc:
+            return self._error(-32603, f"Tool '{name}' failed: {exc}")
+
+    def _handle_search(self, args: dict[str, Any]) -> str:
+        query = args.get("query", "").strip()
+        limit = min(int(args.get("limit", MAX_SEARCH_RESULTS)), 20)
+
+        if not query:
+            return "Please provide a search query."
+
+        results = self.index.search(query, limit=limit)
+        if not results:
+            return f'No results found for "{query}". Try different keywords or use list_klipper_docs to browse available files.'
+
+        lines: list[str] = [f"Search results for: {query}\n"]
+        for r in results:
+            lines.append(f"## {r['filename']}  (score: {r['score']})")
+            lines.append(f"{r['snippet']}\n")
+
+        return "\n".join(lines)
+
+    def _handle_read(self, args: dict[str, Any]) -> str:
+        raw = args.get("filename", "").strip()
+        if not raw:
+            return "Please provide a filename."
+
+        stem = Path(raw).stem  # strips .md if present
+        offset = int(args.get("offset", 0))
+        limit = min(int(args.get("limit", MAX_READ_CHARS)), 64_000)
+
+        result = self.index.read_doc(stem, offset=offset, limit=limit)
+        if result is None:
+            # Try a partial match
+            matches = [s for s in self.index._docs if stem.lower() in s.lower()]
+            if not matches:
+                return f'Document "{raw}" not found. Use list_klipper_docs to see available files.'
+            result = self.index.read_doc(matches[0], offset=offset, limit=limit)
+            if result is None:
+                return f'Document not found.'
+
+        header = f"# {result['filename']}\n"
+        if result['offset'] > 0:
+            header += f"(characters {result['offset']}-{result['offset'] + len(result['content'])} of {result['total_chars']})\n"
+        else:
+            header += f"({result['total_chars']} total characters)\n"
+
+        content = header + "\n" + result["content"]
+
+        if result["truncated"]:
+            content += f"\n\n[... Content truncated. Use offset={result['offset'] + limit}&limit={limit} to read the next section.]"
+
+        return content
+
+    def _handle_list_docs(self, args: dict[str, Any]) -> str:
+        docs = self.index.list_docs()
+        if not docs:
+            return "No documentation files found."
+
+        lines: list[str] = [
+            f"# Klipper Documentation ({len(docs)} files)\n",
+        ]
+        for d in docs:
+            config_tag = " [has config sections]" if d["has_config_sections"] else ""
+            heading_count = len(d["headings"])
+            lines.append(
+                f"- **{d['filename']}**  ({d['size_bytes']:,} bytes, {heading_count} headings){config_tag}"
+            )
+
+        return "\n".join(lines)
+
+    def _handle_config_section(self, args: dict[str, Any]) -> str:
+        section = args.get("section_name", "").strip()
+        if not section:
+            return "Please provide a section name."
+
+        result = self.index.get_config_reference_section(section)
+        if result is None:
+            # Fall back to search
+            results = self.index.search(f"[{section}]", limit=3)
+            if results:
+                return (
+                    f"Section '[{section}]' not found in Config_Reference.md. "
+                    f"Related documents found:\n\n"
+                    + "\n\n".join(
+                        f"**{r['filename']}** (score {r['score']})\n{r['snippet']}"
+                        for r in results
+                    )
+                )
+            return (
+                f'Section "[{section}]" not found in Config_Reference.md. '
+                f"Use search_klipper_docs to find relevant documentation, or "
+                f"use get_section_schema to look up supported section types."
+            )
+
+        content = result["content"]
+        aliases = result["aliases"]
+        alias_line = f"Also known as: {', '.join(a for a in aliases if a != result['section'])}" if len(aliases) > 1 else ""
+
+        return f"# [{result['section']}]\n{alias_line}\n\n{content}" if alias_line else f"# [{result['section']}]\n\n{content}"
+
+    def _handle_validate(self, args: dict[str, Any]) -> str:
+        config_text = args.get("config_text", "").strip()
+        filename = args.get("filename", "printer.cfg")
+
+        if not config_text:
+            return "Please provide config text to validate."
+
+        # Use the app's parser/validator if available, otherwise do basic analysis
+        try:
+            from parser.config_parser import parse_config
+            from parser.validator import validate_config
+
+            parsed = parse_config(config_text, filename)
+            validation = validate_config(parsed)
+
+            lines: list[str] = [f"Validation result for: {filename}\n"]
+
+            if validation.errors:
+                errors = [e for e in validation.errors if getattr(e, 'severity', 'error') == 'error' or not hasattr(e, 'severity')]
+                warnings = [e for e in validation.errors if getattr(e, 'severity', '') == 'warning']
+
+                if errors:
+                    lines.append(f"## Errors ({len(errors)})")
+                    for err in errors:
+                        location = f"[{err.section}] {err.param}" if err.param else f"[{err.section}]"
+                        lines.append(f"- {location}: {err.message}")
+                    lines.append("")
+
+                if warnings:
+                    lines.append(f"## Warnings ({len(warnings)})")
+                    for warn in warnings:
+                        location = f"[{warn.section}] {warn.param}" if warn.param else f"[{warn.section}]"
+                        lines.append(f"- {location}: {warn.message}")
+                    lines.append("")
+
+            if not validation.errors:
+                lines.append("✅ Config is valid — no errors or warnings.\n")
+
+            sections = parsed if hasattr(parsed, 'sections') else getattr(parsed, 'config', parsed)
+            # Show parsed section summary
+            if hasattr(parsed, 'sections') and parsed.sections:
+                lines.append(f"## Sections ({len(parsed.sections)})")
+                for s in parsed.sections:
+                    alias_note = f" = {s.section_type}" if hasattr(s, 'section_type') and s.section_type != s.full_header else ""
+                    param_count = len(s.params) if hasattr(s, 'params') else 0
+                    lines.append(f"- {s.full_header}{alias_note} ({param_count} parameters)")
+                lines.append("")
+
+            if hasattr(parsed, 'includes') and parsed.includes:
+                lines.append(f"Includes: {', '.join(parsed.includes)}")
+
+            return "\n".join(lines)
+
+        except ImportError:
+            # Fallback: basic section/param extraction without parser
+            return self._basic_parse(config_text, filename)
+
+    def _basic_parse(self, config_text: str, filename: str) -> str:
+        """Simple fallback parse when the full parser is unavailable."""
+        lines = config_text.split("\n")
+        sections_found: list[str] = []
+        current_section: str | None = None
+        errors: list[str] = []
+
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            # Skip comments and blank lines
+            if not stripped or stripped.startswith("#"):
+                continue
+            # Section header
+            m = re.match(r"^\s*\[([^\]]+)\]\s*$", stripped)
+            if m:
+                current_section = m.group(1).strip()
+                sections_found.append(f"[{current_section}]")
+                continue
+            # Parameter line
+            if current_section and "=" in stripped or ":" in stripped:
+                continue
+            # Lines outside a section before any section is found
+            if current_section is None and stripped:
+                # Could be a header comment or include
+                if stripped.startswith("[include"):
+                    sections_found.append(stripped)
+                    continue
+                errors.append(f"Line {i+1}: content before any section header: {stripped[:60]}")
+
+        result: list[str] = [f"Basic analysis for: {filename}\n"]
+        if sections_found:
+            result.append(f"Sections found: {', '.join(sections_found)}")
+        if errors:
+            result.append(f"\nNotes ({len(errors)}):")
+            for e in errors:
+                result.append(f"- {e}")
+        if not sections_found and not errors:
+            result.append("No recognizable Klipper sections found.")
+
+        return "\n".join(result)
+
+    def _handle_schema(self, args: dict[str, Any]) -> str:
+        section_type = args.get("section_type", "").strip().lower()
+        if not section_type:
+            return "Please provide a section type."
+
+        try:
+            from parser.config_schema import get_section_def
+
+            schema = get_section_def(section_type)
+            if not schema:
+                return f'No schema found for section type "{section_type}". Available types include: extruder, heater_fan, fan, temperature_sensor, probe, bed_mesh, filament_switch_sensor, gcode_macro, display, etc.'
+
+            lines: list[str] = [
+                f"# Section schema: [{section_type}]\n",
+                f"**{schema.description}**\n" if hasattr(schema, 'description') and schema.description else "",
+            ]
+
+            if hasattr(schema, 'parameters') and schema.parameters:
+                lines.append(f"## Parameters ({len(schema.parameters)})")
+                for param in schema.parameters:
+                    ptype = param.param_type if hasattr(param, 'param_type') else "unknown"
+                    default = f"  (default: {param.default})" if hasattr(param, 'default') and param.default else ""
+                    desc = param.description if hasattr(param, 'description') and param.description else ""
+                    lines.append(f"- **{param.name}**  [{ptype}]{default}")
+                    if desc:
+                        lines.append(f"  {desc}")
+                lines.append("")
+
+            return "\n".join(lines)
+
+        except ImportError:
+            return (
+                f'Schema lookup for "{section_type}" is not available '
+                f"because the full config schema module could not be loaded. "
+                f"Use get_config_reference_section or search_klipper_docs instead."
+            )
+
+    def _handle_search_examples(self, args: dict[str, Any]) -> str:
+        query = args.get("query", "").strip()
+        limit = min(int(args.get("limit", 5)), 10)
+
+        if not query:
+            return "Please provide a search query."
+
+        try:
+            from services.board_detector import fuzzy_match_examples, get_available_examples
+
+            examples_dir = REFERENCE_DIR / "config"
+            if not examples_dir.is_dir():
+                return "Example config directory not found."
+
+            examples = fuzzy_match_examples(query)
+            if not examples:
+                return f'No example configs matching "{query}".'
+
+            lines: list[str] = [f"Example configs matching: {query}\n"]
+            for ex in examples[:limit]:
+                name = ex.get("name", ex) if isinstance(ex, dict) else str(ex)
+                desc = ex.get("description", "") if isinstance(ex, dict) else ""
+                board = ex.get("board", "") if isinstance(ex, dict) else ""
+                parts = [name]
+                if board:
+                    parts.append(f"Board: {board}")
+                if desc:
+                    parts.append(desc)
+                lines.append(f"- **{' — '.join(parts)}**")
+            lines.append(f"\n{len(examples)} match(es) total.")
+
+            return "\n".join(lines)
+
+        except ImportError:
+            return (
+                f'Example search for "{query}" is not available '
+                f"because the example config module could not be loaded. "
+                f"Use search_klipper_docs to find reference documentation instead."
+            )
+
+    def _handle_detect_board(self, args: dict[str, Any]) -> str:
+        config_text = args.get("config_text", "").strip()
+        if not config_text:
+            return "Please provide config text to analyse."
+
+        try:
+            from parser.config_parser import parse_config
+            from services.board_detector import detect_board_from_config
+
+            parsed = parse_config(config_text, "analysis.cfg")
+            board_info = detect_board_from_config(parsed)
+
+            lines: list[str] = ["## Board Detection Results\n"]
+            if isinstance(board_info, dict):
+                for key, value in board_info.items():
+                    if value:
+                        lines.append(f"- **{key}**: {value}")
+            else:
+                lines.append(str(board_info))
+
+            return "\n".join(lines) if len(lines) > 1 else "No specific board detected. The config may use generic MCU definitions."
+
+        except ImportError:
+            # Basic heuristics
+            mcu_match = re.search(r"\[mcu(?:\s+[^\]]+)?\]", config_text)
+            if mcu_match:
+                return f"MCU section detected: {mcu_match.group(0)}"
+
+            pin_matches = re.findall(r"^\s*(.+)_pin\s*[:=]", config_text, re.MULTILINE)
+            if pin_matches:
+                return f"Pin references found: {', '.join(set(pin_matches))}"
+
+            return "Could not detect board type from the provided config text."
+
+    # ── JSON-RPC / MCP Protocol ─────────────────────────────────
+
+    def handle_jsonrpc(self, request: dict) -> dict | None:
+        """Process a single JSON-RPC request and return the response."""
+        method = request.get("method", "")
+        params = request.get("params", {})
+        req_id = request.get("id")
+
+        # Notifications (no id) don't get a response
+        if method == "notifications/initialized":
+            self._initialized = True
+            return None
+
+        if method == "initialize":
+            return self._rpc_response(req_id, {
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {
+                    "tools": {},
+                    "resources": {},
+                },
+                "serverInfo": {
+                    "name": SERVER_NAME,
+                    "version": SERVER_VERSION,
+                },
+            })
+
+        if method == "tools/list":
+            return self._rpc_response(req_id, {"tools": self._list_tools()})
+
+        if method == "tools/call":
+            name = params.get("name", "")
+            arguments = params.get("arguments", {})
+            result = self._call_tool(name, arguments)
+            return self._rpc_response(req_id, result)
+
+        if method == "resources/list":
+            docs = self.index.list_docs()
+            return self._rpc_response(req_id, {
+                "resources": [
+                    {
+                        "uri": f"kwc://docs/{d['id']}",
+                        "name": d["filename"],
+                        "description": f"Klipper documentation: {d['filename']}",
+                        "mimeType": "text/markdown",
+                    }
+                    for d in docs[:50]
+                ],
+            })
+
+        if method == "resources/read":
+            uri = params.get("uri", "")
+            stem_match = re.match(r"kwc://docs/(.+)", uri)
+            if stem_match:
+                stem = stem_match.group(1)
+                doc = self.index.read_doc(stem)
+                if doc:
+                    return self._rpc_response(req_id, {
+                        "contents": [
+                            {
+                                "uri": uri,
+                                "mimeType": "text/markdown",
+                                "text": doc["content"],
+                            }
+                        ],
+                    })
+            return self._rpc_response(req_id, {
+                "contents": [],
+            })
+
+        # Root endpoint check
+        if method == "ping":
+            return self._rpc_response(req_id, {})
+
+        return self._rpc_error(req_id, -32601, f"Method not found: {method}")
+
+    def _rpc_response(self, req_id: Any, result: dict) -> dict:
+        return {"jsonrpc": "2.0", "id": req_id, "result": result}
+
+    def _rpc_error(self, req_id: Any, code: int, message: str) -> dict:
+        return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
+
+    def _text_result(self, text: str) -> dict[str, Any]:
+        return {"content": [{"type": "text", "text": text}]}
+
+    def _error(self, code: int, message: str) -> dict[str, Any]:
+        return {"content": [{"type": "text", "text": f"Error: {message}"}], "isError": True}
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  Stdio Transport (for external MCP clients)
+# ══════════════════════════════════════════════════════════════════════
+
+def run_stdio() -> None:
+    """Run the MCP server over stdin/stdout (standard MCP transport)."""
+    server = McpServer()
+    index = get_index()
+
+    if not index.is_ready():
+        print("MCP server: no documentation found at", KLIPPER_DOCS_DIR, file=sys.stderr)
+    else:
+        print(f"MCP server: {index.get_doc_count()} docs indexed from {KLIPPER_DOCS_DIR}", file=sys.stderr)
+
+    # Readline loop
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            request = json.loads(line)
+        except json.JSONDecodeError as exc:
+            # Respond with parse error
+            response = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": f"Parse error: {exc}"}}
+            sys.stdout.write(json.dumps(response) + "\n")
+            sys.stdout.flush()
+            continue
+
+        try:
+            response = server.handle_jsonrpc(request)
+        except Exception as exc:
+            response = {"jsonrpc": "2.0", "id": request.get("id"), "error": {"code": -32603, "message": f"Internal error: {exc}"}}
+
+        if response is not None:
+            sys.stdout.write(json.dumps(response) + "\n")
+            sys.stdout.flush()
+
+
+if __name__ == "__main__":
+    run_stdio()

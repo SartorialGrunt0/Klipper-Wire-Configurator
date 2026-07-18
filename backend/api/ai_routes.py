@@ -1,4 +1,5 @@
 """Klipper Wire Configurator - AI Chat Backend Proxy"""
+import json
 from enum import Enum
 from functools import lru_cache
 from pathlib import Path
@@ -7,6 +8,8 @@ from urllib.parse import urlparse, urlunparse
 
 from fastapi import APIRouter
 from pydantic import BaseModel
+
+from mcp_server import McpServer, get_index
 
 router = APIRouter()
 
@@ -17,6 +20,16 @@ KLIPPER_DOCS_SUMMARY_PATH = KLIPPER_DOCS_DIR / "Klipper_Docs_AI_Summary.md"
 KLIPPER_GCODE_MACRO_SUMMARY_PATH = KLIPPER_DOCS_DIR / "Klipper_GCode_Macro_AI_Summary.md"
 OFFICIAL_CONFIG_REFERENCE_URL = "https://www.klipper3d.org/Config_Reference.html"
 OFFICIAL_KLIPPER_DOC_URL_TEMPLATE = "https://www.klipper3d.org/{document_name}.html"
+
+# ── Embedded MCP server for tool access ──
+_mcp_server = McpServer()
+
+# Match fenced code blocks tagged ```tool ... ```
+# Captures the JSON payload which we parse with json.loads
+MCP_TOOL_BLOCK_RE = re.compile(
+    r"```tool\s*\n(.+?)\n```",
+    re.DOTALL,
+)
 SUMMARY_DOC_FILENAMES = {
     KLIPPER_DOCS_SUMMARY_PATH.name,
     KLIPPER_GCODE_MACRO_SUMMARY_PATH.name,
@@ -154,6 +167,11 @@ class AiProvider(str, Enum):
     openai_compatible = "openai-compatible"
     lm_studio = "lm-studio"
     ollama = "ollama"
+
+    @classmethod
+    def is_openai_compatible(cls, provider: str) -> bool:
+        """Check if the provider uses OpenAI-compatible chat format."""
+        return provider in (cls.chatgpt, cls.google, cls.openai_compatible, cls.lm_studio, cls.ollama)
 
 
 class ChatRequest(BaseModel):
@@ -462,7 +480,25 @@ def _build_reference_lookup_query(messages: list[dict]) -> str:
 
 
 def _is_local_provider(provider: str) -> bool:
-    return provider in ("lm-studio", "ollama")
+    """Check if the provider is a local server (LM Studio, Ollama, OpenAI Compatible)."""
+    return provider in ("lm-studio", "ollama", "openai-compatible")
+
+
+def _is_openai_compatible_provider(provider: str) -> bool:
+    """Check if the provider uses OpenAI-compatible chat format."""
+    return provider in ("chatgpt", "google", "openai-compatible", "lm-studio", "ollama")
+
+
+def _get_openai_compatible_default_url(provider: str) -> str:
+    """Get the default API URL for an OpenAI-compatible provider."""
+    defaults = {
+        "chatgpt": "https://api.openai.com/v1/chat/completions",
+        "google": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        "openai-compatible": "http://localhost:11434/api/chat",
+        "lm-studio": "http://localhost:1234/v1/chat/completions",
+        "ollama": "http://localhost:11434/api/chat",
+    }
+    return defaults.get(provider, "")
 
 
 def _prepare_messages(messages: list[dict]) -> list[dict]:
@@ -504,6 +540,10 @@ def _prepare_messages(messages: list[dict]) -> list[dict]:
             f"If you cannot use `klipper-docs`, fall back to {OFFICIAL_CONFIG_REFERENCE_URL} "
             "and avoid guessing."
         )
+
+    # Append MCP tool context so the model knows what tools are available
+    system_parts.append(_build_mcp_tool_context())
+
     prepared: list[dict] = []
 
     for msg in messages:
@@ -518,6 +558,234 @@ def _prepare_messages(messages: list[dict]) -> list[dict]:
         prepared.append({"role": role, "content": content})
 
     return [{"role": "system", "content": "\n\n".join(system_parts)}] + prepared
+
+
+# ── MCP Tool Integration ───────────────────────────────────────────
+
+
+def _build_mcp_tool_context() -> str:
+    """Build an 'Available Tools' section for the system prompt.
+
+    Describes the embedded MCP tools so the AI model can request them
+    regardless of whether the provider supports native function calling.
+    """
+    tools = _mcp_server._list_tools()
+
+    parts = [
+        "# Available MCP Tools",
+        "",
+        "You have access to the following tools through the application's built-in ",
+        "documentation and config system. Use them to look up Klipper documentation,",
+        "validate configs, get section schemas, detect boards, and more.",
+        "",
+        "To call a tool, include a JSON code block with `tool` as the language tag:",
+        "",
+        "```tool",
+        """{"name": "tool_name", "arguments": {"key": "value"}}""",
+        "```",
+        "",
+        "The application will execute the tool and return the result as a follow-up ",
+        "message. Use the tool result to ground your answer in real documentation.",
+        "",
+        "---",
+        "",
+    ]
+
+    for tool in tools:
+        name = tool["name"]
+        desc = tool.get("description", "").replace("\n", " ")
+        schema = tool.get("inputSchema", {})
+        props = schema.get("properties", {})
+        required = schema.get("required", [])
+
+        parts.append(f"## {name}")
+        parts.append(f"{desc}")
+        if props:
+            parts.append("")
+            parts.append("Parameters:")
+            for param_name, param_info in props.items():
+                ptype = param_info.get("type", "string")
+                pdesc = param_info.get("description", "")
+                req_mark = " (required)" if param_name in required else ""
+                parts.append(f"  - {param_name} [{ptype}]{req_mark}: {pdesc}")
+        parts.append("")
+
+    parts.append("---")
+    parts.append("")
+    parts.append(
+        "When to use each tool:"
+    )
+    parts.append(
+        "- **search_klipper_docs**: Use FIRST when the user asks about any Klipper "
+        "feature, parameter, config section, or troubleshooting topic. "
+        "This grounds your answer in actual documentation."
+    )
+    parts.append(
+        "- **get_config_reference_section**: Use when the user specifically asks about "
+        "a config section's exact parameters, defaults, or syntax. "
+        "Only use this if search_klipper_docs didn't give enough detail."
+    )
+    parts.append(
+        "- **read_klipper_doc**: Use when the user asks for the full contents of a "
+        "specific documentation page, or when you need more context than a search snippet provides."
+    )
+    parts.append(
+        "- **validate_klipper_config**: Use when the user provides a config snippet "
+        "and asks you to check it for errors, or when you want to verify your own "
+        "config suggestion before presenting it."
+    )
+    parts.append(
+        "- **get_section_schema**: Use when the user asks what parameters a section "
+        "type supports, what values are valid, or what defaults exist."
+    )
+    parts.append(
+        "- **search_example_configs**: Use when the user asks for a complete working "
+        "config example for a specific board or printer model."
+    )
+    parts.append(
+        "- **detect_board**: Use when the user asks what board their config targets, "
+        "or when you need to identify the MCU from pin definitions."
+    )
+    parts.append(
+        "- **list_klipper_docs**: Use when the user asks what documentation is available "
+        "or wants to browse the full set of Klipper docs."
+    )
+    parts.append("")
+    parts.append(
+        "Rules of thumb:"
+    )
+    parts.append(
+        "1. When in doubt, search first. Real docs are always better than your training data."
+    )
+    parts.append(
+        "2. You can call multiple tools in a single response if needed."
+    )
+    parts.append(
+        "3. If the tool returns information, use it to answer. Don't ignore the tool result."
+    )
+    parts.append(
+        "4. If you're confident about a simple config parameter from your training, "
+        "you can answer without tools. But for anything specific to Klipper syntax, "
+        "check the docs first."
+    )
+
+    return "\n".join(parts)
+
+
+def _extract_tool_calls(text: str) -> list[dict]:
+    """Extract tool call JSON blocks from a model's response text.
+
+    Looks for fenced code blocks tagged with `tool` and parses
+    the contained JSON as {"name": "...", "arguments": {...}}.
+    """
+    calls: list[dict] = []
+    for match in MCP_TOOL_BLOCK_RE.finditer(text):
+        raw_json = match.group(1).strip()
+        if not raw_json:
+            continue
+        try:
+            parsed = json.loads(raw_json)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        name = parsed.get("name", "")
+        arguments = parsed.get("arguments", {})
+        if name and isinstance(arguments, dict):
+            calls.append({"name": name, "arguments": arguments})
+    return calls
+
+
+def _execute_tool_call(tool_call: dict) -> str:
+    """Execute a single MCP tool call and return the text result."""
+    name = tool_call.get("name", "")
+    arguments = tool_call.get("arguments", {})
+
+    # Build a JSON-RPC request for the tool
+    request = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": name,
+            "arguments": arguments,
+        },
+    }
+
+    response = _mcp_server.handle_jsonrpc(request)
+    if response is None:
+        return f"Error: Tool '{name}' returned no result."
+
+    error = response.get("error")
+    if error:
+        return f"Error calling tool '{name}': {error.get('message', 'Unknown error')}"
+
+    result = response.get("result", {})
+    content = result.get("content", [])
+    text_parts = [
+        item["text"] for item in content if item.get("type") == "text"
+    ]
+    return "\n\n".join(text_parts) if text_parts else "Tool returned no content."
+
+
+def _build_tool_result_message(tool_call: dict, result_text: str) -> str:
+    """Build a user-role message containing the tool result for re-prompting."""
+    name = tool_call.get("name", "unknown")
+    args = tool_call.get("arguments", {})
+    args_summary = ", ".join(f"{k}={v}" for k, v in args.items())
+    return (
+        f"[Tool result: {name}({args_summary})]\n\n"
+        f"{result_text}\n\n"
+        f"[End tool result. Continue answering the user's original request using the information above.]"
+    )
+
+
+MAX_MCP_TOOL_TURNS = 5
+
+
+def _collect_tool_names(messages: list[dict]) -> list[str]:
+    """Extract unique tool names from tool result messages in the conversation."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for msg in messages:
+        content = str(msg.get("content", ""))
+        m = re.search(r"\[Tool result: (\w+)\(", content)
+        if m:
+            name = m.group(1)
+            if name not in seen:
+                seen.add(name)
+                names.append(name)
+    return names
+
+
+def _process_tool_calls_in_response(
+    content: str,
+    current_messages: list[dict],
+    provider: str,
+    model: str,
+) -> tuple[str, list[dict], int]:
+    """Process any tool calls in the model's response.
+
+    Returns:
+        (final_content, updated_messages, tool_turns_used)
+    """
+    tool_calls = _extract_tool_calls(content)
+    if not tool_calls:
+        return content, current_messages, 0
+
+    # Strip tool call blocks from the visible response so the user
+    # doesn't see raw JSON in the chat UI
+    clean_content = MCP_TOOL_BLOCK_RE.sub("", content).strip()
+
+    for turn_index, tool_call in enumerate(tool_calls[:MAX_MCP_TOOL_TURNS]):
+        result_text = _execute_tool_call(tool_call)
+        tool_message = _build_tool_result_message(tool_call, result_text)
+
+        # Add the assistant's partial response (with tool calls) and the tool result
+        current_messages.append({"role": "assistant", "content": content})
+        current_messages.append({"role": "user", "content": tool_message})
+
+    return clean_content, current_messages, len(tool_calls)
 
 
 def _extract_api_error_message(data: dict) -> str | None:
@@ -936,7 +1204,7 @@ async def chat_proxy(req: ChatRequest):
         if req.apiKey:
             headers["Authorization"] = f"Bearer {req.apiKey}"
     else:
-        # OpenAI, Gemini OpenAI-compat, GitHub Copilot, and OpenAI Compatible all use Bearer auth
+        # OpenAI, Google (OpenAI-compat), GitHub Copilot, and OpenAI Compatible all use Bearer auth
         headers = {
             "Authorization": f"Bearer {req.apiKey}",
             "Content-Type": "application/json",
@@ -1136,17 +1404,96 @@ async def chat_proxy(req: ChatRequest):
             if not content:
                 return {"error": "Empty response from API. Make sure a model is loaded in your local server."}
 
+            # ── MCP Tool Call Processing Loop ──
+            # After getting a response from ANY provider, check if the model
+            # requested tool calls. If so, execute them and re-query the provider.
+            # This makes all MCP tools available to every provider transparently.
+            tool_turns = 0
+            current_content = content
+            current_messages = list(messages)
+
+            while tool_turns < MAX_MCP_TOOL_TURNS:
+                tool_calls = _extract_tool_calls(current_content)
+                if not tool_calls:
+                    break
+
+                # Process all tool calls found in the response
+                for tool_call in tool_calls[:MAX_MCP_TOOL_TURNS]:
+                    result_text = _execute_tool_call(tool_call)
+                    tool_message = _build_tool_result_message(tool_call, result_text)
+                    current_messages.append({"role": "assistant", "content": current_content})
+                    current_messages.append({"role": "user", "content": tool_message})
+                    tool_turns += 1
+
+                # Build a new payload with the updated messages and re-query
+                if req.apiProvider == "anthropic":
+                    system = None
+                    filtered_messages = []
+                    for msg in current_messages:
+                        if msg.get("role") == "system":
+                            system = msg["content"]
+                        else:
+                            filtered_messages.append(msg)
+                    tool_payload: dict = {
+                        "model": req.model,
+                        "messages": filtered_messages,
+                    }
+                    if system:
+                        tool_payload["system"] = system
+                else:
+                    tool_payload = {
+                        "model": req.model,
+                        "messages": current_messages,
+                    }
+
+                # Re-query (skip LM Studio MCP plugin for tool follow-ups)
+                if req.apiProvider == "lm-studio" and req.apiKey:
+                    lm_studio_url = _build_lm_studio_chat_url(req.apiUrl)
+                    lm_studio_payload = _build_lm_studio_chat_payload(
+                        current_messages, req.model, None  # No MCP plugin for tool follow-ups
+                    )
+                    try:
+                        resp = await client.post(lm_studio_url, headers=headers, json=lm_studio_payload)
+                        resp.raise_for_status()
+                        data = resp.json()
+                        current_content = _extract_lm_studio_message_content(data) or ""
+                    except Exception:
+                        # Fall back to OpenAI-compatible
+                        data, current_content = await _post_openai_compatible_chat(
+                            client, req.apiUrl, headers, tool_payload
+                        )
+                else:
+                    resp = await client.post(req.apiUrl, headers=headers, json=tool_payload)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    current_content = _extract_provider_content(req.apiProvider, data) or ""
+
+            # Clean up any remaining tool call blocks in the final content
+            final_content = MCP_TOOL_BLOCK_RE.sub("", current_content).strip()
+            if not final_content:
+                final_content = current_content
+
+            # Collect tool names used during the MCP tool loop
+            mcp_tool_names = _collect_tool_names(current_messages)
+
             if req.apiProvider == "lm-studio":
                 return {
-                    "content": content,
+                    "content": final_content,
                     "lmStudioMcp": lm_studio_mcp_metadata,
                     "lmStudioContext": lm_studio_context_metadata,
+                    "mcpToolTurns": tool_turns,
+                    "mcpToolNames": mcp_tool_names,
                 }
 
-            return {"content": content}
+            return {
+                "content": final_content,
+                "mcpToolTurns": tool_turns,
+                "mcpToolNames": mcp_tool_names,
+            }
         except ValueError as e:
             return {"error": f"API error: {str(e)}"}
         except httpx.TimeoutException:
             return {"error": "API request timed out before the model finished responding."}
         except httpx.HTTPError as e:
             return {"error": f"API request failed: {str(e)}"}
+print('DEBUG: File reloaded')

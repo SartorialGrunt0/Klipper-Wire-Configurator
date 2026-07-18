@@ -733,6 +733,8 @@ export interface AiChatResponse {
   error?: string;
   lmStudioMcp?: LmStudioMcpStatus;
   lmStudioContext?: LmStudioContextStatus;
+  mcpToolTurns?: number;
+  mcpToolNames?: string[];
 }
 
 export interface ModelListResponse {
@@ -747,6 +749,61 @@ export async function listModels(apiUrl: string, apiKey: string = ''): Promise<M
   const res = await fetch(`/ai/models?${params.toString()}`);
   if (!res.ok) throw new Error(`Failed to list models: ${res.statusText}`);
   return res.json();
+}
+
+export async function listLocalModels(
+  apiUrl: string,
+  apiKey: string = '',
+  provider: 'lm-studio' | 'ollama' | 'openai-compatible' = 'openai-compatible',
+): Promise<string[]> {
+  /**
+   * List available models from a local OpenAI-compatible server.
+   * 
+   * This function tries multiple endpoints to find working model lists.
+   */
+  try {
+    // Try the standard /v1/models endpoint first
+    const modelsUrl = new URL(apiUrl);
+    modelsUrl.pathname = '/v1/models';
+    
+    const params = new URLSearchParams();
+    if (apiKey && apiKey.trim()) params.set('apiKey', apiKey);
+    
+    const res = await fetch(`${modelsUrl.toString()}?${params.toString()}`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data.data && Array.isArray(data.data)) {
+        return data.data.map((m: any) => m.id);
+      }
+    }
+    
+    // For Ollama specifically, try /api/tags
+    if (provider === 'ollama') {
+      const tagsRes = await fetch(`${apiUrl.replace('/api/chat', '')}/api/tags`);
+      if (tagsRes.ok) {
+        const data = await tagsRes.json();
+        if (data.models && Array.isArray(data.models)) {
+          return data.models.map((m: any) => m.name);
+        }
+      }
+    }
+    
+    // For LM Studio, try /api/v1/models
+    if (provider === 'lm-studio') {
+      const lmStudioModelsRes = await fetch(`${apiUrl.replace('/v1/chat/completions', '')}/api/v1/models`);
+      if (lmStudioModelsRes.ok) {
+        const data = await lmStudioModelsRes.json();
+        if (data.data && Array.isArray(data.data)) {
+          return data.data.map((m: any) => m.id);
+        }
+      }
+    }
+    
+    return [];
+  } catch (error) {
+    console.error('Failed to list local models:', error);
+    return [];
+  }
 }
 
 export async function aiChat(req: AiChatRequest): Promise<AiChatResponse> {

@@ -16,6 +16,7 @@ export interface ChatMessage {
   lmStudioMcp?: LmStudioMcpStatus;
   lmStudioContext?: LmStudioContextStatus;
   autoLoadedDocs?: string[];
+  mcpToolNames?: string[];
 }
 
 export interface AiSettings {
@@ -90,7 +91,7 @@ const DEFAULT_PROVIDER_MODELS: ProviderModels = {
   google: '',
   anthropic: '',
   github: '',
-  'openai-compatible': '',
+  'openai-compatible': 'gpt-4o',
   'lm-studio': '',
   ollama: '',
 };
@@ -113,15 +114,17 @@ function normalizeProviderModels(settings: Partial<AiSettings>): ProviderModels 
 function buildAiSettings(settings: Partial<AiSettings>): AiSettings {
   const merged = { ...DEFAULT_SETTINGS, ...settings };
   const providerModels = normalizeProviderModels(merged);
+  const modelToUse = providerModels[merged.apiProvider] ?? DEFAULT_PROVIDER_MODELS[merged.apiProvider] ?? '';
   return {
     ...merged,
     providerModels,
-    model: providerModels[merged.apiProvider] ?? '',
+    model: modelToUse,
   };
 }
 
 function providerRequiresApiKey(provider: AiProvider): boolean {
-  return !['openai-compatible', 'lm-studio', 'ollama'].includes(provider);
+  // Only cloud providers require API keys
+  return provider === 'chatgpt' || provider === 'google' || provider === 'anthropic' || provider === 'github';
 }
 
 interface AiState {
