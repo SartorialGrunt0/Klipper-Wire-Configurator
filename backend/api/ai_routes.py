@@ -1,5 +1,6 @@
 """Klipper Wire Configurator - AI Chat Backend Proxy"""
 import json
+import logging
 from enum import Enum
 from functools import lru_cache
 from pathlib import Path
@@ -13,7 +14,33 @@ from mcp_server import McpServer, get_index
 
 router = APIRouter()
 
-REFERENCE_DIR = Path(__file__).parent.parent.parent / "reference"
+# ── Logging ────────────────────────────────────────────────────────────
+logger = logging.getLogger("kwc.ai")
+logger.setLevel(logging.DEBUG)
+
+BACKEND_DIR = Path(__file__).parent.parent
+AI_CHAT_LOG = BACKEND_DIR / "ai_chat.log"
+
+# Add handlers if none exist (avoids duplicate handlers on reload)
+if not logger.handlers:
+    # Console handler (stdout) for live visibility
+    _console_handler = logging.StreamHandler()
+    _console_handler.setLevel(logging.DEBUG)
+    # File handler for persistent record
+    _file_handler = logging.FileHandler(AI_CHAT_LOG, mode="a", encoding="utf-8")
+    _file_handler.setLevel(logging.DEBUG)
+    _formatter = logging.Formatter(
+        "%(asctime)s [AI %(levelname)s] %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    _console_handler.setFormatter(_formatter)
+    _file_handler.setFormatter(_formatter)
+    logger.addHandler(_console_handler)
+    logger.addHandler(_file_handler)
+    # Prevent propagating to root logger's handlers (avoid double output)
+    logger.propagate = False
+
+REFERENCE_DIR = BACKEND_DIR.parent / "reference"
 KLIPPER_DOCS_DIR = REFERENCE_DIR / "reference_docs" / "klipper_docs"
 CONFIG_REFERENCE_PATH = KLIPPER_DOCS_DIR / "Config_Reference.md"
 KLIPPER_DOCS_SUMMARY_PATH = KLIPPER_DOCS_DIR / "Klipper_Docs_AI_Summary.md"
@@ -28,6 +55,39 @@ _mcp_server = McpServer()
 # Captures the JSON payload which we parse with json.loads
 MCP_TOOL_BLOCK_RE = re.compile(
     r"```tool\s*\n(.+?)\n```",
+    re.DOTALL,
+)
+# Alternative tool call formats emitted by models that use native
+# function-calling special tokens instead of the fenced ```tool block.
+# This matches <|tool_call|>, <tool_call>, and similar wrappers around
+# JSON or natural-language tool call text.
+# Note: \n is included as a boundary so the regex doesn't eat text
+# that follows the tool call on subsequent lines.
+ALT_TOOL_CALL_CONTENT_RE = re.compile(
+    r"<\|?tool_call\|?>\s*(.*?)(?:</?\|?tool_call\|?>|\n|$)",
+    re.DOTALL,
+)
+# Matches "call tool_name{...}" or "tool_name{...}" for non-JSON tool call text
+CALL_SYNTAX_RE = re.compile(
+    r"(?:^|\n)\s*(?:call[\s:]?\s*)?(\w+)\s*\{(.+)\}",
+    re.DOTALL,
+)
+# Matches Python-style "function_name(arg1=\"val1\", arg2=123)" or
+# "function_name(arg1: \"val1\")" without curly braces
+FUNC_CALL_RE = re.compile(
+    r"(?:^|\n)\s*(?:call[\s:]?\s*)?(\w+)\s*\(" +
+    r"(.+?)" +
+    r"\)\s*(?:\n|$)",
+    re.DOTALL,
+)
+# Cleanup regexes for stripping bare function call text from output.
+# These match on line boundaries to avoid mangling prose.
+CALL_SYNTAX_CLEANUP_RE = re.compile(
+    r"(?:^|\n)\s*(?:call[\s:]?\s*)?\w+\s*\{[^}]*\}\s*(?=\n|$)",
+    re.DOTALL,
+)
+FUNC_CALL_CLEANUP_RE = re.compile(
+    r"(?:^|\n)\s*(?:call[\s:]?\s*)?\w+\s*\([^)]*\)\s*(?=\n|$)",
     re.DOTALL,
 )
 SUMMARY_DOC_FILENAMES = {
@@ -543,6 +603,13 @@ def _prepare_messages(messages: list[dict]) -> list[dict]:
 
     # Append MCP tool context so the model knows what tools are available
     system_parts.append(_build_mcp_tool_context())
+    # Short, high-visibility instruction at the very end of the system prompt
+    # (closest to the user message = most likely to be followed)
+    system_parts.append(
+        "[REQUIRED] Before answering any Klipper question, you MUST call "
+        "`search_klipper_docs` to look up the answer in actual documentation. "
+        "Do not rely on your training data. Always use the tool first."
+    )
 
     prepared: list[dict] = []
 
@@ -557,7 +624,23 @@ def _prepare_messages(messages: list[dict]) -> list[dict]:
             continue
         prepared.append({"role": role, "content": content})
 
-    return [{"role": "system", "content": "\n\n".join(system_parts)}] + prepared
+    system_text = "\n\n".join(system_parts)
+    context_summary = []
+    if klipper_gcode_macro_summary_context:
+        context_summary.append(f"gcode_macro_summary({len(klipper_gcode_macro_summary_context)} chars)")
+    if klipper_docs_summary_context:
+        context_summary.append(f"docs_summary({len(klipper_docs_summary_context)} sections)")
+    if config_reference_context:
+        context_summary.append(f"config_reference({len(config_reference_context)} sections)")
+    if full_klipper_docs_context:
+        context_summary.append(f"full_docs({len(full_klipper_docs_context)} files)")
+    logger.debug(
+        "Prepared messages | system=%d chars context=[%s] user_msgs=%d",
+        len(system_text),
+        ", ".join(context_summary) if context_summary else "none",
+        len(prepared)
+    )
+    return [{"role": "system", "content": system_text}] + prepared
 
 
 # ── MCP Tool Integration ───────────────────────────────────────────
@@ -675,14 +758,25 @@ def _build_mcp_tool_context() -> str:
 def _extract_tool_calls(text: str) -> list[dict]:
     """Extract tool call JSON blocks from a model's response text.
 
-    Looks for fenced code blocks tagged with `tool` and parses
-    the contained JSON as {"name": "...", "arguments": {...}}.
+    Handles several formats:
+      1. ```tool
+         {"name": "...", "arguments": {...}}
+         ```
+      2. <|tool_call|>{"name": "...", "arguments": {...}} or
+         <|tool_call|> call name{arg1="val1", arg2="val2"}
+         (native function-calling token from DeepSeek, Llama 3.1+, Qwen, etc.)
+      3. name(arg1="val1", arg2=123)
+         (Python-style function call without wrapper tokens)
     """
     calls: list[dict] = []
+    seen_contents: set[str] = set()
+
+    # Format 1: standard fenced ```tool block
     for match in MCP_TOOL_BLOCK_RE.finditer(text):
         raw_json = match.group(1).strip()
-        if not raw_json:
+        if not raw_json or raw_json in seen_contents:
             continue
+        seen_contents.add(raw_json)
         try:
             parsed = json.loads(raw_json)
         except json.JSONDecodeError:
@@ -693,7 +787,108 @@ def _extract_tool_calls(text: str) -> list[dict]:
         arguments = parsed.get("arguments", {})
         if name and isinstance(arguments, dict):
             calls.append({"name": name, "arguments": arguments})
+
+    # Format 2: <|tool_call|> or <tool_call> native tokens
+    for match in ALT_TOOL_CALL_CONTENT_RE.finditer(text):
+        content = match.group(1).strip()
+        if not content or content in seen_contents:
+            continue
+        seen_contents.add(content)
+
+        # Try parsing as JSON first
+        parsed: dict | None = None
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            pass
+
+        if isinstance(parsed, dict):
+            name = parsed.get("name", "")
+            arguments = parsed.get("arguments", {})
+            if name and isinstance(arguments, dict):
+                calls.append({"name": name, "arguments": arguments})
+                continue
+
+        # Try parsing "call name{...}" or "name{...}" syntax
+        call_match = CALL_SYNTAX_RE.match(content)
+        if call_match:
+            name = call_match.group(1)
+            args_text = call_match.group(2)
+            if name:
+                arguments = _parse_kwargs(args_text)
+                calls.append({"name": name, "arguments": arguments})
+                continue
+
+        # Try parsing multi-line YAML-style: call:name\nkey: val\nkey2: val2
+        # (used by some Gemma variants)
+        # ALT_TOOL_CALL_CONTENT_RE only captured first line, so read rest
+        # of the tool call from the original text starting after the match.
+        name_match = re.match(r"(?:call[\s:]?\s*)?(\w+)", content)
+        if name_match and name_match.group(1):
+            tool_name = name_match.group(1)
+            # Scan subsequent lines in original text for key:value pairs
+            remaining = text[match.end():]
+            arguments = {}
+            for line in remaining.split("\n"):
+                line = line.strip()
+                if not line:
+                    break  # blank line = end of tool call
+                kv_match = re.match(r"(\w+)\s*[:=]\s*(.+)", line)
+                if kv_match:
+                    key = kv_match.group(1)
+                    val = kv_match.group(2).strip().strip('"').strip("'")
+                    arguments[key] = val
+                else:
+                    break  # non-key:value line = end of tool call
+            if arguments:
+                calls.append({"name": tool_name, "arguments": arguments})
+
+    # Format 3: Python-style name(arg1="val1", arg2=123) (no wrapper tokens)
+    # This is checked on the full text, not inside a tag wrapper.
+    for match in FUNC_CALL_RE.finditer(text):
+        content = match.group(0).strip()
+        if not content or content in seen_contents:
+            continue
+        seen_contents.add(content)
+        name = match.group(1)
+        args_text = match.group(2) if match.lastindex and match.lastindex >= 2 else ""
+        if name:
+            arguments = _parse_kwargs(args_text)
+            calls.append({"name": name, "arguments": arguments})
+
+    # Format 4: name{args} or call name{args} (no wrapper tokens)
+    # Checked on the full text, not inside a tag wrapper.
+    for match in CALL_SYNTAX_RE.finditer(text):
+        content = match.group(0).strip()
+        if not content or content in seen_contents:
+            continue
+        seen_contents.add(content)
+        name = match.group(1)
+        args_text = match.group(2)
+        if name:
+            arguments = _parse_kwargs(args_text)
+            calls.append({"name": name, "arguments": arguments})
+
+    if calls:
+        names = [c["name"] for c in calls]
+        logger.debug("Extracted %d tool call(s): %s", len(calls), names)
     return calls
+
+
+def _parse_kwargs(args_text: str) -> dict:
+    """Parse keyword arguments from text like 'arg1=\"val1\", arg2=123, key=\"value\"'.
+
+    Handles both colon and equals separators, quoted and unquoted values.
+    """
+    arguments: dict = {}
+    for arg_match in re.finditer(
+        r"(\w+)\s*[=:]\s*(.+?)(?:,\s*(?=\w+\s*[=:])|$)",
+        args_text,
+    ):
+        arg_name = arg_match.group(1)
+        arg_value = arg_match.group(2).strip().strip('"').strip("'")
+        arguments[arg_name] = arg_value
+    return arguments
 
 
 def _execute_tool_call(tool_call: dict) -> str:
@@ -776,6 +971,9 @@ def _process_tool_calls_in_response(
     # Strip tool call blocks from the visible response so the user
     # doesn't see raw JSON in the chat UI
     clean_content = MCP_TOOL_BLOCK_RE.sub("", content).strip()
+    clean_content = ALT_TOOL_CALL_CONTENT_RE.sub("", clean_content).strip()
+    clean_content = CALL_SYNTAX_CLEANUP_RE.sub("", clean_content).strip()
+    clean_content = FUNC_CALL_CLEANUP_RE.sub("", clean_content).strip()
 
     for turn_index, tool_call in enumerate(tool_calls[:MAX_MCP_TOOL_TURNS]):
         result_text = _execute_tool_call(tool_call)
@@ -1184,6 +1382,20 @@ async def chat_proxy(req: ChatRequest):
 
     messages = _prepare_messages(req.messages)
 
+    # ── Log request summary ──
+    msg_count = len(messages)
+    system_msgs = [m for m in messages if m.get("role") == "system"]
+    non_system_msgs = [m for m in messages if m.get("role") != "system"]
+    total_chars = sum(len(str(m.get("content", ""))) for m in messages)
+    system_chars = sum(len(str(m.get("content", ""))) for m in system_msgs)
+    query_chars = sum(len(str(m.get("content", ""))) for m in non_system_msgs)
+    logger.info(
+        "Chat request | provider=%s model=%s msgs=%d (sys=%d user=%d) chars=%d (system=%d query=%d)",
+        req.apiProvider.value if hasattr(req.apiProvider, 'value') else req.apiProvider, req.model, msg_count,
+        len(system_msgs), len(non_system_msgs),
+        total_chars, system_chars, query_chars
+    )
+
     # Local providers don't require an API key
     if not _is_local_provider(req.apiProvider) and not req.apiKey:
         return {"error": "AI settings not configured. Please configure your API key in settings."}
@@ -1232,10 +1444,13 @@ async def chat_proxy(req: ChatRequest):
                 "messages": filtered_messages,
             }
     else:
-        # OpenAI-compatible chat providers use the standard messages format
+        # OpenAI-compatible chat providers use the standard messages format.
+        # temperature=0 makes tool call decisions more deterministic.
         payload = {
             "model": req.model,
             "messages": messages,
+            "temperature": 0.1,
+            "max_tokens": 4096,
         }
 
     timeout = httpx.Timeout(connect=15.0, read=None, write=120.0, pool=120.0)
@@ -1391,17 +1606,37 @@ async def chat_proxy(req: ChatRequest):
                     )
                     lm_studio_mcp_metadata = _build_lm_studio_mcp_metadata(None, "openai-compatible")
             else:
+                logger.info(
+                    "Sending to provider | url=%s msgs=%d chars=%d",
+                    req.apiUrl, len(payload.get("messages", [])),
+                    sum(len(str(m.get("content", ""))) for m in payload.get("messages", []))
+                )
                 resp = await client.post(req.apiUrl, headers=headers, json=payload)
                 resp.raise_for_status()
                 data = resp.json()
 
                 error_message = _extract_api_error_message(data)
                 if error_message:
+                    logger.error("Provider returned error | %s", error_message)
                     return {"error": f"API error: {error_message}"}
 
                 content = _extract_provider_content(req.apiProvider, data)
+                logger.info(
+                    "Provider response | chars=%d has_tool_call=%s preview=%s",
+                    len(content) if content else 0,
+                    "yes" if _extract_tool_calls(content or "") else "no",
+                    repr((content or "")[:120])
+                )
 
             if not content:
+                # Log the full response structure when content is empty — this
+                # helps diagnose if the model returned tool_calls or other fields.
+                logger.warning(
+                    "Empty content in provider response | keys=%s finish_reason=%s tool_calls=%s",
+                    list(data.keys()) if isinstance(data, dict) else "N/A",
+                    data.get("choices", [{}])[0].get("finish_reason", "N/A") if isinstance(data, dict) else "N/A",
+                    "yes" if isinstance(data, dict) and data.get("choices", [{}])[0].get("message", {}).get("tool_calls") else "no"
+                )
                 return {"error": "Empty response from API. Make sure a model is loaded in your local server."}
 
             # ── MCP Tool Call Processing Loop ──
@@ -1415,13 +1650,38 @@ async def chat_proxy(req: ChatRequest):
             while tool_turns < MAX_MCP_TOOL_TURNS:
                 tool_calls = _extract_tool_calls(current_content)
                 if not tool_calls:
+                    if tool_turns > 0:
+                        logger.info("Tool call loop done | turns=%d final_chars=%d", tool_turns, len(current_content))
                     break
+
+                logger.info(
+                    "Tool calls detected | turn=%d count=%d first=%s content_preview=%s",
+                    tool_turns + 1, len(tool_calls),
+                    tool_calls[0]["name"],
+                    repr(current_content[:80])
+                )
 
                 # Process all tool calls found in the response
                 for tool_call in tool_calls[:MAX_MCP_TOOL_TURNS]:
                     result_text = _execute_tool_call(tool_call)
+                    logger.info(
+                        "Tool executed | name=%s result_chars=%d",
+                        tool_call["name"], len(result_text)
+                    )
                     tool_message = _build_tool_result_message(tool_call, result_text)
-                    current_messages.append({"role": "assistant", "content": current_content})
+                    # Strip tool call blocks from the assistant message so the
+                    # re-query doesn't confuse native-function-calling models
+                    # (Gemma, Llama 3.1+, Qwen, etc.) with raw special tokens.
+                    clean_content = MCP_TOOL_BLOCK_RE.sub("", current_content).strip()
+                    clean_content = ALT_TOOL_CALL_CONTENT_RE.sub("", clean_content).strip()
+                    clean_content = CALL_SYNTAX_CLEANUP_RE.sub("", clean_content).strip()
+                    clean_content = FUNC_CALL_CLEANUP_RE.sub("", clean_content).strip()
+                    # Only append assistant message if there's actual text content.
+                    # If the model ONLY emitted a tool call (no text), skip the
+                    # assistant message entirely to avoid confusing the model
+                    # with artificial placeholder text during re-query.
+                    if clean_content:
+                        current_messages.append({"role": "assistant", "content": clean_content})
                     current_messages.append({"role": "user", "content": tool_message})
                     tool_turns += 1
 
@@ -1437,6 +1697,7 @@ async def chat_proxy(req: ChatRequest):
                     tool_payload: dict = {
                         "model": req.model,
                         "messages": filtered_messages,
+                        "temperature": 0.1,
                     }
                     if system:
                         tool_payload["system"] = system
@@ -1444,6 +1705,7 @@ async def chat_proxy(req: ChatRequest):
                     tool_payload = {
                         "model": req.model,
                         "messages": current_messages,
+                        "temperature": 0.1,
                     }
 
                 # Re-query (skip LM Studio MCP plugin for tool follow-ups)
@@ -1463,18 +1725,51 @@ async def chat_proxy(req: ChatRequest):
                             client, req.apiUrl, headers, tool_payload
                         )
                 else:
+                    logger.info(
+                        "Re-query | turn=%d msgs=%d chars=%d",
+                        tool_turns, len(tool_payload.get("messages", [])),
+                        sum(len(str(m.get("content", ""))) for m in tool_payload.get("messages", []))
+                    )
                     resp = await client.post(req.apiUrl, headers=headers, json=tool_payload)
                     resp.raise_for_status()
                     data = resp.json()
                     current_content = _extract_provider_content(req.apiProvider, data) or ""
+                    logger.info(
+                        "Re-query response | turn=%d chars=%d has_tool_call=%s preview=%s",
+                        tool_turns, len(current_content),
+                        "yes" if _extract_tool_calls(current_content) else "no",
+                        repr(current_content[:120])
+                    )
 
             # Clean up any remaining tool call blocks in the final content
+            # Check whether the content contained tool call blocks BEFORE cleanup
+            # so we don't restore raw tool call text back into the visible output.
+            had_tool_blocks = bool(
+                MCP_TOOL_BLOCK_RE.search(current_content)
+                or ALT_TOOL_CALL_CONTENT_RE.search(current_content)
+                or CALL_SYNTAX_CLEANUP_RE.search(current_content)
+                or FUNC_CALL_CLEANUP_RE.search(current_content)
+            )
             final_content = MCP_TOOL_BLOCK_RE.sub("", current_content).strip()
-            if not final_content:
+            final_content = ALT_TOOL_CALL_CONTENT_RE.sub("", final_content).strip()
+            final_content = CALL_SYNTAX_CLEANUP_RE.sub("", final_content).strip()
+            final_content = FUNC_CALL_CLEANUP_RE.sub("", final_content).strip()
+            # If the cleanup left nothing but the original was a tool call,
+            # don't restore the raw tool call text — return empty instead.
+            if not final_content and not had_tool_blocks:
                 final_content = current_content
 
             # Collect tool names used during the MCP tool loop
             mcp_tool_names = _collect_tool_names(current_messages)
+
+            logger.info(
+                "Returning response | final_chars=%d tool_turns=%d tools=%s empty=%s",
+                len(final_content), tool_turns,
+                mcp_tool_names or [],
+                "yes" if not final_content else "no"
+            )
+            if not final_content:
+                logger.warning("Empty final content after %d tool turns", tool_turns)
 
             if req.apiProvider == "lm-studio":
                 return {
@@ -1491,9 +1786,11 @@ async def chat_proxy(req: ChatRequest):
                 "mcpToolNames": mcp_tool_names,
             }
         except ValueError as e:
+            logger.error("API error | %s", str(e))
             return {"error": f"API error: {str(e)}"}
         except httpx.TimeoutException:
+            logger.error("Request timed out")
             return {"error": "API request timed out before the model finished responding."}
         except httpx.HTTPError as e:
+            logger.error("HTTP error | %s", str(e))
             return {"error": f"API request failed: {str(e)}"}
-print('DEBUG: File reloaded')
