@@ -39,3 +39,11 @@ reports/
 
 # IDE & Editor
 .vscode/settings.json
+
+# Pi agent workspace config
+.pi/
+
+# Temp / debug files
+temp_*.py
+*.tmp
+nul
