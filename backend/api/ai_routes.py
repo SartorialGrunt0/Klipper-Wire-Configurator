@@ -2,7 +2,6 @@
 import json
 import logging
 from enum import Enum
-from functools import lru_cache
 from pathlib import Path
 import re
 from urllib.parse import urlparse, urlunparse
@@ -40,13 +39,7 @@ if not logger.handlers:
     # Prevent propagating to root logger's handlers (avoid double output)
     logger.propagate = False
 
-REFERENCE_DIR = BACKEND_DIR.parent / "reference"
-KLIPPER_DOCS_DIR = REFERENCE_DIR / "reference_docs" / "klipper_docs"
-CONFIG_REFERENCE_PATH = KLIPPER_DOCS_DIR / "Config_Reference.md"
-KLIPPER_DOCS_SUMMARY_PATH = KLIPPER_DOCS_DIR / "Klipper_Docs_AI_Summary.md"
-KLIPPER_GCODE_MACRO_SUMMARY_PATH = KLIPPER_DOCS_DIR / "Klipper_GCode_Macro_AI_Summary.md"
-OFFICIAL_CONFIG_REFERENCE_URL = "https://www.klipper3d.org/Config_Reference.html"
-OFFICIAL_KLIPPER_DOC_URL_TEMPLATE = "https://www.klipper3d.org/{document_name}.html"
+
 
 # ── Embedded MCP server for tool access ──
 _mcp_server = McpServer()
@@ -90,82 +83,7 @@ FUNC_CALL_CLEANUP_RE = re.compile(
     r"(?:^|\n)\s*(?:call[\s:]?\s*)?\w+\s*\([^)]*\)\s*(?=\n|$)",
     re.DOTALL,
 )
-SUMMARY_DOC_FILENAMES = {
-    KLIPPER_DOCS_SUMMARY_PATH.name,
-    KLIPPER_GCODE_MACRO_SUMMARY_PATH.name,
-}
-QUERY_STOP_WORDS = {
-    "a",
-    "an",
-    "and",
-    "are",
-    "can",
-    "cfg",
-    "config",
-    "configuration",
-    "do",
-    "for",
-    "from",
-    "help",
-    "how",
-    "i",
-    "in",
-    "is",
-    "it",
-    "klipper",
-    "me",
-    "my",
-    "of",
-    "on",
-    "or",
-    "please",
-    "printer",
-    "set",
-    "settings",
-    "show",
-    "tell",
-    "that",
-    "the",
-    "this",
-    "to",
-    "use",
-    "what",
-    "with",
-}
-MAX_CONFIG_REFERENCE_RESULTS = 3
-MAX_CONFIG_REFERENCE_SECTION_CHARS = 3200
-MAX_KLIPPER_GCODE_MACRO_SUMMARY_CHARS = 12000
-MAX_KLIPPER_DOCS_SUMMARY_RESULTS = 4
-MAX_KLIPPER_DOCS_SUMMARY_SECTION_CHARS = 2800
-MAX_FULL_KLIPPER_DOC_RESULTS = 2
-MAX_REFERENCE_LOOKBACK_USER_MESSAGES = 3
-MAX_REFERENCE_LOOKUP_QUERY_CHARS = 1800
-CONFIG_REFERENCE_SECTION_RE = re.compile(r"^### \[([^\]]+)\]\s*$", re.MULTILINE)
-CONFIG_REFERENCE_ALIAS_RE = re.compile(r"^\[([^\]]+)\]\s*$", re.MULTILINE)
-KLIPPER_DOCS_SUMMARY_SECTION_RE = re.compile(r"^## (?!#)(.+?)\s*$", re.MULTILINE)
-REFERENCE_ALIASES_RE = re.compile(r"^Aliases:\s*(.+)\s*$", re.MULTILINE)
-REFERENCE_SOURCE_DOCS_RE = re.compile(r"^Source docs:\s*(.+)\s*$", re.MULTILINE)
-FULL_DOC_REQUEST_WORDS = {"complete", "entire", "full", "raw"}
-FULL_DOC_TARGET_WORDS = {
-    "content",
-    "contents",
-    "doc",
-    "docs",
-    "document",
-    "markdown",
-    "reference",
-    "section",
-    "source",
-}
-GCODE_MACRO_TRIGGER_WORDS = {
-    "delayed_gcode",
-    "g-code",
-    "gcode",
-    "gcode_macro",
-    "macro",
-    "macros",
-}
-GCODE_COMMAND_LIKE_RE = re.compile(r"\b(?:[GMTO]\d+|[A-Z][A-Z0-9]*_[A-Z0-9_]+)\b")
+
 LM_STUDIO_KLIPPER_DOCS_PLUGIN_ID = "mcp/klipper-docs"
 LM_STUDIO_MAX_INPUT_CHARS = 48000
 LM_STUDIO_MAX_HISTORY_MESSAGES = 16
@@ -199,24 +117,7 @@ SYSTEM_PROMPT = (
     "8. Keep prose short. After config or macro code, briefly explain what changed, why, and cite the exact documentation section header and parameter or command names you relied on.\n"
     "9. If no safe grounded answer is possible, say what must be verified next instead of guessing."
 )
-DOCS_GROUNDING_PROMPT = (
-    "Ground all Klipper configuration guidance in documentation before answering. "
-    "If your runtime exposes a `klipper-docs` MCP server or tool, call it first for "
-    "configuration questions. If the tool is unavailable or the tool call fails, use "
-    f"the official Klipper Config Reference at {OFFICIAL_CONFIG_REFERENCE_URL}. "
-    "Treat any bundled Klipper_GCode_Macro_AI_Summary excerpts as compact G-code and "
-    "macro grounding, any bundled Klipper_Docs_AI_Summary excerpts as condensed routing "
-    "notes, and any bundled Config_Reference excerpts included in this prompt as authoritative "
-    "offline reference material for section names and parameters. For macro requests, prefer "
-    "the macro summary first and then the supporting docs excerpts. If the summary is not "
-    "enough, ask for the full Klipper source document by filename; if local markdown is "
-    "unavailable, use https://www.klipper3d.org/<document_name>.html. Do not invent "
-    "section names, parameters, defaults, units, commands, or supported behavior. If "
-    "the docs do not confirm a detail, say that explicitly and ask one short clarifying "
-    "question or state what must be verified. When suggesting config changes, use the "
-    "exact Klipper section headers and parameter names from the docs, prefer minimal "
-    "edits over full-file rewrites, and keep macro state handling explicit and safe."
-)
+
 
 
 class AiProvider(str, Enum):
@@ -243,279 +144,8 @@ class ChatRequest(BaseModel):
     lmStudioMcpPluginId: str | None = None
 
 
-def _tokenize_query(text: str) -> list[str]:
-    tokens = re.findall(r"[a-z0-9_\-]{2,}", text.lower())
-    return [token for token in tokens if token not in QUERY_STOP_WORDS]
-
-
-def _read_reference_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8", errors="replace")
-
-
-def _extract_markdown_sections(content: str, section_re: re.Pattern[str]) -> list[tuple[str, str]]:
-    matches = list(section_re.finditer(content))
-    sections: list[tuple[str, str]] = []
-
-    for index, match in enumerate(matches):
-        header = match.group(1).strip()
-        start = match.start()
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(content)
-        sections.append((header, content[start:end].strip()))
-
-    return sections
-
-
-def _split_reference_csv(value: str) -> tuple[str, ...]:
-    return tuple(item.strip() for item in value.split(",") if item.strip())
-
-
-def _build_doc_aliases(document_name: str) -> set[str]:
-    stem = Path(document_name).stem
-    spaced_stem = stem.replace("_", " ").replace("-", " ")
-    aliases = {
-        document_name,
-        stem,
-        spaced_stem,
-        spaced_stem.replace(" ", ""),
-    }
-    return {alias for alias in aliases if alias}
-
-
-def _build_official_klipper_doc_url(document_name: str) -> str:
-    return OFFICIAL_KLIPPER_DOC_URL_TEMPLATE.format(document_name=Path(document_name).stem)
-
-
-@lru_cache(maxsize=1)
-def _load_klipper_gcode_macro_summary() -> str:
-    if not KLIPPER_GCODE_MACRO_SUMMARY_PATH.exists():
-        return ""
-
-    try:
-        return _read_reference_text(KLIPPER_GCODE_MACRO_SUMMARY_PATH)
-    except OSError:
-        return ""
-
-
-@lru_cache(maxsize=1)
-def _load_config_reference_sections() -> list[tuple[str, str, set[str]]]:
-    if not CONFIG_REFERENCE_PATH.exists():
-        return []
-
-    try:
-        content = _read_reference_text(CONFIG_REFERENCE_PATH)
-    except OSError:
-        return []
-
-    sections: list[tuple[str, str, set[str]]] = []
-
-    for header, section_text in _extract_markdown_sections(content, CONFIG_REFERENCE_SECTION_RE):
-        aliases = {header}
-        aliases.update(alias.strip() for alias in CONFIG_REFERENCE_ALIAS_RE.findall(section_text))
-        sections.append((header, section_text, {alias for alias in aliases if alias}))
-
-    return sections
-
-
-@lru_cache(maxsize=1)
-def _load_klipper_docs_summary_sections() -> list[tuple[str, str, set[str], tuple[str, ...]]]:
-    if not KLIPPER_DOCS_SUMMARY_PATH.exists():
-        return []
-
-    try:
-        content = _read_reference_text(KLIPPER_DOCS_SUMMARY_PATH)
-    except OSError:
-        return []
-
-    sections: list[tuple[str, str, set[str], tuple[str, ...]]] = []
-
-    for header, section_text in _extract_markdown_sections(content, KLIPPER_DOCS_SUMMARY_SECTION_RE):
-        aliases = {header}
-        alias_match = REFERENCE_ALIASES_RE.search(section_text)
-        if alias_match:
-            aliases.update(_split_reference_csv(alias_match.group(1)))
-
-        source_docs: tuple[str, ...] = ()
-        source_docs_match = REFERENCE_SOURCE_DOCS_RE.search(section_text)
-        if source_docs_match:
-            source_docs = _split_reference_csv(source_docs_match.group(1))
-            for document_name in source_docs:
-                aliases.update(_build_doc_aliases(document_name))
-
-        sections.append((header, section_text, {alias for alias in aliases if alias}, source_docs))
-
-    return sections
-
-
-@lru_cache(maxsize=1)
-def _load_klipper_doc_catalog() -> list[tuple[str, Path, set[str]]]:
-    if not KLIPPER_DOCS_DIR.exists():
-        return []
-
-    catalog: list[tuple[str, Path, set[str]]] = []
-    for path in sorted(KLIPPER_DOCS_DIR.glob("*.md")):
-        if path.name in SUMMARY_DOC_FILENAMES:
-            continue
-        catalog.append((path.name, path, _build_doc_aliases(path.name)))
-
-    return catalog
-
-
-def _normalize_lookup_text(text: str) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
-
-
-def _score_reference_section(query_text: str, aliases: set[str]) -> int:
-    query_words = set(query_text.split())
-    score = 0
-
-    for alias in aliases:
-        alias_text = _normalize_lookup_text(alias)
-        if not alias_text:
-            continue
-
-        alias_words = set(alias_text.split())
-        if query_text == alias_text:
-            score = max(score, 100)
-            continue
-        if alias_text in query_text:
-            score = max(score, 70)
-            continue
-        if alias_words and alias_words.issubset(query_words):
-            score = max(score, 50)
-            continue
-
-        overlap = len(alias_words & query_words)
-        if overlap:
-            score = max(score, overlap * 10)
-
-    return score
-
-
-def _trim_reference_section(section_text: str, max_chars: int) -> str:
-    if len(section_text) <= max_chars:
-        return section_text
-
-    return (
-        f"{section_text[:max_chars].rstrip()}\n\n"
-        f"[Section truncated after {max_chars} characters.]"
-    )
-
-
-def _get_config_reference_context(query: str, limit: int = MAX_CONFIG_REFERENCE_RESULTS) -> list[str]:
-    query_text = _normalize_lookup_text(query)
-    if not query_text:
-        return []
-
-    scored_sections: list[tuple[int, str]] = []
-
-    for _header, section_text, aliases in _load_config_reference_sections():
-        score = _score_reference_section(query_text, aliases)
-        if score == 0:
-            continue
-
-        scored_sections.append((score, _trim_reference_section(section_text, MAX_CONFIG_REFERENCE_SECTION_CHARS)))
-
-    scored_sections.sort(key=lambda item: item[0], reverse=True)
-    return [section_text for _, section_text in scored_sections[:limit]]
-
-
-def _get_scored_klipper_docs_summary_sections(query: str) -> list[tuple[int, str, tuple[str, ...]]]:
-    query_text = _normalize_lookup_text(query)
-    if not query_text:
-        return []
-
-    scored_sections: list[tuple[int, str, tuple[str, ...]]] = []
-
-    for _header, section_text, aliases, source_docs in _load_klipper_docs_summary_sections():
-        score = _score_reference_section(query_text, aliases)
-        if score == 0:
-            continue
-        scored_sections.append((score, section_text, source_docs))
-
-    scored_sections.sort(key=lambda item: item[0], reverse=True)
-    return scored_sections
-
-
-def _get_klipper_docs_summary_context(query: str, limit: int = MAX_KLIPPER_DOCS_SUMMARY_RESULTS) -> list[str]:
-    return [
-        _trim_reference_section(section_text, MAX_KLIPPER_DOCS_SUMMARY_SECTION_CHARS)
-        for _score, section_text, _source_docs in _get_scored_klipper_docs_summary_sections(query)[:limit]
-    ]
-
-
-def _query_mentions_gcode_or_macro(query: str) -> bool:
-    return bool(set(_tokenize_query(query)) & GCODE_MACRO_TRIGGER_WORDS) or bool(
-        GCODE_COMMAND_LIKE_RE.search(query)
-    )
-
-
-def _get_klipper_gcode_macro_summary_context(query: str) -> str | None:
-    if not _query_mentions_gcode_or_macro(query):
-        return None
-
-    summary_text = _load_klipper_gcode_macro_summary().strip()
-    if not summary_text:
-        return None
-
-    return _trim_reference_section(summary_text, MAX_KLIPPER_GCODE_MACRO_SUMMARY_CHARS)
-
-
-def _query_requests_full_doc(query: str) -> bool:
-    query_tokens = set(_tokenize_query(query))
-    return bool(query_tokens & FULL_DOC_REQUEST_WORDS) and bool(query_tokens & FULL_DOC_TARGET_WORDS)
-
-
-def _get_requested_klipper_doc_names(query: str, limit: int = MAX_FULL_KLIPPER_DOC_RESULTS) -> list[str]:
-    query_text = _normalize_lookup_text(query)
-    if not query_text:
-        return []
-
-    scored_docs: list[tuple[int, str]] = []
-    for document_name, _path, aliases in _load_klipper_doc_catalog():
-        score = _score_reference_section(query_text, aliases)
-        if score == 0:
-            continue
-        scored_docs.append((score, document_name))
-
-    scored_docs.sort(key=lambda item: (-item[0], item[1]))
-    return [document_name for _score, document_name in scored_docs[:limit]]
-
-
-def _get_full_klipper_docs_context(query: str, limit: int = MAX_FULL_KLIPPER_DOC_RESULTS) -> list[str]:
-    if not _query_requests_full_doc(query):
-        return []
-
-    document_names = _get_requested_klipper_doc_names(query, limit=limit)
-    if not document_names:
-        for _score, _section_text, source_docs in _get_scored_klipper_docs_summary_sections(query):
-            for document_name in source_docs:
-                if document_name in document_names:
-                    continue
-                document_names.append(document_name)
-                if len(document_names) >= limit:
-                    break
-            if len(document_names) >= limit:
-                break
-
-    contexts: list[str] = []
-    for document_name in document_names[:limit]:
-        document_path = KLIPPER_DOCS_DIR / document_name
-        if not document_path.exists():
-            continue
-        try:
-            document_text = _read_reference_text(document_path)
-        except OSError:
-            continue
-        contexts.append(
-            f"Full bundled Klipper document: {document_name}\n"
-            f"Official HTML mirror: {_build_official_klipper_doc_url(document_name)}\n\n"
-            f"{document_text}"
-        )
-
-    return contexts
-
-
 def _build_reference_lookup_query(messages: list[dict]) -> str:
+    """Build a query string from the most recent user messages."""
     recent_user_messages: list[str] = []
 
     for msg in reversed(messages):
@@ -527,16 +157,16 @@ def _build_reference_lookup_query(messages: list[dict]) -> str:
             continue
 
         recent_user_messages.append(content)
-        if len(recent_user_messages) >= MAX_REFERENCE_LOOKBACK_USER_MESSAGES:
+        if len(recent_user_messages) >= 3:
             break
 
     if not recent_user_messages:
         return ""
 
     combined = "\n\n".join(reversed(recent_user_messages))
-    if len(combined) <= MAX_REFERENCE_LOOKUP_QUERY_CHARS:
+    if len(combined) <= 1800:
         return combined
-    return combined[-MAX_REFERENCE_LOOKUP_QUERY_CHARS:]
+    return combined[-1800:]
 
 
 def _is_local_provider(provider: str) -> bool:
@@ -562,57 +192,17 @@ def _get_openai_compatible_default_url(provider: str) -> str:
 
 
 def _prepare_messages(messages: list[dict]) -> list[dict]:
-    system_parts = [SYSTEM_PROMPT, DOCS_GROUNDING_PROMPT]
-    reference_lookup_query = _build_reference_lookup_query(messages)
-    klipper_gcode_macro_summary_context = _get_klipper_gcode_macro_summary_context(reference_lookup_query)
-    klipper_docs_summary_context = _get_klipper_docs_summary_context(reference_lookup_query)
-    config_reference_context = _get_config_reference_context(reference_lookup_query)
-    full_klipper_docs_context = _get_full_klipper_docs_context(reference_lookup_query)
-    if klipper_gcode_macro_summary_context:
-        system_parts.append(
-            "Bundled Klipper_GCode_Macro_AI_Summary.md injected because the recent user request explicitly mentioned G-code or macros:\n\n"
-            + klipper_gcode_macro_summary_context
-        )
-    if klipper_docs_summary_context:
-        system_parts.append(
-            "Relevant sections from the bundled Klipper_Docs_AI_Summary.md for the recent user request(s):\n\n"
-            + "\n\n---\n\n".join(klipper_docs_summary_context)
-        )
-    if config_reference_context:
-        system_parts.append(
-            "Relevant sections from the bundled Config_Reference.md for the recent user request(s):\n\n"
-            + "\n\n---\n\n".join(config_reference_context)
-        )
-    if full_klipper_docs_context:
-        system_parts.append(
-            "Full bundled Klipper markdown document(s) requested explicitly by the user:\n\n"
-            + "\n\n---\n\n".join(full_klipper_docs_context)
-        )
-    if (
-        not klipper_gcode_macro_summary_context
-        and not klipper_docs_summary_context
-        and not config_reference_context
-        and not full_klipper_docs_context
-    ):
-        system_parts.append(
-            "No bundled Klipper docs summary, Config_Reference, or full-document excerpts were matched "
-            "for the recent user request(s). "
-            f"If you cannot use `klipper-docs`, fall back to {OFFICIAL_CONFIG_REFERENCE_URL} "
-            "and avoid guessing."
-        )
+    """Build a clean system prompt with MCP tool descriptions and user messages.
 
-    # Append MCP tool context so the model knows what tools are available
-    system_parts.append(_build_mcp_tool_context())
-    # Short, high-visibility instruction at the very end of the system prompt
-    # (closest to the user message = most likely to be followed)
+    No longer injects keyword-matched doc excerpts — the model fetches
+    documentation on demand via MCP tools (search_klipper_docs, etc.).
+    """
+    system_parts = [SYSTEM_PROMPT, _build_mcp_tool_context()]
     system_parts.append(
-        "[REQUIRED] Before answering any Klipper question, you MUST call "
-        "`search_klipper_docs` to look up the answer in actual documentation. "
-        "Do not rely on your training data. Always use the tool first."
+        "Use the tools you have available to help you answer the following question."
     )
 
     prepared: list[dict] = []
-
     for msg in messages:
         role = msg.get("role")
         content = str(msg.get("content", "")).strip()
@@ -625,20 +215,9 @@ def _prepare_messages(messages: list[dict]) -> list[dict]:
         prepared.append({"role": role, "content": content})
 
     system_text = "\n\n".join(system_parts)
-    context_summary = []
-    if klipper_gcode_macro_summary_context:
-        context_summary.append(f"gcode_macro_summary({len(klipper_gcode_macro_summary_context)} chars)")
-    if klipper_docs_summary_context:
-        context_summary.append(f"docs_summary({len(klipper_docs_summary_context)} sections)")
-    if config_reference_context:
-        context_summary.append(f"config_reference({len(config_reference_context)} sections)")
-    if full_klipper_docs_context:
-        context_summary.append(f"full_docs({len(full_klipper_docs_context)} files)")
     logger.debug(
-        "Prepared messages | system=%d chars context=[%s] user_msgs=%d",
-        len(system_text),
-        ", ".join(context_summary) if context_summary else "none",
-        len(prepared)
+        "Prepared messages | system=%d chars user_msgs=%d",
+        len(system_text), len(prepared)
     )
     return [{"role": "system", "content": system_text}] + prepared
 
@@ -753,6 +332,42 @@ def _build_mcp_tool_context() -> str:
     )
 
     return "\n".join(parts)
+
+
+# ── Auto-search fallback ────────────────────────────────────────────
+
+AUTO_SEARCH_FALLBACK_MAX_CHARS = 4000
+
+
+def _auto_search_context(query: str) -> str | None:
+    """Search Klipper docs using the MCP index and return a concise context block.
+
+    Used as a fallback when the model doesn't call tools on its own.
+    Returns a tool-result-style string with snippets, or None if no results.
+    """
+    index = get_index()
+    if not index.is_ready():
+        return None
+
+    results = index.search(query, limit=3)
+    if not results:
+        return None
+
+    parts: list[str] = []
+    total = 0
+    for r in results:
+        snippet = r["snippet"]
+        header = f"From {r['filename']} (score {r['score']}):\n"
+        block = header + snippet
+        if total + len(block) > AUTO_SEARCH_FALLBACK_MAX_CHARS:
+            break
+        parts.append(block)
+        total += len(block)
+
+    if not parts:
+        return None
+
+    return "\n\n---\n\n".join(parts)
 
 
 def _extract_tool_calls(text: str) -> list[dict]:
@@ -1646,6 +1261,80 @@ async def chat_proxy(req: ChatRequest):
             tool_turns = 0
             current_content = content
             current_messages = list(messages)
+
+            # ── Auto-search fallback ──
+            # If the model didn't call any tools on the first pass, do a backend
+            # search and inject the results so it still gets grounded docs even
+            # if it doesn't support tool calling.
+            if not _extract_tool_calls(current_content):
+                reference_query = _build_reference_lookup_query(req.messages)
+                auto_context = _auto_search_context(reference_query)
+                if auto_context:
+                    logger.info(
+                        "Auto-search fallback triggered | query_chars=%d result_chars=%d",
+                        len(reference_query), len(auto_context)
+                    )
+                    tool_message = _build_tool_result_message(
+                        {"name": "search_klipper_docs", "arguments": {"query": reference_query}},
+                        auto_context,
+                    )
+                    current_messages.append({"role": "assistant", "content": current_content})
+                    current_messages.append({"role": "user", "content": tool_message})
+                    tool_turns += 1
+
+                    # Re-query the model with the injected search results
+                    if req.apiProvider == "anthropic":
+                        system = None
+                        filtered_messages = []
+                        for msg in current_messages:
+                            if msg.get("role") == "system":
+                                system = msg["content"]
+                            else:
+                                filtered_messages.append(msg)
+                        tool_payload: dict = {
+                            "model": req.model,
+                            "messages": filtered_messages,
+                            "temperature": 0.1,
+                        }
+                        if system:
+                            tool_payload["system"] = system
+                    else:
+                        tool_payload = {
+                            "model": req.model,
+                            "messages": current_messages,
+                            "temperature": 0.1,
+                        }
+
+                    if req.apiProvider == "lm-studio" and req.apiKey:
+                        lm_studio_url = _build_lm_studio_chat_url(req.apiUrl)
+                        lm_studio_payload = _build_lm_studio_chat_payload(
+                            current_messages, req.model, None
+                        )
+                        try:
+                            resp = await client.post(lm_studio_url, headers=headers, json=lm_studio_payload)
+                            resp.raise_for_status()
+                            data = resp.json()
+                            current_content = _extract_lm_studio_message_content(data) or ""
+                        except Exception:
+                            data, current_content = await _post_openai_compatible_chat(
+                                client, req.apiUrl, headers, tool_payload
+                            )
+                    else:
+                        logger.info(
+                            "Auto-search re-query | msgs=%d chars=%d",
+                            len(tool_payload.get("messages", [])),
+                            sum(len(str(m.get("content", ""))) for m in tool_payload.get("messages", []))
+                        )
+                        resp = await client.post(req.apiUrl, headers=headers, json=tool_payload)
+                        resp.raise_for_status()
+                        data = resp.json()
+                        current_content = _extract_provider_content(req.apiProvider, data) or ""
+                        logger.info(
+                            "Auto-search re-query response | chars=%d has_tool_call=%s preview=%s",
+                            len(current_content),
+                            "yes" if _extract_tool_calls(current_content) else "no",
+                            repr(current_content[:120])
+                        )
 
             while tool_turns < MAX_MCP_TOOL_TURNS:
                 tool_calls = _extract_tool_calls(current_content)
