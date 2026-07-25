@@ -165,9 +165,13 @@ export default function AiDraftPreviewDialog({
                   {selected ? '✓' : ''}
                 </span>
                 <span
-                  className={change.mode === 'add' ? 'text-green-400' : 'text-[var(--color-accent)]'}
+                  className={
+                    change.mode === 'add' ? 'text-green-400' :
+                    change.mode === 'delete' ? 'text-red-400' :
+                    'text-[var(--color-accent)]'
+                  }
                 >
-                  {change.mode === 'add' ? 'new' : 'update'}
+                  {change.mode === 'add' ? 'new' : change.mode === 'delete' ? 'delete' : 'update'}
                 </span>
                 <span className="text-[var(--color-text-secondary)]">{change.filename}</span>
                 <span>{change.fullHeader}</span>
