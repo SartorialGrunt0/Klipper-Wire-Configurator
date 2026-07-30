@@ -7,7 +7,7 @@
  *
  * Props mirror the editing state from ChatDialog so there's a single source of truth.
  */
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useAiStore, AiProvider, providerRequiresApiKey } from '../../stores/aiStore';
 import * as api from '../../services/api';
 import {
@@ -59,6 +59,7 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState<string | null>(null);
+  const modelsFetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const fetchAvailableModels = async (
     provider: AiProvider = editApiProvider,
@@ -206,7 +207,14 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
             type="text"
             className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
             value={editHost}
-            onChange={(e) => setEditHost(e.target.value)}
+            onChange={(e) => {
+              setEditHost(e.target.value);
+              setModelsError(null);
+              if (modelsFetchTimerRef.current) clearTimeout(modelsFetchTimerRef.current);
+              modelsFetchTimerRef.current = setTimeout(() => {
+                void fetchAvailableModels(editApiProvider, resolvedEditApiUrl, editApiKey);
+              }, 500);
+            }}
             placeholder="localhost"
           />
         </div>
@@ -216,7 +224,14 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
             type="text"
             className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
             value={editPort}
-            onChange={(e) => setEditPort(e.target.value)}
+            onChange={(e) => {
+              setEditPort(e.target.value);
+              setModelsError(null);
+              if (modelsFetchTimerRef.current) clearTimeout(modelsFetchTimerRef.current);
+              modelsFetchTimerRef.current = setTimeout(() => {
+                void fetchAvailableModels(editApiProvider, resolvedEditApiUrl, editApiKey);
+              }, 500);
+            }}
             placeholder="1234"
           />
         </div>
