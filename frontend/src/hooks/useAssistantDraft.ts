@@ -63,7 +63,6 @@ interface ChatRequestBase {
   model: string;
   apiUrl: string;
   apiProvider: AiProvider;
-  lmStudioMcpPluginId?: string;
 }
 
 interface SubmitMessageOptions {
@@ -360,7 +359,6 @@ export function useAssistantDraft(deps: {
       let assistantMessage: ChatMessage = {
         role: 'assistant',
         content: response.content || 'No response.',
-        lmStudioMcp: response.lmStudioMcp,
         lmStudioContext: response.lmStudioContext,
         mcpToolNames: response.mcpToolNames,
       };
@@ -392,7 +390,6 @@ export function useAssistantDraft(deps: {
             assistantMessage = {
               role: 'assistant',
               content: followUpResponse.content || assistantMessage.content,
-              lmStudioMcp: followUpResponse.lmStudioMcp ?? assistantMessage.lmStudioMcp,
               lmStudioContext: followUpResponse.lmStudioContext ?? assistantMessage.lmStudioContext,
               autoLoadedDocs: loadedDocs.map((d) => d.filename),
               mcpToolNames: followUpResponse.mcpToolNames ?? assistantMessage.mcpToolNames,
@@ -427,7 +424,6 @@ export function useAssistantDraft(deps: {
           assistantMessage = {
             role: 'assistant',
             content: rewriteResponse.content || assistantMessage.content,
-            lmStudioMcp: rewriteResponse.lmStudioMcp ?? assistantMessage.lmStudioMcp,
             lmStudioContext: rewriteResponse.lmStudioContext ?? assistantMessage.lmStudioContext,
             autoLoadedDocs: assistantMessage.autoLoadedDocs,
             mcpToolNames: rewriteResponse.mcpToolNames ?? assistantMessage.mcpToolNames,

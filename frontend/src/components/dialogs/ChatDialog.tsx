@@ -131,7 +131,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   const [editApiProvider, setEditApiProvider] = useState<AiProvider>(settings.apiProvider);
   const [editLmStudioHost, setEditLmStudioHost] = useState(settings.lmStudioHost);
   const [editLmStudioPort, setEditLmStudioPort] = useState(settings.lmStudioPort);
-  const [editLmStudioMcpPluginId, setEditLmStudioMcpPluginId] = useState(settings.lmStudioMcpPluginId);
   const [editOllamaHost, setEditOllamaHost] = useState(settings.ollamaHost);
   const [editOllamaPort, setEditOllamaPort] = useState(settings.ollamaPort);
 
@@ -162,7 +161,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       setEditApiProvider(settings.apiProvider);
       setEditLmStudioHost(settings.lmStudioHost);
       setEditLmStudioPort(settings.lmStudioPort);
-      setEditLmStudioMcpPluginId(settings.lmStudioMcpPluginId);
       setEditOllamaHost(settings.ollamaHost);
       setEditOllamaPort(settings.ollamaPort);
       setError(null);
@@ -211,7 +209,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       apiProvider: editApiProvider,
       lmStudioHost: editLmStudioHost,
       lmStudioPort: editLmStudioPort,
-      lmStudioMcpPluginId: editLmStudioMcpPluginId,
       ollamaHost: editOllamaHost,
       ollamaPort: editOllamaPort,
     });
@@ -220,7 +217,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     editApiKey,
     editApiProvider,
     editLmStudioHost,
-    editLmStudioMcpPluginId,
     editLmStudioPort,
     editModel,
     editOllamaHost,
@@ -310,7 +306,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           model: editModel,
           apiUrl: resolvedEditApiUrl,
           apiProvider: editApiProvider,
-          lmStudioMcpPluginId: editApiProvider === 'lm-studio' ? editLmStudioMcpPluginId : undefined,
         };
 
         // Build context messages
@@ -380,7 +375,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       setAssistantDraftApplicableMessages,
       editApiKey,
       editApiProvider,
-      editLmStudioMcpPluginId,
+
       editModel,
       getConfigContexts,
       loading,
@@ -458,8 +453,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     setEditLmStudioHost,
     editLmStudioPort,
     setEditLmStudioPort,
-    editLmStudioMcpPluginId,
-    setEditLmStudioMcpPluginId,
+
     editOllamaHost,
     setEditOllamaHost,
     editOllamaPort,

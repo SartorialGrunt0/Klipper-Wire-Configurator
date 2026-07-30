@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 
-import type { LmStudioContextStatus, LmStudioMcpStatus } from '../types/ai';
+import type { LmStudioContextStatus } from '../types/ai';
 
 const STORAGE_KEY = 'klipper-wire-ai-state';
 const LEGACY_SETTINGS_KEY = 'klipper-wire-ai-settings';
@@ -13,7 +13,6 @@ export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
   hiddenFromUser?: boolean;
-  lmStudioMcp?: LmStudioMcpStatus;
   lmStudioContext?: LmStudioContextStatus;
   autoLoadedDocs?: string[];
   mcpToolNames?: string[];
@@ -27,7 +26,7 @@ export interface AiSettings {
   apiProvider: AiProvider;
   lmStudioHost: string;
   lmStudioPort: string;
-  lmStudioMcpPluginId: string;
+
   ollamaHost: string;
   ollamaPort: string;
 }
@@ -144,7 +143,7 @@ const DEFAULT_SETTINGS: AiSettings = {
   apiProvider: DEFAULT_PROVIDER,
   lmStudioHost: 'localhost',
   lmStudioPort: '1234',
-  lmStudioMcpPluginId: 'mcp/klipper-docs',
+
   ollamaHost: 'localhost',
   ollamaPort: '11434',
 };

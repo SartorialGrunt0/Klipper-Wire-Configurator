@@ -5,7 +5,7 @@
  * the ChatDialog component to reduce file size and improve testability.
  */
 import type { ValidationError, ValidationResult, ConfigFile, ConfigSection } from '../types/config';
-import type { LmStudioContextStatus, LmStudioMcpStatus } from '../types/ai';
+import type { LmStudioContextStatus } from '../types/ai';
 import type { AiProvider } from '../stores/aiStore';
 
 // ── Provider Configuration ──────────────────────────────────────────
@@ -298,43 +298,6 @@ export function resolveAssistantTargetFile(
   if (bestScore.exactMatches > 0 || bestScore.sectionTypeMatches > 0) return bestScore.filename;
   if (configFiles[activeFile]) return activeFile;
   return availableFilenames[0] ?? null;
-}
-
-// ── LM Studio Status Presentation ──────────────────────────────────
-
-export function getLmStudioMcpStatusPresentation(status: LmStudioMcpStatus): {
-  label: string;
-  className: string;
-  title: string;
-} {
-  const pluginText = status.pluginId ?? 'disabled';
-  if (!status.requested) {
-    return {
-      label: 'Docs MCP off',
-      className: 'border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]',
-      title: 'LM Studio docs MCP was disabled for this request.',
-    };
-  }
-  if (status.fallbackUsed) {
-    return {
-      label: 'Docs MCP fallback',
-      className: 'border-amber-500/30 bg-amber-500/10 text-amber-300',
-      title: `${status.fallbackReason ?? 'The proxy retried on the OpenAI-compatible endpoint.'} Plugin: ${pluginText}.`,
-    };
-  }
-  if (status.toolUsed) {
-    const toolText = status.toolNames.length > 0 ? ` Tools: ${status.toolNames.join(', ')}.` : '';
-    return {
-      label: 'Docs MCP used',
-      className: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300',
-      title: `LM Studio used ${pluginText} through /api/v1/chat.${toolText}`,
-    };
-  }
-  return {
-    label: 'Docs MCP not used',
-    className: 'border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]',
-    title: `LM Studio enabled ${pluginText}, but the model answered without calling it.`,
-  };
 }
 
 export function formatCompactCount(value: number): string {

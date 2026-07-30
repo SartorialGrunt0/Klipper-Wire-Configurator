@@ -12,7 +12,7 @@ import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import type { ChatMessage } from '../../stores/aiStore';
 import type { AssistantDraftChange } from '../../utils/assistantDraftMerge';
-import { extractConfigCodeBlock, getLmStudioMcpStatusPresentation, getLmStudioContextPresentation } from '../../utils/chatUtils';
+import { extractConfigCodeBlock, getLmStudioContextPresentation } from '../../utils/chatUtils';
 
 // ── Markdown Code Block Component ───────────────────────────────────
 
@@ -142,9 +142,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
 
         const assistantConfigBlock = msg.role === 'assistant' ? extractConfigCodeBlock(msg.content) : null;
         const hasApplicableAssistantDraft = assistantDraftApplicableMessages[i] === true;
-        const lmStudioMcpStatus = msg.role === 'assistant' ? msg.lmStudioMcp : undefined;
         const lmStudioContextStatus = msg.role === 'assistant' ? msg.lmStudioContext : undefined;
-        const lmStudioMcpPresentation = lmStudioMcpStatus ? getLmStudioMcpStatusPresentation(lmStudioMcpStatus) : null;
         const lmStudioContextPresentation = lmStudioContextStatus ? getLmStudioContextPresentation(lmStudioContextStatus) : null;
 
         return (
@@ -196,36 +194,26 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                 <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
               )}
 
-              {/* LM Studio status badges */}
-              {msg.role === 'assistant' && (lmStudioMcpPresentation || lmStudioContextPresentation) && (
+              {/* LM Studio context badge */}
+              {msg.role === 'assistant' && lmStudioContextPresentation && (
                 <div className="mt-3 flex flex-wrap gap-2">
-                  {lmStudioMcpPresentation && (
-                    <span
-                      className={`inline-flex items-center rounded-full border px-2 py-1 text-[10px] font-medium ${lmStudioMcpPresentation.className}`}
-                      title={lmStudioMcpPresentation.title}
-                    >
-                      {lmStudioMcpPresentation.label}
+                  <span
+                    className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-1 text-[10px] font-medium ${lmStudioContextPresentation.className}`}
+                    title={lmStudioContextPresentation.title}
+                  >
+                    <span className="relative h-3 w-3 shrink-0 rounded-full" aria-hidden="true">
+                      <span className="absolute inset-0 rounded-full bg-current opacity-15" />
+                      {lmStudioContextPresentation.fillRatio !== null && lmStudioContextPresentation.fillRatio > 0 && (
+                        <span
+                          className="absolute inset-0 rounded-full"
+                          style={{
+                            background: `conic-gradient(currentColor ${Math.max(lmStudioContextPresentation.fillRatio * 360, 6)}deg, transparent 0deg)`,
+                          }}
+                        />
+                      )}
                     </span>
-                  )}
-                  {lmStudioContextPresentation && (
-                    <span
-                      className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-1 text-[10px] font-medium ${lmStudioContextPresentation.className}`}
-                      title={lmStudioContextPresentation.title}
-                    >
-                      <span className="relative h-3 w-3 shrink-0 rounded-full" aria-hidden="true">
-                        <span className="absolute inset-0 rounded-full bg-current opacity-15" />
-                        {lmStudioContextPresentation.fillRatio !== null && lmStudioContextPresentation.fillRatio > 0 && (
-                          <span
-                            className="absolute inset-0 rounded-full"
-                            style={{
-                              background: `conic-gradient(currentColor ${Math.max(lmStudioContextPresentation.fillRatio * 360, 6)}deg, transparent 0deg)`,
-                            }}
-                          />
-                        )}
-                      </span>
-                      {lmStudioContextPresentation.label}
-                    </span>
-                  )}
+                    {lmStudioContextPresentation.label}
+                  </span>
                 </div>
               )}
 

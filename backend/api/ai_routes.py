@@ -84,22 +84,7 @@ FUNC_CALL_CLEANUP_RE = re.compile(
     re.DOTALL,
 )
 
-LM_STUDIO_KLIPPER_DOCS_PLUGIN_ID = "mcp/klipper-docs"
-LM_STUDIO_MAX_INPUT_CHARS = 48000
-LM_STUDIO_MAX_HISTORY_MESSAGES = 16
-LM_STUDIO_ESTIMATED_CHARS_PER_TOKEN = 4
-LM_STUDIO_INPUT_TRUNCATED_NOTICE = (
-    "[Conversation context truncated before sending to the LM Studio REST chat endpoint.]"
-)
-LM_STUDIO_MCP_FALLBACK_HINTS = (
-    "allow calling servers from mcp.json",
-    "allow per-request mcps",
-    "api token",
-    "authorization",
-    "integration",
-    "mcp",
-    "plugin",
-)
+
 
 SYSTEM_PROMPT = (
     "You are an expert Klipper firmware, configuration, and macro assistant. "
@@ -141,7 +126,6 @@ class ChatRequest(BaseModel):
     model: str = "gpt-4o"
     apiUrl: str = "https://api.openai.com/v1/chat/completions"
     apiProvider: AiProvider = AiProvider.chatgpt
-    lmStudioMcpPluginId: str | None = None
 
 
 def _build_reference_lookup_query(messages: list[dict]) -> str:
@@ -619,341 +603,6 @@ def _build_api_base_url(api_url: str) -> str:
     return urlunparse((parsed.scheme, parsed.netloc, "", "", "", "")).rstrip("/")
 
 
-def _normalize_lm_studio_mcp_plugin_id(plugin_id: str | None) -> str | None:
-    if plugin_id is None:
-        return LM_STUDIO_KLIPPER_DOCS_PLUGIN_ID
-
-    normalized = plugin_id.strip()
-    return normalized or None
-
-
-def _truncate_lm_studio_input(text: str) -> str:
-    if len(text) <= LM_STUDIO_MAX_INPUT_CHARS:
-        return text
-
-    keep_chars = max(0, LM_STUDIO_MAX_INPUT_CHARS - len(LM_STUDIO_INPUT_TRUNCATED_NOTICE) - 2)
-    return f"{LM_STUDIO_INPUT_TRUNCATED_NOTICE}\n\n{text[-keep_chars:]}"
-
-
-def _format_lm_studio_chat_input(messages: list[dict]) -> str:
-    non_system_messages = [msg for msg in messages if msg.get("role") in {"user", "assistant"}]
-    if not non_system_messages:
-        return ""
-
-    recent_messages = non_system_messages[-LM_STUDIO_MAX_HISTORY_MESSAGES:]
-    latest_message = recent_messages[-1]
-    prior_messages = recent_messages[:-1]
-
-    if not prior_messages and latest_message.get("role") == "user":
-        return _truncate_lm_studio_input(str(latest_message.get("content", "")).strip())
-
-    parts: list[str] = []
-    if prior_messages:
-        history_parts = []
-        for msg in prior_messages:
-            role = "User" if msg.get("role") == "user" else "Assistant"
-            content = str(msg.get("content", "")).strip()
-            if not content:
-                continue
-            history_parts.append(f"{role}:\n{content}")
-        if history_parts:
-            parts.append("Conversation so far:")
-            parts.append("\n\n".join(history_parts))
-
-    latest_content = str(latest_message.get("content", "")).strip()
-    if latest_content:
-        if latest_message.get("role") == "user":
-            parts.append("Current user request:")
-            parts.append(latest_content)
-        else:
-            parts.append(f"Assistant:\n{latest_content}")
-
-    return _truncate_lm_studio_input("\n\n".join(part for part in parts if part))
-
-
-def _build_lm_studio_chat_url(api_url: str) -> str:
-    return f"{_build_api_base_url(api_url)}/api/v1/chat"
-
-
-def _build_lm_studio_chat_payload(messages: list[dict], model: str, mcp_plugin_id: str | None = LM_STUDIO_KLIPPER_DOCS_PLUGIN_ID) -> dict:
-    system_prompt = ""
-    for msg in messages:
-        if msg.get("role") == "system":
-            system_prompt = str(msg.get("content", "")).strip()
-            break
-
-    payload = {
-        "model": model,
-        "input": _format_lm_studio_chat_input(messages),
-        "store": False,
-    }
-
-    if system_prompt:
-        payload["system_prompt"] = system_prompt
-    if mcp_plugin_id:
-        payload["integrations"] = [mcp_plugin_id]
-
-    return payload
-
-
-def _extract_int_value(value: object) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return int(value)
-    if isinstance(value, str):
-        normalized = value.strip()
-        if normalized.isdigit():
-            return int(normalized)
-    return None
-
-
-def _extract_lm_studio_usage_metrics(data: dict) -> tuple[int | None, int | None, int | None]:
-    usage = data.get("usage")
-    if not isinstance(usage, dict):
-        return None, None, None
-
-    prompt_tokens = _extract_int_value(usage.get("prompt_tokens"))
-    completion_tokens = _extract_int_value(usage.get("completion_tokens"))
-    total_tokens = _extract_int_value(usage.get("total_tokens"))
-    if total_tokens is None and prompt_tokens is not None and completion_tokens is not None:
-        total_tokens = prompt_tokens + completion_tokens
-
-    return prompt_tokens, completion_tokens, total_tokens
-
-
-def _extract_lm_studio_context_window_from_model(model_data: dict) -> int | None:
-    for key in (
-        "context_length",
-        "max_context_length",
-        "contextLength",
-        "maxContextLength",
-        "n_ctx",
-    ):
-        value = _extract_int_value(model_data.get(key))
-        if value is not None and value > 0:
-            return value
-
-    model_info = model_data.get("model_info")
-    if isinstance(model_info, dict):
-        for key in (
-            "context_length",
-            "max_context_length",
-            "contextLength",
-            "maxContextLength",
-            "n_ctx",
-        ):
-            value = _extract_int_value(model_info.get(key))
-            if value is not None and value > 0:
-                return value
-
-    return None
-
-
-def _extract_lm_studio_context_window(data: dict) -> int | None:
-    return _extract_lm_studio_context_window_from_model(data)
-
-
-def _count_message_chars(messages: list[dict]) -> int:
-    total = 0
-    for msg in messages:
-        content = str(msg.get("content", "")).strip()
-        if content:
-            total += len(content)
-    return total
-
-
-def _count_lm_studio_payload_chars(payload: dict) -> int:
-    input_text = str(payload.get("input", ""))
-    system_prompt = str(payload.get("system_prompt", ""))
-    return len(input_text) + len(system_prompt)
-
-
-def _lm_studio_payload_truncated(payload: dict) -> bool:
-    return str(payload.get("input", "")).startswith(LM_STUDIO_INPUT_TRUNCATED_NOTICE)
-
-
-async def _fetch_lm_studio_model_context_window(client, api_url: str, headers: dict, model: str) -> int | None:
-    if not model:
-        return None
-
-    base_url = _build_api_base_url(api_url)
-    model_urls = (
-        f"{base_url}/api/v1/models",
-        f"{base_url}/api/v0/models",
-        f"{base_url}/v1/models",
-    )
-
-    for model_url in model_urls:
-        try:
-            resp = await client.get(model_url, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception:
-            continue
-
-        model_items = data.get("data") if isinstance(data, dict) else None
-        if not isinstance(model_items, list):
-            continue
-
-        for item in model_items:
-            if not isinstance(item, dict) or str(item.get("id", "")).strip() != model:
-                continue
-
-            context_window = _extract_lm_studio_context_window_from_model(item)
-            if context_window is not None:
-                return context_window
-
-    return None
-
-
-async def _resolve_lm_studio_context_window(client, api_url: str, headers: dict, model: str, data: dict) -> int | None:
-    context_window = _extract_lm_studio_context_window(data)
-    if context_window is not None:
-        return context_window
-
-    return await _fetch_lm_studio_model_context_window(client, api_url, headers, model)
-
-
-def _build_lm_studio_context_metadata(
-    data: dict,
-    *,
-    request_chars: int,
-    truncated: bool,
-    context_window: int | None = None,
-) -> dict:
-    if context_window is None:
-        context_window = _extract_lm_studio_context_window(data)
-
-    prompt_tokens, completion_tokens, total_tokens = _extract_lm_studio_usage_metrics(data)
-    estimated_prompt_tokens = None
-    if prompt_tokens is None and request_chars > 0:
-        estimated_prompt_tokens = (
-            request_chars + LM_STUDIO_ESTIMATED_CHARS_PER_TOKEN - 1
-        ) // LM_STUDIO_ESTIMATED_CHARS_PER_TOKEN
-
-    used_tokens = total_tokens
-    if used_tokens is None:
-        used_tokens = prompt_tokens
-    if used_tokens is None:
-        used_tokens = estimated_prompt_tokens
-
-    utilization = None
-    if context_window is not None and context_window > 0 and used_tokens is not None:
-        utilization = round(min(used_tokens / context_window, 1.0), 4)
-
-    return {
-        "requestChars": request_chars,
-        "truncated": truncated,
-        "promptTokens": prompt_tokens,
-        "completionTokens": completion_tokens,
-        "totalTokens": total_tokens,
-        "estimatedPromptTokens": estimated_prompt_tokens,
-        "contextWindow": context_window,
-        "usedTokens": used_tokens,
-        "utilization": utilization,
-    }
-
-
-def _extract_lm_studio_message_content(data: dict) -> str:
-    output = data.get("output")
-    if not isinstance(output, list):
-        return ""
-
-    messages: list[str] = []
-    for item in output:
-        if item.get("type") != "message":
-            continue
-        content = str(item.get("content", "")).strip()
-        if content:
-            messages.append(content)
-
-    return "\n\n".join(messages)
-
-
-def _lm_studio_response_needs_fallback(data: dict) -> bool:
-    output = data.get("output")
-    if not isinstance(output, list):
-        return False
-    return any(item.get("type") == "invalid_tool_call" for item in output)
-
-
-def _extract_lm_studio_tool_names(data: dict, plugin_id: str | None) -> list[str]:
-    if not plugin_id:
-        return []
-
-    output = data.get("output")
-    if not isinstance(output, list):
-        return []
-
-    tool_names: list[str] = []
-    for item in output:
-        if item.get("type") != "tool_call":
-            continue
-        provider_info = item.get("provider_info") or {}
-        if provider_info.get("type") != "plugin":
-            continue
-        if provider_info.get("plugin_id") != plugin_id:
-            continue
-
-        tool_name = str(item.get("tool", "")).strip()
-        if tool_name:
-            tool_names.append(tool_name)
-
-    return tool_names
-
-
-def _build_lm_studio_mcp_metadata(
-    plugin_id: str | None,
-    route: str,
-    *,
-    tool_names: list[str] | None = None,
-    fallback_reason: str | None = None,
-) -> dict:
-    normalized_tool_names = tool_names or []
-    return {
-        "requested": plugin_id is not None,
-        "pluginId": plugin_id,
-        "route": route,
-        "toolUsed": bool(normalized_tool_names),
-        "toolNames": normalized_tool_names,
-        "fallbackUsed": fallback_reason is not None,
-        "fallbackReason": fallback_reason,
-    }
-
-
-def _summarize_lm_studio_fallback_reason(default_message: str, response_text: str | None = None) -> str:
-    if not response_text:
-        return default_message
-
-    normalized = re.sub(r"\s+", " ", response_text).strip()
-    if not normalized:
-        return default_message
-    if len(normalized) > 160:
-        normalized = f"{normalized[:157].rstrip()}..."
-    return f"{default_message} {normalized}"
-
-
-async def _post_openai_compatible_chat(client, api_url: str, headers: dict, payload: dict) -> tuple[dict, str]:
-    resp = await client.post(api_url, headers=headers, json=payload)
-    resp.raise_for_status()
-    data = resp.json()
-    error_message = _extract_api_error_message(data)
-    if error_message:
-        raise ValueError(error_message)
-    return data, _extract_provider_content("lm-studio", data)
-
-
-def _should_fallback_lm_studio_request(status_code: int, response_text: str) -> bool:
-    if status_code in {404, 405}:
-        return True
-    if status_code not in {400, 401, 403, 422, 500, 502, 503}:
-        return False
-
-    normalized = response_text.lower()
-    return any(hint in normalized for hint in LM_STUDIO_MCP_FALLBACK_HINTS)
 
 
 @router.post("/ai/chat")
@@ -1038,176 +687,27 @@ async def chat_proxy(req: ChatRequest):
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
-            if req.apiProvider == "lm-studio":
-                lm_studio_mcp_plugin_id = _normalize_lm_studio_mcp_plugin_id(req.lmStudioMcpPluginId)
-                lm_studio_mcp_metadata: dict
-                lm_studio_context_metadata: dict
+            logger.info(
+                "Sending to provider | url=%s msgs=%d chars=%d",
+                req.apiUrl, len(payload.get("messages", [])),
+                sum(len(str(m.get("content", ""))) for m in payload.get("messages", []))
+            )
+            resp = await client.post(req.apiUrl, headers=headers, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
 
-                if lm_studio_mcp_plugin_id:
-                    if not req.apiKey:
-                        data, content = await _post_openai_compatible_chat(client, req.apiUrl, headers, payload)
-                        context_window = await _resolve_lm_studio_context_window(
-                            client,
-                            req.apiUrl,
-                            headers,
-                            req.model,
-                            data,
-                        )
-                        lm_studio_context_metadata = _build_lm_studio_context_metadata(
-                            data,
-                            request_chars=_count_message_chars(messages),
-                            truncated=False,
-                            context_window=context_window,
-                        )
-                        lm_studio_mcp_metadata = _build_lm_studio_mcp_metadata(
-                            lm_studio_mcp_plugin_id,
-                            "openai-compatible",
-                            fallback_reason=(
-                                "LM Studio MCP plugin access requires an API token, so the proxy used the OpenAI-compatible endpoint."
-                            ),
-                        )
-                    else:
-                        lm_studio_url = _build_lm_studio_chat_url(req.apiUrl)
-                        lm_studio_payload = _build_lm_studio_chat_payload(messages, req.model, lm_studio_mcp_plugin_id)
+            error_message = _extract_api_error_message(data)
+            if error_message:
+                logger.error("Provider returned error | %s", error_message)
+                return {"error": f"API error: {error_message}"}
 
-                        try:
-                            resp = await client.post(lm_studio_url, headers=headers, json=lm_studio_payload)
-                            resp.raise_for_status()
-                            data = resp.json()
-                            error_message = _extract_api_error_message(data)
-                            if error_message:
-                                return {"error": f"API error: {error_message}"}
-
-                            tool_names = _extract_lm_studio_tool_names(data, lm_studio_mcp_plugin_id)
-                            content = _extract_lm_studio_message_content(data)
-                            if not content and _lm_studio_response_needs_fallback(data):
-                                fallback_reason = "LM Studio returned invalid MCP tool output, so the proxy retried on the OpenAI-compatible endpoint."
-                                data, content = await _post_openai_compatible_chat(client, req.apiUrl, headers, payload)
-                                context_window = await _resolve_lm_studio_context_window(
-                                    client,
-                                    req.apiUrl,
-                                    headers,
-                                    req.model,
-                                    data,
-                                )
-                                lm_studio_context_metadata = _build_lm_studio_context_metadata(
-                                    data,
-                                    request_chars=_count_message_chars(messages),
-                                    truncated=False,
-                                    context_window=context_window,
-                                )
-                                lm_studio_mcp_metadata = _build_lm_studio_mcp_metadata(
-                                    lm_studio_mcp_plugin_id,
-                                    "openai-compatible",
-                                    fallback_reason=fallback_reason,
-                                )
-                            else:
-                                context_window = await _resolve_lm_studio_context_window(
-                                    client,
-                                    req.apiUrl,
-                                    headers,
-                                    req.model,
-                                    data,
-                                )
-                                lm_studio_context_metadata = _build_lm_studio_context_metadata(
-                                    data,
-                                    request_chars=_count_lm_studio_payload_chars(lm_studio_payload),
-                                    truncated=_lm_studio_payload_truncated(lm_studio_payload),
-                                    context_window=context_window,
-                                )
-                                lm_studio_mcp_metadata = _build_lm_studio_mcp_metadata(
-                                    lm_studio_mcp_plugin_id,
-                                    "api-v1-chat",
-                                    tool_names=tool_names,
-                                )
-                        except httpx.HTTPStatusError as exc:
-                            response_text = exc.response.text if exc.response is not None else ""
-                            if not _should_fallback_lm_studio_request(exc.response.status_code, response_text):
-                                raise
-
-                            fallback_reason = _summarize_lm_studio_fallback_reason(
-                                "LM Studio MCP routing was unavailable, so the proxy retried on the OpenAI-compatible endpoint.",
-                                response_text,
-                            )
-                            data, content = await _post_openai_compatible_chat(client, req.apiUrl, headers, payload)
-                            context_window = await _resolve_lm_studio_context_window(
-                                client,
-                                req.apiUrl,
-                                headers,
-                                req.model,
-                                data,
-                            )
-                            lm_studio_context_metadata = _build_lm_studio_context_metadata(
-                                data,
-                                request_chars=_count_message_chars(messages),
-                                truncated=False,
-                                context_window=context_window,
-                            )
-                            lm_studio_mcp_metadata = _build_lm_studio_mcp_metadata(
-                                lm_studio_mcp_plugin_id,
-                                "openai-compatible",
-                                fallback_reason=fallback_reason,
-                            )
-                        except httpx.TimeoutException:
-                            data, content = await _post_openai_compatible_chat(client, req.apiUrl, headers, payload)
-                            context_window = await _resolve_lm_studio_context_window(
-                                client,
-                                req.apiUrl,
-                                headers,
-                                req.model,
-                                data,
-                            )
-                            lm_studio_context_metadata = _build_lm_studio_context_metadata(
-                                data,
-                                request_chars=_count_message_chars(messages),
-                                truncated=False,
-                                context_window=context_window,
-                            )
-                            lm_studio_mcp_metadata = _build_lm_studio_mcp_metadata(
-                                lm_studio_mcp_plugin_id,
-                                "openai-compatible",
-                                fallback_reason=(
-                                    "LM Studio MCP routing timed out, so the proxy retried on the OpenAI-compatible endpoint."
-                                ),
-                            )
-                else:
-                    data, content = await _post_openai_compatible_chat(client, req.apiUrl, headers, payload)
-                    context_window = await _resolve_lm_studio_context_window(
-                        client,
-                        req.apiUrl,
-                        headers,
-                        req.model,
-                        data,
-                    )
-                    lm_studio_context_metadata = _build_lm_studio_context_metadata(
-                        data,
-                        request_chars=_count_message_chars(messages),
-                        truncated=False,
-                        context_window=context_window,
-                    )
-                    lm_studio_mcp_metadata = _build_lm_studio_mcp_metadata(None, "openai-compatible")
-            else:
-                logger.info(
-                    "Sending to provider | url=%s msgs=%d chars=%d",
-                    req.apiUrl, len(payload.get("messages", [])),
-                    sum(len(str(m.get("content", ""))) for m in payload.get("messages", []))
-                )
-                resp = await client.post(req.apiUrl, headers=headers, json=payload)
-                resp.raise_for_status()
-                data = resp.json()
-
-                error_message = _extract_api_error_message(data)
-                if error_message:
-                    logger.error("Provider returned error | %s", error_message)
-                    return {"error": f"API error: {error_message}"}
-
-                content = _extract_provider_content(req.apiProvider, data)
-                logger.info(
-                    "Provider response | chars=%d has_tool_call=%s preview=%s",
-                    len(content) if content else 0,
-                    "yes" if _extract_tool_calls(content or "") else "no",
-                    repr((content or "")[:120])
-                )
+            content = _extract_provider_content(req.apiProvider, data)
+            logger.info(
+                "Provider response | chars=%d has_tool_call=%s preview=%s",
+                len(content) if content else 0,
+                "yes" if _extract_tool_calls(content or "") else "no",
+                repr((content or "")[:120])
+            )
 
             if not content:
                 # Log the full response structure when content is empty — this
@@ -1271,36 +771,21 @@ async def chat_proxy(req: ChatRequest):
                             "temperature": 0.1,
                         }
 
-                    if req.apiProvider == "lm-studio" and req.apiKey:
-                        lm_studio_url = _build_lm_studio_chat_url(req.apiUrl)
-                        lm_studio_payload = _build_lm_studio_chat_payload(
-                            current_messages, req.model, None
-                        )
-                        try:
-                            resp = await client.post(lm_studio_url, headers=headers, json=lm_studio_payload)
-                            resp.raise_for_status()
-                            data = resp.json()
-                            current_content = _extract_lm_studio_message_content(data) or ""
-                        except Exception:
-                            data, current_content = await _post_openai_compatible_chat(
-                                client, req.apiUrl, headers, tool_payload
-                            )
-                    else:
-                        logger.info(
-                            "Auto-search re-query | msgs=%d chars=%d",
-                            len(tool_payload.get("messages", [])),
-                            sum(len(str(m.get("content", ""))) for m in tool_payload.get("messages", []))
-                        )
-                        resp = await client.post(req.apiUrl, headers=headers, json=tool_payload)
-                        resp.raise_for_status()
-                        data = resp.json()
-                        current_content = _extract_provider_content(req.apiProvider, data) or ""
-                        logger.info(
-                            "Auto-search re-query response | chars=%d has_tool_call=%s preview=%s",
-                            len(current_content),
-                            "yes" if _extract_tool_calls(current_content) else "no",
-                            repr(current_content[:120])
-                        )
+                    logger.info(
+                        "Auto-search re-query | msgs=%d chars=%d",
+                        len(tool_payload.get("messages", [])),
+                        sum(len(str(m.get("content", ""))) for m in tool_payload.get("messages", []))
+                    )
+                    resp = await client.post(req.apiUrl, headers=headers, json=tool_payload)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    current_content = _extract_provider_content(req.apiProvider, data) or ""
+                    logger.info(
+                        "Auto-search re-query response | chars=%d has_tool_call=%s preview=%s",
+                        len(current_content),
+                        "yes" if _extract_tool_calls(current_content) else "no",
+                        repr(current_content[:120])
+                    )
 
             while tool_turns < MAX_MCP_TOOL_TURNS:
                 tool_calls = _extract_tool_calls(current_content)
@@ -1363,38 +848,21 @@ async def chat_proxy(req: ChatRequest):
                         "temperature": 0.1,
                     }
 
-                # Re-query (skip LM Studio MCP plugin for tool follow-ups)
-                if req.apiProvider == "lm-studio" and req.apiKey:
-                    lm_studio_url = _build_lm_studio_chat_url(req.apiUrl)
-                    lm_studio_payload = _build_lm_studio_chat_payload(
-                        current_messages, req.model, None  # No MCP plugin for tool follow-ups
-                    )
-                    try:
-                        resp = await client.post(lm_studio_url, headers=headers, json=lm_studio_payload)
-                        resp.raise_for_status()
-                        data = resp.json()
-                        current_content = _extract_lm_studio_message_content(data) or ""
-                    except Exception:
-                        # Fall back to OpenAI-compatible
-                        data, current_content = await _post_openai_compatible_chat(
-                            client, req.apiUrl, headers, tool_payload
-                        )
-                else:
-                    logger.info(
-                        "Re-query | turn=%d msgs=%d chars=%d",
-                        tool_turns, len(tool_payload.get("messages", [])),
-                        sum(len(str(m.get("content", ""))) for m in tool_payload.get("messages", []))
-                    )
-                    resp = await client.post(req.apiUrl, headers=headers, json=tool_payload)
-                    resp.raise_for_status()
-                    data = resp.json()
-                    current_content = _extract_provider_content(req.apiProvider, data) or ""
-                    logger.info(
-                        "Re-query response | turn=%d chars=%d has_tool_call=%s preview=%s",
-                        tool_turns, len(current_content),
-                        "yes" if _extract_tool_calls(current_content) else "no",
-                        repr(current_content[:120])
-                    )
+                logger.info(
+                    "Re-query | turn=%d msgs=%d chars=%d",
+                    tool_turns, len(tool_payload.get("messages", [])),
+                    sum(len(str(m.get("content", ""))) for m in tool_payload.get("messages", []))
+                )
+                resp = await client.post(req.apiUrl, headers=headers, json=tool_payload)
+                resp.raise_for_status()
+                data = resp.json()
+                current_content = _extract_provider_content(req.apiProvider, data) or ""
+                logger.info(
+                    "Re-query response | turn=%d chars=%d has_tool_call=%s preview=%s",
+                    tool_turns, len(current_content),
+                    "yes" if _extract_tool_calls(current_content) else "no",
+                    repr(current_content[:120])
+                )
 
             # Clean up any remaining tool call blocks in the final content
             # Check whether the content contained tool call blocks BEFORE cleanup
@@ -1425,15 +893,6 @@ async def chat_proxy(req: ChatRequest):
             )
             if not final_content:
                 logger.warning("Empty final content after %d tool turns", tool_turns)
-
-            if req.apiProvider == "lm-studio":
-                return {
-                    "content": final_content,
-                    "lmStudioMcp": lm_studio_mcp_metadata,
-                    "lmStudioContext": lm_studio_context_metadata,
-                    "mcpToolTurns": tool_turns,
-                    "mcpToolNames": mcp_tool_names,
-                }
 
             return {
                 "content": final_content,

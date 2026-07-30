@@ -19,7 +19,6 @@ import {
 
 export interface ChatSettingsPanelProps {
   standalone: boolean;
-  /** All editing state and setters are passed from the parent ChatDialog */
   editApiKey: string;
   setEditApiKey: (v: string) => void;
   editModel: string;
@@ -32,8 +31,6 @@ export interface ChatSettingsPanelProps {
   setEditLmStudioHost: (v: string) => void;
   editLmStudioPort: string;
   setEditLmStudioPort: (v: string) => void;
-  editLmStudioMcpPluginId: string;
-  setEditLmStudioMcpPluginId: (v: string) => void;
   editOllamaHost: string;
   setEditOllamaHost: (v: string) => void;
   editOllamaPort: string;
@@ -57,8 +54,6 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
   setEditLmStudioHost,
   editLmStudioPort,
   setEditLmStudioPort,
-  editLmStudioMcpPluginId,
-  setEditLmStudioMcpPluginId,
   editOllamaHost,
   setEditOllamaHost,
   editOllamaPort,
@@ -69,12 +64,9 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
 }) => {
   const { settings } = useAiStore();
 
-  // Available models from local server
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState<string | null>(null);
-
-  // ── Model Discovery ────────────────────────────────────────────────
 
   const fetchAvailableModels = async (
     provider: AiProvider = editApiProvider,
@@ -110,8 +102,6 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editApiProvider, resolvedEditApiUrl, editApiKey]);
 
-  // ── Handlers ───────────────────────────────────────────────────────
-
   const handleModelChange = (nextModel: string) => {
     setEditModel(nextModel);
     if (isLocalProvider(editApiProvider)) {
@@ -120,7 +110,6 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
   };
 
   const handleProviderChange = (provider: AiProvider) => {
-    // Save current model to previous provider before switching
     setEditApiProvider(provider);
     const providerDefaultModel = PROVIDER_DEFAULTS[provider]?.defaultModel;
     const modelToUse = editModel.trim() || providerDefaultModel || settings.model;
@@ -135,7 +124,6 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
   const isSaveEnabled = !providerRequiresApiKey(editApiProvider) || !!editApiKey.trim();
   const hasSelectedModel = !!editModel.trim();
   const showLocalFields = isLocalProvider(editApiProvider);
-  const showLmStudioMcpField = editApiProvider === 'lm-studio';
 
   // ── Shared Input Fields ────────────────────────────────────────────
 
@@ -255,24 +243,6 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
     </>
   ) : null;
 
-  const lmStudioMcpField = showLmStudioMcpField ? (
-    <div>
-      <label className="block text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-1.5">
-        LM Studio MCP Plugin ID
-      </label>
-      <input
-        type="text"
-        className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-        value={editLmStudioMcpPluginId}
-        onChange={(e) => setEditLmStudioMcpPluginId(e.target.value)}
-        placeholder="mcp/klipper-docs"
-      />
-      <p className="mt-1 text-[10px] text-[var(--color-text-secondary)]">
-        Leave blank to disable MCP docs lookup for LM Studio.
-      </p>
-    </div>
-  ) : null;
-
   const apiKeyField = (
     <div>
       <label className="block text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-1.5">
@@ -301,7 +271,6 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
       {modelField}
       {apiUrlField}
       {hostPortFields}
-      {lmStudioMcpField}
       {apiKeyField}
     </div>
   );
@@ -309,7 +278,6 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
   if (standalone) {
     return (
       <>
-        {/* Greyed-out placeholder */}
         <div className="flex items-center justify-center py-12 opacity-30 pointer-events-none mb-4">
           <div className="text-center">
             <svg width="48" height="48" viewBox="0 0 24 24" fill="none" className="mx-auto mb-3 text-[var(--color-text-secondary)]">
@@ -340,7 +308,6 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
     );
   }
 
-  // Inline mode
   return (
     <div className="px-4 pb-4 border-b border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)]">
       <div className="space-y-3 pt-3">
@@ -408,7 +375,6 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
           )}
           {apiUrlField}
           {hostPortFields}
-          {lmStudioMcpField}
           <div>
             <label className="block text-[10px] text-[var(--color-text-secondary)] mb-1">
               API Key{!providerRequiresApiKey(editApiProvider) && ' (optional)'}
