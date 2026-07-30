@@ -534,8 +534,12 @@ export function useAssistantDraft(deps: {
 
       for (const fp of currentPreview.filePreviews) {
         const hasSelectedChanges = fp.changes.some((change) => selectedChangeIds.has(change.id));
+        console.debug('[AIDraft] Accept check | file:', fp.filename, '| changes:', fp.changes.length, '| selectedAny:', hasSelectedChanges, '| mergedLen:', fp.mergedText.length, '| origLen:', fp.originalText.length);
         if (!hasSelectedChanges) continue;
-        if (normalizeDiffText(fp.originalText) === normalizeDiffText(fp.mergedText)) continue;
+        if (normalizeDiffText(fp.originalText) === normalizeDiffText(fp.mergedText)) {
+          console.warn('[AIDraft] Skipping file with no text diff despite selected changes:', fp.filename);
+          continue;
+        }
 
         // Use the cached merged config directly instead of re-parsing
         updatedConfigs[fp.filename] = fp.mergedConfig;
@@ -549,9 +553,11 @@ export function useAssistantDraft(deps: {
       }
 
       if (touchedFiles.length === 0) {
+        console.warn('[AIDraft] No files with actual text changes — abandoning accept');
         setAssistantDraftPreview(null);
         return;
       }
+      console.debug('[AIDraft] Accepting', touchedFiles.length, 'files:', touchedFiles);
 
       touchedFiles.forEach((filename) => {
         setConfigFile(filename, updatedConfigs[filename]);

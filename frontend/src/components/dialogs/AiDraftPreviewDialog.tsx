@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useEffect } from 'react';
 import type { AssistantDraftChange } from '../../utils/assistantDraftMerge';
 import { createConfigPatch, parsePatch } from '../../utils/configDiff';
 
@@ -27,6 +27,26 @@ export default function AiDraftPreviewDialog({
   onAccept,
   onClose,
 }: AiDraftPreviewDialogProps) {
+  // ── Debug logging ────────────────────────────────────────────────
+  useEffect(() => {
+    console.group('[AIDraft] Preview dialog opened / updated');
+    console.debug('File previews:', filePreviews.map(f => ({
+      filename: f.filename,
+      originalLength: f.originalText.length,
+      mergedLength: f.mergedText.length,
+      sizeDiff: f.mergedText.length - f.originalText.length,
+    })));
+    console.debug('Changes from assistant:', changes.map(c => ({
+      id: c.id,
+      mode: c.mode,
+      filename: c.filename,
+      fullHeader: c.fullHeader,
+    })));
+    console.debug('Selected change IDs:', selectedChangeIds);
+    console.debug('Preview updating:', previewUpdating);
+    console.groupEnd();
+  }, [filePreviews, changes, selectedChangeIds, previewUpdating]);
+
   const selectedIdSet = useMemo(() => new Set(selectedChangeIds), [selectedChangeIds]);
   const selectedCount = selectedChangeIds.length;
   const fileDiffs = useMemo(

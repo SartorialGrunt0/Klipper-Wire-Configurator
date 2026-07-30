@@ -6,6 +6,7 @@
  * "Apply and Review Changes" buttons for applicable assistant messages.
  */
 import React, { useState, useRef, useEffect, type ComponentPropsWithoutRef } from 'react';
+import { extractConfigCodeBlocks } from '../../utils/chatUtils';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -146,6 +147,13 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
         const hasApplicableAssistantDraft = assistantDraftApplicableMessages[i] === true;
         const hasPrinterMemBlock = msg.role === 'assistant' && hasPrinterMemoryBlock(msg.content);
 
+
+        // Log eligibility for the button on each render
+        if (msg.role === 'assistant') {
+          const blockCount = extractConfigCodeBlocks(msg.content).length;
+          const isApplicable = assistantDraftApplicableMessages[i] === true;
+          console.debug('[AIDraft] Message', i, '| blocks:', blockCount, '| applicable:', isApplicable, '| activeFile:', activeFile);
+        }
 
         return (
           <div key={i} className={`mb-2 ${msg.role === 'user' ? 'text-right' : 'text-left'}`}>
