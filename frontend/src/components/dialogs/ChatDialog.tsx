@@ -1933,7 +1933,9 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   // Local providers (LM Studio, Ollama, OpenAI Compatible) don't require a key.
   const isSaveEnabled = !providerRequiresApiKey(editApiProvider) || !!editApiKey.trim();
 
-  // Update URL when provider changes
+  // Update URL when provider changes.
+  // Always reset the API URL to the new provider's default so model-fetch
+  // and chat requests use the correct endpoint immediately.
   const handleProviderChange = (provider: AiProvider) => {
     const nextProviderModels = {
       ...editProviderModels,
@@ -1947,9 +1949,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     const modelToUse = editModel.trim() || providerDefaultModel || settings.model;
     setEditModel(modelToUse);
     const defaults = PROVIDER_DEFAULTS[provider];
-    if (!isLocalProvider(provider)) {
-      setEditApiUrl(defaults.defaultUrl);
-    }
+    setEditApiUrl(defaults.defaultUrl);
   };
 
   // Unconfigured state — show settings panel in the center
@@ -2105,24 +2105,24 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
                 </div>
               )}
 
-              {/* API Key (only shown for providers that require it) */}
-              {providerRequiresApiKey(editApiProvider) && (
-                <div>
-                  <label className="block text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-1.5">
-                    API Key
-                  </label>
-                  <input
-                    type="password"
-                    className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-                    value={editApiKey}
-                    onChange={(e) => setEditApiKey(e.target.value)}
-                    placeholder="sk-..."
-                  />
-                  <p className="text-[10px] text-[var(--color-text-secondary)] mt-1">
-                    Your API key is stored only in your browser
-                  </p>
-                </div>
-              )}
+              {/* API Key (optional for local providers) */}
+              <div>
+                <label className="block text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-1.5">
+                  API Key {!providerRequiresApiKey(editApiProvider) && <span className="font-normal lowercase">(optional)</span>}
+                </label>
+                <input
+                  type="password"
+                  className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
+                  value={editApiKey}
+                  onChange={(e) => setEditApiKey(e.target.value)}
+                  placeholder="sk-..."
+                />
+                <p className="text-[10px] text-[var(--color-text-secondary)] mt-1">
+                  {providerRequiresApiKey(editApiProvider)
+                    ? 'Your API key is stored only in your browser'
+                    : 'Optional — only needed if your local server requires authentication'}
+                </p>
+              </div>
             </div>
           </div>
 
@@ -2331,19 +2331,19 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
                     </p>
                   </div>
                 )}
-                {/* API Key (only shown for providers that require it) */}
-                {providerRequiresApiKey(editApiProvider) && (
-                  <div>
-                    <label className="block text-[10px] text-[var(--color-text-secondary)] mb-1">API Key</label>
-                    <input
-                      type="password"
-                      className="w-full px-3 py-1.5 rounded text-xs font-mono bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-                      value={editApiKey}
-                      onChange={(e) => setEditApiKey(e.target.value)}
-                      placeholder="sk-..."
-                    />
-                  </div>
-                )}
+                {/* API Key (optional for local providers) */}
+                <div>
+                  <label className="block text-[10px] text-[var(--color-text-secondary)] mb-1">
+                    API Key{!providerRequiresApiKey(editApiProvider) && ' (optional)'}
+                  </label>
+                  <input
+                    type="password"
+                    className="w-full px-3 py-1.5 rounded text-xs font-mono bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
+                    value={editApiKey}
+                    onChange={(e) => setEditApiKey(e.target.value)}
+                    placeholder="sk-..."
+                  />
+                </div>
               </div>
             </div>
           </div>
