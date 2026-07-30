@@ -18,6 +18,7 @@ reference directory.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from collections import Counter
@@ -34,6 +35,12 @@ CONFIG_REFERENCE_PATH = KLIPPER_DOCS_DIR / "Config_Reference.md"
 GCODE_MACRO_SUMMARY_PATH = KLIPPER_DOCS_DIR / "Klipper_GCode_Macro_AI_Summary.md"
 DOCS_SUMMARY_PATH = KLIPPER_DOCS_DIR / "Klipper_Docs_AI_Summary.md"
 CONFIG_EXAMPLES_DIR = REFERENCE_DIR / "config"
+# The system path for Klipper configs (e.g. /home/pi/.klipper/config)
+# Can be overridden via KLIPPER_CONFIG_PATH environment variable.
+SYSTEM_CONFIG_PATH = Path(os.environ.get("KLIPPER_CONFIG_PATH", "/home/pi/.klipper/config"))
+# Local fallback directory for imported configs when not running on a Pi.
+LOCAL_CONFIGS_DIR = BACKEND_DIR / "user_configs"
+
 
 # ── Constants ─────────────────────────────────────────────────────────
 
@@ -441,18 +448,39 @@ class McpServer:
                 },
             },
             {
-                "name": "read_example_config",
+                "name": "search_user_configs",
                 "description": (
-                    "Read the full content of a bundled example Klipper config file by filename "
-                    "(with or without .cfg extension). "
-                    "Use search_example_configs first to find the exact filename."
+                    "Search the user's local configuration files (in the 'user_configs' directory). "
+                    "Returns matching filenames with a preview snippet."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query (e.g. 'voron', 'skr', 'bed_mesh')",
+                        },
+                        "limit": {
+                            "type": "number",
+                            "description": "Max results (default 10)",
+                            "default": 10,
+                        },
+                    },
+                    "required": ["query"],
+                },
+            },
+            {
+                "name": "read_user_config",
+                "description": (
+                    "Read the full content of a user configuration file from the 'user_configs' directory. "
+                    "Use search_user_configs first to find the exact filename."
                 ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "filename": {
                             "type": "string",
-                            "description": "Config filename (e.g. 'generic-bigtreetech-skr-mini-e3-v3.0.cfg', 'printer-voron-2.4-octopus.cfg')",
+                            "description": "Config filename (e.g. 'my_printer.cfg')",
                         },
                     },
                     "required": ["filename"],
@@ -603,6 +631,8 @@ class McpServer:
             "get_section_schema": self._handle_schema,
             "search_example_configs": self._handle_search_examples,
             "read_example_config": self._handle_read_example_config,
+            "search_user_configs": self._handle_search_user_configs,
+            "read_user_config": self._handle_read_user_config,
             "detect_board": self._handle_detect_board,
             "calculate_rotation_distance": self._handle_calculate_rotation_distance,
             "generate_macro_template": self._handle_generate_macro_template,
@@ -916,51 +946,127 @@ class McpServer:
 
         return "\n".join(lines)
 
-    def _handle_read_example_config(self, args: dict[str, Any]) -> str:
+    def _handle_search_user_configs(self, args: dict[str, Any]) -> str:
+        query = args.get("query", "").strip().lower()
+        limit = min(int(args.get("limit", 10)), 30)
+
+        if not query:
+            return "Please provide a search query."
+
+        # Collect config files from both the system path and local fallback
+        scan_paths: list[Path] = []
+        if SYSTEM_CONFIG_PATH.is_dir():
+            scan_paths.append(SYSTEM_CONFIG_PATH)
+        if LOCAL_CONFIGS_DIR.is_dir():
+            scan_paths.append(LOCAL_CONFIGS_DIR)
+
+        results: list[dict[str, Any]] = []
+        query_terms = query.replace("-", " ").split()
+        seen_filenames: set[str] = set()
+
+        for scan_dir in scan_paths:
+            try:
+                for cfg_file in sorted(scan_dir.glob("*.cfg")):
+                    if cfg_file.name in seen_filenames:
+                        continue
+                    seen_filenames.add(cfg_file.name)
+
+                    search_text = f"{cfg_file.stem} {cfg_file.name}".lower().replace("-", " ")
+                    score = sum(1 for term in query_terms if term in search_text)
+
+                    try:
+                        text = cfg_file.read_bytes().decode("utf-8", errors="replace")
+                    except OSError:
+                        continue
+
+                    if score == 0:
+                        # Also check content for keyword matches
+                        content_lower = text.lower()
+                        content_score = sum(1 for term in query_terms if term in content_lower)
+                        if content_score == 0:
+                            continue
+                        score = content_score * 0.5
+
+                    content_lines = [
+                        l.strip() for l in text.split("\n")
+                        if l.strip() and not l.strip().startswith("#")
+                    ]
+                    snippet = " ".join(content_lines[:5])[:200]
+
+                    results.append({
+                        "filename": cfg_file.name,
+                        "score": round(score, 1),
+                        "snippet": snippet,
+                    })
+            except OSError:
+                continue
+
+        if not results:
+            return f'No user configs matching "{query}". Try different keywords.'
+
+        results.sort(key=lambda r: (-r["score"], r["filename"]))
+
+        lines: list[str] = [f"User configs matching: {query}\n"]
+        for r in results[:limit]:
+            lines.append(f"## {r['filename']}")
+            if r["snippet"]:
+                lines.append(f"> {r['snippet']}\n")
+        lines.append(f"\n{len(results)} match(es) total. Use read_user_config to read the full file.")
+
+        return "\n".join(lines)
+
+    def _handle_read_user_config(self, args: dict[str, Any]) -> str:
         raw = args.get("filename", "").strip()
         if not raw:
             return "Please provide a config filename."
 
         stem = Path(raw).stem.lower()
 
-        examples_dir = CONFIG_EXAMPLES_DIR
-        if not examples_dir.is_dir():
-            return "Example config directory not found."
+        # Search both local and system config directories
+        scan_paths: list[Path] = []
+        if LOCAL_CONFIGS_DIR.is_dir():
+            scan_paths.append(LOCAL_CONFIGS_DIR)
+        if SYSTEM_CONFIG_PATH.is_dir():
+            scan_paths.append(SYSTEM_CONFIG_PATH)
 
-        # Search all .cfg files in the tree
-        candidates: list[Path] = []
-        for cat_dir in examples_dir.iterdir():
-            if not cat_dir.is_dir():
+        candidate: Path | None = None
+
+        # First try exact match
+        for scan_dir in scan_paths:
+            try:
+                for cfg_file in sorted(scan_dir.glob("*.cfg")):
+                    if cfg_file.name.lower() == raw.lower() or cfg_file.stem.lower() == stem:
+                        candidate = cfg_file
+                        break
+            except OSError:
                 continue
-            for cfg_file in cat_dir.glob("*.cfg"):
-                if cfg_file.stem.lower() == stem or cfg_file.name.lower() == raw.lower():
-                    candidates.append(cfg_file)
+            if candidate:
+                break
 
-        if not candidates:
-            # Try partial match — require ALL query tokens to be present in filename tokens
+        # If no exact match, try fuzzy match
+        if candidate is None:
             query_tokens = set(stem.replace("-", " ").replace("_", " ").split())
-            for cat_dir in examples_dir.iterdir():
-                if not cat_dir.is_dir():
+            for scan_dir in scan_paths:
+                try:
+                    for cfg_file in scan_dir.glob("*.cfg"):
+                        file_tokens = set(cfg_file.stem.lower().replace("-", " ").replace("_", " ").split())
+                        if query_tokens and query_tokens <= file_tokens:
+                            candidate = cfg_file
+                            break
+                except OSError:
                     continue
-                for cfg_file in cat_dir.glob("*.cfg"):
-                    file_tokens = set(cfg_file.stem.lower().replace("-", " ").replace("_", " ").split())
-                    if query_tokens and query_tokens <= file_tokens:
-                        candidates.append(cfg_file)
+                if candidate:
+                    break
 
-        if not candidates:
-            return f'Config file "{raw}" not found. Use search_example_configs to find matching files.'
+        if candidate is None:
+            return f'User config file "{raw}" not found. Use search_user_configs to find matching files.'
 
-        if len(candidates) > 1:
-            names = "\n".join(f"  - {c.name}  [{c.parent.name}]" for c in candidates[:10])
-            return f'Multiple configs match "{raw}":\n{names}\n\nPlease specify the exact filename.'
-
-        path = candidates[0]
         try:
-            content = path.read_text(encoding="utf-8", errors="replace")
+            content = candidate.read_bytes().decode("utf-8", errors="replace")
         except OSError as exc:
-            return f"Error reading {path.name}: {exc}"
+            return f"Error reading {candidate.name}: {exc}"
 
-        header = f"# {path.name}  ({path.parent.name})\n# {len(content)} bytes\n\n"
+        header = f"# {candidate.name}  (User Config)\n# {len(content)} bytes\n\n"
         return header + content
 
     def _handle_detect_board(self, args: dict[str, Any]) -> str:

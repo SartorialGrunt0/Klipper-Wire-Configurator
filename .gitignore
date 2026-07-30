@@ -43,6 +43,13 @@ reports/
 # Pi agent workspace config
 .pi/
 
+# User-imported config files (saved to disk for MCP tools)
+backend/user_configs/
+backend/user_configs/*.cfg
+
+# Runtime data (printer memory, etc.)
+backend/data/printer_memory.json
+
 # Temp / debug files
 temp_*.py
 *.tmp

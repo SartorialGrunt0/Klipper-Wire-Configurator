@@ -269,6 +269,10 @@ export async function loadProject(name: string): Promise<{
   return request(`/projects/${encodeURIComponent(name)}`);
 }
 
+export async function loadSavedConfigs(): Promise<ProjectImportResult> {
+  return request('/project/load-saved');
+}
+
 /* ── Native (Pi) API ─────────────────────────────────── */
 
 export interface NativeStatus {
