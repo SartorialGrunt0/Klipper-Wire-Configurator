@@ -1379,7 +1379,94 @@ class McpServer:
         if g28_in_save:
             issues.append({"severity": "warning", "message": "G28 is used between SAVE_GCODE_STATE and RESTORE_GCODE_STATE. G28 clears the coordinate system, which may make the RESTORE unreliable. Home before saving state instead."})
 
-        # ── 6. Build result ──
+        # ── 6. Move safety checks (requires printer geometry) ──
+        bed_x = args.get("bed_x")
+        bed_y = args.get("bed_y")
+        max_z = args.get("max_z")
+        probe_off_x = args.get("probe_offset_x")
+        probe_off_y = args.get("probe_offset_y")
+
+        if bed_x is not None and bed_y is not None and bed_x > 0 and bed_y > 0:
+            move_pattern = re.compile(
+                r"G[01]\s+"
+                r"(?:.*?(?:X([0-9.-]+)))?\s*"
+                r"(?:.*?(?:Y([0-9.-]+)))?\s*"
+                r"(?:.*?(?:Z([0-9.-]+)))?",
+                re.IGNORECASE
+            )
+
+            for line in lines:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#") or stripped.startswith("description:") or stripped.startswith("gcode:"):
+                    continue
+
+                m = move_pattern.match(stripped)
+                if not m:
+                    continue
+
+                gcode_cmd = stripped.upper().lstrip()
+                if not gcode_cmd.startswith("G0") and not gcode_cmd.startswith("G1 "):
+                    continue
+
+                has_var = False
+
+                # Check X
+                x_val = m.group(1)
+                if x_val is not None:
+                    try:
+                        x = float(x_val)
+                        margin = (probe_off_x or 0) * 1.5
+                        if x < -margin or x > bed_x + margin:
+                            issues.append({
+                                "severity": "warning",
+                                "message": f"Move to X{x:.1f} exceeds bed bounds (0 to {bed_x}mm). Line: '{stripped[:80]}'"
+                            })
+                    except ValueError:
+                        has_var = True
+
+                # Check Y
+                y_val = m.group(2)
+                if y_val is not None:
+                    try:
+                        y = float(y_val)
+                        margin = (probe_off_y or 0) * 1.5
+                        if y < -margin or y > bed_y + margin:
+                            issues.append({
+                                "severity": "warning",
+                                "message": f"Move to Y{y:.1f} exceeds bed bounds (0 to {bed_y}mm). Line: '{stripped[:80]}'"
+                            })
+                    except ValueError:
+                        has_var = True
+
+                # Check Z
+                z_val = m.group(3)
+                if z_val is not None and max_z is not None and max_z > 0:
+                    try:
+                        z = float(z_val)
+                        if z < -1 or z > max_z:
+                            issues.append({
+                                "severity": "warning",
+                                "message": f"Move to Z{z:.1f} exceeds configured Z range (0 to {max_z}mm). Line: '{stripped[:80]}'"
+                            })
+                    except ValueError:
+                        has_var = True
+
+            # Probe off-bed detection
+            if probe_off_x is not None and probe_off_y is not None:
+                for line in lines:
+                    stripped = line.strip().upper()
+                    if "BED_MESH_CALIBRATE" in stripped or "PROBE" in stripped or "PROBE_ACCURACY" in stripped or "PROBE_CALIBRATE" in stripped:
+                        if probe_off_x < 0 or probe_off_y < 0:
+                            issues.append({
+                                "severity": "info",
+                                "message": f"Probe offset (X:{probe_off_x}, Y:{probe_off_y}) means the probe extends beyond the nozzle. "
+                                f"When probing near X=0 or Y=0, the probe may be off the bed. "
+                                f"Consider setting safe probing margins in BED_MESH_CALIBRATE with "
+                                f"mesh_min/mesh_max that account for the probe offset."
+                            })
+                            break
+
+        # ── 7. Build result ──
         if not issues:
             return (
                 f"## Macro validation: No issues found\n\n"
