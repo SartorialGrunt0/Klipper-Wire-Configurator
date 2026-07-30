@@ -460,6 +460,9 @@ export function extractAssistantFileHint(
   const lines = configBlock.split(/\r?\n/);
   let fileHint: string | null = null;
   let fileHintLineIndex = -1;
+
+  // Scan ALL lines for file hints — the first non-empty line might be a
+  // delete marker (*[section]) or explanatory text, so we can't stop early.
   for (let index = 0; index < lines.length; index += 1) {
     const trimmed = lines[index].trim();
     if (!trimmed) continue;
@@ -468,9 +471,10 @@ export function extractAssistantFileHint(
       const rawName = hintMatch[1].trim();
       fileHint = availableByLower.get(rawName.toLowerCase()) ?? rawName;
       fileHintLineIndex = index;
+      break;
     }
-    break;
   }
+
   if (fileHintLineIndex === -1) {
     return { configText: configBlock, fileHint };
   }

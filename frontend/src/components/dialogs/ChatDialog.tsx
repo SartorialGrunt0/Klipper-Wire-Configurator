@@ -532,16 +532,18 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       await handleAcceptAssistantEdit();
       const graphStore = useGraphStore.getState();
       graphStore.clearGraph();
-      // Read config files directly from the store so newly created
-      // files (added by handleAcceptAssistantEdit via setConfigFile)
-      // are included in the graph rebuild.
+      // Read config files AND validation directly from the store so newly
+      // created files and fresh validation results (added by
+      // handleAcceptAssistantEdit via setConfigFile/setValidation) are
+      // included in the graph rebuild instead of stale closure values.
       const latestConfigFiles = useConfigStore.getState().configFiles;
-      buildProjectGraph(latestConfigFiles, graphStore, schemas, validation);
+      const latestValidation = useConfigStore.getState().validation;
+      buildProjectGraph(latestConfigFiles, graphStore, schemas, latestValidation);
       setError(null);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to accept assistant changes.');
     }
-  }, [handleAcceptAssistantEdit, schemas, validation]);
+  }, [handleAcceptAssistantEdit, schemas]);
 
   // ── Pending Request Handling ────────────────────────────────────
   useEffect(() => {
