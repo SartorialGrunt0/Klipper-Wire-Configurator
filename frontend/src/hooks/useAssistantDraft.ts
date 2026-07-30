@@ -234,12 +234,20 @@ export function useAssistantDraft(deps: {
         const targetFile = assistantConfig.filename;
         const baseText = await getConfigText(targetFile);
 
+        if (!baseText) {
+          console.warn('[AIDraft] Empty base text for file:', targetFile, '| configFiles keys:', Object.keys(configFiles));
+          continue;
+        }
+
         const baseResult = await api.parseConfigText(baseText, targetFile);
         const baseConfig = { ...baseResult.config, raw_text: baseText };
         const { mergedConfig, changes } = mergeAssistantSectionsIntoConfig(baseConfig, assistantConfig);
         const mergedText = await api.exportConfig({ ...mergedConfig, raw_text: baseText });
 
-        if (normalizeDiffText(baseText) === normalizeDiffText(mergedText)) continue;
+        const textChanged = normalizeDiffText(baseText) !== normalizeDiffText(mergedText);
+        console.debug('[AIDraft] File:', targetFile, '| baseSections:', baseResult.config.sections.length, '| mergedSections:', mergedConfig.sections.length, '| changes:', changes.length, '| textChanged:', textChanged, '| emptyBase:', !baseText);
+
+        if (!textChanged) continue;
 
         filePreviews.push({
           filename: targetFile,
@@ -253,6 +261,7 @@ export function useAssistantDraft(deps: {
       }
 
       if (filePreviews.length === 0) {
+        console.warn('[AIDraft] No file previews — all target files had identical merged text');
         throw new Error('The assistant response does not change the current draft.');
       }
 
@@ -270,7 +279,8 @@ export function useAssistantDraft(deps: {
       try {
         await prepareAssistantDraftPreview(content, messageIndex, messageHistory);
         return true;
-      } catch {
+      } catch (err: unknown) {
+        console.warn('[AIDraft] Assistant message not applicable:', err instanceof Error ? err.message : err);
         return false;
       }
     },
