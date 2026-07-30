@@ -122,7 +122,7 @@ export default function Toolbar({
   const showImportButton = !hiddenItems.import;
   const showOpenFromPiButton = isNative && !hiddenItems.openFromPi;
   const showExportButton = !hiddenItems.export;
-  const showSaveButton = isNative && hasConfig && !hiddenItems.save;
+  const showSaveButton = hasConfig && !hiddenItems.save && (isNative === true || hasPendingChanges);
   const showRevertButton = hasPendingChanges && hasOriginals && !hiddenItems.revert;
   const showDiffButton = hasOriginals && !hiddenItems.diff;
   const showAiChatButton = !hiddenItems.aiChat;

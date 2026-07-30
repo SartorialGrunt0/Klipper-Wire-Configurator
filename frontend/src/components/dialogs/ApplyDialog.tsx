@@ -4,6 +4,7 @@ import { useConfigStore } from '../../stores/configStore';
 import { useNativeStore } from '../../stores/nativeStore';
 import * as api from '../../services/api';
 import type { ConfigFile } from '../../types/config';
+import type { NativeStatus } from '../../services/api';
 
 interface ApplyDialogProps {
   onClose: () => void;
@@ -190,6 +191,10 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
   const [printerPrintState, setPrinterPrintState] = useState<string | null>(null);
   const [printerPrintFilename, setPrinterPrintFilename] = useState<string | null>(null);
 
+  // Determine save mode
+  const isNativeMode = useNativeStore((s) => s.isNative);
+  const isLocalMode = isNativeMode === false || isNativeMode === null;
+
   // Diff state
   const [currentTexts, setCurrentTexts] = useState<Record<string, string>>({});
   const [diffLoading, setDiffLoading] = useState(true);
@@ -294,13 +299,23 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
         exportedFiles[fn] = text;
       }
 
-      setStatus('applying');
-      setMessage(`Writing ${Object.keys(exportedFiles).length} files to ${configPath}...`);
-
-      const result = await api.applyNativeConfig(exportedFiles, configPath);
-      setAppliedFiles(result.files);
-      setStatus('success');
-      setMessage(`Successfully saved ${result.files.length} file${result.files.length !== 1 ? 's' : ''} to ${result.config_path}`);
+      if (isLocalMode) {
+        // Non-native mode: save to local config storage
+        setStatus('applying');
+        setMessage(`Saving ${Object.keys(exportedFiles).length} files locally...`);
+        const result = await api.saveConfigsToLocal(exportedFiles);
+        setAppliedFiles(result.saved);
+        setStatus('success');
+        setMessage(`Successfully saved ${result.saved.length} file${result.saved.length !== 1 ? 's' : ''} locally`);
+      } else {
+        // Native mode: save to Pi config path
+        setStatus('applying');
+        setMessage(`Writing ${Object.keys(exportedFiles).length} files to ${configPath}...`);
+        const result = await api.applyNativeConfig(exportedFiles, configPath);
+        setAppliedFiles(result.files);
+        setStatus('success');
+        setMessage(`Successfully saved ${result.files.length} file${result.files.length !== 1 ? 's' : ''} to ${result.config_path}`);
+      }
 
       // Update originalTexts to match what was saved, so diff resets
       const configStore = useConfigStore.getState();
@@ -312,7 +327,7 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
       setStatus('error');
       setMessage(err instanceof Error ? err.message : 'Save failed');
     }
-  }, [selectedFiles, configFiles, configPath, currentTexts]);
+  }, [selectedFiles, configFiles, configPath, currentTexts, isLocalMode]);
 
   const pollKlipperStatusAfterRestart = useCallback(async () => {
     const maxAttempts = 24;
@@ -455,9 +470,14 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-[var(--color-bg-tertiary)]">
           <div>
-            <h2 className="text-base font-semibold text-[var(--color-text-primary)]">Save to Pi</h2>
+            <h2 className="text-base font-semibold text-[var(--color-text-primary)]">
+              {isLocalMode ? 'Save Config Files' : 'Save to Pi'}
+            </h2>
             <p className="text-xs text-[var(--color-text-secondary)] mt-0.5">
-              Write config files to <span className="font-mono">{configPath}</span>
+              {isLocalMode
+                ? 'Persist config changes to local storage'
+                : <>Write config files to <span className="font-mono">{configPath}</span></>
+              }
             </p>
           </div>
           <button onClick={onClose} className="p-1 rounded hover:bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">
@@ -470,7 +490,10 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
         {/* Warning */}
         <div className="mx-4 mt-3 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30">
           <p className="text-xs text-amber-400">
-            This will overwrite existing config files on the Pi. Make sure you have a backup.
+            {isLocalMode
+              ? 'This will overwrite the previously imported config files in local storage.'
+              : 'This will overwrite existing config files on the Pi. Make sure you have a backup.'
+            }
           </p>
         </div>
 
@@ -662,7 +685,7 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
               </button>
             )
           )}
-          {status === 'success' && (
+          {status === 'success' && !isLocalMode && (
             <button
               onClick={handleFirmwareRestart}
               disabled={restartStatus === 'restarting' || restartStatus === 'success' || printerStatusLoading || printerIsPrinting}

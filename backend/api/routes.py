@@ -506,6 +506,39 @@ async def load_project(name: str):
     }
 
 
+@router.post("/configs/save")
+async def save_configs(data: dict):
+    """Save config files to the local config storage directory.
+
+    Accepts a dict of filename → config text, persists each file to
+    CONFIG_STORAGE_DIR. Used by non-native mode to persist changes
+    made after import.
+    """
+    files: dict[str, str] = data.get("files", {})
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+
+    saved = []
+    errors = []
+    for filename, text in files.items():
+        # Validate filename (no path traversal)
+        if ".." in filename or filename.startswith("/") or filename.startswith("\\"):
+            errors.append(f"Invalid filename: {filename}")
+            continue
+        try:
+            _save_config_file(filename, text)
+            saved.append(filename)
+        except OSError as e:
+            errors.append(f"{filename}: {e}")
+
+    result: dict[str, object] = {"saved": saved, "file_count": len(saved)}
+    if errors:
+        result["errors"] = errors
+        if not saved:
+            raise HTTPException(status_code=500, detail="Failed to save files: " + "; ".join(errors))
+    return result
+
+
 @router.get("/project/load-saved")
 async def load_saved_configs():
     """Load all config files previously saved to CONFIG_STORAGE_DIR.

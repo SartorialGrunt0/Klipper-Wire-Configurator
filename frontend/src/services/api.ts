@@ -269,6 +269,16 @@ export async function loadProject(name: string): Promise<{
   return request(`/projects/${encodeURIComponent(name)}`);
 }
 
+export async function saveConfigsToLocal(
+  files: Record<string, string>,
+): Promise<{ saved: string[]; file_count: number; errors?: string[] }> {
+  return request('/configs/save', {
+    method: 'POST',
+    body: JSON.stringify({ files }),
+  });
+}
+
+
 export async function loadSavedConfigs(): Promise<ProjectImportResult> {
   return request('/project/load-saved');
 }

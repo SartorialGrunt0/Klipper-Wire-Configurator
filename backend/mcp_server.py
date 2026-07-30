@@ -1066,8 +1066,38 @@ class McpServer:
         except OSError as exc:
             return f"Error reading {candidate.name}: {exc}"
 
-        header = f"# {candidate.name}  (User Config)\n# {len(content)} bytes\n\n"
-        return header + content
+        result = f"# {candidate.name}  (User Config)\n# {len(content)} bytes\n\n"
+        result += content
+
+        # Append validation results if available
+        try:
+            from parser.config_parser import parse_config
+            from parser.validator import validate_config
+
+            parsed = parse_config(content, candidate.name)
+            validation = validate_config(parsed)
+
+            if hasattr(validation, 'errors') and validation.errors:
+                errors = [e for e in validation.errors if getattr(e, 'severity', 'error') == 'error' or not hasattr(e, 'severity')]
+                warnings = [e for e in validation.errors if getattr(e, 'severity', '') == 'warning']
+
+                parts = []
+                if errors:
+                    parts.append(f"## Validation Errors ({len(errors)})")
+                    for err in errors:
+                        loc = f"[{err.section}]" + (f" {err.param}" if err.param else "")
+                        parts.append(f"- {loc}: {err.message}")
+                if warnings:
+                    parts.append(f"## Validation Warnings ({len(warnings)})")
+                    for warn in warnings:
+                        loc = f"[{warn.section}]" + (f" {warn.param}" if warn.param else "")
+                        parts.append(f"- {loc}: {warn.message}")
+                if errors or warnings:
+                    result += "\n\n---\n" + "\n".join(parts)
+        except ImportError:
+            pass  # Parser not available
+
+        return result
 
     def _handle_detect_board(self, args: dict[str, Any]) -> str:
         config_text = args.get("config_text", "").strip()
