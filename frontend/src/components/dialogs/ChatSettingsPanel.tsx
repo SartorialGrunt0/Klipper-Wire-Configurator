@@ -60,6 +60,8 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState<string | null>(null);
   const modelsFetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latestUrlRef = useRef(resolvedEditApiUrl);
+  latestUrlRef.current = resolvedEditApiUrl;
 
   const fetchAvailableModels = async (
     provider: AiProvider = editApiProvider,
@@ -212,7 +214,7 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
               setModelsError(null);
               if (modelsFetchTimerRef.current) clearTimeout(modelsFetchTimerRef.current);
               modelsFetchTimerRef.current = setTimeout(() => {
-                void fetchAvailableModels(editApiProvider, resolvedEditApiUrl, editApiKey);
+                void fetchAvailableModels(editApiProvider, latestUrlRef.current, editApiKey);
               }, 500);
             }}
             placeholder="localhost"
@@ -229,7 +231,7 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
               setModelsError(null);
               if (modelsFetchTimerRef.current) clearTimeout(modelsFetchTimerRef.current);
               modelsFetchTimerRef.current = setTimeout(() => {
-                void fetchAvailableModels(editApiProvider, resolvedEditApiUrl, editApiKey);
+                void fetchAvailableModels(editApiProvider, latestUrlRef.current, editApiKey);
               }, 500);
             }}
             placeholder="1234"
