@@ -369,6 +369,12 @@ export function mergeAssistantSectionsIntoConfig(
       if (section.header_comments?.length) {
         pendingDeletedComments.push(...section.header_comments);
       }
+      // Emit any new sections that were anchored at this index
+      // (e.g. replacing a deleted [probe] with a new [bltouch])
+      const anchoredSections = insertsByAnchor.get(index);
+      if (anchoredSections) {
+        mergedSections.push(...anchoredSections);
+      }
       return;
     }
 
