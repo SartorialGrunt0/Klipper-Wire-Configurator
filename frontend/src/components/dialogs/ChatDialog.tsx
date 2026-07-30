@@ -118,7 +118,7 @@ function resolveProviderApiUrl(
 
   // For openai-compatible, use the provided URL or default to Ollama
   if (provider === 'openai-compatible') {
-    return apiUrl || buildLocalProviderApiUrl(ollamaHost, ollamaPort);
+    return buildLocalProviderApiUrl(ollamaHost, ollamaPort);
   }
 
   return apiUrl;
@@ -1948,8 +1948,13 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     const providerDefaultModel = PROVIDER_DEFAULTS[provider]?.defaultModel;
     const modelToUse = editModel.trim() || providerDefaultModel || settings.model;
     setEditModel(modelToUse);
-    const defaults = PROVIDER_DEFAULTS[provider];
-    setEditApiUrl(defaults.defaultUrl);
+    // For local providers, the URL is built from host/port fields, not editApiUrl.
+    // For cloud providers, use the provider's default API URL.
+    if (isLocalProvider(provider)) {
+      setEditApiUrl('');
+    } else {
+      setEditApiUrl(PROVIDER_DEFAULTS[provider].defaultUrl);
+    }
   };
 
   // Unconfigured state — show settings panel in the center
