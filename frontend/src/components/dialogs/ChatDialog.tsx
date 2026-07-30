@@ -400,13 +400,14 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           try {
             const pmRetry = await draftRequestMessage(chatRequestBase, pmRequestConversation);
             printerMemoryAttempt = pmRetry.assistantMessage;
-          } catch {
+          } catch (pmErr: unknown) {
+            const pmErrorMessage = pmErr instanceof Error ? pmErr.message : 'Unknown error';
             const issueMessages = validationResult.issues
               .map((i) => `- ${i.message}`)
               .join('\n');
             printerMemoryWarnings = [
               printerMemoryWarnings,
-              `Failed to retry after invalid printer memory block:\n${issueMessages}`,
+              `Failed to retry after invalid printer memory block (${pmErrorMessage}):\n${issueMessages}`,
             ].filter(Boolean).join('\n');
             break;
           }

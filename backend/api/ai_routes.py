@@ -356,6 +356,12 @@ def _build_mcp_tool_context() -> str:
         "- **list_klipper_docs**: Use when the user asks what documentation is available "
         "or wants to browse the full set of Klipper docs."
     )
+    parts.append(
+        "- **search_user_configs** / **read_user_config**: Use when the user asks about "
+        "their configuration but hasn't included any files via 'Include Files'. "
+        "Search for and read their config files so you can provide answers grounded "
+        "in their actual printer setup."
+    )
     parts.append("")
     parts.append(
         "Rules of thumb:"

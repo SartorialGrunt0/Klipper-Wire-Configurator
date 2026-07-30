@@ -142,7 +142,17 @@ export function extractConfigCodeBlocks(content: string): string[] {
     }
   }
   if (configBlocks.length > 0) return configBlocks;
-  return fallbackBlocks.length > 0 ? [fallbackBlocks[0]] : [];
+  if (fallbackBlocks.length > 0) return [fallbackBlocks[0]];
+
+  // Fallback: if no fenced code blocks found, check whether the raw text
+  // contains config-like patterns (delete markers *[section], file hints).
+  // This handles AI models that output `*[section_name]` without wrapping
+  // them in ```cfg ... ```.
+  if (/^\s*(?:[*]\[[^\]]+\]|[#;]\s*file\s*:)/m.test(content)) {
+    return [content];
+  }
+
+  return [];
 }
 
 export function extractConfigCodeBlock(content: string): string | null {

@@ -127,7 +127,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
   onReviewPrinterMemory,
   messagesEndRef,
 }) => {
-  if (messages.length === 0 && !loading) {
+  if (messages.length === 0 && !loading && !error) {
     return (
       <div className="flex items-center justify-center h-full text-[var(--color-text-secondary)]">
         <div className="text-center">
@@ -269,10 +269,17 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
         </div>
       )}
 
-      {/* Error message */}
+      {/* Error banner */}
       {error && (
-        <div className="text-left mb-2 text-[var(--color-error)]">
-          <span className="text-[10px]">{error}</span>
+        <div className="flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2.5 mb-2">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" className="mt-0.5 shrink-0 text-[var(--color-error)]" aria-hidden="true">
+            <circle cx="8" cy="8" r="6.5" stroke="currentColor" strokeWidth="1.3"/>
+            <path d="M8 4.5v4M8 11v.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+          </svg>
+          <div className="min-w-0 flex-1">
+            <p className="text-[11px] font-medium text-[var(--color-error)]">Request failed</p>
+            <p className="mt-0.5 text-[10px] text-[var(--color-text-secondary)] leading-relaxed">{error}</p>
+          </div>
         </div>
       )}
 
