@@ -737,20 +737,6 @@ export interface AiChatResponse {
   mcpToolNames?: string[];
 }
 
-export interface ModelListResponse {
-  models: string[];
-  error?: string;
-}
-
-export async function listModels(apiUrl: string, apiKey: string = ''): Promise<ModelListResponse> {
-  const params = new URLSearchParams();
-  params.set('apiUrl', apiUrl);
-  if (apiKey) params.set('apiKey', apiKey);
-  const res = await fetch(`/ai/models?${params.toString()}`);
-  if (!res.ok) throw new Error(`Failed to list models: ${res.statusText}`);
-  return res.json();
-}
-
 export async function listLocalModels(
   apiUrl: string,
   apiKey: string = '',

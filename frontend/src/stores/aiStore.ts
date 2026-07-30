@@ -122,7 +122,7 @@ function buildAiSettings(settings: Partial<AiSettings>): AiSettings {
   };
 }
 
-function providerRequiresApiKey(provider: AiProvider): boolean {
+export function providerRequiresApiKey(provider: AiProvider): boolean {
   // Only cloud providers require API keys
   return provider === 'chatgpt' || provider === 'google' || provider === 'anthropic' || provider === 'github';
 }

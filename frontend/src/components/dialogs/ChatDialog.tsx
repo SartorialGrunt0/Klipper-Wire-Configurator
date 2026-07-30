@@ -5,7 +5,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
-import { useAiStore, AiProvider, ChatMessage } from '../../stores/aiStore';
+import { useAiStore, AiProvider, ChatMessage, providerRequiresApiKey } from '../../stores/aiStore';
 import { useConfigStore } from '../../stores/configStore';
 import { useGraphStore } from '../../stores/graphStore';
 import * as api from '../../services/api';
@@ -138,10 +138,6 @@ function getProviderModel(
     return fallbackModel;
   }
   return '';
-}
-
-function providerRequiresApiKey(provider: AiProvider): boolean {
-  return PROVIDER_DEFAULTS[provider].requiresKey;
 }
 
 type ParagraphProps = ComponentPropsWithoutRef<'p'>;
@@ -1933,16 +1929,9 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
 
   const hasSelectedModel = !!editModel.trim();
 
-  // Compute whether the save button should be enabled
-  const isSaveEnabled = (() => {
-    if (!providerRequiresApiKey(editApiProvider)) {
-      return true;
-    }
-    if (['openai-compatible', 'lm-studio', 'ollama'].includes(editApiProvider)) {
-      return true; // Allow empty for these providers
-    }
-    return !!editApiKey.trim();
-  })();
+  // Compute whether the save button should be enabled.
+  // Local providers (LM Studio, Ollama, OpenAI Compatible) don't require a key.
+  const isSaveEnabled = !providerRequiresApiKey(editApiProvider) || !!editApiKey.trim();
 
   // Update URL when provider changes
   const handleProviderChange = (provider: AiProvider) => {

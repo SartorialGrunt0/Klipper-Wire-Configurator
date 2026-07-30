@@ -135,12 +135,6 @@ class AiProvider(str, Enum):
     lm_studio = "lm-studio"
     ollama = "ollama"
 
-    @classmethod
-    def is_openai_compatible(cls, provider: str) -> bool:
-        """Check if the provider uses OpenAI-compatible chat format."""
-        return provider in (cls.chatgpt, cls.google, cls.openai_compatible, cls.lm_studio, cls.ollama)
-
-
 class ChatRequest(BaseModel):
     messages: list[dict]
     apiKey: str
@@ -178,11 +172,6 @@ def _build_reference_lookup_query(messages: list[dict]) -> str:
 def _is_local_provider(provider: str) -> bool:
     """Check if the provider is a local server (LM Studio, Ollama, OpenAI Compatible)."""
     return provider in ("lm-studio", "ollama", "openai-compatible")
-
-
-def _is_openai_compatible_provider(provider: str) -> bool:
-    """Check if the provider uses OpenAI-compatible chat format."""
-    return provider in ("chatgpt", "google", "openai-compatible", "lm-studio", "ollama")
 
 
 def _get_openai_compatible_default_url(provider: str) -> str:
@@ -965,35 +954,6 @@ def _should_fallback_lm_studio_request(status_code: int, response_text: str) -> 
 
     normalized = response_text.lower()
     return any(hint in normalized for hint in LM_STUDIO_MCP_FALLBACK_HINTS)
-
-
-@router.get("/ai/models")
-async def list_models(apiUrl: str = None, apiKey: str = None):
-    """List available models from a local server (LM Studio, Ollama, etc.)."""
-    import httpx
-    from urllib.parse import urlparse, urlunparse
-
-    if not apiUrl:
-        return {"models": []}
-
-    # Strip the path (e.g., /v1/chat/completions) to get the base URL
-    parsed = urlparse(apiUrl)
-    base_url = urlunparse((parsed.scheme, parsed.netloc, '', '', '', ''))
-    models_url = f"{base_url}/v1/models"
-
-    headers = {"Content-Type": "application/json"}
-    if apiKey and apiKey.strip():
-        headers["Authorization"] = f"Bearer {apiKey}"
-
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        try:
-            resp = await client.get(models_url, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
-            model_ids = [m["id"] for m in data.get("data", [])]
-            return {"models": model_ids}
-        except httpx.HTTPError as e:
-            return {"models": [], "error": str(e)}
 
 
 @router.post("/ai/chat")
