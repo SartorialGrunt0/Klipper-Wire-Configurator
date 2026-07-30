@@ -4,7 +4,7 @@ const STORAGE_KEY = 'klipper-wire-ai-state';
 const LEGACY_SETTINGS_KEY = 'klipper-wire-ai-settings';
 const DEFAULT_PROVIDER: AiProvider = 'chatgpt';
 
-export type AiProvider = 'google' | 'chatgpt' | 'anthropic' | 'github' | 'openai-compatible' | 'lm-studio' | 'ollama';
+export type AiProvider = 'google' | 'chatgpt' | 'anthropic' | 'github' | 'openai-compatible';
 type ProviderModels = Partial<Record<AiProvider, string>>;
 
 export interface ChatMessage {
@@ -21,11 +21,8 @@ export interface AiSettings {
   providerModels: ProviderModels;
   apiUrl: string;
   apiProvider: AiProvider;
-  lmStudioHost: string;
-  lmStudioPort: string;
-
-  ollamaHost: string;
-  ollamaPort: string;
+  host: string;
+  port: string;
 }
 
 interface PersistedAiState {
@@ -88,8 +85,7 @@ const DEFAULT_PROVIDER_MODELS: ProviderModels = {
   anthropic: '',
   github: '',
   'openai-compatible': 'gpt-4o',
-  'lm-studio': '',
-  ollama: '',
+
 };
 
 function normalizeProviderModels(settings: Partial<AiSettings>): ProviderModels {
@@ -138,11 +134,8 @@ const DEFAULT_SETTINGS: AiSettings = {
   providerModels: { ...DEFAULT_PROVIDER_MODELS },
   apiUrl: 'https://api.openai.com/v1/chat/completions',
   apiProvider: DEFAULT_PROVIDER,
-  lmStudioHost: 'localhost',
-  lmStudioPort: '1234',
-
-  ollamaHost: 'localhost',
-  ollamaPort: '11434',
+  host: 'localhost',
+  port: '11434',
 };
 
 export const useAiStore = create<AiState>()((set, get) => {

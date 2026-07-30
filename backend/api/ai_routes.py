@@ -117,8 +117,6 @@ class AiProvider(str, Enum):
     anthropic = "anthropic"
     github = "github"
     openai_compatible = "openai-compatible"
-    lm_studio = "lm-studio"
-    ollama = "ollama"
 
 class ChatRequest(BaseModel):
     messages: list[dict]
@@ -154,8 +152,8 @@ def _build_reference_lookup_query(messages: list[dict]) -> str:
 
 
 def _is_local_provider(provider: str) -> bool:
-    """Check if the provider is a local server (LM Studio, Ollama, OpenAI Compatible)."""
-    return provider in ("lm-studio", "ollama", "openai-compatible")
+    """Check if the provider is a local server (OpenAI Compatible)."""
+    return provider == "openai-compatible"
 
 
 def _get_openai_compatible_default_url(provider: str) -> str:
@@ -164,8 +162,6 @@ def _get_openai_compatible_default_url(provider: str) -> str:
         "chatgpt": "https://api.openai.com/v1/chat/completions",
         "google": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
         "openai-compatible": "http://localhost:11434/api/chat",
-        "lm-studio": "http://localhost:1234/v1/chat/completions",
-        "ollama": "http://localhost:11434/api/chat",
     }
     return defaults.get(provider, "")
 

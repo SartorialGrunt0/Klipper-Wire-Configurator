@@ -129,18 +129,14 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   );
   const [editApiUrl, setEditApiUrl] = useState(settings.apiUrl);
   const [editApiProvider, setEditApiProvider] = useState<AiProvider>(settings.apiProvider);
-  const [editLmStudioHost, setEditLmStudioHost] = useState(settings.lmStudioHost);
-  const [editLmStudioPort, setEditLmStudioPort] = useState(settings.lmStudioPort);
-  const [editOllamaHost, setEditOllamaHost] = useState(settings.ollamaHost);
-  const [editOllamaPort, setEditOllamaPort] = useState(settings.ollamaPort);
+  const [editHost, setEditHost] = useState(settings.host);
+  const [editPort, setEditPort] = useState(settings.port);
 
   const resolvedEditApiUrl = resolveProviderApiUrl(
     editApiProvider,
     editApiUrl,
-    editLmStudioHost,
-    editLmStudioPort,
-    editOllamaHost,
-    editOllamaPort,
+    editHost,
+    editPort,
   );
 
   // ── Refs ────────────────────────────────────────────────────────
@@ -159,10 +155,8 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       setEditModel(getProviderModel(settings.apiProvider, settings.providerModels, settings.model, settings.apiProvider));
       setEditApiUrl(settings.apiUrl);
       setEditApiProvider(settings.apiProvider);
-      setEditLmStudioHost(settings.lmStudioHost);
-      setEditLmStudioPort(settings.lmStudioPort);
-      setEditOllamaHost(settings.ollamaHost);
-      setEditOllamaPort(settings.ollamaPort);
+      setEditHost(settings.host);
+      setEditPort(settings.port);
       setError(null);
     }
   }, [open, settings]);
@@ -207,20 +201,16 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       providerModels: nextProviderModels,
       apiUrl: resolvedEditApiUrl,
       apiProvider: editApiProvider,
-      lmStudioHost: editLmStudioHost,
-      lmStudioPort: editLmStudioPort,
-      ollamaHost: editOllamaHost,
-      ollamaPort: editOllamaPort,
+      host: editHost,
+      port: editPort,
     });
     setShowSettings(false);
   }, [
     editApiKey,
     editApiProvider,
-    editLmStudioHost,
-    editLmStudioPort,
+    editHost,
+    editPort,
     editModel,
-    editOllamaHost,
-    editOllamaPort,
     editProviderModels,
     resolvedEditApiUrl,
     setSettings,
@@ -449,15 +439,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     setEditApiUrl,
     editApiProvider,
     setEditApiProvider,
-    editLmStudioHost,
-    setEditLmStudioHost,
-    editLmStudioPort,
-    setEditLmStudioPort,
-
-    editOllamaHost,
-    setEditOllamaHost,
-    editOllamaPort,
-    setEditOllamaPort,
+    editHost,
+    setEditHost,
+    editPort,
+    setEditPort,
     resolvedEditApiUrl,
     onSaveSettings: handleSaveSettings,
   };

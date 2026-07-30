@@ -27,14 +27,10 @@ export interface ChatSettingsPanelProps {
   setEditApiUrl: (v: string) => void;
   editApiProvider: AiProvider;
   setEditApiProvider: (v: AiProvider) => void;
-  editLmStudioHost: string;
-  setEditLmStudioHost: (v: string) => void;
-  editLmStudioPort: string;
-  setEditLmStudioPort: (v: string) => void;
-  editOllamaHost: string;
-  setEditOllamaHost: (v: string) => void;
-  editOllamaPort: string;
-  setEditOllamaPort: (v: string) => void;
+  editHost: string;
+  setEditHost: (v: string) => void;
+  editPort: string;
+  setEditPort: (v: string) => void;
   resolvedEditApiUrl: string;
   onSaveSettings: () => void;
   onClose?: () => void;
@@ -50,14 +46,10 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
   setEditApiUrl,
   editApiProvider,
   setEditApiProvider,
-  editLmStudioHost,
-  setEditLmStudioHost,
-  editLmStudioPort,
-  setEditLmStudioPort,
-  editOllamaHost,
-  setEditOllamaHost,
-  editOllamaPort,
-  setEditOllamaPort,
+  editHost,
+  setEditHost,
+  editPort,
+  setEditPort,
   resolvedEditApiUrl,
   onSaveSettings,
   onClose,
@@ -80,7 +72,7 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
     setModelsLoading(true);
     setModelsError(null);
     try {
-      const result = await api.listLocalModels(apiUrl, apiKey, provider as 'lm-studio' | 'ollama' | 'openai-compatible');
+      const result = await api.listLocalModels(apiUrl, apiKey);
       setAvailableModels(result);
       if (result.length === 0) {
         setModelsError('No models found at this endpoint. Make sure a model is loaded.');
@@ -213,12 +205,8 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
           <input
             type="text"
             className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-            value={editApiProvider === 'lm-studio' ? editLmStudioHost : editOllamaHost}
-            onChange={(e) => {
-              const v = e.target.value;
-              if (editApiProvider === 'lm-studio') setEditLmStudioHost(v);
-              else setEditOllamaHost(v);
-            }}
+            value={editHost}
+            onChange={(e) => setEditHost(e.target.value)}
             placeholder="localhost"
           />
         </div>
@@ -227,12 +215,8 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
           <input
             type="text"
             className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-            value={editApiProvider === 'lm-studio' ? editLmStudioPort : editOllamaPort}
-            onChange={(e) => {
-              const v = e.target.value;
-              if (editApiProvider === 'lm-studio') setEditLmStudioPort(v);
-              else setEditOllamaPort(v);
-            }}
+            value={editPort}
+            onChange={(e) => setEditPort(e.target.value)}
             placeholder="1234"
           />
         </div>

@@ -25,8 +25,6 @@ export const PROVIDER_OPTIONS: Array<{ value: AiProvider; label: string }> = [
   { value: 'anthropic', label: 'Anthropic (Claude)' },
   { value: 'github', label: 'GitHub Copilot' },
   { value: 'openai-compatible', label: 'OpenAI Compatible' },
-  { value: 'lm-studio', label: 'LM Studio (Local)' },
-  { value: 'ollama', label: 'Ollama (Local)' },
 ];
 
 export const PROVIDER_DEFAULTS: Record<AiProvider, ProviderInfo> = {
@@ -70,28 +68,13 @@ export const PROVIDER_DEFAULTS: Record<AiProvider, ProviderInfo> = {
     defaultPort: '11434',
     defaultModel: 'gpt-4o',
   },
-  'lm-studio': {
-    label: 'LM Studio (Local)',
-    defaultUrl: '',
-    requiresKey: false,
-    defaultHost: 'localhost',
-    defaultPort: '1234',
-    defaultModel: '',
-  },
-  ollama: {
-    label: 'Ollama (Local)',
-    defaultUrl: '',
-    requiresKey: false,
-    defaultHost: 'localhost',
-    defaultPort: '11434',
-    defaultModel: '',
-  },
+
 };
 
 // ── Provider Helpers ────────────────────────────────────────────────
 
 export const isLocalProvider = (provider: AiProvider): boolean =>
-  provider === 'lm-studio' || provider === 'ollama' || provider === 'openai-compatible';
+  provider === 'openai-compatible';
 
 export function buildLocalProviderApiUrl(host: string, port: string): string {
   return `http://${host}:${port}/v1/chat/completions`;
@@ -100,19 +83,11 @@ export function buildLocalProviderApiUrl(host: string, port: string): string {
 export function resolveProviderApiUrl(
   provider: AiProvider,
   apiUrl: string,
-  lmStudioHost: string,
-  lmStudioPort: string,
-  ollamaHost: string,
-  ollamaPort: string,
+  host: string,
+  port: string,
 ): string {
-  if (provider === 'lm-studio') {
-    return buildLocalProviderApiUrl(lmStudioHost, lmStudioPort);
-  }
-  if (provider === 'ollama') {
-    return buildLocalProviderApiUrl(ollamaHost, ollamaPort);
-  }
   if (provider === 'openai-compatible') {
-    return buildLocalProviderApiUrl(ollamaHost, ollamaPort);
+    return buildLocalProviderApiUrl(host, port);
   }
   return apiUrl;
 }
