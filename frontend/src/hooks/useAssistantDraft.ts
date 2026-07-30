@@ -112,12 +112,12 @@ export function useAssistantDraft(deps: {
   // ── Helpers ───────────────────────────────────────────────────────
 
   const getConfigText = useCallback(
-    async (filename: string): Promise<string | null> => {
-      if (!filename) return null;
+    async (filename: string): Promise<string> => {
+      if (!filename) return '';
       const draftText = textDrafts[filename];
       if (typeof draftText === 'string') return draftText;
       const config = configFiles[filename];
-      if (!config) return null;
+      if (!config) return '';
       return api.exportConfig(config);
     },
     [configFiles, textDrafts],
@@ -231,9 +231,6 @@ export function useAssistantDraft(deps: {
       for (const assistantConfig of assistantConfigs) {
         const targetFile = assistantConfig.filename;
         const baseText = await getConfigText(targetFile);
-        if (baseText == null) {
-          throw new Error(`Unable to load ${targetFile} for preview.`);
-        }
 
         const baseResult = await api.parseConfigText(baseText, targetFile);
         const baseConfig = { ...baseResult.config, raw_text: baseText };

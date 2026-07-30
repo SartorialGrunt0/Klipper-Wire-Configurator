@@ -209,7 +209,8 @@ export function extractAssistantFileHint(
     if (!trimmed) continue;
     const hintMatch = ASSISTANT_FILE_HINT_RE.exec(trimmed);
     if (hintMatch) {
-      fileHint = availableByLower.get(hintMatch[1].trim().toLowerCase()) ?? null;
+      const rawName = hintMatch[1].trim();
+      fileHint = availableByLower.get(rawName.toLowerCase()) ?? rawName;
       fileHintLineIndex = index;
     }
     break;
@@ -252,18 +253,40 @@ export function resolveAssistantTargetFile(
   hintedFilenames: string[],
 ): string | null {
   const availableFilenames = Object.keys(configFiles);
-  if (availableFilenames.length === 0) return null;
-  const uniqueHints = Array.from(new Set(hintedFilenames.filter((filename) => Boolean(configFiles[filename]))));
+  const uniqueHints = Array.from(new Set(hintedFilenames));
+
+  // If the AI explicitly named a single target file (existing or new), trust it.
   if (uniqueHints.length === 1) return uniqueHints[0];
 
+  // If no files are loaded and no single hint, we can't resolve a target.
+  if (availableFilenames.length === 0) return null;
+
+  // Multiple hints — narrow to those that exist in the project.
+  const existingHints = uniqueHints.filter((filename) => Boolean(configFiles[filename]));
+  if (existingHints.length === 1) return existingHints[0];
+  if (existingHints.length > 1) {
+    // Multiple existing-file hints — score them against the assistant's sections.
+    const scored = existingHints
+      .map((filename) => {
+        const { exactMatches, sectionTypeMatches } = scoreAssistantTargetFile(configFiles[filename], assistantConfig.sections);
+        return { filename, exactMatches, sectionTypeMatches };
+      })
+      .sort((left, right) => {
+        if (right.exactMatches !== left.exactMatches) return right.exactMatches - left.exactMatches;
+        return right.sectionTypeMatches - left.sectionTypeMatches;
+      });
+    if (scored[0].exactMatches > 0 || scored[0].sectionTypeMatches > 0) return scored[0].filename;
+    return scored[0].filename; // best guess
+  }
+
+  // No matching hints — score all available files against assistant sections.
   const scores = availableFilenames
     .map((filename) => {
       const { exactMatches, sectionTypeMatches } = scoreAssistantTargetFile(configFiles[filename], assistantConfig.sections);
-      return { filename, exactMatches, sectionTypeMatches, hinted: uniqueHints.includes(filename), active: filename === activeFile };
+      return { filename, exactMatches, sectionTypeMatches, active: filename === activeFile };
     })
     .sort((left, right) => {
       if (right.exactMatches !== left.exactMatches) return right.exactMatches - left.exactMatches;
-      if (right.hinted !== left.hinted) return Number(right.hinted) - Number(left.hinted);
       if (right.sectionTypeMatches !== left.sectionTypeMatches) return right.sectionTypeMatches - left.sectionTypeMatches;
       if (right.active !== left.active) return Number(right.active) - Number(left.active);
       return left.filename.localeCompare(right.filename);

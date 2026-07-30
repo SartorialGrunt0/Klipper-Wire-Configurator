@@ -47,6 +47,7 @@ export default function AiDraftPreviewDialog({
         changedLineCount: diffLines.filter(
           (line) => line.type === 'added' || line.type === 'removed',
         ).length,
+        isNewFile: !filePreview.originalText.trim(),
       };
     }),
     [filePreviews],
@@ -202,8 +203,13 @@ export default function AiDraftPreviewDialog({
                   className="overflow-hidden rounded-lg border border-[var(--color-bg-tertiary)]"
                 >
                   <div className="flex items-center justify-between border-b border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-3 py-2">
-                    <span className="text-[11px] font-semibold text-[var(--color-text-primary)]">
+                    <span className="flex items-center gap-2 text-[11px] font-semibold text-[var(--color-text-primary)]">
                       {fileDiff.filename}
+                      {fileDiff.isNewFile && (
+                        <span className="rounded-full bg-green-500/20 px-1.5 py-0.5 text-[10px] font-medium text-green-400">
+                          New file
+                        </span>
+                      )}
                     </span>
                     <span className="text-[10px] text-[var(--color-text-secondary)]">
                       {fileDiff.changedLineCount > 0
