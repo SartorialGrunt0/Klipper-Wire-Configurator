@@ -80,7 +80,21 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   } = useConfigStore();
 
   // ── Draft Hook ──────────────────────────────────────────────────
-  const draft = useAssistantDraft({
+  const {
+    assistantDraftPreview,
+    assistantDraftPreviewLoading,
+    assistantDraftApplicableMessages,
+    setAssistantDraftPreview,
+    setAssistantDraftApplicableMessages,
+    handleApplyAssistantEdit,
+    handleAssistantDraftSelectionChange,
+    handleAcceptAssistantEdit,
+    handleNewChat,
+    requestAssistantMessage: draftRequestMessage,
+    runValidationRetryLoop: draftValidationRetryLoop,
+    flattenAssistantDraftChanges,
+    updateAssistantDraftApplicableMessages,
+  } = useAssistantDraft({
     messages,
     setMessages,
     configFiles,
@@ -178,10 +192,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   // ── Detect applicable assistant messages ────────────────────────
   useEffect(() => {
     if (!open || !activeFile) {
-      draft.setAssistantDraftApplicableMessages({});
+      setAssistantDraftApplicableMessages({});
       return;
     }
-    void draft.updateAssistantDraftApplicableMessages(messages);
+    void updateAssistantDraftApplicableMessages(messages);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, messages, activeFile, configFiles, textDrafts]);
 
@@ -337,10 +351,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         const validationConversation = [...newMessages];
 
         // First request
-        const assistantAttempt = await draft.requestAssistantMessage(chatRequestBase, requestConversation);
+        const assistantAttempt = await draftRequestMessage(chatRequestBase, requestConversation);
 
         // Validation retry loop
-        const result = await draft.runValidationRetryLoop(
+        const result = await draftValidationRetryLoop(
           chatRequestBase,
           requestConversation,
           validationConversation,
@@ -349,7 +363,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
 
         if (result.warningMessage) setError(result.warningMessage);
         setMessages([...newMessages, result.finalMessage]);
-        draft.setAssistantDraftApplicableMessages({}); // Will be re-evaluated by the useEffect
+        setAssistantDraftApplicableMessages({}); // Will be re-evaluated by the useEffect
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : 'Failed to get response.';
         setError(message);
@@ -361,7 +375,9 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     [
       activeFile,
       attachedConfigFiles,
-      draft,
+      draftRequestMessage,
+      draftValidationRetryLoop,
+      setAssistantDraftApplicableMessages,
       editApiKey,
       editApiProvider,
       editLmStudioMcpPluginId,
@@ -397,18 +413,18 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     async (content: string, messageIndex?: number) => {
       setError(null);
       try {
-        await draft.handleApplyAssistantEdit(content, messageIndex);
+        await handleApplyAssistantEdit(content, messageIndex);
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : 'Failed to prepare assistant changes.');
       }
     },
-    [draft],
+    [handleApplyAssistantEdit],
   );
 
   // ── Handle Accept Draft ─────────────────────────────────────────
   const handleAcceptDraft = useCallback(async () => {
     try {
-      await draft.handleAcceptAssistantEdit();
+      await handleAcceptAssistantEdit();
       const graphStore = useGraphStore.getState();
       graphStore.clearGraph();
       buildProjectGraph(configFiles, graphStore, schemas, validation);
@@ -416,7 +432,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to accept assistant changes.');
     }
-  }, [configFiles, draft, schemas, validation]);
+  }, [configFiles, handleAcceptAssistantEdit, schemas, validation]);
 
   // ── Pending Request Handling ────────────────────────────────────
   useEffect(() => {
@@ -499,7 +515,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           </div>
           <div className="flex items-center gap-2">
             <button
-              onClick={draft.handleNewChat}
+              onClick={handleNewChat}
               disabled={loading || messages.length === 0}
               className="px-2 py-1 rounded text-[10px] font-medium bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] disabled:opacity-40 disabled:cursor-not-allowed"
               title="Start a new chat"
@@ -534,8 +550,8 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
             loading={loading}
             error={error}
             activeFile={activeFile}
-            assistantDraftApplicableMessages={draft.assistantDraftApplicableMessages}
-            assistantDraftPreviewLoading={draft.assistantDraftPreviewLoading}
+            assistantDraftApplicableMessages={assistantDraftApplicableMessages}
+            assistantDraftPreviewLoading={assistantDraftPreviewLoading}
             onApplyEdit={handleApplyEdit}
             messagesEndRef={messagesEndRef}
           />
@@ -571,19 +587,19 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       </div>
 
       {/* Draft Preview Dialog */}
-      {draft.assistantDraftPreview && (
+      {assistantDraftPreview && (
         <AiDraftPreviewDialog
-          filePreviews={draft.assistantDraftPreview.filePreviews.map((fp) => ({
+          filePreviews={assistantDraftPreview.filePreviews.map((fp) => ({
             filename: fp.filename,
             originalText: fp.originalText,
             mergedText: fp.mergedText,
           }))}
-          changes={draft.flattenAssistantDraftChanges(draft.assistantDraftPreview.filePreviews)}
-          selectedChangeIds={draft.assistantDraftPreview.selectedChangeIds}
-          previewUpdating={draft.assistantDraftPreview.previewUpdating}
-          onSelectionChange={(ids) => { void draft.handleAssistantDraftSelectionChange(ids); }}
+          changes={flattenAssistantDraftChanges(assistantDraftPreview.filePreviews)}
+          selectedChangeIds={assistantDraftPreview.selectedChangeIds}
+          previewUpdating={assistantDraftPreview.previewUpdating}
+          onSelectionChange={(ids) => { void handleAssistantDraftSelectionChange(ids); }}
           onAccept={() => { void handleAcceptDraft(); }}
-          onClose={() => draft.setAssistantDraftPreview(null)}
+          onClose={() => setAssistantDraftPreview(null)}
         />
       )}
     </div>

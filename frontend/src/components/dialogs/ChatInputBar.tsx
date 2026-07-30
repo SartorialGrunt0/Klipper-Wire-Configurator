@@ -170,7 +170,7 @@ const ChatInputBar: React.FC<ChatInputBarProps> = ({
       {/* Input row */}
       <div className="flex items-center gap-2 p-4 pt-2">
         <div
-          ref={inputRef as React.RefObject<HTMLDivElement>}
+          ref={inputRef}
           className={`flex-1 px-3 py-2 rounded-lg text-xs bg-[var(--color-bg-primary)] border text-[var(--color-text-primary)] focus:outline-none transition-colors resize-none ${
             loading
               ? 'border-[var(--color-bg-tertiary)] opacity-50 cursor-not-allowed'
