@@ -33,6 +33,7 @@ DOC_CATALOG_PATH = KLIPPER_DOCS_DIR
 CONFIG_REFERENCE_PATH = KLIPPER_DOCS_DIR / "Config_Reference.md"
 GCODE_MACRO_SUMMARY_PATH = KLIPPER_DOCS_DIR / "Klipper_GCode_Macro_AI_Summary.md"
 DOCS_SUMMARY_PATH = KLIPPER_DOCS_DIR / "Klipper_Docs_AI_Summary.md"
+CONFIG_EXAMPLES_DIR = REFERENCE_DIR / "config"
 
 # ── Constants ─────────────────────────────────────────────────────────
 
@@ -420,22 +421,41 @@ class McpServer:
                 "name": "search_example_configs",
                 "description": (
                     "Search bundled example Klipper configurations by board, printer, or feature keyword. "
-                    "Returns matching example filenames and their metadata."
+                    "Returns matching filenames with their category and a preview snippet. "
+                    "Use read_example_config to get the full file content."
                 ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "Search query (e.g. 'voron', 'ender3', 'skr mini', 'bltouch')",
+                            "description": "Search query (e.g. 'voron', 'ender3', 'skr mini', 'bltouch', 'adxl345')",
                         },
                         "limit": {
                             "type": "number",
-                            "description": "Max results (default 5)",
-                            "default": 5,
+                            "description": "Max results (default 10)",
+                            "default": 10,
                         },
                     },
                     "required": ["query"],
+                },
+            },
+            {
+                "name": "read_example_config",
+                "description": (
+                    "Read the full content of a bundled example Klipper config file by filename "
+                    "(with or without .cfg extension). "
+                    "Use search_example_configs first to find the exact filename."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "filename": {
+                            "type": "string",
+                            "description": "Config filename (e.g. 'generic-bigtreetech-skr-mini-e3-v3.0.cfg', 'printer-voron-2.4-octopus.cfg')",
+                        },
+                    },
+                    "required": ["filename"],
                 },
             },
             {
@@ -470,6 +490,7 @@ class McpServer:
             "validate_klipper_config": self._handle_validate,
             "get_section_schema": self._handle_schema,
             "search_example_configs": self._handle_search_examples,
+            "read_example_config": self._handle_read_example_config,
             "detect_board": self._handle_detect_board,
         }
 
@@ -716,44 +737,116 @@ class McpServer:
             )
 
     def _handle_search_examples(self, args: dict[str, Any]) -> str:
-        query = args.get("query", "").strip()
-        limit = min(int(args.get("limit", 5)), 10)
+        query = args.get("query", "").strip().lower()
+        limit = min(int(args.get("limit", 10)), 30)
 
         if not query:
             return "Please provide a search query."
 
+        examples_dir = CONFIG_EXAMPLES_DIR
+        if not examples_dir.is_dir():
+            return "Example config directory not found."
+
+        # Scan all .cfg files in the config examples tree
+        results: list[dict[str, Any]] = []
+        query_terms = query.replace("-", " ").split()
+
+        for cat_dir in sorted(examples_dir.iterdir()):
+            if not cat_dir.is_dir():
+                continue
+            category = cat_dir.name
+            for cfg_file in sorted(cat_dir.glob("*.cfg")):
+                name = cfg_file.stem
+                # Create a searchable text from the file path and name
+                search_text = f"{category} {name} {cat_dir.name}".lower().replace("-", " ")
+                # Score by number of matching query terms
+                score = sum(1 for term in query_terms if term in search_text)
+                if score == 0:
+                    continue
+
+                # Read first few non-comment lines for a preview snippet
+                snippet = ""
+                try:
+                    text = cfg_file.read_text(encoding="utf-8", errors="replace")
+                    content_lines = [
+                        l.strip() for l in text.split("\n")
+                        if l.strip() and not l.strip().startswith("#")
+                    ]
+                    snippet = " ".join(content_lines[:5])[:200]
+                except OSError:
+                    pass
+
+                results.append({
+                    "category": category,
+                    "filename": cfg_file.name,
+                    "score": score,
+                    "snippet": snippet,
+                    "subcategory": "generic" if name.startswith("generic-") else (
+                        "printer" if name.startswith("printer-") or name.startswith("kit-") else "sample"
+                    ),
+                })
+
+        if not results:
+            return f'No example configs matching "{query}". Try different keywords (board name, printer model, etc.).'
+
+        # Sort by score descending, then alphabetically
+        results.sort(key=lambda r: (-r["score"], r["category"], r["filename"]))
+
+        lines: list[str] = [f"Example configs matching: {query}\n"]
+        for r in results[:limit]:
+            lines.append(f"## {r['filename']}  [{r['category']}/{r['subcategory']}]")
+            if r["snippet"]:
+                lines.append(f"> {r['snippet']}\n")
+        lines.append(f"\n{len(results)} match(es) total. Use read_example_config to read the full file.")
+
+        return "\n".join(lines)
+
+    def _handle_read_example_config(self, args: dict[str, Any]) -> str:
+        raw = args.get("filename", "").strip()
+        if not raw:
+            return "Please provide a config filename."
+
+        stem = Path(raw).stem.lower()
+
+        examples_dir = CONFIG_EXAMPLES_DIR
+        if not examples_dir.is_dir():
+            return "Example config directory not found."
+
+        # Search all .cfg files in the tree
+        candidates: list[Path] = []
+        for cat_dir in examples_dir.iterdir():
+            if not cat_dir.is_dir():
+                continue
+            for cfg_file in cat_dir.glob("*.cfg"):
+                if cfg_file.stem.lower() == stem or cfg_file.name.lower() == raw.lower():
+                    candidates.append(cfg_file)
+
+        if not candidates:
+            # Try partial match — require ALL query tokens to be present in filename tokens
+            query_tokens = set(stem.replace("-", " ").replace("_", " ").split())
+            for cat_dir in examples_dir.iterdir():
+                if not cat_dir.is_dir():
+                    continue
+                for cfg_file in cat_dir.glob("*.cfg"):
+                    file_tokens = set(cfg_file.stem.lower().replace("-", " ").replace("_", " ").split())
+                    if query_tokens and query_tokens <= file_tokens:
+                        candidates.append(cfg_file)
+
+        if not candidates:
+            return f'Config file "{raw}" not found. Use search_example_configs to find matching files.'
+
+        if len(candidates) > 1:
+            names = "\n".join(f"  - {c.name}  [{c.parent.name}]" for c in candidates[:10])
+            return f'Multiple configs match "{raw}":\n{names}\n\nPlease specify the exact filename.'
+
+        path = candidates[0]
         try:
-            from services.board_detector import fuzzy_match_examples, get_available_examples
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            return f"Error reading {path.name}: {exc}"
 
-            examples_dir = REFERENCE_DIR / "config"
-            if not examples_dir.is_dir():
-                return "Example config directory not found."
-
-            examples = fuzzy_match_examples(query)
-            if not examples:
-                return f'No example configs matching "{query}".'
-
-            lines: list[str] = [f"Example configs matching: {query}\n"]
-            for ex in examples[:limit]:
-                name = ex.get("name", ex) if isinstance(ex, dict) else str(ex)
-                desc = ex.get("description", "") if isinstance(ex, dict) else ""
-                board = ex.get("board", "") if isinstance(ex, dict) else ""
-                parts = [name]
-                if board:
-                    parts.append(f"Board: {board}")
-                if desc:
-                    parts.append(desc)
-                lines.append(f"- **{' — '.join(parts)}**")
-            lines.append(f"\n{len(examples)} match(es) total.")
-
-            return "\n".join(lines)
-
-        except ImportError:
-            return (
-                f'Example search for "{query}" is not available '
-                f"because the example config module could not be loaded. "
-                f"Use search_klipper_docs to find reference documentation instead."
-            )
+        header = f"# {path.name}  ({path.parent.name})\n# {len(content)} bytes\n\n"
+        return header + content
 
     def _handle_detect_board(self, args: dict[str, Any]) -> str:
         config_text = args.get("config_text", "").strip()

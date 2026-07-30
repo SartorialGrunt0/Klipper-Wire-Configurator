@@ -277,7 +277,13 @@ def _build_mcp_tool_context() -> str:
     )
     parts.append(
         "- **search_example_configs**: Use when the user asks for a complete working "
-        "config example for a specific board or printer model."
+        "config example for a specific board or printer model. "
+        "Returns matching filenames with preview snippets — use read_example_config to get the full file."
+    )
+    parts.append(
+        "- **read_example_config**: Use when you need the full content of an example config file "
+        "found via search_example_configs, or when the user explicitly asks to see or use "
+        "a specific example configuration."
     )
     parts.append(
         "- **detect_board**: Use when the user asks what board their config targets, "
