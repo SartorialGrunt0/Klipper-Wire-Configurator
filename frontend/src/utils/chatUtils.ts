@@ -1,0 +1,570 @@
+/**
+ * Shared utility functions and constants for the AI Chat feature.
+ *
+ * Pure functions — no React state or hooks. Designed to be extracted from
+ * the ChatDialog component to reduce file size and improve testability.
+ */
+import type { ValidationError, ValidationResult, ConfigFile, ConfigSection } from '../types/config';
+import type { LmStudioContextStatus, LmStudioMcpStatus } from '../types/ai';
+import type { AiProvider } from '../stores/aiStore';
+
+// ── Provider Configuration ──────────────────────────────────────────
+
+export interface ProviderInfo {
+  label: string;
+  defaultUrl: string;
+  requiresKey: boolean;
+  defaultHost: string;
+  defaultPort: string;
+  defaultModel: string;
+}
+
+export const PROVIDER_OPTIONS: Array<{ value: AiProvider; label: string }> = [
+  { value: 'chatgpt', label: 'ChatGPT (OpenAI)' },
+  { value: 'google', label: 'Google (Gemini)' },
+  { value: 'anthropic', label: 'Anthropic (Claude)' },
+  { value: 'github', label: 'GitHub Copilot' },
+  { value: 'openai-compatible', label: 'OpenAI Compatible' },
+  { value: 'lm-studio', label: 'LM Studio (Local)' },
+  { value: 'ollama', label: 'Ollama (Local)' },
+];
+
+export const PROVIDER_DEFAULTS: Record<AiProvider, ProviderInfo> = {
+  chatgpt: {
+    label: 'ChatGPT (OpenAI)',
+    defaultUrl: 'https://api.openai.com/v1/chat/completions',
+    requiresKey: true,
+    defaultHost: 'localhost',
+    defaultPort: '1234',
+    defaultModel: 'gpt-4o',
+  },
+  google: {
+    label: 'Google (Gemini)',
+    defaultUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
+    requiresKey: true,
+    defaultHost: 'localhost',
+    defaultPort: '1234',
+    defaultModel: 'gemini-1.5-pro',
+  },
+  anthropic: {
+    label: 'Anthropic (Claude)',
+    defaultUrl: 'https://api.anthropic.com/v1/messages',
+    requiresKey: true,
+    defaultHost: 'localhost',
+    defaultPort: '1234',
+    defaultModel: 'claude-3-5-sonnet',
+  },
+  github: {
+    label: 'GitHub Copilot',
+    defaultUrl: 'https://models.github.ai/inference/chat/completions',
+    requiresKey: true,
+    defaultHost: 'localhost',
+    defaultPort: '1234',
+    defaultModel: 'gpt-4o',
+  },
+  'openai-compatible': {
+    label: 'OpenAI Compatible',
+    defaultUrl: 'http://localhost:11434/api/chat',
+    requiresKey: false,
+    defaultHost: 'localhost',
+    defaultPort: '11434',
+    defaultModel: 'gpt-4o',
+  },
+  'lm-studio': {
+    label: 'LM Studio (Local)',
+    defaultUrl: '',
+    requiresKey: false,
+    defaultHost: 'localhost',
+    defaultPort: '1234',
+    defaultModel: '',
+  },
+  ollama: {
+    label: 'Ollama (Local)',
+    defaultUrl: '',
+    requiresKey: false,
+    defaultHost: 'localhost',
+    defaultPort: '11434',
+    defaultModel: '',
+  },
+};
+
+// ── Provider Helpers ────────────────────────────────────────────────
+
+export const isLocalProvider = (provider: AiProvider): boolean =>
+  provider === 'lm-studio' || provider === 'ollama' || provider === 'openai-compatible';
+
+export function buildLocalProviderApiUrl(host: string, port: string): string {
+  return `http://${host}:${port}/v1/chat/completions`;
+}
+
+export function resolveProviderApiUrl(
+  provider: AiProvider,
+  apiUrl: string,
+  lmStudioHost: string,
+  lmStudioPort: string,
+  ollamaHost: string,
+  ollamaPort: string,
+): string {
+  if (provider === 'lm-studio') {
+    return buildLocalProviderApiUrl(lmStudioHost, lmStudioPort);
+  }
+  if (provider === 'ollama') {
+    return buildLocalProviderApiUrl(ollamaHost, ollamaPort);
+  }
+  if (provider === 'openai-compatible') {
+    return buildLocalProviderApiUrl(ollamaHost, ollamaPort);
+  }
+  return apiUrl;
+}
+
+export function getProviderModel(
+  provider: AiProvider,
+  providerModels: Partial<Record<AiProvider, string>>,
+  fallbackModel = '',
+  fallbackProvider?: AiProvider,
+): string {
+  const providerModel = providerModels[provider]?.trim();
+  if (providerModel) {
+    return providerModel;
+  }
+  if (fallbackProvider === provider && fallbackModel.trim()) {
+    return fallbackModel;
+  }
+  return '';
+}
+
+// ── Config Context Helpers ──────────────────────────────────────────
+
+export const CONTEXT_TRUNCATION_LIMIT = 40000;
+export const CONFIG_CODE_LANGUAGES = new Set(['', 'cfg', 'conf', 'ini', 'klipper', 'printercfg']);
+export const ASSISTANT_FILE_HINT_RE = /^[#;]\s*file\s*:\s*(.+?)\s*$/i;
+
+export function truncateConfigContext(content: string): string {
+  if (content.length <= CONTEXT_TRUNCATION_LIMIT) {
+    return content;
+  }
+  return `${content.slice(0, CONTEXT_TRUNCATION_LIMIT)}\n\n# Context truncated after ${CONTEXT_TRUNCATION_LIMIT} characters.`;
+}
+
+export function buildConfigContextMessage(filename: string, content: string, label: string): string {
+  return `${label}: ${filename}\n\n\`\`\`cfg\n${truncateConfigContext(content)}\n\`\`\``;
+}
+
+// ── Config Code Block Extraction ───────────────────────────────────
+
+export function extractConfigCodeBlocks(content: string): string[] {
+  const codeBlockPattern = /```([^\n`]*)\n([\s\S]*?)```/g;
+  const configBlocks: string[] = [];
+  const fallbackBlocks: string[] = [];
+  for (const match of content.matchAll(codeBlockPattern)) {
+    const language = match[1].trim().toLowerCase();
+    const block = match[2].trim();
+    if (!block) continue;
+    if (CONFIG_CODE_LANGUAGES.has(language)) {
+      configBlocks.push(block);
+    } else {
+      fallbackBlocks.push(block);
+    }
+  }
+  if (configBlocks.length > 0) return configBlocks;
+  return fallbackBlocks.length > 0 ? [fallbackBlocks[0]] : [];
+}
+
+export function extractConfigCodeBlock(content: string): string | null {
+  return extractConfigCodeBlocks(content)[0] ?? null;
+}
+
+export function extractEqualsSeparatedConfigLines(content: string): string[] {
+  const matches = extractConfigCodeBlocks(content)
+    .flatMap((block) => block.split(/\r?\n/))
+    .map((line) => line.trim())
+    .filter((line) => /^#?\s*[A-Za-z0-9_][A-Za-z0-9_-]*\s*=.*$/.test(line));
+  return Array.from(new Set(matches));
+}
+
+export function buildConfigSeparatorRewritePrompt(offendingLines: string[]): string {
+  const examples = offendingLines.slice(0, 5).map((line) => `- ${line}`).join('\n');
+  return [
+    'Rewrite your previous reply so every cfg parameter assignment uses a colon separator instead of an equals sign.',
+    'Keep the exact same files, section headers, parameter names, values, ordering, comments, and surrounding explanation.',
+    'Do not change gcode command arguments inside multiline values. Only change cfg parameter lines from `key = value` to `key: value`.',
+    'Return the full replacement reply.',
+    '',
+    'Examples that must be rewritten with colons:',
+    examples,
+  ].join('\n');
+}
+
+// ── String / Text Helpers ──────────────────────────────────────────
+
+export function appendWarningMessage(current: string | null, next: string): string {
+  return current ? `${current}\n${next}` : next;
+}
+
+export function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// ── Config Filename Extraction ─────────────────────────────────────
+
+export function extractMentionedConfigFilenames(
+  texts: string[],
+  availableFilenames: string[],
+): string[] {
+  const matches: string[] = [];
+  for (const filename of availableFilenames) {
+    const pattern = new RegExp(`(^|[^A-Za-z0-9_.-])${escapeRegExp(filename)}(?=$|[^A-Za-z0-9_.-])`, 'i');
+    if (texts.some((text) => pattern.test(text))) {
+      matches.push(filename);
+    }
+  }
+  return matches;
+}
+
+export function extractAssistantFileHint(
+  configBlock: string,
+  availableFilenames: string[],
+): { configText: string; fileHint: string | null } {
+  const availableByLower = new Map(availableFilenames.map((filename) => [filename.toLowerCase(), filename]));
+  const lines = configBlock.split(/\r?\n/);
+  let fileHint: string | null = null;
+  let fileHintLineIndex = -1;
+  for (let index = 0; index < lines.length; index += 1) {
+    const trimmed = lines[index].trim();
+    if (!trimmed) continue;
+    const hintMatch = ASSISTANT_FILE_HINT_RE.exec(trimmed);
+    if (hintMatch) {
+      fileHint = availableByLower.get(hintMatch[1].trim().toLowerCase()) ?? null;
+      fileHintLineIndex = index;
+    }
+    break;
+  }
+  if (fileHintLineIndex === -1) {
+    return { configText: configBlock, fileHint };
+  }
+  return {
+    configText: lines.filter((_, index) => index !== fileHintLineIndex).join('\n').trim(),
+    fileHint,
+  };
+}
+
+// ── Assistant Target Resolution ────────────────────────────────────
+
+function scoreAssistantTargetFile(
+  config: ConfigFile,
+  assistantSections: ConfigSection[],
+): { exactMatches: number; sectionTypeMatches: number } {
+  const fullHeaders = new Set(config.sections.map((section) => section.full_header));
+  const sectionTypes = new Set(config.sections.map((section) => section.section_type));
+  let exactMatches = 0;
+  let sectionTypeMatches = 0;
+  assistantSections.forEach((section) => {
+    if (fullHeaders.has(section.full_header)) {
+      exactMatches += 1;
+      return;
+    }
+    if (sectionTypes.has(section.section_type)) {
+      sectionTypeMatches += 1;
+    }
+  });
+  return { exactMatches, sectionTypeMatches };
+}
+
+export function resolveAssistantTargetFile(
+  assistantConfig: ConfigFile,
+  configFiles: Record<string, ConfigFile>,
+  activeFile: string,
+  hintedFilenames: string[],
+): string | null {
+  const availableFilenames = Object.keys(configFiles);
+  if (availableFilenames.length === 0) return null;
+  const uniqueHints = Array.from(new Set(hintedFilenames.filter((filename) => Boolean(configFiles[filename]))));
+  if (uniqueHints.length === 1) return uniqueHints[0];
+
+  const scores = availableFilenames
+    .map((filename) => {
+      const { exactMatches, sectionTypeMatches } = scoreAssistantTargetFile(configFiles[filename], assistantConfig.sections);
+      return { filename, exactMatches, sectionTypeMatches, hinted: uniqueHints.includes(filename), active: filename === activeFile };
+    })
+    .sort((left, right) => {
+      if (right.exactMatches !== left.exactMatches) return right.exactMatches - left.exactMatches;
+      if (right.hinted !== left.hinted) return Number(right.hinted) - Number(left.hinted);
+      if (right.sectionTypeMatches !== left.sectionTypeMatches) return right.sectionTypeMatches - left.sectionTypeMatches;
+      if (right.active !== left.active) return Number(right.active) - Number(left.active);
+      return left.filename.localeCompare(right.filename);
+    });
+
+  const bestScore = scores[0];
+  if (bestScore.exactMatches > 0 || bestScore.sectionTypeMatches > 0) return bestScore.filename;
+  if (configFiles[activeFile]) return activeFile;
+  return availableFilenames[0] ?? null;
+}
+
+// ── LM Studio Status Presentation ──────────────────────────────────
+
+export function getLmStudioMcpStatusPresentation(status: LmStudioMcpStatus): {
+  label: string;
+  className: string;
+  title: string;
+} {
+  const pluginText = status.pluginId ?? 'disabled';
+  if (!status.requested) {
+    return {
+      label: 'Docs MCP off',
+      className: 'border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]',
+      title: 'LM Studio docs MCP was disabled for this request.',
+    };
+  }
+  if (status.fallbackUsed) {
+    return {
+      label: 'Docs MCP fallback',
+      className: 'border-amber-500/30 bg-amber-500/10 text-amber-300',
+      title: `${status.fallbackReason ?? 'The proxy retried on the OpenAI-compatible endpoint.'} Plugin: ${pluginText}.`,
+    };
+  }
+  if (status.toolUsed) {
+    const toolText = status.toolNames.length > 0 ? ` Tools: ${status.toolNames.join(', ')}.` : '';
+    return {
+      label: 'Docs MCP used',
+      className: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300',
+      title: `LM Studio used ${pluginText} through /api/v1/chat.${toolText}`,
+    };
+  }
+  return {
+    label: 'Docs MCP not used',
+    className: 'border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]',
+    title: `LM Studio enabled ${pluginText}, but the model answered without calling it.`,
+  };
+}
+
+export function formatCompactCount(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1).replace(/\.0$/, '')}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1).replace(/\.0$/, '')}k`;
+  return String(value);
+}
+
+export function formatCount(value: number): string {
+  return value.toLocaleString();
+}
+
+export function getLmStudioContextPresentation(status: LmStudioContextStatus): {
+  label: string;
+  className: string;
+  title: string;
+  fillRatio: number | null;
+} {
+  const fillRatio = typeof status.utilization === 'number' ? Math.max(0, Math.min(status.utilization, 1)) : null;
+  let className = 'border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]';
+  if (status.truncated || (fillRatio !== null && fillRatio >= 0.9)) {
+    className = 'border-rose-500/30 bg-rose-500/10 text-rose-300';
+  } else if (fillRatio !== null && fillRatio >= 0.75) {
+    className = 'border-amber-500/30 bg-amber-500/10 text-amber-300';
+  } else if (fillRatio !== null && fillRatio >= 0.5) {
+    className = 'border-sky-500/30 bg-sky-500/10 text-sky-300';
+  } else if (fillRatio !== null) {
+    className = 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300';
+  }
+
+  const lines: string[] = [];
+  if (status.usedTokens !== null && status.contextWindow !== null && fillRatio !== null) {
+    lines.push(`LM Studio context used for this turn: ${formatCount(status.usedTokens)} / ${formatCount(status.contextWindow)} tokens (${(fillRatio * 100).toFixed(1)}%).`);
+  } else if (status.usedTokens !== null) {
+    const basis = status.totalTokens !== null ? 'total turn tokens' : status.promptTokens !== null ? 'prompt tokens' : 'estimated prompt tokens';
+    lines.push(`LM Studio reported ${basis}: ${formatCount(status.usedTokens)}.`);
+    if (status.contextWindow === null) lines.push('LM Studio did not expose the model context window for this request, so this is not a true max-context percentage.');
+  } else {
+    lines.push(`LM Studio request size: ${formatCount(status.requestChars)} characters.`);
+    lines.push('LM Studio did not report token usage for this request.');
+  }
+
+  if (status.promptTokens !== null || status.completionTokens !== null || status.totalTokens !== null) {
+    const usageParts: string[] = [];
+    if (status.promptTokens !== null) usageParts.push(`prompt ${formatCount(status.promptTokens)}`);
+    if (status.completionTokens !== null) usageParts.push(`completion ${formatCount(status.completionTokens)}`);
+    if (status.totalTokens !== null) usageParts.push(`total ${formatCount(status.totalTokens)}`);
+    if (usageParts.length > 0) lines.push(`Usage: ${usageParts.join(', ')}.`);
+  }
+
+  if (status.estimatedPromptTokens !== null && status.promptTokens === null) {
+    lines.push('Prompt tokens are estimated from request size because LM Studio did not return usage stats for this route.');
+  }
+  lines.push(`Request text sent from the app: ${formatCount(status.requestChars)} characters.`);
+  if (status.truncated) lines.push('The app truncated the LM Studio request text before sending it.');
+
+  if (status.truncated) {
+    return { label: 'Context capped', className, title: lines.join(' '), fillRatio: fillRatio ?? 1 };
+  }
+  if (fillRatio !== null) {
+    return { label: `Context ${Math.round(fillRatio * 100)}%`, className, title: lines.join(' '), fillRatio };
+  }
+  if (status.usedTokens !== null) {
+    return { label: `Context ${formatCompactCount(status.usedTokens)} tok`, className, title: lines.join(' '), fillRatio: null };
+  }
+  return { label: 'Context size', className, title: lines.join(' '), fillRatio: null };
+}
+
+// ── Klipper Doc Auto-Loading ───────────────────────────────────────
+
+const KLIPPER_DOC_FILENAME_RE = /(^|[^A-Za-z0-9_-])([A-Za-z0-9][A-Za-z0-9_-]*\.md)(?=$|[^A-Za-z0-9_.-])/g;
+const KLIPPER_DOC_REQUEST_RE = /\b(?:can you|could you|would you|please|provide|send|share|paste|show me|include|load|fetch|pull|give me|i need|i would need|i'd need)\b/i;
+export const MAX_AUTO_FETCHED_KLIPPER_DOCS = 2;
+
+export function extractRequestedKlipperDocFilenames(content: string): string[] {
+  const requestedDocs = new Set<string>();
+  const segments = content
+    .split(/\r?\n+/)
+    .flatMap((line) => line.split(/(?<=[.!?])\s+/))
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  for (const segment of segments) {
+    if (!KLIPPER_DOC_REQUEST_RE.test(segment)) continue;
+    for (const match of segment.matchAll(KLIPPER_DOC_FILENAME_RE)) {
+      requestedDocs.add(match[2]);
+      if (requestedDocs.size >= MAX_AUTO_FETCHED_KLIPPER_DOCS) return Array.from(requestedDocs);
+    }
+  }
+  return Array.from(requestedDocs);
+}
+
+export function buildAutoLoadedKlipperDocMessage(documents: Array<{ filename: string; content: string }>): string {
+  return [
+    'The app automatically fetched the full bundled Klipper markdown document(s) you requested. Answer the user\'s previous request directly now using these documents. Do not ask the user to paste the same documentation again unless you need a different source document.',
+    ...documents.map((document) => `Full bundled Klipper document: ${document.filename}\n\n${document.content}`),
+  ].join('\n\n---\n\n');
+}
+
+// ── Assistant Validation ───────────────────────────────────────────
+
+export const MAX_ASSISTANT_DRAFT_VALIDATION_ATTEMPTS = 3;
+export const MAX_ASSISTANT_HINT_USER_MESSAGES = 3;
+
+const RETRY_EXEMPT_DUPLICATE_SECTION_RE = /^Section \[[^\]]+\] (?:can only be defined once(?: across active included config files)?\.|is reused across active included config files\.)(?: Also defined in: .+)?$/;
+const RETRY_EXEMPT_SHARED_PIN_RE = /^Pin '.*' is used by multiple sections: .+$/;
+
+export interface AssistantDraftValidationIssueGroup {
+  filename: string;
+  errors: ValidationError[];
+}
+
+export interface AssistantDraftValidationOutcome {
+  applicable: boolean;
+  blockingIssues: AssistantDraftValidationIssueGroup[];
+  failureReason: string | null;
+}
+
+export function isBlockingAssistantValidationIssue(error: ValidationError): boolean {
+  return error.severity === 'error' || error.severity === 'warning';
+}
+
+export function isRetryExemptAssistantValidationIssue(error: ValidationError): boolean {
+  return RETRY_EXEMPT_DUPLICATE_SECTION_RE.test(error.message) || RETRY_EXEMPT_SHARED_PIN_RE.test(error.message);
+}
+
+export function hasOnlyRetryExemptAssistantValidationIssues(
+  blockingIssues: AssistantDraftValidationIssueGroup[],
+): boolean {
+  const issues = blockingIssues.flatMap((group) => group.errors);
+  return issues.length > 0 && issues.every((error) => isRetryExemptAssistantValidationIssue(error));
+}
+
+export function shouldRetryAssistantValidation(
+  validationOutcome: AssistantDraftValidationOutcome,
+  attemptsUsed: number,
+): boolean {
+  if (validationOutcome.applicable) {
+    if (validationOutcome.blockingIssues.length === 0) return false;
+    return !(attemptsUsed > 1 && hasOnlyRetryExemptAssistantValidationIssues(validationOutcome.blockingIssues));
+  }
+  return attemptsUsed > 1 && Boolean(validationOutcome.failureReason);
+}
+
+export function buildValidationErrorKey(filename: string, error: ValidationError): string {
+  return [filename, error.severity, error.section, error.param, error.message].join('::');
+}
+
+export function collectNewValidationErrors(
+  baselineValidations: Record<string, ValidationResult>,
+  candidateValidations: Record<string, ValidationResult>,
+): AssistantDraftValidationIssueGroup[] {
+  const baselineCounts = new Map<string, number>();
+  Object.entries(baselineValidations).forEach(([filename, result]) => {
+    result.errors.forEach((error) => {
+      if (!isBlockingAssistantValidationIssue(error)) return;
+      const key = buildValidationErrorKey(filename, error);
+      baselineCounts.set(key, (baselineCounts.get(key) ?? 0) + 1);
+    });
+  });
+
+  const blockingByFile = new Map<string, ValidationError[]>();
+  Object.entries(candidateValidations)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .forEach(([filename, result]) => {
+      result.errors.forEach((error) => {
+        if (!isBlockingAssistantValidationIssue(error)) return;
+        const key = buildValidationErrorKey(filename, error);
+        const remainingBaselineCount = baselineCounts.get(key) ?? 0;
+        if (remainingBaselineCount > 0) {
+          baselineCounts.set(key, remainingBaselineCount - 1);
+          return;
+        }
+        const existing = blockingByFile.get(filename);
+        if (existing) { existing.push(error); return; }
+        blockingByFile.set(filename, [error]);
+      });
+    });
+
+  return Array.from(blockingByFile.entries()).map(([filename, errors]) => ({ filename, errors }));
+}
+
+export function formatAssistantDraftValidationIssues(
+  blockingIssues: AssistantDraftValidationIssueGroup[],
+  failureReason: string | null,
+): string {
+  const lines: string[] = [];
+  if (failureReason) lines.push(`- ${failureReason}`);
+  blockingIssues.forEach(({ filename, errors }) => {
+    lines.push(`File: ${filename}`);
+    errors.forEach((error) => {
+      const location = error.param ? `[${error.section}] ${error.param}` : `[${error.section}]`;
+      lines.push(`- ${location}: ${error.message}`);
+    });
+  });
+  return lines.join('\n');
+}
+
+export function buildAssistantDraftValidationFeedback(
+  blockingIssues: AssistantDraftValidationIssueGroup[],
+  invalidContent: string,
+  failureReason: string | null,
+  allowExplanationOnly = false,
+): string {
+  const formattedIssues = formatAssistantDraftValidationIssues(blockingIssues, failureReason)
+    || '- The previous reply did not include a complete applicable cfg draft.';
+  return [
+    'Your previous assistant reply included cfg changes that failed the app validation after being merged into the current Klipper config project.',
+    'Return a corrected replacement reply that fixes every problem below and still satisfies the user request.',
+    'If you return config changes, return only complete changed sections inside fenced cfg code blocks and keep any required "# file: <filename>" hint.',
+    allowExplanationOnly
+      ? 'If the remaining problems are duplicate sections or reused pins and you cannot resolve them safely from the current config, do not return another invalid cfg block. Instead, clearly explain the conflict, mention the exact section or pin involved, and say what must change before a valid config can be produced.'
+      : 'Do not ask the user to apply manual fixes for these validation issues.',
+    '',
+    'Validation problems to fix:',
+    formattedIssues,
+    '',
+    'Previous invalid reply:',
+    '````text',
+    invalidContent.trim() || 'No content returned.',
+    '````',
+  ].join('\n');
+}
+
+export function buildAssistantDraftValidationErrorMessage(
+  blockingIssues: AssistantDraftValidationIssueGroup[],
+  failureReason: string | null,
+  attempts: number,
+): string {
+  const formattedIssues = formatAssistantDraftValidationIssues(blockingIssues, failureReason);
+  const attemptLabel = attempts === 1 ? 'attempt' : 'attempts';
+  if (!formattedIssues) return `AI draft failed validation after ${attempts} ${attemptLabel}.`;
+  return `AI draft failed validation after ${attempts} ${attemptLabel}.\n${formattedIssues}`;
+}
