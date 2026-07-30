@@ -713,7 +713,7 @@ export async function deleteNativeLayout(): Promise<{ status: string }> {
   });
 }
 
-import type { LmStudioContextStatus } from '../types/ai';
+
 
 /* ── AI Chat ─────────────────────────────────────────── */
 
@@ -730,7 +730,6 @@ export interface AiChatRequest {
 export interface AiChatResponse {
   content?: string;
   error?: string;
-  lmStudioContext?: LmStudioContextStatus;
   mcpToolTurns?: number;
   mcpToolNames?: string[];
 }

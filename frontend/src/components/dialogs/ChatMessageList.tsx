@@ -12,7 +12,7 @@ import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import type { ChatMessage } from '../../stores/aiStore';
 import type { AssistantDraftChange } from '../../utils/assistantDraftMerge';
-import { extractConfigCodeBlock, getLmStudioContextPresentation } from '../../utils/chatUtils';
+import { extractConfigCodeBlock } from '../../utils/chatUtils';
 
 // ── Markdown Code Block Component ───────────────────────────────────
 
@@ -142,8 +142,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
 
         const assistantConfigBlock = msg.role === 'assistant' ? extractConfigCodeBlock(msg.content) : null;
         const hasApplicableAssistantDraft = assistantDraftApplicableMessages[i] === true;
-        const lmStudioContextStatus = msg.role === 'assistant' ? msg.lmStudioContext : undefined;
-        const lmStudioContextPresentation = lmStudioContextStatus ? getLmStudioContextPresentation(lmStudioContextStatus) : null;
+
 
         return (
           <div key={i} className={`mb-2 ${msg.role === 'user' ? 'text-right' : 'text-left'}`}>
@@ -194,28 +193,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                 <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
               )}
 
-              {/* LM Studio context badge */}
-              {msg.role === 'assistant' && lmStudioContextPresentation && (
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <span
-                    className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-1 text-[10px] font-medium ${lmStudioContextPresentation.className}`}
-                    title={lmStudioContextPresentation.title}
-                  >
-                    <span className="relative h-3 w-3 shrink-0 rounded-full" aria-hidden="true">
-                      <span className="absolute inset-0 rounded-full bg-current opacity-15" />
-                      {lmStudioContextPresentation.fillRatio !== null && lmStudioContextPresentation.fillRatio > 0 && (
-                        <span
-                          className="absolute inset-0 rounded-full"
-                          style={{
-                            background: `conic-gradient(currentColor ${Math.max(lmStudioContextPresentation.fillRatio * 360, 6)}deg, transparent 0deg)`,
-                          }}
-                        />
-                      )}
-                    </span>
-                    {lmStudioContextPresentation.label}
-                  </span>
-                </div>
-              )}
+
 
               {/* MCP tool names badge */}
               {msg.role === 'assistant' && Array.isArray(msg.mcpToolNames) && msg.mcpToolNames.length > 0 && (

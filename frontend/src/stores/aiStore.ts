@@ -1,7 +1,5 @@
 import { create } from 'zustand';
 
-import type { LmStudioContextStatus } from '../types/ai';
-
 const STORAGE_KEY = 'klipper-wire-ai-state';
 const LEGACY_SETTINGS_KEY = 'klipper-wire-ai-settings';
 const DEFAULT_PROVIDER: AiProvider = 'chatgpt';
@@ -13,7 +11,6 @@ export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
   hiddenFromUser?: boolean;
-  lmStudioContext?: LmStudioContextStatus;
   autoLoadedDocs?: string[];
   mcpToolNames?: string[];
 }

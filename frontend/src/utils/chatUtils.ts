@@ -5,7 +5,7 @@
  * the ChatDialog component to reduce file size and improve testability.
  */
 import type { ValidationError, ValidationResult, ConfigFile, ConfigSection } from '../types/config';
-import type { LmStudioContextStatus } from '../types/ai';
+
 import type { AiProvider } from '../stores/aiStore';
 
 // ── Provider Configuration ──────────────────────────────────────────
@@ -298,72 +298,6 @@ export function resolveAssistantTargetFile(
   if (bestScore.exactMatches > 0 || bestScore.sectionTypeMatches > 0) return bestScore.filename;
   if (configFiles[activeFile]) return activeFile;
   return availableFilenames[0] ?? null;
-}
-
-export function formatCompactCount(value: number): string {
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1).replace(/\.0$/, '')}M`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1).replace(/\.0$/, '')}k`;
-  return String(value);
-}
-
-export function formatCount(value: number): string {
-  return value.toLocaleString();
-}
-
-export function getLmStudioContextPresentation(status: LmStudioContextStatus): {
-  label: string;
-  className: string;
-  title: string;
-  fillRatio: number | null;
-} {
-  const fillRatio = typeof status.utilization === 'number' ? Math.max(0, Math.min(status.utilization, 1)) : null;
-  let className = 'border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]';
-  if (status.truncated || (fillRatio !== null && fillRatio >= 0.9)) {
-    className = 'border-rose-500/30 bg-rose-500/10 text-rose-300';
-  } else if (fillRatio !== null && fillRatio >= 0.75) {
-    className = 'border-amber-500/30 bg-amber-500/10 text-amber-300';
-  } else if (fillRatio !== null && fillRatio >= 0.5) {
-    className = 'border-sky-500/30 bg-sky-500/10 text-sky-300';
-  } else if (fillRatio !== null) {
-    className = 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300';
-  }
-
-  const lines: string[] = [];
-  if (status.usedTokens !== null && status.contextWindow !== null && fillRatio !== null) {
-    lines.push(`LM Studio context used for this turn: ${formatCount(status.usedTokens)} / ${formatCount(status.contextWindow)} tokens (${(fillRatio * 100).toFixed(1)}%).`);
-  } else if (status.usedTokens !== null) {
-    const basis = status.totalTokens !== null ? 'total turn tokens' : status.promptTokens !== null ? 'prompt tokens' : 'estimated prompt tokens';
-    lines.push(`LM Studio reported ${basis}: ${formatCount(status.usedTokens)}.`);
-    if (status.contextWindow === null) lines.push('LM Studio did not expose the model context window for this request, so this is not a true max-context percentage.');
-  } else {
-    lines.push(`LM Studio request size: ${formatCount(status.requestChars)} characters.`);
-    lines.push('LM Studio did not report token usage for this request.');
-  }
-
-  if (status.promptTokens !== null || status.completionTokens !== null || status.totalTokens !== null) {
-    const usageParts: string[] = [];
-    if (status.promptTokens !== null) usageParts.push(`prompt ${formatCount(status.promptTokens)}`);
-    if (status.completionTokens !== null) usageParts.push(`completion ${formatCount(status.completionTokens)}`);
-    if (status.totalTokens !== null) usageParts.push(`total ${formatCount(status.totalTokens)}`);
-    if (usageParts.length > 0) lines.push(`Usage: ${usageParts.join(', ')}.`);
-  }
-
-  if (status.estimatedPromptTokens !== null && status.promptTokens === null) {
-    lines.push('Prompt tokens are estimated from request size because LM Studio did not return usage stats for this route.');
-  }
-  lines.push(`Request text sent from the app: ${formatCount(status.requestChars)} characters.`);
-  if (status.truncated) lines.push('The app truncated the LM Studio request text before sending it.');
-
-  if (status.truncated) {
-    return { label: 'Context capped', className, title: lines.join(' '), fillRatio: fillRatio ?? 1 };
-  }
-  if (fillRatio !== null) {
-    return { label: `Context ${Math.round(fillRatio * 100)}%`, className, title: lines.join(' '), fillRatio };
-  }
-  if (status.usedTokens !== null) {
-    return { label: `Context ${formatCompactCount(status.usedTokens)} tok`, className, title: lines.join(' '), fillRatio: null };
-  }
-  return { label: 'Context size', className, title: lines.join(' '), fillRatio: null };
 }
 
 // ── Klipper Doc Auto-Loading ───────────────────────────────────────

@@ -359,7 +359,6 @@ export function useAssistantDraft(deps: {
       let assistantMessage: ChatMessage = {
         role: 'assistant',
         content: response.content || 'No response.',
-        lmStudioContext: response.lmStudioContext,
         mcpToolNames: response.mcpToolNames,
       };
       let conversationTrail: ChatMessage[] = [{ role: 'assistant', content: assistantMessage.content }];
@@ -390,7 +389,6 @@ export function useAssistantDraft(deps: {
             assistantMessage = {
               role: 'assistant',
               content: followUpResponse.content || assistantMessage.content,
-              lmStudioContext: followUpResponse.lmStudioContext ?? assistantMessage.lmStudioContext,
               autoLoadedDocs: loadedDocs.map((d) => d.filename),
               mcpToolNames: followUpResponse.mcpToolNames ?? assistantMessage.mcpToolNames,
             };
@@ -424,7 +422,6 @@ export function useAssistantDraft(deps: {
           assistantMessage = {
             role: 'assistant',
             content: rewriteResponse.content || assistantMessage.content,
-            lmStudioContext: rewriteResponse.lmStudioContext ?? assistantMessage.lmStudioContext,
             autoLoadedDocs: assistantMessage.autoLoadedDocs,
             mcpToolNames: rewriteResponse.mcpToolNames ?? assistantMessage.mcpToolNames,
           };
