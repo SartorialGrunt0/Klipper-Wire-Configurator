@@ -456,7 +456,23 @@ export function extractAssistantFileHint(
   configBlock: string,
   availableFilenames: string[],
 ): { configText: string; fileHint: string | null } {
-  const availableByLower = new Map(availableFilenames.map((filename) => [filename.toLowerCase(), filename]));
+  // Build lookup: exact filename (case-insensitive) + basename (without path prefix).
+  // This lets hints like "printer.cfg" match loaded files with path prefixes
+  // like "trident_backup/printer.cfg" or "config/printer.cfg".
+  const availableByLower = new Map<string, string>();
+  for (const filename of availableFilenames) {
+    const lower = filename.toLowerCase();
+    availableByLower.set(lower, filename);
+    // Also map the bare basename so "printer.cfg" matches "path/to/printer.cfg"
+    const base = filename.replace(/^.*[\\/]/, '').toLowerCase();
+    if (base && base !== lower) {
+      // Only set if not already taken by an exact match
+      if (!availableByLower.has(base)) {
+        availableByLower.set(base, filename);
+      }
+    }
+  }
+
   const lines = configBlock.split(/\r?\n/);
   let fileHint: string | null = null;
   let fileHintLineIndex = -1;
@@ -506,6 +522,21 @@ function scoreAssistantTargetFile(
   return { exactMatches, sectionTypeMatches };
 }
 
+/** Strip path prefix, returning just the basename. */
+function basename(filename: string): string {
+  return filename.replace(/^.*[\\/]/, '');
+}
+
+/** Find an available config key by exact name or basename fallback. */
+function resolveFilename(hint: string, configFiles: Record<string, ConfigFile>): string | null {
+  if (configFiles[hint]) return hint;
+  const hintBase = basename(hint).toLowerCase();
+  for (const key of Object.keys(configFiles)) {
+    if (basename(key).toLowerCase() === hintBase) return key;
+  }
+  return null;
+}
+
 export function resolveAssistantTargetFile(
   assistantConfig: ConfigFile,
   configFiles: Record<string, ConfigFile>,
@@ -515,14 +546,20 @@ export function resolveAssistantTargetFile(
   const availableFilenames = Object.keys(configFiles);
   const uniqueHints = Array.from(new Set(hintedFilenames));
 
-  // If the AI explicitly named a single target file (existing or new), trust it.
-  if (uniqueHints.length === 1) return uniqueHints[0];
+  // If the AI explicitly named a single target file, resolve it to an
+  // actual loaded filename (handles path-prefixed keys like
+  // "trident_backup/printer.cfg" matching hint "printer.cfg").
+  if (uniqueHints.length === 1) {
+    return resolveFilename(uniqueHints[0], configFiles) ?? uniqueHints[0];
+  }
 
   // If no files are loaded and no single hint, we can't resolve a target.
   if (availableFilenames.length === 0) return null;
 
-  // Multiple hints — narrow to those that exist in the project.
-  const existingHints = uniqueHints.filter((filename) => Boolean(configFiles[filename]));
+  // Multiple hints — narrow to those that exist in the project (exact or basename match).
+  const existingHints = uniqueHints.filter(
+    (filename) => resolveFilename(filename, configFiles) != null,
+  ).map((filename) => resolveFilename(filename, configFiles)!);
   if (existingHints.length === 1) return existingHints[0];
   if (existingHints.length > 1) {
     // Multiple existing-file hints — score them against the assistant's sections.
