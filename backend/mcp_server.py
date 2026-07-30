@@ -476,6 +476,98 @@ class McpServer:
                     "required": ["config_text"],
                 },
             },
+            {
+                "name": "calculate_rotation_distance",
+                "description": (
+                    "Calculate rotation_distance for a Klipper stepper config. "
+                    "Supports three methods: leadscrew (pitch + starts), belt-driven "
+                    "(pulley teeth + belt pitch), or deriving from existing steps_per_mm. "
+                    "Returns the exact rotation_distance value with the formula used."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "method": {
+                            "type": "string",
+                            "enum": ["leadscrew", "belt", "from_steps_per_mm"],
+                            "description": "Calculation method: 'leadscrew' for Z leadscrews, 'belt' for belt-driven axes, 'from_steps_per_mm' if you already know steps_per_mm",
+                        },
+                        "pitch": {
+                            "type": "number",
+                            "description": "Leadscrew pitch in mm per rotation (e.g. 2 for a standard 2mm pitch leadscrew). Required for 'leadscrew' method.",
+                        },
+                        "starts": {
+                            "type": "number",
+                            "description": "Number of leadscrew starts (default: 1). Most leadscrews are single-start. A 4-start leadscrew with 8mm pitch would have starts=4, pitch=2.",
+                        },
+                        "pulley_teeth": {
+                            "type": "number",
+                            "description": "Number of teeth on the pulley attached to the motor. Required for 'belt' method.",
+                        },
+                        "belt_pitch": {
+                            "type": "number",
+                            "description": "Belt pitch in mm (default: 2 for GT2 belts). Required for 'belt' method.",
+                        },
+                        "motor_steps": {
+                            "type": "number",
+                            "description": "Motor steps per revolution (default: 200 for NEMA17 steppers). Used with 'from_steps_per_mm' method.",
+                        },
+                        "microsteps": {
+                            "type": "number",
+                            "description": "Microsteps configured in the stepper driver (e.g. 16). Used with 'from_steps_per_mm' method.",
+                        },
+                        "steps_per_mm": {
+                            "type": "number",
+                            "description": "Current steps_per_mm value to derive rotation_distance from. Required for 'from_steps_per_mm' method.",
+                        },
+                    },
+                    "required": ["method"],
+                },
+            },
+            {
+                "name": "generate_macro_template",
+                "description": (
+                    "Generate a Klipper gcode_macro template for common operations. "
+                    "Returns a complete, ready-to-use macro section with proper "
+                    "save/restore state, error handling, and Klipper-standard gcode. "
+                    "Supported macros: PRINT_START, PRINT_END, PAUSE, RESUME, CANCEL_PRINT."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "macro_name": {
+                            "type": "string",
+                            "enum": ["PRINT_START", "PRINT_END", "PAUSE", "RESUME", "CANCEL_PRINT"],
+                            "description": "Which macro template to generate",
+                        },
+                        "include_bed_mesh": {
+                            "type": "boolean",
+                            "description": "Whether PRINT_START should include BED_MESH_CALIBRATE (default: false). Only applies to PRINT_START.",
+                        },
+                        "park_x": {
+                            "type": "number",
+                            "description": "X position to park the toolhead during PAUSE/PRINT_END (default: 0)",
+                        },
+                        "park_y": {
+                            "type": "number",
+                            "description": "Y position to park the toolhead during PAUSE/PRINT_END (default: 0)",
+                        },
+                        "park_z": {
+                            "type": "number",
+                            "description": "Z lift amount in mm during PAUSE (default: 10)",
+                        },
+                        "retract_distance": {
+                            "type": "number",
+                            "description": "Filament retract distance in mm during PAUSE/PRINT_END (default: 5)",
+                        },
+                        "retract_speed": {
+                            "type": "number",
+                            "description": "Filament retract speed in mm/s (default: 40)",
+                        },
+                    },
+                    "required": ["macro_name"],
+                },
+            },
         ]
 
     # ── Tool Handlers ─────────────────────────────────────────────
@@ -492,6 +584,8 @@ class McpServer:
             "search_example_configs": self._handle_search_examples,
             "read_example_config": self._handle_read_example_config,
             "detect_board": self._handle_detect_board,
+            "calculate_rotation_distance": self._handle_calculate_rotation_distance,
+            "generate_macro_template": self._handle_generate_macro_template,
         }
 
         handler = handlers.get(name)
@@ -881,6 +975,296 @@ class McpServer:
                 return f"Pin references found: {', '.join(set(pin_matches))}"
 
             return "Could not detect board type from the provided config text."
+
+    def _handle_calculate_rotation_distance(self, args: dict[str, Any]) -> str:
+        """Calculate rotation_distance for a Klipper stepper."""
+        method = args.get("method", "").strip()
+        if not method:
+            return "Please specify a calculation method: leadscrew, belt, or from_steps_per_mm."
+
+        if method == "leadscrew":
+            pitch = args.get("pitch")
+            starts = args.get("starts", 1)
+            if not pitch or pitch <= 0:
+                return "Please provide a valid leadscrew pitch (e.g. pitch=2 for a 2mm pitch leadscrew)."
+            if not starts or starts <= 0:
+                return "Number of starts must be a positive number."
+            result = round(float(pitch) * float(starts), 4)
+            return (
+                f"## rotation_distance: {result}\n\n"
+                f"Formula: rotation_distance = leadscrew_pitch × number_of_starts\n"
+                f"  {float(pitch)} × {float(starts)} = {result}\n\n"
+                f"Example [stepper_z] entry:\n"
+                f"```\n"
+                f"rotation_distance: {result}\n"
+                f"```"
+            )
+
+        if method == "belt":
+            pulley_teeth = args.get("pulley_teeth")
+            belt_pitch = args.get("belt_pitch", 2)
+            if not pulley_teeth or pulley_teeth <= 0:
+                return "Please provide the number of pulley teeth (e.g. pulley_teeth=20 for a 20-tooth GT2 pulley)."
+            if not belt_pitch or belt_pitch <= 0:
+                return "Belt pitch must be a positive number (default 2 for GT2 belts)."
+            result = round(float(pulley_teeth) * float(belt_pitch), 4)
+            return (
+                f"## rotation_distance: {result}\n\n"
+                f"Formula: rotation_distance = pulley_teeth × belt_pitch\n"
+                f"  {float(pulley_teeth)} × {float(belt_pitch)} = {result}\n\n"
+                f"Example [stepper_x] or [stepper_y] entry:\n"
+                f"```\n"
+                f"rotation_distance: {result}\n"
+                f"```"
+            )
+
+        if method == "from_steps_per_mm":
+            steps_per_mm = args.get("steps_per_mm")
+            motor_steps = args.get("motor_steps", 200)
+            microsteps = args.get("microsteps")
+            if not steps_per_mm or steps_per_mm <= 0:
+                return "Please provide the current steps_per_mm value (e.g. steps_per_mm=80)."
+            if not microsteps or microsteps <= 0:
+                return "Please provide the microsteps setting (e.g. microsteps=16 for 1/16 stepping)."
+            if not motor_steps or motor_steps <= 0:
+                return "Motor steps must be a positive number (default 200 for NEMA17)."
+            result = round(float(motor_steps) * float(microsteps) / float(steps_per_mm), 4)
+            return (
+                f"## rotation_distance: {result}\n\n"
+                f"Formula: rotation_distance = motor_steps × microsteps ÷ steps_per_mm\n"
+                f"  {float(motor_steps)} × {float(microsteps)} ÷ {float(steps_per_mm)} = {result}\n\n"
+                f"Example [stepper_x] entry:\n"
+                f"```\n"
+                f"rotation_distance: {result}\n"
+                f"```"
+            )
+
+        return f'Unknown method: "{method}". Use "leadscrew", "belt", or "from_steps_per_mm".'
+
+    # ── Macro Templates ────────────────────────────────────────────
+
+    MACRO_TEMPLATES: dict[str, str] = {
+        "PRINT_START": (
+            "[gcode_macro PRINT_START]\n"
+            "description: Start a print - heat bed, mesh level, heat nozzle, prime\n"
+            "gcode:\n"
+            "    # Parameters (set by slicer)\n"
+            "    {% set BED_TEMP = params.BED|default(60)|int %}\n"
+            "    {% set EXTRUDER_TEMP = params.EXTRUDER|default(200)|int %}\n"
+            "\n"
+            "    # Heat bed first so it can soak while mesh loads\n"
+            "    M140 S{BED_TEMP}\n"
+            "    M104 S{EXTRUDER_TEMP - 40}  # Pre-heat extruder partway\n"
+            "\n"
+            "    # Home all axes\n"
+            "    G28\n"
+            "\n"
+            "    # Bed mesh (if configured)\n"
+            "    {% if printer.bed_mesh %}\n"
+            "        BED_MESH_CALIBRATE\n"
+            "    {% endif %}\n"
+            "\n"
+            "    # Wait for bed to reach target\n"
+            "    M190 S{BED_TEMP}\n"
+            "\n"
+            "    # Heat extruder fully\n"
+            "    M109 S{EXTRUDER_TEMP}\n"
+            "\n"
+            "    # Prime nozzle\n"
+            "    G92 E0\n"
+            "    G1 X10 Y10 Z0.4 F3000\n"
+            "    G1 X200 Y10 Z0.4 E25 F600  # purge line\n"
+            "    G1 X200 Y10.5 Z0.4 F3000\n"
+            "    G1 X10 Y10.5 Z0.4 E50 F600  # second purge line\n"
+            "    G92 E0\n"
+            "    G1 E-2 F600  # light retract\n"
+            "    G92 E0\n"
+        ),
+        "PRINT_END": (
+            "[gcode_macro PRINT_END]\n"
+            "description: End a print - park, retract, turn off heaters, disable motors\n"
+            "gcode:\n"
+            "    # Retract filament\n"
+            "    G91  # relative positioning\n"
+            "    G1 E-5 F1800  # retract 5mm\n"
+            "    G1 Z10 F300  # lift Z\n"
+            "    G90  # absolute positioning\n"
+            "\n"
+            "    # Park toolhead\n"
+            "    {% set PARK_X = params.PARK_X|default(0)|int %}\n"
+            "    {% set PARK_Y = params.PARK_Y|default(0)|int %}\n"
+            "    G1 X{PARK_X} Y{PARK_Y} F6000\n"
+            "\n"
+            "    # Turn off heater, bed, fans\n"
+            "    M140 S0\n"
+            "    M104 S0\n"
+            "    M106 S0  # part cooling fan off\n"
+            "\n"
+            "    # Disable steppers\n"
+            "    M84\n"
+        ),
+        "PAUSE": (
+            "[gcode_macro PAUSE]\n"
+            "description: Pause the print - park, retract, record position\n"
+            "gcode:\n"
+            "    {% set PARK_X = params.PARK_X|default(0)|int %}\n"
+            "    {% set PARK_Y = params.PARK_Y|default(0)|int %}\n"
+            "    {% set LIFT_Z = params.LIFT_Z|default(10)|float %}\n"
+            "    {% set RETRACT = params.RETRACT|default(5)|float %}\n"
+            "    {% set RETRACT_SPEED = params.RETRACT_SPEED|default(40)|int %}\n"
+            "\n"
+            "    # Save current position\n"
+            "    SAVE_GCODE_STATE NAME=PAUSE_STATE\n"
+            "\n"
+            "    # Retract to prevent ooze\n"
+            "    G91\n"
+            "    G1 E-{RETRACT} F{RETRACT_SPEED * 60}\n"
+            "    G90\n"
+            "\n"
+            "    # Lift Z to avoid knocking print\n"
+            "    G91\n"
+            "    G1 Z{LIFT_Z} F300\n"
+            "    G90\n"
+            "\n"
+            "    # Park toolhead\n"
+            "    G1 X{PARK_X} Y{PARK_Y} F6000\n"
+            "\n"
+            "    # Optionally turn off extruder heater\n"
+            "    M104 S0\n"
+            "\n"
+            "    {% raw %}\n"
+            "    # Adjust for your display/screen - uncomment if needed:\n"
+            "    # M117 Paused\n"
+            "    {% endraw %}\n"
+        ),
+        "RESUME": (
+            "[gcode_macro RESUME]\n"
+            "description: Resume the print - restore position, prime, unpark\n"
+            "gcode:\n"
+            "    {% set PRIME = params.PRIME|default(6)|float %}\n"
+            "    {% set PRIME_SPEED = params.PRIME_SPEED|default(20)|int %}\n"
+            "\n"
+            "    # Re-heat extruder (slicer temp is restored by toolhead state)\n"
+            "    M109 S{printer.toolhead.target_extruder|int}\n"
+            "\n"
+            "    # Restore position and prime\n"
+            "    RESTORE_GCODE_STATE NAME=PAUSE_STATE MOVE=1 MOVE_SPEED=100\n"
+            "\n"
+            "    # Prime extruder to rejoin filament\n"
+            "    G91\n"
+            "    G1 E{PRIME} F{PRIME_SPEED * 60}\n"
+            "    G90\n"
+            "\n"
+            "    {% raw %}\n"
+            "    # Adjust for your display/screen - uncomment if needed:\n"
+            "    # M117 Resuming\n"
+            "    {% endraw %}\n"
+        ),
+        "CANCEL_PRINT": (
+            "[gcode_macro CANCEL_PRINT]\n"
+            "description: Cancel the print - cleanup and stop\n"
+            "gcode:\n"
+            "    # Turn off heaters\n"
+            "    M140 S0\n"
+            "    M104 S0\n"
+            "\n"
+            "    # Turn off fans\n"
+            "    M106 S0\n"
+            "\n"
+            "    # Retract filament\n"
+            "    G91\n"
+            "    G1 E-5 F1800\n"
+            "    G90\n"
+            "\n"
+            "    # Lift Z and park\n"
+            "    G91\n"
+            "    G1 Z10 F300\n"
+            "    G90\n"
+            "    G1 X0 Y0 F6000\n"
+            "\n"
+            "    # Disable steppers\n"
+            "    M84\n"
+            "\n"
+            "    # Clear the print\n"
+            "    CLEAR_PAUSE\n"
+            "    SDCARD_RESET_FILE\n"
+        ),
+    }
+
+    def _handle_generate_macro_template(self, args: dict[str, Any]) -> str:
+        """Generate a Klipper gcode_macro template."""
+        macro_name = args.get("macro_name", "").strip().upper()
+        if not macro_name:
+            return "Please specify a macro name: PRINT_START, PRINT_END, PAUSE, RESUME, or CANCEL_PRINT."
+
+        template = self.MACRO_TEMPLATES.get(macro_name)
+        if template is None:
+            return f'Unknown macro: "{macro_name}". Available: PRINT_START, PRINT_END, PAUSE, RESUME, CANCEL_PRINT.'
+
+        # For PRINT_START, handle the include_bed_mesh option
+        if macro_name == "PRINT_START" and not args.get("include_bed_mesh", False):
+            # Remove the bed mesh block but keep the G28
+            template = (
+                "[gcode_macro PRINT_START]\n"
+                "description: Start a print - heat bed, heat nozzle, prime\n"
+                "gcode:\n"
+                "    # Parameters (set by slicer)\n"
+                "    {% set BED_TEMP = params.BED|default(60)|int %}\n"
+                "    {% set EXTRUDER_TEMP = params.EXTRUDER|default(200)|int %}\n"
+                "\n"
+                "    # Heat bed and pre-heat extruder\n"
+                "    M140 S{BED_TEMP}\n"
+                "    M104 S{EXTRUDER_TEMP - 40}\n"
+                "\n"
+                "    # Home all axes\n"
+                "    G28\n"
+                "\n"
+                "    # Wait for bed to reach target\n"
+                "    M190 S{BED_TEMP}\n"
+                "\n"
+                "    # Heat extruder fully\n"
+                "    M109 S{EXTRUDER_TEMP}\n"
+                "\n"
+                "    # Prime nozzle\n"
+                "    G92 E0\n"
+                "    G1 X10 Y10 Z0.4 F3000\n"
+                "    G1 X200 Y10 Z0.4 E25 F600\n"
+                "    G1 X200 Y10.5 Z0.4 F3000\n"
+                "    G1 X10 Y10.5 Z0.4 E50 F600\n"
+                "    G92 E0\n"
+                "    G1 E-2 F600\n"
+                "    G92 E0\n"
+            )
+
+        # Apply custom park/retract values
+        park_x = args.get("park_x")
+        park_y = args.get("park_y")
+        park_z = args.get("park_z")
+        retract = args.get("retract_distance")
+        retract_speed = args.get("retract_speed")
+
+        # For PAUSE and RESUME, inject custom defaults
+        if macro_name in ("PAUSE", "PRINT_END", "CANCEL_PRINT") and (park_x is not None or park_y is not None):
+            # Replace default park coordinates
+            px = int(park_x) if park_x is not None else 0
+            py = int(park_y) if park_y is not None else 0
+            template = template.replace("{% set PARK_X = params.PARK_X|default(0)|int %}", f"{{% set PARK_X = params.PARK_X|default({px})|int %}}")
+            template = template.replace("{% set PARK_Y = params.PARK_Y|default(0)|int %}", f"{{% set PARK_Y = params.PARK_Y|default({py})|int %}}")
+
+        if macro_name == "PAUSE":
+            if park_z is not None:
+                template = template.replace("{% set LIFT_Z = params.LIFT_Z|default(10)|float %}", f"{{% set LIFT_Z = params.LIFT_Z|default({float(park_z)})|float %}}")
+            if retract is not None:
+                template = template.replace("{% set RETRACT = params.RETRACT|default(5)|float %}", f"{{% set RETRACT = params.RETRACT|default({float(retract)})|float %}}")
+            if retract_speed is not None:
+                template = template.replace("{% set RETRACT_SPEED = params.RETRACT_SPEED|default(40)|int %}", f"{{% set RETRACT_SPEED = params.RETRACT_SPEED|default({int(retract_speed)})|int %}}")
+
+        return (
+            f"## {macro_name}\n\n"
+            f"```\n{template}\n```\n\n"
+            f"To use, copy this macro into your printer.cfg (or a separate macros.cfg and [include] it). "
+            f"Adjust park coordinates, temperatures, and purge distances to match your printer geometry."
+        )
 
     # ── JSON-RPC / MCP Protocol ─────────────────────────────────
 

@@ -290,6 +290,16 @@ def _build_mcp_tool_context() -> str:
         "or when you need to identify the MCU from pin definitions."
     )
     parts.append(
+        "- **calculate_rotation_distance**: Use when the user needs to calculate "
+        "rotation_distance for a stepper motor. Supports leadscrew, belt-driven, "
+        "and steps-per-mm derivation methods."
+    )
+    parts.append(
+        "- **generate_macro_template**: Use when the user asks for a PRINT_START, "
+        "PRINT_END, PAUSE, RESUME, or CANCEL_PRINT macro. Returns a complete "
+        "Klipper gcode_macro with proper save/restore state and temperature management."
+    )
+    parts.append(
         "- **list_klipper_docs**: Use when the user asks what documentation is available "
         "or wants to browse the full set of Klipper docs."
     )
