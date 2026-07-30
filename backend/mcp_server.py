@@ -568,6 +568,26 @@ class McpServer:
                     "required": ["macro_name"],
                 },
             },
+            {
+                "name": "validate_macro",
+                "description": (
+                    "Validate a Klipper gcode_macro for common structural issues. "
+                    "Checks syntax, save/restore state pairing, temperature commands, "
+                    "macro structure, and potential problems. Does NOT simulate "
+                    "movements or machine state — use the Macro Designer in the app "
+                    "for full gcode simulation."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "macro_text": {
+                            "type": "string",
+                            "description": "The full macro text including the [gcode_macro ...] header through to the end of the gcode section",
+                        },
+                    },
+                    "required": ["macro_text"],
+                },
+            },
         ]
 
     # ── Tool Handlers ─────────────────────────────────────────────
@@ -586,6 +606,7 @@ class McpServer:
             "detect_board": self._handle_detect_board,
             "calculate_rotation_distance": self._handle_calculate_rotation_distance,
             "generate_macro_template": self._handle_generate_macro_template,
+            "validate_macro": self._handle_validate_macro,
         }
 
         handler = handlers.get(name)
@@ -1265,6 +1286,132 @@ class McpServer:
             f"To use, copy this macro into your printer.cfg (or a separate macros.cfg and [include] it). "
             f"Adjust park coordinates, temperatures, and purge distances to match your printer geometry."
         )
+
+    def _handle_validate_macro(self, args: dict[str, Any]) -> str:
+        """Validate a Klipper gcode_macro for common structural issues."""
+        macro_text = args.get("macro_text", "")
+        if not macro_text.strip():
+            return "Please provide macro text to validate."
+
+        issues: list[dict[str, str]] = []  # {severity, message}
+        lines = macro_text.split("\n")
+
+        # ── 1. Check section header ──
+        header_match = re.search(r"\[gcode_macro\s+(\S+)\]", macro_text)
+        if not header_match:
+            issues.append({"severity": "error", "message": "Missing or invalid [gcode_macro <name>] header."})
+        else:
+            macro_name = header_match.group(1)
+            # Check gcode: key
+            for line in lines[1:]:
+                stripped = line.strip()
+                if stripped.startswith("gcode:") or stripped.startswith("gcode :"):
+                    break
+                if stripped and not stripped.startswith("#") and not stripped.startswith("description:"):
+                    issues.append({"severity": "warning", "message": f"Macro '{macro_name}' is missing the 'gcode:' key. A gcode_macro must have a 'gcode:' section with the commands to run."})
+                    break
+
+            # Check description:
+            has_description = any(line.strip().startswith("description:") for line in lines[1:10])
+            if not has_description:
+                issues.append({"severity": "info", "message": f"Macro '{macro_name}' is missing a 'description:' field. Adding one makes the macro self-documenting."})
+
+        # ── 2. Jinja2 template balance ──
+        # Check {% raw %}...{% endraw %} pairs
+        raw_starts = [i for i, line in enumerate(lines) if "{% raw %}" in line or "{%- raw -%}" in line or "{%raw%}" in line]
+        raw_ends = [i for i, line in enumerate(lines) if "{% endraw %}" in line or "{%- endraw -%}" in line or "{%endraw%}" in line]
+        if len(raw_starts) != len(raw_ends):
+            issues.append({"severity": "error", "message": f"Unbalanced {{% raw %}} / {{% endraw %}} blocks ({len(raw_starts)} starts, {len(raw_ends)} ends)."})
+
+        # Check {% if %}...{% endif %} pairs (rough count)
+        if_opens = sum(1 for line in lines if "{% if " in line or "{%if " in line)
+        if_closes = sum(1 for line in lines if "{% endif %}" in line or "{%endif%}" in line)
+        if if_opens != if_closes:
+            issues.append({"severity": "error", "message": f"Unbalanced {{% if %}} / {{% endif %}} blocks ({if_opens} opens, {if_closes} closes)."})
+
+        # Check {% for %}...{% endfor %} pairs
+        for_opens = sum(1 for line in lines if "{% for " in line or "{%for " in line)
+        for_closes = sum(1 for line in lines if "{% endfor %}" in line or "{%endfor%}" in line)
+        if for_opens != for_closes:
+            issues.append({"severity": "error", "message": f"Unbalanced {{% for %}} / {{% endfor %}} blocks ({for_opens} opens, {for_closes} closes)."})
+
+        # ── 3. Save/restore state pairing ──
+        save_count = len(re.findall(r"SAVE_GCODE_STATE", macro_text))
+        restore_count = len(re.findall(r"RESTORE_GCODE_STATE", macro_text))
+        if save_count > restore_count:
+            issues.append({"severity": "warning", "message": f"SAVE_GCODE_STATE is called {save_count} time(s) but RESTORE_GCODE_STATE is only called {restore_count} time(s). Each SAVE should have a matching RESTORE."})
+        if save_count == 0 and "G1" in macro_text:
+            issues.append({"severity": "info", "message": "Macro performs moves but does not use SAVE_GCODE_STATE / RESTORE_GCODE_STATE. Consider wrapping state-changing operations to avoid side effects."})
+
+        # ── 4. Temperature commands ──
+        temp_cmds = re.findall(r"(M104|M109|M140|M190)", macro_text)
+        for cmd in temp_cmds:
+            # Check if S parameter is present (or a variable)
+            pattern = cmd + r"\s+S"
+            if not re.search(pattern, macro_text):
+                # Check if it uses a jinja variable for temp
+                var_pattern = cmd + r"\s+\{\%"
+                if not re.search(var_pattern, macro_text):
+                    issues.append({"severity": "warning", "message": f"'{cmd}' without 'S' temperature parameter may not heat as expected. Use 'M140 S60' or 'M104 S{{TEMP}}'."})
+
+        # Check for G1 E moves without F (feedrate)
+        g1e_lines = re.findall(r"G1\s+.*E[0-9.]", macro_text, re.IGNORECASE)
+        for gl in g1e_lines[:5]:
+            if "F" not in gl.upper() and "F{" not in gl:
+                issues.append({"severity": "warning", "message": f"Extrusion move without feedrate: '{gl.strip()[:80]}'. Add F parameter to control extrusion speed."})
+
+        # ── 5. Common issues ──
+        # BED_MESH_CALIBRATE without prior G28
+        if "BED_MESH_CALIBRATE" in macro_text and "G28" not in macro_text:
+            # Check if called from another macro that might have G28
+            issues.append({"severity": "info", "message": "BED_MESH_CALIBRATE is called but this macro does not include G28. Make sure homing happens before the mesh is probed (e.g., in the calling macro or PRINT_START)."})
+
+        # G28 inside SAVE_GCODE_STATE block - can cause issues
+        g28_in_save = False
+        in_save_block = False
+        for line in lines:
+            if "SAVE_GCODE_STATE" in line:
+                in_save_block = True
+            if "RESTORE_GCODE_STATE" in line:
+                in_save_block = False
+            if in_save_block and "G28" in line:
+                g28_in_save = True
+        if g28_in_save:
+            issues.append({"severity": "warning", "message": "G28 is used between SAVE_GCODE_STATE and RESTORE_GCODE_STATE. G28 clears the coordinate system, which may make the RESTORE unreliable. Home before saving state instead."})
+
+        # ── 6. Build result ──
+        if not issues:
+            return (
+                f"## Macro validation: No issues found\n\n"
+                f"The macro passed all basic checks. For a full gcode simulation with machine state "
+                f"tracking, movement validation, and zone checking, use the Macro Designer in the app."
+            )
+
+        errors = [i for i in issues if i["severity"] == "error"]
+        warnings = [i for i in issues if i["severity"] == "warning"]
+        info = [i for i in issues if i["severity"] == "info"]
+
+        parts: list[str] = [f"## Macro validation: {len(issues)} issue(s) found\n"]
+        if errors:
+            parts.append(f"### Errors ({len(errors)})")
+            for e in errors:
+                parts.append(f"- {e['message']}")
+            parts.append("")
+        if warnings:
+            parts.append(f"### Warnings ({len(warnings)})")
+            for w in warnings:
+                parts.append(f"- {w['message']}")
+            parts.append("")
+        if info:
+            parts.append(f"### Suggestions ({len(info)})")
+            for i_item in info:
+                parts.append(f"- {i_item['message']}")
+            parts.append("")
+
+        parts.append("---")
+        parts.append("For a full gcode simulation with machine state tracking, use the Macro Designer in the app.")
+
+        return "\n".join(parts)
 
     # ── JSON-RPC / MCP Protocol ─────────────────────────────────
 

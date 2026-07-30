@@ -300,6 +300,11 @@ def _build_mcp_tool_context() -> str:
         "Klipper gcode_macro with proper save/restore state and temperature management."
     )
     parts.append(
+        "- **validate_macro**: Use after generating a macro or when the user provides one "
+        "that may have issues. Checks section structure, Jinja2 syntax balance, "
+        "save/restore state pairing, temperature command sanity, and common problems."
+    )
+    parts.append(
         "- **list_klipper_docs**: Use when the user asks what documentation is available "
         "or wants to browse the full set of Klipper docs."
     )
