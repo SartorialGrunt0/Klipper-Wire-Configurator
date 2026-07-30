@@ -12,7 +12,7 @@ import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import type { ChatMessage } from '../../stores/aiStore';
 import type { AssistantDraftChange } from '../../utils/assistantDraftMerge';
-import { extractConfigCodeBlock } from '../../utils/chatUtils';
+import { extractConfigCodeBlock, hasPrinterMemoryBlock } from '../../utils/chatUtils';
 
 // ── Markdown Code Block Component ───────────────────────────────────
 
@@ -98,6 +98,7 @@ export interface ChatMessageListProps {
   assistantDraftApplicableMessages: Record<number, boolean>;
   assistantDraftPreviewLoading: string | null;
   onApplyEdit: (content: string, messageIndex?: number) => void;
+  onReviewPrinterMemory: (content: string) => void;
   messagesEndRef: React.RefObject<HTMLDivElement | null>;
 }
 
@@ -123,6 +124,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
   assistantDraftApplicableMessages,
   assistantDraftPreviewLoading,
   onApplyEdit,
+  onReviewPrinterMemory,
   messagesEndRef,
 }) => {
   if (messages.length === 0 && !loading) {
@@ -142,6 +144,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
 
         const assistantConfigBlock = msg.role === 'assistant' ? extractConfigCodeBlock(msg.content) : null;
         const hasApplicableAssistantDraft = assistantDraftApplicableMessages[i] === true;
+        const hasPrinterMemBlock = msg.role === 'assistant' && hasPrinterMemoryBlock(msg.content);
 
 
         return (
@@ -223,9 +226,10 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                 </div>
               )}
 
-              {/* Apply and Review Changes button */}
-              {msg.role === 'assistant' && assistantConfigBlock && activeFile && hasApplicableAssistantDraft && (
-                <div className="mt-3 flex justify-end">
+              {/* Action buttons row */}
+              <div className="mt-3 flex flex-wrap justify-end gap-2">
+                {/* Apply and Review Changes button */}
+                {msg.role === 'assistant' && assistantConfigBlock && activeFile && hasApplicableAssistantDraft && (
                   <button
                     onClick={() => onApplyEdit(msg.content, i)}
                     disabled={assistantDraftPreviewLoading === msg.content}
@@ -234,8 +238,19 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                   >
                     {assistantDraftPreviewLoading === msg.content ? 'Preparing Review...' : 'Apply and Review Changes'}
                   </button>
-                </div>
-              )}
+                )}
+
+                {/* Review Printer Memory button */}
+                {msg.role === 'assistant' && hasPrinterMemBlock && (
+                  <button
+                    onClick={() => onReviewPrinterMemory(msg.content)}
+                    className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-[10px] font-medium text-[var(--color-text-secondary)] transition-colors hover:border-blue-500 hover:text-blue-400"
+                    title="Review proposed printer memory changes"
+                  >
+                    Review Printer Memory
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         );

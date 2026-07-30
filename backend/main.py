@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse
 from api.routes import router
 from api.native_routes import router as native_router
 from api.ai_routes import router as ai_router
+from api.printer_memory_routes import router as printer_memory_router
 from mcp_server import McpServer, get_index
 from fastapi.responses import JSONResponse
 
@@ -58,6 +59,7 @@ async def mcp_health():
 app.include_router(router, prefix="/api")
 app.include_router(native_router, prefix="/api/native")
 app.include_router(ai_router)
+app.include_router(printer_memory_router, prefix="/api")
 
 PROJECTS_DIR = Path(os.environ.get("KWC_PROJECTS_DIR", "./projects"))
 PROJECTS_DIR.mkdir(parents=True, exist_ok=True)

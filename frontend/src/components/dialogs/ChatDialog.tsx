@@ -15,10 +15,17 @@ import { useAiStore, AiProvider, providerRequiresApiKey } from '../../stores/aiS
 import { useChatHistoryStore } from '../../stores/chatHistoryStore';
 import { useConfigStore } from '../../stores/configStore';
 import { useGraphStore } from '../../stores/graphStore';
+import { usePrinterMemoryStore, DEFAULT_PRINTER_MEMORY, type PrinterMemory } from '../../stores/printerMemoryStore';
 import * as api from '../../services/api';
 import {
   buildConfigContextMessage,
   extractMentionedConfigFilenames,
+  extractPrinterMemoryBlock,
+  validatePrinterMemoryContent,
+  buildPrinterMemoryValidationFeedback,
+  type PrinterMemoryValidationIssue,
+  MAX_PRINTER_MEMORY_VALIDATION_ATTEMPTS,
+  hasPrinterMemoryBlock,
   PROVIDER_DEFAULTS,
   isLocalProvider,
   resolveProviderApiUrl,
@@ -28,6 +35,7 @@ import { buildProjectGraph } from '../../utils/graphBuilder';
 import { useAssistantDraft } from '../../hooks/useAssistantDraft';
 import ChatSettingsPanel from './ChatSettingsPanel';
 import ChatHistoryDialog from './ChatHistoryDialog';
+import PrinterMemoryDialog from './PrinterMemoryDialog';
 import ChatMessageList from './ChatMessageList';
 import ChatInputBar from './ChatInputBar';
 import AiDraftPreviewDialog from './AiDraftPreviewDialog';
@@ -124,6 +132,8 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   );
   const [attachedConfigFiles, setAttachedConfigFiles] = useState<AttachedConfigFile[]>([]);
   const [showChatHistory, setShowChatHistory] = useState(false);
+  const [showPrinterMemory, setShowPrinterMemory] = useState(false);
+  const [proposedMemory, setProposedMemory] = useState<PrinterMemory | null>(null);
 
   // ── Settings Editing State (single source of truth) ─────────────
   const [editApiKey, setEditApiKey] = useState(settings.apiKey);
@@ -342,7 +352,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         // First request
         const assistantAttempt = await draftRequestMessage(chatRequestBase, requestConversation);
 
-        // Validation retry loop
+        // Validation retry loop (config drafts)
         const result = await draftValidationRetryLoop(
           chatRequestBase,
           requestConversation,
@@ -350,8 +360,60 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           assistantAttempt,
         );
 
-        if (result.warningMessage) setError(result.warningMessage);
-        setMessages([...newMessages, result.finalMessage]);
+        // ── Printer memory validation retry loop ─────────────────
+        // If the AI included a printer-memory block, validate it thoroughly:
+        // - JSON must parse correctly
+        // - Must be a flat object (not an array or primitive)
+        // - Only the 7 defined fields are allowed
+        // If validation fails, tell the AI what's wrong and ask for a fix.
+        let printerMemoryAttempt = result.finalMessage;
+        let printerMemoryWarnings = result.warningMessage;
+        let printerMemoryAttemptsUsed = 0;
+
+        while (printerMemoryAttemptsUsed < MAX_PRINTER_MEMORY_VALIDATION_ATTEMPTS) {
+          const validationResult = validatePrinterMemoryContent(printerMemoryAttempt.content);
+          if (!validationResult) break; // No printer-memory block in this message, nothing to validate
+          if (validationResult.issues.length === 0) break; // Block is valid
+
+          printerMemoryAttemptsUsed += 1;
+          if (printerMemoryAttemptsUsed >= MAX_PRINTER_MEMORY_VALIDATION_ATTEMPTS) {
+            const issueMessages = validationResult.issues
+              .map((i) => `- ${i.message}`)
+              .join('\n');
+            printerMemoryWarnings = [
+              printerMemoryWarnings,
+              `The AI returned an invalid printer-memory block after ${MAX_PRINTER_MEMORY_VALIDATION_ATTEMPTS} attempts:\n${issueMessages}`,
+            ].filter(Boolean).join('\n');
+            break;
+          }
+
+          // Build feedback telling the AI what to fix
+          const validationFeedback = buildPrinterMemoryValidationFeedback(validationResult.issues);
+
+          // Append the feedback and re-request
+          const pmRequestConversation: Array<{ role: AiChatRole; content: string }> = [
+            ...requestConversation,
+            ...result.finalConversation.map((m) => ({ role: m.role as AiChatRole, content: m.content })),
+            { role: 'user' as AiChatRole, content: validationFeedback },
+          ];
+
+          try {
+            const pmRetry = await draftRequestMessage(chatRequestBase, pmRequestConversation);
+            printerMemoryAttempt = pmRetry.assistantMessage;
+          } catch {
+            const issueMessages = validationResult.issues
+              .map((i) => `- ${i.message}`)
+              .join('\n');
+            printerMemoryWarnings = [
+              printerMemoryWarnings,
+              `Failed to retry after invalid printer memory block:\n${issueMessages}`,
+            ].filter(Boolean).join('\n');
+            break;
+          }
+        }
+
+        if (printerMemoryWarnings) setError(printerMemoryWarnings);
+        setMessages([...newMessages, printerMemoryAttempt]);
         setAssistantDraftApplicableMessages({}); // Will be re-evaluated by the useEffect
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : 'Failed to get response.';
@@ -410,6 +472,33 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       setAttachedConfigFiles([]);
     },
     [saveCurrentConversation, setMessages, setSettings],
+  );
+
+  // ── Printer Memory ──────────────────────────────────────────────
+
+  const handleReviewPrinterMemory = useCallback(
+    (content: string) => {
+      const memory = extractPrinterMemoryBlock(content);
+      if (memory) {
+        setProposedMemory(memory as unknown as PrinterMemory);
+        setShowPrinterMemory(true);
+      }
+    },
+    [],
+  );
+
+  const handleAcceptPrinterMemoryProposal = useCallback(
+    async (memory: PrinterMemory) => {
+      try {
+        const { save } = usePrinterMemoryStore.getState();
+        await save(memory);
+        setProposedMemory(null);
+        setShowPrinterMemory(false);
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to save printer memory');
+      }
+    },
+    [],
   );
 
   // ── Handle Key Down ─────────────────────────────────────────────
@@ -528,6 +617,17 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           </div>
           <div className="flex items-center gap-2">
             <button
+              onClick={() => {
+                setShowPrinterMemory(true);
+                // Clear any stale proposal when opening manually
+                setProposedMemory(null);
+              }}
+              className="px-2 py-1 rounded text-[10px] font-medium bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
+              title="View and edit printer memory"
+            >
+              Printer Memory
+            </button>
+            <button
               onClick={() => setShowChatHistory(true)}
               className="px-2 py-1 rounded text-[10px] font-medium bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
               title="View and load past conversations"
@@ -573,6 +673,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
             assistantDraftApplicableMessages={assistantDraftApplicableMessages}
             assistantDraftPreviewLoading={assistantDraftPreviewLoading}
             onApplyEdit={handleApplyEdit}
+            onReviewPrinterMemory={handleReviewPrinterMemory}
             messagesEndRef={messagesEndRef}
           />
         </div>
@@ -629,6 +730,16 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           onClose={() => setShowChatHistory(false)}
           onLoadConversation={handleLoadConversation}
           currentMessageCount={messages.length}
+        />
+      )}
+
+      {/* Printer Memory Dialog */}
+      {showPrinterMemory && (
+        <PrinterMemoryDialog
+          open={showPrinterMemory}
+          onClose={() => { setShowPrinterMemory(false); setProposedMemory(null); }}
+          proposedMemory={proposedMemory}
+          onAcceptProposal={handleAcceptPrinterMemoryProposal}
         />
       )}
     </div>

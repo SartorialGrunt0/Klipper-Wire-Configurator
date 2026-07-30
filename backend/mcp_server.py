@@ -1500,6 +1500,8 @@ class McpServer:
 
         return "\n".join(parts)
 
+    # ── Printer Memory ────────────────────────────────────────────
+
     # ── JSON-RPC / MCP Protocol ─────────────────────────────────
 
     def handle_jsonrpc(self, request: dict) -> dict | None:

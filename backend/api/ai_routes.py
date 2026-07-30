@@ -9,6 +9,11 @@ from urllib.parse import urlparse, urlunparse
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from api.printer_memory_routes import (
+    load_printer_memory,
+    printer_memory_to_context,
+    is_printer_memory_blank,
+)
 from mcp_server import McpServer, get_index
 
 router = APIRouter()
@@ -167,15 +172,52 @@ def _get_openai_compatible_default_url(provider: str) -> str:
 
 
 def _prepare_messages(messages: list[dict]) -> list[dict]:
-    """Build a clean system prompt with MCP tool descriptions and user messages.
-
-    No longer injects keyword-matched doc excerpts — the model fetches
-    documentation on demand via MCP tools (search_klipper_docs, etc.).
+    """Build a clean system prompt with MCP tool descriptions, printer memory,
+    and user messages.
     """
     system_parts = [SYSTEM_PROMPT, _build_mcp_tool_context()]
     system_parts.append(
         "Use the tools you have available to help you answer the following question."
     )
+
+    # ── Inject printer memory context ──
+    memory = load_printer_memory()
+    memory_context = printer_memory_to_context(memory)
+    system_parts.append(memory_context)
+
+    # If printer memory is completely blank and there are user messages to work with,
+    # add an auto-fill instruction asking the AI to investigate.
+    if is_printer_memory_blank(memory):
+        auto_fill_prompt = (
+            "\n---\n"
+            "**Printer Memory Auto-Fill**\n\n"
+            "The printer memory above is completely blank. Your task is to fill it in:\n"
+            "1. Examine the user's config files passed as context below for clues about the "
+            "mainboard, toolhead board, kinematics, probe type, etc.\n"
+            "2. Use `search_example_configs` with keywords from the user's config "
+            "(board name, printer model, MCU type) to find matching example configurations "
+            "in the bundled reference configs. Then use `read_example_config` to examine "
+            "the most relevant ones in full. Correlate what you find with the user's "
+            "config — for instance, a Voron 2.4 config usually uses CoreXY kinematics "
+            "and specific board types.\n"
+            "3. Also use `search_klipper_docs`, `get_config_reference_section`, and "
+            "`detect_board` as needed to confirm hardware details and fill in gaps.\n"
+            "4. For each field you can determine, provide the value. For any field you "
+            "cannot determine, ask the user to provide the information.\n"
+            "5. IMPORTANT: Only these 7 fields are allowed — do NOT add any extra fields:\n"
+            "   mainboard, toolheadBoard, expanderBoards, printerName, kinematics, "
+            "probe, additionalNotes\n"
+            "   Any unsupported fields will be rejected and you will be asked to fix them.\n"
+            "6. Propose the filled-in printer memory in a fenced `printer-memory` code "
+            "block. The block must contain ONLY valid JSON — no surrounding explanation "
+            "or markdown inside the block. Example:\n"
+            "   ```printer-memory\n"
+            "   {\"mainboard\": \"BTT Octopus Pro v1.1\", \"kinematics\": \"CoreXY\"}\n"
+            "   ```\n"
+            "7. After the user confirms in the review dialog, the application will save it automatically. "
+            "Do NOT save printer memory directly — always use the code block approach so the user can review first."
+        )
+        system_parts.append(auto_fill_prompt)
 
     prepared: list[dict] = []
     for msg in messages:
@@ -191,8 +233,8 @@ def _prepare_messages(messages: list[dict]) -> list[dict]:
 
     system_text = "\n\n".join(system_parts)
     logger.debug(
-        "Prepared messages | system=%d chars user_msgs=%d",
-        len(system_text), len(prepared)
+        "Prepared messages | system=%d chars user_msgs=%d printer_memory_blank=%s",
+        len(system_text), len(prepared), is_printer_memory_blank(memory)
     )
     return [{"role": "system", "content": system_text}] + prepared
 
@@ -303,6 +345,12 @@ def _build_mcp_tool_context() -> str:
         "- **validate_macro**: Use after generating a macro or when the user provides one "
         "that may have issues. Checks section structure, Jinja2 syntax balance, "
         "save/restore state pairing, temperature command sanity, and common problems."
+    )
+    parts.append(
+        "- **printer-memory code block**: When you want to propose printer memory updates, "
+        "return the full updated JSON inside a fenced code block tagged with `printer-memory`. "
+        "The application will detect this block and allow the user to review and confirm the changes "
+        "before saving. Do NOT save printer memory directly — always let the user review first."
     )
     parts.append(
         "- **list_klipper_docs**: Use when the user asks what documentation is available "
