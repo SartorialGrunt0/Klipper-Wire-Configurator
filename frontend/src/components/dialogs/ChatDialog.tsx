@@ -12,6 +12,7 @@
  */
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useAiStore, AiProvider, providerRequiresApiKey } from '../../stores/aiStore';
+import { useChatHistoryStore } from '../../stores/chatHistoryStore';
 import { useConfigStore } from '../../stores/configStore';
 import { useGraphStore } from '../../stores/graphStore';
 import * as api from '../../services/api';
@@ -26,11 +27,13 @@ import {
 import { buildProjectGraph } from '../../utils/graphBuilder';
 import { useAssistantDraft } from '../../hooks/useAssistantDraft';
 import ChatSettingsPanel from './ChatSettingsPanel';
+import ChatHistoryDialog from './ChatHistoryDialog';
 import ChatMessageList from './ChatMessageList';
 import ChatInputBar from './ChatInputBar';
 import AiDraftPreviewDialog from './AiDraftPreviewDialog';
 import type { PendingAiChatRequest } from '../../types/ai';
 import type { AiChatRole } from '../../services/api';
+import type { SavedConversation } from '../../stores/chatHistoryStore';
 
 // ── Props ───────────────────────────────────────────────────────────
 
@@ -120,6 +123,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     activeFile ? [activeFile] : [],
   );
   const [attachedConfigFiles, setAttachedConfigFiles] = useState<AttachedConfigFile[]>([]);
+  const [showChatHistory, setShowChatHistory] = useState(false);
 
   // ── Settings Editing State (single source of truth) ─────────────
   const [editApiKey, setEditApiKey] = useState(settings.apiKey);
@@ -382,6 +386,32 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     void submitMessage(input);
   }, [input, submitMessage]);
 
+  // ── Chat History ────────────────────────────────────────────────
+  const saveCurrentConversation = useCallback(() => {
+    const { settings, messages } = useAiStore.getState();
+    if (messages.length > 0) {
+      useChatHistoryStore.getState().saveConversation(messages, settings);
+    }
+  }, []);
+
+  const handleNewChatWithSave = useCallback(() => {
+    saveCurrentConversation();
+    handleNewChat();
+    setAttachedConfigFiles([]);
+  }, [saveCurrentConversation, handleNewChat]);
+
+  const handleLoadConversation = useCallback(
+    (conversation: SavedConversation) => {
+      // Save current conversation before loading a different one
+      saveCurrentConversation();
+      setMessages(conversation.messages);
+      setSettings(conversation.settings);
+      setAssistantDraftPreview(null);
+      setAttachedConfigFiles([]);
+    },
+    [saveCurrentConversation, setMessages, setSettings],
+  );
+
   // ── Handle Key Down ─────────────────────────────────────────────
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -498,7 +528,14 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           </div>
           <div className="flex items-center gap-2">
             <button
-              onClick={handleNewChat}
+              onClick={() => setShowChatHistory(true)}
+              className="px-2 py-1 rounded text-[10px] font-medium bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
+              title="View and load past conversations"
+            >
+              Chat History
+            </button>
+            <button
+              onClick={handleNewChatWithSave}
               disabled={loading || messages.length === 0}
               className="px-2 py-1 rounded text-[10px] font-medium bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] disabled:opacity-40 disabled:cursor-not-allowed"
               title="Start a new chat"
@@ -583,6 +620,15 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           onSelectionChange={(ids) => { void handleAssistantDraftSelectionChange(ids); }}
           onAccept={() => { void handleAcceptDraft(); }}
           onClose={() => setAssistantDraftPreview(null)}
+        />
+      )}
+
+      {/* Chat History Dialog */}
+      {showChatHistory && (
+        <ChatHistoryDialog
+          onClose={() => setShowChatHistory(false)}
+          onLoadConversation={handleLoadConversation}
+          currentMessageCount={messages.length}
         />
       )}
     </div>
