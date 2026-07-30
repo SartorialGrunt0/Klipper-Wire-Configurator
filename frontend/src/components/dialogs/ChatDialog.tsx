@@ -412,12 +412,16 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       await handleAcceptAssistantEdit();
       const graphStore = useGraphStore.getState();
       graphStore.clearGraph();
-      buildProjectGraph(configFiles, graphStore, schemas, validation);
+      // Read config files directly from the store so newly created
+      // files (added by handleAcceptAssistantEdit via setConfigFile)
+      // are included in the graph rebuild.
+      const latestConfigFiles = useConfigStore.getState().configFiles;
+      buildProjectGraph(latestConfigFiles, graphStore, schemas, validation);
       setError(null);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to accept assistant changes.');
     }
-  }, [configFiles, handleAcceptAssistantEdit, schemas, validation]);
+  }, [handleAcceptAssistantEdit, schemas, validation]);
 
   // ── Pending Request Handling ────────────────────────────────────
   useEffect(() => {
