@@ -42,8 +42,10 @@ interface AssistantDraftFilePreview {
   originalText: string;
   baseConfig: ConfigFile;
   assistantConfig: ConfigFile;
+  mergedConfig: ConfigFile;
   mergedText: string;
   changes: AssistantDraftChange[];
+  mergedValidation?: ValidationResult;
 }
 
 export interface AssistantDraftPreview {
@@ -239,7 +241,15 @@ export function useAssistantDraft(deps: {
 
         if (normalizeDiffText(baseText) === normalizeDiffText(mergedText)) continue;
 
-        filePreviews.push({ filename: targetFile, originalText: baseText, baseConfig, assistantConfig, mergedText, changes });
+        filePreviews.push({
+          filename: targetFile,
+          originalText: baseText,
+          baseConfig,
+          assistantConfig,
+          mergedConfig,
+          mergedText,
+          changes,
+        });
       }
 
       if (filePreviews.length === 0) {
@@ -517,9 +527,14 @@ export function useAssistantDraft(deps: {
         if (!hasSelectedChanges) continue;
         if (normalizeDiffText(fp.originalText) === normalizeDiffText(fp.mergedText)) continue;
 
-        const result = await api.parseConfigText(fp.mergedText, fp.filename);
-        updatedConfigs[fp.filename] = result.config;
-        updatedValidation[fp.filename] = result.validation;
+        // Use the cached merged config directly instead of re-parsing
+        updatedConfigs[fp.filename] = fp.mergedConfig;
+        // Validate — lighter than parse since we already have the parsed config
+        try {
+          updatedValidation[fp.filename] = await api.validateConfig(fp.mergedConfig);
+        } catch {
+          // Validation failure shouldn't block the edit
+        }
         touchedFiles.push(fp.filename);
       }
 
