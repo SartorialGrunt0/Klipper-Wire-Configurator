@@ -10,7 +10,7 @@ import { useConfigStore } from '../../stores/configStore';
 import { useGraphStore } from '../../stores/graphStore';
 import * as api from '../../services/api';
 import AiDraftPreviewDialog from './AiDraftPreviewDialog';
-import { mergeAssistantSectionsIntoConfig, type AssistantDraftChange } from '../../utils/assistantDraftMerge';
+import { mergeAssistantSectionsIntoConfig, preprocessDeleteMarkers, type AssistantDraftChange } from '../../utils/assistantDraftMerge';
 import { normalizeDiffText } from '../../utils/configDiff';
 import { buildProjectGraph } from '../../utils/graphBuilder';
 import type { LmStudioContextStatus, LmStudioMcpStatus, PendingAiChatRequest } from '../../types/ai';
@@ -1220,7 +1220,9 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       }
 
       const assistantParseFilename = fileHint ?? mentionedFilenames[0] ?? activeFile ?? loadedConfigFilenames[0] ?? 'printer.cfg';
-      const assistantResult = await api.parseConfigText(configText, assistantParseFilename);
+      // Preprocess `*[section_name]` deletion markers before parsing
+      const processedConfigText = preprocessDeleteMarkers(configText);
+      const assistantResult = await api.parseConfigText(processedConfigText, assistantParseFilename);
 
       if (assistantResult.config.sections.length === 0) {
         continue;
@@ -1758,7 +1760,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       } else if (activeFile) {
         contextMessages.push({
           role: 'system',
-          content: `If the user asks you to modify ${activeFile}, or does not name a different config file, return only the changed, new, or deleted sections for ${activeFile} inside a single fenced code block labeled cfg. Include full section headers and the full contents of each changed section. To COMMENT OUT / DISABLE a section, include its header commented out with existing params: #[extruder]. To DELETE a section entirely (remove from file), include the commented-out header plus the special marker param #_action: delete like so: #[extruder]\n#_action: delete. The #_action param is not a real Klipper setting — it signals "delete this section". Without it, a commented-out header is just a disable/comment-out. If a different loaded config file is clearly requested, target that file instead and start that cfg block with a first comment line exactly like "# file: <filename>". If changes span multiple files, return one separate fenced cfg block per file. Do not return the entire file unless the user explicitly asks for a full replacement.`,
+          content: `If the user asks you to modify ${activeFile}, or does not name a different config file, return only the changed, new, or deleted sections for ${activeFile} inside a single fenced code block labeled cfg. Include full section headers and the full contents of each changed section. To COMMENT OUT / DISABLE a section, include its header commented out with existing params: #[extruder]. To DELETE a section entirely (remove from file), write *[section_name] on its own line inside the cfg block — the * before the bracket tells the app to remove that section. Do NOT use # for deletions: # means comment out, * means delete. Example: *[extruder]. You can mix deletion markers with normal sections in the same cfg block. If a different loaded config file is clearly requested, target that file instead and start that cfg block with a first comment line exactly like "# file: <filename>". If changes span multiple files, return one separate fenced cfg block per file. Do not return the entire file unless the user explicitly asks for a full replacement.`,
         });
       }
 

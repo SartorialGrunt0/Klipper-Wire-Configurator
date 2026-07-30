@@ -50,35 +50,56 @@ function cloneSection(section: ConfigSection): ConfigSection {
 }
 
 /**
+ * Special section type used by the AI to signal "delete this entire section."
+ *
+ * The AI outputs `*[section_name]` inside a cfg block. Before parsing,
+ * the frontend preprocesses this into:
+ *
+ *   [delete_section]
+ *   section: section_name
+ *
+ * The `delete_section` type is not a real Klipper section — it's a meta-
+ * instruction that tells the merge logic to remove the named section.
+ * The `*` symbol keeps deletion visually distinct from `#[header]`
+ * (which means "comment out / disable").
+ */
+const DELETE_SECTION_TYPE = 'delete_section';
+
+/**
+ * Regex to match `*[section_name]` deletion markers inside raw cfg block text.
+ */
+export const DELETE_MARKER_RE = /^\*\[([^\]]+)\]\s*$/m;
+
+/**
+ * Preprocess raw cfg block text, converting `*[section_name]` lines into
+ * `[delete_section]\nsection: section_name` blocks for parsing.
+ */
+export function preprocessDeleteMarkers(text: string): string {
+  return text.replace(DELETE_MARKER_RE, (_match, sectionName: string) => {
+    return `[delete_section]\nsection: ${sectionName.trim()}`;
+  });
+}
+
+/**
  * Detect whether a section from the assistant represents a deletion signal.
  *
- * To avoid conflating "comment out/disable" (standard Klipper `#[header]`)
- * with "delete entirely," the AI uses an explicit marker param:
- *
- *   #[extruder]
- *   #_action: delete
- *
- * The section header is commented out (signals the section being acted upon)
- * and the `#_action: delete` param (underscore-prefixed, so no collision with
- * real Klipper params) unambiguously signals "delete this entire section."
- *
- * Without `#_action: delete`, a commented-out header like `#[extruder]` with
- * no params is treated as a standard "comment out/disable" request.
+ * A delete section has `section_type === "delete_section"` with a `section`
+ * param naming the target to remove.
  */
-const DELETE_ACTION_PARAM_KEY = '_action';
-const DELETE_ACTION_PARAM_VALUE = 'delete';
-
 function isDeleteSection(section: ConfigSection): boolean {
-  // The header MUST be commented out AND have the _action: delete marker.
-  // This prevents an active section with a coincidental `_action` param
-  // from being accidentally deleted.
-  if (!section.is_commented_out) {
+  if (section.section_type !== DELETE_SECTION_TYPE) {
     return false;
   }
-  return section.params.some(
-    (p) => p.key === DELETE_ACTION_PARAM_KEY
-      && p.value.trim().toLowerCase() === DELETE_ACTION_PARAM_VALUE
-  );
+  const targetParam = section.params.find((p) => p.key === 'section');
+  return targetParam != null && targetParam.value.trim().length > 0;
+}
+
+/**
+ * Get the target section name from a delete_section entry.
+ */
+function getDeleteTarget(section: ConfigSection): string | null {
+  const targetParam = section.params.find((p) => p.key === 'section');
+  return targetParam?.value.trim() ?? null;
 }
 
 
@@ -124,7 +145,7 @@ function mergeAssistantParams(existingParams: ConfigParam[], assistantParams: Co
   //   to keep vs. exclude.
   const unlinkedAiKeys = new Set(
     assistantParams
-      .filter((p) => p.key !== '_comment_' && p.key !== DELETE_ACTION_PARAM_KEY)
+      .filter((p) => p.key !== '_comment_')
       .map((p) => p.key),
   );
   const matchedExistingIndexes = new Set<number>();
@@ -159,7 +180,7 @@ function mergeAssistantParams(existingParams: ConfigParam[], assistantParams: Co
   //   output are excluded (the AI intentionally removed them).
   const aiKeySet = new Set(
     assistantParams
-      .filter((p) => p.key !== '_comment_' && p.key !== DELETE_ACTION_PARAM_KEY)
+      .filter((p) => p.key !== '_comment_')
       .map((p) => p.key),
   );
   const result: ConfigParam[] = [];
@@ -278,21 +299,23 @@ export function mergeAssistantSectionsIntoConfig(
 
     // Check if this assistant section signals a deletion
     if (isDeleteSection(assistantSection)) {
-      const existingIndex = sectionIndex.get(assistantSection.full_header)?.[seenCount];
-      if (existingIndex != null) {
-        changes.push({
-          id: changeId,
-          filename: baseConfig.filename,
-          fullHeader: assistantSection.full_header,
-          mode: 'delete',
-        });
-        if (shouldApply) {
-          deletedIndexes.add(existingIndex);
+      const targetName = getDeleteTarget(assistantSection);
+      if (targetName) {
+        const existingIndex = sectionIndex.get(targetName)?.[0];
+        if (existingIndex != null) {
+          changes.push({
+            id: changeId,
+            filename: baseConfig.filename,
+            fullHeader: targetName,
+            mode: 'delete',
+          });
+          if (shouldApply) {
+            deletedIndexes.add(existingIndex);
+          }
+          return;
         }
-        return;
       }
-
-      // Commented-out section with no match in base — nothing to delete
+      // Target section not found in base config — nothing to delete
       return;
     }
 
