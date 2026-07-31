@@ -361,7 +361,7 @@ def build_questions() -> list[TestQuestion]:
             expected_tools=(),
             require_tool=False,
             criteria=(
-                ("regex", r"```cfg"),
+                ("regex", r"```(?:cfg|ini|conf|klipper)"),
                 ("contains", "[bed_mesh]"),
                 ("regex", r"probe_count.{0,20}?5"),
             ),
@@ -419,7 +419,7 @@ def build_macro_questions() -> list[TestQuestion]:
                 ("contains", "description:"),
                 ("regex", r"G1\b[^\n]*X0|G28"),
                 ("regex", r"M106[^\n]*S0"),
-                ("regex", r"```cfg"),
+                ("regex", r"```(?:cfg|ini|conf|klipper)"),
             ),
         ),
         TestQuestion(
@@ -443,7 +443,7 @@ def build_macro_questions() -> list[TestQuestion]:
                 ("regex", r"\[gcode_macro\s+PRINT_START"),
                 ("regex", r"M140[^\n]*S60"),
                 ("contains", "BED_MESH_CALIBRATE"),
-                ("regex", r"```cfg"),
+                ("regex", r"```(?:cfg|ini|conf|klipper)"),
             ),
         ),
         TestQuestion(
@@ -466,7 +466,7 @@ def build_macro_questions() -> list[TestQuestion]:
                 ("regex", r"\[gcode_macro\s+FIX_ME"),
                 ("contains", "{% endif %}"),
                 ("contains", "BED_MESH_CALIBRATE"),
-                ("regex", r"```cfg"),
+                ("regex", r"```(?:cfg|ini|conf|klipper)"),
             ),
         ),
         TestQuestion(
@@ -529,7 +529,8 @@ def build_macro_questions() -> list[TestQuestion]:
             require_tool=True,
             criteria=(
                 ("contains", "M104"),
-                ("regex", r"without\s+'?S'?|requires?\s+an?\s+[`']?S|missing.{0,20}temp"),
+                ("regex", r"without\s+'?S'?|without.{0,40}['`]?S|"
+                          r"requires?\s+an?\s+[`']?S|missing.{0,20}temp"),
             ),
         ),
         TestQuestion(
@@ -713,7 +714,7 @@ def build_trident_questions() -> list[TestQuestion]:
             expected_tools=("validate_klipper_config",),
             require_tool=False,
             criteria=(
-                ("regex", r"```cfg"),
+                ("regex", r"```(?:cfg|ini|conf|klipper)"),
                 ("regex", r"#\s*file\s*:\s*printer\.cfg"),
                 ("regex", r"\[printer\]"),
                 ("regex", r"max_accel\s*:\s*12000"),
@@ -730,7 +731,7 @@ def build_trident_questions() -> list[TestQuestion]:
             expected_tools=("validate_klipper_config",),
             require_tool=False,
             criteria=(
-                ("regex", r"```cfg"),
+                ("regex", r"```(?:cfg|ini|conf|klipper)"),
                 ("regex", r"#\s*file\s*:\s*printer\.cfg"),
                 ("regex", r"\*\s*\[gcode_macro\s+RESET_ACCEL\]"),
             ),
@@ -1363,7 +1364,7 @@ def resolve_settings(args: argparse.Namespace) -> dict:
     model = args.model or _prompt("Model", preset["default_model"])
 
     api_key = args.api_key
-    if api_key is None:
+    if not api_key:
         env_key = __import__("os").environ.get("KWC_TEST_API_KEY", "")
         api_key = env_key or ("" if preset["local"] else _prompt("API key", secret=True))
 
@@ -1442,6 +1443,8 @@ def main() -> int:
                         help="Directory for the log and results JSON")
     parser.add_argument("--timeout", default=600, type=float,
                         help="Per-request timeout in seconds")
+    parser.add_argument("--delay", default=0.0, type=float,
+                        help="Seconds to sleep between questions (rate-limit pacing)")
     parser.add_argument("--include-memory", action="store_true",
                         help="Also test printer-memory auto-fill: back up the backend's "
                              "printer memory, blank it, run MEMORY-01..03, then restore it")
@@ -1525,6 +1528,9 @@ def main() -> int:
     try:
         for idx in selected:
             q = questions[idx]
+            if args.delay > 0 and idx != selected[0]:
+                log.write(f"Delaying {args.delay}s before {q.qid} (rate-limit pacing)")
+                time.sleep(args.delay)
             # Blank printer memory right before the MEMORY questions so the
             # backend injects the auto-fill prompt (fresh chats pick it up).
             if args.include_memory and q.qid.startswith("MEMORY") and memory_backup is None:
