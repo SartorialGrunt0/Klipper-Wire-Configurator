@@ -793,6 +793,7 @@ def chat_request(base_url: str, question: TestQuestion, settings: dict,
         "apiProvider": settings["provider"],
         "requestId": request_id,
         "maxTokens": settings["max_tokens"],
+        "temperature": settings["temperature"],
     }
     url = base_url.rstrip("/") + "/ai/chat"
     try:
@@ -989,6 +990,10 @@ def resolve_settings(args: argparse.Namespace) -> dict:
             api_url = _prompt("API URL", preset["default_url"])
 
     max_tokens = args.max_tokens or int(_prompt("Max tokens", "4096"))
+    temperature = (
+        args.temperature if args.temperature is not None
+        else float(_prompt("Temperature", "0.7"))
+    )
     base_url = args.base_url or _prompt("Backend base URL", "http://localhost:8099")
 
     return {
@@ -997,6 +1002,7 @@ def resolve_settings(args: argparse.Namespace) -> dict:
         "api_key": api_key,
         "api_url": api_url,
         "max_tokens": int(max_tokens),
+        "temperature": float(temperature),
         "base_url": base_url,
     }
 
@@ -1037,6 +1043,8 @@ def main() -> int:
     parser.add_argument("--host", default="", help="Host for openai-compatible local server")
     parser.add_argument("--port", default="", help="Port for openai-compatible local server")
     parser.add_argument("--max-tokens", default=0, type=int, help="Max tokens per reply")
+    parser.add_argument("--temperature", default=None, type=float,
+                        help="Sampling temperature 0-2 (default 0.7)")
     parser.add_argument("--questions", default="", help="Subset, e.g. '1-5,8' (1-based)")
     parser.add_argument("--start", default=0, type=int,
                         help="Start at question N (1-based), running N..end. "
