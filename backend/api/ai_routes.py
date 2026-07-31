@@ -607,6 +607,10 @@ def _build_tool_result_message(tool_call: dict, result_text: str) -> str:
 
 
 MAX_MCP_TOOL_TURNS = 5
+# When a model ends its turn with only a tool call and no visible text
+# (tool-loop exhaustion, an unparseable call format, or a final tool-only
+# response), re-prompt it without tools to force a direct text answer.
+EMPTY_REPROMPT_LIMIT = 2
 
 
 def _collect_tool_names(messages: list[dict]) -> list[str]:
@@ -1167,6 +1171,44 @@ async def chat_proxy(req: ChatRequest):
             if not final_content and not had_tool_blocks:
                 final_content = current_content
 
+            # ── Empty-response backstop ──
+            # Models sometimes end their turn with only a tool call and no
+            # visible text. Re-prompt without tools so the model answers the
+            # user's question directly instead of the UI showing
+            # "No response.".
+            empty_reprompts = 0
+            while not final_content and empty_reprompts < EMPTY_REPROMPT_LIMIT:
+                if stop_event is not None and stop_event.is_set():
+                    raise ChatStoppedError()
+                empty_reprompts += 1
+                logger.warning(
+                    "Empty final content | re-prompting without tools (attempt %d/%d)",
+                    empty_reprompts, EMPTY_REPROMPT_LIMIT,
+                )
+                current_messages.append({
+                    "role": "system",
+                    "content": (
+                        "Your previous response contained no visible text. "
+                        "Answer the user's latest question directly with text "
+                        "now. Do not call any tools."
+                    ),
+                })
+                retry_payload = _build_provider_payload(
+                    req.apiProvider, current_messages, req.model,
+                    max_tokens=req.maxTokens,
+                    temperature=req.temperature,
+                    tools=None,
+                )
+                current_content, _ = await _query_provider(
+                    client, req.apiUrl, headers, retry_payload, req.apiProvider,
+                    logger_context=f"empty-reprompt-{empty_reprompts}",
+                    stop_event=stop_event,
+                )
+                final_content = MCP_TOOL_BLOCK_RE.sub("", current_content).strip()
+                final_content = ALT_TOOL_CALL_CONTENT_RE.sub("", final_content).strip()
+                final_content = CALL_SYNTAX_CLEANUP_RE.sub("", final_content).strip()
+                final_content = FUNC_CALL_CLEANUP_RE.sub("", final_content).strip()
+
             # Collect tool names used during the MCP tool loop. Native tool
             # calls don't leave `[Tool result: ...]` messages, so fall back
             # to the names captured while executing them.
@@ -1181,7 +1223,10 @@ async def chat_proxy(req: ChatRequest):
                 "yes" if not final_content else "no",
             )
             if not final_content:
-                logger.warning("Empty final content after %d tool turns", tool_turns)
+                logger.warning(
+                    "Empty final content after %d tool turns (%d re-prompts)",
+                    tool_turns, empty_reprompts,
+                )
 
             return {
                 "content": final_content,

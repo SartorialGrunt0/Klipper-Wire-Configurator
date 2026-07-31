@@ -483,6 +483,120 @@ def test_chat_proxy_native_tool_call_loop(monkeypatch):
     assert assistant_msg['tool_calls'][0]['function']['name'] == 'search_klipper_docs'
 
 
+# ── Empty-response re-prompt backstop ──────────────────────────────────
+# When a model ends its turn with only a tool call and no visible text,
+# the backend re-prompts without tools so the UI doesn't show "No response."
+
+
+def test_chat_proxy_empty_response_reprompt_recovers(monkeypatch):
+    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
+    monkeypatch.setattr(
+        ai_routes, '_execute_tool_call',
+        lambda call: f"result for {call['name']}",
+    )
+
+    # The llama.cpp/Qwen-style tool-only response from the real failure log.
+    tool_only = (
+        '<|tool_call>call:tool_call:get_config_reference_section'
+        '{section_name: "bed_mesh"}<tool_call|>'
+    )
+    calls = []
+
+    def fake_post(url, headers, payload):
+        calls.append(payload)
+        if len(calls) <= 6:
+            # Initial call + 5 tool-turn re-queries: tool-only, no text.
+            return DummyResponse(
+                {'choices': [{'message': {'content': tool_only}}]},
+                url=url,
+            )
+        # The empty-response re-prompt (tools disabled) finally yields text.
+        return DummyResponse(
+            {'choices': [{'message': {
+                'content': 'horizontal_move_z sets the Z hop before XY travel.',
+            }}]},
+            url=url,
+        )
+
+    monkeypatch.setattr(
+        httpx, 'AsyncClient',
+        lambda *args, **kwargs: FakeAsyncClient(post_handler=fake_post),
+    )
+
+    response = client.post(
+        '/ai/chat',
+        json={
+            'messages': [{'role': 'user',
+                          'content': 'What does [bed_mesh] horizontal_move_z do?'}],
+            'apiKey': 'openai-token',
+            'model': 'gpt-4o',
+            'apiUrl': 'https://api.openai.com/v1/chat/completions',
+            'apiProvider': 'chatgpt',
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body['content'] == 'horizontal_move_z sets the Z hop before XY travel.'
+    assert body['mcpToolTurns'] == 5
+    assert 'get_config_reference_section' in body['mcpToolNames']
+    # 1 initial + 5 tool turns + 1 empty re-prompt = 7 provider calls.
+    assert len(calls) == 7
+    # The re-prompt payload must disable tools and carry the direct-answer instruction.
+    reprompt = calls[6]
+    assert 'tools' not in reprompt
+    assert any(
+        m.get('role') == 'system' and 'Do not call any tools' in m.get('content', '')
+        for m in reprompt['messages']
+    )
+
+
+def test_chat_proxy_empty_response_reprompt_exhausts(monkeypatch):
+    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
+    monkeypatch.setattr(
+        ai_routes, '_execute_tool_call',
+        lambda call: f"result for {call['name']}",
+    )
+
+    tool_only = (
+        '<|tool_call>call:tool_call:get_config_reference_section'
+        '{section_name: "bed_mesh"}<tool_call|>'
+    )
+    calls = []
+
+    def fake_post(url, headers, payload):
+        calls.append(payload)
+        # Every response — including both re-prompts — is tool-only.
+        return DummyResponse(
+            {'choices': [{'message': {'content': tool_only}}]},
+            url=url,
+        )
+
+    monkeypatch.setattr(
+        httpx, 'AsyncClient',
+        lambda *args, **kwargs: FakeAsyncClient(post_handler=fake_post),
+    )
+
+    response = client.post(
+        '/ai/chat',
+        json={
+            'messages': [{'role': 'user',
+                          'content': 'What does [bed_mesh] horizontal_move_z do?'}],
+            'apiKey': 'openai-token',
+            'model': 'gpt-4o',
+            'apiUrl': 'https://api.openai.com/v1/chat/completions',
+            'apiProvider': 'chatgpt',
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body['content'] == ''
+    assert body['mcpToolTurns'] == 5
+    # 1 initial + 5 tool turns + 2 re-prompts = 8 provider calls, then give up.
+    assert len(calls) == 8
+
+
 # ── Google Gemini thought-signature passthrough ─────────────────────────
 # Gemini 3.5+ reasoning models attach extra_content.google.thought_signature
 # to every tool call. The backend must preserve it when echoing the assistant
