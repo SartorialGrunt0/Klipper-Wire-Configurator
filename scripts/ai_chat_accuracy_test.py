@@ -279,7 +279,7 @@ def build_questions() -> list[TestQuestion]:
             expected_tools=("calculate_rotation_distance",),
             criteria=(
                 ("contains", "rotation_distance"),
-                ("regex", r"rotation_distance\s*[:=]?\s*2(\.0+)?\b"),
+                ("regex", r"rotation[_ ]distance[^0-9]{0,40}?\b2(\.0+)?\b"),
             ),
         ),
         TestQuestion(
@@ -290,7 +290,7 @@ def build_questions() -> list[TestQuestion]:
             expected_tools=("calculate_rotation_distance",),
             criteria=(
                 ("contains", "rotation_distance"),
-                ("regex", r"rotation_distance\s*[:=]?\s*40(\.0+)?\b"),
+                ("regex", r"rotation[_ ]distance[^0-9]{0,40}?\b40(\.0+)?\b"),
             ),
         ),
         TestQuestion(

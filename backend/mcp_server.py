@@ -664,10 +664,35 @@ class McpServer:
             return self._error(-32601, f"Unknown tool: {name}")
 
         try:
-            result = handler(arguments)
+            result = handler(self._coerce_args(arguments))
             return self._text_result(result)
         except Exception as exc:
             return self._error(-32603, f"Tool '{name}' failed: {exc}")
+
+    def _coerce_args(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Coerce numeric- and boolean-looking strings to typed values.
+
+        Text-protocol tool calls (```tool JSON blocks, <|tool_call|> native
+        tokens) arrive as regex-parsed strings even for numeric parameters.
+        Handlers that do arithmetic would otherwise raise TypeError (e.g.
+        `'20' <= 0`), and `"false"` would be truthy. Native function-calling
+        payloads already carry proper types, so this is a no-op for them.
+        """
+        coerced: dict[str, Any] = {}
+        for key, value in args.items():
+            if isinstance(value, str):
+                stripped = value.strip()
+                if re.fullmatch(r"-?\d+", stripped):
+                    coerced[key] = int(stripped)
+                elif re.fullmatch(r"-?\d*\.\d+", stripped):
+                    coerced[key] = float(stripped)
+                elif stripped.lower() in ("true", "false"):
+                    coerced[key] = stripped.lower() == "true"
+                else:
+                    coerced[key] = value
+            else:
+                coerced[key] = value
+        return coerced
 
     def _handle_search(self, args: dict[str, Any]) -> str:
         query = args.get("query", "").strip()
@@ -1216,6 +1241,7 @@ class McpServer:
             result = round(float(pitch) * float(starts), 4)
             return (
                 f"## rotation_distance: {result}\n\n"
+                f"Use this value exactly in your answer — do NOT recalculate.\n\n"
                 f"Formula: rotation_distance = leadscrew_pitch × number_of_starts\n"
                 f"  {float(pitch)} × {float(starts)} = {result}\n\n"
                 f"Example [stepper_z] entry:\n"
@@ -1234,6 +1260,7 @@ class McpServer:
             result = round(float(pulley_teeth) * float(belt_pitch), 4)
             return (
                 f"## rotation_distance: {result}\n\n"
+                f"Use this value exactly in your answer — do NOT recalculate.\n\n"
                 f"Formula: rotation_distance = pulley_teeth × belt_pitch\n"
                 f"  {float(pulley_teeth)} × {float(belt_pitch)} = {result}\n\n"
                 f"Example [stepper_x] or [stepper_y] entry:\n"
@@ -1255,6 +1282,7 @@ class McpServer:
             result = round(float(motor_steps) * float(microsteps) / float(steps_per_mm), 4)
             return (
                 f"## rotation_distance: {result}\n\n"
+                f"Use this value exactly in your answer — do NOT recalculate.\n\n"
                 f"Formula: rotation_distance = motor_steps × microsteps ÷ steps_per_mm\n"
                 f"  {float(motor_steps)} × {float(microsteps)} ÷ {float(steps_per_mm)} = {result}\n\n"
                 f"Example [stepper_x] entry:\n"

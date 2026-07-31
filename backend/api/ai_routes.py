@@ -362,6 +362,10 @@ def _build_mcp_tool_context() -> str:
         "or detect_board for exact values, valid parameters, and hardware identification."
     )
     parts.append(
+        "- When a tool returns a computed value (e.g. '## rotation_distance: 40'), "
+        "state that value exactly in your answer — never recalculate it yourself."
+    )
+    parts.append(
         "- To propose printer-memory updates, return the full updated JSON in a fenced "
         "`printer-memory` code block; the user reviews before it saves."
     )
