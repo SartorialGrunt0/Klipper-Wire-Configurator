@@ -314,8 +314,17 @@ export function mergeAssistantSectionsIntoConfig(
           }
           return;
         }
+        // Target section not found in base config — still record the
+        // proposed deletion as a change so the UI shows it (user can
+        // see what the AI suggested even if it's a no-op).
+        changes.push({
+          id: changeId,
+          filename: baseConfig.filename,
+          fullHeader: targetName,
+          mode: 'delete',
+        });
+        return;
       }
-      // Target section not found in base config — nothing to delete
       return;
     }
 

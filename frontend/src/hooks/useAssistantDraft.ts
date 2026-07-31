@@ -247,7 +247,12 @@ export function useAssistantDraft(deps: {
         const textChanged = normalizeDiffText(baseText) !== normalizeDiffText(mergedText);
         console.debug('[AIDraft] File:', targetFile, '| baseSections:', baseResult.config.sections.length, '| mergedSections:', mergedConfig.sections.length, '| changes:', changes.length, '| textChanged:', textChanged, '| emptyBase:', !baseText);
 
-        if (!textChanged) continue;
+        // Include the file even if text didn't change, as long as there
+        // are change entries (e.g. non-existent delete targets proposed
+        // by the AI). The dialog will show the changes pills even if
+        // the diff is empty, and the accept flow harmlessy skips files
+        // whose text didn't actually change.
+        if (!textChanged && changes.length === 0) continue;
 
         filePreviews.push({
           filename: targetFile,
