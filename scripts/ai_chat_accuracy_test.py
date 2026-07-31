@@ -565,6 +565,24 @@ def build_macro_questions() -> list[TestQuestion]:
                 ("regex", r"valid|issue|warning|error"),
             ),
         ),
+        TestQuestion(
+            qid="MACRO-11",
+            title="Macros: move-safety geometry",
+            text=("Validate this macro against a printer with a 300x300mm bed and 250mm "
+                  "max Z, with a no-go zone from X100-180, Y100-180. Use the validate_macro "
+                  "tool and pass the bed dimensions and no-go zone so it can check move "
+                  "safety:\n\n"
+                  "[gcode_macro MOVE]\n"
+                  "description: test\n"
+                  "\n"
+                  "gcode:\n"
+                  "    G1 X150 Y150 F6000\n"),
+            expected_tools=("validate_macro",),
+            require_tool=True,
+            criteria=(
+                ("regex", r"no-?go|zone hit|inside a zone|crosses? a zone"),
+            ),
+        ),
     ]
 
 

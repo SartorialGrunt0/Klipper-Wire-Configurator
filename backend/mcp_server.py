@@ -621,9 +621,12 @@ class McpServer:
                 "description": (
                     "Validate a Klipper gcode_macro for common structural issues. "
                     "Checks syntax, save/restore state pairing, temperature commands, "
-                    "macro structure, and potential problems. Does NOT simulate "
-                    "movements or machine state — use the Macro Designer in the app "
-                    "for full gcode simulation."
+                    "macro structure, and potential problems. When bed dimensions "
+                    "are supplied (bed_x/bed_y/max_z), also checks moves for "
+                    "out-of-bounds targets and no-go zone hits (including path "
+                    "crossings between consecutive moves), mirroring the Macro "
+                    "Designer's geometry. Does NOT simulate full machine state — "
+                    "use the Macro Designer in the app for complete simulation."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -631,6 +634,39 @@ class McpServer:
                         "macro_text": {
                             "type": "string",
                             "description": "The full macro text including the [gcode_macro ...] header through to the end of the gcode section",
+                        },
+                        "bed_x": {
+                            "type": "number",
+                            "description": "Bed width in mm (max X). Required to enable move-bounds and no-go zone checks.",
+                        },
+                        "bed_y": {
+                            "type": "number",
+                            "description": "Bed depth in mm (max Y). Required to enable move-bounds and no-go zone checks.",
+                        },
+                        "max_z": {
+                            "type": "number",
+                            "description": "Maximum Z travel in mm (default 200).",
+                        },
+                        "probe_offset_x": {
+                            "type": "number",
+                            "description": "Probe X offset in mm; expands the allowed X margin by 1.5x.",
+                        },
+                        "probe_offset_y": {
+                            "type": "number",
+                            "description": "Probe Y offset in mm; expands the allowed Y margin by 1.5x.",
+                        },
+                        "no_go_zones": {
+                            "type": "array",
+                            "description": "List of rectangular no-go zones, each {x, y, width, height} in mm. Endpoints inside a zone or paths crossing one are flagged.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "x": {"type": "number"},
+                                    "y": {"type": "number"},
+                                    "width": {"type": "number"},
+                                    "height": {"type": "number"},
+                                },
+                            },
                         },
                     },
                     "required": ["macro_text"],
@@ -1638,76 +1674,117 @@ class McpServer:
             issues.append({"severity": "warning", "message": "G28 is used between SAVE_GCODE_STATE and RESTORE_GCODE_STATE. G28 clears the coordinate system, which may make the RESTORE unreliable. Home before saving state instead."})
 
         # ── 6. Move safety checks (requires printer geometry) ──
+        # Mirrors the Macro Designer's bounds/zone geometry (macro_sim.py).
         bed_x = args.get("bed_x")
         bed_y = args.get("bed_y")
         max_z = args.get("max_z")
         probe_off_x = args.get("probe_offset_x")
         probe_off_y = args.get("probe_offset_y")
+        raw_zones = args.get("no_go_zones")
 
         if bed_x is not None and bed_y is not None and bed_x > 0 and bed_y > 0:
-            move_pattern = re.compile(
-                r"G[01]\s+"
-                r"(?:.*?(?:X([0-9.-]+)))?\s*"
-                r"(?:.*?(?:Y([0-9.-]+)))?\s*"
-                r"(?:.*?(?:Z([0-9.-]+)))?",
-                re.IGNORECASE
-            )
+            try:
+                from services.macro_sim import (
+                    MOVE_PARAM_RE, MoveBounds, MoveTracker, NoGoZone,
+                    find_path_zone_hit, find_zone_hit,
+                )
+            except ImportError:
+                return ("## Macro validation: geometry module unavailable; "
+                        "move-bounds and no-go zone checks skipped.")
 
+            zones: list[NoGoZone] = []
+            if isinstance(raw_zones, list):
+                for z in raw_zones:
+                    if not isinstance(z, dict):
+                        continue
+                    try:
+                        zones.append(NoGoZone(
+                            x=float(z.get("x", 0)),
+                            y=float(z.get("y", 0)),
+                            width=float(z.get("width", 10)),
+                            height=float(z.get("height", 10)),
+                        ))
+                    except (TypeError, ValueError):
+                        continue
+
+            bounds = MoveBounds(
+                min_x=0.0, max_x=float(bed_x),
+                min_y=0.0, max_y=float(bed_y),
+                min_z=0.0, max_z=float(max_z) if max_z else 200.0,
+                zones=zones,
+            )
+            margin_x = (probe_off_x or 0) * 1.5
+            margin_y = (probe_off_y or 0) * 1.5
+
+            tracker = MoveTracker()
             for line in lines:
                 stripped = line.strip()
-                if not stripped or stripped.startswith("#") or stripped.startswith("description:") or stripped.startswith("gcode:"):
+                if not stripped or stripped.startswith("#"):
+                    continue
+                upper = stripped.upper()
+                if upper.startswith("G90"):
+                    tracker.set_mode(True)
+                    continue
+                if upper.startswith("G91"):
+                    tracker.set_mode(False)
+                    continue
+                if upper.startswith("G28"):
+                    tracker.home()
+                    continue
+                if not (upper.startswith("G0") or upper.startswith("G1 ")):
                     continue
 
-                m = move_pattern.match(stripped)
-                if not m:
+                params = {k.upper(): v for k, v in MOVE_PARAM_RE.findall(stripped)}
+                if not params:
                     continue
 
-                gcode_cmd = stripped.upper().lstrip()
-                if not gcode_cmd.startswith("G0") and not gcode_cmd.startswith("G1 "):
-                    continue
+                try:
+                    x = float(params["X"]) if "X" in params else None
+                    y = float(params["Y"]) if "Y" in params else None
+                    z = float(params["Z"]) if "Z" in params else None
+                except ValueError:
+                    continue  # template variable in a move
 
-                has_var = False
+                tx, ty, tz = tracker.move(x, y, z)
 
-                # Check X
-                x_val = m.group(1)
-                if x_val is not None:
-                    try:
-                        x = float(x_val)
-                        margin = (probe_off_x or 0) * 1.5
-                        if x < -margin or x > bed_x + margin:
+                if tx is not None and ty is not None:
+                    if tx < -margin_x or tx > bounds.max_x + margin_x or \
+                       ty < -margin_y or ty > bounds.max_y + margin_y:
+                        issues.append({
+                            "severity": "warning",
+                            "message": f"Move to X{tx:.1f} Y{ty:.1f} exceeds bed bounds "
+                                       f"(0 to {bed_x} x 0 to {bed_y}mm). Line: '{stripped[:80]}'",
+                        })
+                    if zones:
+                        zone = find_zone_hit(bounds, tx, ty)
+                        if zone:
                             issues.append({
                                 "severity": "warning",
-                                "message": f"Move to X{x:.1f} exceeds bed bounds (0 to {bed_x}mm). Line: '{stripped[:80]}'"
+                                "message": f"Move ends inside a no-go zone "
+                                           f"(X{zone.x:.0f}-{zone.x + zone.width:.0f}, "
+                                           f"Y{zone.y:.0f}-{zone.y + zone.height:.0f}). "
+                                           f"Line: '{stripped[:80]}'",
                             })
-                    except ValueError:
-                        has_var = True
+                        if tracker.prev_x is not None and tracker.prev_y is not None:
+                            path_zone = find_path_zone_hit(
+                                bounds, tracker.prev_x, tracker.prev_y, tx, ty,
+                            )
+                            if path_zone:
+                                issues.append({
+                                    "severity": "warning",
+                                    "message": f"Move path crosses a no-go zone "
+                                               f"(X{path_zone.x:.0f}-{path_zone.x + path_zone.width:.0f}, "
+                                               f"Y{path_zone.y:.0f}-{path_zone.y + path_zone.height:.0f}). "
+                                               f"Line: '{stripped[:80]}'",
+                                })
 
-                # Check Y
-                y_val = m.group(2)
-                if y_val is not None:
-                    try:
-                        y = float(y_val)
-                        margin = (probe_off_y or 0) * 1.5
-                        if y < -margin or y > bed_y + margin:
-                            issues.append({
-                                "severity": "warning",
-                                "message": f"Move to Y{y:.1f} exceeds bed bounds (0 to {bed_y}mm). Line: '{stripped[:80]}'"
-                            })
-                    except ValueError:
-                        has_var = True
-
-                # Check Z
-                z_val = m.group(3)
-                if z_val is not None and max_z is not None and max_z > 0:
-                    try:
-                        z = float(z_val)
-                        if z < -1 or z > max_z:
-                            issues.append({
-                                "severity": "warning",
-                                "message": f"Move to Z{z:.1f} exceeds configured Z range (0 to {max_z}mm). Line: '{stripped[:80]}'"
-                            })
-                    except ValueError:
-                        has_var = True
+                if tz is not None and bounds.max_z:
+                    if tz < -1 or tz > bounds.max_z:
+                        issues.append({
+                            "severity": "warning",
+                            "message": f"Move to Z{tz:.1f} exceeds configured Z range "
+                                       f"(0 to {bounds.max_z:.0f}mm). Line: '{stripped[:80]}'",
+                        })
 
             # Probe off-bed detection
             if probe_off_x is not None and probe_off_y is not None:
@@ -1723,6 +1800,7 @@ class McpServer:
                                 f"mesh_min/mesh_max that account for the probe offset."
                             })
                             break
+
 
         # ── 7. Build result ──
         if not issues:
