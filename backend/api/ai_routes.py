@@ -56,6 +56,9 @@ MCP_TOOL_BLOCK_RE = re.compile(
     r"```tool\s*\n(.+?)\n```",
     re.DOTALL,
 )
+# A fenced ```printer-memory block signals a complete structured proposal —
+# the auto-search fallback must not fire when the model returns one.
+PRINTER_MEMORY_BLOCK_RE = re.compile(r"```printer-memory\s*\n", re.DOTALL)
 # Alternative tool call formats emitted by models that use native
 # function-calling special tokens instead of the fenced ```tool block.
 # This matches <|tool_call|>, <tool_call>, and similar wrappers around
@@ -117,7 +120,10 @@ SYSTEM_PROMPT = (
     "6. Keep prose short. After config or macro code, briefly explain what changed, why, and "
     "cite the exact documentation section header and parameter or command names you relied on.\n"
     "7. If no safe grounded answer is possible, say what must be verified next instead of "
-    "guessing."
+    "guessing.\n"
+    "8. Tool calls: only call tools that are listed in your Available Tools section. "
+    "Klipper G-code commands and macro names (G28, M104, BED_MESH_CALIBRATE, "
+    "SET_FAN_SPEED, PRINT_START, etc.) are NOT tools — never wrap them in ```tool blocks."
 )
 
 
@@ -296,6 +302,10 @@ def _build_mcp_tool_context() -> str:
         "",
         "Call tools to ground answers in the bundled Klipper docs and config system.",
         "",
+        "The tool list below is EXHAUSTIVE: the only callable tools are exactly the ones "
+        "listed. Never invent, guess, or repeat other names. A ```tool block is executed "
+        "only when its name matches one of the tools below exactly.",
+        "",
         "Text format (used by providers without native function calling): put a JSON ",
         "code block tagged `tool` in your reply:",
         "",
@@ -357,6 +367,11 @@ def _build_mcp_tool_context() -> str:
     )
     parts.append(
         "- You can call multiple tools in one response (e.g. search, then read the top match)."
+    )
+    parts.append(
+        "- NEVER wrap G-code commands or macro names (e.g. G28, M104, BED_MESH_CALIBRATE, "
+        "SET_FAN_SPEED, PRINT_START) in ```tool blocks. Those are printer commands, not "
+        "tools — emit them inside cfg blocks or plain code instead."
     )
     parts.append(
         "- When in doubt, search the docs first — real docs beat training data."
@@ -985,33 +1000,38 @@ async def chat_proxy(req: ChatRequest):
             # search and inject the results so it still gets grounded docs even
             # if it doesn't support tool calling.
             if not _extract_native_tool_calls(req.apiProvider, current_data) and not _extract_tool_calls(current_content):
-                if stop_event is not None and stop_event.is_set():
-                    raise ChatStoppedError()
-                reference_query = _build_reference_lookup_query(req.messages)
-                auto_context = _auto_search_context(reference_query)
-                if auto_context:
-                    logger.info(
-                        "Auto-search fallback triggered | query_chars=%d result_chars=%d",
-                        len(reference_query), len(auto_context),
-                    )
-                    tool_message = _build_tool_result_message(
-                        {"name": "search_klipper_docs", "arguments": {"query": reference_query}},
-                        auto_context,
-                    )
-                    current_messages.append({"role": "assistant", "content": current_content})
-                    current_messages.append({"role": "user", "content": tool_message})
-                    tool_turns += 1
+                if PRINTER_MEMORY_BLOCK_RE.search(current_content):
+                    # The model already produced a structured printer-memory
+                    # proposal; injecting a doc search would only derail it.
+                    logger.info("Auto-search fallback skipped | printer-memory block present")
+                else:
+                    if stop_event is not None and stop_event.is_set():
+                        raise ChatStoppedError()
+                    reference_query = _build_reference_lookup_query(req.messages)
+                    auto_context = _auto_search_context(reference_query)
+                    if auto_context:
+                        logger.info(
+                            "Auto-search fallback triggered | query_chars=%d result_chars=%d",
+                            len(reference_query), len(auto_context),
+                        )
+                        tool_message = _build_tool_result_message(
+                            {"name": "search_klipper_docs", "arguments": {"query": reference_query}},
+                            auto_context,
+                        )
+                        current_messages.append({"role": "assistant", "content": current_content})
+                        current_messages.append({"role": "user", "content": tool_message})
+                        tool_turns += 1
 
-                    # Re-query with injected search results
-                    tool_payload = _build_provider_payload(
-                        req.apiProvider, current_messages, req.model,
-                        max_tokens=req.maxTokens, tools=native_tools,
-                    )
-                    current_content, current_data = await _query_provider(
-                        client, req.apiUrl, headers, tool_payload, req.apiProvider,
-                        logger_context="auto-search",
-                        stop_event=stop_event,
-                    )
+                        # Re-query with injected search results
+                        tool_payload = _build_provider_payload(
+                            req.apiProvider, current_messages, req.model,
+                            max_tokens=req.maxTokens, tools=native_tools,
+                        )
+                        current_content, current_data = await _query_provider(
+                            client, req.apiUrl, headers, tool_payload, req.apiProvider,
+                            logger_context="auto-search",
+                            stop_event=stop_event,
+                        )
 
             while tool_turns < MAX_MCP_TOOL_TURNS:
                 if stop_event is not None and stop_event.is_set():
@@ -1025,6 +1045,22 @@ async def chat_proxy(req: ChatRequest):
                 if not tool_calls:
                     if tool_turns > 0:
                         logger.info("Tool call loop done | turns=%d final_chars=%d", tool_turns, len(current_content))
+                    break
+
+                # ── Hallucinated-tool guard ──
+                # If the model wrapped names that are not real tools (e.g.
+                # G-code commands like BED_MESH_CALIBRATE) in tool blocks and
+                # produced answer text alongside, keep the text and stop
+                # instead of feeding "Unknown tool" errors back — that derails
+                # models into explaining the error instead of answering.
+                known_tool_names = {t["name"] for t in _mcp_server._list_tools()}
+                if tool_calls and current_content.strip() and all(
+                    c.get("name") not in known_tool_names for c in tool_calls
+                ):
+                    logger.warning(
+                        "Hallucinated tool call(s) skipped | names=%s content_chars=%d",
+                        [c.get("name") for c in tool_calls], len(current_content),
+                    )
                     break
 
                 logger.info(

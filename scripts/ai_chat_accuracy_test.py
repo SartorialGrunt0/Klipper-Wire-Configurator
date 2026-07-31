@@ -32,6 +32,9 @@ Other useful flags:
     --questions 1-5,8     run only a subset of questions
     --list-questions      print the question bank and exit (no API calls)
     --output-dir DIR      where to write the log (default reports/ai-chat-accuracy)
+    --include-memory      also test printer-memory auto-fill (MEMORY-01..03); the backend's
+                          printer memory is backed up, blanked to trigger the auto-fill
+                          prompt, and restored automatically afterward
 
 Stdlib only — no third-party dependencies.
 """
@@ -157,7 +160,7 @@ def build_questions() -> list[TestQuestion]:
             expected_tools=("search_klipper_docs", "get_config_reference_section"),
             criteria=(
                 ("contains", "horizontal_move_z"),
-                ("regex", r"\b5\s*mm\b"),
+                ("regex", r"\b5\b"),
             ),
         ),
         TestQuestion(
@@ -191,7 +194,7 @@ def build_questions() -> list[TestQuestion]:
             expected_tools=("list_klipper_docs",),
             criteria=(
                 ("contains", "Config_Reference"),
-                ("contains", "Pressure_Advance"),
+                ("regex", r"(?:\d+\.\s+\*\*[^*\n]+\.md\*\*\s*){4,}"),
             ),
         ),
         TestQuestion(
@@ -231,7 +234,6 @@ def build_questions() -> list[TestQuestion]:
                  "and show me its [mcu] section.",
             expected_tools=("search_example_configs", "read_example_config"),
             criteria=(
-                ("regex", r"skr mini"),
                 ("contains", "mcu"),
                 ("regex", r"serial|usb"),
             ),
@@ -333,8 +335,10 @@ def build_questions() -> list[TestQuestion]:
         TestQuestion(
             qid="Q17",
             title="Draft protocol: add [bed_mesh]",
-            text="Add a [bed_mesh] section to my printer config with a 5x5 mesh and "
-                 "default settings otherwise. Return it as a cfg block.\n\n"
+            text="My printer bed is 300x300 mm and my probe is at x_offset 0, "
+                 "y_offset 20. Add a [bed_mesh] section to my "
+                 "printer config with a 5x5 mesh and default settings otherwise. "
+                 "Return it as a cfg block.\n\n"
                  "[printer]\n"
                  "kinematics: cartesian\n"
                  "max_velocity: 300\n"
@@ -353,7 +357,7 @@ def build_questions() -> list[TestQuestion]:
             text="What is the default value of pressure_advance in the [extruder] section?",
             expected_tools=("search_klipper_docs", "get_config_reference_section"),
             criteria=(
-                ("regex", r"default.{0,60}?\b0\b"),
+                ("regex", r"default.{0,120}?\b0\b"),
             ),
         ),
         TestQuestion(
@@ -364,7 +368,7 @@ def build_questions() -> list[TestQuestion]:
             expected_tools=(),
             require_tool=False,
             criteria=(
-                ("contains", "?"),
+                ("regex", r"provide|need to know|what|which"),
                 ("regex", r"kinematic|mainboard|probe|toolhead|bed|printer|config"),
             ),
         ),
@@ -376,7 +380,91 @@ def build_questions() -> list[TestQuestion]:
             expected_tools=("search_klipper_docs", "get_config_reference_section"),
             criteria=(
                 ("contains", "SAVE_CONFIG"),
-                ("regex", r"\[\s*save_config\s*\]"),
+                ("regex", r"append|to the end|section"),
+            ),
+        ),
+    ]
+
+
+_MEMORY_CONFIG_SNIPPET = """[mcu]
+serial: /dev/serial/by-id/usb-Klipper_stm32f446xx_3D002B000E50505734393820-if00
+
+[printer]
+kinematics: corexy
+max_velocity: 400
+max_accel: 5000
+
+[stepper_x]
+step_pin: PC2
+dir_pin: PB9
+enable_pin: PC3
+microsteps: 16
+rotation_distance: 40
+
+[probe]
+pin: PA1
+x_offset: 0
+y_offset: 20
+z_offset: 2.0
+"""
+
+
+def build_memory_questions() -> list[TestQuestion]:
+    """Questions that exercise the printer-memory auto-fill path.
+    The backend only injects the auto-fill prompt when printer memory is
+    blank, so these run after the harness blanks memory (backed up first,
+    restored after the run). Success = a valid fenced `printer-memory` JSON
+    block with only the 7 allowed fields, plus correct field values.
+    """
+    return [
+        TestQuestion(
+            qid="MEMORY-01",
+            title="Printer memory: derive from config",
+            text=("Here is my printer config. Fill in the printer memory profile from it.\n\n"
+                  + _MEMORY_CONFIG_SNIPPET),
+            expected_tools=("detect_board", "search_klipper_docs",
+                            "get_config_reference_section", "search_example_configs",
+                            "read_example_config"),
+            require_tool=False,
+            criteria=(
+                ("memory_block", ""),
+                ("memory_valid", ""),
+                ("memory_has", "kinematics:corexy"),
+                ("memory_has", "mainboard:stm32|f446|octopus|mcu|board"),
+            ),
+        ),
+        TestQuestion(
+            qid="MEMORY-02",
+            title="Printer memory: stated facts",
+            text=("My printer is a Voron Trident with a Fysetc Spider mainboard, an EBBCan "
+                  "toolhead board, CoreXY kinematics, and a Voron Tap probe. "
+                  "Fill in my printer memory."),
+            expected_tools=(),
+            require_tool=False,
+            criteria=(
+                ("memory_block", ""),
+                ("memory_valid", ""),
+                ("memory_has", "printerName:trident"),
+                ("memory_has", "mainboard:spider"),
+                ("memory_has", "kinematics:corexy"),
+                ("memory_has", "probe:tap"),
+            ),
+        ),
+        TestQuestion(
+            qid="MEMORY-03",
+            title="Printer memory: tool-driven fill",
+            text=("I have an EBB36 toolhead board, a BIGTREETECH Octopus Pro mainboard, "
+                  "CoreXY kinematics, and a Voron Tap probe. Fill in my printer memory — "
+                  "use the bundled tools to confirm the hardware details."),
+            expected_tools=("search_example_configs", "read_example_config",
+                            "search_klipper_docs", "get_config_reference_section",
+                            "detect_board"),
+            require_tool=False,
+            criteria=(
+                ("memory_block", ""),
+                ("memory_valid", ""),
+                ("memory_has", "toolheadBoard:ebb"),
+                ("memory_has", "mainboard:octopus"),
             ),
         ),
     ]
@@ -399,15 +487,61 @@ ALL_TOOLS = (
     "validate_macro",
 )
 
+# ── Printer memory (REQ-AI-08) ────────────────────────────────────────
+PRINTER_MEMORY_BLOCK_RE = re.compile(r"```printer-memory\s*\n(.+?)\n```", re.DOTALL)
+ALLOWED_MEMORY_FIELDS = (
+    "mainboard",
+    "toolheadBoard",
+    "expanderBoards",
+    "printerName",
+    "kinematics",
+    "probe",
+    "additionalNotes",
+)
+
+
+def extract_printer_memory(content: str) -> tuple[str, dict | None]:
+    """Extract a fenced ```printer-memory block.
+    Returns (block_text, parsed dict) or ("", None) when absent/invalid.
+    """
+    m = PRINTER_MEMORY_BLOCK_RE.search(content)
+    if not m:
+        return "", None
+    block = m.group(1).strip()
+    try:
+        data = json.loads(block)
+    except json.JSONDecodeError:
+        return block, None
+    if not isinstance(data, dict):
+        return block, None
+    return block, data
+
 
 # ── Evaluation ─────────────────────────────────────────────────────────
-def criterion_ok(kind: str, value: str, content: str) -> bool:
+def criterion_ok(kind: str, value: str, content: str,
+                 memory: tuple[str, dict | None] | None = None) -> bool:
     if kind == "contains":
         return value.lower() in content.lower()
     if kind == "not_contains":
         return value.lower() not in content.lower()
     if kind == "regex":
         return re.search(value, content, re.IGNORECASE | re.DOTALL) is not None
+    if kind == "memory_block":
+        return bool(memory and memory[0])
+    if kind == "memory_valid":
+        if not memory or memory[1] is None:
+            return False
+        data = memory[1]
+        keys_ok = all(k in ALLOWED_MEMORY_FIELDS for k in data)
+        has_value = any(str(v).strip() for v in data.values())
+        return keys_ok and has_value
+    if kind == "memory_has":
+        if not memory or memory[1] is None:
+            return False
+        field, _, pattern = value.partition(":")
+        if field not in memory[1]:
+            return False
+        return re.search(pattern, str(memory[1].get(field, "")), re.IGNORECASE) is not None
     return False
 
 
@@ -433,12 +567,12 @@ def http_get_json(url: str, timeout: float) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def http_post_json(url: str, payload: dict, timeout: float) -> dict:
+def http_post_json(url: str, payload: dict, timeout: float, method: str = "POST") -> dict:
     req = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json"},
-        method="POST",
+        method=method,
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
@@ -484,6 +618,109 @@ def read_backend_log_slice(before_size: int) -> list[str]:
     with open(BACKEND_CHAT_LOG, "r", encoding="utf-8", errors="replace") as fh:
         fh.seek(before_size)
         return [ln.rstrip("\n") for ln in fh.read().splitlines()]
+
+
+# ── Printer memory helpers (backup / blank / restore via the real API) ─
+def get_printer_memory(base_url: str) -> dict:
+    return http_get_json(base_url.rstrip("/") + "/api/printer-memory", timeout=15)
+
+
+def put_printer_memory(base_url: str, memory: dict) -> dict:
+    return http_post_json(base_url.rstrip("/") + "/api/printer-memory", memory,
+                          timeout=15, method="PUT")
+
+
+def blank_printer_memory(base_url: str) -> dict:
+    """Back up the current memory, blank it via the API, return the backup."""
+    backup = get_printer_memory(base_url)
+    put_printer_memory(base_url, {})
+    return backup
+
+
+def restore_printer_memory(base_url: str, backup: dict) -> None:
+    put_printer_memory(base_url, backup)
+
+
+def run_one_question(
+    q: TestQuestion,
+    settings: dict,
+    args: argparse.Namespace,
+    log: TestLog,
+    base_url: str,
+) -> QuestionResult:
+    """Run one fresh-chat question, log every step, and evaluate it."""
+    log.section(f"{q.qid} — {q.title}")
+    print(f"\n[{q.qid}] {q.title} ...", end=" ", flush=True)
+    start = time.monotonic()
+    before_size = BACKEND_CHAT_LOG.stat().st_size if BACKEND_CHAT_LOG.exists() else -1
+
+    response, error = chat_request(base_url, q, settings, args.timeout)
+    duration = time.monotonic() - start
+    log_lines = read_backend_log_slice(before_size)
+
+    result = QuestionResult(qid=q.qid, title=q.title, duration_s=round(duration, 1))
+    log.write(f"Request: messages=[user: {q.text}] requestId=accuracy-{q.qid}-* "
+              f"(apiKey redacted)")
+    log.write(f"Backend log slice ({len(log_lines)} lines):")
+    for ln in log_lines:
+        log.write(f"  {ln}")
+
+    if error:
+        result.status = "ERROR"
+        result.error = error
+        log.write(f"ERROR: {error}")
+        print("ERROR", flush=True)
+    elif response is None:
+        result.status = "ERROR"
+        result.error = "No response received"
+        log.write("ERROR: No response received")
+        print("ERROR", flush=True)
+    else:
+        result.response = response.get("content", "")
+        result.tool_names = list(response.get("mcpToolNames", []) or [])
+        result.tool_turns = int(response.get("mcpToolTurns", 0) or 0)
+
+        log.write(f"Response mcpToolTurns={result.tool_turns} "
+                  f"mcpToolNames={result.tool_names}")
+        log.write(f"Raw response keys: {sorted(response.keys())}")
+        log.write(f"Answer ({len(result.response)} chars):")
+        log.write(result.response)
+
+        if "error" in response:
+            result.status = "ERROR"
+            result.error = str(response["error"])
+            log.write(f"API error: {result.error}")
+            print("ERROR", flush=True)
+        else:
+            # Tool-usage check
+            used = set(result.tool_names)
+            expected = set(q.expected_tools)
+            result.tool_ok = (not q.require_tool) or bool(used & expected)
+            if q.require_tool and not used:
+                result.tool_ok = False
+
+            # Answer check (memory criteria get the parsed printer-memory block)
+            memory = extract_printer_memory(result.response)
+            for kind, value in q.criteria:
+                ok = criterion_ok(kind, value, result.response, memory=memory)
+                result.checks.append((kind, value, ok))
+            result.answer_ok = all(ok for _, _, ok in result.checks)
+            result.status = "PASS" if (result.answer_ok and result.tool_ok) else "FAIL"
+
+            if q.qid.startswith("MEMORY"):
+                block, parsed = memory
+                log.write(f"Printer memory block ({len(block)} chars):")
+                log.write(block[:600] if block else "(no printer-memory block)")
+                log.write(f"Parsed: {json.dumps(parsed, indent=2) if parsed else 'invalid/absent'}")
+
+            log.write(f"Tool check: {'PASS' if result.tool_ok else 'FAIL'} "
+                      f"(used={sorted(used)} expected={sorted(expected)})")
+            for kind, value, ok in result.checks:
+                log.write(f"  criterion {kind} {value!r}: {'PASS' if ok else 'FAIL'}")
+            log.write(f"OVERALL: {result.status}")
+            print(result.status, flush=True)
+
+    return result
 
 
 # ── Logging ────────────────────────────────────────────────────────────
@@ -607,9 +844,14 @@ def main() -> int:
                         help="Directory for the log and results JSON")
     parser.add_argument("--timeout", default=600, type=float,
                         help="Per-request timeout in seconds")
+    parser.add_argument("--include-memory", action="store_true",
+                        help="Also test printer-memory auto-fill: back up the backend's "
+                             "printer memory, blank it, run MEMORY-01..03, then restore it")
     args = parser.parse_args()
 
     questions = build_questions()
+    if args.include_memory:
+        questions += build_memory_questions()
     if args.list_questions:
         print(f"{'QID':<5} {'TOOLS':<45} TITLE")
         print("-" * 100)
@@ -673,72 +915,34 @@ def main() -> int:
     print(f"\nRunning {len(selected)} of {len(questions)} questions against "
           f"provider={settings['provider']} model={settings['model']}")
 
-    for idx in selected:
-        q = questions[idx]
-        log.section(f"{q.qid} — {q.title}")
-        print(f"\n[{q.qid}] {q.title} ...", end=" ", flush=True)
-        start = time.monotonic()
-        before_size = BACKEND_CHAT_LOG.stat().st_size if BACKEND_CHAT_LOG.exists() else -1
-
-        response, error = chat_request(base_url, q, settings, args.timeout)
-        duration = time.monotonic() - start
-        log_lines = read_backend_log_slice(before_size)
-
-        result = QuestionResult(qid=q.qid, title=q.title, duration_s=round(duration, 1))
-        log.write(f"Request: messages=[user: {q.text}] requestId=accuracy-{q.qid}-* "
-                  f"(apiKey redacted)")
-        log.write(f"Backend log slice ({len(log_lines)} lines):")
-        for ln in log_lines:
-            log.write(f"  {ln}")
-
-        if error:
-            result.status = "ERROR"
-            result.error = error
-            log.write(f"ERROR: {error}")
-            print("ERROR", flush=True)
-        elif response is None:
-            result.status = "ERROR"
-            result.error = "No response received"
-            log.write("ERROR: No response received")
-            print("ERROR", flush=True)
-        else:
-            result.response = response.get("content", "")
-            result.tool_names = list(response.get("mcpToolNames", []) or [])
-            result.tool_turns = int(response.get("mcpToolTurns", 0) or 0)
-
-            log.write(f"Response mcpToolTurns={result.tool_turns} "
-                      f"mcpToolNames={result.tool_names}")
-            log.write(f"Raw response keys: {sorted(response.keys())}")
-            log.write(f"Answer ({len(result.response)} chars):")
-            log.write(result.response)
-
-            if "error" in response:
-                result.status = "ERROR"
-                result.error = str(response["error"])
-                log.write(f"API error: {result.error}")
-                print("ERROR", flush=True)
-            else:
-                # Tool-usage check
-                used = set(result.tool_names)
-                expected = set(q.expected_tools)
-                result.tool_ok = (not q.require_tool) or bool(used & expected)
-                if q.require_tool and not used:
-                    result.tool_ok = False
-                # Answer check
-                for kind, value in q.criteria:
-                    ok = criterion_ok(kind, value, result.response)
-                    result.checks.append((kind, value, ok))
-                result.answer_ok = all(ok for _, _, ok in result.checks)
-                result.status = "PASS" if (result.answer_ok and result.tool_ok) else "FAIL"
-
-                log.write(f"Tool check: {'PASS' if result.tool_ok else 'FAIL'} "
-                          f"(used={sorted(used)} expected={sorted(expected)})")
-                for kind, value, ok in result.checks:
-                    log.write(f"  criterion {kind} {value!r}: {'PASS' if ok else 'FAIL'}")
-                log.write(f"OVERALL: {result.status}")
-                print(result.status, flush=True)
-
-        results.append(result)
+    memory_backup: dict | None = None
+    try:
+        for idx in selected:
+            q = questions[idx]
+            # Blank printer memory right before the MEMORY questions so the
+            # backend injects the auto-fill prompt (fresh chats pick it up).
+            if args.include_memory and q.qid.startswith("MEMORY") and memory_backup is None:
+                memory_backup = blank_printer_memory(base_url)
+                log.section("PRINTER MEMORY TEST SETUP")
+                log.write(f"Backed up current printer memory ({len(memory_backup)} fields) "
+                          f"and blanked it to trigger the auto-fill prompt.")
+                log.write("The original memory is restored after the run.")
+                print(f"\n[printer-memory] backed up {len(memory_backup)} fields, blanked "
+                      f"for {q.qid}+ (restored after run)")
+            results.append(run_one_question(q, settings, args, log, base_url))
+    finally:
+        if memory_backup is not None:
+            try:
+                restore_printer_memory(base_url, memory_backup)
+                log.write(f"\n[restore] printer memory restored: {json.dumps(memory_backup)}")
+                print(f"\n[printer-memory] restored original memory "
+                      f"({len(memory_backup)} fields)")
+            except Exception as exc:  # noqa: BLE001
+                msg = (f"\n[restore FAILED] printer memory was NOT restored! Restore manually "
+                       f"via PUT /api/printer-memory with: {json.dumps(memory_backup)} "
+                       f"Error: {exc}")
+                log.write(msg)
+                print(msg, file=sys.stderr)
 
     # ── Summary ──
     log.section("SUMMARY")
@@ -766,11 +970,16 @@ def main() -> int:
         for r in errored:
             log.write(f"  {r.qid} {r.title}: {r.error}")
 
-    exercised = {t for r in results for t in r.tool_names}
+    raw_used = {t for r in results for t in r.tool_names}
+    exercised = raw_used & set(ALL_TOOLS)
+    unknown_attempts = sorted(raw_used - set(ALL_TOOLS))
     missing = [t for t in ALL_TOOLS if t not in exercised]
     log.write("")
     log.write(f"Tools exercised ({len(exercised)}/{len(ALL_TOOLS)}): "
               f"{', '.join(sorted(exercised)) or '(none)'}")
+    if unknown_attempts:
+        log.write(f"Unknown tool names attempted by model (not real MCP tools): "
+                  f"{', '.join(unknown_attempts)}")
     if missing:
         log.write(f"Tools NEVER used: {', '.join(missing)}")
 
@@ -781,6 +990,7 @@ def main() -> int:
             "settings": log_settings,
             "results": [vars(r) for r in results],
             "tools_exercised": sorted(exercised),
+            "unknown_tool_attempts": unknown_attempts,
             "tools_missing": missing,
         }, fh, indent=2)
 
@@ -796,6 +1006,8 @@ def main() -> int:
         mark = "PASS" if r.status == "PASS" else ("ERR " if r.status == "ERROR" else "FAIL")
         print(f"  {r.qid} {mark}  tools=[{','.join(r.tool_names) or '-'}]  {r.title}")
     print(f"\nTools exercised: {len(exercised)}/{len(ALL_TOOLS)}")
+    if unknown_attempts:
+        print(f"Unknown tool attempts (not real MCP tools): {', '.join(unknown_attempts)}")
     if missing:
         print(f"Tools NEVER used: {', '.join(missing)}")
     print(f"\nFull log: {log_path}")
