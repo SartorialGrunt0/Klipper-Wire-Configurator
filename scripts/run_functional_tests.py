@@ -72,12 +72,14 @@ AUTOMATED_SUITES = (
             "REQ-FW-04",
             "REQ-NATIVE-06",
         ),
-        description="Strict pass/fail validation of native firmware routes and flash-target services.",
+        description="Strict pass/fail validation of native firmware routes, flash-target services, flash profiles, and Klipper log excerpt handling.",
         selectors=(
             "tests/test_native_firmware_routes.py",
             "tests/test_flash_target_routes.py",
             "tests/test_flash_target_service.py",
             "tests/test_klipper_firmware_service.py",
+            "tests/test_flash_profile_service.py",
+            "tests/test_native_klipper_service.py",
         ),
     ),
     SuiteDefinition(
@@ -89,9 +91,22 @@ AUTOMATED_SUITES = (
             "REQ-AI-03",
             "REQ-AI-04",
         ),
-        description="Strict pass/fail validation of AI model listing, docs-grounded prompt preparation, and LM Studio MCP fallback behavior.",
+        description="Strict pass/fail validation of provider key gating, docs-grounded prompt preparation, provider payload building, response extraction, auto-search fallback, and the native tool-call loop.",
         selectors=(
             "tests/test_ai_chat_routes.py",
+        ),
+    ),
+    SuiteDefinition(
+        suite_id="FTA-004",
+        title="MCP tool-calling helper suite",
+        kind="pytest",
+        requirement_ids=(
+            "REQ-AI-04",
+            "REQ-AI-06",
+        ),
+        description="Strict pass/fail validation of text-based and native tool-call extraction, execution, and follow-up message building.",
+        selectors=(
+            "tests/test_mcp_tool_calling.py",
         ),
     ),
 )

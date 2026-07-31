@@ -1,6 +1,6 @@
 # Functional Test Plan
 
-Last reviewed: 2026-05-14
+Last reviewed: 2026-07-31
 
 This plan verifies the requirements captured in [requirements-specifications.md](requirements-specifications.md). It separates strict automated suites, informational automation that produces diagnostics without hard assertions, and manual scenarios that still require a running UI or real hardware.
 
@@ -25,8 +25,9 @@ python scripts/run_functional_tests.py
 | Test ID | Requirement IDs | Purpose | Automation type | Evidence source |
 | --- | --- | --- | --- | --- |
 | FTA-001 | REQ-CONF-03, REQ-EDIT-05, REQ-VAL-01, REQ-VAL-02, REQ-VAL-03, REQ-OUT-01 | Validate parser, validator, save-config handling, cross-file validation, shared-pin allowances, and warning acknowledgement behavior. | Strict pass/fail | [tests/test_delta_validation.py](tests/test_delta_validation.py), [tests/test_warning_acknowledgments.py](tests/test_warning_acknowledgments.py), [tests/test_save_config_handling.py](tests/test_save_config_handling.py) |
-| FTA-002 | REQ-FW-01, REQ-FW-02, REQ-FW-03, REQ-FW-04, REQ-NATIVE-06 | Validate firmware and flash-target API contract forwarding, artifact selection, and flash-device candidate logic. | Strict pass/fail | [tests/test_native_firmware_routes.py](tests/test_native_firmware_routes.py), [tests/test_flash_target_routes.py](tests/test_flash_target_routes.py), [tests/test_flash_target_service.py](tests/test_flash_target_service.py), [tests/test_klipper_firmware_service.py](tests/test_klipper_firmware_service.py) |
-| FTA-003 | REQ-AI-02, REQ-AI-03, REQ-AI-04 | Validate AI model listing, provider key gating, docs-grounded prompt preparation, and LM Studio MCP fallback metadata on the backend proxy. | Strict pass/fail | [tests/test_ai_chat_routes.py](tests/test_ai_chat_routes.py) |
+| FTA-002 | REQ-FW-01, REQ-FW-02, REQ-FW-03, REQ-FW-04, REQ-NATIVE-06 | Validate firmware and flash-target API contract forwarding, artifact selection, flash-device candidate logic, flash profile persistence, and Klipper log excerpt handling. | Strict pass/fail | [tests/test_native_firmware_routes.py](tests/test_native_firmware_routes.py), [tests/test_flash_target_routes.py](tests/test_flash_target_routes.py), [tests/test_flash_target_service.py](tests/test_flash_target_service.py), [tests/test_klipper_firmware_service.py](tests/test_klipper_firmware_service.py), [tests/test_flash_profile_service.py](tests/test_flash_profile_service.py), [tests/test_native_klipper_service.py](tests/test_native_klipper_service.py) |
+| FTA-003 | REQ-AI-02, REQ-AI-03, REQ-AI-04 | Validate provider key gating, docs-grounded prompt preparation, provider payload building, response extraction, auto-search fallback, and the native tool-call loop on the backend proxy. | Strict pass/fail | [tests/test_ai_chat_routes.py](tests/test_ai_chat_routes.py) |
+| FTA-004 | REQ-AI-04, REQ-AI-06 | Validate text-based and native tool-call extraction, execution, and follow-up message building for the embedded MCP server. | Strict pass/fail | [tests/test_mcp_tool_calling.py](tests/test_mcp_tool_calling.py) |
 | FTI-001 | REQ-CONF-01, REQ-CONF-02, REQ-CONF-03, REQ-OUT-01 | Exercise corpus-wide parse/export round-tripping across bundled reference configs and backups. | Informational automation | [tests/test_roundtrip.py](tests/test_roundtrip.py) |
 | FTI-002 | REQ-CONF-03, REQ-EDIT-04, REQ-OUT-01, REQ-OUT-02 | Exercise the parse -> API model -> smart export path against the Trident backup sample and report diff counts. | Informational automation | [tests/test_diff_roundtrip.py](tests/test_diff_roundtrip.py) |
 
