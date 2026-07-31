@@ -7,7 +7,7 @@
  *
  * Props mirror the editing state from ChatDialog so there's a single source of truth.
  */
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, type Dispatch, type SetStateAction } from 'react';
 import { useAiStore, AiProvider, providerRequiresApiKey } from '../../stores/aiStore';
 import * as api from '../../services/api';
 import {
@@ -22,7 +22,7 @@ export interface ChatSettingsPanelProps {
   editApiKey: string;
   setEditApiKey: (v: string) => void;
   editModel: string;
-  setEditModel: (v: string) => void;
+  setEditModel: Dispatch<SetStateAction<string>>;
   editApiUrl: string;
   setEditApiUrl: (v: string) => void;
   editApiProvider: AiProvider;
@@ -87,6 +87,20 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
       setAvailableModels(result);
       if (result.length === 0) {
         setModelsError('No models found at this endpoint. Make sure a model is loaded.');
+      } else {
+        // The server is the source of truth for local models. If the current
+        // selection is not actually served (e.g. a cloud placeholder like
+        // 'gpt-4o' left over from another provider, or a stale saved name),
+        // select the first available model so the dropdown shows exactly what
+        // will be saved — otherwise the user sees one model but Save persists
+        // the stale one, and chat requests fail with a model-not-found error.
+        setEditModel((prev) => {
+          const current = prev.trim();
+          if (!current || !result.includes(current)) {
+            return result[0];
+          }
+          return prev;
+        });
       }
     } catch (err: unknown) {
       setModelsError(err instanceof Error ? err.message : 'Failed to fetch models');
