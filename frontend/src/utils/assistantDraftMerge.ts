@@ -68,7 +68,7 @@ const DELETE_SECTION_TYPE = 'delete_section';
 /**
  * Regex to match `*[section_name]` deletion markers inside raw cfg block text.
  */
-export const DELETE_MARKER_RE = /^\*\[([^\]]+)\]\s*$/m;
+export const DELETE_MARKER_RE = /^\*\[([^\]]+)\]\s*$/gm;
 
 /**
  * Preprocess raw cfg block text, converting `*[section_name]` lines into
