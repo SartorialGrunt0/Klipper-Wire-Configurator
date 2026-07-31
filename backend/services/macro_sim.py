@@ -1,11 +1,17 @@
 """Macro geometry helpers ported from frontend/src/utils/macroDesigner.ts.
 
-Mirrors isPointInMoveBounds / findZoneHit / findPathZoneHit (Liang-Barsky
-segment-rectangle intersection) plus a small G90/G91 position tracker, so the
-MCP validate_macro tool reports out-of-bounds moves and no-go zone hits with
-the same geometry the Macro Designer uses in the UI.
+⚠️ SYNC WARNING — mirrored geometry
+This module mirrors the geometry in frontend/src/utils/macroDesigner.ts
+(isPointInMoveBounds / findZoneHit / findPathZoneHit /
+lineSegmentIntersectsRect) plus a small G90/G91 position tracker, so the MCP
+validate_macro tool reports out-of-bounds moves and no-go zone hits with the
+same geometry the Macro Designer uses in the UI.
 
-Keep this file in sync with the frontend helpers when the geometry changes.
+If you change the geometry in EITHER file, apply the same change to the other:
+- backend/services/macro_sim.py          (this file — used by the MCP tool)
+- frontend/src/utils/macroDesigner.ts    (the Macro Designer UI)
+Otherwise the AI validator and the designer will disagree about what is in
+bounds and where the no-go zones are.
 """
 from __future__ import annotations
 
