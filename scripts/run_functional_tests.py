@@ -129,6 +129,19 @@ AUTOMATED_SUITES = (
             "tests/test_api_routes.py",
         ),
     ),
+    SuiteDefinition(
+        suite_id="FTA-006",
+        title="MCP server tool suite",
+        kind="pytest",
+        requirement_ids=(
+            "REQ-AI-04",
+            "REQ-AI-06",
+        ),
+        description="Strict pass/fail validation of the embedded MCP server: DocIndex search engine, all tool handlers, argument coercion, and the JSON-RPC protocol surface.",
+        selectors=(
+            "tests/test_mcp_server_tools.py",
+        ),
+    ),
 )
 
 
