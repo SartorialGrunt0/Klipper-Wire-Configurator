@@ -109,6 +109,26 @@ AUTOMATED_SUITES = (
             "tests/test_mcp_tool_calling.py",
         ),
     ),
+    SuiteDefinition(
+        suite_id="FTA-005",
+        title="Core config editor API suite",
+        kind="pytest",
+        requirement_ids=(
+            "REQ-CONF-01",
+            "REQ-CONF-02",
+            "REQ-CONF-04",
+            "REQ-CONF-05",
+            "REQ-CONF-06",
+            "REQ-CONF-07",
+            "REQ-EDIT-05",
+            "REQ-VAL-02",
+            "REQ-OUT-01",
+        ),
+        description="Strict pass/fail validation of the core editor API: single/multi-file import, validate, export, generate, examples, schema, reference docs, project persistence, and warning acknowledgements.",
+        selectors=(
+            "tests/test_api_routes.py",
+        ),
+    ),
 )
 
 
