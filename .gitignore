@@ -9,6 +9,8 @@ frontend/node_modules/
 # Build output
 frontend/dist/
 frontend/.vite/
+frontend/coverage/
+.coverage
 frontend/public/reference/config/
 frontend/public/reference/examples.json
 frontend/public/reference/schema.json
