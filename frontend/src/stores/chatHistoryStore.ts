@@ -10,12 +10,19 @@ export interface SavedConversation {
   timestamp: number;
   messages: ChatMessage[];
   settings: AiSettings;
+  /** Config files that were attached during the original chat, so a loaded
+   * conversation can be continued with the same file context. */
+  attachedConfigFiles?: Array<{ name: string; content: string }>;
 }
 
 interface ChatHistoryState {
   conversations: SavedConversation[];
   _loaded: boolean;
-  saveConversation: (messages: ChatMessage[], settings: AiSettings) => string;
+  saveConversation: (
+    messages: ChatMessage[],
+    settings: AiSettings,
+    attachedConfigFiles?: Array<{ name: string; content: string }>,
+  ) => string;
   deleteConversation: (id: string) => void;
   loadConversations: () => void;
   clearHistory: () => void;
@@ -71,7 +78,11 @@ export const useChatHistoryStore = create<ChatHistoryState>()((set, get) => ({
     set({ conversations, _loaded: true });
   },
 
-  saveConversation: (messages: ChatMessage[], settings: AiSettings): string => {
+  saveConversation: (
+    messages: ChatMessage[],
+    settings: AiSettings,
+    attachedConfigFiles?: Array<{ name: string; content: string }>,
+  ): string => {
     const nonEmptyMessages = messages.filter(
       (m) => m.content.trim().length > 0 && (m.role === 'user' || m.role === 'assistant'),
     );
@@ -85,6 +96,7 @@ export const useChatHistoryStore = create<ChatHistoryState>()((set, get) => ({
       timestamp: Date.now(),
       messages: nonEmptyMessages,
       settings,
+      attachedConfigFiles: attachedConfigFiles && attachedConfigFiles.length > 0 ? attachedConfigFiles : undefined,
     };
 
     const conversations = get().conversations;

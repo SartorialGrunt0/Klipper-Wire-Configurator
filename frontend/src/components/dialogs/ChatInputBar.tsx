@@ -31,6 +31,7 @@ export interface ChatInputBarProps {
   attachedConfigFiles: AttachedConfigFile[];
   onInputChange: (text: string) => void;
   onSend: () => void;
+  onStop: () => void;
   onKeyDown: (e: React.KeyboardEvent) => void;
   onAttachFiles: (e: React.ChangeEvent<HTMLInputElement>) => void;
   onRemoveAttachedFile: (id: string) => void;
@@ -50,6 +51,7 @@ const ChatInputBar: React.FC<ChatInputBarProps> = ({
   attachedConfigFiles,
   onInputChange,
   onSend,
+  onStop,
   onKeyDown,
   onAttachFiles,
   onRemoveAttachedFile,
@@ -187,11 +189,12 @@ const ChatInputBar: React.FC<ChatInputBarProps> = ({
           style={{ minHeight: 36, maxHeight: 120, overflow: 'auto' }}
         />
         <button
-          onClick={onSend}
-          disabled={loading || !input.trim()}
+          onClick={loading ? onStop : onSend}
+          disabled={!loading && !input.trim()}
           className="px-4 py-2 rounded-lg text-xs font-medium bg-[var(--color-accent)] text-white hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
+          title={loading ? 'Stop the AI from processing' : 'Send message'}
         >
-          {loading ? '...' : 'Send'}
+          {loading ? 'Stop' : 'Send'}
         </button>
       </div>
     </div>

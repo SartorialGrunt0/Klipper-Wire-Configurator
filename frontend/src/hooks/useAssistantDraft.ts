@@ -6,6 +6,8 @@
  */
 import { useState, useRef, useCallback } from 'react';
 import type { ChatMessage } from '../stores/aiStore';
+import { useAiStore } from '../stores/aiStore';
+import { useConfigStore } from '../stores/configStore';
 import type { AiProvider } from '../stores/aiStore';
 import type { ConfigFile, ConfigSection, ValidationResult } from '../types/config';
 import type { AiChatRole } from '../services/api';
@@ -17,10 +19,10 @@ import {
   resolveAssistantTargetFile,
   extractRequestedKlipperDocFilenames,
   buildAutoLoadedKlipperDocMessage,
-  extractEqualsSeparatedConfigLines,
-  buildConfigSeparatorRewritePrompt,
   appendWarningMessage,
-  shouldRetryAssistantValidation,
+  rewriteConfigEqualsSeparators,
+} from '../utils/chatUtils';
+import {
   buildAssistantDraftValidationFeedback,
   buildAssistantDraftValidationErrorMessage,
   hasOnlyRetryExemptAssistantValidationIssues,
@@ -30,10 +32,11 @@ import {
   collectNewValidationErrors,
   type AssistantDraftValidationOutcome,
   type AssistantDraftValidationIssueGroup,
-} from '../utils/chatUtils';
+} from '../utils/draftValidation';
 import type { AssistantDraftChange } from '../utils/assistantDraftMerge';
 import { mergeAssistantSectionsIntoConfig, preprocessDeleteMarkers } from '../utils/assistantDraftMerge';
 import { normalizeDiffText } from '../utils/configDiff';
+import type { ReplyValidator } from '../utils/replyValidation';
 
 // ── Internal Types ──────────────────────────────────────────────────
 
@@ -65,6 +68,8 @@ interface ChatRequestBase {
   model: string;
   apiUrl: string;
   apiProvider: AiProvider;
+  /** Client-generated id used to signal a user-initiated stop. */
+  requestId?: string;
 }
 
 interface SubmitMessageOptions {
@@ -73,35 +78,19 @@ interface SubmitMessageOptions {
 
 // ── Hook ────────────────────────────────────────────────────────────
 
-export function useAssistantDraft(deps: {
-  messages: ChatMessage[];
-  setMessages: (messages: ChatMessage[]) => void;
-  configFiles: Record<string, ConfigFile>;
-  activeFile: string;
-  validation: Record<string, ValidationResult>;
-  schemas: unknown;
-  textDrafts: Record<string, string>;
-  textEditorDirty: boolean;
-  setConfigFile: (filename: string, config: ConfigFile) => void;
-  setValidation: (filename: string, validation: ValidationResult) => void;
-  clearTextDraft: (filename: string) => void;
-  markDirty: () => void;
-  clearMessages: () => void;
-  loadedConfigFilenames: string[];
-}) {
+export function useAssistantDraft() {
+  const { messages, setMessages, clearMessages } = useAiStore();
   const {
-    messages,
-    setMessages,
     configFiles,
     activeFile,
+    validation,
     textDrafts,
     setConfigFile,
     setValidation,
     clearTextDraft,
     markDirty,
-    clearMessages,
-    loadedConfigFilenames,
-  } = deps;
+  } = useConfigStore();
+  const loadedConfigFilenames = Object.keys(configFiles);
 
   // ── State ─────────────────────────────────────────────────────────
 
@@ -235,7 +224,29 @@ export function useAssistantDraft(deps: {
         const baseText = await getConfigText(targetFile);
 
         if (!baseText) {
-          console.warn('[AIDraft] Empty base text for file:', targetFile, '| configFiles keys:', Object.keys(configFiles));
+          // The assistant proposed a NEW file that does not exist yet.
+          // Build the preview against an empty base so every section shows
+          // up as an addition, the "new file" badge appears in the preview
+          // dialog, and the user can review + create the file.
+          console.info('[AIDraft] New file proposed by assistant:', targetFile);
+          const emptyBaseConfig: ConfigFile = {
+            filename: targetFile,
+            includes: [],
+            header_comments: [],
+            sections: [],
+            raw_text: '',
+          };
+          const { mergedConfig, changes } = mergeAssistantSectionsIntoConfig(emptyBaseConfig, assistantConfig);
+          const mergedText = await api.exportConfig({ ...mergedConfig, raw_text: '' });
+          filePreviews.push({
+            filename: targetFile,
+            originalText: '',
+            baseConfig: emptyBaseConfig,
+            assistantConfig,
+            mergedConfig,
+            mergedText,
+            changes,
+          });
           continue;
         }
 
@@ -393,15 +404,16 @@ export function useAssistantDraft(deps: {
     [buildProjectConfigsForValidation, messages, prepareAssistantDraftPreview],
   );
 
-  // ── Request Assistant Message (with auto-doc loading & separator rewrite) ──
+  // ── Request Assistant Message (with auto-doc loading & separator post-processing) ──
 
   const requestAssistantMessage = useCallback(
     async (
       chatRequestBase: ChatRequestBase,
       conversationMessages: Array<{ role: AiChatRole; content: string }>,
       onMessageUpdate?: (msg: ChatMessage) => void,
+      options?: { signal?: AbortSignal },
     ): Promise<AssistantReplyAttempt> => {
-      const response = await api.aiChat({ ...chatRequestBase, messages: conversationMessages });
+      const response = await api.aiChat({ ...chatRequestBase, messages: conversationMessages }, options?.signal);
 
       if (response.error) throw new Error(response.error);
 
@@ -431,7 +443,7 @@ export function useAssistantDraft(deps: {
                 ...conversationTrail.map((m) => ({ role: m.role as AiChatRole, content: m.content })),
                 { role: 'user', content: autoLoadedDocsMessage },
               ],
-            });
+            }, options?.signal);
 
             if (followUpResponse.error) throw new Error(followUpResponse.error);
 
@@ -452,45 +464,15 @@ export function useAssistantDraft(deps: {
         }
       }
 
-      // Rewrite equals-sign separators to colons if present
-      const equalsSeparatedLines = extractEqualsSeparatedConfigLines(assistantMessage.content);
-      if (equalsSeparatedLines.length > 0) {
-        const rewritePrompt = buildConfigSeparatorRewritePrompt(equalsSeparatedLines);
-        try {
-          const rewriteResponse = await api.aiChat({
-            ...chatRequestBase,
-            messages: [
-              ...conversationMessages,
-              ...conversationTrail.map((m) => ({ role: m.role as AiChatRole, content: m.content })),
-              { role: 'user', content: rewritePrompt },
-            ],
-          });
-
-          if (rewriteResponse.error) throw new Error(rewriteResponse.error);
-
-          assistantMessage = {
-            role: 'assistant',
-            content: rewriteResponse.content || assistantMessage.content,
-            autoLoadedDocs: assistantMessage.autoLoadedDocs,
-            mcpToolNames: rewriteResponse.mcpToolNames ?? assistantMessage.mcpToolNames,
-          };
-          conversationTrail = [
-            ...conversationTrail,
-            { role: 'user', content: rewritePrompt },
-            { role: 'assistant', content: assistantMessage.content },
-          ];
-
-          if (extractEqualsSeparatedConfigLines(assistantMessage.content).length > 0) {
-            warningMessage = appendWarningMessage(
-              warningMessage,
-              'The assistant was asked to rewrite cfg assignments with colons, but the replacement reply still included equals-sign separators.',
-            );
-          }
-        } catch (rewriteErr: unknown) {
-          warningMessage = appendWarningMessage(
-            warningMessage,
-            `Automatic cfg separator rewrite failed: ${rewriteErr instanceof Error ? rewriteErr.message : 'Unknown error'}`,
-          );
+      // Normalise cfg separators (`key = value` → `key: value`) as local
+      // post-processing. Previously this was a full AI re-query; the
+      // deterministic rewrite is instant and cannot fail or drift.
+      const rewrittenContent = rewriteConfigEqualsSeparators(assistantMessage.content);
+      if (rewrittenContent !== assistantMessage.content) {
+        assistantMessage = { ...assistantMessage, content: rewrittenContent };
+        const lastIndex = conversationTrail.length - 1;
+        if (lastIndex >= 0) {
+          conversationTrail[lastIndex] = { ...conversationTrail[lastIndex], content: rewrittenContent };
         }
       }
 
@@ -561,7 +543,7 @@ export function useAssistantDraft(deps: {
     try {
       const selectedChangeIds = new Set(currentPreview.selectedChangeIds);
       const updatedConfigs = { ...configFiles };
-      const updatedValidation = { ...deps.validation };
+      const updatedValidation = { ...validation };
       const touchedFiles: string[] = [];
 
       for (const fp of currentPreview.filePreviews) {
@@ -602,7 +584,7 @@ export function useAssistantDraft(deps: {
     } catch (err: unknown) {
       throw err; // Let caller handle the error
     }
-  }, [assistantDraftPreview, configFiles, deps.validation, setConfigFile, setValidation, clearTextDraft, markDirty]);
+  }, [assistantDraftPreview, configFiles, validation, setConfigFile, setValidation, clearTextDraft, markDirty]);
 
   // ── Applicable Messages (for showing/hiding "Apply and Review Changes" buttons) ──
 
@@ -626,89 +608,97 @@ export function useAssistantDraft(deps: {
     [canAssistantMessageAffectDraft],
   );
 
-  // ── Validation Retry Loop ──
+  // ── Draft Reply Validator ────────────────────────────────────────
+  // Conforms to the shared ReplyValidator interface driven by
+  // runReplyValidationPipeline (utils/replyValidation.ts).
 
-  const runValidationRetryLoop = useCallback(
-    async (
-      chatRequestBase: ChatRequestBase,
-      requestConversation: Array<{ role: AiChatRole; content: string }>,
-      validationConversation: ChatMessage[],
-      assistantAttempt: AssistantReplyAttempt,
-    ): Promise<{
-      finalMessage: ChatMessage;
-      finalConversation: ChatMessage[];
-      warningMessage: string | null;
-    }> => {
-      let currentAttempt = assistantAttempt;
-      let candidateConversation = [...validationConversation, ...currentAttempt.conversationMessages];
-      let validationOutcome = await runAssistantDraftValidation(
-        currentAttempt.assistantMessage.content,
-        candidateConversation.length - 1,
-        candidateConversation,
-        false,
-      );
-      let attemptsUsed = 1;
-      let pendingWarningMessage = currentAttempt.warningMessage;
+  const createDraftReplyValidator = useCallback((): ReplyValidator => {
+    // Remember the most recent validation outcome so buildFeedback and
+    // onMaxAttemptsReached can rebuild the structured feedback message.
+    let lastOutcome: AssistantDraftValidationOutcome | null = null;
 
-      while (shouldRetryAssistantValidation(validationOutcome, attemptsUsed)) {
-        if (attemptsUsed >= MAX_ASSISTANT_DRAFT_VALIDATION_ATTEMPTS) {
-          throw new Error(
-            buildAssistantDraftValidationErrorMessage(validationOutcome.blockingIssues, validationOutcome.failureReason, attemptsUsed),
-          );
+    return {
+      name: 'config-draft',
+      maxAttempts: MAX_ASSISTANT_DRAFT_VALIDATION_ATTEMPTS,
+      failMode: 'throw',
+
+      validate: async (content, context) => {
+        // On the first check a plain Q&A reply (no config draft) is fine.
+        // On retries the AI must produce a usable draft unless the previous
+        // feedback allowed an explanation-only response.
+        const requireApplicable = context.isRetry && !context.allowExplanationOnly;
+        const outcome = await runAssistantDraftValidation(
+          content,
+          context.messageIndex,
+          context.messageHistory,
+          requireApplicable,
+        );
+        lastOutcome = outcome;
+
+        if (!outcome.applicable) {
+          if (!context.isRetry || !outcome.failureReason) {
+            return { applicable: false, issues: [], failureReason: outcome.failureReason };
+          }
+          // AI gave up on producing a draft during a retry — treat as blocking.
+          return {
+            applicable: true,
+            issues: [{ type: 'config-draft', message: outcome.failureReason }],
+            failureReason: outcome.failureReason,
+          };
         }
 
-        const allowExplanationOnly = hasOnlyRetryExemptAssistantValidationIssues(validationOutcome.blockingIssues);
-        const validationFeedback = buildAssistantDraftValidationFeedback(
-          validationOutcome.blockingIssues,
-          currentAttempt.assistantMessage.content,
-          validationOutcome.failureReason,
+        // Duplicate-section / shared-pin issues the AI cannot resolve are
+        // advisory only after one retry — keep the reply and warn instead.
+        const giveUp =
+          context.isRetry && hasOnlyRetryExemptAssistantValidationIssues(outcome.blockingIssues);
+
+        return {
+          applicable: true,
+          issues: outcome.blockingIssues.flatMap((group) =>
+            group.errors.map((error) => {
+              const location = error.param ? `[${error.section}] ${error.param}` : `[${error.section}]`;
+              return {
+                type: 'config-draft',
+                message: `${group.filename}: ${location}: ${error.message}`,
+              };
+            }),
+          ),
+          failureReason: null,
+          giveUp,
+          warningOnGiveUp: giveUp
+            ? [
+                `AI draft still has duplicate section or pin-conflict validation issues after ${context.attemptsUsed + 1} attempts. The assistant response was returned so it can explain the conflict.`,
+                formatAssistantDraftValidationIssues(outcome.blockingIssues, null),
+              ].join('\n')
+            : null,
+        };
+      },
+
+      buildFeedback: (content, result) => {
+        if (!lastOutcome) return null;
+        const allowExplanationOnly = hasOnlyRetryExemptAssistantValidationIssues(lastOutcome.blockingIssues);
+        return {
+          content: buildAssistantDraftValidationFeedback(
+            lastOutcome.blockingIssues,
+            content,
+            result.failureReason,
+            allowExplanationOnly,
+          ),
           allowExplanationOnly,
-        );
+        };
+      },
 
-        requestConversation = [
-          ...requestConversation,
-          ...currentAttempt.conversationMessages.map((m) => ({ role: m.role as AiChatRole, content: m.content })),
-          { role: 'user', content: validationFeedback },
-        ];
-        validationConversation = [...candidateConversation, { role: 'user', content: validationFeedback }];
-        currentAttempt = await requestAssistantMessage(chatRequestBase, requestConversation);
-        pendingWarningMessage = currentAttempt.warningMessage ?? pendingWarningMessage;
-        candidateConversation = [...validationConversation, ...currentAttempt.conversationMessages];
-        attemptsUsed += 1;
-        validationOutcome = await runAssistantDraftValidation(
-          currentAttempt.assistantMessage.content,
-          candidateConversation.length - 1,
-          candidateConversation,
-          !allowExplanationOnly,
-        );
-      }
+      onMaxAttemptsReached: (_content, result, totalAttempts) =>
+        buildAssistantDraftValidationErrorMessage(
+          lastOutcome?.blockingIssues ?? [],
+          result.failureReason ?? lastOutcome?.failureReason ?? null,
+          totalAttempts,
+        ),
 
-      if (
-        validationOutcome.applicable &&
-        validationOutcome.blockingIssues.length > 0 &&
-        hasOnlyRetryExemptAssistantValidationIssues(validationOutcome.blockingIssues)
-      ) {
-        const advisoryWarning = [
-          `AI draft still has duplicate section or pin-conflict validation issues after ${attemptsUsed} attempts. The assistant response was returned so it can explain the conflict.`,
-          formatAssistantDraftValidationIssues(validationOutcome.blockingIssues, null),
-        ].join('\n');
-        pendingWarningMessage = pendingWarningMessage ? `${pendingWarningMessage}\n${advisoryWarning}` : advisoryWarning;
-      }
-
-      if (!validationOutcome.applicable && validationOutcome.failureReason) {
-        throw new Error(
-          buildAssistantDraftValidationErrorMessage(validationOutcome.blockingIssues, validationOutcome.failureReason, attemptsUsed),
-        );
-      }
-
-      return {
-        finalMessage: currentAttempt.assistantMessage,
-        finalConversation: candidateConversation,
-        warningMessage: pendingWarningMessage,
-      };
-    },
-    [requestAssistantMessage, runAssistantDraftValidation],
-  );
+      // Request errors (network, API) propagate to the caller unchanged.
+      handleRequestError: () => null,
+    };
+  }, [runAssistantDraftValidation]);
 
   // ── New Chat ──────────────────────────────────────────────────────
 
@@ -732,7 +722,7 @@ export function useAssistantDraft(deps: {
     canAssistantMessageAffectDraft,
     runAssistantDraftValidation,
     requestAssistantMessage,
-    runValidationRetryLoop,
+    createDraftReplyValidator,
     handleApplyAssistantEdit,
     handleAssistantDraftSelectionChange,
     handleAcceptAssistantEdit,

@@ -13,7 +13,8 @@ import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import type { ChatMessage } from '../../stores/aiStore';
 import type { AssistantDraftChange } from '../../utils/assistantDraftMerge';
-import { extractConfigCodeBlock, hasPrinterMemoryBlock } from '../../utils/chatUtils';
+import { extractConfigCodeBlock } from '../../utils/chatUtils';
+import { hasPrinterMemoryBlock } from '../../utils/printerMemory';
 
 // ── Markdown Code Block Component ───────────────────────────────────
 
@@ -95,6 +96,8 @@ export interface ChatMessageListProps {
   messages: ChatMessage[];
   loading: boolean;
   error: string | null;
+  /** Re-submits the last failed user message with full context. */
+  onRetry?: () => void;
   activeFile: string | null;
   assistantDraftApplicableMessages: Record<number, boolean>;
   assistantDraftPreviewLoading: string | null;
@@ -121,6 +124,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
   messages,
   loading,
   error,
+  onRetry,
   activeFile,
   assistantDraftApplicableMessages,
   assistantDraftPreviewLoading,
@@ -288,6 +292,16 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
             <p className="text-[11px] font-medium text-[var(--color-error)]">Request failed</p>
             <p className="mt-0.5 text-[10px] text-[var(--color-text-secondary)] leading-relaxed">{error}</p>
           </div>
+          {onRetry && (
+            <button
+              type="button"
+              onClick={onRetry}
+              className="shrink-0 px-2.5 py-1 rounded text-[10px] font-medium bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors"
+              title="Resend the last question with the full conversation and config context"
+            >
+              Retry
+            </button>
+          )}
         </div>
       )}
 

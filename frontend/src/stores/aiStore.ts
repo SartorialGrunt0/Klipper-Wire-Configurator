@@ -23,6 +23,8 @@ export interface AiSettings {
   apiProvider: AiProvider;
   host: string;
   port: string;
+  /** Maximum tokens the AI is allowed to generate per response. */
+  maxTokens: number;
 }
 
 interface PersistedAiState {
@@ -136,6 +138,7 @@ const DEFAULT_SETTINGS: AiSettings = {
   apiProvider: DEFAULT_PROVIDER,
   host: 'localhost',
   port: '11434',
+  maxTokens: 4096,
 };
 
 export const useAiStore = create<AiState>()((set, get) => {

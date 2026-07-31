@@ -311,8 +311,7 @@ class McpServer:
                 "name": "search_klipper_docs",
                 "description": (
                     "Search all bundled Klipper documentation by query. "
-                    "Returns up to 10 results with filenames, relevance scores, and snippets. "
-                    "Matches filenames, section headings, and document content."
+                    "Returns up to 10 ranked results with source filename, score, and snippet."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -448,6 +447,24 @@ class McpServer:
                 },
             },
             {
+                "name": "read_example_config",
+                "description": (
+                    "Read the full content of a bundled example Klipper config file by filename "
+                    "(with or without .cfg extension). "
+                    "Use search_example_configs first to find the exact filename."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "filename": {
+                            "type": "string",
+                            "description": "Config filename (e.g. 'generic-bigtreetech-skr-mini-e3-v3.0.cfg', 'printer-voron-2.4-octopus.cfg')",
+                        },
+                    },
+                    "required": ["filename"],
+                },
+            },
+            {
                 "name": "search_user_configs",
                 "description": (
                     "Search the user's local configuration files (in the 'user_configs' directory). "
@@ -489,7 +506,7 @@ class McpServer:
             {
                 "name": "detect_board",
                 "description": (
-                    "Analyse a Klipper config snippet and detect the likely printer "
+                    "Analyze a Klipper config snippet and detect the likely printer "
                     "board type and MCU family from common pin names, MCU definitions, "
                     "and section patterns."
                 ),
@@ -945,6 +962,53 @@ class McpServer:
         lines.append(f"\n{len(results)} match(es) total. Use read_example_config to read the full file.")
 
         return "\n".join(lines)
+
+    def _handle_read_example_config(self, args: dict[str, Any]) -> str:
+        raw = args.get("filename", "").strip()
+        if not raw:
+            return "Please provide a config filename."
+
+        stem = Path(raw).stem.lower()
+
+        examples_dir = CONFIG_EXAMPLES_DIR
+        if not examples_dir.is_dir():
+            return "Example config directory not found."
+
+        # Search all .cfg files in the tree
+        candidates: list[Path] = []
+        for cat_dir in examples_dir.iterdir():
+            if not cat_dir.is_dir():
+                continue
+            for cfg_file in cat_dir.glob("*.cfg"):
+                if cfg_file.stem.lower() == stem or cfg_file.name.lower() == raw.lower():
+                    candidates.append(cfg_file)
+
+        if not candidates:
+            # Try partial match — require ALL query tokens to be present in filename tokens
+            query_tokens = set(stem.replace("-", " ").replace("_", " ").split())
+            for cat_dir in examples_dir.iterdir():
+                if not cat_dir.is_dir():
+                    continue
+                for cfg_file in cat_dir.glob("*.cfg"):
+                    file_tokens = set(cfg_file.stem.lower().replace("-", " ").replace("_", " ").split())
+                    if query_tokens and query_tokens <= file_tokens:
+                        candidates.append(cfg_file)
+
+        if not candidates:
+            return f'Config file "{raw}" not found. Use search_example_configs to find matching files.'
+
+        if len(candidates) > 1:
+            names = "\n".join(f"  - {c.name}  [{c.parent.name}]" for c in candidates[:10])
+            return f'Multiple configs match "{raw}":\n{names}\n\nPlease specify the exact filename.'
+
+        path = candidates[0]
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            return f"Error reading {path.name}: {exc}"
+
+        header = f"# {path.name}  ({path.parent.name})\n# {len(content)} bytes\n\n"
+        return header + content
 
     def _handle_search_user_configs(self, args: dict[str, Any]) -> str:
         query = args.get("query", "").strip().lower()

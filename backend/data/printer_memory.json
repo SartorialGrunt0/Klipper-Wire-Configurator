@@ -5,5 +5,5 @@
   "printerName": "Voron Trident",
   "kinematics": "corexy",
   "probe": "Voron Tap",
-  "additionalNotes": "Uses host_mcu for chamber sensor; PIS used for resonance testing. Matched Configs: generic-fysetc-spider.cfg, sample-fysetc-portable-input-shaper.cfg, printer-Voron-Trident-M8P_v1.0_config.cfg, example-corexy.cfg"
+  "additionalNotes": "Uses host_mcu for chamber sensor; PIS used for resonance testing."
 }

@@ -15,7 +15,7 @@ import {
   PROVIDER_DEFAULTS,
   isLocalProvider,
   resolveProviderApiUrl,
-} from '../../utils/chatUtils';
+} from '../../utils/chatProviders';
 
 export interface ChatSettingsPanelProps {
   standalone: boolean;
@@ -31,6 +31,8 @@ export interface ChatSettingsPanelProps {
   setEditHost: (v: string) => void;
   editPort: string;
   setEditPort: (v: string) => void;
+  editMaxTokens: string;
+  setEditMaxTokens: (v: string) => void;
   resolvedEditApiUrl: string;
   onSaveSettings: () => void;
   onClose?: () => void;
@@ -50,6 +52,8 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
   setEditHost,
   editPort,
   setEditPort,
+  editMaxTokens,
+  setEditMaxTokens,
   resolvedEditApiUrl,
   onSaveSettings,
   onClose,
@@ -264,6 +268,26 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
     </div>
   );
 
+  const maxTokensField = (
+    <div>
+      <label className="block text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-1.5">
+        Max Tokens
+      </label>
+      <input
+        type="number"
+        min={256}
+        step={256}
+        className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
+        value={editMaxTokens}
+        onChange={(e) => setEditMaxTokens(e.target.value)}
+        placeholder="4096"
+      />
+      <p className="text-[10px] text-[var(--color-text-secondary)] mt-1">
+        Limits the length of AI responses (default 4096). Lower values speed up replies.
+      </p>
+    </div>
+  );
+
   // ── Render ─────────────────────────────────────────────────────────
 
   const formContent = (
@@ -273,6 +297,7 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
       {apiUrlField}
       {hostPortFields}
       {apiKeyField}
+      {maxTokensField}
     </div>
   );
 
@@ -387,6 +412,19 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
               onChange={(e) => setEditApiKey(e.target.value)}
               placeholder="sk-..."
             />
+          </div>
+          <div>
+            <label className="block text-[10px] text-[var(--color-text-secondary)] mb-1">Max Tokens</label>
+            <input
+              type="number"
+              min={256}
+              step={256}
+              className="w-full px-3 py-1.5 rounded text-xs font-mono bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
+              value={editMaxTokens}
+              onChange={(e) => setEditMaxTokens(e.target.value)}
+              placeholder="4096"
+            />
+            <p className="text-[10px] text-[var(--color-text-secondary)] mt-1">Limits AI response length (default 4096).</p>
           </div>
         </div>
       </div>

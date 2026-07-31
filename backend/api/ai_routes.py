@@ -1,4 +1,5 @@
 """Klipper Wire Configurator - AI Chat Backend Proxy"""
+import asyncio
 import json
 import logging
 from enum import Enum
@@ -6,6 +7,7 @@ from pathlib import Path
 import re
 from urllib.parse import urlparse, urlunparse
 
+import httpx
 from fastapi import APIRouter
 from pydantic import BaseModel
 
@@ -43,7 +45,6 @@ if not logger.handlers:
     logger.addHandler(_file_handler)
     # Prevent propagating to root logger's handlers (avoid double output)
     logger.propagate = False
-
 
 
 # ── Embedded MCP server for tool access ──
@@ -90,30 +91,34 @@ FUNC_CALL_CLEANUP_RE = re.compile(
 )
 
 
-
 SYSTEM_PROMPT = (
     "You are an expert Klipper firmware, configuration, and macro assistant. "
     "Answer Klipper questions, edit existing configs, and draft macros without inventing details.\n\n"
-    "Keeps answers short and focused.\n\n"
+    "Keep answers short and focused.\n\n"
     "Operating rules:\n"
-    "1. Treat bundled Klipper docs, Config_Reference excerpts, tool output, and user-provided config text as the source of truth.\n"
-    "2. Never invent section names, parameter names, defaults, units, commands, or supported behavior. "
-    "If the docs in context do not confirm a detail, say that explicitly.\n"
-    "3. Separate verified facts from assumptions. If the request depends on unknown printer details such as kinematics, probe type, MCU, toolhead, bed size, macro names, or sensors, ask one short clarifying question unless the provided config already resolves it.\n"
-    "4. Prefer minimal targeted edits over rewrites. Preserve unrelated settings, comments, and file structure unless the user explicitly asks for a larger refactor.\n"
-    "5. When editing config, return only the changed, new, or deleted Klipper sections inside fenced cfg code blocks. For each changed section, output the full final section using the exact Klipper section header and exact parameter names from the docs.\n"
-    "   To COMMENT OUT / DISABLE a section (keeping it in the file but suppressed), include the section header commented out with its existing params: #[extruder]\n"
-    "   To DELETE a section entirely (remove it from the config file), write `*[section_name]` on its own line inside the cfg block. The `*` before the bracket tells the app to remove that section. Do NOT use # for deletions — # means comment out, * means delete. Example:\n"
-    "   ```\n"
-    "   *[extruder]\n"
-    "   ```\n"
-    "   You can list multiple sections to delete, each on its own line: *[section_a] then *[section_b]. You can mix deletion markers with normal sections in the same cfg block.\n"
-    "6. When the app asks for per-file output, keep each file in a separate fenced cfg block and include any required '# file: <filename>' hint line exactly as requested.\n"
-    "7. When drafting macros, produce valid Klipper syntax, keep motion and temperature behavior conservative, and make mode changes explicit. If a macro changes motion or extrusion state, preserve or restore that state unless the user clearly wants persistent changes.\n"
-    "8. Keep prose short. After config or macro code, briefly explain what changed, why, and cite the exact documentation section header and parameter or command names you relied on.\n"
-    "9. If no safe grounded answer is possible, say what must be verified next instead of guessing."
+    "1. Source of truth: bundled Klipper docs, Config_Reference excerpts, tool output, and "
+    "user-provided config text. Never invent section names, parameter names, defaults, units, "
+    "commands, or supported behavior. If the docs in context do not confirm a detail, say so "
+    "explicitly.\n"
+    "2. If the request depends on unknown printer details (kinematics, probe, MCU, toolhead, bed "
+    "size, macros, sensors), ask one short clarifying question unless the provided config "
+    "already resolves it.\n"
+    "3. Prefer minimal targeted edits. Preserve unrelated settings, comments, and file structure "
+    "unless the user explicitly asks for a larger refactor.\n"
+    "4. For config edits, return only changed, new, or deleted sections in fenced cfg code "
+    "blocks, with full final sections using exact Klipper headers and parameter names. To "
+    "delete a section entirely, write `*[section_name]` on its own line inside the cfg block "
+    "(* = delete). To comment a section out, keep it in the file with its header commented "
+    "out: #[extruder]. You can list multiple deletions one per line and mix them with normal "
+    "sections in the same cfg block.\n"
+    "5. For macros: valid Klipper syntax, conservative motion and temperature behavior, explicit "
+    "mode changes. If a macro changes motion or extrusion state, preserve or restore it unless "
+    "the user clearly wants persistent changes.\n"
+    "6. Keep prose short. After config or macro code, briefly explain what changed, why, and "
+    "cite the exact documentation section header and parameter or command names you relied on.\n"
+    "7. If no safe grounded answer is possible, say what must be verified next instead of "
+    "guessing."
 )
-
 
 
 class AiProvider(str, Enum):
@@ -129,6 +134,34 @@ class ChatRequest(BaseModel):
     model: str = "gpt-4o"
     apiUrl: str = "https://api.openai.com/v1/chat/completions"
     apiProvider: AiProvider = AiProvider.chatgpt
+    requestId: str | None = None
+    maxTokens: int = 4096
+
+
+class ChatStopRequest(BaseModel):
+    requestId: str
+
+
+class ChatStoppedError(Exception):
+    """Raised when the user requests to stop the current AI chat request."""
+
+
+# Registry of in-flight chat request stop events, keyed by client requestId.
+_chat_stop_events: dict[str, asyncio.Event] = {}
+
+
+@router.post("/ai/chat/stop")
+async def chat_stop(req: ChatStopRequest):
+    """Signal an in-flight /ai/chat request to stop processing."""
+    event = _chat_stop_events.get(req.requestId)
+    logger.info(
+        "Stop lookup | requestId=%s found=%s registry_size=%d",
+        req.requestId, event is not None, len(_chat_stop_events),
+    )
+    if event is None:
+        return {"stopped": False}
+    event.set()
+    return {"stopped": True}
 
 
 def _build_reference_lookup_query(messages: list[dict]) -> str:
@@ -177,7 +210,7 @@ def _prepare_messages(messages: list[dict]) -> list[dict]:
     """
     system_parts = [SYSTEM_PROMPT, _build_mcp_tool_context()]
     system_parts.append(
-        "Use the tools you have available to help you answer the following question."
+        "Use the tools you have available to help you answer the user's latest request."
     )
 
     # ── Inject printer memory context ──
@@ -191,31 +224,23 @@ def _prepare_messages(messages: list[dict]) -> list[dict]:
         auto_fill_prompt = (
             "\n---\n"
             "**Printer Memory Auto-Fill**\n\n"
-            "The printer memory above is completely blank. Your task is to fill it in:\n"
-            "1. Examine the user's config files passed as context below for clues about the "
-            "mainboard, toolhead board, kinematics, probe type, etc.\n"
-            "2. Use `search_example_configs` with keywords from the user's config "
-            "(board name, printer model, MCU type) to find matching example configurations "
-            "in the bundled reference configs. Then use `read_example_config` to examine "
-            "the most relevant ones in full. Correlate what you find with the user's "
-            "config — for instance, a Voron 2.4 config usually uses CoreXY kinematics "
-            "and specific board types.\n"
-            "3. Also use `search_klipper_docs`, `get_config_reference_section`, and "
-            "`detect_board` as needed to confirm hardware details and fill in gaps.\n"
-            "4. For each field you can determine, provide the value. For any field you "
-            "cannot determine, ask the user to provide the information.\n"
-            "5. IMPORTANT: Only these 7 fields are allowed — do NOT add any extra fields:\n"
-            "   mainboard, toolheadBoard, expanderBoards, printerName, kinematics, "
-            "probe, additionalNotes\n"
-            "   Any unsupported fields will be rejected and you will be asked to fix them.\n"
-            "6. Propose the filled-in printer memory in a fenced `printer-memory` code "
-            "block. The block must contain ONLY valid JSON — no surrounding explanation "
-            "or markdown inside the block. Example:\n"
+            "The printer memory above is blank. Fill it in using the config files and tools below:\n"
+            "1. Examine the user's config files passed as context for clues about the mainboard, "
+            "toolhead board, kinematics, probe type, etc.\n"
+            "2. Use `search_example_configs` with board/printer/MCU keywords from the config, then "
+            "`read_example_config` on the best matches. Use `search_klipper_docs`, "
+            "`get_config_reference_section`, and `detect_board` to confirm details. Correlate with "
+            "the user's config — e.g. a Voron 2.4 usually uses CoreXY kinematics.\n"
+            "3. For any field you cannot determine, ask the user to provide it.\n"
+            "4. Return your proposal in a fenced `printer-memory` code block containing ONLY valid "
+            "JSON — no surrounding explanation or markdown inside the block. Only these 7 fields "
+            "are allowed; unsupported fields will be rejected: mainboard, toolheadBoard, "
+            "expanderBoards, printerName, kinematics, probe, additionalNotes.\n"
             "   ```printer-memory\n"
             "   {\"mainboard\": \"BTT Octopus Pro v1.1\", \"kinematics\": \"CoreXY\"}\n"
             "   ```\n"
-            "7. After the user confirms in the review dialog, the application will save it automatically. "
-            "Do NOT save printer memory directly — always use the code block approach so the user can review first."
+            "The user confirms in a review dialog before anything is saved — do NOT save printer "
+            "memory directly."
         )
         system_parts.append(auto_fill_prompt)
 
@@ -236,6 +261,22 @@ def _prepare_messages(messages: list[dict]) -> list[dict]:
         "Prepared messages | system=%d chars user_msgs=%d printer_memory_blank=%s",
         len(system_text), len(prepared), is_printer_memory_blank(memory)
     )
+
+    # Task anchor: with a long conversation the model can mistake an earlier
+    # question for the current one. A trailing system message explicitly points
+    # it at the LAST user message so it stays on task. Anthropic's payload
+    # builder merges every system message (see _build_provider_payload), so the
+    # anchor also survives there.
+    task_anchor = (
+        "Your current task is the user's latest (last) message in this conversation. "
+        "Earlier messages are history and context only."
+    )
+    if prepared:
+        return [
+            {"role": "system", "content": system_text},
+            *prepared,
+            {"role": "system", "content": task_anchor},
+        ]
     return [{"role": "system", "content": system_text}] + prepared
 
 
@@ -251,20 +292,18 @@ def _build_mcp_tool_context() -> str:
     tools = _mcp_server._list_tools()
 
     parts = [
-        "# Available MCP Tools",
+        "# Available Tools",
         "",
-        "You have access to the following tools through the application's built-in ",
-        "documentation and config system. Use them to look up Klipper documentation,",
-        "validate configs, get section schemas, detect boards, and more.",
+        "Call tools to ground answers in the bundled Klipper docs and config system.",
         "",
-        "To call a tool, include a JSON code block with `tool` as the language tag:",
+        "Text format (used by providers without native function calling): put a JSON ",
+        "code block tagged `tool` in your reply:",
         "",
         "```tool",
         """{"name": "tool_name", "arguments": {"key": "value"}}""",
         "```",
         "",
-        "The application will execute the tool and return the result as a follow-up ",
-        "message. Use the tool result to ground your answer in real documentation.",
+        "The tool runs and the result is returned as a follow-up message — use it to answer.",
         "",
         "---",
         "",
@@ -291,94 +330,36 @@ def _build_mcp_tool_context() -> str:
 
     parts.append("---")
     parts.append("")
+    parts.append("Guidance:")
     parts.append(
-        "When to use each tool:"
+        "- Use search_klipper_docs first for questions about Klipper features, parameters, "
+        "sections, or troubleshooting; it grounds answers in real docs."
     )
     parts.append(
-        "- **search_klipper_docs**: Use FIRST when the user asks about any Klipper "
-        "feature, parameter, config section, or troubleshooting topic. "
-        "This grounds your answer in actual documentation."
+        "- search_example_configs finds working configs by board or printer; follow with "
+        "read_example_config for the full file."
     )
     parts.append(
-        "- **get_config_reference_section**: Use when the user specifically asks about "
-        "a config section's exact parameters, defaults, or syntax. "
-        "Only use this if search_klipper_docs didn't give enough detail."
+        "- search_user_configs / read_user_config access the user's own config files when "
+        "they aren't already attached."
     )
     parts.append(
-        "- **read_klipper_doc**: Use when the user asks for the full contents of a "
-        "specific documentation page, or when you need more context than a search snippet provides."
+        "- Validate config snippets before presenting them, and validate macros after "
+        "generating them."
     )
     parts.append(
-        "- **validate_klipper_config**: Use when the user provides a config snippet "
-        "and asks you to check it for errors, or when you want to verify your own "
-        "config suggestion before presenting it."
+        "- Use calculate_rotation_distance, get_section_schema, get_config_reference_section, "
+        "or detect_board for exact values, valid parameters, and hardware identification."
     )
     parts.append(
-        "- **get_section_schema**: Use when the user asks what parameters a section "
-        "type supports, what values are valid, or what defaults exist."
+        "- To propose printer-memory updates, return the full updated JSON in a fenced "
+        "`printer-memory` code block; the user reviews before it saves."
     )
     parts.append(
-        "- **search_example_configs**: Use when the user asks for a complete working "
-        "config example for a specific board or printer model. "
-        "Returns matching filenames with preview snippets — use read_example_config to get the full file."
+        "- You can call multiple tools in one response (e.g. search, then read the top match)."
     )
     parts.append(
-        "- **read_example_config**: Use when you need the full content of an example config file "
-        "found via search_example_configs, or when the user explicitly asks to see or use "
-        "a specific example configuration."
-    )
-    parts.append(
-        "- **detect_board**: Use when the user asks what board their config targets, "
-        "or when you need to identify the MCU from pin definitions."
-    )
-    parts.append(
-        "- **calculate_rotation_distance**: Use when the user needs to calculate "
-        "rotation_distance for a stepper motor. Supports leadscrew, belt-driven, "
-        "and steps-per-mm derivation methods."
-    )
-    parts.append(
-        "- **generate_macro_template**: Use when the user asks for a PRINT_START, "
-        "PRINT_END, PAUSE, RESUME, or CANCEL_PRINT macro. Returns a complete "
-        "Klipper gcode_macro with proper save/restore state and temperature management."
-    )
-    parts.append(
-        "- **validate_macro**: Use after generating a macro or when the user provides one "
-        "that may have issues. Checks section structure, Jinja2 syntax balance, "
-        "save/restore state pairing, temperature command sanity, and common problems."
-    )
-    parts.append(
-        "- **printer-memory code block**: When you want to propose printer memory updates, "
-        "return the full updated JSON inside a fenced code block tagged with `printer-memory`. "
-        "The application will detect this block and allow the user to review and confirm the changes "
-        "before saving. Do NOT save printer memory directly — always let the user review first."
-    )
-    parts.append(
-        "- **list_klipper_docs**: Use when the user asks what documentation is available "
-        "or wants to browse the full set of Klipper docs."
-    )
-    parts.append(
-        "- **search_user_configs** / **read_user_config**: Use when the user asks about "
-        "their configuration but hasn't included any files via 'Include Files'. "
-        "Search for and read their config files so you can provide answers grounded "
-        "in their actual printer setup."
-    )
-    parts.append("")
-    parts.append(
-        "Rules of thumb:"
-    )
-    parts.append(
-        "1. When in doubt, search first. Real docs are always better than your training data."
-    )
-    parts.append(
-        "2. You can call multiple tools in a single response if needed."
-    )
-    parts.append(
-        "3. If the tool returns information, use it to answer. Don't ignore the tool result."
-    )
-    parts.append(
-        "4. If you're confident about a simple config parameter from your training, "
-        "you can answer without tools. But for anything specific to Klipper syntax, "
-        "check the docs first."
+        "- When in doubt, search the docs first — real docs beat training data."
     )
 
     return "\n".join(parts)
@@ -596,7 +577,8 @@ def _build_tool_result_message(tool_call: dict, result_text: str) -> str:
     return (
         f"[Tool result: {name}({args_summary})]\n\n"
         f"{result_text}\n\n"
-        f"[End tool result. Continue answering the user's original request using the information above.]"
+        "[End tool result. Use this information to answer the user's latest (last) request above. "
+        "Earlier messages are history and context. Do not repeat the tool call.]"
     )
 
 
@@ -618,37 +600,282 @@ def _collect_tool_names(messages: list[dict]) -> list[str]:
     return names
 
 
-def _process_tool_calls_in_response(
-    content: str,
-    current_messages: list[dict],
+def _build_native_tools() -> list[dict]:
+    """Build native function-calling tool definitions from the MCP server.
+
+    Returns OpenAI-style tool objects:
+        {"type": "function", "function": {"name", "description", "parameters"}}
+    """
+    native: list[dict] = []
+    for tool in _mcp_server._list_tools():
+        native.append({
+            "type": "function",
+            "function": {
+                "name": tool["name"],
+                "description": tool.get("description", "").replace("\n", " "),
+                "parameters": tool.get("inputSchema", {"type": "object", "properties": {}}),
+            },
+        })
+    return native
+
+
+def _extract_native_tool_calls(provider: str, data: dict) -> list[dict] | None:
+    """Extract structured tool calls from a provider response.
+
+    Handles native function-calling responses:
+      - OpenAI-compatible: choices[0].message.tool_calls
+      - Anthropic: content blocks with type == "tool_use"
+
+    Returns a list of {"name", "arguments", "id"} or None when the response
+    contains no native tool calls (plain text or text ```tool blocks).
+    """
+    try:
+        if provider == "anthropic":
+            blocks = data.get("content")
+            if not isinstance(blocks, list):
+                return None
+            calls: list[dict] = []
+            for block in blocks:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    calls.append({
+                        "name": block.get("name", ""),
+                        "arguments": block.get("input", {}) or {},
+                        "id": block.get("id", ""),
+                    })
+            return calls or None
+
+        message = data.get("choices", [{}])[0].get("message", {})
+        raw_calls = message.get("tool_calls")
+        if not raw_calls:
+            return None
+        calls = []
+        for raw in raw_calls:
+            if not isinstance(raw, dict) or raw.get("type") != "function":
+                continue
+            function = raw.get("function", {})
+            name = function.get("name", "")
+            arguments = function.get("arguments", "{}")
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError:
+                    arguments = {}
+            if name:
+                calls.append({"name": name, "arguments": arguments, "id": raw.get("id", "")})
+        return calls or None
+    except Exception:
+        return None
+
+
+def _build_native_tool_followup(
     provider: str,
+    assistant_content: str,
+    tool_calls: list[dict],
+    results: list[str],
+) -> list[dict]:
+    """Build the messages that continue a native function-calling exchange.
+
+    OpenAI-compatible providers require the assistant message with its
+    tool_calls echoed back, followed by one 'tool' message per call.
+    Anthropic requires the assistant content blocks (including tool_use)
+    echoed back, followed by a single user message with tool_result blocks.
+
+    Returns the list of messages to append to the conversation.
+    """
+    if provider == "anthropic":
+        content_blocks: list[dict] = []
+        if assistant_content:
+            content_blocks.append({"type": "text", "text": assistant_content})
+        for call in tool_calls:
+            content_blocks.append({
+                "type": "tool_use",
+                "id": call.get("id") or f"toolu_{call['name']}",
+                "name": call["name"],
+                "input": call["arguments"],
+            })
+        tool_results = [
+            {
+                "type": "tool_result",
+                "tool_use_id": call.get("id") or f"toolu_{call['name']}",
+                "content": result,
+            }
+            for call, result in zip(tool_calls, results)
+        ]
+        return [
+            {"role": "assistant", "content": content_blocks},
+            {"role": "user", "content": tool_results},
+        ]
+
+    assistant_message: dict = {
+        "role": "assistant",
+        "content": assistant_content or None,
+        "tool_calls": [
+            {
+                "type": "function",
+                "id": call.get("id") or f"call_{index}",
+                "function": {
+                    "name": call["name"],
+                    "arguments": json.dumps(call["arguments"])
+                    if isinstance(call["arguments"], dict)
+                    else str(call["arguments"]),
+                },
+            }
+            for index, call in enumerate(tool_calls)
+        ],
+    }
+
+    tool_messages = [
+        {
+            "role": "tool",
+            "tool_call_id": call.get("id") or f"call_{index}",
+            "content": result,
+        }
+        for index, (call, result) in enumerate(zip(tool_calls, results))
+    ]
+
+    return [assistant_message, *tool_messages]
+
+
+def _build_provider_payload(
+    provider: str,
+    messages: list[dict],
     model: str,
-) -> tuple[str, list[dict], int]:
-    """Process any tool calls in the model's response.
+    max_tokens: int = 4096,
+    tools: list[dict] | None = None,
+) -> dict:
+    """Build the request payload for the given provider.
+
+    Handles Anthropic's separate system field and OpenAI-compatible
+    formats with temperature settings. When tools is provided, native
+    function-calling tool definitions are included.
+    """
+    if provider == "anthropic":
+        # Anthropic takes a single top-level system field. Merge every system
+        # message (main prompt, config context, and the trailing task anchor)
+        # instead of keeping only the last one.
+        system_parts: list[str] = []
+        filtered_messages: list[dict] = []
+        for msg in messages:
+            if msg["role"] == "system":
+                system_parts.append(str(msg["content"]))
+            else:
+                filtered_messages.append(msg)
+        payload: dict = {
+            "model": model,
+            "messages": filtered_messages,
+            "max_tokens": max_tokens,
+        }
+        if system_parts:
+            payload["system"] = "\n\n".join(system_parts)
+
+        if tools:
+            # Anthropic expects a flat tool list (no "type" wrapper): each
+            # entry carries name/description/input_schema directly.
+            payload["tools"] = [
+                {
+                    "name": tool["function"]["name"],
+                    "description": tool["function"].get("description", ""),
+                    "input_schema": tool["function"].get("parameters", {"type": "object", "properties": {}}),
+                }
+                for tool in tools
+            ]
+    else:
+        # OpenAI-compatible chat providers use the standard messages format.
+        # temperature=0 makes tool call decisions more deterministic.
+        payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": 0.1,
+            "max_tokens": max_tokens,
+        }
+        if tools:
+            payload["tools"] = tools
+
+    return payload
+
+
+async def _query_provider(
+    client: httpx.AsyncClient,
+    url: str,
+    headers: dict,
+    payload: dict,
+    provider: str,
+    logger_context: str | None = None,
+    stop_event: asyncio.Event | None = None,
+) -> tuple[str, dict]:
+    """Send a request to the AI provider and extract the response content.
 
     Returns:
-        (final_content, updated_messages, tool_turns_used)
+        (content, data) where content is the extracted text and data is
+        the full JSON response for further inspection.
+
+    Raises:
+        ChatStoppedError: If the user requested a stop via stop_event.
+        ValueError: If the API returned an error in the response body.
+        httpx.TimeoutException: On request timeout.
+        httpx.HTTPError: On HTTP-level errors.
     """
-    tool_calls = _extract_tool_calls(content)
-    if not tool_calls:
-        return content, current_messages, 0
+    if stop_event is not None and stop_event.is_set():
+        raise ChatStoppedError()
 
-    # Strip tool call blocks from the visible response so the user
-    # doesn't see raw JSON in the chat UI
-    clean_content = MCP_TOOL_BLOCK_RE.sub("", content).strip()
-    clean_content = ALT_TOOL_CALL_CONTENT_RE.sub("", clean_content).strip()
-    clean_content = CALL_SYNTAX_CLEANUP_RE.sub("", clean_content).strip()
-    clean_content = FUNC_CALL_CLEANUP_RE.sub("", clean_content).strip()
+    context = logger_context or "main"
+    logger.info(
+        "Querying provider | url=%s msgs=%d chars=%d context=%s",
+        url,
+        len(payload.get("messages", [])),
+        sum(len(str(m.get("content", ""))) for m in payload.get("messages", [])),
+        context,
+    )
 
-    for turn_index, tool_call in enumerate(tool_calls[:MAX_MCP_TOOL_TURNS]):
-        result_text = _execute_tool_call(tool_call)
-        tool_message = _build_tool_result_message(tool_call, result_text)
+    if stop_event is not None:
+        # Race the provider request against the stop event so a user stop
+        # cancels the in-flight request instead of waiting for it to finish.
+        query_task = asyncio.create_task(client.post(url, headers=headers, json=payload))
+        stop_task = asyncio.create_task(stop_event.wait())
+        done, _pending = await asyncio.wait(
+            {query_task, stop_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if stop_task in done:
+            query_task.cancel()
+            stop_task.cancel()
+            raise ChatStoppedError()
+        stop_task.cancel()
+        resp = await query_task
+    else:
+        resp = await client.post(url, headers=headers, json=payload)
 
-        # Add the assistant's partial response (with tool calls) and the tool result
-        current_messages.append({"role": "assistant", "content": content})
-        current_messages.append({"role": "user", "content": tool_message})
+    resp.raise_for_status()
+    data = resp.json()
 
-    return clean_content, current_messages, len(tool_calls)
+    error_message = _extract_api_error_message(data)
+    if error_message:
+        logger.error("Provider returned error | %s context=%s", error_message, context)
+        raise ValueError(error_message)
+
+    content = _extract_provider_content(provider, data) or ""
+
+    logger.info(
+        "Provider response | chars=%d context=%s preview=%s",
+        len(content), context, repr(content[:120]),
+    )
+
+    if not content:
+        # Empty text content is fine when the response carries native tool
+        # calls (OpenAI tool_calls / Anthropic tool_use blocks).
+        if _extract_native_tool_calls(provider, data):
+            logger.info("Empty text, native tool calls present | context=%s", context)
+            return "", data
+
+        logger.warning(
+            "Empty content | keys=%s finish_reason=%s context=%s",
+            list(data.keys()) if isinstance(data, dict) else "N/A",
+            data.get("choices", [{}])[0].get("finish_reason", "N/A") if isinstance(data, dict) else "N/A",
+            context,
+        )
+        raise ValueError("Empty response from API. Make sure a model is loaded in your local server.")
+
+    return content, data
 
 
 def _extract_api_error_message(data: dict) -> str | None:
@@ -674,13 +901,9 @@ def _build_api_base_url(api_url: str) -> str:
     return urlunparse((parsed.scheme, parsed.netloc, "", "", "", "")).rstrip("/")
 
 
-
-
 @router.post("/ai/chat")
 async def chat_proxy(req: ChatRequest):
     """Proxy chat messages to the user's configured API provider."""
-    import httpx
-
     messages = _prepare_messages(req.messages)
 
     # ── Log request summary ──
@@ -691,10 +914,11 @@ async def chat_proxy(req: ChatRequest):
     system_chars = sum(len(str(m.get("content", ""))) for m in system_msgs)
     query_chars = sum(len(str(m.get("content", ""))) for m in non_system_msgs)
     logger.info(
-        "Chat request | provider=%s model=%s msgs=%d (sys=%d user=%d) chars=%d (system=%d query=%d)",
-        req.apiProvider.value if hasattr(req.apiProvider, 'value') else req.apiProvider, req.model, msg_count,
-        len(system_msgs), len(non_system_msgs),
-        total_chars, system_chars, query_chars
+        "Chat request | provider=%s model=%s msgs=%d (sys=%d user=%d) chars=%d (system=%d query=%d) requestId=%s",
+        req.apiProvider.value if hasattr(req.apiProvider, 'value') else req.apiProvider,
+        req.model, msg_count, len(system_msgs), len(non_system_msgs),
+        total_chars, system_chars, query_chars,
+        req.requestId or "none",
     )
 
     # Local providers don't require an API key
@@ -723,93 +947,52 @@ async def chat_proxy(req: ChatRequest):
             "Content-Type": "application/json",
         }
 
-    # Build payload based on provider
-    if req.apiProvider == "anthropic":
-        # Claude uses a different format - extract system message
-        system = None
-        filtered_messages = []
-        for msg in messages:
-            if msg["role"] == "system":
-                system = msg["content"]
-            else:
-                filtered_messages.append(msg)
-        if system:
-            payload = {
-                "model": req.model,
-                "messages": filtered_messages,
-                "system": system,
-            }
-        else:
-            payload = {
-                "model": req.model,
-                "messages": filtered_messages,
-            }
-    else:
-        # OpenAI-compatible chat providers use the standard messages format.
-        # temperature=0 makes tool call decisions more deterministic.
-        payload = {
-            "model": req.model,
-            "messages": messages,
-            "temperature": 0.1,
-            "max_tokens": 4096,
-        }
+    # Native function calling for cloud providers only; local providers keep
+    # the text-based ```tool protocol since local tool support varies.
+    native_tools = None if _is_local_provider(req.apiProvider) else _build_native_tools()
+
+    # ── Stop-event registration ──
+    stop_event = None
+    if req.requestId:
+        stop_event = asyncio.Event()
+        _chat_stop_events[req.requestId] = stop_event
+        logger.info(
+            "Stop event registered | requestId=%s registry_size=%d",
+            req.requestId, len(_chat_stop_events),
+        )
 
     timeout = httpx.Timeout(connect=15.0, read=None, write=120.0, pool=120.0)
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
-            logger.info(
-                "Sending to provider | url=%s msgs=%d chars=%d",
-                req.apiUrl, len(payload.get("messages", [])),
-                sum(len(str(m.get("content", ""))) for m in payload.get("messages", []))
-            )
-            resp = await client.post(req.apiUrl, headers=headers, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-
-            error_message = _extract_api_error_message(data)
-            if error_message:
-                logger.error("Provider returned error | %s", error_message)
-                return {"error": f"API error: {error_message}"}
-
-            content = _extract_provider_content(req.apiProvider, data)
-            logger.info(
-                "Provider response | chars=%d has_tool_call=%s preview=%s",
-                len(content) if content else 0,
-                "yes" if _extract_tool_calls(content or "") else "no",
-                repr((content or "")[:120])
+            payload = _build_provider_payload(
+                req.apiProvider, messages, req.model,
+                max_tokens=req.maxTokens, tools=native_tools,
             )
 
-            if not content:
-                # Log the full response structure when content is empty — this
-                # helps diagnose if the model returned tool_calls or other fields.
-                logger.warning(
-                    "Empty content in provider response | keys=%s finish_reason=%s tool_calls=%s",
-                    list(data.keys()) if isinstance(data, dict) else "N/A",
-                    data.get("choices", [{}])[0].get("finish_reason", "N/A") if isinstance(data, dict) else "N/A",
-                    "yes" if isinstance(data, dict) and data.get("choices", [{}])[0].get("message", {}).get("tool_calls") else "no"
-                )
-                return {"error": "Empty response from API. Make sure a model is loaded in your local server."}
+            current_content, current_data = await _query_provider(
+                client, req.apiUrl, headers, payload, req.apiProvider,
+                logger_context="initial",
+                stop_event=stop_event,
+            )
 
-            # ── MCP Tool Call Processing Loop ──
-            # After getting a response from ANY provider, check if the model
-            # requested tool calls. If so, execute them and re-query the provider.
-            # This makes all MCP tools available to every provider transparently.
             tool_turns = 0
-            current_content = content
             current_messages = list(messages)
+            executed_tool_names: list[str] = []
 
             # ── Auto-search fallback ──
             # If the model didn't call any tools on the first pass, do a backend
             # search and inject the results so it still gets grounded docs even
             # if it doesn't support tool calling.
-            if not _extract_tool_calls(current_content):
+            if not _extract_native_tool_calls(req.apiProvider, current_data) and not _extract_tool_calls(current_content):
+                if stop_event is not None and stop_event.is_set():
+                    raise ChatStoppedError()
                 reference_query = _build_reference_lookup_query(req.messages)
                 auto_context = _auto_search_context(reference_query)
                 if auto_context:
                     logger.info(
                         "Auto-search fallback triggered | query_chars=%d result_chars=%d",
-                        len(reference_query), len(auto_context)
+                        len(reference_query), len(auto_context),
                     )
                     tool_message = _build_tool_result_message(
                         {"name": "search_klipper_docs", "arguments": {"query": reference_query}},
@@ -819,123 +1002,90 @@ async def chat_proxy(req: ChatRequest):
                     current_messages.append({"role": "user", "content": tool_message})
                     tool_turns += 1
 
-                    # Re-query the model with the injected search results
-                    if req.apiProvider == "anthropic":
-                        system = None
-                        filtered_messages = []
-                        for msg in current_messages:
-                            if msg.get("role") == "system":
-                                system = msg["content"]
-                            else:
-                                filtered_messages.append(msg)
-                        tool_payload: dict = {
-                            "model": req.model,
-                            "messages": filtered_messages,
-                            "temperature": 0.1,
-                        }
-                        if system:
-                            tool_payload["system"] = system
-                    else:
-                        tool_payload = {
-                            "model": req.model,
-                            "messages": current_messages,
-                            "temperature": 0.1,
-                        }
-
-                    logger.info(
-                        "Auto-search re-query | msgs=%d chars=%d",
-                        len(tool_payload.get("messages", [])),
-                        sum(len(str(m.get("content", ""))) for m in tool_payload.get("messages", []))
+                    # Re-query with injected search results
+                    tool_payload = _build_provider_payload(
+                        req.apiProvider, current_messages, req.model,
+                        max_tokens=req.maxTokens, tools=native_tools,
                     )
-                    resp = await client.post(req.apiUrl, headers=headers, json=tool_payload)
-                    resp.raise_for_status()
-                    data = resp.json()
-                    current_content = _extract_provider_content(req.apiProvider, data) or ""
-                    logger.info(
-                        "Auto-search re-query response | chars=%d has_tool_call=%s preview=%s",
-                        len(current_content),
-                        "yes" if _extract_tool_calls(current_content) else "no",
-                        repr(current_content[:120])
+                    current_content, current_data = await _query_provider(
+                        client, req.apiUrl, headers, tool_payload, req.apiProvider,
+                        logger_context="auto-search",
+                        stop_event=stop_event,
                     )
 
             while tool_turns < MAX_MCP_TOOL_TURNS:
-                tool_calls = _extract_tool_calls(current_content)
+                if stop_event is not None and stop_event.is_set():
+                    raise ChatStoppedError()
+
+                # Native function calls come from the structured response body
+                # (OpenAI tool_calls / Anthropic tool_use blocks); otherwise
+                # fall back to regex extraction from the response text.
+                native_calls = _extract_native_tool_calls(req.apiProvider, current_data)
+                tool_calls = native_calls or _extract_tool_calls(current_content)
                 if not tool_calls:
                     if tool_turns > 0:
                         logger.info("Tool call loop done | turns=%d final_chars=%d", tool_turns, len(current_content))
                     break
 
                 logger.info(
-                    "Tool calls detected | turn=%d count=%d first=%s content_preview=%s",
+                    "Tool calls detected | turn=%d count=%d first=%s format=%s content_preview=%s",
                     tool_turns + 1, len(tool_calls),
                     tool_calls[0]["name"],
-                    repr(current_content[:80])
+                    "native" if native_calls else "text",
+                    repr(current_content[:80]),
                 )
 
-                # Process all tool calls found in the response
+                # Execute every tool call in this round first, then build the
+                # follow-up messages in the format the provider expects.
+                results = []
                 for tool_call in tool_calls[:MAX_MCP_TOOL_TURNS]:
                     result_text = _execute_tool_call(tool_call)
                     logger.info(
                         "Tool executed | name=%s result_chars=%d",
-                        tool_call["name"], len(result_text)
+                        tool_call["name"], len(result_text),
                     )
-                    tool_message = _build_tool_result_message(tool_call, result_text)
-                    # Strip tool call blocks from the assistant message so the
-                    # re-query doesn't confuse native-function-calling models
-                    # (Gemma, Llama 3.1+, Qwen, etc.) with raw special tokens.
-                    clean_content = MCP_TOOL_BLOCK_RE.sub("", current_content).strip()
-                    clean_content = ALT_TOOL_CALL_CONTENT_RE.sub("", clean_content).strip()
-                    clean_content = CALL_SYNTAX_CLEANUP_RE.sub("", clean_content).strip()
-                    clean_content = FUNC_CALL_CLEANUP_RE.sub("", clean_content).strip()
-                    # Only append assistant message if there's actual text content.
-                    # If the model ONLY emitted a tool call (no text), skip the
-                    # assistant message entirely to avoid confusing the model
-                    # with artificial placeholder text during re-query.
-                    if clean_content:
-                        current_messages.append({"role": "assistant", "content": clean_content})
-                    current_messages.append({"role": "user", "content": tool_message})
-                    tool_turns += 1
+                    executed_tool_names.append(tool_call["name"])
+                    results.append(result_text)
 
-                # Build a new payload with the updated messages and re-query
-                if req.apiProvider == "anthropic":
-                    system = None
-                    filtered_messages = []
-                    for msg in current_messages:
-                        if msg.get("role") == "system":
-                            system = msg["content"]
-                        else:
-                            filtered_messages.append(msg)
-                    tool_payload: dict = {
-                        "model": req.model,
-                        "messages": filtered_messages,
-                        "temperature": 0.1,
-                    }
-                    if system:
-                        tool_payload["system"] = system
+                if native_calls is not None:
+                    # Native format: echo the assistant message (with tool_calls)
+                    # and append one 'tool' / tool_result message per call.
+                    current_messages.extend(
+                        _build_native_tool_followup(
+                            req.apiProvider, current_content, tool_calls, results,
+                        )
+                    )
+                    tool_turns += len(tool_calls)
                 else:
-                    tool_payload = {
-                        "model": req.model,
-                        "messages": current_messages,
-                        "temperature": 0.1,
-                    }
+                    # Text format: strip the tool call syntax from the assistant
+                    # message so the re-query doesn't confuse models that use
+                    # native special tokens (Gemma, Llama 3.1+, Qwen, etc.),
+                    # then append one user tool-result message per call. Only
+                    # append the assistant message if it has actual text — if
+                    # the model ONLY emitted a tool call, skip it.
+                    for tool_call, result_text in zip(tool_calls, results):
+                        tool_message = _build_tool_result_message(tool_call, result_text)
 
-                logger.info(
-                    "Re-query | turn=%d msgs=%d chars=%d",
-                    tool_turns, len(tool_payload.get("messages", [])),
-                    sum(len(str(m.get("content", ""))) for m in tool_payload.get("messages", []))
+                        clean_content = MCP_TOOL_BLOCK_RE.sub("", current_content).strip()
+                        clean_content = ALT_TOOL_CALL_CONTENT_RE.sub("", clean_content).strip()
+                        clean_content = CALL_SYNTAX_CLEANUP_RE.sub("", clean_content).strip()
+                        clean_content = FUNC_CALL_CLEANUP_RE.sub("", clean_content).strip()
+                        if clean_content:
+                            current_messages.append({"role": "assistant", "content": clean_content})
+                        current_messages.append({"role": "user", "content": tool_message})
+                    tool_turns += len(tool_calls)
+
+                tool_payload = _build_provider_payload(
+                    req.apiProvider, current_messages, req.model,
+                    max_tokens=req.maxTokens, tools=native_tools,
                 )
-                resp = await client.post(req.apiUrl, headers=headers, json=tool_payload)
-                resp.raise_for_status()
-                data = resp.json()
-                current_content = _extract_provider_content(req.apiProvider, data) or ""
-                logger.info(
-                    "Re-query response | turn=%d chars=%d has_tool_call=%s preview=%s",
-                    tool_turns, len(current_content),
-                    "yes" if _extract_tool_calls(current_content) else "no",
-                    repr(current_content[:120])
+                current_content, current_data = await _query_provider(
+                    client, req.apiUrl, headers, tool_payload, req.apiProvider,
+                    logger_context=f"tool-turn-{tool_turns}",
+                    stop_event=stop_event,
                 )
 
-            # Clean up any remaining tool call blocks in the final content
+            # Clean up any remaining tool call blocks in the final content.
             # Check whether the content contained tool call blocks BEFORE cleanup
             # so we don't restore raw tool call text back into the visible output.
             had_tool_blocks = bool(
@@ -953,14 +1103,18 @@ async def chat_proxy(req: ChatRequest):
             if not final_content and not had_tool_blocks:
                 final_content = current_content
 
-            # Collect tool names used during the MCP tool loop
+            # Collect tool names used during the MCP tool loop. Native tool
+            # calls don't leave `[Tool result: ...]` messages, so fall back
+            # to the names captured while executing them.
             mcp_tool_names = _collect_tool_names(current_messages)
+            if not mcp_tool_names and executed_tool_names:
+                mcp_tool_names = list(dict.fromkeys(executed_tool_names))
 
             logger.info(
                 "Returning response | final_chars=%d tool_turns=%d tools=%s empty=%s",
                 len(final_content), tool_turns,
                 mcp_tool_names or [],
-                "yes" if not final_content else "no"
+                "yes" if not final_content else "no",
             )
             if not final_content:
                 logger.warning("Empty final content after %d tool turns", tool_turns)
@@ -970,6 +1124,9 @@ async def chat_proxy(req: ChatRequest):
                 "mcpToolTurns": tool_turns,
                 "mcpToolNames": mcp_tool_names,
             }
+        except ChatStoppedError:
+            logger.info("Chat stopped by user | requestId=%s", req.requestId)
+            return {"stopped": True}
         except ValueError as e:
             logger.error("API error | %s", str(e))
             return {"error": f"API error: {str(e)}"}
@@ -979,3 +1136,6 @@ async def chat_proxy(req: ChatRequest):
         except httpx.HTTPError as e:
             logger.error("HTTP error | %s", str(e))
             return {"error": f"API request failed: {str(e)}"}
+        finally:
+            if req.requestId:
+                _chat_stop_events.pop(req.requestId, None)

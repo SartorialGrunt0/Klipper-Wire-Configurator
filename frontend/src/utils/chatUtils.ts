@@ -1,112 +1,15 @@
 /**
  * Shared utility functions and constants for the AI Chat feature.
  *
- * Pure functions — no React state or hooks. Designed to be extracted from
- * the ChatDialog component to reduce file size and improve testability.
+ * Pure functions — no React state or hooks.
+ *
+ * Phase 3 cleanup: the provider config, printer-memory, and draft
+ * validation groups moved to dedicated modules:
+ *   - chatProviders.ts
+ *   - printerMemory.ts
+ *   - draftValidation.ts
  */
-import type { ValidationError, ValidationResult, ConfigFile, ConfigSection } from '../types/config';
-
-import type { AiProvider } from '../stores/aiStore';
-
-// ── Provider Configuration ──────────────────────────────────────────
-
-export interface ProviderInfo {
-  label: string;
-  defaultUrl: string;
-  requiresKey: boolean;
-  defaultHost: string;
-  defaultPort: string;
-  defaultModel: string;
-}
-
-export const PROVIDER_OPTIONS: Array<{ value: AiProvider; label: string }> = [
-  { value: 'chatgpt', label: 'ChatGPT (OpenAI)' },
-  { value: 'google', label: 'Google (Gemini)' },
-  { value: 'anthropic', label: 'Anthropic (Claude)' },
-  { value: 'github', label: 'GitHub Copilot' },
-  { value: 'openai-compatible', label: 'OpenAI Compatible' },
-];
-
-export const PROVIDER_DEFAULTS: Record<AiProvider, ProviderInfo> = {
-  chatgpt: {
-    label: 'ChatGPT (OpenAI)',
-    defaultUrl: 'https://api.openai.com/v1/chat/completions',
-    requiresKey: true,
-    defaultHost: 'localhost',
-    defaultPort: '1234',
-    defaultModel: 'gpt-4o',
-  },
-  google: {
-    label: 'Google (Gemini)',
-    defaultUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
-    requiresKey: true,
-    defaultHost: 'localhost',
-    defaultPort: '1234',
-    defaultModel: 'gemini-1.5-pro',
-  },
-  anthropic: {
-    label: 'Anthropic (Claude)',
-    defaultUrl: 'https://api.anthropic.com/v1/messages',
-    requiresKey: true,
-    defaultHost: 'localhost',
-    defaultPort: '1234',
-    defaultModel: 'claude-3-5-sonnet',
-  },
-  github: {
-    label: 'GitHub Copilot',
-    defaultUrl: 'https://models.github.ai/inference/chat/completions',
-    requiresKey: true,
-    defaultHost: 'localhost',
-    defaultPort: '1234',
-    defaultModel: 'gpt-4o',
-  },
-  'openai-compatible': {
-    label: 'OpenAI Compatible',
-    defaultUrl: 'http://localhost:11434/api/chat',
-    requiresKey: false,
-    defaultHost: 'localhost',
-    defaultPort: '11434',
-    defaultModel: 'gpt-4o',
-  },
-
-};
-
-// ── Provider Helpers ────────────────────────────────────────────────
-
-export const isLocalProvider = (provider: AiProvider): boolean =>
-  provider === 'openai-compatible';
-
-export function buildLocalProviderApiUrl(host: string, port: string): string {
-  return `http://${host}:${port}/v1/chat/completions`;
-}
-
-export function resolveProviderApiUrl(
-  provider: AiProvider,
-  apiUrl: string,
-  host: string,
-  port: string,
-): string {
-  if (provider === 'openai-compatible') {
-    return buildLocalProviderApiUrl(host, port);
-  }
-  return apiUrl;
-}
-
-export function getProviderModel(
-  provider: AiProvider,
-  providerModels: Partial<Record<AiProvider, string>>,
-  fallbackModel = '',
-  fallbackProvider?: AiProvider,
-): string {
-  const providerModel = providerModels[provider]?.trim();
-  if (providerModel) {
-    return providerModel;
-  }
-  if (fallbackProvider === provider && fallbackModel.trim()) {
-    return fallbackModel;
-  }
-  return '';
-}
+import type { ConfigFile, ConfigSection } from '../types/config';
 
 // ── Config Context Helpers ──────────────────────────────────────────
 
@@ -159,271 +62,33 @@ export function extractConfigCodeBlock(content: string): string | null {
   return extractConfigCodeBlocks(content)[0] ?? null;
 }
 
-// ── Printer Memory Code Block Extraction ───────────────────────────
-
-const PRINTER_MEMORY_LANGUAGE = 'printer-memory';
+// ── Config Separator Normalisation ─────────────────────────────────
 
 /**
- * Normalise printer memory keys from display-friendly formats (e.g.
- * "Mainboard", "Toolhead Board", "Printer Name") to internal camelCase
- * keys ("mainboard", "toolheadBoard", "printerName").
- */
-const PRINTER_MEMORY_KEY_MAP: Record<string, string> = {
-  mainboard: 'mainboard',
-  Mainboard: 'mainboard',
-  'toolhead board': 'toolheadBoard',
-  'Toolhead Board': 'toolheadBoard',
-  toolheadboard: 'toolheadBoard',
-  'expander boards': 'expanderBoards',
-  'Expander Boards': 'expanderBoards',
-  expanderboards: 'expanderBoards',
-  'printer name': 'printerName',
-  'Printer Name': 'printerName',
-  printername: 'printerName',
-  kinematics: 'kinematics',
-  Kinematics: 'kinematics',
-  probe: 'probe',
-  Probe: 'probe',
-  'additional notes': 'additionalNotes',
-  'Additional Notes': 'additionalNotes',
-  additionalnotes: 'additionalNotes',
-};
-
-function normalizePrinterMemoryKeys(raw: Record<string, string>): Record<string, string> {
-  const result: Record<string, string> = {};
-  for (const [key, value] of Object.entries(raw)) {
-    const canonical = PRINTER_MEMORY_KEY_MAP[key.trim()] || key;
-    result[canonical] = typeof value === 'string' ? value : String(value ?? '');
-  }
-  return result;
-}
-
-/**
- * Extract a printer-memory fenced code block from AI response text.
- * Returns the parsed PrinterMemory object, or null if none found.
+ * Rewrite `key = value` parameter assignments to `key: value` inside
+ * fenced cfg code blocks.
  *
- * Handles:
- * - Explanatory text around the JSON inside the code block
- * - Display-friendly keys ("Mainboard", "Printer Name") → canonical camelCase
+ * Deterministic post-processing that replaces the previous AI re-query
+ * (which asked the model to rewrite its own reply). Only touches lines
+ * that look like a Klipper parameter assignment (`name = value` at line
+ * start, optionally commented), leaving gcode, Jinja expressions, and
+ * prose untouched.
  */
-export function extractPrinterMemoryBlock(content: string): Record<string, string> | null {
+export function rewriteConfigEqualsSeparators(content: string): string {
   const codeBlockPattern = /```([^\n`]*)\n([\s\S]*?)```/g;
-  for (const match of content.matchAll(codeBlockPattern)) {
-    const language = match[1].trim().toLowerCase();
-    if (language !== PRINTER_MEMORY_LANGUAGE) continue;
-    const block = match[2].trim();
-    if (!block) continue;
-
-    // Find JSON content within the block — look for first { to last }
-    const jsonStart = block.indexOf('{');
-    if (jsonStart === -1) continue;
-    const jsonEnd = block.lastIndexOf('}');
-    if (jsonEnd === -1 || jsonEnd <= jsonStart) continue;
-    const jsonStr = block.slice(jsonStart, jsonEnd + 1);
-
-    try {
-      const parsed = JSON.parse(jsonStr);
-      if (parsed && typeof parsed === 'object') {
-        const normalized = normalizePrinterMemoryKeys(parsed as Record<string, string>);
-        // Strip any keys not in the allowed set (safety net against AI adding extra fields)
-        return stripPrinterMemoryExtraKeys(normalized);
-      }
-    } catch {
-      // Not valid JSON, skip this block
+  return content.replace(codeBlockPattern, (whole, language: string, block: string) => {
+    if (!CONFIG_CODE_LANGUAGES.has(language.trim().toLowerCase())) {
+      return whole;
     }
-  }
-  return null;
-}
-
-/**
- * Check if a message contains a printer-memory code block.
- */
-export function hasPrinterMemoryBlock(content: string): boolean {
-  return /```printer-memory\s*\n/i.test(content);
-}
-
-// ── Printer Memory Validation ──────────────────────────────────
-
-/** The only keys the printer-memory JSON may contain. */
-const ALLOWED_PRINTER_MEMORY_KEYS = new Set([
-  'mainboard',
-  'toolheadBoard',
-  'expanderBoards',
-  'printerName',
-  'kinematics',
-  'probe',
-  'additionalNotes',
-]);
-
-/**
- * Return any keys in the parsed object that are NOT in the allowed set.
- * Used to detect when the AI adds unsupported fields.
- */
-export function getPrinterMemoryExtraKeys(
-  parsed: Record<string, string>,
-): string[] {
-  return Object.keys(parsed).filter((k) => !ALLOWED_PRINTER_MEMORY_KEYS.has(k));
-}
-
-/**
- * Strip any keys from the object that aren't in the allowed set.
- * Applied inside `extractPrinterMemoryBlock` as a safety net.
- */
-export function stripPrinterMemoryExtraKeys(
-  parsed: Record<string, string>,
-): Record<string, string> {
-  const result: Record<string, string> = {};
-  for (const [key, value] of Object.entries(parsed)) {
-    if (ALLOWED_PRINTER_MEMORY_KEYS.has(key)) {
-      result[key] = value;
-    }
-  }
-  return result;
-}
-
-// ── Comprehensive Printer Memory Validation ────────────────────
-
-export interface PrinterMemoryValidationIssue {
-  type: 'parse_error' | 'extra_keys';
-  message: string;
-  extraKeys?: string[];
-}
-
-/**
- * Run comprehensive validation on an AI message containing a
- * printer-memory code block. Catches:
- * - Missing/invalid JSON inside the block
- * - Non-object values (arrays, primitives)
- * - Extra fields beyond the 7 allowed keys
- *
- * @returns null if no printer-memory block is found.
- *          Otherwise returns issues (empty = valid) + the cleaned parsed data.
- */
-export function validatePrinterMemoryContent(
-  content: string,
-): { issues: PrinterMemoryValidationIssue[]; parsed: Record<string, string> | null } | null {
-  if (!hasPrinterMemoryBlock(content)) return null;
-
-  const codeBlockPattern = /```([^\n`]*)\n([\s\S]*?)```/g;
-  for (const match of content.matchAll(codeBlockPattern)) {
-    const language = match[1].trim().toLowerCase();
-    if (language !== PRINTER_MEMORY_LANGUAGE) continue;
-
-    const block = match[2].trim();
-    if (!block) {
-      return { issues: [{ type: 'parse_error', message: 'The printer-memory code block is empty.' }], parsed: null };
-    }
-
-    // Find JSON content within the block
-    const jsonStart = block.indexOf('{');
-    if (jsonStart === -1) {
-      return {
-        issues: [{ type: 'parse_error', message: 'The printer-memory block does not contain a JSON object (no opening { found).' }],
-        parsed: null,
-      };
-    }
-    const jsonEnd = block.lastIndexOf('}');
-    if (jsonEnd === -1 || jsonEnd <= jsonStart) {
-      return {
-        issues: [{ type: 'parse_error', message: 'The printer-memory block has an incomplete JSON object (missing closing }).' }],
-        parsed: null,
-      };
-    }
-
-    const jsonStr = block.slice(jsonStart, jsonEnd + 1);
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(jsonStr);
-    } catch (err: unknown) {
-      const detail = err instanceof Error ? err.message : 'unknown error';
-      return {
-        issues: [{ type: 'parse_error', message: `The printer-memory block contains invalid JSON: ${detail}` }],
-        parsed: null,
-      };
-    }
-
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return {
-        issues: [{ type: 'parse_error', message: 'The printer-memory block JSON must be a flat object, not an array or primitive.' }],
-        parsed: null,
-      };
-    }
-
-    // Normalise keys to canonical camelCase
-    const normalized = normalizePrinterMemoryKeys(parsed as Record<string, string>);
-    const issues: PrinterMemoryValidationIssue[] = [];
-
-    // Check for extra keys
-    const extraKeys = getPrinterMemoryExtraKeys(normalized);
-    if (extraKeys.length > 0) {
-      issues.push({
-        type: 'extra_keys',
-        message: `Unsupported fields: ${extraKeys.join(', ')}. Only the 7 defined fields are allowed.`,
-        extraKeys,
-      });
-    }
-
-    // Strip extras and return
-    const stripped = stripPrinterMemoryExtraKeys(normalized);
-    return { issues, parsed: Object.keys(stripped).length > 0 ? stripped : null };
-  }
-
-  return null;
-}
-
-/** Build a user-role message telling the AI to fix printer-memory block issues. */
-export function buildPrinterMemoryValidationFeedback(
-  issues: PrinterMemoryValidationIssue[],
-): string {
-  const parts: string[] = [
-    'The printer-memory block you returned has errors that must be fixed:',
-    '',
-  ];
-  for (const issue of issues) {
-    if (issue.type === 'parse_error') {
-      parts.push('- The block has a formatting error.');
-      parts.push(`  ${issue.message}`);
-    } else if (issue.type === 'extra_keys') {
-      parts.push('- The block contains fields that are not supported.');
-      parts.push(`  ${issue.message}`);
-    }
-  }
-  parts.push('');
-  parts.push('Only these 7 fields are allowed:');
-  parts.push('  - mainboard');
-  parts.push('  - toolheadBoard');
-  parts.push('  - expanderBoards');
-  parts.push('  - printerName');
-  parts.push('  - kinematics');
-  parts.push('  - probe');
-  parts.push('  - additionalNotes');
-  parts.push('');
-  parts.push('All values must be plain strings. Return a corrected printer-memory block.');
-  return parts.join('\n');
-}
-
-/** Maximum retries for printer memory validation. */
-export const MAX_PRINTER_MEMORY_VALIDATION_ATTEMPTS = 3;
-
-export function extractEqualsSeparatedConfigLines(content: string): string[] {
-  const matches = extractConfigCodeBlocks(content)
-    .flatMap((block) => block.split(/\r?\n/))
-    .map((line) => line.trim())
-    .filter((line) => /^#?\s*[A-Za-z0-9_][A-Za-z0-9_-]*\s*=.*$/.test(line));
-  return Array.from(new Set(matches));
-}
-
-export function buildConfigSeparatorRewritePrompt(offendingLines: string[]): string {
-  const examples = offendingLines.slice(0, 5).map((line) => `- ${line}`).join('\n');
-  return [
-    'Rewrite your previous reply so every cfg parameter assignment uses a colon separator instead of an equals sign.',
-    'Keep the exact same files, section headers, parameter names, values, ordering, comments, and surrounding explanation.',
-    'Do not change gcode command arguments inside multiline values. Only change cfg parameter lines from `key = value` to `key: value`.',
-    'Return the full replacement reply.',
-    '',
-    'Examples that must be rewritten with colons:',
-    examples,
-  ].join('\n');
+    const rewritten = block
+      .split(/\r?\n/)
+      .map((line) => line.replace(
+        /^(\s*)(#?\s*[A-Za-z0-9_][A-Za-z0-9_-]*)\s*=\s*(.*)$/,
+        (_match, indent: string, name: string, value: string) => `${indent}${name}: ${value}`,
+      ))
+      .join('\n');
+    return `\`\`\`${language}\n${rewritten}\`\`\``;
+  });
 }
 
 // ── String / Text Helpers ──────────────────────────────────────────
@@ -620,143 +285,7 @@ export function extractRequestedKlipperDocFilenames(content: string): string[] {
 
 export function buildAutoLoadedKlipperDocMessage(documents: Array<{ filename: string; content: string }>): string {
   return [
-    'The app automatically fetched the full bundled Klipper markdown document(s) you requested. Answer the user\'s previous request directly now using these documents. Do not ask the user to paste the same documentation again unless you need a different source document.',
+    'The app fetched the full bundled Klipper document(s) you requested. Use them to answer the user\'s request directly.',
     ...documents.map((document) => `Full bundled Klipper document: ${document.filename}\n\n${document.content}`),
   ].join('\n\n---\n\n');
-}
-
-// ── Assistant Validation ───────────────────────────────────────────
-
-export const MAX_ASSISTANT_DRAFT_VALIDATION_ATTEMPTS = 3;
-export const MAX_ASSISTANT_HINT_USER_MESSAGES = 3;
-
-const RETRY_EXEMPT_DUPLICATE_SECTION_RE = /^Section \[[^\]]+\] (?:can only be defined once(?: across active included config files)?\.|is reused across active included config files\.)(?: Also defined in: .+)?$/;
-const RETRY_EXEMPT_SHARED_PIN_RE = /^Pin '.*' is used by multiple sections: .+$/;
-
-export interface AssistantDraftValidationIssueGroup {
-  filename: string;
-  errors: ValidationError[];
-}
-
-export interface AssistantDraftValidationOutcome {
-  applicable: boolean;
-  blockingIssues: AssistantDraftValidationIssueGroup[];
-  failureReason: string | null;
-}
-
-export function isBlockingAssistantValidationIssue(error: ValidationError): boolean {
-  return error.severity === 'error' || error.severity === 'warning';
-}
-
-export function isRetryExemptAssistantValidationIssue(error: ValidationError): boolean {
-  return RETRY_EXEMPT_DUPLICATE_SECTION_RE.test(error.message) || RETRY_EXEMPT_SHARED_PIN_RE.test(error.message);
-}
-
-export function hasOnlyRetryExemptAssistantValidationIssues(
-  blockingIssues: AssistantDraftValidationIssueGroup[],
-): boolean {
-  const issues = blockingIssues.flatMap((group) => group.errors);
-  return issues.length > 0 && issues.every((error) => isRetryExemptAssistantValidationIssue(error));
-}
-
-export function shouldRetryAssistantValidation(
-  validationOutcome: AssistantDraftValidationOutcome,
-  attemptsUsed: number,
-): boolean {
-  if (validationOutcome.applicable) {
-    if (validationOutcome.blockingIssues.length === 0) return false;
-    return !(attemptsUsed > 1 && hasOnlyRetryExemptAssistantValidationIssues(validationOutcome.blockingIssues));
-  }
-  return attemptsUsed > 1 && Boolean(validationOutcome.failureReason);
-}
-
-export function buildValidationErrorKey(filename: string, error: ValidationError): string {
-  return [filename, error.severity, error.section, error.param, error.message].join('::');
-}
-
-export function collectNewValidationErrors(
-  baselineValidations: Record<string, ValidationResult>,
-  candidateValidations: Record<string, ValidationResult>,
-): AssistantDraftValidationIssueGroup[] {
-  const baselineCounts = new Map<string, number>();
-  Object.entries(baselineValidations).forEach(([filename, result]) => {
-    result.errors.forEach((error) => {
-      if (!isBlockingAssistantValidationIssue(error)) return;
-      const key = buildValidationErrorKey(filename, error);
-      baselineCounts.set(key, (baselineCounts.get(key) ?? 0) + 1);
-    });
-  });
-
-  const blockingByFile = new Map<string, ValidationError[]>();
-  Object.entries(candidateValidations)
-    .sort(([left], [right]) => left.localeCompare(right))
-    .forEach(([filename, result]) => {
-      result.errors.forEach((error) => {
-        if (!isBlockingAssistantValidationIssue(error)) return;
-        const key = buildValidationErrorKey(filename, error);
-        const remainingBaselineCount = baselineCounts.get(key) ?? 0;
-        if (remainingBaselineCount > 0) {
-          baselineCounts.set(key, remainingBaselineCount - 1);
-          return;
-        }
-        const existing = blockingByFile.get(filename);
-        if (existing) { existing.push(error); return; }
-        blockingByFile.set(filename, [error]);
-      });
-    });
-
-  return Array.from(blockingByFile.entries()).map(([filename, errors]) => ({ filename, errors }));
-}
-
-export function formatAssistantDraftValidationIssues(
-  blockingIssues: AssistantDraftValidationIssueGroup[],
-  failureReason: string | null,
-): string {
-  const lines: string[] = [];
-  if (failureReason) lines.push(`- ${failureReason}`);
-  blockingIssues.forEach(({ filename, errors }) => {
-    lines.push(`File: ${filename}`);
-    errors.forEach((error) => {
-      const location = error.param ? `[${error.section}] ${error.param}` : `[${error.section}]`;
-      lines.push(`- ${location}: ${error.message}`);
-    });
-  });
-  return lines.join('\n');
-}
-
-export function buildAssistantDraftValidationFeedback(
-  blockingIssues: AssistantDraftValidationIssueGroup[],
-  invalidContent: string,
-  failureReason: string | null,
-  allowExplanationOnly = false,
-): string {
-  const formattedIssues = formatAssistantDraftValidationIssues(blockingIssues, failureReason)
-    || '- The previous reply did not include a complete applicable cfg draft.';
-  return [
-    'Your previous assistant reply included cfg changes that failed the app validation after being merged into the current Klipper config project.',
-    'Return a corrected replacement reply that fixes every problem below and still satisfies the user request.',
-    'If you return config changes, return only complete changed sections inside fenced cfg code blocks and keep any required "# file: <filename>" hint.',
-    allowExplanationOnly
-      ? 'If the remaining problems are duplicate sections or reused pins and you cannot resolve them safely from the current config, do not return another invalid cfg block. Instead, clearly explain the conflict, mention the exact section or pin involved, and say what must change before a valid config can be produced.'
-      : 'Do not ask the user to apply manual fixes for these validation issues.',
-    '',
-    'Validation problems to fix:',
-    formattedIssues,
-    '',
-    'Previous invalid reply:',
-    '````text',
-    invalidContent.trim() || 'No content returned.',
-    '````',
-  ].join('\n');
-}
-
-export function buildAssistantDraftValidationErrorMessage(
-  blockingIssues: AssistantDraftValidationIssueGroup[],
-  failureReason: string | null,
-  attempts: number,
-): string {
-  const formattedIssues = formatAssistantDraftValidationIssues(blockingIssues, failureReason);
-  const attemptLabel = attempts === 1 ? 'attempt' : 'attempts';
-  if (!formattedIssues) return `AI draft failed validation after ${attempts} ${attemptLabel}.`;
-  return `AI draft failed validation after ${attempts} ${attemptLabel}.\n${formattedIssues}`;
 }

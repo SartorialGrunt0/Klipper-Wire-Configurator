@@ -20,17 +20,17 @@ import * as api from '../../services/api';
 import {
   buildConfigContextMessage,
   extractMentionedConfigFilenames,
-  extractPrinterMemoryBlock,
-  validatePrinterMemoryContent,
-  buildPrinterMemoryValidationFeedback,
-  type PrinterMemoryValidationIssue,
-  MAX_PRINTER_MEMORY_VALIDATION_ATTEMPTS,
-  hasPrinterMemoryBlock,
+  CONTEXT_TRUNCATION_LIMIT,
+  truncateConfigContext,
+} from '../../utils/chatUtils';
+import { extractPrinterMemoryBlock } from '../../utils/printerMemory';
+import {
   PROVIDER_DEFAULTS,
   isLocalProvider,
   resolveProviderApiUrl,
   getProviderModel,
-} from '../../utils/chatUtils';
+} from '../../utils/chatProviders';
+import { runReplyValidationPipeline, createPrinterMemoryReplyValidator } from '../../utils/replyValidation';
 import { buildProjectGraph } from '../../utils/graphBuilder';
 import { useAssistantDraft } from '../../hooks/useAssistantDraft';
 import ChatSettingsPanel from './ChatSettingsPanel';
@@ -60,12 +60,8 @@ interface AttachedConfigFile {
 
 // ── Constants ───────────────────────────────────────────────────────
 
-const CONTEXT_TRUNCATION_LIMIT = 40000;
-
-function truncateConfigContext(content: string): string {
-  if (content.length <= CONTEXT_TRUNCATION_LIMIT) return content;
-  return `${content.slice(0, CONTEXT_TRUNCATION_LIMIT)}\n\n# Context truncated after ${CONTEXT_TRUNCATION_LIMIT} characters.`;
-}
+// CONTEXT_TRUNCATION_LIMIT and truncateConfigContext live in
+// utils/chatUtils.ts — imported above to avoid duplicate definitions.
 
 // ── Component ───────────────────────────────────────────────────────
 
@@ -102,25 +98,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     handleAcceptAssistantEdit,
     handleNewChat,
     requestAssistantMessage: draftRequestMessage,
-    runValidationRetryLoop: draftValidationRetryLoop,
+    createDraftReplyValidator,
     flattenAssistantDraftChanges,
     updateAssistantDraftApplicableMessages,
-  } = useAssistantDraft({
-    messages,
-    setMessages,
-    configFiles,
-    activeFile,
-    validation,
-    schemas,
-    textDrafts,
-    textEditorDirty,
-    setConfigFile,
-    setValidation,
-    clearTextDraft,
-    markDirty,
-    clearMessages,
-    loadedConfigFilenames: Object.keys(configFiles),
-  });
+  } = useAssistantDraft();
 
   // ── Component State ─────────────────────────────────────────────
   const [input, setInput] = useState('');
@@ -132,6 +113,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   );
   const [attachedConfigFiles, setAttachedConfigFiles] = useState<AttachedConfigFile[]>([]);
   const [showChatHistory, setShowChatHistory] = useState(false);
+  const [showCarryOverPrompt, setShowCarryOverPrompt] = useState(false);
   const [showPrinterMemory, setShowPrinterMemory] = useState(false);
   const [proposedMemory, setProposedMemory] = useState<PrinterMemory | null>(null);
 
@@ -145,6 +127,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   const [editApiProvider, setEditApiProvider] = useState<AiProvider>(settings.apiProvider);
   const [editHost, setEditHost] = useState(settings.host);
   const [editPort, setEditPort] = useState(settings.port);
+  const [editMaxTokens, setEditMaxTokens] = useState(String(settings.maxTokens ?? 4096));
 
   const resolvedEditApiUrl = resolveProviderApiUrl(
     editApiProvider,
@@ -158,6 +141,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   const inputRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const handledPendingRequestIdRef = useRef<string | null>(null);
+  // Stop button: AbortController cancels the client fetch immediately;
+  // the backend /ai/chat/stop endpoint (via requestId) cancels the work.
+  const stopControllerRef = useRef<AbortController | null>(null);
+  const stopRequestIdRef = useRef<string | null>(null);
 
   const loadedConfigFilenames = Object.keys(configFiles);
 
@@ -171,6 +158,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       setEditApiProvider(settings.apiProvider);
       setEditHost(settings.host);
       setEditPort(settings.port);
+      setEditMaxTokens(String(settings.maxTokens ?? 4096));
       setError(null);
     }
   }, [open, settings]);
@@ -217,12 +205,14 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       apiProvider: editApiProvider,
       host: editHost,
       port: editPort,
+      maxTokens: Math.max(256, parseInt(editMaxTokens, 10) || 4096),
     });
     setShowSettings(false);
   }, [
     editApiKey,
     editApiProvider,
     editHost,
+    editMaxTokens,
     editPort,
     editModel,
     editProviderModels,
@@ -291,13 +281,25 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
 
   // ── Submit Message ──────────────────────────────────────────────
   const submitMessage = useCallback(
-    async (messageText: string, options?: { hiddenFromUser?: boolean }) => {
+    async (messageText: string, options?: { hiddenFromUser?: boolean; retry?: boolean }) => {
       const trimmedMessage = messageText.trim();
       if (!trimmedMessage || loading) return;
 
+      // Fresh stop handle for this request (covers the whole pipeline,
+      // including validation retries and auto-doc re-queries).
+      const stopController = new AbortController();
+      const stopRequestId = (typeof crypto !== 'undefined' && 'randomUUID' in crypto)
+        ? crypto.randomUUID()
+        : `chat-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      stopControllerRef.current = stopController;
+      stopRequestIdRef.current = stopRequestId;
+
       const userMsg = { role: 'user' as const, content: trimmedMessage, hiddenFromUser: options?.hiddenFromUser === true };
       const previousMessages = options?.hiddenFromUser ? [] : messages;
-      const newMessages = [...previousMessages, userMsg];
+      // On retry the conversation already ends with the failed user message —
+      // reuse it as-is so the request includes the failed question in context
+      // without duplicating it.
+      const newMessages = options?.retry ? messages : [...previousMessages, userMsg];
       setMessages(newMessages);
       setInput('');
       if (inputRef.current) inputRef.current.textContent = '';
@@ -310,6 +312,8 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           model: editModel,
           apiUrl: resolvedEditApiUrl,
           apiProvider: editApiProvider,
+          requestId: stopRequestId,
+          maxTokens: Math.max(256, parseInt(editMaxTokens, 10) || 4096),
         };
 
         // Build context messages
@@ -334,12 +338,12 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         if (mentionedConfigFiles.length > 0) {
           contextMessages.push({
             role: 'system',
-            content: `The user explicitly referenced these loaded config files: ${mentionedConfigFiles.join(', ')}. Apply requested edits to those files instead of defaulting to the active text-view file. When you return cfg sections for a specific file, add a first comment line exactly like "# file: <filename>" before the changed sections. If changes span multiple files, return one separate fenced cfg block per file. To create a new file, use "# file: <newfilename>" with a filename that does not exist yet.`,
+            content: `Apply requested edits to these loaded files: ${mentionedConfigFiles.join(', ')}. Start each cfg block with a '# file: <filename>' hint line; use one separate block per file. To create a new file, use '# file: <newfilename>' with a name that does not exist yet.`,
           });
         } else if (activeFile) {
           contextMessages.push({
             role: 'system',
-            content: `If the user asks you to modify ${activeFile}, or does not name a different config file, return only the changed, new, or deleted sections for ${activeFile} inside a single fenced code block labeled cfg. Include full section headers and the full contents of each changed section. To COMMENT OUT / DISABLE a section, include its header commented out with existing params: #[extruder]. To DELETE a section entirely (remove from file), write *[section_name] on its own line inside the cfg block — the * before the bracket tells the app to remove that section. Do NOT use # for deletions: # means comment out, * means delete. Example: *[extruder]. You can mix deletion markers with normal sections in the same cfg block. If a different loaded config file is clearly requested, target that file instead and start that cfg block with a first comment line exactly like "# file: <filename>". If changes span multiple files, return one separate fenced cfg block per file. To create a new file, use "# file: <newfilename>" with a filename that does not exist yet. Do not return the entire file unless the user explicitly asks for a full replacement.`,
+            content: `Unless the user names a different file, apply edits to ${activeFile}. Return only changed, new, or deleted sections in a fenced cfg code block. Start each block with a '# file: <filename>' hint line when targeting a specific file. To create a new file, use '# file: <newfilename>'. Do not return the whole file unless the user explicitly asks for a full replacement.`,
           });
         }
 
@@ -350,85 +354,62 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         const validationConversation = [...newMessages];
 
         // First request
-        const assistantAttempt = await draftRequestMessage(chatRequestBase, requestConversation);
-
-        // Validation retry loop (config drafts)
-        const result = await draftValidationRetryLoop(
+        const assistantAttempt = await draftRequestMessage(
           chatRequestBase,
           requestConversation,
-          validationConversation,
-          assistantAttempt,
+          undefined,
+          { signal: stopController.signal },
         );
 
-        // ── Printer memory validation retry loop ─────────────────
-        // If the AI included a printer-memory block, validate it thoroughly:
-        // - JSON must parse correctly
-        // - Must be a flat object (not an array or primitive)
-        // - Only the 7 defined fields are allowed
-        // If validation fails, tell the AI what's wrong and ask for a fix.
-        let printerMemoryAttempt = result.finalMessage;
-        let printerMemoryWarnings = result.warningMessage;
-        let printerMemoryAttemptsUsed = 0;
+        // ── Unified validation retry pipeline ───────────────────
+        // Runs the config-draft validator and the printer-memory validator
+        // in sequence. Each validator decides whether the reply applies to
+        // it, what feedback to send for retries, and how to handle max
+        // attempts (throw vs. warn). Previously these were two separate
+        // retry loops with independent conversation bookkeeping.
+        const pipelineResult = await runReplyValidationPipeline({
+          requestFn: (conversation) => draftRequestMessage(
+            chatRequestBase,
+            conversation,
+            undefined,
+            { signal: stopController.signal },
+          ),
+          requestConversation,
+          validationConversation,
+          initialAttempt: assistantAttempt,
+          validators: [
+            createDraftReplyValidator(),
+            createPrinterMemoryReplyValidator(),
+          ],
+        });
 
-        while (printerMemoryAttemptsUsed < MAX_PRINTER_MEMORY_VALIDATION_ATTEMPTS) {
-          const validationResult = validatePrinterMemoryContent(printerMemoryAttempt.content);
-          if (!validationResult) break; // No printer-memory block in this message, nothing to validate
-          if (validationResult.issues.length === 0) break; // Block is valid
-
-          printerMemoryAttemptsUsed += 1;
-          if (printerMemoryAttemptsUsed >= MAX_PRINTER_MEMORY_VALIDATION_ATTEMPTS) {
-            const issueMessages = validationResult.issues
-              .map((i) => `- ${i.message}`)
-              .join('\n');
-            printerMemoryWarnings = [
-              printerMemoryWarnings,
-              `The AI returned an invalid printer-memory block after ${MAX_PRINTER_MEMORY_VALIDATION_ATTEMPTS} attempts:\n${issueMessages}`,
-            ].filter(Boolean).join('\n');
-            break;
-          }
-
-          // Build feedback telling the AI what to fix
-          const validationFeedback = buildPrinterMemoryValidationFeedback(validationResult.issues);
-
-          // Append the feedback and re-request
-          const pmRequestConversation: Array<{ role: AiChatRole; content: string }> = [
-            ...requestConversation,
-            ...result.finalConversation.map((m) => ({ role: m.role as AiChatRole, content: m.content })),
-            { role: 'user' as AiChatRole, content: validationFeedback },
-          ];
-
-          try {
-            const pmRetry = await draftRequestMessage(chatRequestBase, pmRequestConversation);
-            printerMemoryAttempt = pmRetry.assistantMessage;
-          } catch (pmErr: unknown) {
-            const pmErrorMessage = pmErr instanceof Error ? pmErr.message : 'Unknown error';
-            const issueMessages = validationResult.issues
-              .map((i) => `- ${i.message}`)
-              .join('\n');
-            printerMemoryWarnings = [
-              printerMemoryWarnings,
-              `Failed to retry after invalid printer memory block (${pmErrorMessage}):\n${issueMessages}`,
-            ].filter(Boolean).join('\n');
-            break;
-          }
-        }
-
-        if (printerMemoryWarnings) setError(printerMemoryWarnings);
-        setMessages([...newMessages, printerMemoryAttempt]);
+        if (pipelineResult.warnings) setError(pipelineResult.warnings);
+        setMessages([...newMessages, pipelineResult.finalMessage]);
         setAssistantDraftApplicableMessages({}); // Will be re-evaluated by the useEffect
       } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : 'Failed to get response.';
-        setError(message);
-        setMessages(previousMessages); // Roll back on failure
+        const stopped = stopController.signal.aborted || err instanceof api.ChatStoppedError;
+        if (stopped) {
+          // User pressed Stop — keep the user message in history, no error banner.
+          setAssistantDraftApplicableMessages({});
+        } else {
+          const message = err instanceof Error ? err.message : 'Failed to get response.';
+          setError(message);
+          // Keep the user message in history (no rollback) so a follow-up or
+          // retry sends the full conversation — including the failed question —
+          // back to the model. Previously the message was rolled back, so the
+          // model never saw what the user had asked.
+        }
       } finally {
+        stopControllerRef.current = null;
+        stopRequestIdRef.current = null;
         setLoading(false);
       }
     },
     [
       activeFile,
       attachedConfigFiles,
+      createDraftReplyValidator,
       draftRequestMessage,
-      draftValidationRetryLoop,
       setAssistantDraftApplicableMessages,
       editApiKey,
       editApiProvider,
@@ -449,18 +430,73 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     void submitMessage(input);
   }, [input, submitMessage]);
 
+  // ── Handle Stop ────────────────────────────────────────────────
+  // Abort the client fetch immediately (stops the UI wait) and tell the
+  // backend to cancel the in-flight provider calls / tool work.
+  const handleStop = useCallback(() => {
+    stopControllerRef.current?.abort();
+    const requestId = stopRequestIdRef.current;
+    if (requestId) {
+      void api.stopChat(requestId);
+    }
+  }, []);
+
+  // ── Handle Retry ────────────────────────────────────────────────
+  // Re-submit the last user message after a failure (timeout, unloaded
+  // model, API error). The stored conversation already ends with the
+  // failed message, so the retry request carries the full history — plus
+  // rebuilt config/doc context — back to the model.
+  const handleRetry = useCallback(() => {
+    const { messages: currentMessages } = useAiStore.getState();
+    const last = currentMessages[currentMessages.length - 1];
+    if (last?.role === 'user' && !loading) {
+      void submitMessage(last.content, { retry: true });
+    }
+  }, [loading, submitMessage]);
+
   // ── Chat History ────────────────────────────────────────────────
   const saveCurrentConversation = useCallback(() => {
     const { settings, messages } = useAiStore.getState();
     if (messages.length > 0) {
-      useChatHistoryStore.getState().saveConversation(messages, settings);
+      useChatHistoryStore.getState().saveConversation(
+        messages,
+        settings,
+        attachedConfigFiles.map(({ name, content }) => ({ name, content })),
+      );
     }
-  }, []);
+  }, [attachedConfigFiles]);
 
   const handleNewChatWithSave = useCallback(() => {
+    const { messages: currentMessages } = useAiStore.getState();
+    const last = currentMessages[currentMessages.length - 1];
+    // If the conversation ends with an unanswered user message (timeout,
+    // unloaded model, stop, or validation failure), offer to carry the
+    // context into the new chat instead of silently dropping it.
+    if (currentMessages.length > 0 && last?.role === 'user') {
+      setShowCarryOverPrompt(true);
+      return;
+    }
     saveCurrentConversation();
     handleNewChat();
     setAttachedConfigFiles([]);
+  }, [saveCurrentConversation, handleNewChat]);
+
+  // Carry the existing conversation into the "new" chat so the next prompt
+  // appends to it — the model keeps all prior context.
+  const handleCarryOverContext = useCallback(() => {
+    saveCurrentConversation();
+    setAssistantDraftPreview(null);
+    setAttachedConfigFiles([]);
+    setError(null);
+    setShowCarryOverPrompt(false);
+  }, [saveCurrentConversation]);
+
+  const handleStartFreshChat = useCallback(() => {
+    saveCurrentConversation();
+    handleNewChat();
+    setAttachedConfigFiles([]);
+    setError(null);
+    setShowCarryOverPrompt(false);
   }, [saveCurrentConversation, handleNewChat]);
 
   const handleLoadConversation = useCallback(
@@ -470,7 +506,15 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       setMessages(conversation.messages);
       setSettings(conversation.settings);
       setAssistantDraftPreview(null);
-      setAttachedConfigFiles([]);
+      // Restore config files that were attached during the original chat so
+      // continuing the conversation keeps the same file context.
+      setAttachedConfigFiles(
+        (conversation.attachedConfigFiles ?? []).map((file, index) => ({
+          id: `${file.name}-${index}`,
+          name: file.name,
+          content: file.content,
+        })),
+      );
     },
     [saveCurrentConversation, setMessages, setSettings],
   );
@@ -569,6 +613,8 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     setEditHost,
     editPort,
     setEditPort,
+    editMaxTokens,
+    setEditMaxTokens,
     resolvedEditApiUrl,
     onSaveSettings: handleSaveSettings,
   };
@@ -672,6 +718,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
             messages={messages}
             loading={loading}
             error={error}
+            onRetry={handleRetry}
             activeFile={activeFile}
             assistantDraftApplicableMessages={assistantDraftApplicableMessages}
             assistantDraftPreviewLoading={assistantDraftPreviewLoading}
@@ -701,6 +748,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           attachedConfigFiles={attachedConfigFiles}
           onInputChange={setInput}
           onSend={handleSend}
+          onStop={handleStop}
           onKeyDown={handleKeyDown}
           onAttachFiles={handleAttachConfigFiles}
           onRemoveAttachedFile={handleRemoveAttachedFile}
@@ -744,6 +792,37 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           proposedMemory={proposedMemory}
           onAcceptProposal={handleAcceptPrinterMemoryProposal}
         />
+      )}
+
+      {/* Interrupted-conversation carry-over prompt */}
+      {showCarryOverPrompt && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50" onClick={() => setShowCarryOverPrompt(false)}>
+          <div
+            className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[420px] p-5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="text-sm font-semibold mb-1">Your last message didn't get a response</h2>
+            <p className="text-[11px] text-[var(--color-text-secondary)] leading-relaxed mb-4">
+              The conversation was interrupted — the model may have timed out or been unloaded.
+              Keep the previous conversation so your next message still has full context, or
+              start completely fresh.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={handleStartFreshChat}
+                className="px-3 py-1.5 rounded text-xs font-medium border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
+              >
+                Start Fresh
+              </button>
+              <button
+                onClick={handleCarryOverContext}
+                className="px-3 py-1.5 rounded text-xs font-medium bg-blue-600 text-white hover:bg-blue-500 transition-colors"
+              >
+                Keep Context &amp; Continue
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

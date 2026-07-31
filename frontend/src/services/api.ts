@@ -739,13 +739,29 @@ export interface AiChatRequest {
   model?: string;
   apiUrl?: string;
   apiProvider?: string;
+  /** Client-generated id used to signal a user-initiated stop. */
+  requestId?: string;
+  /** Maximum number of tokens the provider should generate. */
+  maxTokens?: number;
 }
 
 export interface AiChatResponse {
   content?: string;
   error?: string;
+  stopped?: boolean;
   mcpToolTurns?: number;
   mcpToolNames?: string[];
+}
+
+/**
+ * Thrown when the user presses Stop and the backend confirms cancellation
+ * (or the client-side AbortController fires).
+ */
+export class ChatStoppedError extends Error {
+  constructor() {
+    super('Chat stopped by user.');
+    this.name = 'ChatStoppedError';
+  }
 }
 
 export async function listLocalModels(
@@ -777,12 +793,32 @@ export async function listLocalModels(
   }
 }
 
-export async function aiChat(req: AiChatRequest): Promise<AiChatResponse> {
+export async function aiChat(req: AiChatRequest, signal?: AbortSignal): Promise<AiChatResponse> {
   const res = await fetch('/ai/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(req),
+    signal,
   });
   if (!res.ok) throw new Error(`AI chat failed: ${res.statusText}`);
-  return res.json();
+  const data = (await res.json()) as AiChatResponse;
+  if (data.stopped) throw new ChatStoppedError();
+  return data;
+}
+
+/**
+ * Best-effort request to cancel an in-flight /ai/chat call.
+ * The client-side AbortController already stops the UI wait; this tells
+ * the backend to stop spending provider calls / tool work.
+ */
+export async function stopChat(requestId: string): Promise<void> {
+  try {
+    await fetch('/ai/chat/stop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requestId }),
+    });
+  } catch {
+    // Best-effort only — ignore network failures here.
+  }
 }

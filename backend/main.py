@@ -91,4 +91,8 @@ if __name__ == "__main__":
     import uvicorn
 
     port = int(os.environ.get("KWC_PORT", "8099"))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
+    # Reload is opt-in (KWC_RELOAD=1). The uvicorn reloader spawns a second
+    # process that can split incoming requests across two in-memory states
+    # (e.g. the AI chat stop registry), so it is disabled by default.
+    reload = os.environ.get("KWC_RELOAD", "0") == "1"
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=reload)

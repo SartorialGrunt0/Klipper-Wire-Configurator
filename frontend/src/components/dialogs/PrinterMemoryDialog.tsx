@@ -74,6 +74,21 @@ const PrinterMemoryDialog: React.FC<PrinterMemoryDialogProps> = ({
     }
   }, [proposedMemory]);
 
+  // When no proposal is active (manual edit mode), sync edits from the loaded
+  // store memory. Without this the form shows blanks on first open, because
+  // load() completes asynchronously AFTER mount and nothing ever copies the
+  // fetched values into the form. While a proposal is active, skip syncing so
+  // the AI-proposed values stay the source of truth.
+  useEffect(() => {
+    if (!proposedMemory) {
+      setEditValues((prev) => {
+        const prevStr = JSON.stringify(prev);
+        const nextStr = JSON.stringify(memory);
+        return prevStr === nextStr ? prev : { ...memory };
+      });
+    }
+  }, [memory, proposedMemory]);
+
   // Reset success message after a delay
   useEffect(() => {
     if (saveSuccess) {
