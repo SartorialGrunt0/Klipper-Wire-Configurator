@@ -697,7 +697,8 @@ def build_trident_questions() -> list[TestQuestion]:
             require_tool=False,
             criteria=(
                 ("contains", "corexy"),
-                ("regex", r"max_accel\s*:\s*15500"),
+                # Tolerate markdown formatting (e.g. `max_accel`: `15500`)
+                ("regex", r"max_accel[^0-9]{0,20}?15500"),
                 ("contains", "tmc2209"),
             ),
         ),
@@ -890,8 +891,9 @@ def build_trident_questions() -> list[TestQuestion]:
             qid="TRIDENT-13",
             title="Add + modify + delete in one file, preserve the rest",
             text=("In printer.cfg, perform all three of these edits and nothing "
-                  "else: (1) add a new [gcode_macro PARK_HEAD] section, "
-                  "(2) change [bed_mesh] probe_count from 7,7 to 5,5, "
+                  "else: (1) add a new [gcode_macro PARK_HEAD] section that "
+                  "homes the toolhead and parks it at X175 Y175 with a 20mm Z "
+                  "lift, (2) change [bed_mesh] probe_count from 7,7 to 5,5, "
                   "(3) delete the [gcode_macro RESET_ACCEL] section using "
                   "'*[gcode_macro RESET_ACCEL]'. Return them in fenced cfg code "
                   "blocks with '# file: printer.cfg' hint lines. Do not modify "
@@ -925,7 +927,9 @@ def build_trident_questions() -> list[TestQuestion]:
                 ("regex", r"#\s*file\s*:\s*printer\.cfg"),
                 ("regex", r"\[printer\]"),
                 ("regex", r"kinematics\s*:\s*corexy"),
-                ("not_contains", "coresy"),
+                # Note: no not_contains gate on the buggy value — a correct
+                # answer legitimately names it in prose while fixing it in
+                # the cfg block.
             ),
         ),
     ]
