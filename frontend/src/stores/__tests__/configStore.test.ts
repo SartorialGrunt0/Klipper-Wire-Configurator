@@ -126,9 +126,11 @@ describe('configStore file operations', () => {
     expect(useConfigStore.getState().configFiles['a.cfg']).toBeDefined();
   });
 
-  it('copyConfigFile copies the section objects (params shared by reference)', () => {
+  it('copyConfigFile deep-copies sections and params', () => {
     const store = useConfigStore.getState();
-    const section = makeSection({ params: [makeParam('serial')] });
+    const section = makeSection({
+      params: [makeParam('serial'), makeParam('baud')],
+    });
     store.setConfigFile('a.cfg', makeConfigFile([section]));
 
     useConfigStore.getState().copyConfigFile('a.cfg', 'copy.cfg');
@@ -136,7 +138,15 @@ describe('configStore file operations', () => {
     const copy = useConfigStore.getState().configFiles['copy.cfg'];
     expect(copy.filename).toBe('copy.cfg');
     expect(copy.sections[0].params[0].key).toBe('serial');
+    // Section container is a new object...
     expect(copy.sections[0]).not.toBe(section);
+    // ...and so is every param object and the params array itself
+    expect(copy.sections[0].params).not.toBe(section.params);
+    expect(copy.sections[0].params[0]).not.toBe(section.params[0]);
+    expect(copy.sections[0].params[1]).not.toBe(section.params[1]);
+    // Editing the copy must not leak into the original
+    copy.sections[0].params[0].value = '/dev/ttyACM9';
+    expect(section.params[0].value).toBe('x');
   });
 
   it('loadConfigs sets files and clears dirty state', () => {
