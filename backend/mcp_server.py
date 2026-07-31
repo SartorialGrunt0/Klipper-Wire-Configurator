@@ -230,6 +230,9 @@ class DocIndex:
                     m.group(1).strip()
                     for m in CONFIG_ALIAS_RE.finditer(section_text)
                 )
+                # The section body often repeats the header as a bare [name]
+                # line; dedupe and drop empties so 'Also known as:' stays clean.
+                aliases = list(dict.fromkeys(a for a in aliases if a))
 
                 return {
                     "section": header_name,
@@ -1493,8 +1496,20 @@ class McpServer:
         if not macro_text.strip():
             return "Please provide macro text to validate."
 
+        # Accept macros wrapped in fenced code blocks (```cfg or plain ```),
+        # which is how generate_macro_template and the chat cfg-block protocol
+        # deliver them. Validate the block content, not the surrounding fences.
+        fenced = re.findall(r"```(?:cfg|yaml|toml|text)?\s*\n(.*?)```", macro_text, re.DOTALL)
+        if fenced:
+            macro_text = "\n\n".join(block.strip() for block in fenced)
+
         issues: list[dict[str, str]] = []  # {severity, message}
         lines = macro_text.split("\n")
+        # Non-comment code lines used by several checks below so comments
+        # cannot trigger false positives.
+        code_lines = [ln.strip() for ln in lines
+                      if ln.strip() and not ln.strip().startswith("#")]
+        code_text = "\n".join(code_lines)
 
         # ── 1. Check section header ──
         header_match = re.search(r"\[gcode_macro\s+(\S+)\]", macro_text)
@@ -1536,15 +1551,17 @@ class McpServer:
             issues.append({"severity": "error", "message": f"Unbalanced {{% for %}} / {{% endfor %}} blocks ({for_opens} opens, {for_closes} closes)."})
 
         # ── 3. Save/restore state pairing ──
-        save_count = len(re.findall(r"SAVE_GCODE_STATE", macro_text))
-        restore_count = len(re.findall(r"RESTORE_GCODE_STATE", macro_text))
+        save_count = len(re.findall(r"SAVE_GCODE_STATE", code_text))
+        restore_count = len(re.findall(r"RESTORE_GCODE_STATE", code_text))
         if save_count > restore_count:
-            issues.append({"severity": "warning", "message": f"SAVE_GCODE_STATE is called {save_count} time(s) but RESTORE_GCODE_STATE is only called {restore_count} time(s). Each SAVE should have a matching RESTORE."})
-        if save_count == 0 and "G1" in macro_text:
+            issues.append({"severity": "info", "message": f"SAVE_GCODE_STATE is called {save_count} time(s) but RESTORE_GCODE_STATE is only called {restore_count} time(s) in this macro. This is expected for PAUSE-style macros whose state is restored by another macro (e.g. RESUME); otherwise add a matching RESTORE."})
+        elif restore_count > save_count:
+            issues.append({"severity": "warning", "message": f"RESTORE_GCODE_STATE is called {restore_count} time(s) without a SAVE_GCODE_STATE in this macro ({save_count} SAVE(s)). Expected for RESUME-style macros restoring state saved by another macro (e.g. PAUSE); otherwise the RESTORE will fail at runtime because no matching saved state exists."})
+        if save_count == 0 and re.search(r"\bG1\b", code_text):
             issues.append({"severity": "info", "message": "Macro performs moves but does not use SAVE_GCODE_STATE / RESTORE_GCODE_STATE. Consider wrapping state-changing operations to avoid side effects."})
 
         # ── 4. Temperature commands ──
-        temp_cmds = re.findall(r"(M104|M109|M140|M190)", macro_text)
+        temp_cmds = re.findall(r"(M104|M109|M140|M190)", code_text)
         for cmd in temp_cmds:
             # Check if S parameter is present (or a variable)
             pattern = cmd + r"\s+S"
@@ -1554,27 +1571,40 @@ class McpServer:
                 if not re.search(var_pattern, macro_text):
                     issues.append({"severity": "warning", "message": f"'{cmd}' without 'S' temperature parameter may not heat as expected. Use 'M140 S60' or 'M104 S{{TEMP}}'."})
 
-        # Check for G1 E moves without F (feedrate)
-        g1e_lines = re.findall(r"G1\s+.*E[0-9.]", macro_text, re.IGNORECASE)
-        for gl in g1e_lines[:5]:
-            if "F" not in gl.upper() and "F{" not in gl:
-                issues.append({"severity": "warning", "message": f"Extrusion move without feedrate: '{gl.strip()[:80]}'. Add F parameter to control extrusion speed."})
+        # Check for G1 E moves without F (feedrate). Inspect the whole line —
+        # a greedy regex previously cut the match at the E coordinate and
+        # missed an F parameter on the same line (e.g. 'G1 X200 Y10 Z0.4 E25 F600').
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if not re.match(r"G1\b", stripped, re.IGNORECASE):
+                continue
+            if re.search(r"\bE\s*[0-9{]", stripped, re.IGNORECASE) and \
+               not re.search(r"\bF\s*[0-9{]", stripped, re.IGNORECASE):
+                issues.append({"severity": "warning",
+                               "message": f"Extrusion move without feedrate: '{stripped[:80]}'. Add F parameter to control extrusion speed."})
 
         # ── 5. Common issues ──
-        # BED_MESH_CALIBRATE without prior G28
-        if "BED_MESH_CALIBRATE" in macro_text and "G28" not in macro_text:
-            # Check if called from another macro that might have G28
+        # BED_MESH_CALIBRATE without prior G28 (comments ignored)
+        if any("BED_MESH_CALIBRATE" in ln for ln in code_lines) and \
+           not any(re.search(r"\bG28\b", ln) for ln in code_lines):
             issues.append({"severity": "info", "message": "BED_MESH_CALIBRATE is called but this macro does not include G28. Make sure homing happens before the mesh is probed (e.g., in the calling macro or PRINT_START)."})
 
-        # G28 inside SAVE_GCODE_STATE block - can cause issues
+        # G28 inside SAVE_GCODE_STATE block - can cause issues.
+        # Track save nesting depth and ignore comments so a commented-out
+        # 'G28' or 'SAVE_GCODE_STATE' cannot trigger a false positive.
         g28_in_save = False
-        in_save_block = False
+        save_depth = 0
         for line in lines:
-            if "SAVE_GCODE_STATE" in line:
-                in_save_block = True
-            if "RESTORE_GCODE_STATE" in line:
-                in_save_block = False
-            if in_save_block and "G28" in line:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if "SAVE_GCODE_STATE" in stripped:
+                save_depth += 1
+            if "RESTORE_GCODE_STATE" in stripped:
+                save_depth = max(0, save_depth - 1)
+            if save_depth > 0 and re.search(r"\bG28\b", stripped):
                 g28_in_save = True
         if g28_in_save:
             issues.append({"severity": "warning", "message": "G28 is used between SAVE_GCODE_STATE and RESTORE_GCODE_STATE. G28 clears the coordinate system, which may make the RESTORE unreliable. Home before saving state instead."})
