@@ -37,6 +37,10 @@ Other useful flags:
                           printer memory is backed up, blanked to trigger the auto-fill
                           prompt, and restored automatically afterward
 
+Question bank: Q01-Q20 (core tools), MACRO-01..10 (macro authoring, editing,
+fixing, template options, and the individual validate_macro checks), and
+MEMORY-01..03 (printer-memory auto-fill, requires --include-memory).
+
 Stdlib only — no third-party dependencies.
 """
 
@@ -382,6 +386,183 @@ def build_questions() -> list[TestQuestion]:
             criteria=(
                 ("contains", "SAVE_CONFIG"),
                 ("regex", r"append|to the end|section"),
+            ),
+        ),
+    ]
+
+
+def build_macro_questions() -> list[TestQuestion]:
+    """Macro-focused questions: authoring, editing, fixing, template options,
+    and the individual validate_macro checks."""
+    return [
+        TestQuestion(
+            qid="MACRO-01",
+            title="Macros: create from scratch",
+            text=("Write a NEW Klipper gcode_macro from scratch named PARK_HEAD that: "
+                  "parks the toolhead at X0 Y0 with a 10mm Z lift, turns off the part "
+                  "cooling fan (M106 S0), and includes a short description line. "
+                  "Return it as a cfg block."),
+            expected_tools=("validate_macro",),
+            require_tool=False,
+            criteria=(
+                ("regex", r"\[gcode_macro\s+PARK_HEAD"),
+                ("contains", "description:"),
+                ("regex", r"G1\b[^\n]*X0|G28"),
+                ("regex", r"M106[^\n]*S0"),
+                ("regex", r"```cfg"),
+            ),
+        ),
+        TestQuestion(
+            qid="MACRO-02",
+            title="Macros: modify existing",
+            text=("Here is my current PRINT_START macro:\n\n"
+                  "```cfg\n"
+                  "[gcode_macro PRINT_START]\n"
+                  "description: Start a print\n"
+                  "\n"
+                  "gcode:\n"
+                  "    G28\n"
+                  "    G1 X150 Y150 F6000\n"
+                  "    G92 E0\n"
+                  "```\n\n"
+                  "Modify it to heat the bed to 60C (M140 S60) and run BED_MESH_CALIBRATE "
+                  "before the G1 move. Return the full updated macro as a cfg block."),
+            expected_tools=("validate_macro", "get_config_reference_section"),
+            require_tool=False,
+            criteria=(
+                ("regex", r"\[gcode_macro\s+PRINT_START"),
+                ("regex", r"M140[^\n]*S60"),
+                ("contains", "BED_MESH_CALIBRATE"),
+                ("regex", r"```cfg"),
+            ),
+        ),
+        TestQuestion(
+            qid="MACRO-03",
+            title="Macros: fix a bug",
+            text=("This macro has a bug. Fix it and return the corrected version as a "
+                  "cfg block:\n\n"
+                  "```cfg\n"
+                  "[gcode_macro FIX_ME]\n"
+                  "description: test\n"
+                  "\n"
+                  "gcode:\n"
+                  "    {% if printer.bed_mesh %}\n"
+                  "        BED_MESH_CALIBRATE\n"
+                  "    M140 S60\n"
+                  "```"),
+            expected_tools=("validate_macro",),
+            require_tool=False,
+            criteria=(
+                ("regex", r"\[gcode_macro\s+FIX_ME"),
+                ("contains", "{% endif %}"),
+                ("contains", "BED_MESH_CALIBRATE"),
+                ("regex", r"```cfg"),
+            ),
+        ),
+        TestQuestion(
+            qid="MACRO-04",
+            title="Macros: generate all templates",
+            text=("Generate PAUSE, RESUME, PRINT_END, and CANCEL_PRINT macro templates "
+                  "for me — one cfg block per macro."),
+            expected_tools=("generate_macro_template",),
+            require_tool=True,
+            criteria=(
+                ("regex", r"\[gcode_macro\s+PAUSE"),
+                ("regex", r"\[gcode_macro\s+RESUME"),
+                ("regex", r"\[gcode_macro\s+PRINT_END"),
+                ("regex", r"\[gcode_macro\s+CANCEL_PRINT"),
+            ),
+        ),
+        TestQuestion(
+            qid="MACRO-05",
+            title="Macros: custom park/retract options",
+            text=("Generate a PAUSE macro template with park position X=100 Y=150, "
+                  "Z lift 20mm, retract 3mm at 30mm/s. Return it as a cfg block."),
+            expected_tools=("generate_macro_template",),
+            require_tool=True,
+            criteria=(
+                ("regex", r"\[gcode_macro\s+PAUSE"),
+                ("regex", r"PARK_X[^\n]*100"),
+                ("regex", r"PARK_Y[^\n]*150"),
+                ("regex", r"LIFT_Z[^\n]*20"),
+                ("regex", r"RETRACT[^\n]*3\b"),
+                ("regex", r"RETRACT_SPEED[^\n]*30\b"),
+            ),
+        ),
+        TestQuestion(
+            qid="MACRO-06",
+            title="Macros: validate Jinja imbalance",
+            text=("Validate this macro and tell me what is wrong with it:\n\n"
+                  "[gcode_macro TEST]\n"
+                  "description: x\n"
+                  "\n"
+                  "gcode:\n"
+                  "    {% if printer.bed_mesh %}\n"
+                  "        G28\n"),
+            expected_tools=("validate_macro",),
+            require_tool=True,
+            criteria=(
+                ("regex", r"unbalanced|missing.{0,20}end|end.?if"),
+            ),
+        ),
+        TestQuestion(
+            qid="MACRO-07",
+            title="Macros: validate M104 without S",
+            text=("Validate this macro and report any problems:\n\n"
+                  "[gcode_macro HEAT]\n"
+                  "description: heat\n"
+                  "\n"
+                  "gcode:\n"
+                  "    M104\n"
+                  "    G28\n"),
+            expected_tools=("validate_macro",),
+            require_tool=True,
+            criteria=(
+                ("contains", "M104"),
+                ("regex", r"without\s+'?S'?|requires?\s+an?\s+[`']?S|missing.{0,20}temp"),
+            ),
+        ),
+        TestQuestion(
+            qid="MACRO-08",
+            title="Macros: validate G1 E without feedrate",
+            text=("Validate this macro and report any problems:\n\n"
+                  "[gcode_macro PRIME]\n"
+                  "description: prime\n"
+                  "\n"
+                  "gcode:\n"
+                  "    G1 X10 Y10 E5\n"),
+            expected_tools=("validate_macro",),
+            require_tool=True,
+            criteria=(
+                ("regex", r"without feedrate|feedrate"),
+            ),
+        ),
+        TestQuestion(
+            qid="MACRO-09",
+            title="Macros: validate mesh without homing",
+            text=("Validate this macro and report any problems:\n\n"
+                  "[gcode_macro MESH]\n"
+                  "description: mesh\n"
+                  "\n"
+                  "gcode:\n"
+                  "    BED_MESH_CALIBRATE\n"),
+            expected_tools=("validate_macro",),
+            require_tool=True,
+            criteria=(
+                ("contains", "G28"),
+                ("contains", "BED_MESH_CALIBRATE"),
+            ),
+        ),
+        TestQuestion(
+            qid="MACRO-10",
+            title="Macros: generate then validate",
+            text=("Generate a RESUME macro template, then validate the generated macro "
+                  "and report whether it has any issues."),
+            expected_tools=("generate_macro_template", "validate_macro"),
+            require_tool=True,
+            criteria=(
+                ("regex", r"\[gcode_macro\s+RESUME"),
+                ("regex", r"valid|issue|warning|error"),
             ),
         ),
     ]
@@ -853,7 +1034,7 @@ def main() -> int:
                              "printer memory, blank it, run MEMORY-01..03, then restore it")
     args = parser.parse_args()
 
-    questions = build_questions()
+    questions = build_questions() + build_macro_questions()
     if args.include_memory:
         questions += build_memory_questions()
     if args.list_questions:
