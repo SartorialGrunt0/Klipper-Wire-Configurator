@@ -680,7 +680,14 @@ def _extract_native_tool_calls(provider: str, data: dict) -> list[dict] | None:
                 except json.JSONDecodeError:
                     arguments = {}
             if name:
-                calls.append({"name": name, "arguments": arguments, "id": raw.get("id", "")})
+                calls.append({
+                    "name": name,
+                    "arguments": arguments,
+                    "id": raw.get("id", ""),
+                    # Gemini 3.5+ reasoning models attach a thought_signature here;
+                    # it MUST be echoed back on the follow-up or Google 400s.
+                    "extra_content": raw.get("extra_content"),
+                })
         return calls or None
     except Exception:
         return None
@@ -738,6 +745,8 @@ def _build_native_tool_followup(
                     if isinstance(call["arguments"], dict)
                     else str(call["arguments"]),
                 },
+                # Gemini 3.5+ requires the thought_signature to be echoed back.
+                **({"extra_content": call["extra_content"]} if call.get("extra_content") else {}),
             }
             for index, call in enumerate(tool_calls)
         ],

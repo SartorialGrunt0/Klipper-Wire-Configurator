@@ -449,6 +449,128 @@ def test_chat_proxy_native_tool_call_loop(monkeypatch):
     assert assistant_msg['tool_calls'][0]['function']['name'] == 'search_klipper_docs'
 
 
+# ── Google Gemini thought-signature passthrough ─────────────────────────
+# Gemini 3.5+ reasoning models attach extra_content.google.thought_signature
+# to every tool call. The backend must preserve it when echoing the assistant
+# message or Google rejects the follow-up with 400 "missing a thought_signature".
+
+
+def test_extract_native_tool_calls_preserves_google_extra_content():
+    calls = ai_routes._extract_native_tool_calls('chatgpt', {
+        'choices': [{'message': {
+            'content': None,
+            'tool_calls': [{
+                'type': 'function',
+                'id': 'N0Y5NuNL',
+                'function': {'name': 'search_klipper_docs', 'arguments': '{"query": "bed_mesh"}'},
+                'extra_content': {'google': {'thought_signature': 'sig123'}},
+            }],
+        }}],
+    })
+    assert calls is not None
+    assert calls[0]['name'] == 'search_klipper_docs'
+    assert calls[0]['id'] == 'N0Y5NuNL'
+    assert calls[0]['extra_content'] == {'google': {'thought_signature': 'sig123'}}
+
+
+def test_extract_native_tool_calls_without_extra_content_still_works():
+    calls = ai_routes._extract_native_tool_calls('chatgpt', {
+        'choices': [{'message': {
+            'tool_calls': [{
+                'type': 'function',
+                'id': 'call_1',
+                'function': {'name': 'search_klipper_docs', 'arguments': '{"query": "bed_mesh"}'},
+            }],
+        }}],
+    })
+    assert calls is not None
+    assert calls[0]['extra_content'] is None
+
+
+def test_build_native_tool_followup_echoes_extra_content():
+    messages = ai_routes._build_native_tool_followup(
+        'chatgpt',
+        '',
+        [{
+            'name': 'search_klipper_docs',
+            'arguments': {'query': 'bed_mesh'},
+            'id': 'N0Y5NuNL',
+            'extra_content': {'google': {'thought_signature': 'sig123'}},
+        }],
+        ['result text'],
+    )
+    assistant_msg = messages[0]
+    assert assistant_msg['role'] == 'assistant'
+    assert assistant_msg['tool_calls'][0]['extra_content'] == {'google': {'thought_signature': 'sig123'}}
+    assert messages[1]['role'] == 'tool'
+    assert messages[1]['tool_call_id'] == 'N0Y5NuNL'
+
+
+def test_build_native_tool_followup_omits_extra_content_when_absent():
+    messages = ai_routes._build_native_tool_followup(
+        'chatgpt',
+        '',
+        [{'name': 'search_klipper_docs', 'arguments': {'query': 'bed_mesh'}, 'id': 'call_1'}],
+        ['result text'],
+    )
+    assert 'extra_content' not in messages[0]['tool_calls'][0]
+
+
+def test_chat_proxy_native_tool_loop_preserves_google_thought_signature(monkeypatch):
+    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
+    monkeypatch.setattr(ai_routes, '_execute_tool_call', lambda call: f"result for {call['name']}")
+
+    calls = []
+
+    def fake_post(url, headers, payload):
+        calls.append(payload)
+        if len(calls) == 1:
+            # Gemini 3.5-style response: tool call WITH Google's extra_content.
+            return DummyResponse(
+                {
+                    'choices': [{
+                        'message': {
+                            'content': None,
+                            'tool_calls': [{
+                                'type': 'function',
+                                'id': 'N0Y5NuNL',
+                                'function': {'name': 'search_klipper_docs', 'arguments': '{"query": "bed_mesh"}'},
+                                'extra_content': {'google': {'thought_signature': 'sig123'}},
+                            }],
+                        }
+                    }]
+                },
+                url=url,
+            )
+        # Second response: final answer after the tool result is fed back.
+        return DummyResponse(
+            {'choices': [{'message': {'content': 'horizontal_move_z sets the Z hop before XY travel.'}}]},
+            url=url,
+        )
+
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda *args, **kwargs: FakeAsyncClient(post_handler=fake_post))
+
+    response = client.post(
+        '/ai/chat',
+        json={
+            'messages': [{'role': 'user', 'content': 'What does [bed_mesh] horizontal_move_z do?'}],
+            'apiKey': 'google-token',
+            'model': 'gemini-3.5-flash-lite',
+            'apiUrl': 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
+            'apiProvider': 'google',
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body['content'] == 'horizontal_move_z sets the Z hop before XY travel.'
+    assert body['mcpToolTurns'] == 1
+    # The follow-up payload must echo the thought_signature or Google 400s.
+    second_payload = calls[1]
+    assistant_msg = [m for m in second_payload['messages'] if m['role'] == 'assistant'][-1]
+    assert assistant_msg['tool_calls'][0]['extra_content'] == {'google': {'thought_signature': 'sig123'}}
+
+
 def test_reference_route_returns_full_klipper_doc():
     response = client.get('/api/reference/klipper-docs/Bed_Mesh.md')
 

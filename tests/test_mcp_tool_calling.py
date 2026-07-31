@@ -154,7 +154,10 @@ def test_extract_native_tool_calls_openai():
         }]
     }
     calls = _extract_native_tool_calls("openai", data)
-    assert calls == [{"name": "search_klipper_docs", "arguments": {"query": "bed_mesh"}, "id": "call_1"}]
+    assert calls == [{
+        "name": "search_klipper_docs", "arguments": {"query": "bed_mesh"}, "id": "call_1",
+        "extra_content": None,
+    }]
 
 
 def test_extract_native_tool_calls_anthropic():
@@ -187,7 +190,7 @@ def test_extract_native_tool_calls_invalid_arguments_json():
         }]
     }
     calls = _extract_native_tool_calls("openai", data)
-    assert calls == [{"name": "lookup", "arguments": {}, "id": "call_2"}]
+    assert calls == [{"name": "lookup", "arguments": {}, "id": "call_2", "extra_content": None}]
 
 
 # ── _build_native_tool_followup ─────────────────────────────────────────
