@@ -39,10 +39,11 @@ Other useful flags:
 
 Question bank: Q01-Q20 (core tools), MACRO-01..11 (macro authoring, editing,
 fixing, template options, and the individual validate_macro checks),
-TRIDENT-01..08 (real configs from reference/Trident_backup — read, edit,
-delete, and manage the actual printer.cfg/aux_fan.cfg via the draft-block
-protocol; the files are attached as read-only context and never modified),
-and MEMORY-01..03 (printer-memory auto-fill, requires --include-memory).
+TRIDENT-01..14 (real configs from reference/Trident_backup and the real
+backend/user_configs — read, edit, delete, manage, and fix the actual
+printer.cfg/aux_fan.cfg/PIS.cfg via the draft-block protocol; the files are
+attached as read-only context and never modified), and MEMORY-01..03
+(printer-memory auto-fill, requires --include-memory).
 
 Stdlib only — no third-party dependencies.
 """
@@ -622,13 +623,65 @@ def _cfg_context(*filenames: str) -> tuple[tuple[str, str, str], ...]:
     )
 
 
+# The real user-config directory the backend's search_user_configs /
+# read_user_config tools serve. Its printer.cfg genuinely differs from the
+# Trident backup: the [gcode_macro M109] macro is missing its {% endif %}
+# (unbalanced Jinja) — a real bug used by the macro error-check questions.
+BACKEND_USER_CONFIGS_DIR = REPO_ROOT / "backend" / "user_configs"
+
+
+def _load_user_config(filename: str) -> str:
+    path = BACKEND_USER_CONFIGS_DIR / filename
+    if not path.exists():
+        raise FileNotFoundError(f"Backend user config missing: {path}")
+    return path.read_text(encoding="utf-8")
+
+
+def _load_m109_bugged_printer_cfg() -> str:
+    """Real backend/user_configs/printer.cfg whose M109 macro is genuinely
+    missing {% endif %}. Guard against the fixture being fixed so the
+    error-check questions stay honest."""
+    content = _load_user_config("printer.cfg")
+    m109 = re.search(r"\[gcode_macro M109\].*?(?=\n\[gcode_macro|\Z)",
+                     content, re.DOTALL)
+    if (not m109 or "{% if s != 0 %}" not in m109.group(0)
+            or "{% endif %}" in m109.group(0)):
+        raise RuntimeError(
+            "backend/user_configs/printer.cfg no longer has the expected M109 "
+            "unbalanced-Jinja fixture; update TRIDENT-09/10."
+        )
+    return content
+
+
+def _load_kinematics_bugged_printer_cfg() -> str:
+    """Real Trident printer.cfg with one planted bug in a config section:
+    [printer] kinematics corexy -> coresy. The on-disk file is untouched —
+    only the attached test fixture carries the bug."""
+    content = _load_trident_config("printer.cfg")
+    bugged = content.replace("kinematics: corexy", "kinematics: coresy", 1)
+    if bugged == content:
+        raise RuntimeError(
+            "could not plant kinematics bug — marker not found in printer.cfg"
+        )
+    return bugged
+
+
+def _context_with(content: str,
+                   filename: str = "printer.cfg") -> tuple[tuple[str, str, str], ...]:
+    return ((filename, TRIDENT_FILE_LABEL, content),)
+
+
 def build_trident_questions() -> list[TestQuestion]:
-    """Real-file questions: read through, edit, delete, and manage the
-    actual configs in reference/Trident_backup (printer.cfg and friends).
+    """Real-file questions: read through, edit, delete, manage, and fix the
+    actual configs in reference/Trident_backup (printer.cfg, aux_fan.cfg,
+    PIS.cfg) and the real backend/user_configs/printer.cfg.
 
     The files are attached as context (never modified); every criterion
     checks the model actually engaged the real file and used the
-    draft-block protocol with correct '# file:' targeting.
+    draft-block protocol with correct '# file:' targeting. Questions
+    09-10 use the genuine unbalanced-Jinja bug in the real
+    backend/user_configs/printer.cfg M109 macro; question 14 plants one
+    kinematics typo on a real section of an attached copy.
     """
     printer_cfg = _cfg_context("printer.cfg")
     printer_and_aux = _cfg_context("printer.cfg", "aux_fan.cfg")
@@ -764,6 +817,115 @@ def build_trident_questions() -> list[TestQuestion]:
                 ("regex", r"\[bed_mesh\]"),
                 ("regex", r"probe_count\s*:\s*5,\s*5"),
                 ("regex", r"mesh_pps\s*:\s*5,\s*5"),
+            ),
+        ),
+        TestQuestion(
+            qid="TRIDENT-09",
+            title="Real macro: error-check M109",
+            text=("Read the [gcode_macro M109] macro in the provided printer.cfg "
+                  "and error-check it. Is there anything wrong with the macro "
+                  "itself? Be specific about the problem."),
+            # Real backend/user_configs/printer.cfg — its M109 genuinely
+            # lacks {% endif %} (unbalanced Jinja).
+            context_files=_context_with(_load_m109_bugged_printer_cfg()),
+            expected_tools=("validate_macro",),
+            require_tool=False,
+            criteria=(
+                ("contains", "M109"),
+                ("regex", r"unbalanced|missing.{0,30}end.?if|end.?if|{% endif %}"),
+            ),
+        ),
+        TestQuestion(
+            qid="TRIDENT-10",
+            title="Real macro: fix unbalanced Jinja in M109",
+            text=("The [gcode_macro M109] macro in the provided printer.cfg has "
+                  "a bug: its Jinja conditional is unbalanced. Fix it and return "
+                  "the corrected macro in a fenced cfg code block with a "
+                  "'# file: printer.cfg' hint line."),
+            context_files=_context_with(_load_m109_bugged_printer_cfg()),
+            expected_tools=("validate_macro",),
+            require_tool=False,
+            criteria=(
+                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
+                ("regex", r"\[gcode_macro\s+M109\]"),
+                ("contains", "{% endif %}"),
+            ),
+        ),
+        TestQuestion(
+            qid="TRIDENT-11",
+            title="Two user files: edit printer.cfg and aux_fan.cfg",
+            text=("Make two edits across two user files: in printer.cfg change "
+                  "[printer] max_accel to 12000, and in aux_fan.cfg change "
+                  "[fan_generic Aux_Fan] max_power to 0.8. Return two fenced cfg "
+                  "code blocks — one per file — each with the correct "
+                  "'# file:' hint line."),
+            context_files=_cfg_context("printer.cfg", "aux_fan.cfg"),
+            require_tool=False,
+            criteria=(
+                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
+                ("regex", r"max_accel\s*:\s*12000"),
+                ("regex", r"#\s*file\s*:\s*aux_fan\.cfg"),
+                ("regex", r"max_power\s*:\s*0\.8"),
+            ),
+        ),
+        TestQuestion(
+            qid="TRIDENT-12",
+            title="Included + non-included user files",
+            text=("In this config set, aux_fan.cfg is included by printer.cfg but "
+                  "PIS.cfg is NOT included (its include line is commented out). "
+                  "Edit aux_fan.cfg to change [fan_generic Aux_Fan] max_power to "
+                  "0.8, and edit PIS.cfg to change [resonance_tester] "
+                  "accel_per_hz to 50. Return two fenced cfg code blocks with the "
+                  "correct '# file:' hint lines."),
+            context_files=_cfg_context("printer.cfg", "aux_fan.cfg", "PIS.cfg"),
+            require_tool=False,
+            criteria=(
+                ("regex", r"#\s*file\s*:\s*aux_fan\.cfg"),
+                ("regex", r"max_power\s*:\s*0\.8"),
+                ("regex", r"#\s*file\s*:\s*PIS\.cfg"),
+                ("regex", r"accel_per_hz\s*:\s*50"),
+            ),
+        ),
+        TestQuestion(
+            qid="TRIDENT-13",
+            title="Add + modify + delete in one file, preserve the rest",
+            text=("In printer.cfg, perform all three of these edits and nothing "
+                  "else: (1) add a new [gcode_macro PARK_HEAD] section, "
+                  "(2) change [bed_mesh] probe_count from 7,7 to 5,5, "
+                  "(3) delete the [gcode_macro RESET_ACCEL] section using "
+                  "'*[gcode_macro RESET_ACCEL]'. Return them in fenced cfg code "
+                  "blocks with '# file: printer.cfg' hint lines. Do not modify "
+                  "any other content in the file."),
+            context_files=printer_cfg,
+            require_tool=False,
+            criteria=(
+                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
+                ("regex", r"\[gcode_macro\s+PARK_HEAD"),
+                ("regex", r"probe_count\s*:\s*5,\s*5"),
+                ("regex", r"\*\s*\[gcode_macro\s+RESET_ACCEL\]"),
+                # Unwanted-content gate: the reply must not contain real
+                # stepper section content (i.e. it did not dump/re-edit
+                # unrelated sections).
+                ("not_contains", "[stepper_x]\nstep_pin"),
+            ),
+        ),
+        TestQuestion(
+            qid="TRIDENT-14",
+            title="Fix issue in a real config section",
+            text=("The provided printer.cfg fails to load — the [printer] "
+                  "section has an invalid kinematics value. Find the invalid "
+                  "value and return the corrected [printer] section in a fenced "
+                  "cfg code block with a '# file: printer.cfg' hint line."),
+            # Real Trident printer.cfg with one planted bug: kinematics
+            # corexy -> coresy in [printer]. On-disk file untouched.
+            context_files=_context_with(_load_kinematics_bugged_printer_cfg()),
+            expected_tools=("validate_klipper_config",),
+            require_tool=False,
+            criteria=(
+                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
+                ("regex", r"\[printer\]"),
+                ("regex", r"kinematics\s*:\s*corexy"),
+                ("not_contains", "coresy"),
             ),
         ),
     ]
