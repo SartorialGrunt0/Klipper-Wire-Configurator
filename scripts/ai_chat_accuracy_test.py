@@ -30,6 +30,7 @@ also be passed as flags for unattended runs:
 
 Other useful flags:
     --questions 1-5,8     run only a subset of questions
+    --start N             start at question N (runs N..end); ignored when --questions is set
     --list-questions      print the question bank and exit (no API calls)
     --output-dir DIR      where to write the log (default reports/ai-chat-accuracy)
     --include-memory      also test printer-memory auto-fill (MEMORY-01..03); the backend's
@@ -838,6 +839,9 @@ def main() -> int:
     parser.add_argument("--port", default="", help="Port for openai-compatible local server")
     parser.add_argument("--max-tokens", default=0, type=int, help="Max tokens per reply")
     parser.add_argument("--questions", default="", help="Subset, e.g. '1-5,8' (1-based)")
+    parser.add_argument("--start", default=0, type=int,
+                        help="Start at question N (1-based), running N..end. "
+                             "Ignored when --questions is set.")
     parser.add_argument("--list-questions", action="store_true",
                         help="Print the question bank and exit")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR),
@@ -859,6 +863,10 @@ def main() -> int:
             tools = ",".join(q.expected_tools) if q.expected_tools else "(any/none)"
             print(f"{q.qid:<5} {tools:<45} {q.title}")
         return 0
+
+    # Validate --start before any interactive prompts so bad values fail fast.
+    if args.start and not args.questions and (args.start < 1 or args.start > len(questions)):
+        parser.error(f"--start must be between 1 and {len(questions)}")
 
     settings = resolve_settings(args)
 
@@ -897,8 +905,12 @@ def main() -> int:
         print(msg, file=sys.stderr)
         return 1
 
-    selected = parse_question_filter(args.questions, len(questions)) if args.questions \
-        else list(range(len(questions)))
+    if args.questions:
+        selected = parse_question_filter(args.questions, len(questions))
+    elif args.start:
+        selected = list(range(args.start - 1, len(questions)))
+    else:
+        selected = list(range(len(questions)))
     if not selected:
         print("No questions selected (check --questions syntax).", file=sys.stderr)
         log.close()
