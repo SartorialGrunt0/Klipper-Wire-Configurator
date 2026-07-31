@@ -195,7 +195,7 @@ def build_questions() -> list[TestQuestion]:
             expected_tools=("list_klipper_docs",),
             criteria=(
                 ("contains", "Config_Reference"),
-                ("regex", r"(?:\d+\.\s+\*\*[^*\n]+\.md\*\*\s*){4,}"),
+                ("regex", r"(?:\d+\.\s+\*\*[^*\n]+\.md\*\*[^\n]*(?:\n|$)){4,}"),
             ),
         ),
         TestQuestion(
