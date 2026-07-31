@@ -2,7 +2,7 @@
 
 Last reviewed: 2026-05-14
 
-This plan verifies the requirements captured in [requirements-specifications](requirements-specifications). It separates strict automated suites, informational automation that produces diagnostics without hard assertions, and manual scenarios that still require a running UI or real hardware.
+This plan verifies the requirements captured in [requirements-specifications.md](requirements-specifications.md). It separates strict automated suites, informational automation that produces diagnostics without hard assertions, and manual scenarios that still require a running UI or real hardware.
 
 ## Execution Model
 
