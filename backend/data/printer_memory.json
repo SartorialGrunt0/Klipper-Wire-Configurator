@@ -1,9 +1,0 @@
-{
-  "mainboard": "Fysetc Spider",
-  "toolheadBoard": "EBBCan",
-  "expanderBoards": "PIS (RP2040), Hotkey (RP2040)",
-  "printerName": "Voron Trident",
-  "kinematics": "corexy",
-  "probe": "Voron Tap",
-  "additionalNotes": "Uses host_mcu for chamber sensor; PIS used for resonance testing."
-}
