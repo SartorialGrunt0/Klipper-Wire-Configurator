@@ -63,6 +63,14 @@ interface AttachedConfigFile {
 // CONTEXT_TRUNCATION_LIMIT and truncateConfigContext live in
 // utils/chatUtils.ts — imported above to avoid duplicate definitions.
 
+// Parse the temperature edit field into a clamped sampling value.
+// Invalid input falls back to the 0.7 default; range is 0-2.
+function parseTemperature(value: string): number {
+  const parsed = parseFloat(value);
+  if (Number.isNaN(parsed)) return 0.7;
+  return Math.min(2, Math.max(0, parsed));
+}
+
 // ── Component ───────────────────────────────────────────────────────
 
 const ChatDialog: React.FC<ChatDialogProps> = ({
@@ -128,6 +136,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   const [editHost, setEditHost] = useState(settings.host);
   const [editPort, setEditPort] = useState(settings.port);
   const [editMaxTokens, setEditMaxTokens] = useState(String(settings.maxTokens ?? 4096));
+  const [editTemperature, setEditTemperature] = useState(String(settings.temperature ?? 0.7));
 
   const resolvedEditApiUrl = resolveProviderApiUrl(
     editApiProvider,
@@ -159,6 +168,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       setEditHost(settings.host);
       setEditPort(settings.port);
       setEditMaxTokens(String(settings.maxTokens ?? 4096));
+      setEditTemperature(String(settings.temperature ?? 0.7));
       setError(null);
     }
   }, [open, settings]);
@@ -206,6 +216,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       host: editHost,
       port: editPort,
       maxTokens: Math.max(256, parseInt(editMaxTokens, 10) || 4096),
+      temperature: parseTemperature(editTemperature),
     });
     setShowSettings(false);
   }, [
@@ -216,6 +227,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     editPort,
     editModel,
     editProviderModels,
+    editTemperature,
     resolvedEditApiUrl,
     setSettings,
   ]);
@@ -314,6 +326,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           apiProvider: editApiProvider,
           requestId: stopRequestId,
           maxTokens: Math.max(256, parseInt(editMaxTokens, 10) || 4096),
+          temperature: parseTemperature(editTemperature),
         };
 
         // Build context messages
@@ -413,7 +426,8 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       setAssistantDraftApplicableMessages,
       editApiKey,
       editApiProvider,
-
+      editMaxTokens,
+      editTemperature,
       editModel,
       getConfigContexts,
       loading,
@@ -615,6 +629,8 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     setEditPort,
     editMaxTokens,
     setEditMaxTokens,
+    editTemperature,
+    setEditTemperature,
     resolvedEditApiUrl,
     onSaveSettings: handleSaveSettings,
   };

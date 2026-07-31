@@ -25,6 +25,8 @@ export interface AiSettings {
   port: string;
   /** Maximum tokens the AI is allowed to generate per response. */
   maxTokens: number;
+  /** Sampling temperature for AI responses (0-2; 0.7 default). */
+  temperature: number;
 }
 
 interface PersistedAiState {
@@ -139,6 +141,7 @@ const DEFAULT_SETTINGS: AiSettings = {
   host: 'localhost',
   port: '11434',
   maxTokens: 4096,
+  temperature: 0.7,
 };
 
 export const useAiStore = create<AiState>()((set, get) => {

@@ -743,6 +743,8 @@ export interface AiChatRequest {
   requestId?: string;
   /** Maximum number of tokens the provider should generate. */
   maxTokens?: number;
+  /** Sampling temperature for the provider (0-2). Omit for provider default. */
+  temperature?: number;
 }
 
 export interface AiChatResponse {

@@ -166,6 +166,40 @@ def test_build_provider_payload_openai_with_tools():
     assert payload['tools'] == tools
 
 
+def test_build_provider_payload_openai_honors_temperature():
+    payload = ai_routes._build_provider_payload(
+        'chatgpt',
+        [{'role': 'user', 'content': 'hi'}],
+        'gpt-4o',
+        temperature=0.7,
+    )
+    assert payload['temperature'] == 0.7
+    assert payload['max_tokens'] == 4096
+
+
+def test_build_provider_payload_anthropic_includes_temperature_when_set():
+    payload = ai_routes._build_provider_payload(
+        'anthropic',
+        [{'role': 'user', 'content': 'hi'}],
+        'claude-sonnet',
+        temperature=0.5,
+    )
+    assert payload['temperature'] == 0.5
+    assert payload['max_tokens'] == 4096
+
+
+def test_build_provider_payload_anthropic_omits_temperature_by_default():
+    # Preserve historical behavior: Anthropic's own default applies when the
+    # client does not send a temperature.
+    payload = ai_routes._build_provider_payload(
+        'anthropic',
+        [{'role': 'user', 'content': 'hi'}],
+        'claude-sonnet',
+    )
+    assert 'temperature' not in payload
+    assert payload['max_tokens'] == 4096
+
+
 def test_build_provider_payload_anthropic_flattens_tools():
     tools = [{'type': 'function', 'function': {'name': 'lookup', 'description': 'd', 'parameters': {}}}]
     payload = ai_routes._build_provider_payload(

@@ -142,6 +142,9 @@ class ChatRequest(BaseModel):
     apiProvider: AiProvider = AiProvider.chatgpt
     requestId: str | None = None
     maxTokens: int = 4096
+    # Sampling temperature. None = use the provider's default for the
+    # request type (0.1 for OpenAI-compatible, Anthropic's default otherwise).
+    temperature: float | None = None
 
 
 class ChatStopRequest(BaseModel):
@@ -769,6 +772,7 @@ def _build_provider_payload(
     messages: list[dict],
     model: str,
     max_tokens: int = 4096,
+    temperature: float | None = None,
     tools: list[dict] | None = None,
 ) -> dict:
     """Build the request payload for the given provider.
@@ -793,6 +797,8 @@ def _build_provider_payload(
             "messages": filtered_messages,
             "max_tokens": max_tokens,
         }
+        if temperature is not None:
+            payload["temperature"] = temperature
         if system_parts:
             payload["system"] = "\n\n".join(system_parts)
 
@@ -809,11 +815,12 @@ def _build_provider_payload(
             ]
     else:
         # OpenAI-compatible chat providers use the standard messages format.
-        # temperature=0 makes tool call decisions more deterministic.
+        # Low temperature makes tool call decisions more deterministic;
+        # 0.1 is the historical default, overridable per request.
         payload = {
             "model": model,
             "messages": messages,
-            "temperature": 0.1,
+            "temperature": temperature if temperature is not None else 0.1,
             "max_tokens": max_tokens,
         }
         if tools:
@@ -995,7 +1002,9 @@ async def chat_proxy(req: ChatRequest):
         try:
             payload = _build_provider_payload(
                 req.apiProvider, messages, req.model,
-                max_tokens=req.maxTokens, tools=native_tools,
+                max_tokens=req.maxTokens,
+                temperature=req.temperature,
+                tools=native_tools,
             )
 
             current_content, current_data = await _query_provider(
@@ -1038,7 +1047,9 @@ async def chat_proxy(req: ChatRequest):
                         # Re-query with injected search results
                         tool_payload = _build_provider_payload(
                             req.apiProvider, current_messages, req.model,
-                            max_tokens=req.maxTokens, tools=native_tools,
+                            max_tokens=req.maxTokens,
+                            temperature=req.temperature,
+                            tools=native_tools,
                         )
                         current_content, current_data = await _query_provider(
                             client, req.apiUrl, headers, tool_payload, req.apiProvider,
@@ -1126,7 +1137,9 @@ async def chat_proxy(req: ChatRequest):
 
                 tool_payload = _build_provider_payload(
                     req.apiProvider, current_messages, req.model,
-                    max_tokens=req.maxTokens, tools=native_tools,
+                    max_tokens=req.maxTokens,
+                    temperature=req.temperature,
+                    tools=native_tools,
                 )
                 current_content, current_data = await _query_provider(
                     client, req.apiUrl, headers, tool_payload, req.apiProvider,
