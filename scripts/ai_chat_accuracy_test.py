@@ -37,9 +37,12 @@ Other useful flags:
                           printer memory is backed up, blanked to trigger the auto-fill
                           prompt, and restored automatically afterward
 
-Question bank: Q01-Q20 (core tools), MACRO-01..10 (macro authoring, editing,
-fixing, template options, and the individual validate_macro checks), and
-MEMORY-01..03 (printer-memory auto-fill, requires --include-memory).
+Question bank: Q01-Q20 (core tools), MACRO-01..11 (macro authoring, editing,
+fixing, template options, and the individual validate_macro checks),
+TRIDENT-01..08 (real configs from reference/Trident_backup — read, edit,
+delete, and manage the actual printer.cfg/aux_fan.cfg via the draft-block
+protocol; the files are attached as read-only context and never modified),
+and MEMORY-01..03 (printer-memory auto-fill, requires --include-memory).
 
 Stdlib only — no third-party dependencies.
 """
@@ -118,6 +121,12 @@ class TestQuestion:
     expected_tools: tuple[str, ...] = ()
     require_tool: bool = True
     criteria: tuple[tuple[str, str], ...] = ()
+    # Real config files to attach as system context, mirroring how the
+    # frontend attaches config files to the chat. Each entry is
+    # (filename, label, content). The model must read/answer from these
+    # rather than inventing config. Files are never modified — the chat
+    # endpoint only returns draft text.
+    context_files: tuple[tuple[str, str, str], ...] = ()
 
 
 # Shared config snippets used by several questions.
@@ -586,6 +595,180 @@ def build_macro_questions() -> list[TestQuestion]:
     ]
 
 
+# ── Real-config (Trident backup) questions ─────────────────────────────
+# These attach the real printer config files under
+# reference/Trident_backup/printer_data/config/ as chat context, exactly
+# like the frontend does when config files are loaded/attached, and force
+# the model to read, edit, delete, and manage the real files via the
+# draft-block protocol (# file: hints, *[section] deletes, #[section]
+# comment-outs). The backend /ai/chat endpoint only returns draft text —
+# it never writes these files, so the backup stays untouched.
+TRIDENT_BACKUP_DIR = (
+    REPO_ROOT / "reference" / "Trident_backup" / "printer_data" / "config"
+)
+TRIDENT_FILE_LABEL = "Klipper config file (reference/Trident_backup)"
+
+
+def _load_trident_config(filename: str) -> str:
+    path = TRIDENT_BACKUP_DIR / filename
+    if not path.exists():
+        raise FileNotFoundError(f"Trident backup config missing: {path}")
+    return path.read_text(encoding="utf-8")
+
+
+def _cfg_context(*filenames: str) -> tuple[tuple[str, str, str], ...]:
+    return tuple(
+        (name, TRIDENT_FILE_LABEL, _load_trident_config(name)) for name in filenames
+    )
+
+
+def build_trident_questions() -> list[TestQuestion]:
+    """Real-file questions: read through, edit, delete, and manage the
+    actual configs in reference/Trident_backup (printer.cfg and friends).
+
+    The files are attached as context (never modified); every criterion
+    checks the model actually engaged the real file and used the
+    draft-block protocol with correct '# file:' targeting.
+    """
+    printer_cfg = _cfg_context("printer.cfg")
+    printer_and_aux = _cfg_context("printer.cfg", "aux_fan.cfg")
+    return [
+        TestQuestion(
+            qid="TRIDENT-01",
+            title="Real file: read through printer.cfg",
+            text=("Read through the provided printer.cfg and answer from the file: "
+                  "what kinematics does it use, what is the configured max_accel, "
+                  "and which TMC driver sections are present? Name the real values "
+                  "you found in the file."),
+            context_files=printer_cfg,
+            require_tool=False,
+            criteria=(
+                ("contains", "corexy"),
+                ("regex", r"max_accel\s*:\s*15500"),
+                ("contains", "tmc2209"),
+            ),
+        ),
+        TestQuestion(
+            qid="TRIDENT-02",
+            title="Real file: edit [printer] max_accel",
+            text=("In printer.cfg the [printer] section sets max_accel to 15500. "
+                  "Change it to 12000 and return only the changed section in a "
+                  "fenced cfg code block starting with a '# file: printer.cfg' "
+                  "hint line. Validate the result."),
+            context_files=printer_cfg,
+            expected_tools=("validate_klipper_config",),
+            require_tool=False,
+            criteria=(
+                ("regex", r"```cfg"),
+                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
+                ("regex", r"\[printer\]"),
+                ("regex", r"max_accel\s*:\s*12000"),
+            ),
+        ),
+        TestQuestion(
+            qid="TRIDENT-03",
+            title="Real file: delete RESET_ACCEL macro",
+            text=("In printer.cfg there is a [gcode_macro RESET_ACCEL] section. "
+                  "Delete it entirely: write '*[gcode_macro RESET_ACCEL]' on its "
+                  "own line inside a fenced cfg code block that starts with a "
+                  "'# file: printer.cfg' hint line."),
+            context_files=printer_cfg,
+            expected_tools=("validate_klipper_config",),
+            require_tool=False,
+            criteria=(
+                ("regex", r"```cfg"),
+                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
+                ("regex", r"\*\s*\[gcode_macro\s+RESET_ACCEL\]"),
+            ),
+        ),
+        TestQuestion(
+            qid="TRIDENT-04",
+            title="Real file: comment out sensorless include",
+            text=("In printer.cfg, sensorless.cfg is currently included. Comment "
+                  "out that include line so sensorless.cfg no longer loads. Return "
+                  "the edit as a fenced cfg code block with a '# file: printer.cfg' "
+                  "hint line."),
+            context_files=printer_cfg,
+            require_tool=False,
+            criteria=(
+                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
+                ("regex", r"#\s*\[include\s+sensorless\.cfg\]"),
+            ),
+        ),
+        TestQuestion(
+            qid="TRIDENT-05",
+            title="Real file: edit aux_fan.cfg fan",
+            text=("The file aux_fan.cfg defines [fan_generic Aux_Fan] and the "
+                  "M106/M107 replacement macros. In aux_fan.cfg, change the "
+                  "Aux_Fan max_power to 0.8. Return only the changed section in a "
+                  "fenced cfg code block with a '# file: aux_fan.cfg' hint line."),
+            context_files=printer_and_aux,
+            expected_tools=("validate_klipper_config",),
+            require_tool=False,
+            criteria=(
+                ("regex", r"#\s*file\s*:\s*aux_fan\.cfg"),
+                ("regex", r"\[fan_generic\s+Aux_Fan\]"),
+                ("regex", r"max_power\s*:\s*0\.8"),
+            ),
+        ),
+        TestQuestion(
+            qid="TRIDENT-06",
+            title="Real file: create park_head.cfg + include it",
+            text=("Create a NEW file park_head.cfg containing a [gcode_macro "
+                  "PARK_HEAD] macro that homes the toolhead and parks it at "
+                  "X175 Y175 with a 20mm Z lift. Then add an "
+                  "[include park_head.cfg] line to printer.cfg. Return two fenced "
+                  "cfg code blocks — one per file — each with the correct "
+                  "'# file:' hint line."),
+            context_files=printer_cfg,
+            expected_tools=("validate_macro",),
+            require_tool=False,
+            criteria=(
+                ("regex", r"#\s*file\s*:\s*park_head\.cfg"),
+                ("regex", r"\[gcode_macro\s+PARK_HEAD"),
+                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
+                ("regex", r"\[include\s+park_head\.cfg\]"),
+            ),
+        ),
+        TestQuestion(
+            qid="TRIDENT-07",
+            title="Real file: probe tolerance grounded in docs",
+            text=("In printer.cfg the [probe] section sets samples_tolerance to "
+                  "0.008. Look up what samples_tolerance does in the Klipper "
+                  "Config_Reference, then propose changing it to 0.005 in "
+                  "printer.cfg. Return the changed section in a fenced cfg code "
+                  "block with a '# file: printer.cfg' hint line and cite the doc."),
+            context_files=printer_cfg,
+            expected_tools=("get_config_reference_section", "search_klipper_docs"),
+            require_tool=False,
+            criteria=(
+                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
+                ("regex", r"\[probe\]"),
+                ("regex", r"samples_tolerance\s*:\s*0\.005"),
+                ("contains", "samples_tolerance"),
+            ),
+        ),
+        TestQuestion(
+            qid="TRIDENT-08",
+            title="Real file: bed_mesh multi-parameter edit",
+            text=("In printer.cfg the [bed_mesh] section currently uses "
+                  "probe_count 7,7 and mesh_pps 10,10. Change probe_count to 5,5 "
+                  "and mesh_pps to 5,5. Return the full updated [bed_mesh] "
+                  "section in a fenced cfg code block with a '# file: printer.cfg' "
+                  "hint line."),
+            context_files=printer_cfg,
+            expected_tools=("validate_klipper_config",),
+            require_tool=False,
+            criteria=(
+                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
+                ("regex", r"\[bed_mesh\]"),
+                ("regex", r"probe_count\s*:\s*5,\s*5"),
+                ("regex", r"mesh_pps\s*:\s*5,\s*5"),
+            ),
+        ),
+    ]
+
+
 _MEMORY_CONFIG_SNIPPET = """[mcu]
 serial: /dev/serial/by-id/usb-Klipper_stm32f446xx_3D002B000E50505734393820-if00
 
@@ -778,6 +961,40 @@ def http_post_json(url: str, payload: dict, timeout: float, method: str = "POST"
         return json.loads(resp.read().decode("utf-8"))
 
 
+def _build_chat_messages(question: TestQuestion) -> list[dict]:
+    """Build the /ai/chat messages for a question.
+
+    When the question carries real config files (context_files), they are
+    attached as system messages in the same format the frontend uses
+    (``label: filename`` + fenced cfg block), followed by the frontend's
+    file-targeting instruction so the model returns draft cfg blocks with
+    ``# file: <filename>`` hints. Files are only attached as context —
+    the chat endpoint never writes them.
+    """
+    messages: list[dict] = []
+    for filename, label, content in question.context_files:
+        messages.append({
+            "role": "system",
+            "content": f"{label}: {filename}\n\n```cfg\n{content}\n```",
+        })
+    if question.context_files:
+        primary = question.context_files[0][0]
+        messages.append({
+            "role": "system",
+            "content": (
+                f"Unless the user names a different file, apply edits to {primary}. "
+                "Return only changed, new, or deleted sections in a fenced cfg "
+                "code block. "
+                "Start each block with a '# file: <filename>' hint line when "
+                "targeting a specific file. To create a new file, use "
+                "'# file: <newfilename>'. Do not return the whole file unless "
+                "the user explicitly asks for a full replacement."
+            ),
+        })
+    messages.append({"role": "user", "content": question.text})
+    return messages
+
+
 def chat_request(base_url: str, question: TestQuestion, settings: dict,
                  timeout: float) -> tuple[dict | None, str]:
     """POST one fresh chat dialog to /ai/chat.
@@ -786,7 +1003,7 @@ def chat_request(base_url: str, question: TestQuestion, settings: dict,
     """
     request_id = f"accuracy-{question.qid}-{int(time.time())}"
     payload = {
-        "messages": [{"role": "user", "content": question.text}],
+        "messages": _build_chat_messages(question),
         "apiKey": settings["api_key"],
         "model": settings["model"],
         "apiUrl": settings["api_url"],
@@ -862,6 +1079,10 @@ def run_one_question(
     result = QuestionResult(qid=q.qid, title=q.title, duration_s=round(duration, 1))
     log.write(f"Request: messages=[user: {q.text}] requestId=accuracy-{q.qid}-* "
               f"(apiKey redacted)")
+    if q.context_files:
+        log.write("Context files attached (read-only, never modified):")
+        for name, label, content in q.context_files:
+            log.write(f"  {name} [{label}] ({len(content)} chars)")
     log.write(f"Backend log slice ({len(log_lines)} lines):")
     for ln in log_lines:
         log.write(f"  {ln}")
@@ -1060,7 +1281,7 @@ def main() -> int:
                              "printer memory, blank it, run MEMORY-01..03, then restore it")
     args = parser.parse_args()
 
-    questions = build_questions() + build_macro_questions()
+    questions = build_questions() + build_macro_questions() + build_trident_questions()
     if args.include_memory:
         questions += build_memory_questions()
     if args.list_questions:
