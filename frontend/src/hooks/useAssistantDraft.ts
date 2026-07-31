@@ -198,13 +198,30 @@ export function useAssistantDraft(deps: {
           throw new Error('Unable to determine which config file should receive the assistant changes.');
         }
 
+        // Filter out delete markers targeting sections that don't exist
+        // in the target config file — the AI may suggest deleting a section
+        // that was already removed or never existed.
+        const targetConfig = configFiles[targetFile];
+        const filteredSections = targetConfig
+          ? assistantResult.config.sections.filter((section) => {
+              if (section.section_type !== 'delete_section') return true;
+              const targetName = section.params.find((p) => p.key === 'section')?.value?.trim();
+              if (!targetName) return false;
+              return targetConfig.sections.some((s) => s.full_header === targetName);
+            })
+          : assistantResult.config.sections;
+
+        // Skip this config block if all its delete markers were filtered
+        // out and there are no other section changes.
+        if (filteredSections.length === 0) continue;
+
         const existingTarget = groupedTargets.get(targetFile);
         if (existingTarget) {
           groupedTargets.set(targetFile, {
             ...existingTarget,
             includes: Array.from(new Set([...existingTarget.includes, ...assistantResult.config.includes])),
             header_comments: existingTarget.header_comments.length > 0 ? existingTarget.header_comments : assistantResult.config.header_comments,
-            sections: [...existingTarget.sections, ...assistantResult.config.sections],
+            sections: [...existingTarget.sections, ...filteredSections],
           });
         } else {
           groupedTargets.set(targetFile, {
@@ -212,7 +229,7 @@ export function useAssistantDraft(deps: {
             filename: targetFile,
             includes: [...assistantResult.config.includes],
             header_comments: [...assistantResult.config.header_comments],
-            sections: [...assistantResult.config.sections],
+            sections: [...filteredSections],
           });
         }
       }
