@@ -69,15 +69,17 @@ ALT_TOOL_CALL_CONTENT_RE = re.compile(
     r"<\|?tool_call\|?>\s*(.*?)(?:</?\|?tool_call\|?>|\n|$)",
     re.DOTALL,
 )
-# Matches "call tool_name{...}" or "tool_name{...}" for non-JSON tool call text
+# Matches "call tool_name{...}" or "tool_name{...}" for non-JSON tool call text.
+# Also accepts the llama.cpp/Qwen-style "call:tool_call:tool_name{...}" prefix
+# emitted inside <|tool_call|> tokens by models with native tool templates.
 CALL_SYNTAX_RE = re.compile(
-    r"(?:^|\n)\s*(?:call[\s:]?\s*)?(\w+)\s*\{(.+)\}",
+    r"(?:^|\n)\s*(?:call[\s:]?\s*)?(?:tool_call[\s:]*)?(\w+)\s*\{(.+)\}",
     re.DOTALL,
 )
 # Matches Python-style "function_name(arg1=\"val1\", arg2=123)" or
 # "function_name(arg1: \"val1\")" without curly braces
 FUNC_CALL_RE = re.compile(
-    r"(?:^|\n)\s*(?:call[\s:]?\s*)?(\w+)\s*\(" +
+    r"(?:^|\n)\s*(?:call[\s:]?\s*)?(?:tool_call[\s:]*)?(\w+)\s*\(" +
     r"(.+?)" +
     r"\)\s*(?:\n|$)",
     re.DOTALL,
@@ -85,11 +87,11 @@ FUNC_CALL_RE = re.compile(
 # Cleanup regexes for stripping bare function call text from output.
 # These match on line boundaries to avoid mangling prose.
 CALL_SYNTAX_CLEANUP_RE = re.compile(
-    r"(?:^|\n)\s*(?:call[\s:]?\s*)?\w+\s*\{[^}]*\}\s*(?=\n|$)",
+    r"(?:^|\n)\s*(?:call[\s:]?\s*)?(?:tool_call[\s:]*)?\w+\s*\{[^}]*\}\s*(?=\n|$)",
     re.DOTALL,
 )
 FUNC_CALL_CLEANUP_RE = re.compile(
-    r"(?:^|\n)\s*(?:call[\s:]?\s*)?\w+\s*\([^)]*\)\s*(?=\n|$)",
+    r"(?:^|\n)\s*(?:call[\s:]?\s*)?(?:tool_call[\s:]*)?\w+\s*\([^)]*\)\s*(?=\n|$)",
     re.DOTALL,
 )
 
@@ -491,7 +493,7 @@ def _extract_tool_calls(text: str) -> list[dict]:
         # (used by some Gemma variants)
         # ALT_TOOL_CALL_CONTENT_RE only captured first line, so read rest
         # of the tool call from the original text starting after the match.
-        name_match = re.match(r"(?:call[\s:]?\s*)?(\w+)", content)
+        name_match = re.match(r"(?:call[\s:]?\s*)?(?:tool_call[\s:]*)?(\w+)", content)
         if name_match and name_match.group(1):
             tool_name = name_match.group(1)
             # Scan subsequent lines in original text for key:value pairs

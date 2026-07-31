@@ -11,6 +11,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'backend'))
 
 from api.ai_routes import (  # noqa: E402
+    ALT_TOOL_CALL_CONTENT_RE,
+    CALL_SYNTAX_CLEANUP_RE,
+    MCP_TOOL_BLOCK_RE,
     _build_native_tool_followup,
     _build_native_tools,
     _build_tool_result_message,
@@ -46,6 +49,40 @@ def test_extract_tool_calls_native_token_call_syntax():
     text = '<|tool_call|> call search_klipper_docs{query="bed_mesh"}\n'
     calls = _extract_tool_calls(text)
     assert calls == [{"name": "search_klipper_docs", "arguments": {"query": "bed_mesh"}}]
+
+
+def test_extract_tool_calls_llamacpp_tool_call_prefix():
+    # llama.cpp native tool template (Qwen/Gemma style): the model emits
+    # call:tool_call:NAME{...} inside <|tool_call|> tokens. Previously the
+    # extra 'tool_call:' segment made the parser drop the call, so the
+    # backend treated the response as tool-less, ran the auto-search
+    # fallback, re-queried, got the same unparseable call, and finally
+    # returned empty content ("No response." in the UI).
+    text = (
+        '<|tool_call>call:tool_call:get_config_reference_section'
+        '{section_name: "bed_mesh"}<tool_call|>'
+    )
+    calls = _extract_tool_calls(text)
+    assert calls == [{
+        "name": "get_config_reference_section",
+        "arguments": {"section_name": "bed_mesh"},
+    }]
+    # The raw call text must also be fully cleanable from output using the
+    # same cleanup chain the backend applies to final content.
+    cleaned = MCP_TOOL_BLOCK_RE.sub("", text)
+    cleaned = ALT_TOOL_CALL_CONTENT_RE.sub("", cleaned)
+    cleaned = CALL_SYNTAX_CLEANUP_RE.sub("", cleaned)
+    assert cleaned.strip() == ""
+
+
+def test_extract_tool_calls_llamacpp_tool_call_prefix_with_space():
+    text = ('<|tool_call|>call:tool_call: read_klipper_doc'
+            '{doc: "Pressure_Advance.md"}<|tool_call|>')
+    calls = _extract_tool_calls(text)
+    assert calls == [{
+        "name": "read_klipper_doc",
+        "arguments": {"doc": "Pressure_Advance.md"},
+    }]
 
 
 def test_extract_tool_calls_python_style():
