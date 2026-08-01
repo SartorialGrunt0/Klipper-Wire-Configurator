@@ -18,9 +18,12 @@ if [ ! -f "$BACKEND_DIR/venv/bin/python" ]; then
     echo "Creating backend venv..."
     cd "$BACKEND_DIR"
     python3 -m venv venv
-    venv/bin/pip install -r requirements.txt
 fi
 cd "$BACKEND_DIR"
+# Refresh Python dependencies on every start so pulls that add new
+# requirements (e.g. jinja2) work without manually reinstalling.
+echo "Refreshing backend Python dependencies..."
+venv/bin/pip install -r requirements.txt
 venv/bin/python main.py &
 BACKEND_PID=$!
 
