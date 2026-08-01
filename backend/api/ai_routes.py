@@ -485,6 +485,10 @@ def _extract_tool_calls(text: str) -> list[dict]:
             name = call_match.group(1)
             args_text = call_match.group(2)
             if name:
+                recovered = _recover_tool_call(name, args_text)
+                if recovered:
+                    calls.append({"name": recovered[0], "arguments": recovered[1]})
+                    continue
                 arguments = _parse_kwargs(args_text)
                 calls.append({"name": name, "arguments": arguments})
                 continue
@@ -536,6 +540,10 @@ def _extract_tool_calls(text: str) -> list[dict]:
         name = match.group(1)
         args_text = match.group(2)
         if name:
+            recovered = _recover_tool_call(name, args_text)
+            if recovered:
+                calls.append({"name": recovered[0], "arguments": recovered[1]})
+                continue
             arguments = _parse_kwargs(args_text)
             calls.append({"name": name, "arguments": arguments})
 
@@ -559,6 +567,44 @@ def _parse_kwargs(args_text: str) -> dict:
         arg_value = arg_match.group(2).strip().strip('"').strip("'")
         arguments[arg_name] = arg_value
     return arguments
+
+
+# llama.cpp/Gemma text-protocol templates wrap tool calls in decoration
+# tokens where the visible name is NOT the tool name:
+#   call:tool{"name": "...", "arguments": {...}}   <- real name in JSON body
+#   call:tool_use_search_klipper_docs{query: ...}  <- real name in the token
+#   tool\n{"name": "...", "arguments": {...}}      <- bare 'tool' token
+# The generic parser sees name='tool' / 'tool_use_<NAME>' and the calls get
+# discarded by the hallucinated-tool guard, leaving an empty response. Recover
+# the real name before that guard runs.
+_TOOL_DECORATION_RE = re.compile(r"tool_(?:use|call)_(.+)")
+
+
+def _recover_tool_call(token: str, args_text: str) -> tuple[str, dict] | None:
+    """Recover (name, arguments) from a decorated tool-call token.
+
+    Returns None when the token is a plain tool name — the caller then falls
+    back to the generic extraction.
+    """
+    # 1) The args body is JSON with explicit name + arguments. The generic
+    #    CALL_SYNTAX_RE strips the outer braces, so try the fragment both
+    #    bare and re-wrapped.
+    for candidate in (args_text, "{" + args_text + "}"):
+        try:
+            parsed = json.loads(candidate)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(parsed, dict):
+            name = parsed.get("name")
+            arguments = parsed.get("arguments")
+            if isinstance(name, str) and name and isinstance(arguments, dict):
+                return name, arguments
+            break
+    # 2) The token embeds the name: tool_use_<NAME> / tool_call_<NAME>.
+    m = _TOOL_DECORATION_RE.match(token)
+    if m:
+        return m.group(1), _parse_kwargs(args_text)
+    return None
 
 
 def _execute_tool_call(tool_call: dict) -> str:
@@ -914,7 +960,11 @@ async def _query_provider(
             data.get("choices", [{}])[0].get("finish_reason", "N/A") if isinstance(data, dict) else "N/A",
             context,
         )
-        raise ValueError("Empty response from API. Make sure a model is loaded in your local server.")
+        # Don't raise: a transient empty completion from a local server
+        # (llama.cpp) is recoverable, and the caller's empty-response backstop
+        # re-prompts without tools before surfacing a graceful fallback. The
+        # warning above still records every empty for diagnostics.
+        return "", data
 
     return content, data
 
@@ -1226,6 +1276,13 @@ async def chat_proxy(req: ChatRequest):
                 logger.warning(
                     "Empty final content after %d tool turns (%d re-prompts)",
                     tool_turns, empty_reprompts,
+                )
+                # Never surface a blank bubble: the UI would show "No response."
+                # The re-prompt loop already burned EMPTY_REPROMPT_LIMIT queries,
+                # so return an explicit fallback the user can act on instead.
+                final_content = (
+                    "I wasn't able to generate a response. "
+                    "Please try rephrasing your question."
                 )
 
             return {

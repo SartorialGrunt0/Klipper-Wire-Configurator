@@ -253,21 +253,25 @@ def test_query_provider_extracts_anthropic_content():
     assert content == 'Anthropic answer.'
 
 
-def test_query_provider_empty_content_raises_value_error():
+def test_query_provider_empty_content_returns_empty():
+    # A literal empty completion (llama.cpp transient hiccup) must come back
+    # as an empty string, not an exception — the chat handler's backstop
+    # re-prompts without tools and recovers.
     def fake_post(url, headers, payload):
         return DummyResponse(
             {'choices': [{'message': {'content': ''}}], 'error': None},
             url=url,
         )
 
-    with pytest.raises(ValueError, match='Empty response from API'):
-        asyncio.run(ai_routes._query_provider(
-            FakeAsyncClient(post_handler=fake_post),
-            'http://localhost:1234/v1/chat/completions',
-            {},
-            {},
-            'chatgpt',
-        ))
+    content, data = asyncio.run(ai_routes._query_provider(
+        FakeAsyncClient(post_handler=fake_post),
+        'http://localhost:1234/v1/chat/completions',
+        {},
+        {},
+        'chatgpt',
+    ))
+    assert content == ''
+    assert data['choices'][0]['message']['content'] == ''
 
 
 def test_query_provider_api_error_raises_value_error():
@@ -591,10 +595,77 @@ def test_chat_proxy_empty_response_reprompt_exhausts(monkeypatch):
 
     assert response.status_code == 200
     body = response.json()
-    assert body['content'] == ''
+    # Backstop: never surface a blank bubble — return an explicit fallback so
+    # the UI doesn't show "No response."
+    assert body['content'] == (
+        "I wasn't able to generate a response. "
+        "Please try rephrasing your question."
+    )
     assert body['mcpToolTurns'] == 5
     # 1 initial + 5 tool turns + 2 re-prompts = 8 provider calls, then give up.
     assert len(calls) == 8
+
+
+def test_chat_proxy_provider_empty_recovers_via_backstop(monkeypatch):
+    # A literal empty completion from the provider (llama.cpp transient
+    # hiccup) must not surface as an API error. The auto-search fallback and
+    # the empty-response backstop both re-query; the tool-less re-prompt
+    # recovers with real text.
+    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
+    monkeypatch.setattr(
+        ai_routes, '_auto_search_context',
+        lambda query: 'Snippet: BED_MESH_CALIBRATE ADAPTIVE=1 ...',
+    )
+
+    calls = []
+
+    def fake_post(url, headers, payload):
+        calls.append(payload)
+        if len(calls) <= 2:
+            # Initial pass and the auto-search re-query: literally nothing
+            # from the server.
+            return DummyResponse(
+                {'choices': [{'message': {'content': ''}}]},
+                url=url,
+            )
+        # The tool-less backstop re-prompt finally answers directly.
+        return DummyResponse(
+            {'choices': [{'message': {
+                'content': 'horizontal_move_z sets the Z hop before XY travel.',
+            }}]},
+            url=url,
+        )
+
+    monkeypatch.setattr(
+        httpx, 'AsyncClient',
+        lambda *args, **kwargs: FakeAsyncClient(post_handler=fake_post),
+    )
+
+    response = client.post(
+        '/ai/chat',
+        json={
+            'messages': [{'role': 'user',
+                          'content': 'What does [bed_mesh] horizontal_move_z do?'}],
+            'apiKey': 'openai-token',
+            'model': 'gpt-4o',
+            'apiUrl': 'https://api.openai.com/v1/chat/completions',
+            'apiProvider': 'chatgpt',
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body['content'] == 'horizontal_move_z sets the Z hop before XY travel.'
+    # 1 initial + 1 auto-search + 1 backstop re-prompt = 3 provider calls.
+    assert len(calls) == 3
+    # The backstop re-prompt must disable tools and carry the direct-answer
+    # instruction.
+    reprompt = calls[2]
+    assert 'tools' not in reprompt
+    assert any(
+        m.get('role') == 'system' and 'Do not call any tools' in m.get('content', '')
+        for m in reprompt['messages']
+    )
 
 
 # ── Google Gemini thought-signature passthrough ─────────────────────────

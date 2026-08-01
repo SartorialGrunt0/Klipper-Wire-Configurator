@@ -85,6 +85,53 @@ def test_extract_tool_calls_llamacpp_tool_call_prefix_with_space():
     }]
 
 
+def test_extract_tool_calls_llamacpp_call_tool_json_body():
+    # llama.cpp/Gemma text protocol: the model emits call:tool{...} where
+    # 'tool' is template decoration and the real name+arguments live in the
+    # JSON body. Previously the parser kept name='tool', the hallucinated-tool
+    # guard discarded the call, and the response came back empty ("No
+    # response." in the UI) after burning both re-prompts.
+    text = ('<|tool_call|>call:tool{"arguments":{"query":"adaptive mesh"},'
+            '"name":"search_klipper_docs"}<tool_call|>')
+    calls = _extract_tool_calls(text)
+    assert calls == [{
+        "name": "search_klipper_docs",
+        "arguments": {"query": "adaptive mesh"},
+    }]
+
+
+def test_extract_tool_calls_llamacpp_tool_use_prefix():
+    # Gemma variant: call:tool_use_<NAME>{...} — the real name is embedded in
+    # the decorated token, not the visible token itself.
+    text = 'call:tool_use_search_klipper_docs{query: "adaptive mesh"}'
+    calls = _extract_tool_calls(text)
+    assert calls == [{
+        "name": "search_klipper_docs",
+        "arguments": {"query": "adaptive mesh"},
+    }]
+
+
+def test_extract_tool_calls_bare_tool_json_line():
+    # Unwrapped 'tool\n{json}' (no <|tool_call|> token) — Format 4 path.
+    text = 'tool\n{"name": "get_section_schema", "arguments": {"section_type": "bed_mesh"}}\n'
+    calls = _extract_tool_calls(text)
+    assert calls == [{
+        "name": "get_section_schema",
+        "arguments": {"section_type": "bed_mesh"},
+    }]
+
+
+def test_extract_tool_calls_call_tool_json_with_typed_args():
+    # JSON body arguments must survive as typed values (limit stays an int).
+    text = ('<|tool_call|>call:tool{"name": "search_user_configs", '
+            '"arguments": {"query": "KAMP_Settings.cfg", "limit": 1}}<tool_call|>')
+    calls = _extract_tool_calls(text)
+    assert calls == [{
+        "name": "search_user_configs",
+        "arguments": {"query": "KAMP_Settings.cfg", "limit": 1},
+    }]
+
+
 def test_extract_tool_calls_python_style():
     text = 'lookup(query="bed_mesh", limit=5)'
     calls = _extract_tool_calls(text)
