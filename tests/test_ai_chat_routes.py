@@ -668,6 +668,73 @@ def test_chat_proxy_provider_empty_recovers_via_backstop(monkeypatch):
     )
 
 
+def test_chat_proxy_local_reprompt_bumps_max_tokens(monkeypatch):
+    # Local reasoning builds (llama.cpp --reasoning-budget) can exhaust a low
+    # max_tokens invisibly and return empty content with finish_reason=length.
+    # The tool-less re-prompt must raise the budget so the answer fits.
+    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
+    monkeypatch.setattr(
+        ai_routes, '_execute_tool_call',
+        lambda call: f"result for {call['name']}",
+    )
+
+    tool_only = (
+        '<|tool_call>call:tool_call:get_config_reference_section'
+        '{section_name: "bed_mesh"}<tool_call|>'
+    )
+    calls = []
+
+    def fake_post(url, headers, payload):
+        calls.append(payload)
+        return DummyResponse(
+            {'choices': [{'message': {'content': tool_only}}]},
+            url=url,
+        )
+
+    monkeypatch.setattr(
+        httpx, 'AsyncClient',
+        lambda *args, **kwargs: FakeAsyncClient(post_handler=fake_post),
+    )
+
+    response = client.post(
+        '/ai/chat',
+        json={
+            'messages': [{'role': 'user',
+                          'content': 'What does [bed_mesh] horizontal_move_z do?'}],
+            'apiKey': 'local',
+            'model': 'gemma-4-12b',
+            'apiUrl': 'http://localhost:1234/v1/chat/completions',
+            'apiProvider': 'openai-compatible',
+            'maxTokens': 1024,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    # All responses are tool-only → backstop exhausts → graceful fallback.
+    assert body['content'] == (
+        "I wasn't able to generate a response. "
+        "Please try rephrasing your question."
+    )
+    # 1 initial + 5 tool turns + 2 re-prompts = 8 provider calls.
+    assert len(calls) == 8
+    # The two backstop re-prompts (last two calls) must disable tools via the
+    # direct-answer instruction AND raise the budget from the requested 1024
+    # to EMPTY_REPROMPT_MAX_TOKENS (4096). Earlier payloads keep the request's
+    # budget. Local providers don't use the native 'tools' key, so identify
+    # the re-prompts by their system instruction.
+    reprompts = calls[-2:]
+    assert len(reprompts) == 2
+    for p in reprompts:
+        assert p['max_tokens'] == ai_routes.EMPTY_REPROMPT_MAX_TOKENS == 4096
+        assert any(
+            m.get('role') == 'system' and 'Do not call any tools' in m.get('content', '')
+            for m in p['messages']
+        )
+    for p in calls[:-2]:
+        assert p['max_tokens'] == 1024
+
+
 # ── Google Gemini thought-signature passthrough ─────────────────────────
 # Gemini 3.5+ reasoning models attach extra_content.google.thought_signature
 # to every tool call. The backend must preserve it when echoing the assistant

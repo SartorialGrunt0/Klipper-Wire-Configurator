@@ -657,6 +657,12 @@ MAX_MCP_TOOL_TURNS = 5
 # (tool-loop exhaustion, an unparseable call format, or a final tool-only
 # response), re-prompt it without tools to force a direct text answer.
 EMPTY_REPROMPT_LIMIT = 2
+# Reasoning-enabled local builds (llama.cpp --reasoning-budget) spend part of
+# the completion budget on hidden tokens that never become visible content.
+# A low max_tokens can exhaust the whole budget invisibly and come back
+# empty with finish_reason=length. When re-prompting, give local providers
+# at least this much room so the hidden prefix + the real answer both fit.
+EMPTY_REPROMPT_MAX_TOKENS = 4096
 
 
 def _collect_tool_names(messages: list[dict]) -> list[str]:
@@ -1243,9 +1249,20 @@ async def chat_proxy(req: ChatRequest):
                         "now. Do not call any tools."
                     ),
                 })
+                # Local reasoning builds burn hidden tokens before visible
+                # text, so give the re-prompt at least EMPTY_REPROMPT_MAX_TOKENS
+                # of budget — the original limit may have been exhausted
+                # invisibly (empty content + finish_reason=length).
+                retry_max_tokens = req.maxTokens
+                if _is_local_provider(req.apiProvider):
+                    retry_max_tokens = max(req.maxTokens, EMPTY_REPROMPT_MAX_TOKENS)
+                logger.info(
+                    "Empty re-prompt budget | req=%d retry=%d provider=%s",
+                    req.maxTokens, retry_max_tokens, req.apiProvider,
+                )
                 retry_payload = _build_provider_payload(
                     req.apiProvider, current_messages, req.model,
-                    max_tokens=req.maxTokens,
+                    max_tokens=retry_max_tokens,
                     temperature=req.temperature,
                     tools=None,
                 )
