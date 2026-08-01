@@ -28,6 +28,10 @@ also be passed as flags for unattended runs:
         --provider openai-compatible --host localhost --port 1234 \
         --model llama-3.1-8b --max-tokens 4096 --base-url http://localhost:8099
 
+Cloud providers need an API key: pass --api-key, set env KWC_TEST_API_KEY,
+or answer the interactive prompt (never echoed). Keys are redacted to '***'
+in logs and are never written to output files.
+
 Other useful flags:
     --questions 1-5,8     run only a subset of questions
     --start N             start at question N (runs N..end); ignored when --questions is set
@@ -624,34 +628,25 @@ def _cfg_context(*filenames: str) -> tuple[tuple[str, str, str], ...]:
     )
 
 
-# The real user-config directory the backend's search_user_configs /
-# read_user_config tools serve. Its printer.cfg genuinely differs from the
-# Trident backup: the [gcode_macro M109] macro is missing its {% endif %}
-# (unbalanced Jinja) — a real bug used by the macro error-check questions.
-BACKEND_USER_CONFIGS_DIR = REPO_ROOT / "backend" / "user_configs"
-
-
-def _load_user_config(filename: str) -> str:
-    path = BACKEND_USER_CONFIGS_DIR / filename
-    if not path.exists():
-        raise FileNotFoundError(f"Backend user config missing: {path}")
-    return path.read_text(encoding="utf-8")
-
-
 def _load_m109_bugged_printer_cfg() -> str:
-    """Real backend/user_configs/printer.cfg whose M109 macro is genuinely
-    missing {% endif %}. Guard against the fixture being fixed so the
-    error-check questions stay honest."""
-    content = _load_user_config("printer.cfg")
+    """Trident printer.cfg with the M109 {% endif %} removed.
+
+    The real backend/user_configs/printer.cfg previously carried this
+    unbalanced-Jinja bug, but the live file was fixed — so the test now
+    plants the same bug on the reference copy. On-disk files are untouched.
+    """
+    content = _load_trident_config("printer.cfg")
     m109 = re.search(r"\[gcode_macro M109\].*?(?=\n\[gcode_macro|\Z)",
                      content, re.DOTALL)
-    if (not m109 or "{% if s != 0 %}" not in m109.group(0)
-            or "{% endif %}" in m109.group(0)):
+    if not m109 or "{% endif %}" not in m109.group(0):
         raise RuntimeError(
-            "backend/user_configs/printer.cfg no longer has the expected M109 "
-            "unbalanced-Jinja fixture; update TRIDENT-09/10."
+            "could not plant M109 bug — marker not found in printer.cfg"
         )
-    return content
+    bugged_block = m109.group(0).replace("{% endif %}\n", "", 1)
+    bugged = content.replace(m109.group(0), bugged_block, 1)
+    if bugged == content:
+        raise RuntimeError("could not plant M109 bug — replacement had no effect")
+    return bugged
 
 
 def _load_kinematics_bugged_printer_cfg() -> str:
@@ -680,9 +675,10 @@ def build_trident_questions() -> list[TestQuestion]:
     The files are attached as context (never modified); every criterion
     checks the model actually engaged the real file and used the
     draft-block protocol with correct '# file:' targeting. Questions
-    09-10 use the genuine unbalanced-Jinja bug in the real
-    backend/user_configs/printer.cfg M109 macro; question 14 plants one
-    kinematics typo on a real section of an attached copy.
+    09-10 plant an unbalanced-Jinja bug in the M109 macro of the reference
+    copy (the real user config file that once carried it was fixed);
+    question 14 plants a kinematics typo on a real section of an attached
+    copy.
     """
     printer_cfg = _cfg_context("printer.cfg")
     printer_and_aux = _cfg_context("printer.cfg", "aux_fan.cfg")
@@ -827,8 +823,8 @@ def build_trident_questions() -> list[TestQuestion]:
             text=("Read the [gcode_macro M109] macro in the provided printer.cfg "
                   "and error-check it. Is there anything wrong with the macro "
                   "itself? Be specific about the problem."),
-            # Real backend/user_configs/printer.cfg — its M109 genuinely
-            # lacks {% endif %} (unbalanced Jinja).
+            # Planted bug on the reference printer.cfg: M109 is missing its
+            # {% endif %} (unbalanced Jinja).
             context_files=_context_with(_load_m109_bugged_printer_cfg()),
             expected_tools=("validate_macro",),
             require_tool=False,
@@ -844,6 +840,7 @@ def build_trident_questions() -> list[TestQuestion]:
                   "a bug: its Jinja conditional is unbalanced. Fix it and return "
                   "the corrected macro in a fenced cfg code block with a "
                   "'# file: printer.cfg' hint line."),
+            # Same planted bug as TRIDENT-09.
             context_files=_context_with(_load_m109_bugged_printer_cfg()),
             expected_tools=("validate_macro",),
             require_tool=False,
@@ -1426,7 +1423,8 @@ def main() -> int:
                         help="AI provider (prompted if omitted)")
     parser.add_argument("--model", default="", help="Model name (prompted if omitted)")
     parser.add_argument("--api-key", default="", help="API key (prompted if omitted; "
-                        "env KWC_TEST_API_KEY also works; never logged)")
+                        "env KWC_TEST_API_KEY also works; never logged or written "
+                        "to output files)")
     parser.add_argument("--api-url", default="", help="Full API URL (openai-compatible derives from host/port)")
     parser.add_argument("--host", default="", help="Host for openai-compatible local server")
     parser.add_argument("--port", default="", help="Port for openai-compatible local server")
@@ -1605,6 +1603,27 @@ def main() -> int:
             "unknown_tool_attempts": unknown_attempts,
             "tools_missing": missing,
         }, fh, indent=2)
+
+    # Belt-and-suspenders: never let the raw API key end up in any output
+    # file (run log or results JSON), so reports/ can be shared or pushed
+    # safely. The key is redacted as '***' above; this is a final check.
+    if settings["api_key"]:
+        leaked: list[str] = []
+        for p in (log_path, results_path):
+            try:
+                raw = p.read_text(encoding="utf-8", errors="replace")
+                if settings["api_key"] in raw:
+                    leaked.append(str(p))
+            except OSError:
+                pass
+        if leaked:
+            msg = ("SECURITY: raw API key found in output file(s): "
+                   + ", ".join(leaked)
+                   + ". Delete these files before sharing or pushing.")
+            log.write(msg)
+            print(msg, file=sys.stderr)
+            log.close()
+            return 3
 
     log.close()
 
