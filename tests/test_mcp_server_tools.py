@@ -116,6 +116,39 @@ def test_doc_index_search_empty_query(tmp_path):
     assert index.search("   ") == []
 
 
+def test_doc_index_search_underscore_space_synonyms(tmp_path):
+    _make_doc(tmp_path, "Bed_Mesh.md", "# Bed Mesh\n\n" + "horizontal_move_z " * 30)
+    _make_doc(tmp_path, "Probe.md", "# Probe\n\nno matching words here")
+    index = _index_for(tmp_path)
+
+    # Natural-language spacing must match the joined config term.
+    results = index.search("horizontal move z", limit=10)
+    assert results
+    assert results[0]["filename"] == "Bed_Mesh.md"
+
+
+def test_doc_index_search_plural_fold(tmp_path):
+    _make_doc(tmp_path, "Probe.md", "# Probe\n\nThe probe z_offset is calibrated. Probes measure offsets.\n")
+    _make_doc(tmp_path, "Bed_Mesh.md", "# Bed Mesh\n\nno matching words here")
+    index = _index_for(tmp_path)
+
+    # Plural query forms must fold onto singular index terms (and vice versa).
+    results = index.search("probe z offsets", limit=10)
+    assert results
+    assert results[0]["filename"] == "Probe.md"
+
+
+def test_doc_index_search_alias_map(tmp_path):
+    _make_doc(tmp_path, "Endstop.md", "# Endstop\n\nThe end_stop pin is configured.\n")
+    _make_doc(tmp_path, "Probe.md", "# Probe\n\nno matching words here")
+    index = _index_for(tmp_path)
+
+    # Unseparated human spelling must match the joined config term.
+    results = index.search("endstop", limit=10)
+    assert results
+    assert results[0]["filename"] == "Endstop.md"
+
+
 def test_doc_index_read_doc_pagination(tmp_path):
     content = "A" * 100 + "B" * 100
     _make_doc(tmp_path, "Bed_Mesh.md", content)

@@ -64,6 +64,39 @@ CONFIG_SECTION_HEADER_RE = re.compile(r"^### \[([^\]]+)\]\s*$", re.MULTILINE)
 CONFIG_ALIAS_RE = re.compile(r"^\[([^\]]+)\]\s*$", re.MULTILINE)
 HEADING_RE = re.compile(r"^##?\s+(.+)$", re.MULTILINE)
 
+# Word-level synonyms mapping common human spellings to canonical config
+# terms. Applied symmetrically at index + query time so both directions
+# converge (a doc containing "end_stop" and a query "endstop" both emit
+# [end, stop]). Keep entries minimal and justify each from a real gap.
+ALIAS_MAP: dict[str, tuple[str, ...]] = {
+    "endstop": ("end_stop", "end-stop", "end stop"),
+    "bltouch": ("bl_touch", "bl-touch", "bl touch"),
+    "zoff": ("z_offset", "z-offset", "z offset"),
+    "z_off": ("z_offset",),
+}
+
+# Common irregular plurals that naive suffix-stripping gets wrong.
+_IRREGULAR_PLURALS = {
+    "axes": "axis",
+    "feet": "foot",
+    "teeth": "tooth",
+}
+
+
+def _fold_plural(word: str) -> str:
+    """Best-effort singular form for retrieval (symmetric, ranking-only)."""
+    if len(word) < 5:
+        return word
+    if word in _IRREGULAR_PLURALS:
+        return _IRREGULAR_PLURALS[word]
+    if word.endswith("ies") and len(word) > 5:
+        return word[:-3] + "y"
+    if word.endswith(("ses", "xes", "zes", "ches", "shes")):
+        return word[:-2]
+    if word.endswith("s") and not word.endswith(("ss", "us", "is")):
+        return word[:-1]
+    return word
+
 
 # ══════════════════════════════════════════════════════════════════════
 #  Search Engine
@@ -243,11 +276,23 @@ class DocIndex:
         return None
 
     def _tokenize(self, text: str) -> list[str]:
-        """Split text into lowercase alphanumeric tokens, filtering stop words."""
-        return [
-            t for t in re.findall(r"[a-z0-9_\-]{2,}", text.lower())
-            if t not in STOP_WORDS and not t.isdigit()
-        ]
+        """Split text into word tokens (underscores/hyphens become separators),
+        adding folded plurals and alias variants so natural-language queries
+        match joined config terms (e.g. "probe offset" -> probe_offset)."""
+        tokens: list[str] = []
+        for t in re.findall(r"[a-z0-9]{2,}", text.lower()):
+            if t in STOP_WORDS or t.isdigit():
+                continue
+            tokens.append(t)
+            folded = _fold_plural(t)
+            if folded != t:
+                tokens.append(folded)
+            for alias in ALIAS_MAP.get(t, ()):
+                tokens.extend(
+                    a for a in re.findall(r"[a-z0-9]{2,}", alias.lower())
+                    if a not in STOP_WORDS and not a.isdigit()
+                )
+        return tokens
 
     def _make_snippet(self, content: str, query: str) -> str:
         """Extract a relevant snippet around the first query match."""
