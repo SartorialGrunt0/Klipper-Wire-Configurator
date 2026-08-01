@@ -310,6 +310,17 @@ fi
 # shellcheck disable=SC1091
 source venv/bin/activate
 
+# --- Ensure 32-bit ARM wheels are available (piwheels fallback) ---
+# markupsafe (jinja2's dependency) ships no official armv7l wheels; Raspberry
+# Pi OS configures piwheels by default, but minimal images may not. When pip
+# has no index pointing at piwheels, add it as a fallback so the Pi 3B/4
+# 32-bit install does not try to build markupsafe from source (needs a Rust
+# toolchain not present on stock images).
+if ! pip config list 2>/dev/null | grep -qi piwheels; then
+    export PIP_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL:+$PIP_EXTRA_INDEX_URL }https://www.piwheels.org/simple"
+    info "Added piwheels index for ARM wheel availability."
+fi
+
 info "Installing Python dependencies..."
 pip install --upgrade pip
 pip install -r backend/requirements.txt
