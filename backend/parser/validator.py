@@ -15,6 +15,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
+import jinja2
+
 from parser.config_parser import ConfigFile, ConfigSection
 from parser.config_schema import (
     SECTION_DEFS,
@@ -320,6 +322,72 @@ def _append_special_temperature_sensor_errors(
                 ))
 
 
+# Klipper's own macro template environment (klippy/extras/gcode_macro.py):
+# custom single-brace variable delimiters. Parsing gcode bodies with the
+# same engine flags unbalanced {% if %}/{% endif %}, {% for %}/{% endfor %},
+# {% raw %}/{% endraw %}, and other template syntax errors exactly as Klippy
+# would when loading the macro.
+_MACRO_JINJA_ENV = jinja2.Environment("{%", "%}", "{", "}")
+
+# Section types whose gcode bodies are Jinja templates evaluated by Klipper.
+_MACRO_TEMPLATE_SECTIONS = frozenset({"gcode_macro", "delayed_gcode"})
+
+
+def _strip_inline_comments(body: str) -> str:
+    """Mirror Klipper's config parsing before templates reach jinja2.
+
+    Two passes, matching how Klippy actually reads a config:
+    1. klippy/configfile.py _parse_config strips from the first '#' on every
+       line unconditionally (community macros write '#' as \\x23 inside jinja
+       strings to survive this, e.g. sample-macros.cfg M117).
+    2. configparser inline_comment_prefixes=(';', '#') strips ';' only when
+       preceded by whitespace or at line start — so 'split(\\';\\', 1)' inside
+       a jinja expression is preserved while 'G28 ; home' is not.
+    """
+    stripped_lines = []
+    for line in body.split("\n"):
+        hash_pos = line.find("#")
+        if hash_pos >= 0:
+            line = line[:hash_pos]
+        semi_match = re.search(r"(?:^|\s);", line)
+        if semi_match:
+            line = line[: semi_match.start() + 1]
+        stripped_lines.append(line)
+    return "\n".join(stripped_lines)
+
+
+def _validate_macro_jinja(section: ConfigSection, result: ValidationResult) -> None:
+    """Validate a gcode_macro / delayed_gcode body as a Klipper Jinja template.
+
+    Catches structural template errors (dropped {% endif %}, unbalanced
+    {% for %}/{% endfor %}, malformed blocks) that a plain config parser
+    cannot see because the gcode body is opaque text to it. Uses the same
+    jinja2 environment Klipper builds for macros, so valid Klipper
+    single-brace syntax ({printer.x}) is accepted.
+    """
+    gcode_param = section.get_param("gcode")
+    if gcode_param is None:
+        return
+    body = gcode_param.value
+    if not body.strip():
+        return
+    try:
+        # Klipper strips inline #/; comments from every config line before
+        # the body is templated; do the same so community comment styles do
+        # not false-positive.
+        _MACRO_JINJA_ENV.from_string(_strip_inline_comments(body))
+    except jinja2.exceptions.TemplateSyntaxError as exc:
+        # exc.lineno is 1-indexed within the gcode body, which starts on the
+        # line after the 'gcode:' key.
+        result.errors.append(ValidationError(
+            severity="error",
+            section=section.full_header,
+            param="gcode",
+            message=f"Jinja template error in macro: {exc.message}",
+            line_number=gcode_param.line_number + exc.lineno,
+        ))
+
+
 def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> ValidationResult:
     """Validate a full configuration file."""
     result = ValidationResult()
@@ -353,6 +421,12 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
 
         if _is_suppressed_for_validation(section, sec_def.category if sec_def else None):
             continue
+
+        # Validate gcode_macro / delayed_gcode bodies as Klipper Jinja
+        # templates so dropped {% endif %} and similar structural errors are
+        # caught in the graph/text editors and the AI draft retry loop.
+        if sec_type in _MACRO_TEMPLATE_SECTIONS:
+            _validate_macro_jinja(section, result)
 
         defined_sections.add(section.full_header)
 
