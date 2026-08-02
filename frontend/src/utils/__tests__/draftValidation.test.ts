@@ -113,7 +113,7 @@ describe('formatting', () => {
     expect(text).toContain('- [mcu] serial: missing serial');
   });
 
-  it('builds feedback with the invalid content quoted', () => {
+  it('builds feedback WITHOUT quoting the invalid content (Phase 4 anti-copy)', () => {
     const feedback = buildAssistantDraftValidationFeedback(
       [{ filename: 'a.cfg', errors: [error()] }],
       '[mcu]\nserial: x\n',
@@ -121,8 +121,10 @@ describe('formatting', () => {
     );
     expect(feedback).toContain('Your cfg changes failed validation');
     expect(feedback).toContain('[mcu] serial: missing serial');
-    expect(feedback).toContain('[mcu]');
-    expect(feedback).toContain('serial: x');
+    // The broken draft must NOT be echoed back — models copy it verbatim.
+    expect(feedback).not.toContain('serial: x');
+    expect(feedback).not.toContain('Previous invalid reply');
+    expect(feedback).toContain('Do NOT copy or repeat your previous reply');
   });
 
   it('uses explanation-only variant when allowed', () => {
@@ -150,7 +152,7 @@ describe('formatting', () => {
     expect(withIssues).toContain('[mcu] serial: missing serial');
   });
 
-  it('exposes the max attempts constant', () => {
-    expect(MAX_ASSISTANT_DRAFT_VALIDATION_ATTEMPTS).toBe(3);
+  it('exposes the max attempts constant (fail fast: one repair attempt)', () => {
+    expect(MAX_ASSISTANT_DRAFT_VALIDATION_ATTEMPTS).toBe(2);
   });
 });

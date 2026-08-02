@@ -8,7 +8,7 @@ import type { ValidationError, ValidationResult } from '../types/config';
 
 // ── Constants ───────────────────────────────────────────────────────
 
-export const MAX_ASSISTANT_DRAFT_VALIDATION_ATTEMPTS = 3;
+export const MAX_ASSISTANT_DRAFT_VALIDATION_ATTEMPTS = 2;
 export const MAX_ASSISTANT_HINT_USER_MESSAGES = 3;
 
 const RETRY_EXEMPT_DUPLICATE_SECTION_RE = /^Section \[[^\]]+\] (?:can only be defined once(?: across active included config files)?\.|is reused across active included config files\.)(?: Also defined in: .+)?$/;
@@ -114,17 +114,16 @@ export function buildAssistantDraftValidationFeedback(
     'Your cfg changes failed validation after merging into the current project.',
     'Return a corrected replacement reply that fixes every problem below and still satisfies the user request.',
     'If you return config changes, return only changed content inside fenced cfg code blocks and keep any required "# file: <filename>" hint. To edit an existing section use a mini-diff (section header plus only the changed lines, "-" removed / "+" added with original indentation); unchanged lines are preserved automatically. To add a new section, write it in full.',
+    // Phase 4: never quote the previous reply — models copy it verbatim and
+    // regenerate the broken draft. The anti-copy directive + the mini-diff
+    // protocol (which only accepts changed lines) break that loop.
+    'Do NOT copy or repeat your previous reply. Emit a fresh mini-diff with ONLY the corrected lines.',
     allowExplanationOnly
       ? 'If the remaining problems are duplicate sections or reused pins and you cannot resolve them safely from the current config, do not return another invalid cfg block. Instead, clearly explain the conflict, mention the exact section or pin involved, and say what must change before a valid config can be produced.'
       : 'Do not ask the user to apply manual fixes for these validation issues.',
     '',
     'Validation problems to fix:',
     formattedIssues,
-    '',
-    'Previous invalid reply:',
-    '````text',
-    invalidContent.trim() || 'No content returned.',
-    '````',
   ].join('\n');
 }
 
