@@ -216,9 +216,18 @@ def _build_reference_lookup_query(messages: list[dict]) -> str:
     return combined[-1800:]
 
 
-def _is_local_provider(provider: str) -> bool:
-    """Check if the provider is a local server (OpenAI Compatible)."""
-    return provider == "openai-compatible"
+def _is_local_provider(provider: str, api_url: str = "") -> bool:
+    """Check if the provider is a local server (OpenAI Compatible).
+
+    OpenAI-compatible endpoints on plain http are local servers (LM Studio,
+    Ollama, llama.cpp on the LAN): auth optional, text-based ```tool
+    protocol. https endpoints are cloud OpenAI-compatible APIs (DeepSeek,
+    OpenRouter, Groq, ...): they get the cloud treatment — required API key
+    and native function calling.
+    """
+    if provider != "openai-compatible":
+        return False
+    return not api_url.strip().lower().startswith("https://")
 
 
 def _get_openai_compatible_default_url(provider: str) -> str:
@@ -1048,7 +1057,7 @@ async def chat_proxy(req: ChatRequest):
     )
 
     # Local providers don't require an API key
-    if not _is_local_provider(req.apiProvider) and not req.apiKey:
+    if not _is_local_provider(req.apiProvider, req.apiUrl) and not req.apiKey:
         return {"error": "AI settings not configured. Please configure your API key in settings."}
 
     # Build headers based on provider
@@ -1059,7 +1068,7 @@ async def chat_proxy(req: ChatRequest):
             "anthropic-version": "2023-06-01",
             "Content-Type": "application/json",
         }
-    elif _is_local_provider(req.apiProvider):
+    elif _is_local_provider(req.apiProvider, req.apiUrl):
         # LM Studio and Ollama: auth optional, include key if provided
         headers = {
             "Content-Type": "application/json",
@@ -1075,7 +1084,7 @@ async def chat_proxy(req: ChatRequest):
 
     # Native function calling for cloud providers only; local providers keep
     # the text-based ```tool protocol since local tool support varies.
-    native_tools = None if _is_local_provider(req.apiProvider) else _build_native_tools()
+    native_tools = None if _is_local_provider(req.apiProvider, req.apiUrl) else _build_native_tools()
 
     # ── Stop-event registration ──
     stop_event = None
@@ -1289,7 +1298,7 @@ async def chat_proxy(req: ChatRequest):
                 # of budget — the original limit may have been exhausted
                 # invisibly (empty content + finish_reason=length).
                 retry_max_tokens = req.maxTokens
-                if _is_local_provider(req.apiProvider):
+                if _is_local_provider(req.apiProvider, req.apiUrl):
                     retry_max_tokens = max(req.maxTokens, EMPTY_REPROMPT_MAX_TOKENS)
                 logger.info(
                     "Empty re-prompt budget | req=%d retry=%d provider=%s",

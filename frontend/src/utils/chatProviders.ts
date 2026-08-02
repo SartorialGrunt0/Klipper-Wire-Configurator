@@ -59,7 +59,7 @@ export const PROVIDER_DEFAULTS: Record<AiProvider, ProviderInfo> = {
   },
   'openai-compatible': {
     label: 'OpenAI Compatible',
-    defaultUrl: 'http://localhost:11434/api/chat',
+    defaultUrl: 'http://localhost:11434/v1/chat/completions',
     requiresKey: false,
     defaultHost: 'localhost',
     defaultPort: '11434',
@@ -72,6 +72,11 @@ export const PROVIDER_DEFAULTS: Record<AiProvider, ProviderInfo> = {
 export const isLocalProvider = (provider: AiProvider): boolean =>
   provider === 'openai-compatible';
 
+/** True when the URL points at a cloud (https) OpenAI-compatible API. */
+export function isHttpsUrl(url: string): boolean {
+  return url.trim().toLowerCase().startsWith('https://');
+}
+
 export function buildLocalProviderApiUrl(host: string, port: string): string {
   return `http://${host}:${port}/v1/chat/completions`;
 }
@@ -83,6 +88,13 @@ export function resolveProviderApiUrl(
   port: string,
 ): string {
   if (provider === 'openai-compatible') {
+    // An explicit API URL wins (covers cloud OpenAI-compatible providers
+    // like DeepSeek, OpenRouter, Groq). Host/port is only the quick local
+    // entry path used when no URL has been entered yet.
+    const trimmed = apiUrl.trim();
+    if (trimmed) {
+      return trimmed.replace(/\/+$/, '');
+    }
     return buildLocalProviderApiUrl(host, port);
   }
   return apiUrl;

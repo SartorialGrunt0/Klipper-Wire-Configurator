@@ -13,6 +13,8 @@ import * as api from '../../services/api';
 import {
   PROVIDER_OPTIONS,
   PROVIDER_DEFAULTS,
+  buildLocalProviderApiUrl,
+  isHttpsUrl,
   isLocalProvider,
   resolveProviderApiUrl,
 } from '../../utils/chatProviders';
@@ -76,7 +78,11 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
     apiUrl: string = resolvedEditApiUrl,
     apiKey: string = editApiKey,
   ) => {
-    if (!isLocalProvider(provider)) {
+    // Model discovery only makes sense against a local server we can reach
+    // from the browser. Cloud OpenAI-compatible endpoints (https) would
+    // CORS-fail and leak the key as a query param — the model field is a
+    // plain text input for those instead.
+    if (!isLocalProvider(provider) || isHttpsUrl(apiUrl)) {
       setAvailableModels([]);
       return;
     }
@@ -132,7 +138,7 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
     const modelToUse = editModel.trim() || providerDefaultModel || settings.model;
     setEditModel(modelToUse);
     if (isLocalProvider(provider)) {
-      setEditApiUrl('');
+      setEditApiUrl(buildLocalProviderApiUrl(editHost, editPort));
     } else {
       setEditApiUrl(PROVIDER_DEFAULTS[provider].defaultUrl);
     }
@@ -140,7 +146,9 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
 
   const isSaveEnabled = !providerRequiresApiKey(editApiProvider) || !!editApiKey.trim();
   const hasSelectedModel = !!editModel.trim();
-  const showLocalFields = isLocalProvider(editApiProvider);
+  // Host/port quick-entry only applies to local http servers; an https URL
+  // means a cloud OpenAI-compatible API (model field becomes free text).
+  const showLocalFields = isLocalProvider(editApiProvider) && !isHttpsUrl(editApiUrl);
 
   // ── Shared Input Fields ────────────────────────────────────────────
 
@@ -207,7 +215,7 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
     </div>
   );
 
-  const apiUrlField = !showLocalFields ? (
+  const apiUrlField = (
     <div>
       <label className="block text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-1.5">
         API URL
@@ -217,10 +225,12 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
         className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
         value={editApiUrl}
         onChange={(e) => setEditApiUrl(e.target.value)}
-        placeholder="https://api.openai.com/v1/chat/completions"
+        placeholder={isLocalProvider(editApiProvider)
+          ? 'http://localhost:11434/v1/chat/completions — or https://api.deepseek.com/v1/chat/completions'
+          : 'https://api.openai.com/v1/chat/completions'}
       />
     </div>
-  ) : null;
+  );
 
   const hostPortFields = showLocalFields ? (
     <>
@@ -232,7 +242,9 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
             className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
             value={editHost}
             onChange={(e) => {
-              setEditHost(e.target.value);
+              const nextHost = e.target.value;
+              setEditHost(nextHost);
+              setEditApiUrl(buildLocalProviderApiUrl(nextHost, editPort));
               setModelsError(null);
               if (modelsFetchTimerRef.current) clearTimeout(modelsFetchTimerRef.current);
               modelsFetchTimerRef.current = setTimeout(() => {
@@ -249,7 +261,9 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
             className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
             value={editPort}
             onChange={(e) => {
-              setEditPort(e.target.value);
+              const nextPort = e.target.value;
+              setEditPort(nextPort);
+              setEditApiUrl(buildLocalProviderApiUrl(editHost, nextPort));
               setModelsError(null);
               if (modelsFetchTimerRef.current) clearTimeout(modelsFetchTimerRef.current);
               modelsFetchTimerRef.current = setTimeout(() => {
@@ -281,7 +295,9 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
       <p className="text-[10px] text-[var(--color-text-secondary)] mt-1">
         {providerRequiresApiKey(editApiProvider)
           ? 'Your API key is stored only in your browser'
-          : 'Optional — only needed if your local server requires authentication'}
+          : isLocalProvider(editApiProvider)
+            ? 'Optional for local servers — required for cloud APIs (DeepSeek, OpenRouter, ...)'
+            : 'Optional — only needed if your local server requires authentication'}
       </p>
     </div>
   );

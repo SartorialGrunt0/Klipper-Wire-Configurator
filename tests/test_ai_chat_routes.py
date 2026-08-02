@@ -372,6 +372,21 @@ def test_build_api_base_url():
     assert ai_routes._build_api_base_url('') == ''
 
 
+def test_is_local_provider():
+    # Local OpenAI-compatible servers use plain http.
+    assert ai_routes._is_local_provider('openai-compatible', 'http://192.168.1.133:8080/v1/chat/completions') is True
+    assert ai_routes._is_local_provider('openai-compatible', 'http://localhost:11434/v1/chat/completions') is True
+    # Cloud OpenAI-compatible APIs (DeepSeek, OpenRouter, ...) are https and
+    # get the cloud treatment: required API key + native function calling.
+    assert ai_routes._is_local_provider('openai-compatible', 'https://api.deepseek.com/v1/chat/completions') is False
+    assert ai_routes._is_local_provider('openai-compatible', 'HTTPS://api.deepseek.com/v1/chat/completions') is False
+    # Other providers are never local.
+    assert ai_routes._is_local_provider('chatgpt', 'http://localhost:1234/v1/chat/completions') is False
+    assert ai_routes._is_local_provider('chatgpt') is False
+    # Blank URL defaults to local treatment (backward compatible).
+    assert ai_routes._is_local_provider('openai-compatible') is True
+
+
 def test_extract_provider_content():
     assert ai_routes._extract_provider_content('chatgpt', {'choices': [{'message': {'content': 'x'}}]}) == 'x'
     assert ai_routes._extract_provider_content('anthropic', {'content': [{'text': 'y'}]}) == 'y'
@@ -403,6 +418,65 @@ def test_chat_proxy_requires_api_key_for_remote_provider():
     assert response.json() == {
         'error': 'AI settings not configured. Please configure your API key in settings.'
     }
+
+
+def test_chat_proxy_cloud_openai_compatible_requires_api_key():
+    # Cloud OpenAI-compatible endpoints (https) must carry an API key, just
+    # like the other cloud providers.
+    response = client.post(
+        '/ai/chat',
+        json={
+            'messages': [{'role': 'user', 'content': 'Explain pressure advance.'}],
+            'apiKey': '',
+            'model': 'deepseek-chat',
+            'apiUrl': 'https://api.deepseek.com/v1/chat/completions',
+            'apiProvider': 'openai-compatible',
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        'error': 'AI settings not configured. Please configure your API key in settings.'
+    }
+
+
+def test_chat_proxy_local_openai_compatible_allows_missing_key(monkeypatch):
+    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
+    monkeypatch.setattr(ai_routes, '_auto_search_context', lambda query: None)
+
+    captured = {}
+
+    def fake_post(url, headers, payload):
+        captured['url'] = url
+        captured['headers'] = headers
+        return DummyResponse(
+            {'choices': [{'message': {'content': 'LM Studio answer.'}}]},
+            url=url,
+        )
+
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda *args, **kwargs: FakeAsyncClient(post_handler=fake_post))
+
+    response = client.post(
+        '/ai/chat',
+        json={
+            'messages': [{'role': 'user', 'content': 'Hi'}],
+            'apiKey': '',
+            'model': 'gemma-4-12b',
+            'apiUrl': 'http://192.168.1.133:8080/v1/chat/completions',
+            'apiProvider': 'openai-compatible',
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        'content': 'LM Studio answer.',
+        'mcpToolTurns': 0,
+        'mcpToolNames': [],
+    }
+    # The local URL is POSTed verbatim and no Authorization header is added
+    # when no key was provided.
+    assert captured['url'] == 'http://192.168.1.133:8080/v1/chat/completions'
+    assert 'Authorization' not in captured['headers']
 
 
 def test_chat_proxy_returns_plain_content(monkeypatch):

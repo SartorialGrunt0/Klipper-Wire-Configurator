@@ -4,6 +4,7 @@ import {
   PROVIDER_OPTIONS,
   buildLocalProviderApiUrl,
   getProviderModel,
+  isHttpsUrl,
   isLocalProvider,
   resolveProviderApiUrl,
 } from '@/utils/chatProviders';
@@ -43,9 +44,39 @@ describe('buildLocalProviderApiUrl', () => {
   });
 });
 
+describe('isHttpsUrl', () => {
+  it('detects cloud https endpoints', () => {
+    expect(isHttpsUrl('https://api.deepseek.com/v1/chat/completions')).toBe(true);
+    expect(isHttpsUrl('  https://api.openrouter.ai/api/v1  ')).toBe(true);
+  });
+
+  it('treats http and blank URLs as not-cloud', () => {
+    expect(isHttpsUrl('http://192.168.1.133:8080/v1/chat/completions')).toBe(false);
+    expect(isHttpsUrl('')).toBe(false);
+  });
+});
+
 describe('resolveProviderApiUrl', () => {
-  it('uses host/port for local providers', () => {
-    expect(resolveProviderApiUrl('openai-compatible', 'ignored', '192.168.1.133', '8080')).toBe(
+  it('passes through an explicit cloud URL for openai-compatible', () => {
+    expect(resolveProviderApiUrl(
+      'openai-compatible',
+      'https://api.deepseek.com/v1/chat/completions',
+      'localhost',
+      '11434',
+    )).toBe('https://api.deepseek.com/v1/chat/completions');
+  });
+
+  it('strips trailing slashes from an explicit URL', () => {
+    expect(resolveProviderApiUrl(
+      'openai-compatible',
+      'https://api.deepseek.com/v1/chat/completions/',
+      'localhost',
+      '11434',
+    )).toBe('https://api.deepseek.com/v1/chat/completions');
+  });
+
+  it('falls back to host/port when the openai-compatible URL is blank', () => {
+    expect(resolveProviderApiUrl('openai-compatible', '', '192.168.1.133', '8080')).toBe(
       'http://192.168.1.133:8080/v1/chat/completions',
     );
   });
