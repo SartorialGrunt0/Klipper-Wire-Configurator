@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import os
 from enum import Enum
 from pathlib import Path
 import re
@@ -392,6 +393,20 @@ def _is_edit_request(messages: list[dict]) -> bool:
             continue
         return bool(_EDIT_VERB_RE.search(content) and _EDIT_TARGET_RE.search(content))
     return False
+
+
+def _auto_search_enabled() -> bool:
+    """Auto-search fallback toggle (env KWC_AUTO_SEARCH=1 re-enables it).
+
+    Defaults to DISABLED. Harness A/B (2026-08, gemma-4-12b, Q01-Q20,
+    19/19 both ways): with the compact prompt the model calls the docs tools
+    itself on every grounding question, and the fallback only injects content
+    the model didn't ask for (visible as phantom search_klipper_docs tool
+    names on knowledge-answerable questions). Smaller local models
+    (gemma-4-e2b, qwen3.5-4b) call tools less reliably — set
+    KWC_AUTO_SEARCH=1 for them until their A/B says otherwise.
+    """
+    return os.environ.get("KWC_AUTO_SEARCH", "0") != "0"
 
 
 def _auto_search_context(query: str) -> str | None:
@@ -1088,6 +1103,8 @@ async def chat_proxy(req: ChatRequest):
                     # Phase 3: edits are answered from the config context; a
                     # doc search injection mid-edit derails the draft.
                     logger.info("Auto-search fallback skipped | edit request")
+                elif not _auto_search_enabled():
+                    logger.info("Auto-search fallback skipped | disabled via KWC_AUTO_SEARCH=0")
                 elif PRINTER_MEMORY_BLOCK_RE.search(current_content):
                     # The model already produced a structured printer-memory
                     # proposal; injecting a doc search would only derail it.

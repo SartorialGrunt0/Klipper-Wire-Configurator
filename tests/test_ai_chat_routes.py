@@ -128,6 +128,15 @@ def test_is_edit_request_uses_latest_user_message():
     ])
 
 
+def test_auto_search_enabled_toggle(monkeypatch):
+    monkeypatch.delenv('KWC_AUTO_SEARCH', raising=False)
+    assert not ai_routes._auto_search_enabled()  # default disabled (Phase 3 A/B)
+    monkeypatch.setenv('KWC_AUTO_SEARCH', '1')
+    assert ai_routes._auto_search_enabled()
+    monkeypatch.setenv('KWC_AUTO_SEARCH', '0')
+    assert not ai_routes._auto_search_enabled()
+
+
 def test_prepare_messages_starts_with_system_and_ends_with_task_anchor(monkeypatch):
     _blank_memory(monkeypatch)
     prepared = ai_routes._prepare_messages([
@@ -429,6 +438,9 @@ def test_chat_proxy_returns_plain_content(monkeypatch):
 
 def test_chat_proxy_auto_search_fallback_injects_docs(monkeypatch):
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
+    # The fallback is off by default (Phase 3 A/B) — this test exercises the
+    # injection path with the toggle explicitly enabled.
+    monkeypatch.setenv('KWC_AUTO_SEARCH', '1')
     monkeypatch.setattr(
         ai_routes,
         '_auto_search_context',
