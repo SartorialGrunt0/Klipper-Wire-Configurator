@@ -233,7 +233,7 @@ def _prepare_messages(messages: list[dict]) -> list[dict]:
     memory = load_printer_memory()
     memory_context = printer_memory_to_context(memory)
 
-    system_parts = [SYSTEM_PROMPT, _build_mcp_tool_context(include_example_configs=is_printer_memory_blank(memory)), memory_context]
+    system_parts = [SYSTEM_PROMPT, _build_mcp_tool_context(), memory_context]
 
     # If printer memory is completely blank and there are user messages to work with,
     # add an auto-fill instruction asking the AI to investigate.
@@ -300,7 +300,7 @@ def _prepare_messages(messages: list[dict]) -> list[dict]:
 # ── MCP Tool Integration ───────────────────────────────────────────
 
 
-def _build_mcp_tool_context(*, include_example_configs: bool = False) -> str:
+def _build_mcp_tool_context() -> str:
     """Build a compact 'Available Tools' section for the system prompt.
 
     Only the tools the model should actively choose are advertised, each as a
@@ -310,28 +310,22 @@ def _build_mcp_tool_context(*, include_example_configs: bool = False) -> str:
     model is not nudged toward them, which keeps attention on the tools that
     matter for the current task.
 
-    Tool tiers:
-    - Always visible: docs search/read, Config_Reference, user config read,
-      and the two validators.
-    - include_example_configs=True: also advertise example-config search/read
-      (used when printer memory is blank and auto-fill is active).
-    - Hidden (registered, not advertised): search_user_configs,
+    Visible: docs search/read, Config_Reference, user config read, example
+    config search/read, and the two validators.
+    Hidden (registered, not advertised): search_user_configs,
       list_klipper_docs, get_section_schema, detect_board,
       calculate_rotation_distance, generate_macro_template.
     """
     snippets: dict[str, str] = {
         "search_klipper_docs": "Search the bundled Klipper docs",
         "read_klipper_doc": "Read a bundled Klipper doc file",
-        "get_config_reference_section": "Get the Config_Reference section and valid params for a config section",
+        "get_config_reference_section": "Get the Config_Reference section and valid params for a config section (pass section_name, e.g. section_name='bed_mesh')",
         "read_user_config": "Read one of the user's own config files",
+        "search_example_configs": "Search example configs by board or printer",
+        "read_example_config": "Read a full example config file",
         "validate_klipper_config": "Validate a config snippet with Klipper rules",
         "validate_macro": "Validate a macro draft with Klipper's Jinja rules",
     }
-    if include_example_configs:
-        snippets.update({
-            "search_example_configs": "Search example configs by board or printer",
-            "read_example_config": "Read a full example config file",
-        })
 
     parts = [
         "# Available Tools",

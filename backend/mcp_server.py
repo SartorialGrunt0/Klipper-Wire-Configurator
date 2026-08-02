@@ -843,7 +843,9 @@ class McpServer:
         return "\n".join(lines)
 
     def _handle_config_section(self, args: dict[str, Any]) -> str:
-        section = args.get("section_name", "").strip()
+        # Accept both `section` and `section_name` — small local models often
+        # guess the shorter key when the prompt only carries a one-line snippet.
+        section = str(args.get("section_name") or args.get("section") or "").strip()
         if not section:
             return "Please provide a section name."
 

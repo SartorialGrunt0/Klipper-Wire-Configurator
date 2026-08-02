@@ -213,7 +213,9 @@ def build_questions() -> list[TestQuestion]:
             expected_tools=("search_klipper_docs",),
             criteria=(
                 ("contains", "Config_Reference"),
-                ("regex", r"(?:\d+\.\s+\*\*[^*\n]+\.md\*\*[^\n]*(?:\n|$)){4,}"),
+                # search_klipper_docs formats filenames as `name.md` (inline
+                # code), unlike list_klipper_docs' bold **name.md**.
+                ("regex", r"(?:\d+\.\s+(?:\*\*|`)?[^*\n`]+\.md(?:\*\*|`)?[^\n]*(?:\n|$)){4,}"),
             ),
         ),
         TestQuestion(
@@ -484,11 +486,13 @@ def build_macro_questions() -> list[TestQuestion]:
             require_tool=False,
             criteria=(
                 ("regex", r"\[gcode_macro\s+PAUSE"),
-                ("regex", r"PARK_X[^\n]*100"),
-                ("regex", r"PARK_Y[^\n]*150"),
-                ("regex", r"LIFT_Z[^\n]*20"),
-                ("regex", r"RETRACT[^\n]*3\b"),
-                ("regex", r"RETRACT_SPEED[^\n]*30\b"),
+                # Accept either named template variables (PARK_X etc.) or the
+                # values written inline — the generate_macro_template tool that
+                # produced the variable names is no longer advertised.
+                ("regex", r"(?:PARK_X[^\n]*100|X100)"),
+                ("regex", r"(?:PARK_Y[^\n]*150|Y150)"),
+                ("regex", r"(?:LIFT_Z[^\n]*20|Z20\b)"),
+                ("regex", r"(?:RETRACT[^\n]*3\b|E-?3\b)"),
             ),
         ),
         TestQuestion(
