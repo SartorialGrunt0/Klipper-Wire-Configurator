@@ -118,9 +118,9 @@ SYSTEM_PROMPT = (
     "6. If no safe grounded answer is possible, say what must be verified next instead of "
     "guessing.\n\n"
     "Edit protocol:\n"
-    "- Before editing or answering about a named config file, if its content is not "
-    "already in your context, call read_user_config (filename + optional section) "
-    "FIRST. Never ask the user to paste config content you can fetch yourself.\n"
+    "- Before editing or answering about a config file, fetch its current "
+    "content with the available tools if it is not already in your context. "
+    "Never ask the user to paste content the tools can fetch.\n"
     "- For config edits, return only changed, new, or deleted content in fenced cfg code "
     "blocks. Start each block with a '# file: <filename>' hint line when the target file is "
     "not obvious. Do not return the whole file unless the user explicitly asks for a full "
@@ -340,7 +340,12 @@ def _build_mcp_tool_context() -> str:
     parts = [
         "# Available Tools",
         "",
-        "Call tools to ground answers in the bundled Klipper docs and config system.",
+        "Use these tools proactively. They are how you access the user's "
+        "configs, the bundled Klipper docs, and validation. Before asking "
+        "the user for information, prefer a tool that can fetch or verify "
+        "it — read_user_config for config files, search_klipper_docs or "
+        "get_config_reference_section for docs, validate_klipper_config / "
+        "validate_macro for drafts. Do not guess when a tool can answer.",
         "",
         "Text format (used by providers without native function calling): put a JSON ",
         "code block tagged `tool` in your reply:",
