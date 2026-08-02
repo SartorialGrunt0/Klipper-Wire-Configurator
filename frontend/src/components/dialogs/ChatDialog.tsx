@@ -122,9 +122,9 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
-  const [selectedConfigContextFiles, setSelectedConfigContextFiles] = useState<string[]>(
-    activeFile ? [activeFile] : [],
-  );
+  // EXPERIMENT (auto-attach off): don't auto-select the active file.
+  // Context only includes files the user explicitly checks in "Include Files".
+  const [selectedConfigContextFiles, setSelectedConfigContextFiles] = useState<string[]>([]);
   const [attachedConfigFiles, setAttachedConfigFiles] = useState<AttachedConfigFile[]>([]);
   const [showChatHistory, setShowChatHistory] = useState(false);
   const [showCarryOverPrompt, setShowCarryOverPrompt] = useState(false);
@@ -342,7 +342,11 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         // Build context messages
         const contextMessages: Array<{ role: 'system'; content: string }> = [];
         const mentionedConfigFiles = extractMentionedConfigFilenames([userMsg.content], loadedConfigFilenames);
-        const contextTargets = Array.from(new Set([...selectedConfigContextFiles, ...mentionedConfigFiles]));
+        // EXPERIMENT (auto-attach off): mentioned files are NOT auto-injected.
+        // The targeting instructions below still name them so the model can
+        // fetch content itself via read_user_config. Only files the user
+        // explicitly checks in "Include Files" are sent as context.
+        const contextTargets = Array.from(new Set(selectedConfigContextFiles));
 
         const chatIntent = detectChatIntent(userMsg.content);
         if (chatIntent === 'edit') {
