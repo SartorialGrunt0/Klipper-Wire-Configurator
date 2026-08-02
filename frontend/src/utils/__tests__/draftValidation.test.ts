@@ -11,6 +11,7 @@ import {
   hasOnlyRetryExemptAssistantValidationIssues,
   isBlockingAssistantValidationIssue,
   isRetryExemptAssistantValidationIssue,
+  suppressValidationErrorsShadowedByFullRewrite,
 } from '@/utils/draftValidation';
 import type { ValidationError, ConfigSection } from '@/types/config';
 
@@ -28,6 +29,50 @@ describe('issue classification', () => {
     expect(isBlockingAssistantValidationIssue(error({ severity: 'error' }))).toBe(true);
     expect(isBlockingAssistantValidationIssue(error({ severity: 'warning' }))).toBe(true);
     expect(isBlockingAssistantValidationIssue(error({ severity: 'info' }))).toBe(false);
+  });
+
+  it('suppresses validation errors shadowed by a full-rewrite guard on the same section', () => {
+    const guardMessage = "Existing section '[bed_mesh]' was returned as a full rewrite. Emit it as a mini-diff instead: the section header followed by ONLY the lines that change, prefixing removals with '-' and additions with '+'. Unchanged lines are preserved automatically and cannot be dropped.";
+    const issues = [
+      {
+        filename: 'printer.cfg',
+        errors: [
+          error({ section: 'bed_mesh', param: 'mesh_min', message: "Required parameter 'mesh_min' is missing." }),
+          error({ section: 'bed_mesh', param: 'mesh_max', message: "Required parameter 'mesh_max' is missing." }),
+          error({ section: 'bed_mesh', param: '', message: guardMessage }),
+        ],
+      },
+    ];
+    const filtered = suppressValidationErrorsShadowedByFullRewrite(issues);
+    expect(filtered).toHaveLength(1);
+    expect(filtered[0].errors).toHaveLength(1);
+    expect(filtered[0].errors[0].message).toContain('was returned as a full rewrite');
+  });
+
+  it('keeps validation errors for sections NOT flagged by the full-rewrite guard', () => {
+    const guardMessage = "Existing section '[bed_mesh]' was returned as a full rewrite. Emit it as a mini-diff instead.";
+    const issues = [
+      {
+        filename: 'printer.cfg',
+        errors: [
+          error({ section: 'bed_mesh', param: '', message: guardMessage }),
+          error({ section: 'extruder', param: 'max_temp', message: 'max_temp too low' }),
+        ],
+      },
+    ];
+    const filtered = suppressValidationErrorsShadowedByFullRewrite(issues);
+    expect(filtered).toHaveLength(1);
+    expect(filtered[0].errors.map((e) => e.section)).toEqual(['bed_mesh', 'extruder']);
+  });
+
+  it('returns the issues untouched when no full-rewrite guard fired', () => {
+    const issues = [
+      {
+        filename: 'printer.cfg',
+        errors: [error({ section: 'extruder', message: 'max_temp too low' })],
+      },
+    ];
+    expect(suppressValidationErrorsShadowedByFullRewrite(issues)).toBe(issues);
   });
 
   it('recognizes retry-exempt duplicate-section and shared-pin messages', () => {

@@ -31,6 +31,7 @@ import {
   MAX_ASSISTANT_HINT_USER_MESSAGES,
   collectNewValidationErrors,
   buildFullRewriteSectionIssues,
+  suppressValidationErrorsShadowedByFullRewrite,
   type AssistantDraftValidationOutcome,
   type AssistantDraftValidationIssueGroup,
 } from '../utils/draftValidation';
@@ -503,11 +504,11 @@ export function useAssistantDraft() {
 
       return {
         applicable: true,
-        blockingIssues: [
+        blockingIssues: suppressValidationErrorsShadowedByFullRewrite([
           ...collectNewValidationErrors(baselineValidations, candidateValidations),
           ...missingSectionIssues,
           ...fullRewriteIssues,
-        ],
+        ]),
         failureReason: null,
         repairedSections: preview.repairedSections,
       };

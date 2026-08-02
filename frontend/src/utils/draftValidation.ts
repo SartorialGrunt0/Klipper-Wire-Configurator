@@ -69,6 +69,37 @@ export function isBlockingAssistantValidationIssue(error: ValidationError): bool
   return error.severity === 'error' || error.severity === 'warning';
 }
 
+/**
+ * When the full-rewrite guard flags a section, other validation errors for
+ * that SAME section are artifacts of the partial rewrite (a stub section
+ * trivially fails required-param checks) and FIGHT the guard's directive:
+ * "missing mesh_min" invites the model to return the whole section, which
+ * re-triggers the guard. Drop them so the retry feedback carries one clear
+ * instruction. Errors for other sections are untouched.
+ */
+export function suppressValidationErrorsShadowedByFullRewrite(
+  blockingIssues: AssistantDraftValidationIssueGroup[],
+): AssistantDraftValidationIssueGroup[] {
+  const guardKeys = new Set<string>();
+  for (const group of blockingIssues) {
+    for (const error of group.errors) {
+      if (error.message.includes('was returned as a full rewrite')) {
+        guardKeys.add(`${group.filename}::${error.section}`);
+      }
+    }
+  }
+  if (guardKeys.size === 0) return blockingIssues;
+  return blockingIssues
+    .map((group) => ({
+      ...group,
+      errors: group.errors.filter((error) => {
+        const key = `${group.filename}::${error.section}`;
+        return !guardKeys.has(key) || error.message.includes('was returned as a full rewrite');
+      }),
+    }))
+    .filter((group) => group.errors.length > 0);
+}
+
 export function isRetryExemptAssistantValidationIssue(error: ValidationError): boolean {
   return RETRY_EXEMPT_DUPLICATE_SECTION_RE.test(error.message) || RETRY_EXEMPT_SHARED_PIN_RE.test(error.message);
 }
