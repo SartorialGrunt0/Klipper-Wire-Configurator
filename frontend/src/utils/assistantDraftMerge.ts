@@ -107,7 +107,7 @@ function pickMatchingParamIndex(
   params: ConfigParam[],
   key: string,
   isCommentedOut: boolean,
-  usedIndexes: Set<number>,
+  usedIndexes: Map<number, number>,
 ): number | null {
   const exactStateMatch = params.findIndex(
     (param, index) => !usedIndexes.has(index) && param.key === key && param.is_commented_out === isCommentedOut,
@@ -138,21 +138,21 @@ function mergeAssistantParams(existingParams: ConfigParam[], assistantParams: Co
   // unlinkedAiKeys: AI param keys that didn't match any existing
   //   param — these are new params or key renames (e.g. typo fixes)
   //   and will be appended at the end.
-  // matchedExistingIndexes: indexes of existing params that were
-  //   matched by an AI param and should be updated in place.
-  // aiKeysPresentInExisting: AI param keys that matched at least
-  //   one existing param — used to decide which existing params
-  //   to keep vs. exclude.
+  // matchedExistingIndexes: maps an existing param index to the index of
+  //   the assistant param that matched it. We need the SPECIFIC pairing so
+  //   that sections with duplicate keys (e.g. the three `serial` lines in
+  //   [mcu], `#max_accel` + active `max_accel` in [printer]) update each
+  //   line with ITS matching AI param rather than the last same-key one.
   const unlinkedAiKeys = new Set(
     assistantParams
       .filter((p) => p.key !== '_comment_')
       .map((p) => p.key),
   );
-  const matchedExistingIndexes = new Set<number>();
+  const matchedExistingIndexes = new Map<number, number>();
 
-  for (const aiParam of assistantParams) {
+  assistantParams.forEach((aiParam, aiIndex) => {
     if (aiParam.key === '_comment_') {
-      continue;
+      return;
     }
 
     const matchIndex = pickMatchingParamIndex(
@@ -163,10 +163,10 @@ function mergeAssistantParams(existingParams: ConfigParam[], assistantParams: Co
     );
 
     if (matchIndex !== null) {
-      matchedExistingIndexes.add(matchIndex);
+      matchedExistingIndexes.set(matchIndex, aiIndex);
       unlinkedAiKeys.delete(aiParam.key);
     }
-  }
+  });
 
   // Phase 2: Walk existing params in order.
   // - Comments (_comment_) are always preserved in place.
@@ -192,13 +192,12 @@ function mergeAssistantParams(existingParams: ConfigParam[], assistantParams: Co
       return;
     }
 
-    if (matchedExistingIndexes.has(index)) {
-      // This existing param was matched by an AI param — merge values
-      const aiParams = assistantParams.filter(
-        (p) => p.key === existingParam.key && p.key !== '_comment_',
-      );
-      // Use the last matching AI param (same as Map.set behavior)
-      const aiParam = aiParams[aiParams.length - 1];
+    const matchedAiIndex = matchedExistingIndexes.get(index);
+    if (matchedAiIndex !== undefined) {
+      // This existing param was matched by a SPECIFIC assistant param —
+      // use that exact pairing (not "the last param with this key", which
+      // conflates duplicate-key lines like the [mcu] #serial alternatives).
+      const aiParam = assistantParams[matchedAiIndex];
       if (aiParam) {
         const clonedAi = cloneParam(aiParam);
         result.push({

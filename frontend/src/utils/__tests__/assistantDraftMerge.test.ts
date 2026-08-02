@@ -167,3 +167,152 @@ describe('mergeAssistantSectionsIntoConfig', () => {
     expect(mergedConfig.sections[0].header_comments).toContain('# divider');
   });
 });
+
+describe('mergeAssistantSectionsIntoConfig — duplicate keys', () => {
+  it('verbatim re-emit of a duplicate-key section is a no-op (mcu serial lines)', () => {
+    const base = config([
+      section({
+        full_header: 'mcu',
+        params: [
+          param('serial', '/dev/ttyAMA0', { is_commented_out: true, comment: ' # f446' }),
+          param('serial', '/dev/ttyS0', { is_commented_out: true, comment: ' # alternate' }),
+          param('serial', '/dev/serial/by-id/usb-1a86-usb', { is_commented_out: false }),
+        ],
+      }),
+    ]);
+    const assistant = config([
+      section({
+        full_header: 'mcu',
+        params: [
+          param('serial', '/dev/ttyAMA0', { is_commented_out: true, comment: ' # f446' }),
+          param('serial', '/dev/ttyS0', { is_commented_out: true, comment: ' # alternate' }),
+          param('serial', '/dev/serial/by-id/usb-1a86-usb', { is_commented_out: false }),
+        ],
+      }),
+    ]);
+    const { mergedConfig } = mergeAssistantSectionsIntoConfig(base, assistant);
+    const merged = mergedConfig.sections[0];
+    // Each line keeps its OWN value — no conflation onto the last one.
+    expect(merged.params.map((p) => p.value)).toEqual([
+      '/dev/ttyAMA0',
+      '/dev/ttyS0',
+      '/dev/serial/by-id/usb-1a86-usb',
+    ]);
+    expect(merged.params.map((p) => p.is_commented_out)).toEqual([true, true, false]);
+  });
+
+  it('assistant params in a different order still pair with their own existing lines', () => {
+    // Two same-key lines with DISTINCT states: the state disambiguates the
+    // pairing no matter what order the AI emits them in. The old code
+    // conflated both onto the last same-key param ('A' active) -> ['A','A'].
+    const base = config([
+      section({
+        full_header: 'mcu',
+        params: [
+          param('serial', 'A', { is_commented_out: false }),
+          param('serial', 'B', { is_commented_out: true }),
+        ],
+      }),
+    ]);
+    const assistant = config([
+      section({
+        full_header: 'mcu',
+        params: [
+          param('serial', 'B', { is_commented_out: true }),
+          param('serial', 'A', { is_commented_out: false }),
+        ],
+      }),
+    ]);
+    const { mergedConfig } = mergeAssistantSectionsIntoConfig(base, assistant);
+    const merged = mergedConfig.sections[0];
+    expect(merged.params.map((p) => p.value)).toEqual(['A', 'B']);
+    expect(merged.params.map((p) => p.is_commented_out)).toEqual([false, true]);
+  });
+
+  it('same-state duplicate lines emitted in a different order pair greedily but never conflate', () => {
+    // Existing: active A, #B, #C. Assistant emits the same lines reversed
+    // (#C, #B, active A). The greedy per-state matcher pairs #C with B's
+    // slot and #B with C's slot, so the values land as A, C, B — the whole
+    // multiset and every commented-state are preserved (no conflation onto
+    // the last same-key param, which is what the old code did).
+    const base = config([
+      section({
+        full_header: 'mcu',
+        params: [
+          param('serial', 'A', { is_commented_out: false }),
+          param('serial', 'B', { is_commented_out: true }),
+          param('serial', 'C', { is_commented_out: true }),
+        ],
+      }),
+    ]);
+    const assistant = config([
+      section({
+        full_header: 'mcu',
+        params: [
+          param('serial', 'C', { is_commented_out: true }),
+          param('serial', 'B', { is_commented_out: true }),
+          param('serial', 'A', { is_commented_out: false }),
+        ],
+      }),
+    ]);
+    const { mergedConfig } = mergeAssistantSectionsIntoConfig(base, assistant);
+    const merged = mergedConfig.sections[0];
+    expect(merged.params.map((p) => p.value)).toEqual(['A', 'C', 'B']);
+    expect(merged.params.map((p) => p.is_commented_out)).toEqual([false, true, true]);
+  });
+
+  it('a changed active value updates only the active line, leaving comments alone', () => {
+    const base = config([
+      section({
+        full_header: 'printer',
+        section_type: 'printer',
+        params: [
+          param('max_accel', '4800', { is_commented_out: true }),
+          param('max_accel', '15500', { is_commented_out: false }),
+        ],
+      }),
+    ]);
+    const assistant = config([
+      section({
+        full_header: 'printer',
+        section_type: 'printer',
+        params: [
+          param('max_accel', '4800', { is_commented_out: true }),
+          param('max_accel', '20000', { is_commented_out: false }),
+        ],
+      }),
+    ]);
+    const { mergedConfig } = mergeAssistantSectionsIntoConfig(base, assistant);
+    const merged = mergedConfig.sections[0];
+    expect(merged.params.map((p) => p.value)).toEqual(['4800', '20000']);
+    expect(merged.params[0].is_commented_out).toBe(true);
+    expect(merged.params[1].is_commented_out).toBe(false);
+  });
+
+  it('commented AI param falling back to an active existing param preserves existing comment state but takes the matched value', () => {
+    const base = config([
+      section({
+        full_header: 'stepper_x',
+        section_type: 'stepper_x',
+        params: [
+          param('endstop_pin', '^PC2', { is_commented_out: false }),
+        ],
+      }),
+    ]);
+    const assistant = config([
+      section({
+        full_header: 'stepper_x',
+        section_type: 'stepper_x',
+        params: [
+          param('endstop_pin', '^PC1', { is_commented_out: true }),
+        ],
+      }),
+    ]);
+    const { mergedConfig } = mergeAssistantSectionsIntoConfig(base, assistant);
+    const merged = mergedConfig.sections[0];
+    // Existing active state is preserved (no force-comment), but the
+    // value comes from the specific matched AI param.
+    expect(merged.params[0].is_commented_out).toBe(false);
+    expect(merged.params[0].value).toBe('^PC1');
+  });
+});
