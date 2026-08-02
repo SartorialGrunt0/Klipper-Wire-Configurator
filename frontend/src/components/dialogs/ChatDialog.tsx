@@ -348,6 +348,37 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         const contextTargets = Array.from(new Set(selectedConfigContextFiles));
 
         const chatIntent = detectChatIntent(userMsg.content);
+        // User-attached local .cfg files get the same lean treatment as
+        // loaded configs: edit intents send only the sections they target.
+        const appendAttachedFileContexts = (targeted: boolean) => {
+          for (const file of attachedConfigFiles) {
+            if (targeted) {
+              const targetedHeaders = extractTargetedSectionHeaders(userMsg.content, file.content);
+              if (targetedHeaders.length === 0) {
+                contextMessages.push({
+                  role: 'system',
+                  content: buildConfigContextMessage(file.name, file.content, 'User-attached local Klipper config file'),
+                });
+                continue;
+              }
+              for (const header of targetedHeaders) {
+                const sectionText = extractSectionText(file.content, header);
+                if (sectionText != null) {
+                  contextMessages.push({
+                    role: 'system',
+                    content: buildSectionContextMessage(file.name, 'User-attached local Klipper config file', header, sectionText),
+                  });
+                }
+              }
+            } else {
+              contextMessages.push({
+                role: 'system',
+                content: buildConfigContextMessage(file.name, file.content, 'User-attached local Klipper config file'),
+              });
+            }
+          }
+        };
+
         if (chatIntent === 'edit') {
           // Phase 3: edits get ONLY the sections they target, not the whole
           // file. The model works from lean context (the mini-diff apply still
@@ -375,17 +406,13 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
               }
             }
           }
+          appendAttachedFileContexts(true);
         } else {
           const selectedConfigContexts = await getConfigContexts(contextTargets);
           for (const ctx of selectedConfigContexts) {
             contextMessages.push({ role: 'system', content: ctx });
           }
-        }
-        for (const file of attachedConfigFiles) {
-          contextMessages.push({
-            role: 'system',
-            content: buildConfigContextMessage(file.name, file.content, 'User-attached local Klipper config file'),
-          });
+          appendAttachedFileContexts(false);
         }
 
         // File targeting instructions

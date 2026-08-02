@@ -660,15 +660,12 @@ export function useAssistantDraft() {
         lastOutcome = outcome;
 
         if (!outcome.applicable) {
-          if (!context.isRetry || !outcome.failureReason) {
-            return { applicable: false, issues: [], failureReason: outcome.failureReason };
-          }
-          // AI gave up on producing a draft during a retry — treat as blocking.
-          return {
-            applicable: true,
-            issues: [{ type: 'config-draft', message: outcome.failureReason }],
-            failureReason: outcome.failureReason,
-          };
+          // A reply without a cfg draft (clarifying question, explanation,
+          // or a tool-only turn) is a normal chat message — show it as-is.
+          // Forcing retries here produced "Request fails: did not include a
+          // config code block" whenever the model asked for more info instead
+          // of drafting. The retry loop only fixes broken drafts.
+          return { applicable: false, issues: [], failureReason: outcome.failureReason };
         }
 
         // Duplicate-section / shared-pin issues the AI cannot resolve are
