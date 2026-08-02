@@ -703,7 +703,10 @@ def build_trident_questions() -> list[TestQuestion]:
             expected_tools=("validate_klipper_config",),
             require_tool=False,
             criteria=(
-                ("regex", r"```(?:cfg|ini|conf|klipper)"),
+                # Accept fenced blocks OR bare text with a file hint — the
+                # frontend's extractConfigCodeBlocks falls back to raw text
+                # when a '# file:' hint is present, so bare mini-diffs apply.
+                ("regex", r"```(?:cfg|ini|conf|klipper)|#\s*file\s*:\s*printer\.cfg"),
                 ("regex", r"#\s*file\s*:\s*printer\.cfg"),
                 ("regex", r"\[printer\]"),
                 ("regex", r"max_accel\s*:\s*12000"),
