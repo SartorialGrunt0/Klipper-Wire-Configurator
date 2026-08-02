@@ -179,11 +179,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     }
   }, [open, settings]);
 
-  // ── Reset file menu on close ────────────────────────────────────
-  useEffect(() => {
-    if (!open) return;
-    setSelectedConfigContextFiles((prev) => (prev.length > 0 || !activeFile ? prev : [activeFile]));
-  }, [open, activeFile]);
+  // ── EXPERIMENT (auto-attach off) ───────────────────────────────
+  // Removed the old "seed the active file into the selection when the
+  // dialog opens" effect. Context now only includes files the user
+  // explicitly checks in "Include Files" (or manually attaches).
 
   // ── Prune config context files when files are removed ───────────
   useEffect(() => {
