@@ -618,6 +618,66 @@ def test_chat_proxy_native_tool_call_loop(monkeypatch):
     assert assistant_msg['tool_calls'][0]['function']['name'] == 'search_klipper_docs'
 
 
+def test_chat_proxy_dsml_text_protocol_tool_loop(monkeypatch):
+    # DeepSeek V3.2/V4 sometimes returns its native DSML tool-call markup as
+    # plain text in message.content instead of structured tool_calls. The
+    # backend must parse it, execute the tool, and keep the markup out of the
+    # visible reply.
+    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
+    monkeypatch.setattr(ai_routes, '_execute_tool_call', lambda call: f"result for {call['name']}")
+
+    calls = []
+
+    def fake_post(url, headers, payload):
+        calls.append(payload)
+        if len(calls) == 1:
+            # First response: DSML tool call only, no visible text.
+            return DummyResponse(
+                {
+                    'choices': [{
+                        'message': {
+                            'content': (
+                                '<||DSML||tool_calls> '
+                                '<||DSML||invoke name="search_klipper_docs"> '
+                                '<||DSML||parameter name="query" string="true">bed_mesh adaptive</||DSML||parameter> '
+                                '</||DSML||invoke> '
+                                '</||DSML||tool_calls>'
+                            ),
+                        }
+                    }]
+                },
+                url=url,
+            )
+        # Second response: final answer.
+        return DummyResponse(
+            {'choices': [{'message': {'content': 'BED_MESH_CALIBRATE ADAPTIVE=1 probes the print area.'}}]},
+            url=url,
+        )
+
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda *args, **kwargs: FakeAsyncClient(post_handler=fake_post))
+
+    response = client.post(
+        '/ai/chat',
+        json={
+            'messages': [{'role': 'user', 'content': 'Make my level bed macro adaptive.'}],
+            'apiKey': 'deepseek-test-key',
+            'model': 'deepseek-chat',
+            'apiUrl': 'https://api.deepseek.com/v1/chat/completions',
+            'apiProvider': 'openai-compatible',
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body['content'] == 'BED_MESH_CALIBRATE ADAPTIVE=1 probes the print area.'
+    assert body['mcpToolTurns'] == 1
+    assert body['mcpToolNames'] == ['search_klipper_docs']
+    # The DSML markup must not leak into any assistant message sent onward.
+    second_payload = calls[1]
+    assert any('[Tool result: search_klipper_docs' in str(m.get('content', '')) for m in second_payload['messages'])
+    assert not any('DSML' in str(m.get('content', '')) for m in second_payload['messages'])
+
+
 # ── Empty-response re-prompt backstop ──────────────────────────────────
 # When a model ends its turn with only a tool call and no visible text,
 # the backend re-prompts without tools so the UI doesn't show "No response."

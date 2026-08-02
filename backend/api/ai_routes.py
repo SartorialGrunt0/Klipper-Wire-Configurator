@@ -95,6 +95,33 @@ FUNC_CALL_CLEANUP_RE = re.compile(
     r"(?:^|\n)\s*(?:call[\s:]?\s*)?(?:tool_call[\s:]*)?\w+\s*\([^)]*\)\s*(?=\n|$)",
     re.DOTALL,
 )
+# DeepSeek DSML (Data Structure Markup Language) native tool-call markup.
+# DeepSeek V3.2/V4 models emit tool calls as:
+#   <||DSML||tool_calls>
+#   <||DSML||invoke name="search_klipper_docs">
+#   <||DSML||parameter name="limit" string="false">10</||DSML||parameter>
+#   <||DSML||parameter name="query" string="true">bed_mesh adaptive</||DSML||parameter>
+#   </||DSML||invoke>
+#   </||DSML||tool_calls>
+# Some serving stacks (vLLM/sglang bugs, plain-text content mode) return this
+# markup inside message.content instead of structured tool_calls, so KWC must
+# parse it from text. Tolerates both ||DSML|| and |DSML| delimiters and stray
+# whitespace around the pipes.
+DSML_INVOKE_RE = re.compile(
+    r"<\|{1,2}\s*DSML\s*\|{1,2}\s*invoke\s+name=\"([^\"]*)\"[^>]*>(.*?)"
+    r"</\|{1,2}\s*DSML\s*\|{1,2}\s*invoke\s*>",
+    re.DOTALL,
+)
+DSML_PARAM_RE = re.compile(
+    r"<\|{1,2}\s*DSML\s*\|{1,2}\s*parameter\s+name=\"([^\"]*)\"[^>]*>(.*?)"
+    r"</\|{1,2}\s*DSML\s*\|{1,2}\s*parameter\s*>",
+    re.DOTALL,
+)
+# Full DSML tool_calls block; used to strip leaked markup from final content.
+DSML_CLEANUP_RE = re.compile(
+    r"<\|{1,2}\s*DSML\s*\|{1,2}\s*tool_calls\s*>.*?</\|{1,2}\s*DSML\s*\|{1,2}\s*tool_calls\s*>",
+    re.DOTALL,
+)
 
 
 SYSTEM_PROMPT = (
@@ -475,6 +502,14 @@ def _extract_tool_calls(text: str) -> list[dict]:
          (native function-calling token from DeepSeek, Llama 3.1+, Qwen, etc.)
       3. name(arg1="val1", arg2=123)
          (Python-style function call without wrapper tokens)
+      4. name{arg1="val1", arg2="val2"}
+         (brace-style call without wrapper tokens)
+      5. DeepSeek DSML:
+         <||DSML||invoke name="name">
+           <||DSML||parameter name="arg1" string="true">val1</||DSML||parameter>
+         </||DSML||invoke>
+         (DeepSeek V3.2/V4 native format; returned as plain text by some
+         serving stacks instead of structured tool_calls)
     """
     calls: list[dict] = []
     seen_contents: set[str] = set()
@@ -584,6 +619,23 @@ def _extract_tool_calls(text: str) -> list[dict]:
                 continue
             arguments = _parse_kwargs(args_text)
             calls.append({"name": name, "arguments": arguments})
+
+    # Format 5: DeepSeek DSML (Data Structure Markup Language) tool calls.
+    # DeepSeek V3.2/V4 native format; some serving stacks return the markup
+    # in message.content instead of structured tool_calls.
+    for invoke_match in DSML_INVOKE_RE.finditer(text):
+        name = invoke_match.group(1).strip()
+        body = invoke_match.group(2)
+        if not name or body in seen_contents:
+            continue
+        seen_contents.add(body)
+        arguments: dict = {}
+        for param_match in DSML_PARAM_RE.finditer(body):
+            key = param_match.group(1).strip()
+            value = param_match.group(2).strip()
+            if key:
+                arguments[key] = value
+        calls.append({"name": name, "arguments": arguments})
 
     if calls:
         names = [c["name"] for c in calls]
@@ -1236,6 +1288,7 @@ async def chat_proxy(req: ChatRequest):
                         clean_content = ALT_TOOL_CALL_CONTENT_RE.sub("", clean_content).strip()
                         clean_content = CALL_SYNTAX_CLEANUP_RE.sub("", clean_content).strip()
                         clean_content = FUNC_CALL_CLEANUP_RE.sub("", clean_content).strip()
+                        clean_content = DSML_CLEANUP_RE.sub("", clean_content).strip()
                         if clean_content:
                             current_messages.append({"role": "assistant", "content": clean_content})
                         current_messages.append({"role": "user", "content": tool_message})
@@ -1261,11 +1314,13 @@ async def chat_proxy(req: ChatRequest):
                 or ALT_TOOL_CALL_CONTENT_RE.search(current_content)
                 or CALL_SYNTAX_CLEANUP_RE.search(current_content)
                 or FUNC_CALL_CLEANUP_RE.search(current_content)
+                or DSML_CLEANUP_RE.search(current_content)
             )
             final_content = MCP_TOOL_BLOCK_RE.sub("", current_content).strip()
             final_content = ALT_TOOL_CALL_CONTENT_RE.sub("", final_content).strip()
             final_content = CALL_SYNTAX_CLEANUP_RE.sub("", final_content).strip()
             final_content = FUNC_CALL_CLEANUP_RE.sub("", final_content).strip()
+            final_content = DSML_CLEANUP_RE.sub("", final_content).strip()
             # If the cleanup left nothing but the original was a tool call,
             # don't restore the raw tool call text — return empty instead.
             if not final_content and not had_tool_blocks:
@@ -1319,6 +1374,7 @@ async def chat_proxy(req: ChatRequest):
                 final_content = ALT_TOOL_CALL_CONTENT_RE.sub("", final_content).strip()
                 final_content = CALL_SYNTAX_CLEANUP_RE.sub("", final_content).strip()
                 final_content = FUNC_CALL_CLEANUP_RE.sub("", final_content).strip()
+                final_content = DSML_CLEANUP_RE.sub("", final_content).strip()
 
             # Collect tool names used during the MCP tool loop. Native tool
             # calls don't leave `[Tool result: ...]` messages, so fall back

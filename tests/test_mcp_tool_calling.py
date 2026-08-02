@@ -13,6 +13,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'backend'))
 from api.ai_routes import (  # noqa: E402
     ALT_TOOL_CALL_CONTENT_RE,
     CALL_SYNTAX_CLEANUP_RE,
+    DSML_CLEANUP_RE,
+    DSML_INVOKE_RE,
+    DSML_PARAM_RE,
     MCP_TOOL_BLOCK_RE,
     _build_native_tool_followup,
     _build_native_tools,
@@ -158,6 +161,73 @@ def test_extract_tool_calls_ignores_invalid_json():
 
 def test_extract_tool_calls_no_calls_in_plain_text():
     assert _extract_tool_calls("Just a normal answer about [bed_mesh].") == []
+
+
+def test_extract_tool_calls_dsml_deepseek_format():
+    # DeepSeek V3.2/V4 native DSML markup as returned in message.content by
+    # serving stacks that fail to parse it into structured tool_calls.
+    text = (
+        '<||DSML||tool_calls> <||DSML||invoke name="search_klipper_docs"> '
+        '<||DSML||parameter name="limit" string="false">10</||DSML||parameter> '
+        '<||DSML||parameter name="query" string="true">bed_mesh BED_MESH_CALIBRATE adaptive</||DSML||parameter> '
+        '</||DSML||invoke> </||DSML||tool_calls>'
+    )
+    calls = _extract_tool_calls(text)
+    assert calls == [{
+        "name": "search_klipper_docs",
+        "arguments": {"limit": "10", "query": "bed_mesh BED_MESH_CALIBRATE adaptive"},
+    }]
+
+
+def test_extract_tool_calls_dsml_multiple_invokes():
+    text = (
+        '<||DSML||tool_calls>'
+        '<||DSML||invoke name="read_klipper_doc">'
+        '<||DSML||parameter name="doc" string="true">Config_Reference.md</||DSML||parameter>'
+        '</||DSML||invoke>'
+        '<||DSML||invoke name="search_klipper_docs">'
+        '<||DSML||parameter name="query" string="true">probe offset</||DSML||parameter>'
+        '</||DSML||invoke>'
+        '</||DSML||tool_calls>'
+    )
+    calls = _extract_tool_calls(text)
+    assert calls == [
+        {"name": "read_klipper_doc", "arguments": {"doc": "Config_Reference.md"}},
+        {"name": "search_klipper_docs", "arguments": {"query": "probe offset"}},
+    ]
+
+
+def test_extract_tool_calls_dsml_no_params_keeps_call():
+    # A tool call with zero parameters must still be executed (not dropped).
+    text = '<||DSML||tool_calls><||DSML||invoke name="list_examples"></||DSML||invoke></||DSML||tool_calls>'
+    calls = _extract_tool_calls(text)
+    assert calls == [{"name": "list_examples", "arguments": {}}]
+
+
+def test_dsml_cleanup_re_strips_full_block():
+    text = (
+        'Sure! <||DSML||tool_calls>'
+        '<||DSML||invoke name="search_klipper_docs">'
+        '<||DSML||parameter name="query" string="true">bed_mesh</||DSML||parameter>'
+        '</||DSML||invoke>'
+        '</||DSML||tool_calls>'
+    )
+    stripped = DSML_CLEANUP_RE.sub("", text).strip()
+    assert stripped == "Sure!"
+
+
+def test_dsml_regexes_tolerate_single_pipe_delimiters():
+    # Some encoders emit |DSML| (single pipe) instead of ||DSML||.
+    text = (
+        '<|DSML|tool_calls> <|DSML|invoke name="search_klipper_docs"> '
+        '<|DSML|parameter name="query" string="true">bed_mesh</|DSML|parameter> '
+        '</|DSML|invoke> </|DSML|tool_calls>'
+    )
+    invokes = DSML_INVOKE_RE.findall(text)
+    assert invokes and invokes[0][0] == "search_klipper_docs"
+    params = DSML_PARAM_RE.findall(invokes[0][1])
+    assert params == [("query", "bed_mesh")]
+    assert DSML_CLEANUP_RE.sub("", text).strip() == ""
 
 
 # ── _parse_kwargs ───────────────────────────────────────────────────────
