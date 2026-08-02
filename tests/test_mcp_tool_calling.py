@@ -17,6 +17,9 @@ from api.ai_routes import (  # noqa: E402
     DSML_INVOKE_RE,
     DSML_PARAM_RE,
     MCP_TOOL_BLOCK_RE,
+    XML_INVOKE_RE,
+    XML_PARAM_RE,
+    XML_TOOL_CALLS_CLEANUP_RE,
     _build_native_tool_followup,
     _build_native_tools,
     _build_tool_result_message,
@@ -228,6 +231,43 @@ def test_dsml_regexes_tolerate_single_pipe_delimiters():
     params = DSML_PARAM_RE.findall(invokes[0][1])
     assert params == [("query", "bed_mesh")]
     assert DSML_CLEANUP_RE.sub("", text).strip() == ""
+
+
+def test_extract_tool_calls_xml_format():
+    # DeepSeek flash models emit bare <tool_calls> XML as plain text when
+    # re-prompted without the tools parameter (observed in accuracy runs).
+    text = (
+        '<tool_calls>\n'
+        '<invoke name="search_example_configs">\n'
+        '<parameter name="query" string="true">PC2 PB9 PC3</parameter>\n'
+        '</invoke>\n'
+        '<invoke name="read_example_config">\n'
+        '<parameter name="filename" string="true">generic-fysetc-cheetah-v2.0.cfg</parameter>\n'
+        '</invoke>\n'
+        '</tool_calls>'
+    )
+    calls = _extract_tool_calls(text)
+    assert calls == [
+        {"name": "search_example_configs", "arguments": {"query": "PC2 PB9 PC3"}},
+        {"name": "read_example_config", "arguments": {"filename": "generic-fysetc-cheetah-v2.0.cfg"}},
+    ]
+
+
+def test_extract_tool_calls_xml_string_attribute_ignored():
+    text = (
+        '<tool_calls><invoke name="search_klipper_docs">'
+        '<parameter name="query" string="true">bed_mesh</parameter>'
+        '<parameter name="limit" string="false">10</parameter>'
+        '</invoke></tool_calls>'
+    )
+    calls = _extract_tool_calls(text)
+    assert calls == [{"name": "search_klipper_docs", "arguments": {"query": "bed_mesh", "limit": "10"}}]
+
+
+def test_xml_cleanup_re_strips_full_block():
+    text = 'Sure! <tool_calls><invoke name="search_klipper_docs"><parameter name="query" string="true">bed_mesh</parameter></invoke></tool_calls>'
+    stripped = XML_TOOL_CALLS_CLEANUP_RE.sub("", text).strip()
+    assert stripped == "Sure!"
 
 
 # ── _parse_kwargs ───────────────────────────────────────────────────────

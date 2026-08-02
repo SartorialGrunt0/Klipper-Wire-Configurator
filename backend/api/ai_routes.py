@@ -123,6 +123,28 @@ DSML_CLEANUP_RE = re.compile(
     re.DOTALL,
 )
 
+# Bare XML tool-call blocks (Anthropic/DeepSeek style) emitted as plain
+# text when the model cannot use native tool_calls (e.g. an empty-reprompt
+# sent without the tools parameter). DeepSeek V3.2/V4 "flash" models ignore
+# the no-tools instruction and emit:
+#   <tool_calls>
+#   <invoke name="search_example_configs">
+#   <parameter name="query" string="true">PC2 PB9 PC3</parameter>
+#   </invoke>
+#   </tool_calls>
+XML_INVOKE_RE = re.compile(
+    r"<invoke\s+name=\"([^\"]*)\"[^>]*>(.*?)</invoke>",
+    re.DOTALL,
+)
+XML_PARAM_RE = re.compile(
+    r"<parameter\s+name=\"([^\"]*)\"[^>]*>(.*?)</parameter>",
+    re.DOTALL,
+)
+# Full <tool_calls>...</tool_calls> wrapper; stripped from visible content.
+XML_TOOL_CALLS_CLEANUP_RE = re.compile(
+    r"<tool_calls>.*?</tool_calls>",
+    re.DOTALL,
+)
 
 SYSTEM_PROMPT = (
     "You are an expert Klipper firmware, configuration, and macro assistant. "
@@ -510,6 +532,12 @@ def _extract_tool_calls(text: str) -> list[dict]:
          </||DSML||invoke>
          (DeepSeek V3.2/V4 native format; returned as plain text by some
          serving stacks instead of structured tool_calls)
+      6. Bare XML:
+         <tool_calls><invoke name="name">
+           <parameter name="arg1">val1</parameter>
+         </invoke></tool_calls>
+         (Anthropic/DeepSeek style, emitted as plain text by models that
+         ignore a no-tools re-prompt)
     """
     calls: list[dict] = []
     seen_contents: set[str] = set()
@@ -631,6 +659,25 @@ def _extract_tool_calls(text: str) -> list[dict]:
         seen_contents.add(body)
         arguments: dict = {}
         for param_match in DSML_PARAM_RE.finditer(body):
+            key = param_match.group(1).strip()
+            value = param_match.group(2).strip()
+            if key:
+                arguments[key] = value
+        calls.append({"name": name, "arguments": arguments})
+
+    # Format 6: bare XML tool-call blocks (Anthropic/DeepSeek style):
+    #   <tool_calls><invoke name="name"><parameter name="k">v</parameter>
+    #   </invoke></tool_calls>
+    # Emitted as plain text by models that ignore the no-tools instruction
+    # during an empty-response re-prompt.
+    for xml_match in XML_INVOKE_RE.finditer(text):
+        name = xml_match.group(1).strip()
+        body = xml_match.group(2)
+        if not name or body in seen_contents:
+            continue
+        seen_contents.add(body)
+        arguments = {}
+        for param_match in XML_PARAM_RE.finditer(body):
             key = param_match.group(1).strip()
             value = param_match.group(2).strip()
             if key:
@@ -1289,6 +1336,7 @@ async def chat_proxy(req: ChatRequest):
                         clean_content = CALL_SYNTAX_CLEANUP_RE.sub("", clean_content).strip()
                         clean_content = FUNC_CALL_CLEANUP_RE.sub("", clean_content).strip()
                         clean_content = DSML_CLEANUP_RE.sub("", clean_content).strip()
+                        clean_content = XML_TOOL_CALLS_CLEANUP_RE.sub("", clean_content).strip()
                         if clean_content:
                             current_messages.append({"role": "assistant", "content": clean_content})
                         current_messages.append({"role": "user", "content": tool_message})
@@ -1315,6 +1363,7 @@ async def chat_proxy(req: ChatRequest):
                 or CALL_SYNTAX_CLEANUP_RE.search(current_content)
                 or FUNC_CALL_CLEANUP_RE.search(current_content)
                 or DSML_CLEANUP_RE.search(current_content)
+                or XML_TOOL_CALLS_CLEANUP_RE.search(current_content)
             )
             final_content = MCP_TOOL_BLOCK_RE.sub("", current_content).strip()
             final_content = ALT_TOOL_CALL_CONTENT_RE.sub("", final_content).strip()
@@ -1332,6 +1381,7 @@ async def chat_proxy(req: ChatRequest):
             # user's question directly instead of the UI showing
             # "No response.".
             empty_reprompts = 0
+            reprompt_tool_turns = 0
             while not final_content and empty_reprompts < EMPTY_REPROMPT_LIMIT:
                 if stop_event is not None and stop_event.is_set():
                     raise ChatStoppedError()
@@ -1365,16 +1415,54 @@ async def chat_proxy(req: ChatRequest):
                     temperature=req.temperature,
                     tools=None,
                 )
-                current_content, _ = await _query_provider(
+                current_content, current_data = await _query_provider(
                     client, req.apiUrl, headers, retry_payload, req.apiProvider,
                     logger_context=f"empty-reprompt-{empty_reprompts}",
                     stop_event=stop_event,
                 )
+
+                # Some models (DeepSeek "flash", Qwen, ...) ignore the
+                # no-tools instruction and emit tool calls as plain text —
+                # bare <tool_calls> XML, DSML, or ```tool blocks. Execute them
+                # so the turn isn't wasted on raw markup or the fallback
+                # message; the tool results usually let the model answer.
+                reprompt_calls = (
+                    _extract_native_tool_calls(req.apiProvider, current_data)
+                    or _extract_tool_calls(current_content)
+                )
+                if reprompt_calls and reprompt_tool_turns < MAX_MCP_TOOL_TURNS:
+                    reprompt_tool_turns += len(reprompt_calls)
+                    tool_turns += len(reprompt_calls)
+                    empty_reprompts -= 1  # productive turn, not a failed attempt
+                    logger.info(
+                        "Empty re-prompt returned tool calls | executing %d (reprompt_turns=%d)",
+                        len(reprompt_calls), reprompt_tool_turns,
+                    )
+                    clean_assistant = MCP_TOOL_BLOCK_RE.sub("", current_content).strip()
+                    clean_assistant = ALT_TOOL_CALL_CONTENT_RE.sub("", clean_assistant).strip()
+                    clean_assistant = CALL_SYNTAX_CLEANUP_RE.sub("", clean_assistant).strip()
+                    clean_assistant = FUNC_CALL_CLEANUP_RE.sub("", clean_assistant).strip()
+                    clean_assistant = DSML_CLEANUP_RE.sub("", clean_assistant).strip()
+                    clean_assistant = XML_TOOL_CALLS_CLEANUP_RE.sub("", clean_assistant).strip()
+                    if clean_assistant:
+                        current_messages.append({"role": "assistant", "content": clean_assistant})
+                    for reprompt_call, result_text in zip(
+                        reprompt_calls[:MAX_MCP_TOOL_TURNS],
+                        [_execute_tool_call(c) for c in reprompt_calls[:MAX_MCP_TOOL_TURNS]],
+                    ):
+                        executed_tool_names.append(reprompt_call["name"])
+                        current_messages.append({
+                            "role": "user",
+                            "content": _build_tool_result_message(reprompt_call, result_text),
+                        })
+                    continue
+
                 final_content = MCP_TOOL_BLOCK_RE.sub("", current_content).strip()
                 final_content = ALT_TOOL_CALL_CONTENT_RE.sub("", final_content).strip()
                 final_content = CALL_SYNTAX_CLEANUP_RE.sub("", final_content).strip()
                 final_content = FUNC_CALL_CLEANUP_RE.sub("", final_content).strip()
                 final_content = DSML_CLEANUP_RE.sub("", final_content).strip()
+                final_content = XML_TOOL_CALLS_CLEANUP_RE.sub("", final_content).strip()
 
             # Collect tool names used during the MCP tool loop. Native tool
             # calls don't leave `[Tool result: ...]` messages, so fall back

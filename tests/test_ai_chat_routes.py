@@ -678,6 +678,82 @@ def test_chat_proxy_dsml_text_protocol_tool_loop(monkeypatch):
     assert not any('DSML' in str(m.get('content', '')) for m in second_payload['messages'])
 
 
+def test_chat_proxy_empty_reprompt_executes_xml_calls(monkeypatch):
+    # DeepSeek flash: 5 native tool turns with no text, then the empty
+    # re-prompt (sent WITHOUT tools) still returns a bare <tool_calls> XML
+    # block. The backend must execute those calls and keep the markup out of
+    # the visible reply instead of surfacing raw XML or the fallback message.
+    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
+    monkeypatch.setattr(ai_routes, '_execute_tool_call', lambda call: f"result for {call['name']}")
+
+    calls = []
+
+    def fake_post(url, headers, payload):
+        calls.append(payload)
+        n = len(calls)
+        if n <= 6:
+            # Initial call + 5 native tool turns, all tool-only.
+            return DummyResponse(
+                {
+                    'choices': [{
+                        'message': {
+                            'content': None,
+                            'tool_calls': [{
+                                'type': 'function',
+                                'id': f'call_{n}',
+                                'function': {'name': 'search_klipper_docs', 'arguments': '{"query": "bed_mesh"}'},
+                            }],
+                        }
+                    }]
+                },
+                url=url,
+            )
+        if n == 7:
+            # Empty re-prompt: model ignores no-tools and emits XML markup.
+            return DummyResponse(
+                {
+                    'choices': [{
+                        'message': {
+                            'content': (
+                                '<tool_calls>\n'
+                                '<invoke name="search_klipper_docs">\n'
+                                '<parameter name="query" string="true">bed_mesh adaptive</parameter>\n'
+                                '</invoke>\n'
+                                '</tool_calls>'
+                            ),
+                        }
+                    }]
+                },
+                url=url,
+            )
+        # Second re-prompt: real answer.
+        return DummyResponse(
+            {'choices': [{'message': {'content': 'BED_MESH_CALIBRATE probes the print area in adaptive mode.'}}]},
+            url=url,
+        )
+
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda *args, **kwargs: FakeAsyncClient(post_handler=fake_post))
+
+    response = client.post(
+        '/ai/chat',
+        json={
+            'messages': [{'role': 'user', 'content': 'Make my level bed macro adaptive.'}],
+            'apiKey': 'deepseek-test-key',
+            'model': 'deepseek-v4-flash',
+            'apiUrl': 'https://api.deepseek.com/v1/chat/completions',
+            'apiProvider': 'openai-compatible',
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body['content'] == 'BED_MESH_CALIBRATE probes the print area in adaptive mode.'
+    assert body['mcpToolTurns'] >= 6
+    assert 'search_klipper_docs' in body['mcpToolNames']
+    # No raw XML markup anywhere in the messages sent onward.
+    assert not any('<tool_calls>' in str(m.get('content', '')) for m in calls[-1]['messages'])
+
+
 # ── Empty-response re-prompt backstop ──────────────────────────────────
 # When a model ends its turn with only a tool call and no visible text,
 # the backend re-prompts without tools so the UI doesn't show "No response."
@@ -792,9 +868,11 @@ def test_chat_proxy_empty_response_reprompt_exhausts(monkeypatch):
         "I wasn't able to generate a response. "
         "Please try rephrasing your question."
     )
-    assert body['mcpToolTurns'] == 5
-    # 1 initial + 5 tool turns + 2 re-prompts = 8 provider calls, then give up.
-    assert len(calls) == 8
+    # 5 main tool turns + up to 5 more executed re-prompt tool turns (the
+    # model keeps calling tools even when told not to), then 2 empty attempts
+    # before giving up: 1 initial + 5 + 5 + 2 = 13 provider calls.
+    assert body['mcpToolTurns'] == 10
+    assert len(calls) == 13
 
 
 def test_chat_proxy_provider_empty_recovers_via_backstop(monkeypatch):
@@ -907,23 +985,33 @@ def test_chat_proxy_local_reprompt_bumps_max_tokens(monkeypatch):
         "I wasn't able to generate a response. "
         "Please try rephrasing your question."
     )
-    # 1 initial + 5 tool turns + 2 re-prompts = 8 provider calls.
-    assert len(calls) == 8
-    # The two backstop re-prompts (last two calls) must disable tools via the
+    # 1 initial + 5 tool turns + 5 executed re-prompt tool turns + 2 empty
+    # attempts = 13 provider calls.
+    assert len(calls) == 13
+    # The final backstop re-prompts (last two calls) must disable tools via the
     # direct-answer instruction AND raise the budget from the requested 1024
     # to EMPTY_REPROMPT_MAX_TOKENS (4096). Earlier payloads keep the request's
     # budget. Local providers don't use the native 'tools' key, so identify
     # the re-prompts by their system instruction.
     reprompts = calls[-2:]
     assert len(reprompts) == 2
-    for p in reprompts:
+    for p in calls[-2:]:
         assert p['max_tokens'] == ai_routes.EMPTY_REPROMPT_MAX_TOKENS == 4096
         assert any(
             m.get('role') == 'system' and 'Do not call any tools' in m.get('content', '')
             for m in p['messages']
         )
-    for p in calls[:-2]:
+    # The initial + 5 main tool turns keep the request's budget; the
+    # executed re-prompt turns (which also carry the direct-answer
+    # instruction) get the raised budget like the final attempts.
+    for p in calls[:6]:
         assert p['max_tokens'] == 1024
+    for p in calls[6:]:
+        assert p['max_tokens'] == ai_routes.EMPTY_REPROMPT_MAX_TOKENS == 4096
+        assert any(
+            m.get('role') == 'system' and 'Do not call any tools' in m.get('content', '')
+            for m in p['messages']
+        )
 
 
 # ── Google Gemini thought-signature passthrough ─────────────────────────
