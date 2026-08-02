@@ -526,7 +526,8 @@ def build_macro_questions() -> list[TestQuestion]:
             criteria=(
                 ("contains", "M104"),
                 ("regex", r"without\s+'?S'?|without.{0,40}['`]?S|"
-                          r"requires?\s+an?\s+[`']?S|missing.{0,20}temp"),
+                          r"requires?\s+an?\s+[`']?S|missing.{0,20}temp|"
+                          r"must\s+be\s+followed\s+by\s+[`']?S|requires?\s+a\s+temperature"),
             ),
         ),
         TestQuestion(
