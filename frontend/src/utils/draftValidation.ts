@@ -25,6 +25,8 @@ export interface AssistantDraftValidationOutcome {
   applicable: boolean;
   blockingIssues: AssistantDraftValidationIssueGroup[];
   failureReason: string | null;
+  /** Macro section headers whose trailing Jinja closers were auto-appended. */
+  repairedSections: string[];
 }
 
 // ── Full-rewrite guard for existing sections ────────────────────────

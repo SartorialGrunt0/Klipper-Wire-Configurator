@@ -35,6 +35,8 @@ export interface ReplyValidationResult {
   /** Empty = the reply is valid — stop. Non-empty = blocking issues. */
   issues: ReplyValidationIssue[];
   failureReason: string | null;
+  /** Number of sections the reply's draft was deterministically repaired. */
+  repairCount?: number;
   /**
    * True = stop retrying even though issues remain (advisory-only issues
    * such as duplicate sections the AI cannot resolve). Adds warningOnGiveUp.
@@ -102,6 +104,8 @@ export interface ReplyValidationPipelineResult {
   /** Full visible conversation trail (assistant replies + feedback messages). */
   finalConversation: ChatMessage[];
   warnings: string | null;
+  /** Number of feedback/retry rounds the pipeline performed across validators. */
+  retryCount: number;
 }
 
 // ── Pipeline ───────────────────────────────────────────────────────
@@ -122,6 +126,8 @@ export async function runReplyValidationPipeline(
   // so messageIndex = trail.length - 1.
   let trail = [...params.validationConversation, ...params.initialAttempt.conversationMessages];
   let warnings = params.initialAttempt.warningMessage;
+  let retryCount = 0;
+  let lastRepairCount = 0;
 
   for (const validator of validators) {
     let attemptsUsed = 0;
@@ -138,6 +144,9 @@ export async function runReplyValidationPipeline(
       };
 
       const result = await validator.validate(currentAttempt.assistantMessage.content, context);
+      if (typeof result.repairCount === 'number') {
+        lastRepairCount = result.repairCount;
+      }
 
       if (!result.applicable || result.issues.length === 0) {
         break; // Valid or not applicable — move to the next validator
@@ -171,6 +180,7 @@ export async function runReplyValidationPipeline(
         break; // Validator has no fix to suggest — stop retrying
       }
       allowExplanationOnly = feedback.allowExplanationOnly === true;
+      retryCount += 1;
 
       requestConversation = [
         ...requestConversation,
@@ -198,9 +208,14 @@ export async function runReplyValidationPipeline(
   }
 
   return {
-    finalMessage: currentAttempt.assistantMessage,
+    finalMessage: {
+      ...currentAttempt.assistantMessage,
+      repairCount: lastRepairCount,
+      retryCount,
+    },
     finalConversation: trail,
     warnings,
+    retryCount,
   };
 }
 

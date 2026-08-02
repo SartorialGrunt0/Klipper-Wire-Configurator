@@ -425,12 +425,13 @@ export function useAssistantDraft() {
         preview = await prepareAssistantDraftPreview(content, messageIndex, messageHistory);
       } catch (err: unknown) {
         if (!requireApplicable) {
-          return { applicable: false, blockingIssues: [], failureReason: null };
+          return { applicable: false, blockingIssues: [], failureReason: null, repairedSections: [] };
         }
         return {
           applicable: false,
           blockingIssues: [],
           failureReason: err instanceof Error ? err.message : 'The reply did not include a complete applicable cfg draft.',
+          repairedSections: [],
         };
       }
 
@@ -508,6 +509,7 @@ export function useAssistantDraft() {
           ...fullRewriteIssues,
         ],
         failureReason: null,
+        repairedSections: preview.repairedSections,
       };
     },
     [buildProjectConfigsForValidation, messages, prepareAssistantDraftPreview],
@@ -530,6 +532,7 @@ export function useAssistantDraft() {
         role: 'assistant',
         content: response.content || 'No response.',
         mcpToolNames: response.mcpToolNames,
+        repromptCount: response.repromptCount,
       };
       let conversationTrail: ChatMessage[] = [{ role: 'assistant', content: assistantMessage.content }];
       let warningMessage: string | null = null;
@@ -750,7 +753,7 @@ export function useAssistantDraft() {
           // Forcing retries here produced "Request fails: did not include a
           // config code block" whenever the model asked for more info instead
           // of drafting. The retry loop only fixes broken drafts.
-          return { applicable: false, issues: [], failureReason: outcome.failureReason };
+          return { applicable: false, issues: [], failureReason: outcome.failureReason, repairCount: 0 };
         }
 
         // Duplicate-section / shared-pin issues the AI cannot resolve are
@@ -771,6 +774,7 @@ export function useAssistantDraft() {
           ),
           failureReason: null,
           giveUp,
+          repairCount: outcome.repairedSections.length,
           warningOnGiveUp: giveUp
             ? [
                 `AI draft still has duplicate section or pin-conflict validation issues after ${context.attemptsUsed + 1} attempts. The assistant response was returned so it can explain the conflict.`,

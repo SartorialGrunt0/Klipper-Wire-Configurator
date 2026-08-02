@@ -133,6 +133,7 @@ describe('runReplyValidationPipeline', () => {
     expect(calls).toBe(1);
     expect(result.finalMessage.content).toBe(validContent);
     expect(result.warnings).toBeNull();
+    expect(result.retryCount).toBe(1);
   });
 
   it('warns after max attempts when the AI keeps failing', async () => {
@@ -184,5 +185,40 @@ describe('runReplyValidationPipeline', () => {
     const result = await runReplyValidationPipeline(p);
     expect(calls).toBe(0);
     expect(result.finalMessage.content).toBe('no block here');
+    expect(result.retryCount).toBe(0);
+  });
+
+  it('attaches repairCount from the accepting validator to the final message', async () => {
+    const repairingValidator: ReplyValidator = {
+      name: 'repairer',
+      maxAttempts: 1,
+      failMode: 'throw',
+      validate: async () => ({
+        applicable: true,
+        issues: [],
+        failureReason: null,
+        repairCount: 2,
+      }),
+      buildFeedback: () => null,
+      onMaxAttemptsReached: () => null,
+    };
+    const p = params({
+      initialAttempt: attempt(assistant(validContent)),
+      requestFn: async () => attempt(assistant(validContent)),
+      validators: [repairingValidator],
+    });
+    const result = await runReplyValidationPipeline(p);
+    expect(result.finalMessage.repairCount).toBe(2);
+    expect(result.retryCount).toBe(0);
+  });
+
+  it('preserves repromptCount from the attempt that produced the final message', async () => {
+    const p = params({
+      initialAttempt: attempt({ role: 'assistant', content: invalidContent, repromptCount: 2 }),
+      requestFn: async () => attempt({ role: 'assistant', content: validContent, repromptCount: 3 }),
+    });
+    const result = await runReplyValidationPipeline(p);
+    expect(result.finalMessage.repromptCount).toBe(3);
+    expect(result.retryCount).toBe(1);
   });
 });

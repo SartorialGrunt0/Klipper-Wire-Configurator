@@ -472,6 +472,7 @@ def test_chat_proxy_local_openai_compatible_allows_missing_key(monkeypatch):
         'content': 'LM Studio answer.',
         'mcpToolTurns': 0,
         'mcpToolNames': [],
+        'repromptCount': 0,
     }
     # The local URL is POSTed verbatim and no Authorization header is added
     # when no key was provided.
@@ -507,6 +508,7 @@ def test_chat_proxy_returns_plain_content(monkeypatch):
         'content': 'horizontal_move_z is the Z hop before XY travel.',
         'mcpToolTurns': 0,
         'mcpToolNames': [],
+        'repromptCount': 0,
     }
 
 

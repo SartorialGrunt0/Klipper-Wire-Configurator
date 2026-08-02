@@ -13,6 +13,12 @@ export interface ChatMessage {
   hiddenFromUser?: boolean;
   autoLoadedDocs?: string[];
   mcpToolNames?: string[];
+  /** Number of macro sections whose trailing Jinja closers were auto-appended. */
+  repairCount?: number;
+  /** Number of retries the reply pipeline performed before accepting. */
+  retryCount?: number;
+  /** Number of backend empty-response re-prompts for this reply. */
+  repromptCount?: number;
 }
 
 export interface AiSettings {

@@ -1742,6 +1742,7 @@ async def chat_proxy(req: ChatRequest):
                 "content": final_content,
                 "mcpToolTurns": tool_turns,
                 "mcpToolNames": mcp_tool_names,
+                "repromptCount": empty_reprompts,
             }
         except ChatStoppedError:
             logger.info("Chat stopped by user | requestId=%s", req.requestId)

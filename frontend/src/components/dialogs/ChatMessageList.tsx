@@ -15,6 +15,7 @@ import type { ChatMessage } from '../../stores/aiStore';
 import type { AssistantDraftChange } from '../../utils/assistantDraftMerge';
 import { extractConfigCodeBlock } from '../../utils/chatUtils';
 import { hasPrinterMemoryBlock } from '../../utils/printerMemory';
+import { classifyMiniDiffLine, isMiniDiffBlock } from '../../utils/miniDiff';
 
 // ── Markdown Code Block Component ───────────────────────────────────
 
@@ -29,6 +30,7 @@ function MarkdownCode({ children, className, inline }: CodeProps) {
   const content = String(children ?? '').replace(/\n$/, '');
   const language = className?.match(/language-([^\s]+)/)?.[1] ?? '';
   const isBlock = inline === false || Boolean(className) || content.includes('\n');
+  const isMiniDiff = isBlock && isMiniDiffBlock(content);
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle');
   const resetTimerRef = useRef<number | null>(null);
 
@@ -83,8 +85,31 @@ function MarkdownCode({ children, className, inline }: CodeProps) {
           )}
         </button>
       </div>
-      <pre className="overflow-x-auto p-3">
-        <code className="font-mono text-[11px]">{content}</code>
+      <pre className={`overflow-x-auto ${isMiniDiff ? 'font-mono text-[11px] leading-5' : 'p-3'}`}>
+        {isMiniDiff ? (
+          content.split('\n').map((line, index) => {
+            const kind = classifyMiniDiffLine(line);
+            return (
+              <div
+                key={index}
+                className={
+                  kind === 'removal'
+                    ? 'bg-red-500/15 px-3 text-red-400'
+                    : kind === 'addition'
+                      ? 'bg-green-500/15 px-3 text-green-400'
+                      : 'px-3 text-[var(--color-text-primary)]'
+                }
+              >
+                <span className="mr-2 select-none opacity-40">
+                  {kind === 'removal' ? '-' : kind === 'addition' ? '+' : ' '}
+                </span>
+                {line || '\u00A0'}
+              </div>
+            );
+          })
+        ) : (
+          <code className="font-mono text-[11px]">{content}</code>
+        )}
       </pre>
     </div>
   );
@@ -217,10 +242,6 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                     className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[10px] font-medium text-emerald-300"
                     title={`The assistant used MCP tools from the application to answer this: ${msg.mcpToolNames.join(', ')}`}
                   >
-                    <svg width="10" height="10" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                      <path d="M8 1V3M8 13V15M3 8H1M15 8H13M4.5 4.5L3 3M12.5 12.5L14 14M4.5 12.5L3 14M12.5 4.5L14 3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
-                      <circle cx="8" cy="8" r="2.5" stroke="currentColor" strokeWidth="1.3"/>
-                    </svg>
                     Tools: {msg.mcpToolNames.join(', ')}
                   </span>
                 </div>
@@ -237,6 +258,23 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                   </span>
                 </div>
               )}
+
+              {/* Auto-repair / retry / re-prompt footer */}
+              {(() => {
+                const repairCount = msg.repairCount ?? 0;
+                const retryCount = msg.retryCount ?? 0;
+                const repromptCount = msg.repromptCount ?? 0;
+                if (msg.role !== 'assistant' || repairCount + retryCount + repromptCount === 0) return null;
+                const parts: string[] = [];
+                if (repairCount > 0) parts.push(`Auto-repaired ${repairCount} section${repairCount === 1 ? '' : 's'}`);
+                if (retryCount > 0) parts.push(`Retried ${retryCount}×`);
+                if (repromptCount > 0) parts.push(`Re-prompted ${repromptCount}×`);
+                return (
+                  <div className="mt-2 rounded-md border border-red-500/30 bg-red-500/10 px-2 py-1 text-[10px] font-medium text-red-300">
+                    {parts.join(' · ')}
+                  </div>
+                );
+              })()}
 
               {/* Action buttons row */}
               <div className="mt-3 flex flex-wrap justify-end gap-2">

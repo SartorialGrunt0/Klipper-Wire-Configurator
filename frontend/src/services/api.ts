@@ -760,6 +760,8 @@ export interface AiChatResponse {
   stopped?: boolean;
   mcpToolTurns?: number;
   mcpToolNames?: string[];
+  /** Number of empty-response re-prompts the backend performed before content. */
+  repromptCount?: number;
 }
 
 /**
