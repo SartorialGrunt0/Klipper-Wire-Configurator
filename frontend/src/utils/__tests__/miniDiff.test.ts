@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isMiniDiffBlock, applyMiniDiffBlock } from '../miniDiff';
+import { isMiniDiffBlock, applyMiniDiffBlock, classifyMiniDiffLine } from '../miniDiff';
 
 const LEVEL_BED_SECTION = `[gcode_macro Level_Bed]
 #rename_existing: _BED_MESH_CALIBRATE
@@ -32,6 +32,22 @@ describe('isMiniDiffBlock', () => {
 
   it('rejects blocks with delete markers', () => {
     expect(isMiniDiffBlock('[gcode_macro Level_Bed]\n-    BED_MESH_CALIBRATE\n*[gcode_macro Other]')).toBe(false);
+  });
+});
+
+describe('classifyMiniDiffLine', () => {
+  it('classifies removal, addition, and context lines', () => {
+    expect(classifyMiniDiffLine('-    BED_MESH_CALIBRATE')).toBe('removal');
+    expect(classifyMiniDiffLine('+    BED_MESH_CALIBRATE ADAPTIVE=1')).toBe('addition');
+    expect(classifyMiniDiffLine('[gcode_macro Level_Bed]')).toBe('context');
+    expect(classifyMiniDiffLine('gcode:')).toBe('context');
+    expect(classifyMiniDiffLine('')).toBe('context');
+  });
+
+  it('does not treat indented +/- lines as diff markers', () => {
+    // Mini-diff markers sit at column 0; indented lines are config content.
+    expect(classifyMiniDiffLine('    - a comment')).toBe('context');
+    expect(classifyMiniDiffLine('      G1 X-10')).toBe('context');
   });
 });
 

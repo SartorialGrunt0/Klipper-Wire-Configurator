@@ -16,6 +16,19 @@
 export const MINI_DIFF_REMOVAL_RE = /^-(.*)$/;
 export const MINI_DIFF_ADDITION_RE = /^\+(.*)$/;
 
+export type MiniDiffLineKind = 'removal' | 'addition' | 'context';
+
+/**
+ * Classify one line of a mini-diff block for display coloring. Removed ('-')
+ * and added ('+') lines render red/green like the app's diff views; section
+ * headers and context lines stay neutral.
+ */
+export function classifyMiniDiffLine(line: string): MiniDiffLineKind {
+  if (MINI_DIFF_REMOVAL_RE.test(line)) return 'removal';
+  if (MINI_DIFF_ADDITION_RE.test(line)) return 'addition';
+  return 'context';
+}
+
 /** Header line such as `[gcode_macro Level_Bed]` (may have trailing comment). */
 const SECTION_HEADER_RE = /^\s*(\[[^\]]+\])\s*$/;
 /** Deletion marker `*[section_name]` — never treat such blocks as mini-diffs. */
