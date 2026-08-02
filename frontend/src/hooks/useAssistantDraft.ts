@@ -463,12 +463,13 @@ export function useAssistantDraft() {
         baselineProjectConfigs[fp.filename] = fp.baseConfig;
       });
 
-      // Phase 4 full-rewrite guard: an existing section returned as a FULL
-      // rewrite (no mini-diff markers) must be re-emitted as a mini-diff so
-      // unchanged lines survive. Exempt sections the deterministic Jinja
-      // repair already made lossless — a repaired draft is complete, so the
-      // protocol retry would only risk losing it.
-      const repairedHeaderSet = new Set(preview.repairedSections);
+      // Phase 4 full-rewrite guard (FIRST guard): an existing section
+      // returned as a FULL rewrite (no mini-diff markers) must be re-emitted
+      // as a mini-diff so unchanged lines survive. This fires even when the
+      // deterministic Jinja repair re-added a closer — a repaired full
+      // rewrite can still have dropped other lines (G28, M104), and the
+      // protocol retry is what preserves them. The repair remains the
+      // backstop for mini-diff rounds and new-section writes.
       const fullRewriteIssues: AssistantDraftValidationIssueGroup[] = [];
       for (const fp of preview.filePreviews) {
         const errors = buildFullRewriteSectionIssues(
@@ -476,7 +477,6 @@ export function useAssistantDraft() {
           fp.assistantConfig.sections,
           preview.fullRewriteSections
             .filter((target) => target.filename === fp.filename)
-            .filter((target) => !repairedHeaderSet.has(target.fullHeader))
             .map((target) => ({ fullHeader: target.fullHeader })),
         );
         if (errors.length > 0) {
