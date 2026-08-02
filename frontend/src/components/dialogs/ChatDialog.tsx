@@ -348,15 +348,16 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         }
 
         // File targeting instructions
+        const miniDiffInstruction = ` To EDIT an existing section, return a mini-diff: the section header followed by only the lines that change, prefixing removed lines with '-' and added lines with '+', keeping their original indentation. The app applies these replacements exactly, so unchanged lines (like Jinja {% if %}/{% endif %} tags) are preserved automatically. To ADD a new section, write it in full; to delete one, write '*[section_name]'.`;
         if (mentionedConfigFiles.length > 0) {
           contextMessages.push({
             role: 'system',
-            content: `Apply requested edits to these loaded files: ${mentionedConfigFiles.join(', ')}. Start each cfg block with a '# file: <filename>' hint line; use one separate block per file. To create a new file, use '# file: <newfilename>' with a name that does not exist yet.`,
+            content: `Apply requested edits to these loaded files: ${mentionedConfigFiles.join(', ')}. Start each cfg block with a '# file: <filename>' hint line; use one separate block per file. To create a new file, use '# file: <newfilename>' with a name that does not exist yet.${miniDiffInstruction}`,
           });
         } else if (activeFile) {
           contextMessages.push({
             role: 'system',
-            content: `Unless the user names a different file, apply edits to ${activeFile}. Return only changed, new, or deleted sections in a fenced cfg code block. Start each block with a '# file: <filename>' hint line when targeting a specific file. To create a new file, use '# file: <newfilename>'. Do not return the whole file unless the user explicitly asks for a full replacement.`,
+            content: `Unless the user names a different file, apply edits to ${activeFile}. Return only changed, new, or deleted content in a fenced cfg code block. Start each block with a '# file: <filename>' hint line when targeting a specific file. To create a new file, use '# file: <newfilename>'. Do not return the whole file unless the user explicitly asks for a full replacement.${miniDiffInstruction}`,
           });
         }
 

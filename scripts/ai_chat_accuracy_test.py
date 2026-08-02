@@ -209,8 +209,8 @@ def build_questions() -> list[TestQuestion]:
             qid="Q04",
             title="Docs: list bundled docs",
             text="What Klipper documentation files are bundled with this app? "
-                 "Name at least five of them.",
-            expected_tools=("list_klipper_docs",),
+                 "Search the docs index and name at least five of them.",
+            expected_tools=("search_klipper_docs",),
             criteria=(
                 ("contains", "Config_Reference"),
                 ("regex", r"(?:\d+\.\s+\*\*[^*\n]+\.md\*\*[^\n]*(?:\n|$)){4,}"),
@@ -221,7 +221,7 @@ def build_questions() -> list[TestQuestion]:
             title="Schema: [heater_fan] section schema",
             text="What is the section schema for [heater_fan]? "
                  "List the supported parameters and their types.",
-            expected_tools=("get_section_schema",),
+            expected_tools=("get_config_reference_section",),
             criteria=(
                 ("contains", "heater_fan"),
                 ("contains", "max_power"),
@@ -258,21 +258,11 @@ def build_questions() -> list[TestQuestion]:
             ),
         ),
         TestQuestion(
-            qid="Q09",
-            title="User configs: search",
-            text="Search my local configuration files for anything related to fans.",
-            expected_tools=("search_user_configs",),
-            criteria=(
-                ("regex", r"aux_fan|fan"),
-                ("regex", r"\.cfg"),
-            ),
-        ),
-        TestQuestion(
             qid="Q10",
             title="User configs: read aux_fan.cfg",
             text="Read my local config file aux_fan.cfg and tell me what fan section "
                  "it defines.",
-            expected_tools=("read_user_config", "search_user_configs"),
+            expected_tools=("read_user_config",),
             criteria=(
                 ("contains", "Aux_Fan"),
                 ("regex", r"fan_generic|SET_FAN_SPEED"),
@@ -283,7 +273,7 @@ def build_questions() -> list[TestQuestion]:
             title="Board detection",
             text="Here is an MCU definition from my printer.cfg. Which board or MCU "
                  "family does it look like?\n\n" + _MCU_SNIPPET,
-            expected_tools=("detect_board",),
+            require_tool=False,
             criteria=(
                 ("regex", r"stm32|STM32|stm|f446"),
                 ("regex", r"octopus|f4|mcu|board"),
@@ -294,7 +284,7 @@ def build_questions() -> list[TestQuestion]:
             title="Calc: leadscrew rotation_distance",
             text="My Z axis uses a leadscrew with 2mm pitch, single start. "
                  "What is the rotation_distance for my Z stepper?",
-            expected_tools=("calculate_rotation_distance",),
+            require_tool=False,
             criteria=(
                 ("contains", "rotation_distance"),
                 ("regex", r"rotation[_ ]distance[^0-9]{0,40}?\b2(\.0+)?\b"),
@@ -305,7 +295,7 @@ def build_questions() -> list[TestQuestion]:
             title="Calc: belt rotation_distance",
             text="My X axis is belt driven with a 20-tooth pulley on the motor and a "
                  "GT2 belt (2mm pitch). What rotation_distance should I use?",
-            expected_tools=("calculate_rotation_distance",),
+            require_tool=False,
             criteria=(
                 ("contains", "rotation_distance"),
                 ("regex", r"rotation[_ ]distance[^0-9]{0,40}?\b40(\.0+)?\b"),
@@ -316,7 +306,7 @@ def build_questions() -> list[TestQuestion]:
             title="Macros: PRINT_START template",
             text="Generate a PRINT_START macro template for me, including bed mesh "
                  "calibration.",
-            expected_tools=("generate_macro_template",),
+            require_tool=False,
             criteria=(
                 ("contains", "PRINT_START"),
                 ("regex", r"\[gcode_macro"),
@@ -478,8 +468,7 @@ def build_macro_questions() -> list[TestQuestion]:
             title="Macros: generate all templates",
             text=("Generate PAUSE, RESUME, PRINT_END, and CANCEL_PRINT macro templates "
                   "for me — one cfg block per macro."),
-            expected_tools=("generate_macro_template",),
-            require_tool=True,
+            require_tool=False,
             criteria=(
                 ("regex", r"\[gcode_macro\s+PAUSE"),
                 ("regex", r"\[gcode_macro\s+RESUME"),
@@ -492,8 +481,7 @@ def build_macro_questions() -> list[TestQuestion]:
             title="Macros: custom park/retract options",
             text=("Generate a PAUSE macro template with park position X=100 Y=150, "
                   "Z lift 20mm, retract 3mm at 30mm/s. Return it as a cfg block."),
-            expected_tools=("generate_macro_template",),
-            require_tool=True,
+            require_tool=False,
             criteria=(
                 ("regex", r"\[gcode_macro\s+PAUSE"),
                 ("regex", r"PARK_X[^\n]*100"),
@@ -573,7 +561,7 @@ def build_macro_questions() -> list[TestQuestion]:
             title="Macros: generate then validate",
             text=("Generate a RESUME macro template, then validate the generated macro "
                   "and report whether it has any issues."),
-            expected_tools=("generate_macro_template", "validate_macro"),
+            expected_tools=("validate_macro",),
             require_tool=True,
             criteria=(
                 ("regex", r"\[gcode_macro\s+RESUME"),
@@ -930,6 +918,43 @@ def build_trident_questions() -> list[TestQuestion]:
                 # the cfg block.
             ),
         ),
+        TestQuestion(
+            qid="MINIDIFF-01",
+            title="Mini-diff: level_bed adaptive (endif invariant)",
+            text=("Modify my level_bed macro in printer.cfg to call "
+                  "BED_MESH_CALIBRATE in adaptive mode."),
+            context_files=printer_cfg,
+            require_tool=False,
+            criteria=(
+                ("mini_diff", "[gcode_macro Level_Bed]"),
+                ("contains", "ADAPTIVE=1"),
+            ),
+        ),
+        TestQuestion(
+            qid="MINIDIFF-02",
+            title="Mini-diff: [printer] max_accel edit",
+            text=("In printer.cfg change the [printer] max_accel to 12000. "
+                  "Use the mini-diff protocol: the section header plus only "
+                  "the changed lines."),
+            context_files=printer_cfg,
+            require_tool=False,
+            criteria=(
+                ("mini_diff", "[printer]"),
+                ("contains", "12000"),
+            ),
+        ),
+        TestQuestion(
+            qid="MINIDIFF-03",
+            title="Mini-diff: aux_fan.cfg pin edit",
+            text=("In aux_fan.cfg change the [fan_generic Aux_Fan] section's "
+                  "pin to PB9. Start the cfg block with '# file: aux_fan.cfg'."),
+            context_files=printer_and_aux,
+            require_tool=False,
+            criteria=(
+                ("mini_diff", "[fan_generic Aux_Fan]"),
+                ("contains", "PB9"),
+            ),
+        ),
     ]
 
 
@@ -969,7 +994,7 @@ def build_memory_questions() -> list[TestQuestion]:
             title="Printer memory: derive from config",
             text=("Here is my printer config. Fill in the printer memory profile from it.\n\n"
                   + _MEMORY_CONFIG_SNIPPET),
-            expected_tools=("detect_board", "search_klipper_docs",
+            expected_tools=("search_klipper_docs",
                             "get_config_reference_section", "search_example_configs",
                             "read_example_config"),
             require_tool=False,
@@ -1004,8 +1029,7 @@ def build_memory_questions() -> list[TestQuestion]:
                   "CoreXY kinematics, and a Voron Tap probe. Fill in my printer memory — "
                   "use the bundled tools to confirm the hardware details."),
             expected_tools=("search_example_configs", "read_example_config",
-                            "search_klipper_docs", "get_config_reference_section",
-                            "detect_board"),
+                            "search_klipper_docs", "get_config_reference_section"),
             require_tool=False,
             criteria=(
                 ("memory_block", ""),
@@ -1089,6 +1113,29 @@ def criterion_ok(kind: str, value: str, content: str,
         if field not in memory[1]:
             return False
         return re.search(pattern, str(memory[1].get(field, "")), re.IGNORECASE) is not None
+    if kind == "mini_diff":
+        # value = expected section header, e.g. "[gcode_macro Level_Bed]".
+        # Passes when a cfg block in the reply contains that header and
+        # uses the mini-diff protocol: at least one '-' and one '+' line, and
+        # no full-section Jinja reproduction ({% endif %} / {% endfor %}) —
+        # unchanged lines must be preserved by the app, not re-emitted.
+        # Mirrors the frontend's block extraction: fenced cfg blocks first,
+        # then fall back to the raw text when it looks like config (file
+        # hints / section headers), because models sometimes omit fences.
+        target = value.strip().lower()
+        blocks = re.findall(r"```(?:cfg|conf|ini|klipper|printercfg)?\s*\n(.*?)```", content, re.DOTALL)
+        if not blocks and re.search(r"#\s*file\s*:|^\s*\[[^\]]+\]", content, re.MULTILINE):
+            blocks = [content]
+        for block in blocks:
+            if target not in block.lower():
+                continue
+            has_minus = re.search(r"^\s*-(?=\s|\S)", block, re.MULTILINE) is not None
+            has_plus = re.search(r"^\s*\+(?=\s|\S)", block, re.MULTILINE) is not None
+            if has_minus and has_plus:
+                if "{% endif %}" in block or "{% endfor %}" in block:
+                    return False
+                return True
+        return False
     return False
 
 
@@ -1147,12 +1194,19 @@ def _build_chat_messages(question: TestQuestion) -> list[dict]:
             "role": "system",
             "content": (
                 f"Unless the user names a different file, apply edits to {primary}. "
-                "Return only changed, new, or deleted sections in a fenced cfg "
+                "Return only changed, new, or deleted content in a fenced cfg "
                 "code block. "
                 "Start each block with a '# file: <filename>' hint line when "
                 "targeting a specific file. To create a new file, use "
                 "'# file: <newfilename>'. Do not return the whole file unless "
-                "the user explicitly asks for a full replacement."
+                "the user explicitly asks for a full replacement. "
+                "To EDIT an existing section, return a mini-diff: the section "
+                "header followed by only the lines that change, prefixing removed "
+                "lines with '-' and added lines with '+', keeping their original "
+                "indentation. The app applies these replacements exactly, so "
+                "unchanged lines (like Jinja {% if %}/{% endif %} tags) are "
+                "preserved automatically. To ADD a new section, write it in full; "
+                "to delete one, write '*[section_name]'."
             ),
         })
     messages.append({"role": "user", "content": question.text})

@@ -113,7 +113,7 @@ export function buildAssistantDraftValidationFeedback(
   return [
     'Your cfg changes failed validation after merging into the current project.',
     'Return a corrected replacement reply that fixes every problem below and still satisfies the user request.',
-    'If you return config changes, return only complete changed sections inside fenced cfg code blocks and keep any required "# file: <filename>" hint.',
+    'If you return config changes, return only changed content inside fenced cfg code blocks and keep any required "# file: <filename>" hint. To edit an existing section use a mini-diff (section header plus only the changed lines, "-" removed / "+" added with original indentation); unchanged lines are preserved automatically. To add a new section, write it in full.',
     allowExplanationOnly
       ? 'If the remaining problems are duplicate sections or reused pins and you cannot resolve them safely from the current config, do not return another invalid cfg block. Instead, clearly explain the conflict, mention the exact section or pin involved, and say what must change before a valid config can be produced.'
       : 'Do not ask the user to apply manual fixes for these validation issues.',

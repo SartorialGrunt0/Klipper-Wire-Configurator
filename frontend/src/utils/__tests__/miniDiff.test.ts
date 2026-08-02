@@ -1,0 +1,159 @@
+import { describe, it, expect } from 'vitest';
+import { isMiniDiffBlock, applyMiniDiffBlock } from '../miniDiff';
+
+const LEVEL_BED_SECTION = `[gcode_macro Level_Bed]
+#rename_existing: _BED_MESH_CALIBRATE
+gcode:
+    {% if "xyz" not in printer.toolhead.homed_axes %}
+      G28
+    {% endif %}
+    CLEAN_NOZZLE
+    M109 S150
+    Z_TILT_ADJUST
+    G28 Z
+    BED_MESH_CALIBRATE
+    M104 S0
+`;
+
+describe('isMiniDiffBlock', () => {
+  it('detects a section header plus removal lines', () => {
+    expect(isMiniDiffBlock(
+      '[gcode_macro Level_Bed]\n-    BED_MESH_CALIBRATE\n+    BED_MESH_CALIBRATE ADAPTIVE=1',
+    )).toBe(true);
+  });
+
+  it('rejects a full-section block (no +/- lines)', () => {
+    expect(isMiniDiffBlock(LEVEL_BED_SECTION)).toBe(false);
+  });
+
+  it('rejects addition-only blocks (no anchor removal)', () => {
+    expect(isMiniDiffBlock('[gcode_macro Level_Bed]\n+    NEW_LINE')).toBe(false);
+  });
+
+  it('rejects blocks with delete markers', () => {
+    expect(isMiniDiffBlock('[gcode_macro Level_Bed]\n-    BED_MESH_CALIBRATE\n*[gcode_macro Other]')).toBe(false);
+  });
+});
+
+describe('applyMiniDiffBlock', () => {
+  it('applies a single line replacement and preserves the rest verbatim', () => {
+    const result = applyMiniDiffBlock(
+      '[gcode_macro Level_Bed]\n-    BED_MESH_CALIBRATE\n+    BED_MESH_CALIBRATE ADAPTIVE=1',
+      LEVEL_BED_SECTION,
+    );
+    expect(result.applied).toBe(true);
+    expect(result.text).toContain('BED_MESH_CALIBRATE ADAPTIVE=1');
+    // The critical invariant: Jinja tags and unchanged lines survive intact.
+    expect(result.text).toContain('{% if "xyz" not in printer.toolhead.homed_axes %}');
+    expect(result.text).toContain('{% endif %}');
+    expect(result.text).toContain('    G28');
+    expect(result.text).toContain('CLEAN_NOZZLE');
+    expect(result.text).toContain('M104 S0');
+    expect(result.text).not.toContain('\n    BED_MESH_CALIBRATE\n');
+    expect(result.text.split('\n')).toEqual([
+      '[gcode_macro Level_Bed]',
+      '#rename_existing: _BED_MESH_CALIBRATE',
+      'gcode:',
+      '    {% if "xyz" not in printer.toolhead.homed_axes %}',
+      '      G28',
+      '    {% endif %}',
+      '    CLEAN_NOZZLE',
+      '    M109 S150',
+      '    Z_TILT_ADJUST',
+      '    G28 Z',
+      '    BED_MESH_CALIBRATE ADAPTIVE=1',
+      '    M104 S0',
+      '',
+    ]);
+  });
+
+  it('supports multiple removals and multi-line additions in one block', () => {
+    const base = `[extruder]
+step_pin: PB4
+dir_pin: !PB5
+microsteps: sixteen
+rotation_distance: 100
+heater_pin: PB6
+`;
+    const result = applyMiniDiffBlock(
+      '[extruder]\n-rotation_distance: 100\n+rotation_distance: 101\n+gear_ratio: 1:1\n-microsteps: sixteen\n+microsteps: 32',
+      base,
+    );
+    expect(result.applied).toBe(true);
+    expect(result.text).toBe(`[extruder]
+step_pin: PB4
+dir_pin: !PB5
+microsteps: 32
+rotation_distance: 101
+gear_ratio: 1:1
+heater_pin: PB6
+`);
+  });
+
+  it('supports multiple sections in one block', () => {
+    const base = `[fan]
+pin: PB0
+
+[heater_fan partfan]
+pin: PB1
+`;
+    const result = applyMiniDiffBlock(
+      '[fan]\n-pin: PB0\n+pin: PB9\n\n[heater_fan partfan]\n-pin: PB1\n+pin: PB10',
+      base,
+    );
+    expect(result.applied).toBe(true);
+    expect(result.text).toContain('pin: PB9');
+    expect(result.text).toContain('pin: PB10');
+    expect(result.text).toContain('[heater_fan partfan]');
+  });
+
+  it('ignores non-diff context lines inside the block', () => {
+    const result = applyMiniDiffBlock(
+      '[gcode_macro Level_Bed]\n-    BED_MESH_CALIBRATE\n+    BED_MESH_CALIBRATE ADAPTIVE=1\n# context comment',
+      LEVEL_BED_SECTION,
+    );
+    expect(result.applied).toBe(true);
+    expect(result.text).not.toContain('# context comment');
+  });
+
+  it('returns applied=false when a removal has no match in the base', () => {
+    const result = applyMiniDiffBlock(
+      '[gcode_macro Level_Bed]\n-    BED_MESH_CALIBRATE XYZ\n+    BED_MESH_CALIBRATE ADAPTIVE=1',
+      LEVEL_BED_SECTION,
+    );
+    expect(result.applied).toBe(false);
+  });
+
+  it('returns applied=false for non-mini-diff blocks', () => {
+    const result = applyMiniDiffBlock(LEVEL_BED_SECTION, LEVEL_BED_SECTION);
+    expect(result.applied).toBe(false);
+    expect(result.text).toBe(LEVEL_BED_SECTION);
+  });
+
+  it('normalizes trailing whitespace and CRLF when matching', () => {
+    const base = 'gcode:\n    BED_MESH_CALIBRATE\r\n    M104 S0\r\n';
+    const result = applyMiniDiffBlock(
+      '[gcode_macro X]\n-    BED_MESH_CALIBRATE \n+    BED_MESH_CALIBRATE ADAPTIVE=1',
+      `[gcode_macro X]\ngcode:\n    BED_MESH_CALIBRATE\r\n    M104 S0\r\n`,
+    );
+    expect(result.applied).toBe(true);
+    expect(result.text).toBe('[gcode_macro X]\ngcode:\n    BED_MESH_CALIBRATE ADAPTIVE=1\n    M104 S0\n');
+  });
+
+  it('leaves the section unchanged when a removal matches twice and only one is targeted', () => {
+    const base = `[gcode_macro X]
+gcode:
+    G28
+    G28
+`;
+    const result = applyMiniDiffBlock(
+      '[gcode_macro X]\n-    G28\n+    G28 X0',
+      base,
+    );
+    expect(result.applied).toBe(true);
+    // First occurrence is replaced, the second stays.
+    expect(result.text).toContain('G28 X0');
+    const occurrences = result.text.match(/G28/g) ?? [];
+    expect(occurrences.length).toBe(2);
+  });
+});

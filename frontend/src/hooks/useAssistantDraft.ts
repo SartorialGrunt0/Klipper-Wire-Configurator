@@ -36,6 +36,7 @@ import {
 import type { AssistantDraftChange } from '../utils/assistantDraftMerge';
 import { mergeAssistantSectionsIntoConfig, preprocessDeleteMarkers } from '../utils/assistantDraftMerge';
 import { normalizeDiffText } from '../utils/configDiff';
+import { isMiniDiffBlock, applyMiniDiffBlock } from '../utils/miniDiff';
 import type { ReplyValidator } from '../utils/replyValidation';
 
 // ── Internal Types ──────────────────────────────────────────────────
@@ -176,7 +177,26 @@ export function useAssistantDraft() {
         if (!configText.trim()) continue;
 
         const assistantParseFilename = fileHint ?? mentionedFilenames[0] ?? activeFile ?? loadedConfigFilenames[0] ?? 'printer.cfg';
-        const processedConfigText = preprocessDeleteMarkers(configText);
+
+        // Mini-diff protocol: when the block contains '-'/'+' line edits for an
+        // existing section, materialize the full section from the current file
+        // text BEFORE parsing. Unchanged lines (including Jinja tags in macros)
+        // are preserved verbatim from the base file, so the model can never
+        // drop them. If the edit cannot be applied (e.g. the section is not in
+        // the base file), fall back to the raw block so the normal parse and
+        // validation feedback handles it.
+        let draftConfigText = configText;
+        if (isMiniDiffBlock(draftConfigText)) {
+          const baseFileText = await getConfigText(assistantParseFilename);
+          if (baseFileText) {
+            const applied = applyMiniDiffBlock(draftConfigText, baseFileText);
+            if (applied.applied) {
+              draftConfigText = applied.text;
+            }
+          }
+        }
+
+        const processedConfigText = preprocessDeleteMarkers(draftConfigText);
         const assistantResult = await api.parseConfigText(processedConfigText, assistantParseFilename);
 
         if (assistantResult.config.sections.length === 0) continue;
@@ -215,7 +235,7 @@ export function useAssistantDraft() {
       }
       return Array.from(groupedTargets.values());
     },
-    [activeFile, configFiles, getAssistantMessageHintTexts, loadedConfigFilenames],
+    [activeFile, configFiles, getAssistantMessageHintTexts, getConfigText, loadedConfigFilenames],
   );
 
   const prepareAssistantDraftPreview = useCallback(

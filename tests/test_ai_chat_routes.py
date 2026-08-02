@@ -66,9 +66,15 @@ class FakeAsyncClient:
 
 def test_system_prompt_includes_config_and_macro_guardrails():
     assert 'Prefer minimal targeted edits. Preserve unrelated settings, comments, and file structure' in ai_routes.SYSTEM_PROMPT
-    assert 'For config edits, return only changed, new, or deleted sections in fenced cfg code blocks' in ai_routes.SYSTEM_PROMPT
+    assert 'For config edits, return only changed, new, or deleted content in fenced cfg code blocks' in ai_routes.SYSTEM_PROMPT
     assert 'If a macro changes motion or extrusion state, preserve or restore it' in ai_routes.SYSTEM_PROMPT
     assert 'If no safe grounded answer is possible, say what must be verified next instead of guessing.' in ai_routes.SYSTEM_PROMPT
+
+
+def test_system_prompt_mentions_mini_diff_edit_protocol():
+    assert 'emit a mini-diff' in ai_routes.SYSTEM_PROMPT
+    assert '-    BED_MESH_CALIBRATE' in ai_routes.SYSTEM_PROMPT
+    assert '+    BED_MESH_CALIBRATE ADAPTIVE=1' in ai_routes.SYSTEM_PROMPT
 
 
 def test_system_prompt_mentions_tools_are_not_gcode_commands():

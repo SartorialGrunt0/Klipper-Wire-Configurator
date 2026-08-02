@@ -98,37 +98,44 @@ FUNC_CALL_CLEANUP_RE = re.compile(
 
 SYSTEM_PROMPT = (
     "You are an expert Klipper firmware, configuration, and macro assistant. "
-    "Answer Klipper questions, edit existing configs, and draft macros without inventing details.\n\n"
-    "Keep answers short and focused.\n\n"
-    "Operating rules:\n"
-    "1. Source of truth: bundled Klipper docs, Config_Reference excerpts, tool output, and "
-    "user-provided config text. Never invent section names, parameter names, defaults, units, "
-    "commands, or supported behavior. If the docs in context do not confirm a detail, say so "
+    "You help users by answering questions, editing configs, and drafting macros "
+    "without inventing details.\n\n"
+    "Guidelines:\n"
+    "1. Keep answers short and focused.\n"
+    "2. Prefer minimal targeted edits. Preserve unrelated settings, comments, and file "
+    "structure unless the user explicitly asks for a larger refactor.\n"
+    "3. Never invent section names, parameter names, defaults, units, commands, or supported "
+    "behavior. If the bundled docs or the provided config do not confirm a detail, say so "
     "explicitly.\n"
-    "2. If the request depends on unknown printer details (kinematics, probe, MCU, toolhead, bed "
-    "size, macros, sensors), ask one short clarifying question unless the provided config "
+    "4. If the request depends on unknown printer details (kinematics, probe, MCU, toolhead, "
+    "bed size, macros, sensors), ask one short clarifying question unless the provided config "
     "already resolves it.\n"
-    "3. Prefer minimal targeted edits. Preserve unrelated settings, comments, and file structure "
-    "unless the user explicitly asks for a larger refactor.\n"
-    "4. For config edits, return only changed, new, or deleted sections in fenced cfg code "
-    "blocks, with full final sections using exact Klipper headers and parameter names. To "
-    "delete a section entirely, write `*[section_name]` on its own line inside the cfg block "
-    "(* = delete). To comment a section out, keep it in the file with its header commented "
-    "out: #[extruder]. You can list multiple deletions one per line and mix them with normal "
-    "sections in the same cfg block.\n"
-    "5. For macros: valid Klipper syntax, conservative motion and temperature behavior, explicit "
-    "mode changes. If a macro changes motion or extrusion state, preserve or restore it unless "
-    "the user clearly wants persistent changes. When editing an existing macro, reproduce the "
-    "FULL macro body verbatim - every G-code line and every Jinja tag ({% if %}, {% endif %}, "
-    "{% for %}, {% endfor %}, {% raw %}, {% endraw %}) - and change only the requested lines. "
-    "Never drop, reorder, or reword lines that were not part of the request.\n"
-    "6. Keep prose short. After config or macro code, briefly explain what changed, why, and "
-    "cite the exact documentation section header and parameter or command names you relied on.\n"
-    "7. If no safe grounded answer is possible, say what must be verified next instead of "
-    "guessing.\n"
-    "8. Tool calls: only call tools that are listed in your Available Tools section. "
-    "Klipper G-code commands and macro names (G28, M104, BED_MESH_CALIBRATE, "
-    "SET_FAN_SPEED, PRINT_START, etc.) are NOT tools — never wrap them in ```tool blocks."
+    "5. If a macro changes motion or extrusion state, preserve or restore it unless the user "
+    "clearly wants persistent changes.\n"
+    "6. If no safe grounded answer is possible, say what must be verified next instead of "
+    "guessing.\n\n"
+    "Edit protocol:\n"
+    "- For config edits, return only changed, new, or deleted content in fenced cfg code "
+    "blocks. Start each block with a '# file: <filename>' hint line when the target file is "
+    "not obvious. Do not return the whole file unless the user explicitly asks for a full "
+    "replacement.\n"
+    "- To EDIT an existing section, emit a mini-diff: the section header followed by only the "
+    "lines that change, prefixing removed lines with '-' and added lines with '+', keeping "
+    "their original indentation. The app applies these exact replacements to the current "
+    "file — do not reproduce unchanged lines. Example:\n"
+    "  [gcode_macro Level_Bed]\n"
+    "  -    BED_MESH_CALIBRATE\n"
+    "  +    BED_MESH_CALIBRATE ADAPTIVE=1\n"
+    "- To ADD a new section, write the full section. To DELETE a section entirely, write "
+    "`*[section_name]` on its own line inside the cfg block (* = delete). To comment a "
+    "section out, keep it in the file with its header commented out: #[extruder].\n"
+    "- For macros: valid Klipper syntax, conservative motion and temperature behavior. With "
+    "the mini-diff protocol the unchanged lines are preserved automatically; never drop, "
+    "reorder, or reword lines that were not part of the request.\n"
+    "- After config or macro code, briefly explain what changed, why, and cite the exact "
+    "documentation section header and parameter or command names you relied on.\n"
+    "- Klipper G-code commands and macro names (G28, M104, BED_MESH_CALIBRATE, "
+    "SET_FAN_SPEED, PRINT_START, etc.) are NOT tools — never wrap them in ```tool blocks.\n"
 )
 
 
@@ -222,15 +229,11 @@ def _prepare_messages(messages: list[dict]) -> list[dict]:
     """Build a clean system prompt with MCP tool descriptions, printer memory,
     and user messages.
     """
-    system_parts = [SYSTEM_PROMPT, _build_mcp_tool_context()]
-    system_parts.append(
-        "Use the tools you have available to help you answer the user's latest request."
-    )
-
     # ── Inject printer memory context ──
     memory = load_printer_memory()
     memory_context = printer_memory_to_context(memory)
-    system_parts.append(memory_context)
+
+    system_parts = [SYSTEM_PROMPT, _build_mcp_tool_context(include_example_configs=is_printer_memory_blank(memory)), memory_context]
 
     # If printer memory is completely blank and there are user messages to work with,
     # add an auto-fill instruction asking the AI to investigate.
@@ -242,8 +245,8 @@ def _prepare_messages(messages: list[dict]) -> list[dict]:
             "1. Examine the user's config files passed as context for clues about the mainboard, "
             "toolhead board, kinematics, probe type, etc.\n"
             "2. Use `search_example_configs` with board/printer/MCU keywords from the config, then "
-            "`read_example_config` on the best matches. Use `search_klipper_docs`, "
-            "`get_config_reference_section`, and `detect_board` to confirm details. Correlate with "
+            "`read_example_config` on the best matches. Use `search_klipper_docs` and "
+            "`get_config_reference_section` to confirm details. Correlate with "
             "the user's config — e.g. a Voron 2.4 usually uses CoreXY kinematics.\n"
             "3. For any field you cannot determine, ask the user to provide it.\n"
             "4. Return your proposal in a fenced `printer-memory` code block containing ONLY valid "
@@ -297,22 +300,43 @@ def _prepare_messages(messages: list[dict]) -> list[dict]:
 # ── MCP Tool Integration ───────────────────────────────────────────
 
 
-def _build_mcp_tool_context() -> str:
-    """Build an 'Available Tools' section for the system prompt.
+def _build_mcp_tool_context(*, include_example_configs: bool = False) -> str:
+    """Build a compact 'Available Tools' section for the system prompt.
 
-    Describes the embedded MCP tools so the AI model can request them
-    regardless of whether the provider supports native function calling.
+    Only the tools the model should actively choose are advertised, each as a
+    one-line snippet (the same pattern Pi/coding agents use — full schemas
+    stay in the registered tool set for the executor and native function
+    calling). Tools not listed here remain registered and callable, but the
+    model is not nudged toward them, which keeps attention on the tools that
+    matter for the current task.
+
+    Tool tiers:
+    - Always visible: docs search/read, Config_Reference, user config read,
+      and the two validators.
+    - include_example_configs=True: also advertise example-config search/read
+      (used when printer memory is blank and auto-fill is active).
+    - Hidden (registered, not advertised): search_user_configs,
+      list_klipper_docs, get_section_schema, detect_board,
+      calculate_rotation_distance, generate_macro_template.
     """
-    tools = _mcp_server._list_tools()
+    snippets: dict[str, str] = {
+        "search_klipper_docs": "Search the bundled Klipper docs",
+        "read_klipper_doc": "Read a bundled Klipper doc file",
+        "get_config_reference_section": "Get the Config_Reference section and valid params for a config section",
+        "read_user_config": "Read one of the user's own config files",
+        "validate_klipper_config": "Validate a config snippet with Klipper rules",
+        "validate_macro": "Validate a macro draft with Klipper's Jinja rules",
+    }
+    if include_example_configs:
+        snippets.update({
+            "search_example_configs": "Search example configs by board or printer",
+            "read_example_config": "Read a full example config file",
+        })
 
     parts = [
         "# Available Tools",
         "",
         "Call tools to ground answers in the bundled Klipper docs and config system.",
-        "",
-        "The tool list below is EXHAUSTIVE: the only callable tools are exactly the ones "
-        "listed. Never invent, guess, or repeat other names. A ```tool block is executed "
-        "only when its name matches one of the tools below exactly.",
         "",
         "Text format (used by providers without native function calling): put a JSON ",
         "code block tagged `tool` in your reply:",
@@ -323,70 +347,14 @@ def _build_mcp_tool_context() -> str:
         "",
         "The tool runs and the result is returned as a follow-up message — use it to answer.",
         "",
-        "---",
-        "",
+        "Tools:",
     ]
-
-    for tool in tools:
-        name = tool["name"]
-        desc = tool.get("description", "").replace("\n", " ")
-        schema = tool.get("inputSchema", {})
-        props = schema.get("properties", {})
-        required = schema.get("required", [])
-
-        parts.append(f"## {name}")
-        parts.append(f"{desc}")
-        if props:
-            parts.append("")
-            parts.append("Parameters:")
-            for param_name, param_info in props.items():
-                ptype = param_info.get("type", "string")
-                pdesc = param_info.get("description", "")
-                req_mark = " (required)" if param_name in required else ""
-                parts.append(f"  - {param_name} [{ptype}]{req_mark}: {pdesc}")
-        parts.append("")
-
-    parts.append("---")
+    for name, snippet in snippets.items():
+        parts.append(f"- {name}: {snippet}")
     parts.append("")
-    parts.append("Guidance:")
     parts.append(
-        "- Use search_klipper_docs first for questions about Klipper features, parameters, "
-        "sections, or troubleshooting; it grounds answers in real docs."
-    )
-    parts.append(
-        "- search_example_configs finds working configs by board or printer; follow with "
-        "read_example_config for the full file."
-    )
-    parts.append(
-        "- search_user_configs / read_user_config access the user's own config files when "
-        "they aren't already attached."
-    )
-    parts.append(
-        "- Validate config snippets before presenting them, and validate macros after "
-        "generating them."
-    )
-    parts.append(
-        "- Use calculate_rotation_distance, get_section_schema, get_config_reference_section, "
-        "or detect_board for exact values, valid parameters, and hardware identification."
-    )
-    parts.append(
-        "- When a tool returns a computed value (e.g. '## rotation_distance: 40'), "
-        "state that value exactly in your answer — never recalculate it yourself."
-    )
-    parts.append(
-        "- To propose printer-memory updates, return the full updated JSON in a fenced "
-        "`printer-memory` code block; the user reviews before it saves."
-    )
-    parts.append(
-        "- You can call multiple tools in one response (e.g. search, then read the top match)."
-    )
-    parts.append(
-        "- NEVER wrap G-code commands or macro names (e.g. G28, M104, BED_MESH_CALIBRATE, "
-        "SET_FAN_SPEED, PRINT_START) in ```tool blocks. Those are printer commands, not "
-        "tools — emit them inside cfg blocks or plain code instead."
-    )
-    parts.append(
-        "- When in doubt, search the docs first — real docs beat training data."
+        "Klipper G-code commands and macro names (e.g. G28, M104, BED_MESH_CALIBRATE, "
+        "SET_FAN_SPEED, PRINT_START) are NOT tools — never wrap them in tool blocks."
     )
 
     return "\n".join(parts)
