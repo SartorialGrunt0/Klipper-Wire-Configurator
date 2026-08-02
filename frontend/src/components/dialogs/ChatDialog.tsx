@@ -428,12 +428,12 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           if (mentionedConfigFiles.length > 0) {
             contextMessages.push({
               role: 'system',
-              content: `Apply requested edits to these loaded files: ${mentionedConfigFiles.join(', ')}. Start each cfg block with a '# file: <filename>' hint line; use one separate block per file. To create a new file, use '# file: <newfilename>' with a name that does not exist yet.${miniDiffInstruction}`,
+              content: `Apply requested edits to these loaded files: ${mentionedConfigFiles.join(', ')}. Start each fenced \`\`\`cfg block with a '# file: <filename>' hint line; use one separate block per file. To create a new file, use '# file: <newfilename>' with a name that does not exist yet.${miniDiffInstruction}`,
             });
           } else if (activeFile) {
             contextMessages.push({
               role: 'system',
-              content: `Unless the user names a different file, apply edits to ${activeFile}. Return only changed, new, or deleted content in a fenced cfg code block. Start each block with a '# file: <filename>' hint line when targeting a specific file. To create a new file, use '# file: <newfilename>'. Do not return the whole file unless the user explicitly asks for a full replacement.${miniDiffInstruction}`,
+              content: `Unless the user names a different file, apply edits to ${activeFile}. Return only changed, new, or deleted content in a fenced \`\`\`cfg code block. Start each fenced \`\`\`cfg block with a '# file: <filename>' hint line when targeting a specific file. To create a new file, use '# file: <newfilename>'. Do not return the whole file unless the user explicitly asks for a full replacement.${miniDiffInstruction}`,
             });
           }
         } else if (mentionedConfigFiles.length > 0) {
