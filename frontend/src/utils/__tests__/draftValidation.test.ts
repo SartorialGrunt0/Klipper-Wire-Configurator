@@ -4,9 +4,8 @@ import {
   buildAssistantDraftValidationErrorMessage,
   buildAssistantDraftValidationFeedback,
   buildValidationErrorKey,
-  buildFullRewriteMacroIssues,
+  buildFullRewriteSectionIssues,
   collectNewValidationErrors,
-  countSectionBodyLines,
   deriveJinjaRepairCommands,
   formatAssistantDraftValidationIssues,
   hasOnlyRetryExemptAssistantValidationIssues,
@@ -195,79 +194,37 @@ describe('deriveJinjaRepairCommands', () => {
   });
 });
 
-describe('countSectionBodyLines', () => {
-  const section = (params: Array<{ key: string; value: string }>): ConfigSection => ({
-    section_type: 'gcode_macro',
-    section_name: 'X',
-    full_header: 'gcode_macro X',
-    line_number: 1,
-    params: params.map((p) => ({ ...p, comment: '', is_commented_out: false })),
-    header_comments: [],
-  });
-
-  it('counts non-empty value lines across params', () => {
-    expect(countSectionBodyLines(section([
-      { key: 'gcode', value: '    G28\n    M104 S0\n\n    BED_MESH_CALIBRATE\n' },
-      { key: 'description', value: 'Home + mesh' },
-    ]))).toBe(4);
-  });
-});
-
-describe('buildFullRewriteMacroIssues', () => {
-  const macroSection = (header: string, bodyLines: string[]): ConfigSection => ({
-    section_type: 'gcode_macro',
-    section_name: header.replace('gcode_macro ', ''),
+describe('buildFullRewriteSectionIssues', () => {
+  const section = (header: string, sectionType = 'gcode_macro'): ConfigSection => ({
+    section_type: sectionType,
+    section_name: header.replace(/^[a-z_]+ /, ''),
     full_header: header,
     line_number: 1,
-    params: [{
-      key: 'gcode',
-      value: bodyLines.length > 0 ? `    ${bodyLines.join('\n    ')}\n` : '',
-      comment: '',
-      is_commented_out: false,
-    }],
+    params: [{ key: 'gcode', value: '    G28\n', comment: '', is_commented_out: false }],
     header_comments: [],
   });
 
-  const base = [macroSection('gcode_macro Level_Bed', [
-    '{% if "xyz" not in printer.toolhead.homed_axes %}',
-    'G28',
-    '{% endif %}',
-    'BED_MESH_CALIBRATE',
-    'M104 S0',
-  ])];
+  const base = [
+    section('gcode_macro Level_Bed'),
+    section('printer', 'printer'),
+  ];
 
-  it('flags a shorter full rewrite of an existing macro', () => {
-    const draft = [macroSection('gcode_macro Level_Bed', [
-      'BED_MESH_CALIBRATE',
-    ])];
-    const issues = buildFullRewriteMacroIssues(base, draft, [{ fullHeader: 'gcode_macro Level_Bed' }]);
+  it('flags ANY full rewrite of an existing section (no lossy heuristic)', () => {
+    const draft = [section('gcode_macro Level_Bed')];
+    const issues = buildFullRewriteSectionIssues(base, draft, [{ fullHeader: 'gcode_macro Level_Bed' }]);
     expect(issues).toHaveLength(1);
     expect(issues[0]?.message).toContain('Emit it as a mini-diff instead');
-    expect(issues[0]?.message).toContain('1 body lines (current has 5)');
   });
 
-  it('does not flag an equal-or-longer rewrite', () => {
-    const draft = [macroSection('gcode_macro Level_Bed', [
-      '{% if "xyz" not in printer.toolhead.homed_axes %}',
-      'G28',
-      '{% endif %}',
-      'BED_MESH_CALIBRATE ADAPTIVE=1',
-      'M104 S0',
-    ])];
-    expect(buildFullRewriteMacroIssues(base, draft, [{ fullHeader: 'gcode_macro Level_Bed' }])).toEqual([]);
+  it('flags non-macro sections too', () => {
+    const draft = [section('printer', 'printer')];
+    const issues = buildFullRewriteSectionIssues(base, draft, [{ fullHeader: 'printer' }]);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]?.message).toContain('[printer]');
   });
 
-  it('does not flag new macros or non-macro sections', () => {
-    const draft = [macroSection('gcode_macro BRAND_NEW', ['M117 hi'])];
-    expect(buildFullRewriteMacroIssues(base, draft, [{ fullHeader: 'gcode_macro BRAND_NEW' }])).toEqual([]);
-    const nonMacro: ConfigSection = {
-      section_type: 'extruder',
-      section_name: 'extruder',
-      full_header: 'extruder',
-      line_number: 1,
-      params: [],
-      header_comments: [],
-    };
-    expect(buildFullRewriteMacroIssues([nonMacro], [nonMacro], [{ fullHeader: 'extruder' }])).toEqual([]);
+  it('does not flag new sections (additions are written in full)', () => {
+    const draft = [section('gcode_macro BRAND_NEW')];
+    expect(buildFullRewriteSectionIssues(base, draft, [{ fullHeader: 'gcode_macro BRAND_NEW' }])).toEqual([]);
   });
 });

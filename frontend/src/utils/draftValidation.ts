@@ -27,59 +27,36 @@ export interface AssistantDraftValidationOutcome {
   failureReason: string | null;
 }
 
-// ── Full-rewrite guard for existing macros ──────────────────────────
-
-const MACRO_SECTION_TYPES = new Set(['gcode_macro', 'delayed_gcode']);
-
-/** Count non-empty value lines across a section's params (gcode body etc.). */
-export function countSectionBodyLines(section: ConfigSection): number {
-  let count = 0;
-  for (const param of section.params) {
-    for (const line of param.value.split('\n')) {
-      if (line.trim().length > 0) count += 1;
-    }
-  }
-  return count;
-}
+// ── Full-rewrite guard for existing sections ────────────────────────
 
 /**
- * Reject lossy FULL rewrites of existing macro sections. A full rewrite lets
- * the model regenerate a macro from a semantic summary and silently drop
- * lines (G28, {% endif %}, M104); the mini-diff protocol preserves unchanged
- * lines automatically. Only fires when the rewrite is SHORTER than the
- * current section (a genuine expansion or intentional rewrite passes
- * through). New macro sections (not in base) are never flagged.
+ * Reject FULL rewrites of EXISTING sections (any section type). The edit
+ * protocol requires mini-diffs for existing sections so unchanged lines are
+ * preserved automatically; a full rewrite lets the model regenerate a
+ * section from a semantic summary and silently drop lines (G28, {% endif %},
+ * M104, comments). This is the FIRST guard — it fires whenever an existing
+ * section comes back without '-'/'+' markers, before any content heuristics.
+ * New sections (not in base) are never flagged: additions are written in
+ * full by protocol.
  */
-export function buildFullRewriteMacroIssues(
+export function buildFullRewriteSectionIssues(
   baseSections: ConfigSection[],
   assistantSections: ConfigSection[],
   fullRewriteTargets: Array<{ fullHeader: string }>,
 ): ValidationError[] {
-  const baseMacros = new Map(
-    baseSections
-      .filter((section) => MACRO_SECTION_TYPES.has(section.section_type))
-      .map((section) => [section.full_header, section]),
-  );
-  const draftSections = new Map(
-    assistantSections.map((section) => [section.full_header, section]),
-  );
+  const baseHeaders = new Set(baseSections.map((section) => section.full_header));
+  const draftHeaders = new Set(assistantSections.map((section) => section.full_header));
   const errors: ValidationError[] = [];
   for (const target of fullRewriteTargets) {
-    const baseSection = baseMacros.get(target.fullHeader);
-    if (!baseSection) continue; // new macro — a full rewrite is fine
-    const draftSection = draftSections.get(target.fullHeader);
-    if (!draftSection) continue;
-    const baseLines = countSectionBodyLines(baseSection);
-    const draftLines = countSectionBodyLines(draftSection);
-    if (draftLines < baseLines - 2) {
-      errors.push({
-        severity: 'error',
-        message: `Existing macro section '[${target.fullHeader}]' was returned as a full rewrite with ${draftLines} body lines (current has ${baseLines}). Emit it as a mini-diff instead: the section header followed by ONLY the lines that change, prefixing removals with '-' and additions with '+'. Unchanged lines (including {% if %}/{% endif %} tags and G-code commands) are preserved automatically and cannot be dropped.`,
-        section: target.fullHeader,
-        param: '',
-        line_number: 0,
-      });
-    }
+    if (!baseHeaders.has(target.fullHeader)) continue; // new section — full write is fine
+    if (!draftHeaders.has(target.fullHeader)) continue;
+    errors.push({
+      severity: 'error',
+      message: `Existing section '[${target.fullHeader}]' was returned as a full rewrite. Emit it as a mini-diff instead: the section header followed by ONLY the lines that change, prefixing removals with '-' and additions with '+'. Unchanged lines are preserved automatically and cannot be dropped.`,
+      section: target.fullHeader,
+      param: '',
+      line_number: 0,
+    });
   }
   return errors;
 }

@@ -30,7 +30,7 @@ import {
   MAX_ASSISTANT_DRAFT_VALIDATION_ATTEMPTS,
   MAX_ASSISTANT_HINT_USER_MESSAGES,
   collectNewValidationErrors,
-  buildFullRewriteMacroIssues,
+  buildFullRewriteSectionIssues,
   type AssistantDraftValidationOutcome,
   type AssistantDraftValidationIssueGroup,
 } from '../utils/draftValidation';
@@ -61,8 +61,8 @@ export interface AssistantDraftPreview {
   previewUpdating: boolean;
   /** Macro section headers whose trailing Jinja closers were auto-appended. */
   repairedSections: string[];
-  /** Macro sections the assistant returned as full rewrites (lossy-rewrite guard). */
-  fullRewriteMacros: Array<{ filename: string; fullHeader: string }>;
+  /** Sections the assistant returned as full rewrites (full-rewrite guard). */
+  fullRewriteSections: Array<{ filename: string; fullHeader: string }>;
 }
 
 interface AssistantReplyAttempt {
@@ -201,7 +201,7 @@ export function useAssistantDraft() {
       content: string,
       messageIndex?: number,
       messageHistory: ChatMessage[] = messages,
-    ): Promise<{ configs: ConfigFile[]; repairedSections: string[]; fullRewriteMacros: Array<{ filename: string; fullHeader: string }> }> => {
+    ): Promise<{ configs: ConfigFile[]; repairedSections: string[]; fullRewriteSections: Array<{ filename: string; fullHeader: string }> }> => {
       const configBlocks = extractConfigCodeBlocks(content);
       if (configBlocks.length === 0) {
         throw new Error('The assistant response did not include a config code block to review.');
@@ -212,9 +212,9 @@ export function useAssistantDraft() {
       const groupedTargets = new Map<string, ConfigFile>();
       // Phase 4: macro sections whose trailing Jinja blocks were auto-closed.
       const repairedSections: string[] = [];
-      // Phase 4: macro sections the assistant returned as FULL rewrites (no
-      // mini-diff markers) — candidates for the lossy-rewrite guard.
-      const fullRewriteMacros: Array<{ filename: string; fullHeader: string }> = [];
+      // Phase 4: sections the assistant returned as FULL rewrites (no mini-diff
+      // markers) — candidates for the full-rewrite guard.
+      const fullRewriteSections: Array<{ filename: string; fullHeader: string }> = [];
 
       for (const configBlock of configBlocks) {
         const { configText, fileHint } = extractAssistantFileHint(configBlock, loadedConfigFilenames);
@@ -268,9 +268,7 @@ export function useAssistantDraft() {
 
         if (!blockIsMiniDiff) {
           for (const section of assistantResult.config.sections) {
-            if (section.section_type === 'gcode_macro' || section.section_type === 'delayed_gcode') {
-              fullRewriteMacros.push({ filename: targetFile, fullHeader: section.full_header });
-            }
+            fullRewriteSections.push({ filename: targetFile, fullHeader: section.full_header });
           }
         }
 
@@ -296,14 +294,14 @@ export function useAssistantDraft() {
       if (groupedTargets.size === 0) {
         throw new Error('The assistant response did not include any complete config sections to merge.');
       }
-      return { configs: Array.from(groupedTargets.values()), repairedSections, fullRewriteMacros };
+      return { configs: Array.from(groupedTargets.values()), repairedSections, fullRewriteSections };
     },
     [activeFile, configFiles, getAssistantMessageHintTexts, getConfigText, loadedConfigFilenames],
   );
 
   const prepareAssistantDraftPreview = useCallback(
     async (content: string, messageIndex?: number, messageHistory: ChatMessage[] = messages): Promise<AssistantDraftPreview> => {
-      const { configs: assistantConfigs, repairedSections, fullRewriteMacros } = await buildAssistantDraftTargetConfigs(content, messageIndex, messageHistory);
+      const { configs: assistantConfigs, repairedSections, fullRewriteSections } = await buildAssistantDraftTargetConfigs(content, messageIndex, messageHistory);
       const filePreviews: AssistantDraftFilePreview[] = [];
 
       for (const assistantConfig of assistantConfigs) {
@@ -373,7 +371,7 @@ export function useAssistantDraft() {
         selectedChangeIds: flattenAssistantDraftChanges(filePreviews).map((change) => change.id),
         previewUpdating: false,
         repairedSections,
-        fullRewriteMacros,
+        fullRewriteSections,
       };
     },
     [buildAssistantDraftTargetConfigs, flattenAssistantDraftChanges, getConfigText, messages],
@@ -465,16 +463,20 @@ export function useAssistantDraft() {
         baselineProjectConfigs[fp.filename] = fp.baseConfig;
       });
 
-      // Phase 4 full-rewrite guard: a lossy FULL rewrite of an existing macro
-      // section (shorter than the current version) must be re-emitted as a
-      // mini-diff so unchanged lines ({% if %}/{% endif %}, G-code) survive.
+      // Phase 4 full-rewrite guard: an existing section returned as a FULL
+      // rewrite (no mini-diff markers) must be re-emitted as a mini-diff so
+      // unchanged lines survive. Exempt sections the deterministic Jinja
+      // repair already made lossless — a repaired draft is complete, so the
+      // protocol retry would only risk losing it.
+      const repairedHeaderSet = new Set(preview.repairedSections);
       const fullRewriteIssues: AssistantDraftValidationIssueGroup[] = [];
       for (const fp of preview.filePreviews) {
-        const errors = buildFullRewriteMacroIssues(
+        const errors = buildFullRewriteSectionIssues(
           fp.baseConfig.sections,
           fp.assistantConfig.sections,
-          preview.fullRewriteMacros
+          preview.fullRewriteSections
             .filter((target) => target.filename === fp.filename)
+            .filter((target) => !repairedHeaderSet.has(target.fullHeader))
             .map((target) => ({ fullHeader: target.fullHeader })),
         );
         if (errors.length > 0) {
