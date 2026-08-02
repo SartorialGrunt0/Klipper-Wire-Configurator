@@ -39,6 +39,12 @@ function normalizeLine(line: string): string {
   return line.replace(/\r$/, '').trimEnd();
 }
 
+/** Leading whitespace (spaces/tabs) of a line — cosmetic in Klipper configs. */
+function leadingWhitespace(line: string): string {
+  const match = /^[ \t]*/.exec(line);
+  return match ? match[0] : '';
+}
+
 interface MiniDiffOperation {
   /** The removed line content (without the '-' prefix). */
   removal: string;
@@ -111,15 +117,28 @@ function applyOpsToSection(
   const base = sectionLines.map((line) => normalizeLine(line));
   const used = new Set<number>();
   const opToIndex = new Map<number, number>(); // op index -> base line index
+  const opToIndent = new Map<number, string>(); // op index -> matched base indent
 
   for (let opIndex = 0; opIndex < ops.length; opIndex += 1) {
     const normalizedRemoval = normalizeLine(ops[opIndex].removal);
-    const matchIndex = base.findIndex(
+    let matchIndex = base.findIndex(
       (line, index) => !used.has(index) && line === normalizedRemoval,
     );
+    if (matchIndex === -1) {
+      // Indentation-tolerant fallback: leading whitespace is cosmetic in
+      // Klipper configs, so a draft line indented differently from the file
+      // (e.g. 4-space indent emitted for a column-0 [printer] line) must still
+      // match. Only leading whitespace is ignored — a real content mismatch
+      // still returns null and the caller falls back to legacy handling.
+      const strippedRemoval = normalizedRemoval.trimStart();
+      matchIndex = base.findIndex(
+        (line, index) => !used.has(index) && line.trimStart() === strippedRemoval,
+      );
+    }
     if (matchIndex === -1) return null;
     used.add(matchIndex);
     opToIndex.set(opIndex, matchIndex);
+    opToIndent.set(opIndex, leadingWhitespace(base[matchIndex]));
   }
 
   const result: string[] = [];
@@ -132,7 +151,19 @@ function applyOpsToSection(
       }
     }
     if (matchedOpIndex !== -1) {
-      result.push(...ops[matchedOpIndex].additions.map((addition) => addition));
+      const op = ops[matchedOpIndex];
+      const baseIndent = opToIndent.get(matchedOpIndex) ?? '';
+      const diffIndent = leadingWhitespace(op.removal);
+      result.push(
+        ...op.additions.map((addition) => {
+          // Anchor the addition to the base line's indentation, preserving
+          // the relative inner indent of multi-line additions.
+          const relativeIndent =
+            leadingWhitespace(addition).length - diffIndent.length;
+          const pad = relativeIndent > 0 ? ' '.repeat(relativeIndent) : '';
+          return baseIndent + pad + normalizeLine(addition).trimStart();
+        }),
+      );
       continue;
     }
     result.push(sectionLines[index]);

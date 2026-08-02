@@ -201,4 +201,58 @@ gcode:
     const occurrences = result.text.match(/G28/g) ?? [];
     expect(occurrences.length).toBe(2);
   });
+
+  it('matches an indented removal against a column-0 file line', () => {
+    // Regression: the model emitted a 4-space-indented mini-diff for the
+    // column-0 [printer] lines; exact matching failed, the block fell back
+    // to legacy full-section handling and mangled the section.
+    const base = `[printer]
+kinematics: corexy
+max_velocity: 600
+max_accel: 15500 #Ellis Tuned
+`;
+    const result = applyMiniDiffBlock(
+      '[printer]\n-    max_accel: 15500 #Ellis Tuned\n+    max_accel: 18000 #Ellis Tuned',
+      base,
+    );
+    expect(result.applied).toBe(true);
+    expect(result.text).toBe(`[printer]
+kinematics: corexy
+max_velocity: 600
+max_accel: 18000 #Ellis Tuned
+`);
+    // The other params survive (this was the mangling case).
+    expect(result.text).toContain('kinematics: corexy');
+    expect(result.text).toContain('max_velocity: 600');
+  });
+
+  it('inherits the file indentation when the base line is indented', () => {
+    const base = `[printer]\n    max_accel: 15500\n`;
+    const result = applyMiniDiffBlock(
+      '[printer]\n-max_accel: 15500\n+max_accel: 18000',
+      base,
+    );
+    expect(result.applied).toBe(true);
+    expect(result.text).toContain('    max_accel: 18000');
+  });
+
+  it('preserves inner indentation of multi-line additions in the tolerant path', () => {
+    const base = `[gcode_macro X]\ngcode:\n    G28\n`;
+    const result = applyMiniDiffBlock(
+      '[gcode_macro X]\n-  G28\n+  G28 X0\n+    M117 homed',
+      base,
+    );
+    expect(result.applied).toBe(true);
+    expect(result.text).toContain('    G28 X0');
+    expect(result.text).toContain('      M117 homed');
+  });
+
+  it('still fails when content differs despite indentation tolerance', () => {
+    const base = `[printer]\nmax_accel: 15500\n`;
+    const result = applyMiniDiffBlock(
+      '[printer]\n-    max_accel: 99999\n+    max_accel: 18000',
+      base,
+    );
+    expect(result.applied).toBe(false);
+  });
 });
