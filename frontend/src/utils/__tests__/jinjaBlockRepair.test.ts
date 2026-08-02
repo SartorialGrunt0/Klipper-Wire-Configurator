@@ -131,6 +131,38 @@ describe('repairUnclosedJinjaInSectionText', () => {
   it('returns null when there is no gcode param', () => {
     expect(repairUnclosedJinjaInSectionText('[extruder]\nmax_temp: 300')).toBeNull();
   });
+
+  it('repairs an UNINDENTED gcode body at its true end (screenshot case)', () => {
+    // Model emitted the {% if %} indented but the body at column 0 and no
+    // {% endif %} — Klipper treats every non-key line as a continuation, so
+    // the closer belongs AFTER the last body line, not after the if-line.
+    const section = [
+      '[gcode_macro Level_Bed]',
+      'gcode:',
+      '    {% if "xyz" not in printer.toolhead.homed_axes %}',
+      'CLEAN_NOZZLE',
+      'M109 S150',
+      'Z_TILT_ADJUST',
+      'G28 Z',
+      'BED_MESH_CALIBRATE ADAPTIVE=1',
+      'M104 S0',
+    ].join('\n');
+    const repair = repairUnclosedJinjaInSectionText(section);
+    expect(repair).not.toBeNull();
+    expect(repair?.added).toEqual(['    {% endif %}']);
+    expect(repair?.text).toBe([
+      '[gcode_macro Level_Bed]',
+      'gcode:',
+      '    {% if "xyz" not in printer.toolhead.homed_axes %}',
+      'CLEAN_NOZZLE',
+      'M109 S150',
+      'Z_TILT_ADJUST',
+      'G28 Z',
+      'BED_MESH_CALIBRATE ADAPTIVE=1',
+      'M104 S0',
+      '    {% endif %}',
+    ].join('\n'));
+  });
 });
 
 describe('repairUnclosedJinjaInConfigText', () => {
@@ -172,5 +204,19 @@ describe('repairUnclosedJinjaInConfigText', () => {
     const result = repairUnclosedJinjaInConfigText(cfg);
     expect(result.repairedSections).toEqual([]);
     expect(result.text).toBe(cfg);
+  });
+
+  it('preserves the # file: hint when a repair fires', () => {
+    const cfg = [
+      '# file: printer.cfg',
+      '[gcode_macro Level_Bed]',
+      'gcode:',
+      '    {% if x %}',
+      '    G28',
+    ].join('\n');
+    const result = repairUnclosedJinjaInConfigText(cfg);
+    expect(result.repairedSections).toEqual(['gcode_macro Level_Bed']);
+    expect(result.text.startsWith('# file: printer.cfg\n')).toBe(true);
+    expect(result.text).toContain('{% endif %}');
   });
 });

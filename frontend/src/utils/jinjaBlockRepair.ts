@@ -41,6 +41,9 @@ const SECTION_HEADER_RE = /^\s*\[([^\]]+)\]\s*$/;
 /** `gcode:` / `gcode =` param start line (allows a trailing comment). */
 const GCODE_PARAM_RE = /^\s*gcode\s*[:=]\s*(#.*)?$/;
 
+/** A line that starts a NEW config param (`key:` / `key =`). */
+const PARAM_KEY_RE = /^\s*[A-Za-z0-9_][A-Za-z0-9_.-]*\s*[:=]/;
+
 /** Section types whose gcode bodies are Jinja templates evaluated by Klipper. */
 const MACRO_SECTION_PREFIXES = ['gcode_macro ', 'delayed_gcode '];
 
@@ -148,9 +151,11 @@ export function repairUnclosedJinjaBlock(body: string): { repaired: string; adde
 
 /**
  * Repair the gcode body of ONE macro section's raw text. The body runs from
- * the `gcode:` param line through the following indented/blank lines, ending
- * at the next non-indented param line or EOF. Returns null when the section
- * has no gcode body or it is already balanced.
+ * the `gcode:` param line through EOF / the next param-key line / the next
+ * section header. Klipper treats ANY non-key line as a body continuation
+ * regardless of indentation (models often emit unindented bodies), so the
+ * span must NOT stop at the first non-indented line. Returns null when the
+ * section has no gcode body or it is already balanced.
  */
 export function repairUnclosedJinjaInSectionText(
   sectionText: string,
@@ -165,8 +170,11 @@ export function repairUnclosedJinjaInSectionText(
   for (let index = gcodeIndex + 1; index < lines.length; index += 1) {
     const line = lines[index];
     if (line.trim().length === 0) continue;
-    if (!/^\s/.test(line)) {
-      // A non-indented, non-empty line ends the body (next param / EOF).
+    if (SECTION_HEADER_RE.test(line)) {
+      bodyEnd = index;
+      break;
+    }
+    if (PARAM_KEY_RE.test(line)) {
       bodyEnd = index;
       break;
     }
@@ -220,7 +228,13 @@ export function repairUnclosedJinjaInConfigText(
   for (let index = 0; index < lines.length; index += 1) {
     const match = SECTION_HEADER_RE.exec(lines[index]);
     if (match) {
-      flushSection(index);
+      if (sectionStart === -1) {
+        // Leading content (e.g. '# file: <name>' hints, banner comments)
+        // belongs to the file and must survive the repair untouched.
+        out.push(...lines.slice(0, index));
+      } else {
+        flushSection(index);
+      }
       sectionStart = index;
       currentHeader = match[1].trim();
     }
