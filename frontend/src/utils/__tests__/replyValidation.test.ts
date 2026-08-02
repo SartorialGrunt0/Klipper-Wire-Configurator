@@ -88,7 +88,7 @@ describe('createPrinterMemoryReplyValidator', () => {
       attemptsUsed: 0,
       allowExplanationOnly: false,
     });
-    const feedback = v.buildFeedback(content, result);
+    const feedback = await v.buildFeedback(content, result);
     expect(feedback).not.toBeNull();
     expect(feedback!.content).toContain('extraField');
     expect(feedback!.content).toContain('mainboard');

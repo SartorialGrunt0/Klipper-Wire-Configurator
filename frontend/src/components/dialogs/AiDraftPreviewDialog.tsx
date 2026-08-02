@@ -13,6 +13,8 @@ interface AiDraftPreviewDialogProps {
   changes: AssistantDraftChange[];
   selectedChangeIds: string[];
   previewUpdating: boolean;
+  /** Macro section headers whose trailing Jinja closers were auto-appended. */
+  repairedSections?: string[];
   onSelectionChange: (selectedChangeIds: string[]) => void;
   onAccept: () => void;
   onClose: () => void;
@@ -23,6 +25,7 @@ export default function AiDraftPreviewDialog({
   changes,
   selectedChangeIds,
   previewUpdating,
+  repairedSections = [],
   onSelectionChange,
   onAccept,
   onClose,
@@ -126,6 +129,14 @@ export default function AiDraftPreviewDialog({
             </svg>
           </button>
         </div>
+
+        {repairedSections.length > 0 && (
+          <div className="border-b border-[var(--color-bg-tertiary)] bg-[var(--color-bg-tertiary)]/40 px-4 py-2 text-[11px] text-[var(--color-text-secondary)]">
+            Auto-repaired missing Jinja closers in:{' '}
+            {repairedSections.map((header) => `[${header}]`).join(', ')} — the closing tags were
+            appended at the end of the gcode body. Review the green additions in the diff below.
+          </div>
+        )}
 
         <div className="border-b border-[var(--color-bg-tertiary)] px-4 py-3">
           <div className="mb-2 flex flex-wrap items-center gap-2">

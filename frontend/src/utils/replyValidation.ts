@@ -70,7 +70,7 @@ export interface ReplyValidator {
   /** 'throw' → validation failure raises; 'warn' → failure becomes a warning. */
   failMode: 'throw' | 'warn';
   validate(content: string, context: ReplyValidationContext): Promise<ReplyValidationResult> | ReplyValidationResult;
-  buildFeedback(content: string, result: ReplyValidationResult): ReplyValidationFeedback | null;
+  buildFeedback(content: string, result: ReplyValidationResult): ReplyValidationFeedback | null | Promise<ReplyValidationFeedback | null>;
   /** Called after max attempts. Return message for the throw/warning. */
   onMaxAttemptsReached(content: string, result: ReplyValidationResult, totalAttempts: number): string | null;
   /** Return a warning string to convert a request error into a warning; null → rethrow. */
@@ -166,7 +166,7 @@ export async function runReplyValidationPipeline(
         break;
       }
 
-      const feedback = validator.buildFeedback(currentAttempt.assistantMessage.content, result);
+      const feedback = await validator.buildFeedback(currentAttempt.assistantMessage.content, result);
       if (!feedback) {
         break; // Validator has no fix to suggest — stop retrying
       }

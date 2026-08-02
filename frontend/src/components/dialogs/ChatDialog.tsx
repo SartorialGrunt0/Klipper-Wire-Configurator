@@ -874,6 +874,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           changes={flattenAssistantDraftChanges(assistantDraftPreview.filePreviews)}
           selectedChangeIds={assistantDraftPreview.selectedChangeIds}
           previewUpdating={assistantDraftPreview.previewUpdating}
+          repairedSections={assistantDraftPreview.repairedSections}
           onSelectionChange={(ids) => { void handleAssistantDraftSelectionChange(ids); }}
           onAccept={() => { void handleAcceptDraft(); }}
           onClose={() => setAssistantDraftPreview(null)}
