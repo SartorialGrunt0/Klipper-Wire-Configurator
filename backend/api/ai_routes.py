@@ -358,6 +358,41 @@ def _build_mcp_tool_context() -> str:
 
 AUTO_SEARCH_FALLBACK_MAX_CHARS = 4000
 
+# Phase 3: auto-search injects docs only for question-type requests. Edit
+# requests are answered from the attached config context; injecting docs
+# mid-edit derails drafts (models regenerate macros lossily under the extra
+# load — verified 2026-08 on gemma-4-12b/qwen3.5-9b).
+_EDIT_VERB_RE = re.compile(
+    r"\b(?:change|update|modify|edit|add|remove|delete|fix|create|set|rename|"
+    r"enable|disable|tweak|adjust|comment\s*out|calibrat\w*)\b",
+    re.IGNORECASE,
+)
+_EDIT_TARGET_RE = re.compile(
+    r"\[[^\]]+\]|\bmacros?\b|\bsection\b|\.cfg\b|"
+    r"\b(?:max_accel|max_velocity|serial|pin|probe|bed_mesh|kinematics|"
+    r"steps_per_mm|rotation_distance|z_offset|nozzle|extruder|heater|fan)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_edit_request(messages: list[dict]) -> bool:
+    """Heuristic: does the latest user message ask for config/macro changes?
+
+    Mirrors the frontend's detectChatIntent (chatIntent.ts): an edit verb AND
+    a config-ish target. Only the LATEST user message decides — a follow-up
+    question after an edit must not be gated. Validation/retry feedback also
+    matches ('fixes ... cfg'), which is fine: auto-search is not useful during
+    draft repair either.
+    """
+    for msg in reversed(messages):
+        if msg.get("role") != "user":
+            continue
+        content = str(msg.get("content", "")).strip()
+        if not content:
+            continue
+        return bool(_EDIT_VERB_RE.search(content) and _EDIT_TARGET_RE.search(content))
+    return False
+
 
 def _auto_search_context(query: str) -> str | None:
     """Search Klipper docs using the MCP index and return a concise context block.
@@ -1049,7 +1084,11 @@ async def chat_proxy(req: ChatRequest):
             # search and inject the results so it still gets grounded docs even
             # if it doesn't support tool calling.
             if not _extract_native_tool_calls(req.apiProvider, current_data) and not _extract_tool_calls(current_content):
-                if PRINTER_MEMORY_BLOCK_RE.search(current_content):
+                if _is_edit_request(req.messages):
+                    # Phase 3: edits are answered from the config context; a
+                    # doc search injection mid-edit derails the draft.
+                    logger.info("Auto-search fallback skipped | edit request")
+                elif PRINTER_MEMORY_BLOCK_RE.search(current_content):
                     # The model already produced a structured printer-memory
                     # proposal; injecting a doc search would only derail it.
                     logger.info("Auto-search fallback skipped | printer-memory block present")

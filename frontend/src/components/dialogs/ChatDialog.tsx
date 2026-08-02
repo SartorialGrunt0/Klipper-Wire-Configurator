@@ -31,6 +31,12 @@ import {
   getProviderModel,
 } from '../../utils/chatProviders';
 import { runReplyValidationPipeline, createPrinterMemoryReplyValidator } from '../../utils/replyValidation';
+import {
+  detectChatIntent,
+  extractTargetedSectionHeaders,
+  extractSectionText,
+  buildSectionContextMessage,
+} from '../../utils/chatIntent';
 import { buildProjectGraph } from '../../utils/graphBuilder';
 import { useAssistantDraft } from '../../hooks/useAssistantDraft';
 import ChatSettingsPanel from './ChatSettingsPanel';
@@ -269,6 +275,16 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     [configFiles, textDrafts],
   );
 
+  const getConfigContextLabel = useCallback(
+    (filename: string): string =>
+      filename === activeFile
+        ? (typeof textDrafts[activeFile] === 'string' && textEditorDirty
+          ? 'Active Klipper config draft with unapplied text-view changes'
+          : 'Active Klipper config draft')
+        : 'Loaded Klipper config file',
+    [activeFile, textDrafts, textEditorDirty],
+  );
+
   // ── Build context messages ──────────────────────────────────────
   const getConfigContexts = useCallback(
     async (filenames: string[]): Promise<string[]> => {
@@ -277,18 +293,12 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         Array.from(new Set(filenames)).map(async (filename) => {
           const configText = await getConfigText(filename);
           if (configText == null) return null;
-          const label =
-            filename === activeFile
-              ? typeof textDrafts[activeFile] === 'string' && textEditorDirty
-                ? 'Active Klipper config draft with unapplied text-view changes'
-                : 'Active Klipper config draft'
-              : 'Loaded Klipper config file';
-          return buildConfigContextMessage(filename, configText, label);
+          return buildConfigContextMessage(filename, configText, getConfigContextLabel(filename));
         }),
       );
       return contexts.filter((ctx): ctx is string => ctx != null);
     },
-    [activeFile, getConfigText, textDrafts, textEditorDirty],
+    [getConfigContextLabel, getConfigText],
   );
 
   // ── Submit Message ──────────────────────────────────────────────
@@ -332,13 +342,41 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         // Build context messages
         const contextMessages: Array<{ role: 'system'; content: string }> = [];
         const mentionedConfigFiles = extractMentionedConfigFilenames([userMsg.content], loadedConfigFilenames);
-        const selectedConfigContexts = await getConfigContexts([
-          ...selectedConfigContextFiles,
-          ...mentionedConfigFiles,
-        ]);
+        const contextTargets = Array.from(new Set([...selectedConfigContextFiles, ...mentionedConfigFiles]));
 
-        for (const ctx of selectedConfigContexts) {
-          contextMessages.push({ role: 'system', content: ctx });
+        const chatIntent = detectChatIntent(userMsg.content);
+        if (chatIntent === 'edit') {
+          // Phase 3: edits get ONLY the sections they target, not the whole
+          // file. The model works from lean context (the mini-diff apply still
+          // uses the full file server-side, so nothing is lost at merge time).
+          for (const filename of contextTargets) {
+            const fileText = await getConfigText(filename);
+            if (fileText == null) continue;
+            const targetedHeaders = extractTargetedSectionHeaders(userMsg.content, fileText);
+            if (targetedHeaders.length === 0) {
+              // No specific section resolved — fall back to the full file so
+              // the model still has context rather than guessing blind.
+              contextMessages.push({
+                role: 'system',
+                content: buildConfigContextMessage(filename, fileText, getConfigContextLabel(filename)),
+              });
+              continue;
+            }
+            for (const header of targetedHeaders) {
+              const sectionText = extractSectionText(fileText, header);
+              if (sectionText != null) {
+                contextMessages.push({
+                  role: 'system',
+                  content: buildSectionContextMessage(filename, getConfigContextLabel(filename), header, sectionText),
+                });
+              }
+            }
+          }
+        } else {
+          const selectedConfigContexts = await getConfigContexts(contextTargets);
+          for (const ctx of selectedConfigContexts) {
+            contextMessages.push({ role: 'system', content: ctx });
+          }
         }
         for (const file of attachedConfigFiles) {
           contextMessages.push({

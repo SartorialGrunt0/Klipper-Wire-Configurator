@@ -89,6 +89,45 @@ def _blank_memory(monkeypatch):
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
 
 
+# ── _is_edit_request (Phase 3 auto-search gating) ─────────────────────
+
+
+def test_is_edit_request_positive():
+    assert ai_routes._is_edit_request([
+        {'role': 'user', 'content': 'Modify my level_bed macro to call BED_MESH_CALIBRATE in adaptive'},
+    ])
+    assert ai_routes._is_edit_request([
+        {'role': 'user', 'content': 'In printer.cfg change the [printer] max_accel to 12000'},
+    ])
+    assert ai_routes._is_edit_request([
+        {'role': 'user', 'content': 'Add a [bed_mesh] section to my config'},
+    ])
+    assert ai_routes._is_edit_request([
+        {'role': 'user', 'content': 'Delete the RESET_ACCEL macro'},
+    ])
+
+
+def test_is_edit_request_negative():
+    assert not ai_routes._is_edit_request([
+        {'role': 'user', 'content': 'What does horizontal_move_z do?'},
+    ])
+    assert not ai_routes._is_edit_request([
+        {'role': 'user', 'content': 'What is the default value of pressure_advance?'},
+    ])
+    assert not ai_routes._is_edit_request([
+        {'role': 'user', 'content': 'Help me set up my new printer from scratch'},
+    ])
+
+
+def test_is_edit_request_uses_latest_user_message():
+    # The decision is based on the latest user message, not older context.
+    assert not ai_routes._is_edit_request([
+        {'role': 'user', 'content': 'Change my max_accel'},
+        {'role': 'assistant', 'content': 'Done.'},
+        {'role': 'user', 'content': 'What is pressure advance?'},
+    ])
+
+
 def test_prepare_messages_starts_with_system_and_ends_with_task_anchor(monkeypatch):
     _blank_memory(monkeypatch)
     prepared = ai_routes._prepare_messages([
