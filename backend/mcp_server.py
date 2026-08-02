@@ -540,7 +540,9 @@ class McpServer:
                     "Read a user configuration file from the 'user_configs' directory. "
                     "Use search_user_configs first to find the exact filename. "
                     "Pass 'section' to read only one section (lean context for edits); "
-                    "omit it to read the whole file."
+                    "omit it to read the whole file. Call this FIRST whenever the user "
+                    "names a config file to edit or inspect — do not ask the user to "
+                    "provide the content."
                 ),
                 "inputSchema": {
                     "type": "object",

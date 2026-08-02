@@ -118,6 +118,9 @@ SYSTEM_PROMPT = (
     "6. If no safe grounded answer is possible, say what must be verified next instead of "
     "guessing.\n\n"
     "Edit protocol:\n"
+    "- Before editing or answering about a named config file, if its content is not "
+    "already in your context, call read_user_config (filename + optional section) "
+    "FIRST. Never ask the user to paste config content you can fetch yourself.\n"
     "- For config edits, return only changed, new, or deleted content in fenced cfg code "
     "blocks. Start each block with a '# file: <filename>' hint line when the target file is "
     "not obvious. Do not return the whole file unless the user explicitly asks for a full "
@@ -325,7 +328,8 @@ def _build_mcp_tool_context() -> str:
         "get_config_reference_section": "Get the Config_Reference section and valid params for a config section (pass section_name, e.g. section_name='bed_mesh')",
         "read_user_config": (
             "Read a user config file (filename='printer.cfg', optional "
-            "section='extruder' to read one section for lean context)"
+            "section='extruder' for one section). Call FIRST when the user "
+            "names a config file to edit or inspect."
         ),
         "search_example_configs": "Search example configs by board or printer",
         "read_example_config": "Read a full example config file",
