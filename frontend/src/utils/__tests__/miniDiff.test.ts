@@ -140,6 +140,35 @@ pin: PB1
     expect(result.text).toBe('[gcode_macro X]\ngcode:\n    BED_MESH_CALIBRATE ADAPTIVE=1\n    M104 S0\n');
   });
 
+  it('returns only the changed sections, not the whole file', () => {
+    // Regression guard: the output must contain ONLY the edited section so the
+    // section-merge touches just that section (untouched sections would go
+    // through the param-key merge, which conflates duplicate keys like the
+    // three `serial` lines in [mcu] and produces a noisy review diff).
+    const base = [
+      '[mcu]',
+      'serial: /dev/ttyS0',
+      '',
+      '[gcode_macro Level_Bed]',
+      'gcode:',
+      '    BED_MESH_CALIBRATE',
+      '    M104 S0',
+      '',
+      '[fan]',
+      'pin: PB0',
+    ].join('\n');
+    const result = applyMiniDiffBlock(
+      '[gcode_macro Level_Bed]\n-    BED_MESH_CALIBRATE\n+    BED_MESH_CALIBRATE ADAPTIVE=1',
+      base,
+    );
+    expect(result.applied).toBe(true);
+    expect(result.text).toContain('BED_MESH_CALIBRATE ADAPTIVE=1');
+    expect(result.text).not.toContain('[mcu]');
+    expect(result.text).not.toContain('serial:');
+    expect(result.text).not.toContain('[fan]');
+    expect(result.text).not.toContain('pin: PB0');
+  });
+
   it('leaves the section unchanged when a removal matches twice and only one is targeted', () => {
     const base = `[gcode_macro X]
 gcode:

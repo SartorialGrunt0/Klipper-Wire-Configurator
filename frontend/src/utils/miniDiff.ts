@@ -135,9 +135,16 @@ function applyOpsToSection(
  *   caller via extractAssistantFileHint).
  * - `baseFileText`: the current raw text of the file the edit targets.
  *
- * Returns `{ applied: true, text }` with the reconstructed FULL section text
- * (suitable for the normal parse → merge pipeline), or `{ applied: false }`
- * when the block is not a mini-diff or a removal could not be matched.
+ * Returns `{ applied: true, text }` with the CHANGED sections materialized in
+ * full (unchanged lines — including Jinja tags inside macros — copied
+ * verbatim from the base file, only the -/+ edits applied). The output
+ * intentionally contains ONLY the edited sections, not the whole file: the
+ * downstream section-merge (mergeAssistantSectionsIntoConfig) then touches
+ * just those sections, so untouched sections stay byte-identical and the
+ * review diff shows only the real change.
+ *
+ * Returns `{ applied: false }` when the block is not a mini-diff or a
+ * removal could not be matched.
  */
 export function applyMiniDiffBlock(
   configText: string,
@@ -149,45 +156,38 @@ export function applyMiniDiffBlock(
 
   const blockLines = configText.split(/\r?\n/);
   const baseLines = baseFileText.split(/\r?\n/);
+  const outputSections: string[] = [];
 
-  let output = baseLines;
-  let appliedAny = false;
+  for (let blockIndex = 0; blockIndex < blockLines.length; blockIndex += 1) {
+    if (!SECTION_HEADER_RE.test(blockLines[blockIndex])) continue;
+    const header = SECTION_HEADER_RE.exec(blockLines[blockIndex])![1];
+    const ops = extractSectionOps(blockLines, blockIndex);
+    if (ops.length === 0) continue;
 
-  blockLines.forEach((line, index) => {
-    if (!SECTION_HEADER_RE.test(line)) return;
-    const header = SECTION_HEADER_RE.exec(line)![1];
-    const ops = extractSectionOps(blockLines, index);
-    if (ops.length === 0) return;
-
-    const headerIndex = output.findIndex(
+    const headerIndex = baseLines.findIndex(
       (baseLine) => SECTION_HEADER_RE.test(baseLine)
         && SECTION_HEADER_RE.exec(baseLine)![1] === header,
     );
-    if (headerIndex === -1) return; // section not in base — fall back
+    if (headerIndex === -1) continue; // section not in base — fall back
 
     // Section extent: from the header line to the next section header.
-    let endIndex = output.length;
-    for (let scan = headerIndex + 1; scan < output.length; scan += 1) {
-      if (SECTION_HEADER_RE.test(output[scan])) {
+    let endIndex = baseLines.length;
+    for (let scan = headerIndex + 1; scan < baseLines.length; scan += 1) {
+      if (SECTION_HEADER_RE.test(baseLines[scan])) {
         endIndex = scan;
         break;
       }
     }
 
-    const sectionLines = output.slice(headerIndex, endIndex);
+    const sectionLines = baseLines.slice(headerIndex, endIndex);
     const reconstructed = applyOpsToSection(sectionLines, ops);
-    if (!reconstructed) return;
+    if (!reconstructed) continue;
 
-    output = [
-      ...output.slice(0, headerIndex),
-      ...reconstructed,
-      ...output.slice(endIndex),
-    ];
-    appliedAny = true;
-  });
+    outputSections.push(reconstructed.join('\n'));
+  }
 
-  if (!appliedAny) {
+  if (outputSections.length === 0) {
     return { applied: false, text: configText };
   }
-  return { applied: true, text: output.join('\n') };
+  return { applied: true, text: outputSections.join('\n\n') };
 }
