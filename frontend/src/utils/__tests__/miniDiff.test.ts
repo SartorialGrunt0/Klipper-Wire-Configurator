@@ -26,8 +26,8 @@ describe('isMiniDiffBlock', () => {
     expect(isMiniDiffBlock(LEVEL_BED_SECTION)).toBe(false);
   });
 
-  it('rejects addition-only blocks (no anchor removal)', () => {
-    expect(isMiniDiffBlock('[gcode_macro Level_Bed]\n+    NEW_LINE')).toBe(false);
+  it('accepts addition-only blocks (add-only edits have no removal anchor)', () => {
+    expect(isMiniDiffBlock('[gcode_macro Level_Bed]\n+    NEW_LINE')).toBe(true);
   });
 
   it('rejects blocks with delete markers', () => {
@@ -254,5 +254,35 @@ max_accel: 18000 #Ellis Tuned
       base,
     );
     expect(result.applied).toBe(false);
+  });
+
+  it('appends add-only lines at the end of a plain section', () => {
+    const base = `[bed_mesh]\nmesh_min: 10, 10\nmesh_max: 290, 290\n`;
+    const result = applyMiniDiffBlock(
+      '[bed_mesh]\n+adaptive_margin: 10',
+      base,
+    );
+    expect(result.applied).toBe(true);
+    expect(result.text).toBe(`[bed_mesh]\nmesh_min: 10, 10\nmesh_max: 290, 290\nadaptive_margin: 10\n`);
+  });
+
+  it('appends add-only lines at the end of a macro body before trailing blanks', () => {
+    const base = `[gcode_macro X]\ngcode:\n    G28\n\n`;
+    const result = applyMiniDiffBlock(
+      '[gcode_macro X]\n+    M117 done',
+      base,
+    );
+    expect(result.applied).toBe(true);
+    expect(result.text).toBe(`[gcode_macro X]\ngcode:\n    G28\n    M117 done\n\n`);
+  });
+
+  it('supports delete-only mini-diffs (removal with no additions)', () => {
+    const base = `[gcode_macro X]\ngcode:\n    G28\n    M104 S0\n`;
+    const result = applyMiniDiffBlock(
+      '[gcode_macro X]\n-    M104 S0',
+      base,
+    );
+    expect(result.applied).toBe(true);
+    expect(result.text).toBe(`[gcode_macro X]\ngcode:\n    G28\n`);
   });
 });

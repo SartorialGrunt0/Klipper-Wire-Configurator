@@ -31,15 +31,51 @@ export interface AssistantDraftValidationOutcome {
 
 // ── Full-rewrite guard for existing sections ────────────────────────
 
+/** Section types whose body is Jinja/g-code — silently droppable lines. */
+// NOTE: full_header has no brackets (e.g. `gcode_macro Level_Bed`, `bed_mesh`).
+const MACRO_SECTION_HEADER_RE = /^(gcode_macro|delayed_gcode|display_template|display_data)\b/i;
+
+/** True when the draft section is byte-equivalent to the base section. */
+function sectionParamsEqual(left: ConfigSection, right: ConfigSection): boolean {
+  if (left.params.length !== right.params.length) return false;
+  for (let index = 0; index < left.params.length; index += 1) {
+    const a = left.params[index];
+    const b = right.params[index];
+    if (a.key !== b.key
+      || a.value !== b.value
+      || a.comment !== b.comment
+      || a.is_commented_out !== b.is_commented_out) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /**
- * Reject FULL rewrites of EXISTING sections (any section type). The edit
- * protocol requires mini-diffs for existing sections so unchanged lines are
- * preserved automatically; a full rewrite lets the model regenerate a
- * section from a semantic summary and silently drop lines (G28, {% endif %},
- * M104, comments). This is the FIRST guard — it fires whenever an existing
- * section comes back without '-'/'+' markers, before any content heuristics.
- * New sections (not in base) are never flagged: additions are written in
- * full by protocol.
+ * True when a full rewrite of this section could silently drop lines that
+ * validation would NOT catch: macro/Jinja bodies and any multi-line param
+ * value (gcode bodies, data blocks). Plain single-line key-value sections
+ * (bed_mesh, printer, extruder, ...) are safe to full-rewrite — missing
+ * params surface as normal validation errors, and forcing mini-diffs there
+ * is what makes add-only edits deadlock: a pure '+' has no '-' anchor, so
+ * it is not even recognized as a mini-diff and the model cannot comply.
+ */
+function sectionCanHideDroppedLines(section: ConfigSection): boolean {
+  if (MACRO_SECTION_HEADER_RE.test(section.full_header)) return true;
+  return section.params.some((param) => param.value.includes('\n'));
+}
+
+/**
+ * Reject FULL rewrites of EXISTING sections that can silently lose lines
+ * (macros and any section with a multi-line body). The edit protocol
+ * requires mini-diffs for those so unchanged lines are preserved
+ * automatically; a full rewrite lets the model regenerate a section from a
+ * semantic summary and drop lines (G28, {% endif %}, M104, comments).
+ * Plain config sections (single-line key-value params) are NOT flagged —
+ * their full rewrites are validated normally and any dropped param shows
+ * up as a validation error. This is the FIRST guard — it fires before any
+ * content heuristics. New sections (not in base) are never flagged:
+ * additions are written in full by protocol.
  */
 export function buildFullRewriteSectionIssues(
   baseSections: ConfigSection[],
@@ -47,11 +83,18 @@ export function buildFullRewriteSectionIssues(
   fullRewriteTargets: Array<{ fullHeader: string }>,
 ): ValidationError[] {
   const baseHeaders = new Set(baseSections.map((section) => section.full_header));
-  const draftHeaders = new Set(assistantSections.map((section) => section.full_header));
+  const draftByHeader = new Map(
+    assistantSections.map((section) => [section.full_header, section] as const),
+  );
   const errors: ValidationError[] = [];
   for (const target of fullRewriteTargets) {
     if (!baseHeaders.has(target.fullHeader)) continue; // new section — full write is fine
-    if (!draftHeaders.has(target.fullHeader)) continue;
+    const draftSection = draftByHeader.get(target.fullHeader);
+    if (!draftSection || !sectionCanHideDroppedLines(draftSection)) continue;
+    const baseSection = baseSections.find((section) => section.full_header === target.fullHeader);
+    // A no-op quote (draft identical to the current content, e.g. "here is
+    // what is already there") is not a rewrite — allow it.
+    if (baseSection && sectionParamsEqual(draftSection, baseSection)) continue;
     errors.push({
       severity: 'error',
       message: `Existing section '[${target.fullHeader}]' was returned as a full rewrite. Emit it as a mini-diff instead: the section header followed by ONLY the lines that change, prefixing removals with '-' and additions with '+'. Unchanged lines are preserved automatically and cannot be dropped.`,

@@ -423,7 +423,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
 
         // File targeting instructions — only edits carry the draft/mini-diff
         // protocol; questions just get told where the config lives.
-        const miniDiffInstruction = ` To EDIT an existing section, return a mini-diff: the section header followed by only the lines that change, prefixing removed lines with '-' and added lines with '+', keeping their original indentation. The app applies these replacements exactly, so unchanged lines (like Jinja {% if %}/{% endif %} tags) are preserved automatically. Outputting any unchanged line causes the app to reject the reply as a full rewrite and retry — emit ONLY the lines that change. To ADD a new section, write it in full; to delete one, write '*[section_name]'.`;
+        const miniDiffInstruction = ` To EDIT an existing section, return a mini-diff: the section header followed by only the lines that change, prefixing removed lines with '-' and added lines with '+', keeping their original indentation. The app applies these replacements exactly, so unchanged lines (like Jinja {% if %}/{% endif %} tags) are preserved automatically. Outputting any unchanged line causes the app to reject the reply as a full rewrite and retry — emit ONLY the lines that change. A pure addition (nothing removed) needs no '-' line: just the header plus the '+' lines. A pure deletion (nothing added) needs no '+' line: just the header plus the '-' lines. If a section is already correct and you only need to show it, quoting it unchanged is allowed. To ADD a new section, write it in full; to delete one, write '*[section_name]'.`;
         if (chatIntent === 'edit') {
           if (mentionedConfigFiles.length > 0) {
             contextMessages.push({

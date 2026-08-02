@@ -9,8 +9,16 @@
  * lines — including Jinja tags inside macros — are preserved automatically
  * and can never be dropped or reworded by the model.
  *
- * A cfg block with no '-' lines is treated as a full-section block (the
- * legacy protocol) and passes through untouched.
+ * Three shapes are supported:
+ * - edit: '-' removal line(s) with optional '+' additions below them
+ *   (replace matched lines);
+ * - delete-only: '-' lines with no additions (lines are removed);
+ * - add-only: '+' lines with NO preceding '-' — there is no line to remove,
+ *   so the additions are appended at the end of the section (after the last
+ *   non-empty line), which is how "add one param / one line" edits work.
+ *
+ * A cfg block with no '-' AND no '+' lines is treated as a full-section
+ * block (the legacy protocol) and passes through untouched.
  */
 
 export const MINI_DIFF_REMOVAL_RE = /^-(.*)$/;
@@ -46,8 +54,11 @@ function leadingWhitespace(line: string): string {
 }
 
 interface MiniDiffOperation {
-  /** The removed line content (without the '-' prefix). */
-  removal: string;
+  /**
+   * The removed line content (without the '-' prefix), or null for an
+   * add-only operation with no anchor line (appended at end of section).
+   */
+  removal: string | null;
   /** Lines to insert in place of the removed line (without '+' prefixes). */
   additions: string[];
 }
@@ -56,16 +67,18 @@ interface MiniDiffOperation {
 export function isMiniDiffBlock(configText: string): boolean {
   const lines = configText.split(/\r?\n/);
   let hasHeader = false;
-  let hasRemoval = false;
+  let hasMarker = false;
   for (const line of lines) {
     if (DELETE_MARKER_RE.test(line)) return false;
     if (SECTION_HEADER_RE.test(line)) {
       hasHeader = true;
       continue;
     }
-    if (MINI_DIFF_REMOVAL_RE.test(line)) hasRemoval = true;
+    if (MINI_DIFF_REMOVAL_RE.test(line) || MINI_DIFF_ADDITION_RE.test(line)) {
+      hasMarker = true;
+    }
   }
-  return hasHeader && hasRemoval;
+  return hasHeader && hasMarker;
 }
 
 /** Extract the operations for one section header from the block's lines. */
@@ -91,8 +104,12 @@ function extractSectionOps(
     if (additionMatch) {
       if (current) {
         current.additions.push(additionMatch[1]);
+      } else {
+        // '+' with no preceding '-' = add-only operation (no anchor). The
+        // additions are appended at the end of the section.
+        current = { removal: null, additions: [additionMatch[1]] };
+        ops.push(current);
       }
-      // A '+' with no preceding '-' is ambiguous (no anchor) — ignore it.
       continue;
     }
 
@@ -118,9 +135,17 @@ function applyOpsToSection(
   const used = new Set<number>();
   const opToIndex = new Map<number, number>(); // op index -> base line index
   const opToIndent = new Map<number, string>(); // op index -> matched base indent
+  const appendAdditions: string[] = []; // add-only ops (no anchor line)
 
   for (let opIndex = 0; opIndex < ops.length; opIndex += 1) {
-    const normalizedRemoval = normalizeLine(ops[opIndex].removal);
+    const op = ops[opIndex];
+    if (op.removal === null) {
+      // Add-only: no line to remove — the additions append at the end of the
+      // section (after the last non-empty line).
+      appendAdditions.push(...op.additions);
+      continue;
+    }
+    const normalizedRemoval = normalizeLine(op.removal);
     let matchIndex = base.findIndex(
       (line, index) => !used.has(index) && line === normalizedRemoval,
     );
@@ -142,6 +167,7 @@ function applyOpsToSection(
   }
 
   const result: string[] = [];
+  let lastNonEmptyIndex = -1;
   for (let index = 0; index < sectionLines.length; index += 1) {
     let matchedOpIndex = -1;
     for (const [opIndex, baseIndex] of opToIndex.entries()) {
@@ -153,20 +179,30 @@ function applyOpsToSection(
     if (matchedOpIndex !== -1) {
       const op = ops[matchedOpIndex];
       const baseIndent = opToIndent.get(matchedOpIndex) ?? '';
-      const diffIndent = leadingWhitespace(op.removal);
-      result.push(
-        ...op.additions.map((addition) => {
-          // Anchor the addition to the base line's indentation, preserving
-          // the relative inner indent of multi-line additions.
-          const relativeIndent =
-            leadingWhitespace(addition).length - diffIndent.length;
-          const pad = relativeIndent > 0 ? ' '.repeat(relativeIndent) : '';
-          return baseIndent + pad + normalizeLine(addition).trimStart();
-        }),
-      );
+      const diffIndent = leadingWhitespace(op.removal ?? '');
+      const additions = op.additions.map((addition) => {
+        // Anchor the addition to the base line's indentation, preserving
+        // the relative inner indent of multi-line additions.
+        const relativeIndent =
+          leadingWhitespace(addition).length - diffIndent.length;
+        const pad = relativeIndent > 0 ? ' '.repeat(relativeIndent) : '';
+        return baseIndent + pad + normalizeLine(addition).trimStart();
+      });
+      result.push(...additions);
+      for (let a = 0; a < additions.length; a += 1) {
+        if (additions[a].trim() !== '') lastNonEmptyIndex = result.length - 1;
+      }
       continue;
     }
     result.push(sectionLines[index]);
+    if (sectionLines[index].trim() !== '') {
+      lastNonEmptyIndex = result.length - 1;
+    }
+  }
+
+  if (appendAdditions.length > 0) {
+    // Insert after the last non-empty line, before any trailing blank lines.
+    result.splice(lastNonEmptyIndex + 1, 0, ...appendAdditions.map((addition) => normalizeLine(addition)));
   }
 
   return result;

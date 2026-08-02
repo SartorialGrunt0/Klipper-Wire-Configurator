@@ -240,32 +240,72 @@ describe('deriveJinjaRepairCommands', () => {
 });
 
 describe('buildFullRewriteSectionIssues', () => {
-  const section = (header: string, sectionType = 'gcode_macro'): ConfigSection => ({
+  const section = (header: string, sectionType = 'gcode_macro', gcodeValue = '    G28\n'): ConfigSection => ({
     section_type: sectionType,
     section_name: header.replace(/^[a-z_]+ /, ''),
     full_header: header,
     line_number: 1,
-    params: [{ key: 'gcode', value: '    G28\n', comment: '', is_commented_out: false }],
+    params: [{ key: 'gcode', value: gcodeValue, comment: '', is_commented_out: false }],
+    header_comments: [],
+  });
+
+  const plainSection = (
+    header: string,
+    sectionType: string,
+    params: Array<{ key: string; value: string }>,
+  ): ConfigSection => ({
+    section_type: sectionType,
+    section_name: header.replace(/^[a-z_]+ /, ''),
+    full_header: header,
+    line_number: 1,
+    params: params.map((p) => ({ key: p.key, value: p.value, comment: '', is_commented_out: false })),
     header_comments: [],
   });
 
   const base = [
     section('gcode_macro Level_Bed'),
-    section('printer', 'printer'),
+    plainSection('bed_mesh', 'bed_mesh', [
+      { key: 'mesh_min', value: '10, 10' },
+      { key: 'mesh_max', value: '290, 290' },
+    ]),
   ];
 
-  it('flags ANY full rewrite of an existing section (no lossy heuristic)', () => {
-    const draft = [section('gcode_macro Level_Bed')];
+  it('flags a full rewrite of an existing macro section', () => {
+    const draft = [section('gcode_macro Level_Bed', 'gcode_macro', '    G28 X0\n')];
     const issues = buildFullRewriteSectionIssues(base, draft, [{ fullHeader: 'gcode_macro Level_Bed' }]);
     expect(issues).toHaveLength(1);
     expect(issues[0]?.message).toContain('Emit it as a mini-diff instead');
   });
 
-  it('flags non-macro sections too', () => {
-    const draft = [section('printer', 'printer')];
-    const issues = buildFullRewriteSectionIssues(base, draft, [{ fullHeader: 'printer' }]);
+  it('allows a full rewrite of a plain config section (bed_mesh)', () => {
+    // Regression: adding a param to a plain section cannot be expressed as a
+    // mini-diff (a pure '+' has no '-' anchor), so forcing one deadlocks —
+    // the model "refuses" and validation fails after 2 attempts.
+    const draft = [plainSection('bed_mesh', 'bed_mesh', [
+      { key: 'mesh_min', value: '10, 10' },
+      { key: 'mesh_max', value: '290, 290' },
+      { key: 'adaptive_margin', value: '10' },
+    ])];
+    expect(buildFullRewriteSectionIssues(base, draft, [{ fullHeader: 'bed_mesh' }])).toEqual([]);
+  });
+
+  it('flags non-macro sections with multi-line bodies too', () => {
+    const homing = plainSection('homing_override', 'homing_override', [
+      { key: 'gcode', value: 'G28\nG1 Z10\n' },
+    ]);
+    const baseWithHoming = [...base, homing];
+    // Changed draft: same header, different body — a real rewrite.
+    const draft = [plainSection('homing_override', 'homing_override', [
+      { key: 'gcode', value: 'G28\nG1 Z10\nG1 X0 Y0\n' },
+    ])];
+    const issues = buildFullRewriteSectionIssues(baseWithHoming, draft, [{ fullHeader: 'homing_override' }]);
     expect(issues).toHaveLength(1);
-    expect(issues[0]?.message).toContain('[printer]');
+    expect(issues[0]?.message).toContain('[homing_override]');
+  });
+
+  it('allows a no-op quote of an existing macro section (show-what-is-there)', () => {
+    const draft = [section('gcode_macro Level_Bed')]; // identical to base
+    expect(buildFullRewriteSectionIssues(base, draft, [{ fullHeader: 'gcode_macro Level_Bed' }])).toEqual([]);
   });
 
   it('does not flag new sections (additions are written in full)', () => {
