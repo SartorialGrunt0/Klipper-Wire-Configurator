@@ -963,6 +963,28 @@ def build_trident_questions() -> list[TestQuestion]:
                 ("contains", "PB9"),
             ),
         ),
+        TestQuestion(
+            qid="MINIDIFF-04",
+            title="Mini-diff: pressure_advance via read_user_config (tool required)",
+            text=("Can you set a pressure advance value in my printer.cfg extruder "
+                  "section? Just pick a safe default for a direct drive extruder"),
+            # No context_files: the ONLY way to see the [extruder] section is the
+            # read_user_config tool, which reads the backend's user_configs dir
+            # (that dir must contain printer.cfg). The model must return a
+            # mini-diff ADD line (+pressure_advance: <value>) and must NOT dump
+            # or rewrite the whole section (the mangling gate below catches
+            # full-section rewrites via params that only exist in [extruder]).
+            expected_tools=("read_user_config",),
+            require_tool=True,
+            criteria=(
+                ("regex", r"\[extruder\]"),
+                ("regex", r"(?m)^\s*\+[^\n]*pressure_advance\s*[:=]\s*\d+(?:\.\d+)?"),
+                # Mangle gate: a mini-diff add contains only the changed line;
+                # a full [extruder] rewrite would include these params.
+                ("not_contains", "gear_ratio"),
+                ("not_contains", "step_pin"),
+            ),
+        ),
     ]
 
 
