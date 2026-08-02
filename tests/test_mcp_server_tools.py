@@ -383,6 +383,63 @@ def test_read_user_config_not_found(tmp_path):
     assert "not found" in out
 
 
+def test_read_user_config_with_section(tmp_path):
+    server, root = _server(tmp_path)
+    user_dir = root / "user_configs"
+    user_dir.mkdir(parents=True)
+    (user_dir / "my_printer.cfg").write_text(
+        "# Extruder tuning\n"
+        "[extruder]\n"
+        "pressure_advance: 0.05\n"
+        "\n"
+        "[heater_bed]\n"
+        "heater_pin: PB1\n",
+        encoding="utf-8",
+    )
+    out = _call_tool(server, "read_user_config", {
+        "filename": "my_printer.cfg", "section": "extruder",
+    })
+    assert "partial context" in out
+    assert "# Extruder tuning" in out          # banner comment belongs to the section
+    assert "[extruder]" in out
+    assert "pressure_advance: 0.05" in out
+    assert "[heater_bed]" not in out            # other sections excluded
+    assert "heater_pin: PB1" not in out
+
+
+def test_read_user_config_with_section_bracket_and_case(tmp_path):
+    server, root = _server(tmp_path)
+    user_dir = root / "user_configs"
+    user_dir.mkdir(parents=True)
+    (user_dir / "my_printer.cfg").write_text(
+        "[gcode_macro FIX_ME]\n"
+        "gcode:\n"
+        "    M140 S60\n"
+        "\n"
+        "[heater_bed]\n"
+        "heater_pin: PB1\n",
+        encoding="utf-8",
+    )
+    out = _call_tool(server, "read_user_config", {
+        "filename": "my_printer.cfg", "section": "[GCODE_MACRO FIX_ME]",
+    })
+    assert "[gcode_macro FIX_ME]" in out
+    assert "M140 S60" in out
+    assert "heater_pin: PB1" not in out
+
+
+def test_read_user_config_with_section_not_found(tmp_path):
+    server, root = _server(tmp_path)
+    user_dir = root / "user_configs"
+    user_dir.mkdir(parents=True)
+    (user_dir / "my_printer.cfg").write_text("[extruder]\npressure_advance: 0.05\n", encoding="utf-8")
+    out = _call_tool(server, "read_user_config", {
+        "filename": "my_printer.cfg", "section": "no_such_section",
+    })
+    assert 'Section "no_such_section" not found' in out
+    assert "read the whole file" in out
+
+
 # ── detect_board ────────────────────────────────────────────────────────
 
 

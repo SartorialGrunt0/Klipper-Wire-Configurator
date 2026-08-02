@@ -537,8 +537,10 @@ class McpServer:
             {
                 "name": "read_user_config",
                 "description": (
-                    "Read the full content of a user configuration file from the 'user_configs' directory. "
-                    "Use search_user_configs first to find the exact filename."
+                    "Read a user configuration file from the 'user_configs' directory. "
+                    "Use search_user_configs first to find the exact filename. "
+                    "Pass 'section' to read only one section (lean context for edits); "
+                    "omit it to read the whole file."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -546,6 +548,14 @@ class McpServer:
                         "filename": {
                             "type": "string",
                             "description": "Config filename (e.g. 'my_printer.cfg')",
+                        },
+                        "section": {
+                            "type": "string",
+                            "description": (
+                                "Optional section header to read only that section "
+                                "(e.g. 'extruder' or '[gcode_macro FIX_ME]') instead "
+                                "of the whole file (partial context)."
+                            ),
                         },
                     },
                     "required": ["filename"],
@@ -1241,10 +1251,27 @@ class McpServer:
         except OSError as exc:
             return f"Error reading {candidate.name}: {exc}"
 
-        result = f"# {candidate.name}  (User Config)\n# {len(content)} bytes\n\n"
-        result += content
+        section = args.get("section", "").strip()
 
-        # Append validation results if available
+        if section:
+            section_text = self._extract_config_section(content, section)
+            if section_text is None:
+                return (
+                    f'Section "{section}" not found in {candidate.name}. '
+                    "Use search_user_configs to find the exact filename, or omit "
+                    "section to read the whole file."
+                )
+            result = (
+                f"# {candidate.name}  (User Config - section [{section}] partial "
+                "context; the file may have more sections)\n\n"
+            )
+            result += section_text
+        else:
+            result = f"# {candidate.name}  (User Config)\n# {len(content)} bytes\n\n"
+            result += content
+
+        # Append validation results if available (filtered to the requested
+        # section when reading partial context).
         try:
             from parser.config_parser import parse_config
             from parser.validator import validate_config
@@ -1253,8 +1280,21 @@ class McpServer:
             validation = validate_config(parsed)
 
             if hasattr(validation, 'errors') and validation.errors:
-                errors = [e for e in validation.errors if getattr(e, 'severity', 'error') == 'error' or not hasattr(e, 'severity')]
-                warnings = [e for e in validation.errors if getattr(e, 'severity', '') == 'warning']
+                wanted = section.strip().strip("[]").lower() if section else None
+                all_issues = list(validation.errors)
+                if wanted:
+                    all_issues = [
+                        e for e in all_issues
+                        if str(getattr(e, 'section', '')).strip().strip('[]').lower() == wanted
+                    ]
+                errors = [
+                    e for e in all_issues
+                    if getattr(e, 'severity', 'error') == 'error' or not hasattr(e, 'severity')
+                ]
+                warnings = [
+                    e for e in all_issues
+                    if getattr(e, 'severity', '') == 'warning'
+                ]
 
                 parts = []
                 if errors:
@@ -1273,6 +1313,42 @@ class McpServer:
             pass  # Parser not available
 
         return result
+
+    def _extract_config_section(self, content: str, section_name: str) -> str | None:
+        """Return the raw text of one config section: banner comments above the
+        header through the last line before the next section header.
+
+        Case-insensitive; accepts 'name' or '[name]'. Mirrors the frontend's
+        extractSectionText so tool reads and edit-path section targeting agree.
+        """
+        wanted = section_name.strip().strip("[]").lower()
+        lines = content.splitlines()
+        header_index: int | None = None
+        for i, line in enumerate(lines):
+            m = re.match(r"^\s*\[([^\]]+)\]\s*$", line)
+            if m and m.group(1).strip().lower() == wanted:
+                header_index = i
+                break
+        if header_index is None:
+            return None
+
+        end_index = len(lines)
+        for i in range(header_index + 1, len(lines)):
+            if re.match(r"^\s*\[([^\]]+)\]\s*$", lines[i]):
+                end_index = i
+                break
+
+        # Walk back over blank + comment lines above the header (banner
+        # comments and separators belong to the section visually).
+        start_index = header_index
+        while start_index > 0:
+            previous = lines[start_index - 1].strip()
+            if previous == "" or previous.startswith("#"):
+                start_index -= 1
+            else:
+                break
+
+        return "\n".join(lines[start_index:end_index])
 
     def _handle_detect_board(self, args: dict[str, Any]) -> str:
         config_text = args.get("config_text", "").strip()

@@ -321,7 +321,10 @@ def _build_mcp_tool_context() -> str:
         "search_klipper_docs": "Search the bundled Klipper docs",
         "read_klipper_doc": "Read a bundled Klipper doc file",
         "get_config_reference_section": "Get the Config_Reference section and valid params for a config section (pass section_name, e.g. section_name='bed_mesh')",
-        "read_user_config": "Read one of the user's own config files",
+        "read_user_config": (
+            "Read a user config file (filename='printer.cfg', optional "
+            "section='extruder' to read one section for lean context)"
+        ),
         "search_example_configs": "Search example configs by board or printer",
         "read_example_config": "Read a full example config file",
         "validate_klipper_config": "Validate a config snippet with Klipper rules",
