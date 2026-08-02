@@ -6,6 +6,7 @@ import {
   extractTargetedSectionHeaders,
   buildSectionContextMessage,
 } from '../chatIntent';
+import { buildConfigIndexMessage } from '../chatUtils';
 
 const SAMPLE_FILE = `# =====================
 # MCU
@@ -114,5 +115,23 @@ describe('buildSectionContextMessage', () => {
     const msg = buildSectionContextMessage('printer.cfg', 'Active Klipper config draft', 'printer', '[printer]\nkinematics: corexy');
     expect(msg).toContain('printer.cfg — section [printer]');
     expect(msg).toContain('```cfg\n[printer]\nkinematics: corexy\n```');
+  });
+});
+
+describe('buildConfigIndexMessage', () => {
+  it('lists section headers and points at read_user_config', () => {
+    const msg = buildConfigIndexMessage('printer.cfg', findSectionHeaders(SAMPLE_FILE), 'Loaded Klipper config file');
+    expect(msg).toContain('printer.cfg — section index (file content not attached)');
+    expect(msg).toContain('[printer]');
+    expect(msg).toContain('[gcode_macro Level_Bed]');
+    // Must NOT contain any section body content — only the index.
+    expect(msg).not.toContain('max_accel: 15500');
+    // Must tell the model how to fetch sections itself.
+    expect(msg).toContain("read_user_config with filename='printer.cfg'");
+  });
+
+  it('handles a file with no detected sections', () => {
+    const msg = buildConfigIndexMessage('empty.cfg', [], 'Loaded Klipper config file');
+    expect(msg).toContain('(no sections detected)');
   });
 });

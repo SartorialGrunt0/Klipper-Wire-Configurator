@@ -745,6 +745,13 @@ export interface AiChatRequest {
   maxTokens?: number;
   /** Sampling temperature for the provider (0-2). Omit for provider default. */
   temperature?: number;
+  /**
+   * Loaded user-config content (filename -> {content, label}) for the
+   * backend's config-grounding fallback. Held server-side only — it is NOT
+   * injected into the prompt; the backend uses it when the model answers a
+   * question without calling any tool.
+   */
+  contextFiles?: Record<string, { content: string; label: string }>;
 }
 
 export interface AiChatResponse {

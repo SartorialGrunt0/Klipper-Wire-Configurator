@@ -75,6 +75,8 @@ interface ChatRequestBase {
   maxTokens?: number;
   /** Sampling temperature for the provider (0-2). Omit for provider default. */
   temperature?: number;
+  /** Loaded user-config content for the backend config-grounding fallback. */
+  contextFiles?: Record<string, { content: string; label: string }>;
 }
 
 interface SubmitMessageOptions {

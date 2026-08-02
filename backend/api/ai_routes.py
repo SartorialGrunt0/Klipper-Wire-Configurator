@@ -212,6 +212,11 @@ class ChatRequest(BaseModel):
     # Sampling temperature. None = use the provider's default for the
     # request type (0.1 for OpenAI-compatible, Anthropic's default otherwise).
     temperature: float | None = None
+    # Loaded user-config content sent by the frontend (filename ->
+    # {"content", "label"}) for the config-grounding fallback. Held
+    # server-side only — it is NOT injected into the first prompt; the
+    # fallback uses it when the model answers without calling any tool.
+    contextFiles: dict[str, dict[str, str]] = {}
 
 
 class ChatStopRequest(BaseModel):
@@ -465,6 +470,204 @@ def _is_edit_request(messages: list[dict]) -> bool:
             continue
         return bool(_EDIT_VERB_RE.search(content) and _EDIT_TARGET_RE.search(content))
     return False
+
+
+# ── Config-grounding fallback (Phase 4) ──────────────────────────────
+# Ports the frontend's chatIntent.ts / chatUtils.ts targeting heuristics so
+# the backend can resolve which file + which sections a question needs when
+# the model did not fetch them itself. The fallback is ON by default: config
+# questions cannot be answered from training, so an ungrounded first pass is
+# rescued by injecting the user's actual loaded content (section-targeted
+# when possible).
+
+# Cap for whole-file last-resort injections (keeps the fallback lean).
+CONFIG_FALLBACK_MAX_CHARS = 12000
+
+
+def _latest_user_message_text(messages: list[dict]) -> str:
+    """Return the most recent non-empty user message text."""
+    for msg in reversed(messages):
+        if msg.get("role") != "user":
+            continue
+        content = str(msg.get("content", "")).strip()
+        if content:
+            return content
+    return ""
+
+
+def _mentioned_config_filenames(text: str, available: list[str]) -> list[str]:
+    """Return available filenames that appear in the text (word-boundary match).
+
+    Mirrors the frontend's extractMentionedConfigFilenames (chatUtils.ts).
+    """
+    matches: list[str] = []
+    for filename in available:
+        pattern = re.compile(
+            rf"(^|[^A-Za-z0-9_.-]){re.escape(filename)}(?=$|[^A-Za-z0-9_.-])",
+            re.IGNORECASE,
+        )
+        if pattern.search(text):
+            matches.append(filename)
+    return matches
+
+
+_SECTION_HEADER_RE = re.compile(r"^\s*\[([^\]]+)\]\s*$")
+
+
+def _find_section_headers(file_text: str) -> list[str]:
+    """All section header names (e.g. 'gcode_macro Level_Bed') in file text."""
+    headers: list[str] = []
+    for line in file_text.splitlines():
+        match = _SECTION_HEADER_RE.match(line)
+        if match:
+            headers.append(match.group(1).strip())
+    return headers
+
+
+def _extract_section_text(file_text: str, header: str) -> str | None:
+    """Extract one section (header + body, incl. leading comment banner).
+
+    Mirrors the frontend's extractSectionText (chatIntent.ts): the section
+    runs from its header (walking back over blank/comment banner lines) to
+    the next section header.
+    """
+    lines = file_text.splitlines()
+    header_index = -1
+    for index, line in enumerate(lines):
+        match = _SECTION_HEADER_RE.match(line)
+        if match and match.group(1).strip() == header:
+            header_index = index
+            break
+    if header_index == -1:
+        return None
+
+    end_index = len(lines)
+    for index in range(header_index + 1, len(lines)):
+        if _SECTION_HEADER_RE.match(lines[index]):
+            end_index = index
+            break
+
+    start_index = header_index
+    while start_index > 0:
+        previous = lines[start_index - 1].strip()
+        if previous == "" or previous.startswith("#"):
+            start_index -= 1
+        else:
+            break
+
+    return "\n".join(lines[start_index:end_index])
+
+
+def _targeted_section_headers(text: str, file_text: str) -> list[str]:
+    """Resolve which section headers a user message targets.
+
+    Mirrors the frontend's extractTargetedSectionHeaders (chatIntent.ts):
+    matches explicit [section] references, 'macro X' / 'X macro' phrases,
+    'the X section' noun phrases, and bare macro-style identifiers. Returns
+    matched headers in file order, deduplicated.
+    """
+    headers = _find_section_headers(file_text)
+    if not headers:
+        return []
+
+    candidates: list[str] = []
+    for match in re.finditer(r"\[([^\]]+)\]", text):
+        candidates.append(match.group(1).strip())
+    for match in re.finditer(r"\b([A-Za-z0-9_]+)\s+macro\b|\bmacro\s+([A-Za-z0-9_]+)\b", text, re.IGNORECASE):
+        candidates.append(match.group(1) or match.group(2))
+    for match in re.finditer(r"\bthe\s+([a-z0-9_]+)\s+section\b|\b([a-z0-9_]+)\s+section\b", text, re.IGNORECASE):
+        candidates.append(match.group(1) or match.group(2))
+    for match in re.finditer(r"\b([A-Z][A-Za-z0-9_]{2,})\b", text):
+        candidates.append(match.group(1))
+
+    matched: set[str] = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        lower = candidate.lower()
+        exact = next((h for h in headers if h.lower() == lower), None)
+        if exact:
+            matched.add(exact)
+            continue
+        contains = [h for h in headers if lower in h.lower()]
+        if contains:
+            matched.add(min(contains, key=len))
+            continue
+        contained = next(
+            (h for h in headers if lower in h.lower() and len(h.lower()) > 3),
+            None,
+        )
+        if contained:
+            matched.add(contained)
+
+    return [h for h in headers if h in matched]
+
+
+def _config_fallback_context(
+    latest_user_text: str,
+    context_files: dict[str, dict[str, str]],
+) -> list[tuple[dict, str]] | None:
+    """Resolve which user-config content a question needs and render it.
+
+    Returns a list of (tool_call, result_text) pairs to inject as fake
+    read_user_config tool results, or None when no config file is clearly
+    referenced (the model should answer from knowledge/docs instead).
+
+    Resolution per file: section-targeted read when the message names
+    sections; otherwise the whole file (truncated) as a last resort so the
+    model is grounded rather than guessing.
+    """
+    if not context_files:
+        return None
+
+    available = sorted(context_files.keys())
+    mentioned = _mentioned_config_filenames(latest_user_text, available)
+    targets = mentioned
+    if not targets and len(available) == 1 and _EDIT_TARGET_RE.search(latest_user_text):
+        # Single loaded file with no explicit filename mention: treat it as
+        # the target only when the question looks config-related (a section
+        # reference or a common config keyword) — a pure knowledge question
+        # shouldn't pull the file in.
+        targets = available
+    if not targets:
+        return None
+
+    injections: list[tuple[dict, str]] = []
+    for filename in targets:
+        entry = context_files.get(filename)
+        if not entry:
+            continue
+        content = entry.get("content", "")
+        if not content.strip():
+            continue
+
+        section_headers = _targeted_section_headers(latest_user_text, content)
+        if section_headers:
+            for header in section_headers:
+                section_text = _extract_section_text(content, header)
+                if section_text is None:
+                    continue
+                injections.append((
+                    {"name": "read_user_config", "arguments": {"filename": filename, "section": header}},
+                    (
+                        f"# {filename}  (User Config - section [{header}] partial "
+                        "context; the file may have more sections)\n\n"
+                        + section_text
+                    ),
+                ))
+        else:
+            truncated = content
+            if len(truncated) > CONFIG_FALLBACK_MAX_CHARS:
+                truncated = (
+                    truncated[:CONFIG_FALLBACK_MAX_CHARS]
+                    + f"\n\n# Context truncated after {CONFIG_FALLBACK_MAX_CHARS} characters."
+                )
+            injections.append((
+                {"name": "read_user_config", "arguments": {"filename": filename}},
+                f"# {filename}  (User Config)\n# {len(content)} bytes\n\n{truncated}",
+            ))
+
+    return injections or None
 
 
 def _auto_search_enabled() -> bool:
@@ -1215,6 +1418,51 @@ async def chat_proxy(req: ChatRequest):
             tool_turns = 0
             current_messages = list(messages)
             executed_tool_names: list[str] = []
+
+            # ── Config-grounding fallback (Phase 4) ──
+            # If the model didn't call any tools on the first pass, inject the
+            # user-config content the question needs (section-targeted when
+            # possible; whole file truncated as last resort). Config questions
+            # cannot be answered from training — without this the model either
+            # hallucinates or asks the user to paste content the app already
+            # has. On by default (unlike the env-gated docs auto-search below).
+            if not _extract_native_tool_calls(req.apiProvider, current_data) and not _extract_tool_calls(current_content):
+                if _is_edit_request(req.messages):
+                    logger.info("Config fallback skipped | edit request")
+                elif PRINTER_MEMORY_BLOCK_RE.search(current_content):
+                    logger.info("Config fallback skipped | printer-memory block present")
+                else:
+                    config_injections = _config_fallback_context(
+                        _latest_user_message_text(req.messages),
+                        req.contextFiles,
+                    )
+                    if config_injections:
+                        logger.info(
+                            "Config fallback triggered | injections=%d result_chars=%d files=%s",
+                            len(config_injections),
+                            sum(len(result) for _, result in config_injections),
+                            [call["arguments"].get("filename") for call, _ in config_injections],
+                        )
+                        if current_content.strip():
+                            current_messages.append({"role": "assistant", "content": current_content})
+                        for tool_call, result_text in config_injections:
+                            executed_tool_names.append(tool_call["name"])
+                            current_messages.append({
+                                "role": "user",
+                                "content": _build_tool_result_message(tool_call, result_text),
+                            })
+                        tool_turns += len(config_injections)
+                        tool_payload = _build_provider_payload(
+                            req.apiProvider, current_messages, req.model,
+                            max_tokens=req.maxTokens,
+                            temperature=req.temperature,
+                            tools=native_tools,
+                        )
+                        current_content, current_data = await _query_provider(
+                            client, req.apiUrl, headers, tool_payload, req.apiProvider,
+                            logger_context="config-fallback",
+                            stop_event=stop_event,
+                        )
 
             # ── Auto-search fallback ──
             # If the model didn't call any tools on the first pass, do a backend

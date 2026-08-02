@@ -19,6 +19,7 @@ import { usePrinterMemoryStore, DEFAULT_PRINTER_MEMORY, type PrinterMemory } fro
 import * as api from '../../services/api';
 import {
   buildConfigContextMessage,
+  buildConfigIndexMessage,
   extractMentionedConfigFilenames,
   CONTEXT_TRUNCATION_LIMIT,
   truncateConfigContext,
@@ -35,6 +36,7 @@ import {
   detectChatIntent,
   extractTargetedSectionHeaders,
   extractSectionText,
+  findSectionHeaders,
   buildSectionContextMessage,
 } from '../../utils/chatIntent';
 import { buildProjectGraph } from '../../utils/graphBuilder';
@@ -130,6 +132,13 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   const [showCarryOverPrompt, setShowCarryOverPrompt] = useState(false);
   const [showPrinterMemory, setShowPrinterMemory] = useState(false);
   const [proposedMemory, setProposedMemory] = useState<PrinterMemory | null>(null);
+
+  // Phase 4: carry the sections injected last turn so follow-up questions
+  // keep their grounding even when the new message names no section. Entries
+  // are bounded to the last two turns and dropped when the file leaves the
+  // selection.
+  const carriedSectionsRef = useRef<Array<{ filename: string; headers: string[]; turn: number }>>([]);
+  const chatTurnRef = useRef(0);
 
   // ── Settings Editing State (single source of truth) ─────────────
   const [editApiKey, setEditApiKey] = useState(settings.apiKey);
@@ -284,22 +293,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     [activeFile, textDrafts, textEditorDirty],
   );
 
-  // ── Build context messages ──────────────────────────────────────
-  const getConfigContexts = useCallback(
-    async (filenames: string[]): Promise<string[]> => {
-      if (filenames.length === 0) return [];
-      const contexts = await Promise.all(
-        Array.from(new Set(filenames)).map(async (filename) => {
-          const configText = await getConfigText(filename);
-          if (configText == null) return null;
-          return buildConfigContextMessage(filename, configText, getConfigContextLabel(filename));
-        }),
-      );
-      return contexts.filter((ctx): ctx is string => ctx != null);
-    },
-    [getConfigContextLabel, getConfigText],
-  );
-
   // ── Submit Message ──────────────────────────────────────────────
   const submitMessage = useCallback(
     async (messageText: string, options?: { hiddenFromUser?: boolean; retry?: boolean }) => {
@@ -348,85 +341,113 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         const contextTargets = Array.from(new Set(selectedConfigContextFiles));
 
         const chatIntent = detectChatIntent(userMsg.content);
-        // User-attached local .cfg files get the same lean treatment as
-        // loaded configs: edit intents send only the sections they target.
-        const appendAttachedFileContexts = (targeted: boolean) => {
-          for (const file of attachedConfigFiles) {
-            if (targeted) {
-              const targetedHeaders = extractTargetedSectionHeaders(userMsg.content, file.content);
-              if (targetedHeaders.length === 0) {
-                contextMessages.push({
-                  role: 'system',
-                  content: buildConfigContextMessage(file.name, file.content, 'User-attached local Klipper config file'),
-                });
-                continue;
-              }
-              for (const header of targetedHeaders) {
-                const sectionText = extractSectionText(file.content, header);
-                if (sectionText != null) {
-                  contextMessages.push({
-                    role: 'system',
-                    content: buildSectionContextMessage(file.name, 'User-attached local Klipper config file', header, sectionText),
-                  });
-                }
-              }
-            } else {
-              contextMessages.push({
-                role: 'system',
-                content: buildConfigContextMessage(file.name, file.content, 'User-attached local Klipper config file'),
-              });
-            }
-          }
-        };
 
-        if (chatIntent === 'edit') {
-          // Phase 3: edits get ONLY the sections they target, not the whole
-          // file. The model works from lean context (the mini-diff apply still
-          // uses the full file server-side, so nothing is lost at merge time).
-          for (const filename of contextTargets) {
-            const fileText = await getConfigText(filename);
-            if (fileText == null) continue;
-            const targetedHeaders = extractTargetedSectionHeaders(userMsg.content, fileText);
-            if (targetedHeaders.length === 0) {
-              // No specific section resolved — fall back to the full file so
-              // the model still has context rather than guessing blind.
-              contextMessages.push({
-                role: 'system',
-                content: buildConfigContextMessage(filename, fileText, getConfigContextLabel(filename)),
-              });
-              continue;
-            }
-            for (const header of targetedHeaders) {
-              const sectionText = extractSectionText(fileText, header);
+        // Phase 4: collect the candidate files (checked in "Include Files" +
+        // manually attached) with their content and labels. Content is sent
+        // to the backend as contextFiles so ITS config-grounding fallback can
+        // inject the exact loaded content if the model answers without
+        // calling any tool — but nothing is dumped into the prompt up front
+        // beyond what the intent path below decides.
+        const candidateFiles = new Map<string, { text: string; label: string }>();
+        for (const filename of contextTargets) {
+          const fileText = await getConfigText(filename);
+          if (fileText != null) {
+            candidateFiles.set(filename, { text: fileText, label: getConfigContextLabel(filename) });
+          }
+        }
+        for (const file of attachedConfigFiles) {
+          candidateFiles.set(file.name, { text: file.content, label: 'User-attached local Klipper config file' });
+        }
+
+        // Phase 4 carry-over: resolve the sections this message targets for
+        // each candidate file. Targeted sections replace any carried set;
+        // files with no new target keep the previous turn's sections so
+        // follow-up questions stay grounded. Carried entries are bounded to
+        // the last two turns and dropped when the file leaves the selection.
+        chatTurnRef.current += 1;
+        const currentTurn = chatTurnRef.current;
+        const usedSections = new Map<string, string[]>();
+        const nextCarried: Array<{ filename: string; headers: string[]; turn: number }> = [];
+        for (const [filename, candidate] of candidateFiles) {
+          const targetedHeaders = extractTargetedSectionHeaders(userMsg.content, candidate.text);
+          if (targetedHeaders.length > 0) {
+            usedSections.set(filename, targetedHeaders);
+            nextCarried.push({ filename, headers: targetedHeaders, turn: currentTurn });
+            continue;
+          }
+          const recent = [...carriedSectionsRef.current]
+            .filter((entry) => entry.filename === filename && currentTurn - entry.turn <= 2)
+            .sort((a, b) => b.turn - a.turn)[0];
+          if (recent) {
+            usedSections.set(filename, recent.headers);
+            nextCarried.push({ filename, headers: recent.headers, turn: currentTurn });
+          }
+        }
+        carriedSectionsRef.current = nextCarried;
+
+        // Inject the lean context this request actually needs.
+        const appendFileContext = (filename: string, candidate: { text: string; label: string }, fallbackWholeFile: boolean) => {
+          const headers = usedSections.get(filename);
+          if (headers && headers.length > 0) {
+            for (const header of headers) {
+              const sectionText = extractSectionText(candidate.text, header);
               if (sectionText != null) {
                 contextMessages.push({
                   role: 'system',
-                  content: buildSectionContextMessage(filename, getConfigContextLabel(filename), header, sectionText),
+                  content: buildSectionContextMessage(filename, candidate.label, header, sectionText),
                 });
               }
             }
+            return;
           }
-          appendAttachedFileContexts(true);
-        } else {
-          const selectedConfigContexts = await getConfigContexts(contextTargets);
-          for (const ctx of selectedConfigContexts) {
-            contextMessages.push({ role: 'system', content: ctx });
+          if (fallbackWholeFile) {
+            // No specific section resolved — fall back to the full file so
+            // the model still has context rather than guessing blind.
+            contextMessages.push({
+              role: 'system',
+              content: buildConfigContextMessage(filename, candidate.text, candidate.label),
+            });
+            return;
           }
-          appendAttachedFileContexts(false);
+          // Phase 4: questions get a compact section index, not the whole
+          // file. The model fetches the sections it needs via read_user_config.
+          contextMessages.push({
+            role: 'system',
+            content: buildConfigIndexMessage(filename, findSectionHeaders(candidate.text), candidate.label),
+          });
+        };
+
+        for (const [filename, candidate] of candidateFiles) {
+          appendFileContext(filename, candidate, chatIntent === 'edit');
         }
 
-        // File targeting instructions
+        // File targeting instructions — only edits carry the draft/mini-diff
+        // protocol; questions just get told where the config lives.
         const miniDiffInstruction = ` To EDIT an existing section, return a mini-diff: the section header followed by only the lines that change, prefixing removed lines with '-' and added lines with '+', keeping their original indentation. The app applies these replacements exactly, so unchanged lines (like Jinja {% if %}/{% endif %} tags) are preserved automatically. To ADD a new section, write it in full; to delete one, write '*[section_name]'.`;
-        if (mentionedConfigFiles.length > 0) {
+        if (chatIntent === 'edit') {
+          if (mentionedConfigFiles.length > 0) {
+            contextMessages.push({
+              role: 'system',
+              content: `Apply requested edits to these loaded files: ${mentionedConfigFiles.join(', ')}. Start each cfg block with a '# file: <filename>' hint line; use one separate block per file. To create a new file, use '# file: <newfilename>' with a name that does not exist yet.${miniDiffInstruction}`,
+            });
+          } else if (activeFile) {
+            contextMessages.push({
+              role: 'system',
+              content: `Unless the user names a different file, apply edits to ${activeFile}. Return only changed, new, or deleted content in a fenced cfg code block. Start each block with a '# file: <filename>' hint line when targeting a specific file. To create a new file, use '# file: <newfilename>'. Do not return the whole file unless the user explicitly asks for a full replacement.${miniDiffInstruction}`,
+            });
+          }
+        } else if (mentionedConfigFiles.length > 0) {
           contextMessages.push({
             role: 'system',
-            content: `Apply requested edits to these loaded files: ${mentionedConfigFiles.join(', ')}. Start each cfg block with a '# file: <filename>' hint line; use one separate block per file. To create a new file, use '# file: <newfilename>' with a name that does not exist yet.${miniDiffInstruction}`,
+            content: `The user's question references these loaded config files: ${mentionedConfigFiles.join(', ')}. Their content is not attached unless a section index/context block above includes it — fetch the sections you need via read_user_config(filename=..., section=...) instead of asking the user to paste them.`,
           });
-        } else if (activeFile) {
-          contextMessages.push({
-            role: 'system',
-            content: `Unless the user names a different file, apply edits to ${activeFile}. Return only changed, new, or deleted content in a fenced cfg code block. Start each block with a '# file: <filename>' hint line when targeting a specific file. To create a new file, use '# file: <newfilename>'. Do not return the whole file unless the user explicitly asks for a full replacement.${miniDiffInstruction}`,
-          });
+        }
+
+        // Context files sent to the backend for its config-grounding fallback
+        // (content never lands in the prompt here — the model must fetch).
+        const contextFilesPayload: Record<string, { content: string; label: string }> = {};
+        for (const [filename, candidate] of candidateFiles) {
+          contextFilesPayload[filename] = { content: candidate.text, label: candidate.label };
         }
 
         const requestConversation: Array<{ role: AiChatRole; content: string }> = [
@@ -437,7 +458,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
 
         // First request
         const assistantAttempt = await draftRequestMessage(
-          chatRequestBase,
+          { ...chatRequestBase, contextFiles: contextFilesPayload },
           requestConversation,
           undefined,
           { signal: stopController.signal },
@@ -451,7 +472,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         // retry loops with independent conversation bookkeeping.
         const pipelineResult = await runReplyValidationPipeline({
           requestFn: (conversation) => draftRequestMessage(
-            chatRequestBase,
+            { ...chatRequestBase, contextFiles: contextFilesPayload },
             conversation,
             undefined,
             { signal: stopController.signal },
@@ -498,7 +519,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       editMaxTokens,
       editTemperature,
       editModel,
-      getConfigContexts,
       loading,
       loadedConfigFilenames,
       messages,
