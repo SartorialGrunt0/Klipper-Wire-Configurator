@@ -28,6 +28,14 @@ also be passed as flags for unattended runs:
         --provider openai-compatible --host localhost --port 1234 \
         --model llama-3.1-8b --max-tokens 4096 --base-url http://localhost:8099
 
+Cloud OpenAI-compatible endpoints (DeepSeek, OpenRouter, Groq, ...) take a
+full https API URL and need a key:
+
+    python3 scripts/ai_chat_accuracy_test.py \
+        --provider openai-compatible \
+        --api-url https://api.deepseek.com/v1/chat/completions \
+        --model deepseek-chat --api-key sk-... --base-url http://localhost:8099
+
 Cloud providers need an API key: pass --api-key, set env KWC_TEST_API_KEY,
 or answer the interactive prompt (never echoed). Keys are redacted to '***'
 in logs and are never written to output files.
@@ -101,9 +109,9 @@ PROVIDER_PRESETS: dict[str, dict] = {
         "local": False,
     },
     "openai-compatible": {
-        "label": "OpenAI Compatible (LM Studio / Ollama)",
+        "label": "OpenAI Compatible (local or cloud)",
         "default_model": "",
-        "default_url": "",  # derived from host:port -> http://host:port/v1/chat/completions
+        "default_url": "http://localhost:11434/v1/chat/completions",
         "requires_key": False,
         "local": True,
     },
@@ -1452,11 +1460,23 @@ def resolve_settings(args: argparse.Namespace) -> dict:
     api_url = args.api_url
     if not api_url:
         if preset["local"]:
-            host = args.host or _prompt("Host", "localhost")
-            port = args.port or _prompt("Port", "1234")
-            api_url = f"http://{host}:{port}/v1/chat/completions"
+            # openai-compatible: cloud https endpoints (DeepSeek, OpenRouter,
+            # ...) take a full API URL; --host/--port remain the quick local
+            # entry path (mirrors the frontend ChatSettingsPanel).
+            if args.host or args.port:
+                host = args.host or _prompt("Host", "localhost")
+                port = args.port or _prompt("Port", "1234")
+                api_url = f"http://{host}:{port}/v1/chat/completions"
+            else:
+                api_url = _prompt("API URL", preset["default_url"])
         else:
             api_url = _prompt("API URL", preset["default_url"])
+
+    # Cloud OpenAI-compatible endpoints require an API key (https => cloud),
+    # matching the backend's _is_local_provider(provider, api_url) split.
+    if preset["local"] and not api_key and api_url.strip().lower().startswith("https://"):
+        env_key = __import__("os").environ.get("KWC_TEST_API_KEY", "")
+        api_key = env_key or _prompt("API key", secret=True)
 
     max_tokens = args.max_tokens or int(_prompt("Max tokens", "4096"))
     temperature = (
@@ -1509,7 +1529,8 @@ def main() -> int:
     parser.add_argument("--api-key", default="", help="API key (prompted if omitted; "
                         "env KWC_TEST_API_KEY also works; never logged or written "
                         "to output files)")
-    parser.add_argument("--api-url", default="", help="Full API URL (openai-compatible derives from host/port)")
+    parser.add_argument("--api-url", default="", help="Full API URL; for openai-compatible "
+                        "an https URL means cloud (DeepSeek etc.), otherwise host/port is used")
     parser.add_argument("--host", default="", help="Host for openai-compatible local server")
     parser.add_argument("--port", default="", help="Port for openai-compatible local server")
     parser.add_argument("--max-tokens", default=0, type=int, help="Max tokens per reply")
