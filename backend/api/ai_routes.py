@@ -387,7 +387,7 @@ def _build_mcp_tool_context() -> str:
     """
     snippets: dict[str, str] = {
         "search_klipper_docs": "Search the bundled Klipper docs",
-        "read_klipper_doc": "Read a bundled Klipper doc file",
+        "read_klipper_doc": "Read a bundled Klipper doc file (filename='Klipper_GCode_Macro_AI_Summary.md' for macro/Jinja formatting: single-brace { } delimiters, {% if %}/{% endif %} block closing, comment stripping)",
         "get_config_reference_section": "Get the Config_Reference section and valid params for a config section (pass section_name, e.g. section_name='bed_mesh')",
         "read_user_config": (
             "Read a user config file (filename='printer.cfg', optional "
