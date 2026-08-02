@@ -270,8 +270,13 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                 if (retryCount > 0) parts.push(`Retried ${retryCount}×`);
                 if (repromptCount > 0) parts.push(`Re-prompted ${repromptCount}×`);
                 return (
-                  <div className="mt-2 rounded-md border border-red-500/30 bg-red-500/10 px-2 py-1 text-[10px] font-medium text-red-300">
-                    {parts.join(' · ')}
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <span
+                      className="inline-flex items-center rounded-full border border-red-500/30 bg-red-500/10 px-2 py-1 text-[10px] font-medium text-red-300"
+                      title="The app auto-repaired the draft and/or the model needed retries before this reply was accepted"
+                    >
+                      {parts.join(' · ')}
+                    </span>
                   </div>
                 );
               })()}
