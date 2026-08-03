@@ -285,4 +285,110 @@ max_accel: 18000 #Ellis Tuned
     expect(result.applied).toBe(true);
     expect(result.text).toBe(`[gcode_macro X]\ngcode:\n    G28\n`);
   });
+
+  it('does not sweep the NEXT section\'s comment banner into an add-only edit', () => {
+    // Regression: [bed_mesh] is followed by the `##########` / `# print_start
+    // macro` banner that the parser attaches to [gcode_macro print_start] as
+    // header_comments. The old section extent ran to the next header and
+    // swallowed the banner, so the addition was appended AFTER it and the
+    // parse→merge pipeline duplicated the banner in the review diff (phantom
+    // "+ # print_start macro" added lines).
+    const base = `[bed_mesh]
+speed: 120
+algorithm: bicubic
+##########
+# print_start macro
+##########
+[gcode_macro print_start]
+gcode:
+    M117 hello
+`;
+    const result = applyMiniDiffBlock('[bed_mesh]\n+adaptive_margin: 5', base);
+    expect(result.applied).toBe(true);
+    expect(result.text).toContain('adaptive_margin: 5');
+    // The banner is NOT part of the materialized [bed_mesh] section.
+    expect(result.text).not.toContain('# print_start macro');
+    expect(result.text).not.toContain('##########');
+    // The addition lands with the params, after the last param line.
+    expect(result.text.split('\n')).toEqual([
+      '[bed_mesh]',
+      'speed: 120',
+      'algorithm: bicubic',
+      'adaptive_margin: 5',
+    ]);
+  });
+
+  it('does not sweep the NEXT section\'s comment banner into a replacement edit', () => {
+    const base = `[bed_mesh]
+algorithm: bicubic
+##########
+# print_start macro
+##########
+[gcode_macro print_start]
+`;
+    const result = applyMiniDiffBlock(
+      '[bed_mesh]\n-algorithm: bicubic\n+algorithm: bicubic\n+adaptive_margin: 5',
+      base,
+    );
+    expect(result.applied).toBe(true);
+    expect(result.text.split('\n')).toEqual([
+      '[bed_mesh]',
+      'algorithm: bicubic',
+      'adaptive_margin: 5',
+    ]);
+  });
+
+  it('preserves trailing comments after a gcode-like body (part of the value)', () => {
+    // Exemption: the parser folds a trailing column-0 comment after a gcode
+    // body into the multi-line value, so the mini-diff must NOT trim it.
+    const base = `[gcode_macro X]
+gcode:
+    G28
+# end of macro
+[next_section]
+pin: PB0
+`;
+    const result = applyMiniDiffBlock(
+      '[gcode_macro X]\n+    M117 done',
+      base,
+    );
+    expect(result.applied).toBe(true);
+    expect(result.text).toContain('    M117 done');
+    expect(result.text).toContain('# end of macro');
+    expect(result.text).not.toContain('[next_section]');
+    expect(result.text).not.toContain('pin: PB0');
+  });
+
+  it('keeps trailing blank lines of the last section in the file', () => {
+    const base = `[bed_mesh]\nmesh_min: 10, 10\nmesh_max: 290, 290\n`;
+    const result = applyMiniDiffBlock('[bed_mesh]\n+adaptive_margin: 10', base);
+    expect(result.applied).toBe(true);
+    expect(result.text).toBe(`[bed_mesh]\nmesh_min: 10, 10\nmesh_max: 290, 290\nadaptive_margin: 10\n`);
+  });
+
+  it('keeps comment lines BETWEEN params while trimming the trailing banner', () => {
+    // The banner trim must only remove the trailing comment block that belongs
+    // to the NEXT section — comment lines inside the section (between params)
+    // are section content and must survive the materialization.
+    const base = `[bed_mesh]
+mesh_min: 25, 25
+# probe grid note
+mesh_max: 345, 345
+algorithm: bicubic
+##########
+# print_start macro
+##########
+[gcode_macro print_start]
+`;
+    const result = applyMiniDiffBlock('[bed_mesh]\n+adaptive_margin: 5', base);
+    expect(result.applied).toBe(true);
+    expect(result.text.split('\n')).toEqual([
+      '[bed_mesh]',
+      'mesh_min: 25, 25',
+      '# probe grid note',
+      'mesh_max: 345, 345',
+      'algorithm: bicubic',
+      'adaptive_margin: 5',
+    ]);
+  });
 });

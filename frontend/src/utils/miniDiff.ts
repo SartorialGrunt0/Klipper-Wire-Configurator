@@ -41,6 +41,68 @@ export function classifyMiniDiffLine(line: string): MiniDiffLineKind {
 const SECTION_HEADER_RE = /^\s*(\[[^\]]+\])\s*$/;
 /** Deletion marker `*[section_name]` — never treat such blocks as mini-diffs. */
 const DELETE_MARKER_RE = /^\s*\*\[[^\]]+\]\s*$/;
+/** Column-0 param line (`key: value` / `key= value`) — mirrors the parser. */
+const PARAM_LINE_RE = /^(\w[\w]*)\s*[:=]/;
+
+/** True when `key` names a multi-line gcode body (parser folds trailing
+ * comment lines into its value). */
+function isGcodeBodyKey(key: string): boolean {
+  return key === 'gcode' || key.endsWith('_gcode');
+}
+
+/**
+ * Find where a section's own content ends in the base file, trimming the
+ * trailing column-0 comment block that sits between the last param and the
+ * next section header (blank lines before it are kept).
+ *
+ * Those comment lines belong to the NEXT section: the parser collects them as
+ * pending comments and attaches them as the next header's `header_comments`
+ * (e.g. the `##########` / `# print_start macro` banner above `[gcode_macro
+ * print_start]`). If they stay inside the materialized section, the draft
+ * parse carries them back into the merged section and the section-merge
+ * re-emits them, DUPLICATING the banner in the review diff after an edit to
+ * the preceding section.
+ *
+ * Sections with a gcode-like body (`gcode:` / `*_gcode:`) are exempt: the
+ * parser treats trailing comment lines after the body as part of the
+ * multi-line value, so they ARE section content and must be preserved.
+ */
+function sectionContentEnd(
+  baseLines: string[],
+  headerIndex: number,
+  endIndex: number,
+): number {
+  // Locate the last non-blank line of the extent.
+  let last = endIndex - 1;
+  while (last > headerIndex && baseLines[last].trim() === '') last -= 1;
+  if (last <= headerIndex) return endIndex;
+
+  // No trailing comment block — keep the whole extent (incl. trailing blanks).
+  if (!baseLines[last].startsWith('#')) return endIndex;
+
+  // A trailing comment block could belong to the NEXT section (its
+  // header_comments) or to a gcode-like body value. Detect the latter by
+  // scanning up to the last column-0 param line; indented continuation lines
+  // are skipped.
+  let hasGcodeBody = false;
+  for (let scan = last; scan > headerIndex; scan -= 1) {
+    const line = baseLines[scan];
+    if (line.trim() === '' || line.startsWith('#')) continue;
+    if (line.startsWith('[')) break;
+    const paramMatch = PARAM_LINE_RE.exec(line);
+    if (paramMatch) {
+      hasGcodeBody = isGcodeBodyKey(paramMatch[1]);
+      break;
+    }
+    // Indented continuation or bare text — keep scanning upward.
+  }
+  if (hasGcodeBody) return endIndex;
+
+  // Trim the trailing column-0 comment block; blank lines before it are kept.
+  let start = last;
+  while (start > headerIndex && baseLines[start].startsWith('#')) start -= 1;
+  return start + 1;
+}
 
 /** Normalise a line for matching: strip CR and trailing whitespace only. */
 function normalizeLine(line: string): string {
@@ -250,7 +312,9 @@ export function applyMiniDiffBlock(
     );
     if (headerIndex === -1) continue; // section not in base — fall back
 
-    // Section extent: from the header line to the next section header.
+    // Section extent: from the header line to the next section header, then
+    // trimmed to the section's own content (trailing comment banners belong
+    // to the NEXT section — see sectionContentEnd).
     let endIndex = baseLines.length;
     for (let scan = headerIndex + 1; scan < baseLines.length; scan += 1) {
       if (SECTION_HEADER_RE.test(baseLines[scan])) {
@@ -259,7 +323,7 @@ export function applyMiniDiffBlock(
       }
     }
 
-    const sectionLines = baseLines.slice(headerIndex, endIndex);
+    const sectionLines = baseLines.slice(headerIndex, sectionContentEnd(baseLines, headerIndex, endIndex));
     const reconstructed = applyOpsToSection(sectionLines, ops);
     if (!reconstructed) continue;
 
