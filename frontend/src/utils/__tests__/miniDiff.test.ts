@@ -391,4 +391,39 @@ algorithm: bicubic
       'adaptive_margin: 5',
     ]);
   });
+
+  it('strips the marker separator space from add-only additions on plain sections', () => {
+    // Regression: models write "+ value" with a space after the marker (or
+    // indent everything 4 spaces). Kept verbatim, the leading whitespace made
+    // the parser fold the addition into the PREVIOUS param's value as an
+    // indented continuation line, corrupting the config.
+    const base = `[printer]\nkinematics: corexy\nmax_velocity: 600\nmax_accel: 15500\n`;
+    const result = applyMiniDiffBlock('[printer]\n+ max_accel: 13000', base);
+    expect(result.applied).toBe(true);
+    expect(result.text).toContain('\nmax_accel: 13000');
+    expect(result.text).not.toContain('\n max_accel: 13000');
+  });
+
+  it('strips the model\'s blanket 4-space indent from add-only additions on plain sections', () => {
+    const base = `[bed_mesh]\nmesh_min: 10, 10\nmesh_max: 290, 290\n`;
+    const result = applyMiniDiffBlock('[bed_mesh]\n+    adaptive_margin: 10', base);
+    expect(result.applied).toBe(true);
+    expect(result.text).toBe(`[bed_mesh]\nmesh_min: 10, 10\nmesh_max: 290, 290\nadaptive_margin: 10\n`);
+  });
+
+  it('strips the separator space from add-only comment lines on plain sections', () => {
+    const base = `[printer]\nkinematics: corexy\nmax_velocity: 600\n`;
+    const result = applyMiniDiffBlock('[printer]\n+ # tuned value\n+ max_accel: 13000', base);
+    expect(result.applied).toBe(true);
+    expect(result.text).toContain('\n# tuned value\nmax_accel: 13000');
+  });
+
+  it('keeps gcode body line indentation for add-only additions (space is content)', () => {
+    // Gcode-like bodies are exempt from the trim: models indent body lines
+    // exactly as they want them, so "+    M117 done" stays 4-space.
+    const base = `[gcode_macro X]\ngcode:\n    G28\n\n`;
+    const result = applyMiniDiffBlock('[gcode_macro X]\n+    M117 done', base);
+    expect(result.applied).toBe(true);
+    expect(result.text).toBe(`[gcode_macro X]\ngcode:\n    G28\n    M117 done\n\n`);
+  });
 });

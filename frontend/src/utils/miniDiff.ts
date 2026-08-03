@@ -50,6 +50,27 @@ function isGcodeBodyKey(key: string): boolean {
   return key === 'gcode' || key.endsWith('_gcode');
 }
 
+/** Last column-0 param key of a section's lines (null when none is found).
+ * Indented continuation lines and comments are skipped. */
+function lastSectionParamKey(sectionLines: string[]): string | null {
+  for (let index = sectionLines.length - 1; index >= 0; index -= 1) {
+    const line = sectionLines[index];
+    if (line.trim() === '' || line.startsWith('#')) continue;
+    if (line.startsWith('[')) break;
+    const paramMatch = PARAM_LINE_RE.exec(line);
+    if (paramMatch) return paramMatch[1];
+    // Indented continuation or bare text — keep scanning upward.
+  }
+  return null;
+}
+
+/** True when the section's last param is a gcode-like body (the parser folds
+ * trailing comment lines into its value). */
+function sectionHasGcodeBody(sectionLines: string[]): boolean {
+  const key = lastSectionParamKey(sectionLines);
+  return key !== null && isGcodeBodyKey(key);
+}
+
 /**
  * Find where a section's own content ends in the base file, trimming the
  * trailing column-0 comment block that sits between the last param and the
@@ -81,22 +102,8 @@ function sectionContentEnd(
   if (!baseLines[last].startsWith('#')) return endIndex;
 
   // A trailing comment block could belong to the NEXT section (its
-  // header_comments) or to a gcode-like body value. Detect the latter by
-  // scanning up to the last column-0 param line; indented continuation lines
-  // are skipped.
-  let hasGcodeBody = false;
-  for (let scan = last; scan > headerIndex; scan -= 1) {
-    const line = baseLines[scan];
-    if (line.trim() === '' || line.startsWith('#')) continue;
-    if (line.startsWith('[')) break;
-    const paramMatch = PARAM_LINE_RE.exec(line);
-    if (paramMatch) {
-      hasGcodeBody = isGcodeBodyKey(paramMatch[1]);
-      break;
-    }
-    // Indented continuation or bare text — keep scanning upward.
-  }
-  if (hasGcodeBody) return endIndex;
+  // header_comments) or to a gcode-like body value.
+  if (sectionHasGcodeBody(baseLines.slice(headerIndex, endIndex))) return endIndex;
 
   // Trim the trailing column-0 comment block; blank lines before it are kept.
   let start = last;
@@ -263,8 +270,20 @@ function applyOpsToSection(
   }
 
   if (appendAdditions.length > 0) {
+    // The '+' marker is followed by the line content; models usually write
+    // "+ value" with a separator space (or indent everything 4 spaces). For
+    // plain sections that leading whitespace must NOT survive — the parser
+    // would fold an indented line into the PREVIOUS param's value as a
+    // continuation, corrupting the config (e.g. "+ max_accel: 13000" after
+    // "max_accel: 15500" becomes a multiline value). Strip it; gcode-like
+    // body lines keep their indent, where the space after '+' is content.
+    const isGcodeBody = sectionHasGcodeBody(sectionLines);
+    const normalizedAdditions = appendAdditions.map((addition) => {
+      const line = normalizeLine(addition);
+      return isGcodeBody ? line : line.trimStart();
+    });
     // Insert after the last non-empty line, before any trailing blank lines.
-    result.splice(lastNonEmptyIndex + 1, 0, ...appendAdditions.map((addition) => normalizeLine(addition)));
+    result.splice(lastNonEmptyIndex + 1, 0, ...normalizedAdditions);
   }
 
   return result;
