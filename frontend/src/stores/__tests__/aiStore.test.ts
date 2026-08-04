@@ -112,4 +112,19 @@ describe('aiStore file persistence', () => {
     const arg = mockedSaveAiState.mock.calls[0][0] as { settings: { temperature: number } };
     expect(arg.settings.temperature).toBe(0.2);
   });
+
+  it('chatStatus is transient — settable but never persisted', async () => {
+    useAiStore.getState().setChatStatus('success');
+    expect(useAiStore.getState().chatStatus).toBe('success');
+
+    await vi.advanceTimersByTimeAsync(500);
+    // The status change must not trigger a backend write (transient UI state).
+    expect(mockedSaveAiState).not.toHaveBeenCalled();
+
+    useAiStore.getState().setChatStatus('error');
+    expect(useAiStore.getState().chatStatus).toBe('error');
+
+    useAiStore.getState().setChatStatus('idle');
+    expect(useAiStore.getState().chatStatus).toBe('idle');
+  });
 });

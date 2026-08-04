@@ -153,11 +153,19 @@ export function providerRequiresApiKey(provider: AiProvider): boolean {
 interface AiState {
   settings: AiSettings;
   messages: ChatMessage[];
+  /**
+   * Background completion signal for the toolbar button: 'success' when a
+   * request finished while the dialog was closed, 'error' when it failed out
+   * (retry limit / unrecoverable error), 'idle' otherwise. Transient UI state
+   * — NOT persisted to the backend file.
+   */
+  chatStatus: 'idle' | 'success' | 'error';
   /** Load AI settings + messages from the backend file (migrating localStorage). */
   loadState: () => Promise<void>;
   setSettings: (settings: Partial<AiSettings>) => void;
   setMessages: (messages: ChatMessage[]) => void;
   clearMessages: () => void;
+  setChatStatus: (status: 'idle' | 'success' | 'error') => void;
   isConfigured: () => boolean;
 }
 
@@ -179,6 +187,7 @@ export const useAiStore = create<AiState>()((set, get) => {
   return {
     settings: buildAiSettings(persisted.settings),
     messages: persisted.messages,
+    chatStatus: 'idle',
     loadState: async () => {
       const file = await loadAiState();
       const fileSettings = file?.settings && typeof file.settings === 'object'
@@ -234,6 +243,7 @@ export const useAiStore = create<AiState>()((set, get) => {
         schedulePersistState({ settings: state.settings, messages: [] });
         return { messages: [] };
       }),
+    setChatStatus: (chatStatus) => set({ chatStatus }),
     isConfigured: () => {
       const s = get().settings;
       if (!s.model.trim()) {

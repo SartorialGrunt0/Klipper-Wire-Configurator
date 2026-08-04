@@ -178,6 +178,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   const inputRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const handledPendingRequestIdRef = useRef<string | null>(null);
+  // Live open state for async completions: the toolbar button only flashes
+  // green/red when the dialog is closed at the moment the request finishes.
+  const openRef = useRef(open);
+  openRef.current = open;
   // Stop button: AbortController cancels the client fetch immediately;
   // the backend /ai/chat/stop endpoint (via requestId) cancels the work.
   const stopControllerRef = useRef<AbortController | null>(null);
@@ -198,6 +202,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       setEditMaxTokens(String(settings.maxTokens ?? 4096));
       setEditTemperature(String(settings.temperature ?? 0.7));
       setError(null);
+      // Opening the dialog consumes any background completion signal — the
+      // toolbar button returns to its default color (the user is looking at
+      // the conversation now).
+      useAiStore.getState().setChatStatus('idle');
     }
   }, [open, settings]);
 
@@ -504,6 +512,11 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         if (pipelineResult.warnings) setError(pipelineResult.warnings);
         setMessages([...newMessages, pipelineResult.finalMessage]);
         setAssistantDraftApplicableMessages({}); // Will be re-evaluated by the useEffect
+        // Background completion signal: if the dialog is closed when the reply
+        // lands, flag the toolbar button so the user knows it's ready.
+        if (!openRef.current) {
+          useAiStore.getState().setChatStatus('success');
+        }
       } catch (err: unknown) {
         const stopped = stopController.signal.aborted || err instanceof api.ChatStoppedError;
         if (stopped) {
@@ -519,6 +532,12 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           if (looksLikeTransientFailure(err)) {
             connectionLostRef.current = true;
             setConnectionLost(true);
+          } else {
+            // Unrecoverable failure (validation retry limit, API error): signal
+            // the toolbar button red if the dialog is closed.
+            if (!openRef.current) {
+              useAiStore.getState().setChatStatus('error');
+            }
           }
         }
       } finally {
@@ -777,6 +796,13 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   // ═════════════════════════════════════════════════════════════════
   // RENDER
   // ═════════════════════════════════════════════════════════════════
+
+  // The dialog stays MOUNTED when closed so an in-flight request keeps
+  // running (validation retries, connection-recovery listener, WIP state).
+  // Closing only hides the overlay; reopening shows the finished reply.
+  if (!open) {
+    return null;
+  }
 
   // ── Unconfigured State ──────────────────────────────────────────
   if (!isConfigured()) {
