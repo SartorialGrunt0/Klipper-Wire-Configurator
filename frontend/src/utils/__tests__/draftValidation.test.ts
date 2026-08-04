@@ -199,8 +199,8 @@ describe('formatting', () => {
     expect(withIssues).toContain('[mcu] serial: missing serial');
   });
 
-  it('exposes the max attempts constant (fail fast: one repair attempt)', () => {
-    expect(MAX_ASSISTANT_DRAFT_VALIDATION_ATTEMPTS).toBe(2);
+  it('exposes the max attempts constant (Phase 5: up to three repair attempts)', () => {
+    expect(MAX_ASSISTANT_DRAFT_VALIDATION_ATTEMPTS).toBe(3);
   });
 });
 
@@ -225,17 +225,16 @@ describe('deriveJinjaRepairCommands', () => {
     expect(deriveJinjaRepairCommands([{ filename: 'a.cfg', errors: [error()] }])).toEqual([]);
   });
 
-  it('includes affected section content in feedback when passed', () => {
+  it('nudges tool use instead of including current section content (Phase 5 lean retry)', () => {
     const feedback = buildAssistantDraftValidationFeedback(
       [{ filename: 'a.cfg', errors: [error({ section: 'gcode_macro M109', param: '' })] }],
       '[gcode_macro M109]\ngcode:\n  M104\n',
       null,
       false,
-      [{ filename: 'a.cfg', header: 'gcode_macro M109', content: '[gcode_macro M109]\ngcode:\n  M104\n' }],
     );
-    expect(feedback).toContain('Current section content (edit only what must change):');
-    expect(feedback).toContain('### [gcode_macro M109] in a.cfg');
-    expect(feedback).toContain('M104');
+    expect(feedback).not.toContain('Current section content (edit only what must change):');
+    expect(feedback).not.toContain('### [gcode_macro M109] in a.cfg');
+    expect(feedback).toContain('fetch it yourself with read_user_config');
   });
 });
 

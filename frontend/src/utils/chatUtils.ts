@@ -278,32 +278,4 @@ export function resolveAssistantTargetFile(
   return availableFilenames[0] ?? null;
 }
 
-// ── Klipper Doc Auto-Loading ───────────────────────────────────────
-
-const KLIPPER_DOC_FILENAME_RE = /(^|[^A-Za-z0-9_-])([A-Za-z0-9][A-Za-z0-9_-]*\.md)(?=$|[^A-Za-z0-9_.-])/g;
-const KLIPPER_DOC_REQUEST_RE = /\b(?:can you|could you|would you|please|provide|send|share|paste|show me|include|load|fetch|pull|give me|i need|i would need|i'd need)\b/i;
-export const MAX_AUTO_FETCHED_KLIPPER_DOCS = 2;
-
-export function extractRequestedKlipperDocFilenames(content: string): string[] {
-  const requestedDocs = new Set<string>();
-  const segments = content
-    .split(/\r?\n+/)
-    .flatMap((line) => line.split(/(?<=[.!?])\s+/))
-    .map((segment) => segment.trim())
-    .filter(Boolean);
-  for (const segment of segments) {
-    if (!KLIPPER_DOC_REQUEST_RE.test(segment)) continue;
-    for (const match of segment.matchAll(KLIPPER_DOC_FILENAME_RE)) {
-      requestedDocs.add(match[2]);
-      if (requestedDocs.size >= MAX_AUTO_FETCHED_KLIPPER_DOCS) return Array.from(requestedDocs);
-    }
-  }
-  return Array.from(requestedDocs);
-}
-
-export function buildAutoLoadedKlipperDocMessage(documents: Array<{ filename: string; content: string }>): string {
-  return [
-    'The app fetched the full bundled Klipper document(s) you requested. Use them to answer the user\'s request directly.',
-    ...documents.map((document) => `Full bundled Klipper document: ${document.filename}\n\n${document.content}`),
-  ].join('\n\n---\n\n');
-}
+// ── String / Text Helpers ──────────────────────────────────────────

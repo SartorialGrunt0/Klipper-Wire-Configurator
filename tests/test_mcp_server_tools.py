@@ -1,6 +1,6 @@
 """Tests for the embedded MCP server (mcp_server.py).
 
-Covers the DocIndex search engine, all 14 tool handlers, argument
+Covers the DocIndex search engine, all 15 tool handlers, argument
 coercion, and the JSON-RPC protocol surface (initialize, tools/list,
 tools/call, resources, ping).
 """
@@ -364,6 +364,63 @@ def test_search_user_configs_no_results(tmp_path):
     assert "No user configs matching" in out
 
 
+# ── list_user_configs ────────────────────────────────────────────────────
+
+
+def test_list_user_configs_both_paths(tmp_path):
+    server, root = _server(tmp_path)
+    (root / "user_configs").mkdir(parents=True)
+    (root / "user_configs" / "imported.cfg").write_text(
+        "[mcu]\nserial: a\n", encoding="utf-8",
+    )
+    (root / "system_config").mkdir(parents=True)
+    (root / "system_config" / "native.cfg").write_text(
+        "[mcu]\nserial: b\n", encoding="utf-8",
+    )
+    out = _call_tool(server, "list_user_configs", {})
+    assert "imported.cfg" in out
+    assert "native.cfg" in out
+    assert "pi-native" in out
+    assert "imported" in out
+
+
+def test_list_user_configs_empty(tmp_path):
+    server, _ = _server(tmp_path)
+    out = _call_tool(server, "list_user_configs", {})
+    assert "No user config files found" in out
+
+
+def test_list_user_configs_nested(tmp_path):
+    server, root = _server(tmp_path)
+    nested = root / "user_configs" / "configs" / "my_extra_configs"
+    nested.mkdir(parents=True)
+    (nested / "config.cfg").write_text("[mcu]\nserial: a\n", encoding="utf-8")
+    out = _call_tool(server, "list_user_configs", {})
+    assert "configs/my_extra_configs/config.cfg" in out
+
+
+def test_read_user_config_nested(tmp_path):
+    server, root = _server(tmp_path)
+    nested = root / "user_configs" / "configs" / "my_extra_configs"
+    nested.mkdir(parents=True)
+    (nested / "config.cfg").write_text("[mcu]\nserial: nested\n", encoding="utf-8")
+    out = _call_tool(server, "read_user_config", {
+        "filename": "configs/my_extra_configs/config.cfg",
+    })
+    assert "nested" in out
+
+
+def test_search_user_configs_nested(tmp_path):
+    server, root = _server(tmp_path)
+    nested = root / "user_configs" / "configs" / "my_extra_configs"
+    nested.mkdir(parents=True)
+    (nested / "config.cfg").write_text(
+        "[mcu]\nserial: /dev/serial/by-id/voron\n", encoding="utf-8",
+    )
+    out = _call_tool(server, "search_user_configs", {"query": "voron"})
+    assert "configs/my_extra_configs/config.cfg" in out
+
+
 def test_read_user_config(tmp_path):
     server, root = _server(tmp_path)
     user_dir = root / "user_configs"
@@ -438,6 +495,48 @@ def test_read_user_config_with_section_not_found(tmp_path):
     })
     assert 'Section "no_such_section" not found' in out
     assert "read the whole file" in out
+
+
+def test_read_user_config_list_sections(tmp_path):
+    server, root = _server(tmp_path)
+    user_dir = root / "user_configs"
+    user_dir.mkdir(parents=True)
+    (user_dir / "my_printer.cfg").write_text(
+        "# banner\n"
+        "[extruder]\n"
+        "pressure_advance: 0.05\n"
+        "\n"
+        "[gcode_macro FIX_ME]\n"
+        "gcode:\n"
+        "    M140 S60\n"
+        "\n"
+        "[extruder]\n"
+        "nozzle_diameter: 0.4\n",
+        encoding="utf-8",
+    )
+    out = _call_tool(server, "read_user_config", {
+        "filename": "my_printer.cfg", "list_sections": True,
+    })
+    assert "section index" in out
+    assert "file content not attached" in out
+    assert "[extruder]" in out
+    assert "[gcode_macro FIX_ME]" in out
+    # Deduplicated: the second [extruder] does not repeat.
+    assert out.count("[extruder]") == 1
+    # No content is included.
+    assert "pressure_advance" not in out
+    assert "M140 S60" not in out
+
+
+def test_read_user_config_list_sections_none(tmp_path):
+    server, root = _server(tmp_path)
+    user_dir = root / "user_configs"
+    user_dir.mkdir(parents=True)
+    (user_dir / "plain.cfg").write_text("no sections here\n", encoding="utf-8")
+    out = _call_tool(server, "read_user_config", {
+        "filename": "plain.cfg", "list_sections": True,
+    })
+    assert "No sections detected" in out
 
 
 # ── detect_board ────────────────────────────────────────────────────────
@@ -622,7 +721,8 @@ def test_tools_list(tmp_path):
     assert "search_klipper_docs" in names
     assert "validate_klipper_config" in names
     assert "generate_macro_template" in names
-    assert len(names) == 14
+    assert "list_user_configs" in names
+    assert len(names) == 15
 
 
 def test_tools_call_unknown_tool(tmp_path):

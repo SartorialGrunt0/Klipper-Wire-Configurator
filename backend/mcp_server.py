@@ -433,7 +433,8 @@ class McpServer:
             {
                 "name": "validate_klipper_config",
                 "description": (
-                    "Parse and validate a Klipper config snippet. "
+                    "Validate that a new or existing config section block is valid "
+                    "and free of errors. Parse and validate a Klipper config block. "
                     "Returns structured results: parsed sections with their parameters, "
                     "any errors or warnings, and the raw config text."
                 ),
@@ -535,14 +536,31 @@ class McpServer:
                 },
             },
             {
+                "name": "list_user_configs",
+                "description": (
+                    "List all user configuration files available to the assistant, "
+                    "from both the Pi's native config path and imported user configs "
+                    "(including subfolders). Use this to discover which files exist "
+                    "before reading one — e.g. when the user names a macro or section "
+                    "without saying which file it is in."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            {
                 "name": "read_user_config",
                 "description": (
                     "Read a user configuration file from the 'user_configs' directory. "
                     "Use search_user_configs first to find the exact filename. "
-                    "Pass 'section' to read only one section (lean context for edits); "
-                    "omit it to read the whole file. Call this FIRST whenever the user "
-                    "names a config file to edit or inspect — do not ask the user to "
-                    "provide the content."
+                    "Pass 'list_sections': true to get ONLY the section headers (lean "
+                    "context); then read the section you need with 'section' (e.g. "
+                    "section='extruder' or section='[gcode_macro FIX_ME]'). Omit both "
+                    "ONLY when you need the whole file as an overview. Do NOT read "
+                    "config for from-scratch macro creation unless you need a specific "
+                    "value. Call this FIRST whenever the user names a config file to "
+                    "edit or inspect — do not ask the user to provide the content."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -550,6 +568,14 @@ class McpServer:
                         "filename": {
                             "type": "string",
                             "description": "Config filename (e.g. 'my_printer.cfg')",
+                        },
+                        "list_sections": {
+                            "type": "boolean",
+                            "description": (
+                                "When true, return only the section headers of the "
+                                "file (e.g. '[printer]', '[bed_mesh]') instead of "
+                                "content — lean context to pick which section to read."
+                            ),
                         },
                         "section": {
                             "type": "string",
@@ -676,14 +702,14 @@ class McpServer:
             {
                 "name": "validate_macro",
                 "description": (
-                    "Validate a Klipper gcode_macro for common structural issues. "
-                    "Checks syntax, save/restore state pairing, temperature commands, "
-                    "macro structure, and potential problems. When bed dimensions "
-                    "are supplied (bed_x/bed_y/max_z), also checks moves for "
-                    "out-of-bounds targets and no-go zone hits (including path "
-                    "crossings between consecutive moves), mirroring the Macro "
-                    "Designer's geometry. Does NOT simulate full machine state — "
-                    "use the Macro Designer in the app for complete simulation."
+                    "Validate a gcode_macro against Klipper's Jinja rules. "
+                    "Checks Jinja syntax (balanced {% if %}/{% endif %} and "
+                    "{% for %}/{% endfor %} blocks), save/restore state pairing, "
+                    "temperature commands, macro structure, and potential problems. "
+                    "When bed dimensions are supplied (bed_x/bed_y/max_z), also "
+                    "checks moves for out-of-bounds targets and no-go zone hits "
+                    "(including path crossings between consecutive moves). "
+                    "Does NOT simulate full machine state."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -745,6 +771,7 @@ class McpServer:
             "search_example_configs": self._handle_search_examples,
             "read_example_config": self._handle_read_example_config,
             "search_user_configs": self._handle_search_user_configs,
+            "list_user_configs": self._handle_list_user_configs,
             "read_user_config": self._handle_read_user_config,
             "detect_board": self._handle_detect_board,
             "calculate_rotation_distance": self._handle_calculate_rotation_distance,
@@ -1153,12 +1180,13 @@ class McpServer:
 
         for scan_dir in scan_paths:
             try:
-                for cfg_file in sorted(scan_dir.glob("*.cfg")):
+                for cfg_file in scan_dir.rglob("*.cfg"):
                     if cfg_file.name in seen_filenames:
                         continue
                     seen_filenames.add(cfg_file.name)
 
-                    search_text = f"{cfg_file.stem} {cfg_file.name}".lower().replace("-", " ")
+                    rel_path = cfg_file.relative_to(scan_dir).as_posix()
+                    search_text = f"{cfg_file.stem} {cfg_file.name} {rel_path}".lower().replace("-", " ")
                     score = sum(1 for term in query_terms if term in search_text)
 
                     try:
@@ -1181,7 +1209,7 @@ class McpServer:
                     snippet = " ".join(content_lines[:5])[:200]
 
                     results.append({
-                        "filename": cfg_file.name,
+                        "filename": rel_path,
                         "score": round(score, 1),
                         "snippet": snippet,
                     })
@@ -1202,10 +1230,48 @@ class McpServer:
 
         return "\n".join(lines)
 
+    def _handle_list_user_configs(self, args: dict[str, Any]) -> str:
+        """List user config files from both the system path and local fallback.
+
+        Recurses into subfolders (Klipper supports includes like
+        configs/my_extra_configs/config.cfg). Displays the path relative to
+        the scanned root so nested files are addressable by read_user_config.
+        """
+        scan_paths: list[Path] = []
+        if SYSTEM_CONFIG_PATH.is_dir():
+            scan_paths.append(SYSTEM_CONFIG_PATH)
+        if LOCAL_CONFIGS_DIR.is_dir():
+            scan_paths.append(LOCAL_CONFIGS_DIR)
+
+        seen: dict[str, str] = {}
+        for scan_dir in scan_paths:
+            label = "pi-native" if scan_dir == SYSTEM_CONFIG_PATH else "imported"
+            try:
+                for cfg_file in scan_dir.rglob("*.cfg"):
+                    rel = cfg_file.relative_to(scan_dir).as_posix()
+                    if rel not in seen:
+                        seen[rel] = label
+            except OSError:
+                continue
+
+        if not seen:
+            return "No user config files found."
+
+        lines: list[str] = [f"# User config files ({len(seen)})\n"]
+        for rel in sorted(seen):
+            lines.append(f"- {rel}  ({seen[rel]})")
+        lines.append(
+            "\nUse read_user_config (filename=...) to read one. "
+            "Use search_user_configs to find files by keyword."
+        )
+        return "\n".join(lines)
+
     def _handle_read_user_config(self, args: dict[str, Any]) -> str:
-        raw = args.get("filename", "").strip()
+        # Accept `file` as an alias — small local models guess the shorter
+        # key when the prompt snippet carries only `filename=`.
+        raw = str(args.get("filename") or args.get("file") or "").strip()
         if not raw:
-            return "Please provide a config filename."
+            return "Please provide a config filename (filename='printer.cfg')."
 
         stem = Path(raw).stem.lower()
 
@@ -1218,11 +1284,13 @@ class McpServer:
 
         candidate: Path | None = None
 
-        # First try exact match
+        # First try exact match (basename or relative path like
+        # configs/my_extra_configs/config.cfg)
         for scan_dir in scan_paths:
             try:
-                for cfg_file in sorted(scan_dir.glob("*.cfg")):
-                    if cfg_file.name.lower() == raw.lower() or cfg_file.stem.lower() == stem:
+                for cfg_file in scan_dir.rglob("*.cfg"):
+                    rel = cfg_file.relative_to(scan_dir).as_posix()
+                    if cfg_file.name.lower() == raw.lower() or rel.lower() == raw.lower():
                         candidate = cfg_file
                         break
             except OSError:
@@ -1235,7 +1303,7 @@ class McpServer:
             query_tokens = set(stem.replace("-", " ").replace("_", " ").split())
             for scan_dir in scan_paths:
                 try:
-                    for cfg_file in scan_dir.glob("*.cfg"):
+                    for cfg_file in scan_dir.rglob("*.cfg"):
                         file_tokens = set(cfg_file.stem.lower().replace("-", " ").replace("_", " ").split())
                         if query_tokens and query_tokens <= file_tokens:
                             candidate = cfg_file
@@ -1253,7 +1321,19 @@ class McpServer:
         except OSError as exc:
             return f"Error reading {candidate.name}: {exc}"
 
+        list_sections = bool(args.get("list_sections", False))
         section = args.get("section", "").strip()
+
+        if list_sections:
+            headers = self._list_config_sections(content)
+            if not headers:
+                return f"# {candidate.name}  (User Config)\n# No sections detected."
+            return (
+                f"# {candidate.name}  (section index; file content not attached)\n\n"
+                + "\n".join(f"[{header}]" for header in headers)
+                + "\n\nRead a section with: read_user_config(filename='<name>', "
+                + f"section='{headers[0]}') — or another header above."
+            )
 
         if section:
             section_text = self._extract_config_section(content, section)
@@ -1315,6 +1395,21 @@ class McpServer:
             pass  # Parser not available
 
         return result
+
+    def _list_config_sections(self, content: str) -> list[str]:
+        """Return all section header names (e.g. 'printer', 'gcode_macro Level_Bed')
+        in file order, deduplicated. Mirrors the frontend's findSectionHeaders."""
+        headers: list[str] = []
+        seen: set[str] = set()
+        for line in content.splitlines():
+            m = re.match(r"^\s*\[([^\]]+)\]\s*$", line)
+            if m:
+                header = m.group(1).strip()
+                key = header.lower()
+                if key not in seen:
+                    seen.add(key)
+                    headers.append(header)
+        return headers
 
     def _extract_config_section(self, content: str, section_name: str) -> str | None:
         """Return the raw text of one config section: banner comments above the

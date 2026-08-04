@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'backend'))
 
 import api.routes as routes  # noqa: E402
+import api.ai_routes as ai_routes  # noqa: E402
 from main import app  # noqa: E402
 
 
@@ -528,3 +529,27 @@ def test_acknowledge_warning(monkeypatch, tmp_path):
     ack_file = tmp_path / 'acknowledged_warnings.cfg'
     assert ack_file.exists()
     assert '[my_plugin_section]' in ack_file.read_text(encoding='utf-8')
+
+
+# ── Tool advertisement (_build_mcp_tool_context) ─────────────────────────
+
+
+def test_tool_context_advertises_exposed_tools():
+    ctx = ai_routes._build_mcp_tool_context()
+    for tool in (
+        "list_klipper_docs",
+        "search_user_configs",
+        "list_user_configs",
+        "generate_macro_template",
+    ):
+        assert f"- {tool}:" in ctx, f"{tool} should be advertised"
+
+
+def test_tool_context_hides_detect_board_by_default():
+    ctx = ai_routes._build_mcp_tool_context()
+    assert "- detect_board:" not in ctx
+
+
+def test_tool_context_extra_tools_adds_detect_board():
+    ctx = ai_routes._build_mcp_tool_context(extra_tools=["detect_board"])
+    assert "- detect_board:" in ctx

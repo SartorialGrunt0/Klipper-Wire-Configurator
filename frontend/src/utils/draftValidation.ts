@@ -8,7 +8,7 @@ import type { ValidationError, ValidationResult, ConfigSection } from '../types/
 
 // ── Constants ───────────────────────────────────────────────────────
 
-export const MAX_ASSISTANT_DRAFT_VALIDATION_ATTEMPTS = 2;
+export const MAX_ASSISTANT_DRAFT_VALIDATION_ATTEMPTS = 3;
 export const MAX_ASSISTANT_HINT_USER_MESSAGES = 3;
 
 const RETRY_EXEMPT_DUPLICATE_SECTION_RE = /^Section \[[^\]]+\] (?:can only be defined once(?: across active included config files)?\.|is reused across active included config files\.)(?: Also defined in: .+)?$/;
@@ -263,7 +263,6 @@ export function buildAssistantDraftValidationFeedback(
   invalidContent: string,
   failureReason: string | null,
   allowExplanationOnly = false,
-  affectedSections: Array<{ filename: string; header: string; content: string }> = [],
 ): string {
   const formattedIssues = formatAssistantDraftValidationIssues(blockingIssues, failureReason)
     || '- The previous reply did not include a complete applicable cfg draft.';
@@ -272,10 +271,15 @@ export function buildAssistantDraftValidationFeedback(
     'Your cfg changes failed validation after merging into the current project.',
     'Return a corrected replacement reply that fixes every problem below and still satisfies the user request.',
     'If you return config changes, return only changed content inside fenced cfg code blocks and keep any required "# file: <filename>" hint. To edit an existing section use a mini-diff (section header plus only the changed lines, "-" removed / "+" added with original indentation); unchanged lines are preserved automatically. To add a new section, write it in full.',
-    // Phase 4: never quote the previous reply — models copy it verbatim and
+    // Phase 5: never quote the previous reply — models copy it verbatim and
     // regenerate the broken draft. The anti-copy directive + the mini-diff
     // protocol (which only accepts changed lines) break that loop.
     'Do NOT copy or repeat your previous reply. Emit a fresh mini-diff with ONLY the corrected lines.',
+    // Phase 5: lean retry — hand the model the error + a tool nudge, not the
+    // current section content. If it needs the current content it fetches it
+    // itself via read_user_config, keeping the retry context lean and
+    // exercising the tools it has available.
+    'If you need the current content of any affected section, fetch it yourself with read_user_config (filename=..., section=...) instead of reconstructing it from memory.',
     allowExplanationOnly
       ? 'If the remaining problems are duplicate sections or reused pins and you cannot resolve them safely from the current config, do not return another invalid cfg block. Instead, clearly explain the conflict, mention the exact section or pin involved, and say what must change before a valid config can be produced.'
       : 'Do not ask the user to apply manual fixes for these validation issues.',
@@ -285,12 +289,6 @@ export function buildAssistantDraftValidationFeedback(
   ];
   if (repairCommands.length > 0) {
     parts.push('', 'Direct fixes:', ...repairCommands.map((command) => `- ${command}`));
-  }
-  if (affectedSections.length > 0) {
-    parts.push('', 'Current section content (edit only what must change):');
-    for (const section of affectedSections) {
-      parts.push('', `### [${section.header}] in ${section.filename}`, '```cfg', section.content, '```');
-    }
   }
   return parts.join('\n');
 }

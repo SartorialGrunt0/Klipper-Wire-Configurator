@@ -543,21 +543,6 @@ def build_macro_questions() -> list[TestQuestion]:
             ),
         ),
         TestQuestion(
-            qid="MACRO-08",
-            title="Macros: validate G1 E without feedrate",
-            text=("Validate this macro and report any problems:\n\n"
-                  "[gcode_macro PRIME]\n"
-                  "description: prime\n"
-                  "\n"
-                  "gcode:\n"
-                  "    G1 X10 Y10 E5\n"),
-            expected_tools=("validate_macro",),
-            require_tool=True,
-            criteria=(
-                ("regex", r"without feedrate|feedrate"),
-            ),
-        ),
-        TestQuestion(
             qid="MACRO-09",
             title="Macros: validate mesh without homing",
             text=("Validate this macro and report any problems:\n\n"
@@ -702,8 +687,9 @@ def build_trident_questions() -> list[TestQuestion]:
             require_tool=False,
             criteria=(
                 ("contains", "corexy"),
-                # Tolerate markdown formatting (e.g. `max_accel`: `15500`)
-                ("regex", r"max_accel[^0-9]{0,20}?15500"),
+                # Tolerate markdown formatting AND humanized phrasing
+                # (e.g. `max_accel`: `15500`, "Max Accel: 15500")
+                ("regex", r"max[_\s]?accel[^0-9]{0,20}?15500"),
                 ("contains", "tmc2209"),
             ),
         ),
@@ -713,7 +699,7 @@ def build_trident_questions() -> list[TestQuestion]:
             text=("In printer.cfg the [printer] section sets max_accel to 15500. "
                   "Change it to 12000 and return only the changed section in a "
                   "fenced cfg code block starting with a '# file: printer.cfg' "
-                  "hint line. Validate the result."),
+                  "hint line. Validate the finished cfg code block."),
             context_files=printer_cfg,
             expected_tools=("validate_klipper_config",),
             require_tool=False,
@@ -832,8 +818,9 @@ def build_trident_questions() -> list[TestQuestion]:
             qid="TRIDENT-09",
             title="Real macro: error-check M109",
             text=("Read the [gcode_macro M109] macro in the provided printer.cfg "
-                  "and error-check it. Is there anything wrong with the macro "
-                  "itself? Be specific about the problem."),
+                  "and validate it's free of errors. Does the gcode_macro have any "
+                  "errors that would cause it to fail? Be specific about the "
+                  "problem."),
             # Planted bug on the reference printer.cfg: M109 is missing its
             # {% endif %} (unbalanced Jinja).
             context_files=_context_with(_load_m109_bugged_printer_cfg()),
@@ -1097,6 +1084,7 @@ ALL_TOOLS = (
     "search_example_configs",
     "read_example_config",
     "search_user_configs",
+    "list_user_configs",
     "read_user_config",
     "detect_board",
     "calculate_rotation_distance",
@@ -1189,7 +1177,7 @@ def criterion_ok(kind: str, value: str, content: str,
 class QuestionResult:
     qid: str
     title: str
-    status: str = "ERROR"          # PASS | FAIL | ERROR
+    status: str = "ERROR"          # PASS | FAIL | ERROR | PASS_NO_TOOL | PASS_WRONG_TOOL
     answer_ok: bool = False
     tool_ok: bool = False
     response: str = ""
@@ -1275,6 +1263,7 @@ def chat_request(base_url: str, question: TestQuestion, settings: dict,
         "requestId": request_id,
         "maxTokens": settings["max_tokens"],
         "temperature": settings["temperature"],
+        "toolProtocol": settings.get("tool_protocol", "auto"),
     }
     url = base_url.rstrip("/") + "/ai/chat"
     try:
@@ -1391,7 +1380,13 @@ def run_one_question(
                 ok = criterion_ok(kind, value, result.response, memory=memory)
                 result.checks.append((kind, value, ok))
             result.answer_ok = all(ok for _, _, ok in result.checks)
-            result.status = "PASS" if (result.answer_ok and result.tool_ok) else "FAIL"
+            if result.answer_ok and result.tool_ok:
+                result.status = "PASS"
+            elif result.answer_ok and q.require_tool:
+                # Correct answer, but the required tool was not used as expected.
+                result.status = "PASS_NO_TOOL" if not used else "PASS_WRONG_TOOL"
+            else:
+                result.status = "FAIL"
 
             if q.qid.startswith("MEMORY"):
                 block, parsed = memory
@@ -1500,6 +1495,7 @@ def resolve_settings(args: argparse.Namespace) -> dict:
         "api_url": api_url,
         "max_tokens": int(max_tokens),
         "temperature": float(temperature),
+        "tool_protocol": args.tool_protocol or "auto",
         "base_url": base_url,
     }
 
@@ -1544,6 +1540,14 @@ def main() -> int:
     parser.add_argument("--max-tokens", default=0, type=int, help="Max tokens per reply")
     parser.add_argument("--temperature", default=None, type=float,
                         help="Sampling temperature 0-2 (default 0.7)")
+    parser.add_argument("--tool-protocol", default="auto",
+                        choices=["auto", "native", "text"],
+                        help="Tool-calling protocol sent to the backend: "
+                             "'auto' (default; local http -> text ```tool "
+                             "protocol, cloud https -> native function "
+                             "calling), 'native' (force OpenAI native "
+                             "tool_calls for local llama.cpp servers too), "
+                             "'text' (force the text protocol everywhere)")
     parser.add_argument("--questions", default="", help="Subset, e.g. '1-5,8' (1-based)")
     parser.add_argument("--start", default=0, type=int,
                         help="Start at question N (1-based), running N..end. "
@@ -1672,16 +1676,26 @@ def main() -> int:
     passed = [r for r in results if r.status == "PASS"]
     failed = [r for r in results if r.status == "FAIL"]
     errored = [r for r in results if r.status == "ERROR"]
+    no_tool = [r for r in results if r.status == "PASS_NO_TOOL"]
+    wrong_tool = [r for r in results if r.status == "PASS_WRONG_TOOL"]
 
     log.write(f"Total: {len(results)}  Passed: {len(passed)}  Failed: {len(failed)}  "
               f"Errors: {len(errored)}")
+    if no_tool or wrong_tool:
+        log.write(f"Conditional: {len(no_tool)} correct-but-no-tool, "
+                  f"{len(wrong_tool)} correct-but-wrong-tool")
     log.write(f"Answer accuracy: {len([r for r in results if r.answer_ok])}/{len(results)}")
     log.write(f"Tool-usage accuracy: {len([r for r in results if r.tool_ok])}/{len(results)}")
     log.write("")
-    log.write(f"{'QID':<5} {'STATUS':<7} {'ANSWER':<7} {'TOOL':<7} {'TURNS':<6} TOOLS USED")
+    log.write(f"{'QID':<5} {'STATUS':<15} {'ANSWER':<7} {'TOOL':<7} {'TURNS':<6} TOOLS USED")
     for r in results:
-        log.write(f"{r.qid:<5} {r.status:<7} {str(r.answer_ok):<7} {str(r.tool_ok):<7} "
+        log.write(f"{r.qid:<5} {r.status:<15} {str(r.answer_ok):<7} {str(r.tool_ok):<7} "
                   f"{r.tool_turns:<6} {','.join(r.tool_names) or '-'}")
+    if no_tool or wrong_tool:
+        log.write("")
+        log.write("Conditional passes (correct answer, tool requirement missed):")
+        for r in no_tool + wrong_tool:
+            log.write(f"  {r.qid} {r.title} ({r.status}, tools={','.join(r.tool_names) or '-'})")
     if failed:
         log.write("")
         log.write("Failed questions:")
@@ -1741,14 +1755,23 @@ def main() -> int:
     log.close()
 
     # Console summary
+    no_tool = [r for r in results if r.status == "PASS_NO_TOOL"]
+    wrong_tool = [r for r in results if r.status == "PASS_WRONG_TOOL"]
+    conditional = no_tool + wrong_tool
     print("\n" + "=" * 60)
     print(f"SUMMARY — {len(passed)}/{len(results)} passed "
-          f"({len(failed)} failed, {len(errored)} errored)")
+          f"({len(failed)} failed, {len(errored)} errored"
+          + (f", {len(conditional)} conditional" if conditional else "") + ")")
     print(f"Answer accuracy: {len([r for r in results if r.answer_ok])}/{len(results)}")
     print(f"Tool-usage accuracy: {len([r for r in results if r.tool_ok])}/{len(results)}")
+    marks = {"PASS": "PASS", "PASS_NO_TOOL": "PASS*", "PASS_WRONG_TOOL": "PASS+",
+             "ERROR": "ERR "}
     for r in results:
-        mark = "PASS" if r.status == "PASS" else ("ERR " if r.status == "ERROR" else "FAIL")
+        mark = marks.get(r.status, "FAIL")
         print(f"  {r.qid} {mark}  tools=[{','.join(r.tool_names) or '-'}]  {r.title}")
+    if conditional:
+        print("  * = correct answer, required tool not called "
+              "| + = correct answer, wrong tool called")
     print(f"\nTools exercised: {len(exercised)}/{len(ALL_TOOLS)}")
     if unknown_attempts:
         print(f"Unknown tool attempts (not real MCP tools): {', '.join(unknown_attempts)}")

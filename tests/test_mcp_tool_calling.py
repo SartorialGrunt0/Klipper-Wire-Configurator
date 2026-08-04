@@ -16,6 +16,7 @@ from api.ai_routes import (  # noqa: E402
     DSML_CLEANUP_RE,
     DSML_INVOKE_RE,
     DSML_PARAM_RE,
+    FUNC_CALL_CLEANUP_RE,
     MCP_TOOL_BLOCK_RE,
     XML_INVOKE_RE,
     XML_PARAM_RE,
@@ -89,6 +90,56 @@ def test_extract_tool_calls_llamacpp_tool_call_prefix_with_space():
         "name": "read_klipper_doc",
         "arguments": {"doc": "Pressure_Advance.md"},
     }]
+
+
+def test_extract_tool_calls_ignores_klipper_macro_jinja():
+    # Regression (2026-08-02): the brace-style tool-call regex matched
+    # "BED_MESH_CALIBRATE\n    {% endif %}" and "G28\n    {% else %}" as
+    # tool calls — Klipper Jinja tags were misread as argument braces and
+    # the final cleanup stripped the G-code line AND the Jinja tag out of
+    # correct model replies ("the model keeps dropping G28 / {% endif %}").
+    macro = (
+        "[gcode_macro FIX_ME]\ndescription: test\n\ngcode:\n"
+        "    {% if printer.bed_mesh %}\n"
+        "        BED_MESH_CALIBRATE\n"
+        "    {% endif %}\n"
+        "    M140 S60\n"
+        "    G28\n"
+        "    {% else %}\n"
+        "    {action_respond_info(\"homed\")}\n"
+        "    M117 Heating to {bed_temp}C...\n"
+    )
+    assert _extract_tool_calls(macro) == []
+
+
+def test_cleanup_chain_preserves_klipper_macro_content():
+    # The full final-content cleanup chain must leave a correct Klipper
+    # macro untouched — no stripped G-codes, Jinja tags, or action_respond_info.
+    macro = (
+        "```cfg\n[gcode_macro PREPARE_BED]\n"
+        "gcode:\n"
+        "    {% if printer.bed_mesh %}\n"
+        "        BED_MESH_CALIBRATE\n"
+        "    {% endif %}\n"
+        "    M190 S60\n"
+        "    G28\n"
+        "    {% else %}\n"
+        "        {action_respond_info(\"skipped\")}\n"
+        "    {% endif %}\n"
+        "    M117 Heating to {bed_temp}C...\n"
+        "```\n"
+    )
+    cleaned = MCP_TOOL_BLOCK_RE.sub("", macro)
+    cleaned = ALT_TOOL_CALL_CONTENT_RE.sub("", cleaned)
+    cleaned = CALL_SYNTAX_CLEANUP_RE.sub("", cleaned)
+    cleaned = FUNC_CALL_CLEANUP_RE.sub("", cleaned)
+    cleaned = DSML_CLEANUP_RE.sub("", cleaned)
+    cleaned = XML_TOOL_CALLS_CLEANUP_RE.sub("", cleaned)
+    assert "BED_MESH_CALIBRATE" in cleaned
+    assert "{% endif %}" in cleaned
+    assert "G28" in cleaned
+    assert "action_respond_info" in cleaned
+    assert "{bed_temp}" in cleaned
 
 
 def test_extract_tool_calls_llamacpp_call_tool_json_body():
