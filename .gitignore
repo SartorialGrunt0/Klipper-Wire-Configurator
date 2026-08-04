@@ -52,6 +52,9 @@ backend/user_configs/*.cfg
 # Runtime data (printer memory, etc.)
 backend/data/printer_memory.json
 
+# AI chat state + history (local files, never pushed)
+backend/data/ai/
+
 # Temp / debug files
 temp_*.py
 *.tmp

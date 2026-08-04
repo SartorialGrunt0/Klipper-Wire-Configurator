@@ -12,6 +12,7 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import type { ChatMessage } from '../../stores/aiStore';
+import type { AiToolCallDetail } from '../../services/api';
 import type { AssistantDraftChange } from '../../utils/assistantDraftMerge';
 import { extractConfigCodeBlock } from '../../utils/chatUtils';
 import { hasPrinterMemoryBlock } from '../../utils/printerMemory';
@@ -128,6 +129,10 @@ export interface ChatMessageListProps {
   assistantDraftPreviewLoading: string | null;
   onApplyEdit: (content: string, messageIndex?: number) => void;
   onReviewPrinterMemory: (content: string) => void;
+  /** Replace the user message at `index` with `newText` and regenerate. */
+  onEditMessage?: (index: number, newText: string) => void;
+  /** Export a single message's raw markdown as a file. */
+  onExportMessage?: (content: string, index: number) => void;
   messagesEndRef: React.RefObject<HTMLDivElement | null>;
 }
 
@@ -143,6 +148,88 @@ type TableProps = ComponentPropsWithoutRef<'table'>;
 type TableCellProps = ComponentPropsWithoutRef<'th'>;
 type TableDataCellProps = ComponentPropsWithoutRef<'td'>;
 
+// ── Tool Call Details Popup ─────────────────────────────────────────
+
+const ToolCallDetailsPopup: React.FC<{ calls: AiToolCallDetail[]; onClose: () => void }> = ({ calls, onClose }) => {
+  const [copyState, setCopyState] = useState<'idle' | 'copied'>('idle');
+
+  const handleCopyAll = async () => {
+    try {
+      const text = calls
+        .map((call) => `## ${call.name}\n\nArguments:\n${call.arguments}\n\nOutput:\n${call.output}`)
+        .join('\n\n---\n\n');
+      await navigator.clipboard.writeText(text);
+      setCopyState('copied');
+      setTimeout(() => setCopyState('idle'), 2000);
+    } catch {
+      // Clipboard unavailable — ignore.
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Tool call details"
+    >
+      <div
+        className="max-h-[80vh] w-full max-w-2xl overflow-hidden rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-[var(--color-bg-tertiary)] px-4 py-3">
+          <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
+            Tool Calls ({calls.length})
+          </h3>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => { void handleCopyAll(); }}
+              className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-[10px] font-medium text-[var(--color-text-secondary)] transition-colors hover:text-[var(--color-text-primary)]"
+              title="Copy all tool call details"
+            >
+              {copyState === 'copied' ? 'Copied' : 'Copy all'}
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-md px-2 py-1 text-[10px] font-medium text-[var(--color-text-secondary)] transition-colors hover:text-[var(--color-text-primary)]"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+        <div className="max-h-[calc(80vh-60px)] overflow-y-auto p-4">
+          {calls.map((call, index) => (
+            <div
+              key={`${call.name}-${index}`}
+              className="mb-3 overflow-hidden rounded-lg border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)]"
+            >
+              <div className="flex items-center justify-between border-b border-[var(--color-bg-tertiary)] px-3 py-1.5">
+                <span className="text-[11px] font-semibold text-emerald-300">{call.name}</span>
+                {call.outputTruncated && (
+                  <span className="text-[9px] uppercase tracking-wide text-[var(--color-text-secondary)]">output truncated</span>
+                )}
+              </div>
+              <div className="px-3 py-2">
+                <p className="mb-1 text-[9px] font-medium uppercase tracking-[0.14em] text-[var(--color-text-secondary)]">Arguments</p>
+                <pre className="mb-2 overflow-x-auto rounded bg-[var(--color-bg-primary)] p-2 font-mono text-[10px] leading-5 text-[var(--color-text-primary)]">
+                  {call.arguments}
+                </pre>
+                <p className="mb-1 text-[9px] font-medium uppercase tracking-[0.14em] text-[var(--color-text-secondary)]">Output</p>
+                <pre className="max-h-48 overflow-y-auto whitespace-pre-wrap rounded bg-[var(--color-bg-primary)] p-2 font-mono text-[10px] leading-5 text-[var(--color-text-primary)]">
+                  {call.output || '(no output)'}
+                </pre>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // ── Component ───────────────────────────────────────────────────────
 
 const ChatMessageList: React.FC<ChatMessageListProps> = ({
@@ -155,8 +242,17 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
   assistantDraftPreviewLoading,
   onApplyEdit,
   onReviewPrinterMemory,
+  onEditMessage,
+  onExportMessage,
   messagesEndRef,
 }) => {
+  const [toolDetailsMessageIndex, setToolDetailsMessageIndex] = useState<number | null>(null);
+  const [editMessageIndex, setEditMessageIndex] = useState<number | null>(null);
+  const [editDraft, setEditDraft] = useState('');
+  const [copyState, setCopyState] = useState<Record<number, 'idle' | 'copied' | 'error'>>({});
+  const activeToolDetails = toolDetailsMessageIndex !== null
+    ? (messages[toolDetailsMessageIndex]?.toolCalls ?? null)
+    : null;
   if (messages.length === 0 && !loading && !error) {
     return (
       <div className="flex items-center justify-center h-full text-[var(--color-text-secondary)]">
@@ -194,7 +290,41 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
               }`}
               style={{ wordBreak: 'break-word' }}
             >
-              {msg.role === 'assistant' ? (
+              {editMessageIndex === i ? (
+                <div>
+                  <textarea
+                    value={editDraft}
+                    onChange={(e) => setEditDraft(e.target.value)}
+                    rows={4}
+                    className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-2 py-1.5 text-xs text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none"
+                    autoFocus
+                    aria-label="Edit message"
+                  />
+                  <div className="mt-2 flex flex-wrap justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => { setEditMessageIndex(null); setEditDraft(''); }}
+                      className="rounded-md px-2 py-1 text-[10px] font-medium text-[var(--color-text-secondary)] transition-colors hover:text-[var(--color-text-primary)]"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const nextText = editDraft.trim();
+                        if (nextText && onEditMessage) {
+                          onEditMessage(i, nextText);
+                        }
+                        setEditMessageIndex(null);
+                        setEditDraft('');
+                      }}
+                      className="rounded-md bg-[var(--color-accent)] px-2.5 py-1 text-[10px] font-medium text-white transition-opacity hover:opacity-90"
+                    >
+                      Save and Regenerate
+                    </button>
+                  </div>
+                </div>
+              ) : msg.role === 'assistant' ? (
                 <ReactMarkdown
                   remarkPlugins={[remarkMath, remarkGfm]}
                   rehypePlugins={[rehypeKatex]}
@@ -236,31 +366,37 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
 
 
               {/* MCP tool names badge */}
-              {msg.role === 'assistant' && Array.isArray(msg.mcpToolNames) && msg.mcpToolNames.length > 0 && (
+              {editMessageIndex !== i && msg.role === 'assistant' && Array.isArray(msg.mcpToolNames) && msg.mcpToolNames.length > 0 && (
                 <div className="mt-3 flex flex-wrap gap-2">
-                  <span
-                    className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[10px] font-medium text-emerald-300"
-                    title={`The assistant used MCP tools from the application to answer this: ${msg.mcpToolNames.join(', ')}`}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (Array.isArray(msg.toolCalls) && msg.toolCalls.length > 0) {
+                        setToolDetailsMessageIndex(i);
+                      }
+                    }}
+                    disabled={!Array.isArray(msg.toolCalls) || msg.toolCalls.length === 0}
+                    className={`inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[10px] font-medium text-emerald-300 ${
+                      Array.isArray(msg.toolCalls) && msg.toolCalls.length > 0
+                        ? 'cursor-pointer transition-colors hover:bg-emerald-500/20'
+                        : 'cursor-default'
+                    }`}
+                    title={
+                      Array.isArray(msg.toolCalls) && msg.toolCalls.length > 0
+                        ? `Show details for ${msg.toolCalls.length} tool call(s)`
+                        : `The assistant used MCP tools from the application to answer this: ${msg.mcpToolNames.join(', ')}`
+                    }
                   >
                     Tools: {msg.mcpToolNames.join(', ')}
-                  </span>
-                </div>
-              )}
-
-              {/* Auto-loaded docs badge */}
-              {msg.role === 'assistant' && Array.isArray(msg.autoLoadedDocs) && msg.autoLoadedDocs.length > 0 && (
-                <div className="mt-3 flex">
-                  <span
-                    className="inline-flex items-center rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-1 text-[10px] font-medium text-sky-300"
-                    title={`The app automatically fetched full Klipper docs for this answer: ${msg.autoLoadedDocs.join(', ')}`}
-                  >
-                    Auto-loaded docs: {msg.autoLoadedDocs.join(', ')}
-                  </span>
+                    {Array.isArray(msg.toolCalls) && msg.toolCalls.length > 0 && (
+                      <span className="opacity-70" aria-hidden="true">›</span>
+                    )}
+                  </button>
                 </div>
               )}
 
               {/* Auto-repair / retry / re-prompt footer */}
-              {(() => {
+              {editMessageIndex !== i && (() => {
                 const repairCount = msg.repairCount ?? 0;
                 const retryCount = msg.retryCount ?? 0;
                 const repromptCount = msg.repromptCount ?? 0;
@@ -282,30 +418,81 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
               })()}
 
               {/* Action buttons row */}
-              <div className="mt-3 flex flex-wrap justify-end gap-2">
-                {/* Apply and Review Changes button */}
-                {msg.role === 'assistant' && assistantConfigBlock && activeFile && hasApplicableAssistantDraft && (
-                  <button
-                    onClick={() => onApplyEdit(msg.content, i)}
-                    disabled={assistantDraftPreviewLoading === msg.content}
-                    className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-[10px] font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-60"
-                    title="Preview how the assistant sections would merge into the matching config file"
-                  >
-                    {assistantDraftPreviewLoading === msg.content ? 'Preparing Review...' : 'Apply and Review Changes'}
-                  </button>
-                )}
+              {editMessageIndex !== i && (
+                <div className="mt-3 flex flex-wrap justify-end gap-2">
+                  {/* Edit message (user messages only) */}
+                  {msg.role === 'user' && !loading && onEditMessage && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditMessageIndex(i);
+                        setEditDraft(msg.content);
+                      }}
+                      className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-[10px] font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+                      title="Edit the message and regenerate the reply"
+                    >
+                      Edit
+                    </button>
+                  )}
 
-                {/* Review Printer Memory button */}
-                {msg.role === 'assistant' && hasPrinterMemBlock && (
+                  {/* Copy raw markdown */}
                   <button
-                    onClick={() => onReviewPrinterMemory(msg.content)}
-                    className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-[10px] font-medium text-[var(--color-text-secondary)] transition-colors hover:border-blue-500 hover:text-blue-400"
-                    title="Review proposed printer memory changes"
+                    type="button"
+                    onClick={() => {
+                      void (async () => {
+                        try {
+                          await navigator.clipboard.writeText(msg.content);
+                          setCopyState((prev) => ({ ...prev, [i]: 'copied' }));
+                          setTimeout(() => {
+                            setCopyState((prev) => ({ ...prev, [i]: 'idle' }));
+                          }, 2000);
+                        } catch {
+                          setCopyState((prev) => ({ ...prev, [i]: 'error' }));
+                        }
+                      })();
+                    }}
+                    className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-[10px] font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+                    title="Copy the raw markdown content"
                   >
-                    Review Printer Memory
+                    {copyState[i] === 'copied' ? 'Copied' : copyState[i] === 'error' ? 'Copy failed' : 'Copy'}
                   </button>
-                )}
-              </div>
+
+                  {/* Export raw markdown */}
+                  {onExportMessage && (
+                    <button
+                      type="button"
+                      onClick={() => onExportMessage(msg.content, i)}
+                      className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-[10px] font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+                      title="Export this message as a Markdown file"
+                    >
+                      Export
+                    </button>
+                  )}
+
+                  {/* Apply and Review Changes button */}
+                  {msg.role === 'assistant' && assistantConfigBlock && activeFile && hasApplicableAssistantDraft && (
+                    <button
+                      onClick={() => onApplyEdit(msg.content, i)}
+                      disabled={assistantDraftPreviewLoading === msg.content}
+                      className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-[10px] font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-60"
+                      title="Preview how the assistant sections would merge into the matching config file"
+                    >
+                      {assistantDraftPreviewLoading === msg.content ? 'Preparing Review...' : 'Apply and Review Changes'}
+                    </button>
+                  )}
+
+                  {/* Review Printer Memory button */}
+                  {msg.role === 'assistant' && hasPrinterMemBlock && (
+                    <button
+                      onClick={() => onReviewPrinterMemory(msg.content)}
+                      className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-[10px] font-medium text-[var(--color-text-secondary)] transition-colors hover:border-blue-500 hover:text-blue-400"
+                      title="Review proposed printer memory changes"
+                    >
+                      Review Printer Memory
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         );
@@ -349,6 +536,13 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
       )}
 
       <div ref={messagesEndRef} />
+
+      {activeToolDetails && (
+        <ToolCallDetailsPopup
+          calls={activeToolDetails}
+          onClose={() => setToolDetailsMessageIndex(null)}
+        />
+      )}
     </>
   );
 };

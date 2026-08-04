@@ -17,8 +17,6 @@ import {
   extractMentionedConfigFilenames,
   extractAssistantFileHint,
   resolveAssistantTargetFile,
-  extractRequestedKlipperDocFilenames,
-  buildAutoLoadedKlipperDocMessage,
   appendWarningMessage,
   rewriteConfigEqualsSeparators,
 } from '../utils/chatUtils';
@@ -40,7 +38,6 @@ import { mergeAssistantSectionsIntoConfig, preprocessDeleteMarkers } from '../ut
 import { normalizeDiffText } from '../utils/configDiff';
 import { isMiniDiffBlock, applyMiniDiffBlock } from '../utils/miniDiff';
 import { repairUnclosedJinjaInConfigText } from '../utils/jinjaBlockRepair';
-import { extractSectionText } from '../utils/chatIntent';
 import type { ReplyValidator } from '../utils/replyValidation';
 
 // ── Internal Types ──────────────────────────────────────────────────
@@ -127,36 +124,6 @@ export function useAssistantDraft() {
       return api.exportConfig(config);
     },
     [configFiles, textDrafts],
-  );
-
-  // Phase 4: fetch the CURRENT content of the sections that failed
-  // validation, so the retry feedback shows the model exactly what it is
-  // editing (lean, section-scoped — never the whole file).
-  const buildAffectedSectionContexts = useCallback(
-    async (
-      blockingIssues: AssistantDraftValidationIssueGroup[],
-    ): Promise<Array<{ filename: string; header: string; content: string }>> => {
-      const contexts: Array<{ filename: string; header: string; content: string }> = [];
-      const seen = new Set<string>();
-      for (const group of blockingIssues) {
-        const fileText = await getConfigText(group.filename);
-        if (!fileText) continue;
-        const headers = Array.from(
-          new Set(group.errors.map((error) => error.section).filter(Boolean)),
-        ) as string[];
-        for (const header of headers) {
-          const key = `${group.filename}:${header}`;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          const sectionText = extractSectionText(fileText, header);
-          if (sectionText != null) {
-            contexts.push({ filename: group.filename, header, content: sectionText });
-          }
-        }
-      }
-      return contexts;
-    },
-    [getConfigText],
   );
 
   const flattenAssistantDraftChanges = useCallback(
@@ -533,49 +500,11 @@ export function useAssistantDraft() {
         role: 'assistant',
         content: response.content || 'No response.',
         mcpToolNames: response.mcpToolNames,
+        toolCalls: response.toolCalls,
         repromptCount: response.repromptCount,
       };
       let conversationTrail: ChatMessage[] = [{ role: 'assistant', content: assistantMessage.content }];
       let warningMessage: string | null = null;
-
-      // Auto-load Klipper docs if the assistant requests them
-      const requestedKlipperDocs = extractRequestedKlipperDocFilenames(assistantMessage.content);
-      if (requestedKlipperDocs.length > 0) {
-        try {
-          const docResults = await Promise.allSettled(requestedKlipperDocs.map((filename) => api.getKlipperDoc(filename)));
-          const loadedDocs = docResults.flatMap((r) => (r.status === 'fulfilled' ? [r.value] : []));
-
-          if (loadedDocs.length === 0) {
-            warningMessage = `The assistant requested full Klipper docs (${requestedKlipperDocs.join(', ')}), but none of those bundled markdown files were available from the backend.`;
-          } else {
-            const autoLoadedDocsMessage = buildAutoLoadedKlipperDocMessage(loadedDocs);
-            const followUpResponse = await api.aiChat({
-              ...chatRequestBase,
-              messages: [
-                ...conversationMessages,
-                ...conversationTrail.map((m) => ({ role: m.role as AiChatRole, content: m.content })),
-                { role: 'user', content: autoLoadedDocsMessage },
-              ],
-            }, options?.signal);
-
-            if (followUpResponse.error) throw new Error(followUpResponse.error);
-
-            assistantMessage = {
-              role: 'assistant',
-              content: followUpResponse.content || assistantMessage.content,
-              autoLoadedDocs: loadedDocs.map((d) => d.filename),
-              mcpToolNames: followUpResponse.mcpToolNames ?? assistantMessage.mcpToolNames,
-            };
-            conversationTrail = [
-              ...conversationTrail,
-              { role: 'user', content: autoLoadedDocsMessage },
-              { role: 'assistant', content: assistantMessage.content },
-            ];
-          }
-        } catch (autoDocErr: unknown) {
-          warningMessage = `Automatic full-doc follow-up failed: ${autoDocErr instanceof Error ? autoDocErr.message : 'Unknown error'}`;
-        }
-      }
 
       // Normalise cfg separators (`key = value` → `key: value`) as local
       // post-processing. Previously this was a full AI re-query; the
@@ -788,14 +717,12 @@ export function useAssistantDraft() {
       buildFeedback: async (content, result) => {
         if (!lastOutcome) return null;
         const allowExplanationOnly = hasOnlyRetryExemptAssistantValidationIssues(lastOutcome.blockingIssues);
-        const affectedSections = await buildAffectedSectionContexts(lastOutcome.blockingIssues);
         return {
           content: buildAssistantDraftValidationFeedback(
             lastOutcome.blockingIssues,
             content,
             result.failureReason,
             allowExplanationOnly,
-            affectedSections,
           ),
           allowExplanationOnly,
         };
@@ -811,7 +738,7 @@ export function useAssistantDraft() {
       // Request errors (network, API) propagate to the caller unchanged.
       handleRequestError: () => null,
     };
-  }, [buildAffectedSectionContexts, runAssistantDraftValidation]);
+  }, [runAssistantDraftValidation]);
 
   // ── New Chat ──────────────────────────────────────────────────────
 

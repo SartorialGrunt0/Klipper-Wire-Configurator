@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { loadAiHistory, saveAiHistory } from '../services/api';
 import type { ChatMessage, AiSettings } from './aiStore';
 
 const STORAGE_KEY = 'klipper-wire-chat-history';
@@ -24,7 +25,7 @@ interface ChatHistoryState {
     attachedConfigFiles?: Array<{ name: string; content: string }>,
   ) => string;
   deleteConversation: (id: string) => void;
-  loadConversations: () => void;
+  loadConversations: () => Promise<void>;
   clearHistory: () => void;
 }
 
@@ -40,42 +41,67 @@ function generateTitle(messages: ChatMessage[]): string {
   return 'Empty conversation';
 }
 
+function isSavedConversation(value: unknown): value is SavedConversation {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as SavedConversation).id === 'string' &&
+    typeof (value as SavedConversation).title === 'string' &&
+    typeof (value as SavedConversation).timestamp === 'number' &&
+    Array.isArray((value as SavedConversation).messages)
+  );
+}
+
 function loadFromStorage(): SavedConversation[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (c: unknown): c is SavedConversation =>
-        typeof c === 'object' &&
-        c !== null &&
-        typeof (c as SavedConversation).id === 'string' &&
-        typeof (c as SavedConversation).title === 'string' &&
-        typeof (c as SavedConversation).timestamp === 'number' &&
-        Array.isArray((c as SavedConversation).messages),
-    );
+    return parsed.filter(isSavedConversation);
   } catch {
     return [];
   }
 }
 
-function saveToStorage(conversations: SavedConversation[]): void {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(conversations));
-  } catch {
-    // Storage full or unavailable — silently fail
-  }
+// Debounced save to the backend file so rapid save/delete actions coalesce
+// into a single POST.
+let historySaveTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingHistory: SavedConversation[] | null = null;
+
+function scheduleSaveToFile(conversations: SavedConversation[]): void {
+  pendingHistory = conversations;
+  if (historySaveTimer !== null) return;
+  historySaveTimer = setTimeout(() => {
+    historySaveTimer = null;
+    const toSave = pendingHistory;
+    pendingHistory = null;
+    if (toSave) {
+      void saveAiHistory({ conversations: toSave });
+    }
+  }, 400);
 }
 
 export const useChatHistoryStore = create<ChatHistoryState>()((set, get) => ({
   conversations: [],
   _loaded: false,
 
-  loadConversations: () => {
+  loadConversations: async () => {
     if (get()._loaded) return;
-    const conversations = loadFromStorage();
-    set({ conversations, _loaded: true });
+    // Prefer the backend file; fall back to localStorage migration.
+    const file = await loadAiHistory();
+    const fileConversations = Array.isArray(file?.conversations)
+      ? file.conversations.filter(isSavedConversation)
+      : null;
+    if (fileConversations !== null && fileConversations.length > 0) {
+      set({ conversations: fileConversations, _loaded: true });
+      return;
+    }
+    const local = loadFromStorage();
+    set({ conversations: local, _loaded: true });
+    if (local.length > 0) {
+      scheduleSaveToFile(local);
+    }
   },
 
   saveConversation: (
@@ -101,19 +127,19 @@ export const useChatHistoryStore = create<ChatHistoryState>()((set, get) => ({
 
     const conversations = get().conversations;
     const updated = [entry, ...conversations].slice(0, MAX_SAVED_CONVERSATIONS);
-    saveToStorage(updated);
+    scheduleSaveToFile(updated);
     set({ conversations: updated });
     return id;
   },
 
   deleteConversation: (id: string) => {
     const conversations = get().conversations.filter((c) => c.id !== id);
-    saveToStorage(conversations);
+    scheduleSaveToFile(conversations);
     set({ conversations });
   },
 
   clearHistory: () => {
-    saveToStorage([]);
+    scheduleSaveToFile([]);
     set({ conversations: [] });
   },
 }));

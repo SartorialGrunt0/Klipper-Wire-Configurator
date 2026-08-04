@@ -73,8 +73,15 @@ ALT_TOOL_CALL_CONTENT_RE = re.compile(
 # Matches "call tool_name{...}" or "tool_name{...}" for non-JSON tool call text.
 # Also accepts the llama.cpp/Qwen-style "call:tool_call:tool_name{...}" prefix
 # emitted inside <|tool_call|> tokens by models with native tool templates.
+# Guarded against Klipper macro syntax: the brace must NOT be a Jinja tag
+# ({% / {{) and the args must contain a key-value signature (':' or '=') —
+# otherwise legit macro content like "G28\n    {% endif %}" or
+# "{action_respond_info(...)}" is misparsed as a tool call and the final
+# cleanup strips it from the visible reply (2026-08-02: this was eating
+# BED_MESH_CALIBRATE + {% endif %} and G28 + {% else %} out of correct
+# model replies).
 CALL_SYNTAX_RE = re.compile(
-    r"(?:^|\n)\s*(?:call[\s:]?\s*)?(?:tool_call[\s:]*)?(\w+)\s*\{(.+)\}",
+    r"(?:^|\n)\s*(?:call[\s:]?\s*)?(?:tool_call[\s:]*)?(\w+)\s*\{(?!%|\{)(.+)\}",
     re.DOTALL,
 )
 # Matches Python-style "function_name(arg1=\"val1\", arg2=123)" or
@@ -87,8 +94,11 @@ FUNC_CALL_RE = re.compile(
 )
 # Cleanup regexes for stripping bare function call text from output.
 # These match on line boundaries to avoid mangling prose.
+# Same Jinja/key-value guards as CALL_SYNTAX_RE so Klipper macro bodies
+# (G-code lines followed by {% ... %} or {action_respond_info(...)}) are
+# never stripped from the visible reply.
 CALL_SYNTAX_CLEANUP_RE = re.compile(
-    r"(?:^|\n)\s*(?:call[\s:]?\s*)?(?:tool_call[\s:]*)?\w+\s*\{[^}]*\}\s*(?=\n|$)",
+    r"(?:^|\n)\s*(?:call[\s:]?\s*)?(?:tool_call[\s:]*)?\w+\s*\{(?!%|\{)[^}]*[:=][^}]*\}\s*(?=\n|$)",
     re.DOTALL,
 )
 FUNC_CALL_CLEANUP_RE = re.compile(
@@ -238,6 +248,13 @@ class ChatRequest(BaseModel):
     # server-side only — it is NOT injected into the first prompt; the
     # fallback uses it when the model answers without calling any tool.
     contextFiles: dict[str, dict[str, str]] = {}
+    # Tool-calling protocol override (harness A/B runs). "auto" keeps the
+    # provider-based split (local http -> text ```tool protocol, cloud
+    # https -> native function calling); "native" forces OpenAI native
+    # tool_calls even for local llama.cpp servers (gpt-oss needs this);
+    # "text" forces the text protocol everywhere. The frontend never sends
+    # this; scripts/ai_chat_accuracy_test.py uses it for comparisons.
+    toolProtocol: str = "auto"
 
 
 class ChatStopRequest(BaseModel):
@@ -319,37 +336,57 @@ def _prepare_messages(messages: list[dict]) -> list[dict]:
     """Build a clean system prompt with MCP tool descriptions, printer memory,
     and user messages.
     """
+    minimal = _minimal_prompt_enabled()
+    no_system = _no_system_prompt_enabled()
+
     # ── Inject printer memory context ──
     memory = load_printer_memory()
     memory_context = printer_memory_to_context(memory)
+    memory_blank = is_printer_memory_blank(memory)
 
-    system_parts = [SYSTEM_PROMPT, _build_mcp_tool_context(), memory_context]
-
-    # If printer memory is completely blank and there are user messages to work with,
-    # add an auto-fill instruction asking the AI to investigate.
-    if is_printer_memory_blank(memory):
-        auto_fill_prompt = (
-            "\n---\n"
-            "**Printer Memory Auto-Fill**\n\n"
-            "The printer memory above is blank. Fill it in using the config files and tools below:\n"
-            "1. Examine the user's config files passed as context for clues about the mainboard, "
-            "toolhead board, kinematics, probe type, etc.\n"
-            "2. Use `search_example_configs` with board/printer/MCU keywords from the config, then "
-            "`read_example_config` on the best matches. Use `search_klipper_docs` and "
-            "`get_config_reference_section` to confirm details. Correlate with "
-            "the user's config — e.g. a Voron 2.4 usually uses CoreXY kinematics.\n"
-            "3. For any field you cannot determine, ask the user to provide it.\n"
-            "4. Return your proposal in a fenced `printer-memory` code block containing ONLY valid "
-            "JSON — no surrounding explanation or markdown inside the block. Only these 7 fields "
-            "are allowed; unsupported fields will be rejected: mainboard, toolheadBoard, "
-            "expanderBoards, printerName, kinematics, probe, additionalNotes.\n"
-            "   ```printer-memory\n"
-            "   {\"mainboard\": \"BTT Octopus Pro v1.1\", \"kinematics\": \"CoreXY\"}\n"
-            "   ```\n"
-            "The user confirms in a review dialog before anything is saved — do NOT save printer "
-            "memory directly."
+    if no_system:
+        # Experiment gate: no system content at all — no tools, no prompt,
+        # no memory, no anchor. Just the conversation.
+        system_parts: list[str] = []
+    elif minimal:
+        # Experiment gate: tools only — no SYSTEM_PROMPT, no printer memory,
+        # no auto-fill, no task anchor.
+        system_parts = [_build_mcp_tool_context()]
+    else:
+        # When printer memory is blank the model is offered the auto-fill
+        # flow; expose detect_board (board/MCU identification) only then so
+        # it can identify the mainboard from the user's config.
+        tool_context = _build_mcp_tool_context(
+            extra_tools=["detect_board"] if memory_blank else None
         )
-        system_parts.append(auto_fill_prompt)
+        system_parts = [SYSTEM_PROMPT, tool_context, memory_context]
+
+        # If printer memory is completely blank and there are user messages
+        # to work with, add an auto-fill instruction asking the AI to
+        # investigate.
+        if memory_blank:
+            auto_fill_prompt = (
+                "\n---\n"
+                "**Printer Memory Auto-Fill**\n\n"
+                "The printer memory above is blank. Fill it in using the config files and tools below:\n"
+                "1. Examine the user's config files passed as context for clues about the mainboard, "
+                "toolhead board, kinematics, probe type, etc.\n"
+                "2. Use `search_example_configs` with board/printer/MCU keywords from the config, then "
+                "`read_example_config` on the best matches. Use `search_klipper_docs` and "
+                "`get_config_reference_section` to confirm details. Correlate with "
+                "the user's config — e.g. a Voron 2.4 usually uses CoreXY kinematics.\n"
+                "3. For any field you cannot determine, ask the user to provide it.\n"
+                "4. Return your proposal in a fenced `printer-memory` code block containing ONLY valid "
+                "JSON — no surrounding explanation or markdown inside the block. Only these 7 fields "
+                "are allowed; unsupported fields will be rejected: mainboard, toolheadBoard, "
+                "expanderBoards, printerName, kinematics, probe, additionalNotes.\n"
+                "   ```printer-memory\n"
+                "   {\"mainboard\": \"BTT Octopus Pro v1.1\", \"kinematics\": \"CoreXY\"}\n"
+                "   ```\n"
+                "The user confirms in a review dialog before anything is saved — do NOT save printer "
+                "memory directly."
+            )
+            system_parts.append(auto_fill_prompt)
 
     prepared: list[dict] = []
     for msg in messages:
@@ -380,17 +417,25 @@ def _prepare_messages(messages: list[dict]) -> list[dict]:
     )
     if prepared:
         return [
-            {"role": "system", "content": system_text},
+            *([] if no_system else [{"role": "system", "content": system_text}]),
             *prepared,
-            {"role": "system", "content": task_anchor},
+            *([] if (minimal or no_system) else [{"role": "system", "content": task_anchor}]),
         ]
-    return [{"role": "system", "content": system_text}] + prepared
+    return ([] if no_system else [{"role": "system", "content": system_text}]) + prepared
 
 
 # ── MCP Tool Integration ───────────────────────────────────────────
 
 
-def _build_mcp_tool_context() -> str:
+_EXTRA_TOOL_SNIPPETS: dict[str, str] = {
+    "detect_board": (
+        "Detect the likely printer board/MCU family from a config snippet — "
+        "feed it the user's config to identify the mainboard for printer memory"
+    ),
+}
+
+
+def _build_mcp_tool_context(extra_tools: list[str] | None = None) -> str:
     """Build a compact 'Available Tools' section for the system prompt.
 
     Only the tools the model should actively choose are advertised, each as a
@@ -400,25 +445,47 @@ def _build_mcp_tool_context() -> str:
     model is not nudged toward them, which keeps attention on the tools that
     matter for the current task.
 
-    Visible: docs search/read, Config_Reference, user config read, example
-    config search/read, and the two validators.
-    Hidden (registered, not advertised): search_user_configs,
-      list_klipper_docs, get_section_schema, detect_board,
-      calculate_rotation_distance, generate_macro_template.
+    Visible: docs search/read/list, Config_Reference, user config
+    list/search/read, example config search/read, macro template generation,
+    and the two validators.
+    Hidden (registered, not advertised): get_section_schema,
+      calculate_rotation_distance.
+    Conditionally advertised via extra_tools (trigger-specific flows, e.g.
+      detect_board only when printer memory is blank and auto-fill is offered).
+
+    extra_tools: additional tool names to advertise in the Tools list for
+    this request, from _EXTRA_TOOL_SNIPPETS.
     """
     snippets: dict[str, str] = {
         "search_klipper_docs": "Search the bundled Klipper docs",
         "read_klipper_doc": "Read a bundled Klipper doc file (filename='Klipper_GCode_Macro_AI_Summary.md' for macro/Jinja formatting: single-brace { } delimiters, {% if %}/{% endif %} block closing, comment stripping)",
+        "list_klipper_docs": "List all bundled Klipper documentation files (filenames + headings)",
         "get_config_reference_section": "Get the Config_Reference section and valid params for a config section (pass section_name, e.g. section_name='bed_mesh')",
         "read_user_config": (
-            "Read a user config file (filename='printer.cfg', optional "
-            "section='extruder' for one section). Call FIRST when the user "
-            "names a config file to edit or inspect."
+            "Read a user config file: read_user_config(filename='printer.cfg', "
+            "section='extruder') for one section, or (filename='printer.cfg', "
+            "list_sections=true) for the section headers of that file. This tool "
+            "requires a file name, call list_user_configs (no args) to see all "
+            "available user files."
+        ),
+        "list_user_configs": (
+            "List all user config files (from the Pi's native config path and "
+            "imported user configs). Use when the user names a macro or section "
+            "without saying which file it is in, then read the best candidate."
+        ),
+        "search_user_configs": (
+            "Search the user's config files by filename or content keyword "
+            "(e.g. 'level_bed', 'skr', 'bed_mesh'). Use when the user names a "
+            "macro or section without saying which file it is in."
         ),
         "search_example_configs": "Search example configs by board or printer",
         "read_example_config": "Read a full example config file",
-        "validate_klipper_config": "Validate a config snippet with Klipper rules",
-        "validate_macro": "Validate a macro draft with Klipper's Jinja rules",
+        "validate_klipper_config": "Validate config section block against the klipper config rules",
+        "validate_macro": "Validate a gcode_macro against Klipper's Jinja rules",
+        "generate_macro_template": (
+            "Generate a ready-to-use macro template (PRINT_START, PRINT_END, "
+            "PAUSE, RESUME, CANCEL_PRINT; include_bed_mesh option)"
+        ),
     }
 
     parts = [
@@ -444,6 +511,10 @@ def _build_mcp_tool_context() -> str:
     ]
     for name, snippet in snippets.items():
         parts.append(f"- {name}: {snippet}")
+    for name in extra_tools or []:
+        snippet = _EXTRA_TOOL_SNIPPETS.get(name)
+        if snippet:
+            parts.append(f"- {name}: {snippet}")
     parts.append("")
     parts.append(
         "Klipper G-code commands and macro names (e.g. G28, M104, BED_MESH_CALIBRATE, "
@@ -703,6 +774,38 @@ def _auto_search_enabled() -> bool:
     KWC_AUTO_SEARCH=1 for them until their A/B says otherwise.
     """
     return os.environ.get("KWC_AUTO_SEARCH", "0") != "0"
+
+
+def _no_system_prompt_enabled() -> bool:
+    """Experiment gate (env KWC_NO_SYSTEM=1): send NO system content at all.
+
+    No SYSTEM_PROMPT, no tool list, no printer memory, no task anchor — the
+    request is just the conversation, exactly like a bare chat UI. Measures
+    the model's raw behavior with zero harness interference.
+    """
+    return os.environ.get("KWC_NO_SYSTEM", "0") != "0"
+
+
+def _minimal_prompt_enabled() -> bool:
+    """Experiment gate (env KWC_MINIMAL_PROMPT=1): send ONLY the tool list.
+
+    The system prompt, printer memory, auto-fill, and task anchor are all
+    omitted so the model's raw behavior with tools can be measured without
+    the harness prompt engineering getting in the way. Restart the backend
+    with the env var set, then run the accuracy harness.
+    """
+    return os.environ.get("KWC_MINIMAL_PROMPT", "0") != "0"
+
+
+def _config_fallback_enabled() -> bool:
+    """Config-grounding fallback toggle (env KWC_CONFIG_FALLBACK=1 re-enables it).
+
+    Defaults to DISABLED (2026-08, lean-first-pass workflow): the first pass
+    must be exactly the user prompt + system prompt + tool list. When the
+    model calls no tools, the reply stands as-is — the validation retry loop
+    nudges tool use instead of auto-injecting config content.
+    """
+    return os.environ.get("KWC_CONFIG_FALLBACK", "0") != "0"
 
 
 def _auto_search_context(query: str) -> str | None:
@@ -1000,6 +1103,37 @@ def _execute_tool_call(tool_call: dict) -> str:
     return "\n\n".join(text_parts) if text_parts else "Tool returned no content."
 
 
+# Client-facing tool-call detail records are capped so a huge tool output
+# (e.g. a whole config file read) never bloats the chat response JSON.
+TOOL_CALL_ARGS_MAX_CHARS = 2000
+TOOL_CALL_OUTPUT_MAX_CHARS = 4000
+
+
+def _build_executed_tool_call(tool_call: dict, result_text: str) -> dict:
+    """Build a bounded {name, arguments, output} record for the client."""
+    name = tool_call.get("name", "unknown")
+    arguments = tool_call.get("arguments", {})
+    try:
+        arguments_json = json.dumps(arguments, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError):
+        arguments_json = json.dumps({"raw": str(arguments)}, ensure_ascii=False)
+
+    if len(arguments_json) > TOOL_CALL_ARGS_MAX_CHARS:
+        arguments_json = arguments_json[:TOOL_CALL_ARGS_MAX_CHARS] + "...[truncated]"
+
+    output_text = str(result_text or "")
+    output_truncated = len(output_text) > TOOL_CALL_OUTPUT_MAX_CHARS
+    if output_truncated:
+        output_text = output_text[:TOOL_CALL_OUTPUT_MAX_CHARS] + "...[truncated]"
+
+    return {
+        "name": name,
+        "arguments": arguments_json,
+        "output": output_text,
+        "outputTruncated": output_truncated,
+    }
+
+
 def _build_tool_result_message(tool_call: dict, result_text: str) -> str:
     """Build a user-role message containing the tool result for re-prompting."""
     name = tool_call.get("name", "unknown")
@@ -1058,6 +1192,25 @@ def _build_native_tools() -> list[dict]:
             },
         })
     return native
+
+
+def _resolve_native_tools(provider: str, api_url: str, tool_protocol: str) -> list[dict] | None:
+    """Decide whether to pass native function-calling tools to the provider.
+
+    tool_protocol values (harness A/B runs via ChatRequest.toolProtocol):
+      - "auto"   keep the provider-based split: local plain-http servers get
+                 the text ```tool protocol (None), cloud https endpoints get
+                 native function calling (OpenAI tools array).
+      - "native" force native tools for ANY provider — unlocks local
+                 llama.cpp servers running --jinja for models like gpt-oss
+                 that cannot handle the text protocol.
+      - "text"   force the text protocol even for cloud providers.
+    """
+    if tool_protocol == "native":
+        return _build_native_tools()
+    if tool_protocol == "text":
+        return None
+    return None if _is_local_provider(provider, api_url) else _build_native_tools()
 
 
 def _extract_native_tool_calls(provider: str, data: dict) -> list[dict] | None:
@@ -1407,7 +1560,8 @@ async def chat_proxy(req: ChatRequest):
 
     # Native function calling for cloud providers only; local providers keep
     # the text-based ```tool protocol since local tool support varies.
-    native_tools = None if _is_local_provider(req.apiProvider, req.apiUrl) else _build_native_tools()
+    # ChatRequest.toolProtocol overrides the split for harness A/B runs.
+    native_tools = _resolve_native_tools(req.apiProvider, req.apiUrl, req.toolProtocol)
 
     # ── Stop-event registration ──
     stop_event = None
@@ -1439,16 +1593,21 @@ async def chat_proxy(req: ChatRequest):
             tool_turns = 0
             current_messages = list(messages)
             executed_tool_names: list[str] = []
+            executed_tool_calls: list[dict] = []
 
             # ── Config-grounding fallback (Phase 4) ──
             # If the model didn't call any tools on the first pass, inject the
             # user-config content the question needs (section-targeted when
             # possible; whole file truncated as last resort). Config questions
-            # cannot be answered from training — without this the model either
-            # hallucinates or asks the user to paste content the app already
-            # has. On by default (unlike the env-gated docs auto-search below).
+            # cannot be answered from training. OFF by default since 2026-08
+            # (lean-first-pass workflow): the first pass must be exactly the
+            # user prompt + system prompt + tool list, and the validation retry
+            # loop nudges tool use instead. Re-enable with KWC_CONFIG_FALLBACK=1.
             if not _extract_native_tool_calls(req.apiProvider, current_data) and not _extract_tool_calls(current_content):
-                if _is_edit_request(req.messages):
+                if not _config_fallback_enabled():
+                    # Re-enable with KWC_CONFIG_FALLBACK=1.
+                    logger.info("Config fallback skipped | disabled")
+                elif _is_edit_request(req.messages):
                     logger.info("Config fallback skipped | edit request")
                 elif PRINTER_MEMORY_BLOCK_RE.search(current_content):
                     logger.info("Config fallback skipped | printer-memory block present")
@@ -1468,6 +1627,9 @@ async def chat_proxy(req: ChatRequest):
                             current_messages.append({"role": "assistant", "content": current_content})
                         for tool_call, result_text in config_injections:
                             executed_tool_names.append(tool_call["name"])
+                            executed_tool_calls.append(
+                                _build_executed_tool_call(tool_call, result_text)
+                            )
                             current_messages.append({
                                 "role": "user",
                                 "content": _build_tool_result_message(tool_call, result_text),
@@ -1579,6 +1741,9 @@ async def chat_proxy(req: ChatRequest):
                         tool_call["name"], len(result_text),
                     )
                     executed_tool_names.append(tool_call["name"])
+                    executed_tool_calls.append(
+                        _build_executed_tool_call(tool_call, result_text)
+                    )
                     results.append(result_text)
 
                 if native_calls is not None:
@@ -1720,6 +1885,9 @@ async def chat_proxy(req: ChatRequest):
                         [_execute_tool_call(c) for c in reprompt_calls[:MAX_MCP_TOOL_TURNS]],
                     ):
                         executed_tool_names.append(reprompt_call["name"])
+                        executed_tool_calls.append(
+                            _build_executed_tool_call(reprompt_call, result_text)
+                        )
                         current_messages.append({
                             "role": "user",
                             "content": _build_tool_result_message(reprompt_call, result_text),
@@ -1763,6 +1931,7 @@ async def chat_proxy(req: ChatRequest):
                 "content": final_content,
                 "mcpToolTurns": tool_turns,
                 "mcpToolNames": mcp_tool_names,
+                "toolCalls": executed_tool_calls,
                 "repromptCount": empty_reprompts,
             }
         except ChatStoppedError:
@@ -1780,3 +1949,55 @@ async def chat_proxy(req: ChatRequest):
         finally:
             if req.requestId:
                 _chat_stop_events.pop(req.requestId, None)
+
+
+# ── AI state + chat history file storage ─────────────────────────────
+# Chat settings, the current in-progress conversation, and saved chat
+# history live in gitignored JSON files under backend/data/ai/ so they
+# survive browser cache clears and are not pushed to GitHub.
+
+AI_DATA_DIR = BACKEND_DIR / "data" / "ai"
+AI_STATE_FILE = AI_DATA_DIR / "state.json"
+AI_HISTORY_FILE = AI_DATA_DIR / "history.json"
+
+
+def _load_ai_json(file_path: Path) -> dict:
+    try:
+        payload = json.loads(file_path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_ai_json(file_path: Path, payload: dict) -> None:
+    AI_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    file_path.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+@router.get("/ai/state")
+async def get_ai_state() -> dict:
+    """Load the saved AI settings and in-progress conversation."""
+    return _load_ai_json(AI_STATE_FILE)
+
+
+@router.post("/ai/state")
+async def save_ai_state(payload: dict) -> dict:
+    """Persist AI settings and the in-progress conversation to disk."""
+    _save_ai_json(AI_STATE_FILE, payload)
+    return {"status": "saved"}
+
+
+@router.get("/ai/history")
+async def get_ai_history() -> dict:
+    """Load the saved chat history (list of conversations)."""
+    return _load_ai_json(AI_HISTORY_FILE)
+
+
+@router.post("/ai/history")
+async def save_ai_history(payload: dict) -> dict:
+    """Persist the saved chat history to disk."""
+    _save_ai_json(AI_HISTORY_FILE, payload)
+    return {"status": "saved"}

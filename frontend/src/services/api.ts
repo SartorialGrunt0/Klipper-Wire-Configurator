@@ -754,12 +754,23 @@ export interface AiChatRequest {
   contextFiles?: Record<string, { content: string; label: string }>;
 }
 
+export interface AiToolCallDetail {
+  name: string;
+  /** JSON string of the tool arguments (capped server-side). */
+  arguments: string;
+  /** Text result of the tool execution (capped server-side). */
+  output: string;
+  outputTruncated?: boolean;
+}
+
 export interface AiChatResponse {
   content?: string;
   error?: string;
   stopped?: boolean;
   mcpToolTurns?: number;
   mcpToolNames?: string[];
+  /** Executed tool calls with arguments + output, in execution order. */
+  toolCalls?: AiToolCallDetail[];
   /** Number of empty-response re-prompts the backend performed before content. */
   repromptCount?: number;
 }
@@ -831,5 +842,64 @@ export async function stopChat(requestId: string): Promise<void> {
     });
   } catch {
     // Best-effort only — ignore network failures here.
+  }
+}
+
+// ── AI state + chat history (local files, gitignored) ────────────────
+
+export interface AiStateFile {
+  settings?: unknown;
+  messages?: unknown[];
+}
+
+export interface AiHistoryFile {
+  conversations?: unknown[];
+}
+
+/** Load AI settings + the in-progress conversation from the local file. */
+export async function loadAiState(): Promise<AiStateFile> {
+  try {
+    const res = await fetch('/ai/state');
+    if (!res.ok) return {};
+    return (await res.json()) as AiStateFile;
+  } catch {
+    return {};
+  }
+}
+
+/** Persist AI settings + the in-progress conversation to the local file. */
+export async function saveAiState(state: AiStateFile): Promise<void> {
+  try {
+    await fetch('/ai/state', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(state),
+    });
+  } catch {
+    // Best-effort — a failed save shouldn't break the chat UI.
+  }
+}
+
+/** Load the saved chat history from the local file. */
+export async function loadAiHistory(): Promise<AiHistoryFile> {
+  try {
+    const res = await fetch('/ai/history');
+    if (!res.ok) return {};
+    return (await res.json()) as AiHistoryFile;
+  } catch {
+    return {};
+  }
+}
+
+/** Persist the saved chat history to the local file. */
+export async function saveAiHistory(history: AiHistoryFile): Promise<void> {
+  try {
+    await fetch('/ai/history', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(history),
+    });
+  } catch {
+    // Best-effort — a failed save shouldn't break the chat UI.
   }
 }

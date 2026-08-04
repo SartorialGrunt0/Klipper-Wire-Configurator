@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { loadAiState, saveAiState, type AiToolCallDetail } from '../services/api';
 
 const STORAGE_KEY = 'klipper-wire-ai-state';
 const LEGACY_SETTINGS_KEY = 'klipper-wire-ai-settings';
@@ -11,8 +12,9 @@ export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
   hiddenFromUser?: boolean;
-  autoLoadedDocs?: string[];
   mcpToolNames?: string[];
+  /** Executed tool calls with arguments + output, in execution order. */
+  toolCalls?: AiToolCallDetail[];
   /** Number of macro sections whose trailing Jinja closers were auto-appended. */
   repairCount?: number;
   /** Number of retries the reply pipeline performed before accepting. */
@@ -84,9 +86,28 @@ function loadPersistedState(): { settings: Partial<AiSettings>; messages: ChatMe
   };
 }
 
-function persistState(settings: AiSettings, messages: ChatMessage[]): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify({ settings, messages }));
-  localStorage.setItem(LEGACY_SETTINGS_KEY, JSON.stringify(settings));
+function validateToolCallDetail(value: unknown): value is AiToolCallDetail {
+  if (!value || typeof value !== 'object') return false;
+  const call = value as Partial<AiToolCallDetail>;
+  return typeof call.name === 'string' && typeof call.arguments === 'string' && typeof call.output === 'string';
+}
+
+// Debounced save to the backend file. Chat updates can be bursty (validation
+// retries append several messages quickly), so coalesce writes to one POST.
+let saveTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingState: { settings: AiSettings; messages: ChatMessage[] } | null = null;
+
+function schedulePersistState(state: { settings: AiSettings; messages: ChatMessage[] }): void {
+  pendingState = state;
+  if (saveTimer !== null) return;
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    const toSave = pendingState;
+    pendingState = null;
+    if (toSave) {
+      void saveAiState({ settings: toSave.settings, messages: toSave.messages });
+    }
+  }, 400);
 }
 
 const DEFAULT_PROVIDER_MODELS: ProviderModels = {
@@ -132,6 +153,8 @@ export function providerRequiresApiKey(provider: AiProvider): boolean {
 interface AiState {
   settings: AiSettings;
   messages: ChatMessage[];
+  /** Load AI settings + messages from the backend file (migrating localStorage). */
+  loadState: () => Promise<void>;
   setSettings: (settings: Partial<AiSettings>) => void;
   setMessages: (messages: ChatMessage[]) => void;
   clearMessages: () => void;
@@ -156,6 +179,30 @@ export const useAiStore = create<AiState>()((set, get) => {
   return {
     settings: buildAiSettings(persisted.settings),
     messages: persisted.messages,
+    loadState: async () => {
+      const file = await loadAiState();
+      const fileSettings = file?.settings && typeof file.settings === 'object'
+        ? (file.settings as Partial<AiSettings>)
+        : {};
+      const fileMessages = Array.isArray(file?.messages)
+        ? file.messages.filter(isChatMessage)
+        : null;
+
+      // Prefer the backend file; fall back to what localStorage seeded.
+      const hasFileSettings = Object.keys(fileSettings).length > 0;
+      const hasFileMessages = fileMessages !== null && fileMessages.length > 0;
+      if (!hasFileSettings && !hasFileMessages) return;
+
+      set((state) => {
+        const nextMessages = fileMessages ?? state.messages;
+        const nextSettings = hasFileSettings
+          ? buildAiSettings(fileSettings)
+          : state.settings;
+        // Persist the migrated seed so the backend file becomes the source.
+        schedulePersistState({ settings: nextSettings, messages: nextMessages });
+        return { settings: nextSettings, messages: nextMessages };
+      });
+    },
     setSettings: (partial) =>
       set((state) => {
         const nextProvider = partial.apiProvider ?? state.settings.apiProvider;
@@ -174,17 +221,17 @@ export const useAiStore = create<AiState>()((set, get) => {
           apiProvider: nextProvider,
           providerModels: nextProviderModels,
         });
-        persistState(newSettings, state.messages);
+        schedulePersistState({ settings: newSettings, messages: state.messages });
         return { settings: newSettings };
       }),
     setMessages: (messages) =>
       set((state) => {
-        persistState(state.settings, messages);
+        schedulePersistState({ settings: state.settings, messages });
         return { messages };
       }),
     clearMessages: () =>
       set((state) => {
-        persistState(state.settings, []);
+        schedulePersistState({ settings: state.settings, messages: [] });
         return { messages: [] };
       }),
     isConfigured: () => {

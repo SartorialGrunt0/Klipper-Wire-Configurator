@@ -11,18 +11,15 @@
  * passed down to ChatSettingsPanel as props.
  */
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { useAiStore, AiProvider, providerRequiresApiKey } from '../../stores/aiStore';
+import { useAiStore, AiProvider, providerRequiresApiKey, type ChatMessage } from '../../stores/aiStore';
 import { useChatHistoryStore } from '../../stores/chatHistoryStore';
 import { useConfigStore } from '../../stores/configStore';
 import { useGraphStore } from '../../stores/graphStore';
 import { usePrinterMemoryStore, DEFAULT_PRINTER_MEMORY, type PrinterMemory } from '../../stores/printerMemoryStore';
 import * as api from '../../services/api';
 import {
-  buildConfigContextMessage,
   buildConfigIndexMessage,
   extractMentionedConfigFilenames,
-  CONTEXT_TRUNCATION_LIMIT,
-  truncateConfigContext,
 } from '../../utils/chatUtils';
 import { extractPrinterMemoryBlock } from '../../utils/printerMemory';
 import {
@@ -50,6 +47,17 @@ import AiDraftPreviewDialog from './AiDraftPreviewDialog';
 import type { PendingAiChatRequest } from '../../types/ai';
 import type { AiChatRole } from '../../services/api';
 import type { SavedConversation } from '../../stores/chatHistoryStore';
+
+/**
+ * Heuristic for failures worth auto-recovering from: network drops and
+ * timeouts mid-flight. Deterministic API errors (validation failures,
+ * bad keys) should surface as normal error banners, not auto-resends.
+ */
+function looksLikeTransientFailure(err: unknown): boolean {
+  if (err instanceof api.ChatStoppedError) return false;
+  const message = err instanceof Error ? err.message : String(err);
+  return /failed to fetch|networkerror|network error|timed out|timeout|econnreset|aborted/i.test(message);
+}
 
 // ── Props ───────────────────────────────────────────────────────────
 
@@ -123,6 +131,11 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Set when a transient failure (network drop / timeout mid-flight) leaves
+  // an unanswered user message; offers a one-click resend and auto-resends
+  // when the browser reports the connection is back.
+  const [connectionLost, setConnectionLost] = useState(false);
+  const connectionLostRef = useRef(false);
   const [showSettings, setShowSettings] = useState(false);
   // EXPERIMENT (auto-attach off): don't auto-select the active file.
   // Context only includes files the user explicitly checks in "Include Files".
@@ -295,7 +308,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
 
   // ── Submit Message ──────────────────────────────────────────────
   const submitMessage = useCallback(
-    async (messageText: string, options?: { hiddenFromUser?: boolean; retry?: boolean }) => {
+    async (messageText: string, options?: { hiddenFromUser?: boolean; retry?: boolean; editIndex?: number }) => {
       const trimmedMessage = messageText.trim();
       if (!trimmedMessage || loading) return;
 
@@ -313,12 +326,22 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       // On retry the conversation already ends with the failed user message —
       // reuse it as-is so the request includes the failed question in context
       // without duplicating it.
-      const newMessages = options?.retry ? messages : [...previousMessages, userMsg];
+      // On edit the message at editIndex is replaced with the new text and the
+      // conversation is truncated there, so the model regenerates from the
+      // edited question with full prior context.
+      let newMessages: ChatMessage[];
+      if (options?.editIndex !== undefined) {
+        newMessages = [...messages.slice(0, options.editIndex), userMsg];
+      } else {
+        newMessages = options?.retry ? messages : [...previousMessages, userMsg];
+      }
       setMessages(newMessages);
       setInput('');
       if (inputRef.current) inputRef.current.textContent = '';
       setLoading(true);
       setError(null);
+      connectionLostRef.current = false;
+      setConnectionLost(false);
 
       try {
         const chatRequestBase = {
@@ -386,7 +409,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         carriedSectionsRef.current = nextCarried;
 
         // Inject the lean context this request actually needs.
-        const appendFileContext = (filename: string, candidate: { text: string; label: string }, fallbackWholeFile: boolean) => {
+        // Phase 5: always lean — targeted sections when resolved, otherwise a
+        // compact section index. Never dump the whole file as a system message;
+        // the model fetches the sections it needs via read_user_config.
+        const appendFileContext = (filename: string, candidate: { text: string; label: string }) => {
           const headers = usedSections.get(filename);
           if (headers && headers.length > 0) {
             for (const header of headers) {
@@ -400,17 +426,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
             }
             return;
           }
-          if (fallbackWholeFile) {
-            // No specific section resolved — fall back to the full file so
-            // the model still has context rather than guessing blind.
-            contextMessages.push({
-              role: 'system',
-              content: buildConfigContextMessage(filename, candidate.text, candidate.label),
-            });
-            return;
-          }
-          // Phase 4: questions get a compact section index, not the whole
-          // file. The model fetches the sections it needs via read_user_config.
           contextMessages.push({
             role: 'system',
             content: buildConfigIndexMessage(filename, findSectionHeaders(candidate.text), candidate.label),
@@ -418,7 +433,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         };
 
         for (const [filename, candidate] of candidateFiles) {
-          appendFileContext(filename, candidate, chatIntent === 'edit');
+          appendFileContext(filename, candidate);
         }
 
         // File targeting instructions — only edits carry the draft/mini-diff
@@ -501,6 +516,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           // retry sends the full conversation — including the failed question —
           // back to the model. Previously the message was rolled back, so the
           // model never saw what the user had asked.
+          if (looksLikeTransientFailure(err)) {
+            connectionLostRef.current = true;
+            setConnectionLost(true);
+          }
         }
       } finally {
         stopControllerRef.current = null;
@@ -555,6 +574,51 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     if (last?.role === 'user' && !loading) {
       void submitMessage(last.content, { retry: true });
     }
+  }, [loading, submitMessage]);
+
+  // ── Handle Edit & Regenerate ──────────────────────────────────────
+  // Replace the user message at `index` with the new text and regenerate.
+  const handleEditMessage = useCallback(
+    (index: number, newText: string) => {
+      const { messages: currentMessages } = useAiStore.getState();
+      const target = currentMessages[index];
+      if (target?.role !== 'user' || loading) return;
+      void submitMessage(newText, { editIndex: index });
+    },
+    [loading, submitMessage],
+  );
+
+  // ── Handle Export Message ─────────────────────────────────────────
+  // Download a single message's raw markdown as a .md file.
+  const handleExportMessage = useCallback((content: string, index: number) => {
+    const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `chat-message-${index + 1}.md`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    URL.revokeObjectURL(url);
+  }, []);
+
+  // ── Connection-loss recovery ────────────────────────────────────
+  // If a transient failure left an unanswered question, auto-resend it
+  // once the browser reports the network is back (LAN drops on a Pi are
+  // usually brief). Manual Retry remains available via the error banner.
+  useEffect(() => {
+    const handleOnline = () => {
+      if (!connectionLostRef.current || loading) return;
+      const { messages: currentMessages } = useAiStore.getState();
+      const last = currentMessages[currentMessages.length - 1];
+      if (last?.role === 'user') {
+        connectionLostRef.current = false;
+        setConnectionLost(false);
+        void submitMessage(last.content, { retry: true });
+      }
+    };
+    window.addEventListener('online', handleOnline);
+    return () => window.removeEventListener('online', handleOnline);
   }, [loading, submitMessage]);
 
   // ── Chat History ────────────────────────────────────────────────
@@ -822,13 +886,15 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           <ChatMessageList
             messages={messages}
             loading={loading}
-            error={error}
+            error={connectionLost ? 'Connection lost — the last question will resend automatically when the network returns.' : error}
             onRetry={handleRetry}
             activeFile={activeFile}
             assistantDraftApplicableMessages={assistantDraftApplicableMessages}
             assistantDraftPreviewLoading={assistantDraftPreviewLoading}
             onApplyEdit={handleApplyEdit}
             onReviewPrinterMemory={handleReviewPrinterMemory}
+            onEditMessage={handleEditMessage}
+            onExportMessage={handleExportMessage}
             messagesEndRef={messagesEndRef}
           />
         </div>

@@ -137,6 +137,61 @@ def test_auto_search_enabled_toggle(monkeypatch):
     assert not ai_routes._auto_search_enabled()
 
 
+def test_config_fallback_enabled_toggle(monkeypatch):
+    # Default disabled (Phase 5 lean first pass).
+    monkeypatch.delenv('KWC_CONFIG_FALLBACK', raising=False)
+    assert not ai_routes._config_fallback_enabled()
+    monkeypatch.setenv('KWC_CONFIG_FALLBACK', '1')
+    assert ai_routes._config_fallback_enabled()
+    monkeypatch.setenv('KWC_CONFIG_FALLBACK', '0')
+    assert not ai_routes._config_fallback_enabled()
+
+
+def test_minimal_prompt_enabled_toggle(monkeypatch):
+    monkeypatch.delenv('KWC_MINIMAL_PROMPT', raising=False)
+    assert not ai_routes._minimal_prompt_enabled()
+    monkeypatch.setenv('KWC_MINIMAL_PROMPT', '1')
+    assert ai_routes._minimal_prompt_enabled()
+
+
+def test_no_system_prompt_enabled_toggle(monkeypatch):
+    monkeypatch.delenv('KWC_NO_SYSTEM', raising=False)
+    assert not ai_routes._no_system_prompt_enabled()
+    monkeypatch.setenv('KWC_NO_SYSTEM', '1')
+    assert ai_routes._no_system_prompt_enabled()
+
+
+def test_prepare_messages_no_system_sends_conversation_only(monkeypatch):
+    # Experiment gate: no system content at all — just the conversation.
+    monkeypatch.setenv('KWC_NO_SYSTEM', '1')
+    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
+
+    msgs = ai_routes._prepare_messages([{'role': 'user', 'content': 'hello'}])
+
+    assert all(m['role'] != 'system' for m in msgs)
+    assert len(msgs) == 1
+    assert msgs[0]['content'] == 'hello'
+
+
+def test_prepare_messages_minimal_prompt_sends_tools_only(monkeypatch):
+    # Experiment gate: system message = tool list only, no SYSTEM_PROMPT,
+    # no printer memory, no auto-fill, no task anchor.
+    monkeypatch.setenv('KWC_MINIMAL_PROMPT', '1')
+    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
+
+    msgs = ai_routes._prepare_messages([{'role': 'user', 'content': 'hello'}])
+
+    system_msgs = [m for m in msgs if m['role'] == 'system']
+    assert len(system_msgs) == 1
+    system = system_msgs[0]['content']
+    assert ai_routes.SYSTEM_PROMPT not in system
+    assert 'Available Tools' in system
+    assert 'read_user_config' in system
+    assert 'Printer Memory' not in system
+    assert 'Auto-Fill' not in system
+    assert 'current task' not in system
+
+
 def test_prepare_messages_starts_with_system_and_ends_with_task_anchor(monkeypatch):
     _blank_memory(monkeypatch)
     prepared = ai_routes._prepare_messages([
@@ -387,6 +442,35 @@ def test_is_local_provider():
     assert ai_routes._is_local_provider('openai-compatible') is True
 
 
+def test_resolve_native_tools_auto_split():
+    # "auto" keeps the provider-based split: local http -> text protocol,
+    # cloud https -> native function calling.
+    assert ai_routes._resolve_native_tools(
+        'openai-compatible', 'http://192.168.1.133:8080/v1/chat/completions', 'auto',
+    ) is None
+    tools = ai_routes._resolve_native_tools(
+        'openai-compatible', 'https://api.deepseek.com/v1/chat/completions', 'auto',
+    )
+    assert tools is not None
+    assert {t['function']['name'] for t in tools} >= {'search_klipper_docs'}
+
+
+def test_resolve_native_tools_force_native_for_local():
+    # "native" unlocks local llama.cpp servers (gpt-oss needs native tools).
+    tools = ai_routes._resolve_native_tools(
+        'openai-compatible', 'http://192.168.1.133:8080/v1/chat/completions', 'native',
+    )
+    assert tools is not None
+    assert {t['function']['name'] for t in tools} >= {'search_klipper_docs'}
+
+
+def test_resolve_native_tools_force_text_for_cloud():
+    # "text" forces the text protocol even for cloud endpoints.
+    assert ai_routes._resolve_native_tools(
+        'openai-compatible', 'https://api.deepseek.com/v1/chat/completions', 'text',
+    ) is None
+
+
 def test_extract_provider_content():
     assert ai_routes._extract_provider_content('chatgpt', {'choices': [{'message': {'content': 'x'}}]}) == 'x'
     assert ai_routes._extract_provider_content('anthropic', {'content': [{'text': 'y'}]}) == 'y'
@@ -472,12 +556,80 @@ def test_chat_proxy_local_openai_compatible_allows_missing_key(monkeypatch):
         'content': 'LM Studio answer.',
         'mcpToolTurns': 0,
         'mcpToolNames': [],
+        'toolCalls': [],
         'repromptCount': 0,
     }
     # The local URL is POSTed verbatim and no Authorization header is added
     # when no key was provided.
     assert captured['url'] == 'http://192.168.1.133:8080/v1/chat/completions'
     assert 'Authorization' not in captured['headers']
+
+
+def test_chat_proxy_local_native_tool_protocol_sends_tools(monkeypatch):
+    # toolProtocol="native" forces the OpenAI tools array even for a local
+    # plain-http provider (gpt-oss on llama.cpp needs this).
+    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
+    monkeypatch.setattr(ai_routes, '_auto_search_context', lambda query: None)
+
+    captured = {}
+
+    def fake_post(url, headers, payload):
+        captured['payload'] = payload
+        return DummyResponse(
+            {'choices': [{'message': {'content': 'LM Studio answer.'}}]},
+            url=url,
+        )
+
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda *args, **kwargs: FakeAsyncClient(post_handler=fake_post))
+
+    response = client.post(
+        '/ai/chat',
+        json={
+            'messages': [{'role': 'user', 'content': 'Hi'}],
+            'apiKey': '',
+            'model': 'gpt-oss-20b',
+            'apiUrl': 'http://192.168.1.133:8080/v1/chat/completions',
+            'apiProvider': 'openai-compatible',
+            'toolProtocol': 'native',
+        },
+    )
+
+    assert response.status_code == 200
+    tools = captured['payload'].get('tools')
+    assert tools is not None
+    assert {t['function']['name'] for t in tools} >= {'search_klipper_docs'}
+
+
+def test_chat_proxy_local_default_tool_protocol_sends_no_tools(monkeypatch):
+    # Default ("auto") keeps the text protocol for local providers: no tools
+    # array in the outgoing payload.
+    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
+    monkeypatch.setattr(ai_routes, '_auto_search_context', lambda query: None)
+
+    captured = {}
+
+    def fake_post(url, headers, payload):
+        captured['payload'] = payload
+        return DummyResponse(
+            {'choices': [{'message': {'content': 'LM Studio answer.'}}]},
+            url=url,
+        )
+
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda *args, **kwargs: FakeAsyncClient(post_handler=fake_post))
+
+    response = client.post(
+        '/ai/chat',
+        json={
+            'messages': [{'role': 'user', 'content': 'Hi'}],
+            'apiKey': '',
+            'model': 'gemma-4-12b',
+            'apiUrl': 'http://192.168.1.133:8080/v1/chat/completions',
+            'apiProvider': 'openai-compatible',
+        },
+    )
+
+    assert response.status_code == 200
+    assert 'tools' not in captured['payload']
 
 
 def test_chat_proxy_returns_plain_content(monkeypatch):
@@ -508,6 +660,7 @@ def test_chat_proxy_returns_plain_content(monkeypatch):
         'content': 'horizontal_move_z is the Z hop before XY travel.',
         'mcpToolTurns': 0,
         'mcpToolNames': [],
+        'toolCalls': [],
         'repromptCount': 0,
     }
 
@@ -612,6 +765,13 @@ def test_chat_proxy_native_tool_call_loop(monkeypatch):
     assert body['content'] == 'horizontal_move_z sets the Z hop before XY travel.'
     assert body['mcpToolTurns'] == 1
     assert body['mcpToolNames'] == ['search_klipper_docs']
+    # The client-facing tool call detail must carry name, arguments, and output.
+    assert body['toolCalls'] == [{
+        'name': 'search_klipper_docs',
+        'arguments': json.dumps({'query': 'bed_mesh'}, sort_keys=True),
+        'output': 'result for search_klipper_docs',
+        'outputTruncated': False,
+    }]
     # The second request must carry the assistant tool_calls echo plus a tool result.
     second_payload = calls[1]
     roles = [m['role'] for m in second_payload['messages']]
@@ -1235,6 +1395,9 @@ def test_config_fallback_context_single_file_without_filename_mention():
 def test_chat_proxy_config_fallback_injects_section(monkeypatch):
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
     monkeypatch.setattr(ai_routes, '_auto_search_context', lambda query: None)
+    # The fallback is off by default (lean-first-pass workflow) — this test
+    # exercises the injection path with the toggle explicitly enabled.
+    monkeypatch.setenv('KWC_CONFIG_FALLBACK', '1')
 
     captured = {'count': 0}
 
@@ -1313,3 +1476,79 @@ def test_chat_proxy_config_fallback_skips_without_context_files(monkeypatch):
     body = response.json()
     assert body['mcpToolTurns'] == 0
     assert body['mcpToolNames'] == []
+
+
+# ── Tool call detail records ──────────────────────────────────────────
+
+def test_build_executed_tool_call_bounds_long_output():
+    record = ai_routes._build_executed_tool_call(
+        {'name': 'read_user_config', 'arguments': {'filename': 'printer.cfg'}},
+        'x' * (ai_routes.TOOL_CALL_OUTPUT_MAX_CHARS + 100),
+    )
+    assert record['name'] == 'read_user_config'
+    assert record['output'].endswith('...[truncated]')
+    assert record['outputTruncated'] is True
+    assert len(record['output']) <= (
+        ai_routes.TOOL_CALL_OUTPUT_MAX_CHARS + len('...[truncated]')
+    )
+
+
+def test_build_executed_tool_call_bounds_long_arguments():
+    big_args = {'filename': 'a' * (ai_routes.TOOL_CALL_ARGS_MAX_CHARS + 50)}
+    record = ai_routes._build_executed_tool_call(
+        {'name': 'validate_macro', 'arguments': big_args}, 'ok'
+    )
+    assert record['name'] == 'validate_macro'
+    assert record['outputTruncated'] is False
+    assert record['arguments'].endswith('...[truncated]')
+    assert len(record['arguments']) <= (
+        ai_routes.TOOL_CALL_ARGS_MAX_CHARS + len('...[truncated]')
+    )
+
+
+def test_build_executed_tool_call_handles_non_json_arguments():
+    record = ai_routes._build_executed_tool_call(
+        {'name': 'weird', 'arguments': object()}, 'ok'
+    )
+    assert record['name'] == 'weird'
+    assert 'raw' in record['arguments']
+
+
+# ── AI state + history file storage ───────────────────────────────────
+
+def test_ai_state_roundtrip(monkeypatch, tmp_path):
+    monkeypatch.setattr(ai_routes, 'AI_DATA_DIR', tmp_path)
+    monkeypatch.setattr(ai_routes, 'AI_STATE_FILE', tmp_path / 'state.json')
+
+    assert client.get('/ai/state').json() == {}
+    saved = client.post('/ai/state', json={
+        'settings': {'model': 'gpt-4o', 'apiProvider': 'chatgpt'},
+        'messages': [{'role': 'user', 'content': 'hello'}],
+    })
+    assert saved.status_code == 200
+    assert saved.json() == {'status': 'saved'}
+    assert client.get('/ai/state').json() == {
+        'settings': {'model': 'gpt-4o', 'apiProvider': 'chatgpt'},
+        'messages': [{'role': 'user', 'content': 'hello'}],
+    }
+
+
+def test_ai_history_roundtrip(monkeypatch, tmp_path):
+    monkeypatch.setattr(ai_routes, 'AI_DATA_DIR', tmp_path)
+    monkeypatch.setattr(ai_routes, 'AI_HISTORY_FILE', tmp_path / 'history.json')
+
+    assert client.get('/ai/history').json() == {}
+    conversation_entry = {
+        'id': 'chat_1', 'title': 'Test', 'timestamp': 1, 'messages': [],
+    }
+    saved = client.post('/ai/history', json={'conversations': [conversation_entry]})
+    assert saved.status_code == 200
+    expected_history = {'conversations': [conversation_entry]}
+    assert client.get('/ai/history').json() == expected_history
+
+
+def test_ai_state_returns_empty_for_invalid_json(monkeypatch, tmp_path):
+    monkeypatch.setattr(ai_routes, 'AI_DATA_DIR', tmp_path)
+    monkeypatch.setattr(ai_routes, 'AI_STATE_FILE', tmp_path / 'state.json')
+    (tmp_path / 'state.json').write_text('{not valid json', encoding='utf-8')
+    assert client.get('/ai/state').json() == {}
