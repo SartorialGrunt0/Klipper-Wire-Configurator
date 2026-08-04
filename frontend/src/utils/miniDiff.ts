@@ -43,6 +43,81 @@ const SECTION_HEADER_RE = /^\s*(\[[^\]]+\])\s*$/;
 const DELETE_MARKER_RE = /^\s*\*\[[^\]]+\]\s*$/;
 /** Column-0 param line (`key: value` / `key= value`) — mirrors the parser. */
 const PARAM_LINE_RE = /^(\w[\w]*)\s*[:=]/;
+/** Config-file hint line such as `# file: printer.cfg`. */
+const FILE_HINT_RE = /^\s*[#;]\s*file\s*:/i;
+
+/**
+ * Display-only guard: wrap UNFENCED mini-diff text in a ```cfg fence so it
+ * renders as a diff block instead of markdown bullets.
+ *
+ * GFM treats any line starting with `- ` or `+ ` as a list marker, so when a
+ * model emits a mini-diff without code fences the +/- lines render as bullet
+ * points. The apply pipeline is unaffected (it reads the raw text before
+ * markdown rendering), but the user-facing chat shows bullets. This helper
+ * finds the diff-shaped run inside the content and fences just that run,
+ * leaving prose and already-fenced blocks untouched.
+ *
+ * Safe by construction: a run is only wrapped when it contains BOTH a section
+ * header AND a +/- marker (the same criterion as `isMiniDiffBlock`), so an
+ * ordinary bulleted list ("- first\n- second") is never touched.
+ */
+export function fenceUnfencedMiniDiffs(content: string): string {
+  const lines = content.split(/\r?\n/);
+  const out: string[] = [];
+  let inFence = false;
+  let run: string[] = [];
+
+  const flushRun = () => {
+    if (run.length === 0) return;
+    const text = run.join('\n');
+    if (isMiniDiffBlock(text)) {
+      out.push('```cfg');
+      out.push(text);
+      out.push('```');
+    } else {
+      out.push(...run);
+    }
+    run = [];
+  };
+
+  for (const line of lines) {
+    if (/^\s*```/.test(line)) {
+      flushRun();
+      inFence = !inFence;
+      out.push(line);
+      continue;
+    }
+    if (inFence) {
+      out.push(line);
+      continue;
+    }
+
+    // Not inside a fence: accumulate a candidate run from a config hint or
+    // section header, plus any following +/- markers. Anything else ends it.
+    const isHint = FILE_HINT_RE.test(line) || SECTION_HEADER_RE.test(line);
+    const isMarker = MINI_DIFF_REMOVAL_RE.test(line) || MINI_DIFF_ADDITION_RE.test(line);
+    if (isHint) {
+      // Hints/markers accumulate in one run (`# file:` + `[section]` + +/-
+      // lines all belong to the same block); prose or a fence flushes it.
+      run.push(line);
+      continue;
+    }
+    if (isMarker) {
+      if (run.length > 0) {
+        run.push(line);
+      } else {
+        // Bare marker with no preceding header — a real bullet list, keep it.
+        out.push(line);
+      }
+      continue;
+    }
+    flushRun();
+    out.push(line);
+  }
+  flushRun();
+
+  return out.join('\n');
+}
 
 /** True when `key` names a multi-line gcode body (parser folds trailing
  * comment lines into its value). */

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isMiniDiffBlock, applyMiniDiffBlock, classifyMiniDiffLine } from '../miniDiff';
+import { isMiniDiffBlock, applyMiniDiffBlock, classifyMiniDiffLine, fenceUnfencedMiniDiffs } from '../miniDiff';
 
 const LEVEL_BED_SECTION = `[gcode_macro Level_Bed]
 #rename_existing: _BED_MESH_CALIBRATE
@@ -425,5 +425,48 @@ algorithm: bicubic
     const result = applyMiniDiffBlock('[gcode_macro X]\n+    M117 done', base);
     expect(result.applied).toBe(true);
     expect(result.text).toBe(`[gcode_macro X]\ngcode:\n    G28\n    M117 done\n\n`);
+  });
+});
+
+describe('fenceUnfencedMiniDiffs', () => {
+  it('wraps an unfenced mini-diff in a cfg fence (the bullet-point bug)', () => {
+    const input = `# file: printer.cfg\n[bed_mesh]\n-    algorithm: bicubic\n+    algorithm: bicubic\n+    adaptive_margin: 5\n\nI added adaptive_margin: 5 to the [bed_mesh] section.`;
+    const result = fenceUnfencedMiniDiffs(input);
+    expect(result).toBe(
+      '```cfg\n# file: printer.cfg\n[bed_mesh]\n-    algorithm: bicubic\n+    algorithm: bicubic\n+    adaptive_margin: 5\n```\n\nI added adaptive_margin: 5 to the [bed_mesh] section.',
+    );
+  });
+
+  it('leaves an already-fenced mini-diff untouched', () => {
+    const input = '```cfg\n# file: printer.cfg\n[bed_mesh]\n-    algorithm: bicubic\n+    adaptive_margin: 5\n```\n\nDone.';
+    const result = fenceUnfencedMiniDiffs(input);
+    expect(result).toBe(input);
+  });
+
+  it('does not wrap a plain bulleted list', () => {
+    const input = '- first item\n- second item\n\nSome prose.';
+    const result = fenceUnfencedMiniDiffs(input);
+    expect(result).toBe(input);
+  });
+
+  it('does not wrap a full-section block with no +/- markers', () => {
+    const input = `# file: printer.cfg\n[bed_mesh]\nmesh_min: 10, 10\nmesh_max: 290, 290\n`;
+    const result = fenceUnfencedMiniDiffs(input);
+    expect(result).toBe(input);
+  });
+
+  it('handles prose after the diff plus a second paragraph', () => {
+    const input = `Here you go:\n# file: printer.cfg\n[gcode_macro Level_Bed]\n-    BED_MESH_CALIBRATE\n+    BED_MESH_CALIBRATE ADAPTIVE=1\n\nApplied to the Level_Bed macro.`;
+    const result = fenceUnfencedMiniDiffs(input);
+    expect(result).toBe(
+      'Here you go:\n```cfg\n# file: printer.cfg\n[gcode_macro Level_Bed]\n-    BED_MESH_CALIBRATE\n+    BED_MESH_CALIBRATE ADAPTIVE=1\n```\n\nApplied to the Level_Bed macro.',
+    );
+  });
+
+  it('handles CRLF line endings', () => {
+    const input = '# file: printer.cfg\r\n[bed_mesh]\r\n-    algorithm: bicubic\r\n+    adaptive_margin: 5';
+    const result = fenceUnfencedMiniDiffs(input);
+    expect(result).toContain('```cfg');
+    expect(result).toContain('+    adaptive_margin: 5');
   });
 });

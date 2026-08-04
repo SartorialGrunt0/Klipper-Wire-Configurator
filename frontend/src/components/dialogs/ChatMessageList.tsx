@@ -16,7 +16,7 @@ import type { AiToolCallDetail } from '../../services/api';
 import type { AssistantDraftChange } from '../../utils/assistantDraftMerge';
 import { extractConfigCodeBlock } from '../../utils/chatUtils';
 import { hasPrinterMemoryBlock } from '../../utils/printerMemory';
-import { classifyMiniDiffLine, isMiniDiffBlock } from '../../utils/miniDiff';
+import { classifyMiniDiffLine, fenceUnfencedMiniDiffs, isMiniDiffBlock } from '../../utils/miniDiff';
 
 // ── Markdown Code Block Component ───────────────────────────────────
 
@@ -354,7 +354,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                     code: MarkdownCode,
                   }}
                 >
-                  {msg.content}
+                  {fenceUnfencedMiniDiffs(msg.content)}
                 </ReactMarkdown>
               ) : (
                 <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
