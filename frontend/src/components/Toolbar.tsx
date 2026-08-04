@@ -350,9 +350,9 @@ export default function Toolbar({
           onClick={() => setShowChat(true)}
           className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
             chatStatus === 'success'
-              ? 'bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 hover:text-emerald-200'
+              ? 'bg-green-600 text-white hover:bg-green-700'
               : chatStatus === 'error'
-                ? 'bg-red-500/20 text-red-300 hover:bg-red-500/30 hover:text-red-200'
+                ? 'bg-red-600 text-white hover:bg-red-700'
                 : 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)]'
           }`}
           title={chatStatus === 'success' ? 'AI Chat — response ready' : chatStatus === 'error' ? 'AI Chat — last request failed' : 'AI Chat'}
