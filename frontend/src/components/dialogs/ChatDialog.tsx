@@ -588,20 +588,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     [loading, submitMessage],
   );
 
-  // ── Handle Export Message ─────────────────────────────────────────
-  // Download a single message's raw markdown as a .md file.
-  const handleExportMessage = useCallback((content: string, index: number) => {
-    const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = `chat-message-${index + 1}.md`;
-    document.body.appendChild(anchor);
-    anchor.click();
-    document.body.removeChild(anchor);
-    URL.revokeObjectURL(url);
-  }, []);
-
   // ── Connection-loss recovery ────────────────────────────────────
   // If a transient failure left an unanswered question, auto-resend it
   // once the browser reports the network is back (LAN drops on a Pi are
@@ -894,7 +880,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
             onApplyEdit={handleApplyEdit}
             onReviewPrinterMemory={handleReviewPrinterMemory}
             onEditMessage={handleEditMessage}
-            onExportMessage={handleExportMessage}
             messagesEndRef={messagesEndRef}
           />
         </div>

@@ -131,8 +131,6 @@ export interface ChatMessageListProps {
   onReviewPrinterMemory: (content: string) => void;
   /** Replace the user message at `index` with `newText` and regenerate. */
   onEditMessage?: (index: number, newText: string) => void;
-  /** Export a single message's raw markdown as a file. */
-  onExportMessage?: (content: string, index: number) => void;
   messagesEndRef: React.RefObject<HTMLDivElement | null>;
 }
 
@@ -243,7 +241,6 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
   onApplyEdit,
   onReviewPrinterMemory,
   onEditMessage,
-  onExportMessage,
   messagesEndRef,
 }) => {
   const [toolDetailsMessageIndex, setToolDetailsMessageIndex] = useState<number | null>(null);
@@ -419,7 +416,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
 
               {/* Action buttons row */}
               {editMessageIndex !== i && (
-                <div className="mt-3 flex flex-wrap justify-end gap-2">
+                <div className="mt-3 flex flex-wrap items-center justify-end gap-1">
                   {/* Edit message (user messages only) */}
                   {msg.role === 'user' && !loading && onEditMessage && (
                     <button
@@ -428,10 +425,14 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                         setEditMessageIndex(i);
                         setEditDraft(msg.content);
                       }}
-                      className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-[10px] font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+                      className="rounded p-1 text-white/70 transition-colors hover:bg-white/15 hover:text-white"
+                      aria-label="Edit message and regenerate reply"
                       title="Edit the message and regenerate the reply"
                     >
-                      Edit
+                      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                        <path d="M11.3 2.7l2 2L6 12l-3 1 1-3 7.3-7.3z" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+                        <path d="M9.5 4.5l2 2" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+                      </svg>
                     </button>
                   )}
 
@@ -451,23 +452,25 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                         }
                       })();
                     }}
-                    className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-[10px] font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
-                    title="Copy the raw markdown content"
+                    className={`rounded p-1 transition-colors ${
+                      msg.role === 'user'
+                        ? 'text-white/70 hover:bg-white/15 hover:text-white'
+                        : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text-primary)]'
+                    }`}
+                    aria-label={copyState[i] === 'copied' ? 'Copied' : copyState[i] === 'error' ? 'Copy failed' : 'Copy raw markdown'}
+                    title={copyState[i] === 'copied' ? 'Copied' : copyState[i] === 'error' ? 'Copy failed' : 'Copy the raw markdown content'}
                   >
-                    {copyState[i] === 'copied' ? 'Copied' : copyState[i] === 'error' ? 'Copy failed' : 'Copy'}
+                    {copyState[i] === 'copied' ? (
+                      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                        <path d="M3 8.5l3 3 7-7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    ) : (
+                      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                        <rect x="5" y="3" width="8" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
+                        <path d="M3.5 10.5H3A1.5 1.5 0 011.5 9V3A1.5 1.5 0 013 1.5h6A1.5 1.5 0 0110.5 3v0.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+                      </svg>
+                    )}
                   </button>
-
-                  {/* Export raw markdown */}
-                  {onExportMessage && (
-                    <button
-                      type="button"
-                      onClick={() => onExportMessage(msg.content, i)}
-                      className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-[10px] font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
-                      title="Export this message as a Markdown file"
-                    >
-                      Export
-                    </button>
-                  )}
 
                   {/* Apply and Review Changes button */}
                   {msg.role === 'assistant' && assistantConfigBlock && activeFile && hasApplicableAssistantDraft && (
