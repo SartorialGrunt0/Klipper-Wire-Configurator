@@ -991,6 +991,149 @@ def build_trident_questions() -> list[TestQuestion]:
     ]
 
 
+def build_ambiguity_questions() -> list[TestQuestion]:
+    """Ambiguity probes: prompts that intentionally do NOT name a file or
+    mix edit/question phrasing, to see whether the model can resolve intent
+    from the system prompt + tools alone (no frontend intent gating here —
+    the harness never runs detectChatIntent). Observational: they assert the
+    IDEAL behavior; a follow-up question or tool-less answer shows up as a
+    criteria failure to review in the log.
+    """
+    printer_cfg = _cfg_context("printer.cfg")
+    return [
+        TestQuestion(
+            qid="AMBI-01",
+            title="Ambiguity: new printer.cfg for Ender 3 (no file attached)",
+            text=("I have an Ender 3 V2, can you make me a solid printer.cfg "
+                  "file to get started?"),
+            # No context_files: the model has NO config in context. It should
+            # reach for the example tools (Ender 3 generic example) and emit a
+            # NEW printer.cfg draft with a '# file: printer.cfg' hint — or ask
+            # a clarifying question, which is also a legitimate outcome to log.
+            context_files=(),
+            expected_tools=("search_example_configs", "read_example_config"),
+            require_tool=False,
+            criteria=(
+                ("regex", r"ender\s*3"),
+                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
+            ),
+        ),
+        TestQuestion(
+            qid="AMBI-02",
+            title="Ambiguity: move all macros to a new file (no name given)",
+            text=("Can you move all my gcode macros out of my printer.cfg and "
+                  "put it in a new file?"),
+            context_files=printer_cfg,
+            require_tool=False,
+            criteria=(
+                # A new-file hint that is NOT printer.cfg (multiline: the
+                # filename line is followed by section content).
+                ("regex", r"(?m)^\s*#\s*file\s*:\s*(?!printer\.cfg)[^\s#]+\.cfg"),
+                ("contains", "[gcode_macro"),
+            ),
+        ),
+        TestQuestion(
+            qid="AMBI-03",
+            title="Ambiguity: add adaptive_margin to bed_mesh (no file named)",
+            text=("Can you add an adaptive margin of 5 to my bed mesh section?"),
+            context_files=printer_cfg,
+            require_tool=False,
+            criteria=(
+                ("mini_diff", "[bed_mesh]"),
+                ("regex", r"adaptive_margin\s*:\s*5\b"),
+                # It must target printer.cfg even though the user never named it.
+                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
+            ),
+        ),
+        TestQuestion(
+            qid="AMBI-04",
+            title="Ambiguity: hypothetical edit phrased as a question",
+            text=("What would happen if I changed max_accel to 12000 in my "
+                  "printer.cfg?"),
+            context_files=printer_cfg,
+            require_tool=False,
+            criteria=(
+                ("contains", "max_accel"),
+                # It should ANSWER, not emit an edit — a legit quote of the
+                # current line in a cfg fence is fine; an edit block always
+                # carries a '# file:' target hint.
+                ("not_contains", "# file:"),
+            ),
+        ),
+        TestQuestion(
+            qid="AMBI-05",
+            title="Ambiguity: docs vs user config (pressure_advance, file attached)",
+            text=("What does pressure_advance do, and what's a good starting "
+                  "value for a direct drive extruder?"),
+            context_files=printer_cfg,
+            require_tool=False,
+            criteria=(
+                ("contains", "pressure_advance"),
+                ("regex", r"\b0\.\d{2,3}\b"),
+            ),
+        ),
+        TestQuestion(
+            qid="AMBI-06",
+            title="Ambiguity: batch-read sections via 'sections' (not whole file)",
+            text=("In printer.cfg, read the [extruder], [heater_bed], and [mcu] "
+                  "sections and list which pins or serial each one uses."),
+            # Nothing attached: the ONLY way to see the config is the
+            # read_user_config tool (backend/user_configs/printer.cfg must
+            # exist). The model should call read_user_config ONCE with
+            # sections=[...] (batch) rather than whole_file:true or three
+            # single-section reads.
+            context_files=(),
+            expected_tools=("read_user_config",),
+            require_tool=True,
+            criteria=(
+                # A read_user_config call carrying `sections` with >=2 items.
+                ("tool_args", r"read_user_config:sections:\[[^\]]*,[^\]]*\]"),
+                ("contains", "extruder"),
+            ),
+        ),
+        TestQuestion(
+            qid="AMBI-07",
+            title="Ambiguity: explain two topics AND edit config in one turn",
+            text=("Can you explain pressure advance and input shaper "
+                  "calibration to me, then add some default values for them "
+                  "to my printer.cfg?"),
+            # Multi-step: two doc answers + two config edits ([extruder]
+            # pressure_advance + a new [input_shaper] section). Needs several
+            # tool turns — exercises the MAX_MCP_TOOL_TURNS budget.
+            context_files=printer_cfg,
+            require_tool=False,
+            criteria=(
+                ("contains", "pressure_advance"),
+                ("regex", r"input[_ ]shaper"),
+                ("regex", r"pressure_advance\s*[:=]\s*\d+(?:\.\d+)?"),
+                ("contains", "[input_shaper]"),
+            ),
+        ),
+        TestQuestion(
+            qid="AMBI-08",
+            title="Ambiguity: find which config file uses pin PB3 (content search)",
+            text=("I keep seeing in my logs that pin PB3 is already in use, "
+                  "but I can't find where in my configuration files it's "
+                  "defined. Which file and section uses it?"),
+            # Nothing attached: the model must discover the file itself. The
+            # pin is a bare VALUE that only CONTENT search can find easily —
+            # the case search_user_configs exists for (backend/user_configs/
+            # aux_fan.cfg must exist: [fan_generic Aux_Fan] pin: PB3).
+            context_files=(),
+            expected_tools=("search_user_configs",),
+            require_tool=True,
+            criteria=(
+                # It should search by the pin value, not guess a filename.
+                ("tool_args", r"search_user_configs:query:PB3"),
+                # Answer identifies the file/section and the pin.
+                ("contains", "aux_fan"),
+                ("contains", "fan_generic"),
+                ("contains", "PB3"),
+            ),
+        ),
+    ]
+
+
 _MEMORY_CONFIG_SNIPPET = """[mcu]
 serial: /dev/serial/by-id/usb-Klipper_stm32f446xx_3D002B000E50505734393820-if00
 
@@ -1080,7 +1223,6 @@ ALL_TOOLS = (
     "list_klipper_docs",
     "get_config_reference_section",
     "validate_klipper_config",
-    "get_section_schema",
     "search_example_configs",
     "read_example_config",
     "search_user_configs",
@@ -1124,7 +1266,8 @@ def extract_printer_memory(content: str) -> tuple[str, dict | None]:
 
 # ── Evaluation ─────────────────────────────────────────────────────────
 def criterion_ok(kind: str, value: str, content: str,
-                 memory: tuple[str, dict | None] | None = None) -> bool:
+                 memory: tuple[str, dict | None] | None = None,
+                 tool_calls: list[dict] | None = None) -> bool:
     if kind == "contains":
         return value.lower() in content.lower()
     if kind == "not_contains":
@@ -1170,6 +1313,37 @@ def criterion_ok(kind: str, value: str, content: str,
                     return False
                 return True
         return False
+    if kind == "tool_args":
+        # value = "tool_name:key[:regex]" — passes when ANY executed call for
+        # tool_name carried `key` in its arguments (parsed from the backend's
+        # toolCalls records), and (when a regex is given) the JSON-rendered
+        # value of that key matches it case-insensitively. Examples:
+        #   ("tool_args", "read_user_config:sections")                any sections
+        #   ("tool_args", "read_user_config:sections:\[[^\]]*,[^\]]*\]")  >=2 items
+        if not tool_calls:
+            return False
+        parts = value.split(":", 2)
+        name, key = parts[0], (parts[1] if len(parts) > 1 else "")
+        pattern = parts[2] if len(parts) > 2 else None
+        for call in tool_calls:
+            if call.get("name") != name:
+                continue
+            args = call.get("arguments") or {}
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except (json.JSONDecodeError, TypeError):
+                    args = {"raw": args}
+            if not isinstance(args, dict):
+                args = {"raw": args}
+            if key and key not in args:
+                continue
+            if pattern is None:
+                return True
+            rendered = json.dumps(args.get(key), ensure_ascii=False)
+            if re.search(pattern, rendered, re.IGNORECASE):
+                return True
+        return False
     return False
 
 
@@ -1183,6 +1357,7 @@ class QuestionResult:
     response: str = ""
     tool_names: list[str] = field(default_factory=list)
     tool_turns: int = 0
+    tool_calls: list[dict] = field(default_factory=list)
     backend_log_lines: list[str] = field(default_factory=list)
     error: str = ""
     checks: list[tuple[str, str, bool]] = field(default_factory=list)
@@ -1354,6 +1529,7 @@ def run_one_question(
         result.response = response.get("content", "")
         result.tool_names = list(response.get("mcpToolNames", []) or [])
         result.tool_turns = int(response.get("mcpToolTurns", 0) or 0)
+        result.tool_calls = list(response.get("toolCalls", []) or [])
 
         log.write(f"Response mcpToolTurns={result.tool_turns} "
                   f"mcpToolNames={result.tool_names}")
@@ -1377,7 +1553,8 @@ def run_one_question(
             # Answer check (memory criteria get the parsed printer-memory block)
             memory = extract_printer_memory(result.response)
             for kind, value in q.criteria:
-                ok = criterion_ok(kind, value, result.response, memory=memory)
+                ok = criterion_ok(kind, value, result.response, memory=memory,
+                                  tool_calls=result.tool_calls)
                 result.checks.append((kind, value, ok))
             result.answer_ok = all(ok for _, _, ok in result.checks)
             if result.answer_ok and result.tool_ok:
@@ -1565,7 +1742,7 @@ def main() -> int:
                              "printer memory, blank it, run MEMORY-01..03, then restore it")
     args = parser.parse_args()
 
-    questions = build_questions() + build_macro_questions() + build_trident_questions()
+    questions = build_questions() + build_macro_questions() + build_trident_questions() + build_ambiguity_questions()
     if args.include_memory:
         questions += build_memory_questions()
     if args.list_questions:

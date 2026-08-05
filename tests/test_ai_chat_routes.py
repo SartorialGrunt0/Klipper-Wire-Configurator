@@ -927,6 +927,7 @@ def test_chat_proxy_empty_response_reprompt_recovers(monkeypatch):
         ai_routes, '_execute_tool_call',
         lambda call: f"result for {call['name']}",
     )
+    max_turns = ai_routes.MAX_MCP_TOOL_TURNS
 
     # The llama.cpp/Qwen-style tool-only response from the real failure log.
     tool_only = (
@@ -937,8 +938,8 @@ def test_chat_proxy_empty_response_reprompt_recovers(monkeypatch):
 
     def fake_post(url, headers, payload):
         calls.append(payload)
-        if len(calls) <= 6:
-            # Initial call + 5 tool-turn re-queries: tool-only, no text.
+        if len(calls) <= max_turns + 1:
+            # Initial call + MAX tool-turn re-queries: tool-only, no text.
             return DummyResponse(
                 {'choices': [{'message': {'content': tool_only}}]},
                 url=url,
@@ -971,12 +972,12 @@ def test_chat_proxy_empty_response_reprompt_recovers(monkeypatch):
     assert response.status_code == 200
     body = response.json()
     assert body['content'] == 'horizontal_move_z sets the Z hop before XY travel.'
-    assert body['mcpToolTurns'] == 5
+    assert body['mcpToolTurns'] == max_turns
     assert 'get_config_reference_section' in body['mcpToolNames']
-    # 1 initial + 5 tool turns + 1 empty re-prompt = 7 provider calls.
-    assert len(calls) == 7
+    # 1 initial + MAX tool turns + 1 empty re-prompt = MAX + 2 provider calls.
+    assert len(calls) == max_turns + 2
     # The re-prompt payload must disable tools and carry the direct-answer instruction.
-    reprompt = calls[6]
+    reprompt = calls[max_turns + 1]
     assert 'tools' not in reprompt
     assert any(
         m.get('role') == 'system' and 'Do not call any tools' in m.get('content', '')
@@ -990,6 +991,7 @@ def test_chat_proxy_empty_response_reprompt_exhausts(monkeypatch):
         ai_routes, '_execute_tool_call',
         lambda call: f"result for {call['name']}",
     )
+    max_turns = ai_routes.MAX_MCP_TOOL_TURNS
 
     tool_only = (
         '<|tool_call>call:tool_call:get_config_reference_section'
@@ -1030,11 +1032,11 @@ def test_chat_proxy_empty_response_reprompt_exhausts(monkeypatch):
         "I wasn't able to generate a response. "
         "Please try rephrasing your question."
     )
-    # 5 main tool turns + up to 5 more executed re-prompt tool turns (the
+    # MAX main tool turns + up to MAX more executed re-prompt tool turns (the
     # model keeps calling tools even when told not to), then 2 empty attempts
-    # before giving up: 1 initial + 5 + 5 + 2 = 13 provider calls.
-    assert body['mcpToolTurns'] == 10
-    assert len(calls) == 13
+    # before giving up: 1 initial + MAX + MAX + 2 = 2*MAX + 3 provider calls.
+    assert body['mcpToolTurns'] == 2 * max_turns
+    assert len(calls) == 2 * max_turns + 3
 
 
 def test_chat_proxy_provider_empty_recovers_via_backstop(monkeypatch):
@@ -1108,6 +1110,7 @@ def test_chat_proxy_local_reprompt_bumps_max_tokens(monkeypatch):
         ai_routes, '_execute_tool_call',
         lambda call: f"result for {call['name']}",
     )
+    max_turns = ai_routes.MAX_MCP_TOOL_TURNS
 
     tool_only = (
         '<|tool_call>call:tool_call:get_config_reference_section'
@@ -1147,9 +1150,9 @@ def test_chat_proxy_local_reprompt_bumps_max_tokens(monkeypatch):
         "I wasn't able to generate a response. "
         "Please try rephrasing your question."
     )
-    # 1 initial + 5 tool turns + 5 executed re-prompt tool turns + 2 empty
-    # attempts = 13 provider calls.
-    assert len(calls) == 13
+    # 1 initial + MAX tool turns + MAX executed re-prompt tool turns + 2 empty
+    # attempts = 2*MAX + 3 provider calls.
+    assert len(calls) == 2 * max_turns + 3
     # The final backstop re-prompts (last two calls) must disable tools via the
     # direct-answer instruction AND raise the budget from the requested 1024
     # to EMPTY_REPROMPT_MAX_TOKENS (4096). Earlier payloads keep the request's
@@ -1163,12 +1166,12 @@ def test_chat_proxy_local_reprompt_bumps_max_tokens(monkeypatch):
             m.get('role') == 'system' and 'Do not call any tools' in m.get('content', '')
             for m in p['messages']
         )
-    # The initial + 5 main tool turns keep the request's budget; the
+    # The initial + MAX main tool turns keep the request's budget; the
     # executed re-prompt turns (which also carry the direct-answer
     # instruction) get the raised budget like the final attempts.
-    for p in calls[:6]:
+    for p in calls[:max_turns + 1]:
         assert p['max_tokens'] == 1024
-    for p in calls[6:]:
+    for p in calls[max_turns + 1:]:
         assert p['max_tokens'] == ai_routes.EMPTY_REPROMPT_MAX_TOKENS == 4096
         assert any(
             m.get('role') == 'system' and 'Do not call any tools' in m.get('content', '')

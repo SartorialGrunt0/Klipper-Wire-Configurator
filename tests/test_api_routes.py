@@ -4,6 +4,7 @@ Covers import/parse, validate, export, generate, examples, reference docs,
 schema lookup, project persistence, config saving, and warning
 acknowledgements — the core workflow endpoints the frontend uses.
 """
+import re
 import sys
 from pathlib import Path
 
@@ -545,11 +546,65 @@ def test_tool_context_advertises_exposed_tools():
         assert f"- {tool}:" in ctx, f"{tool} should be advertised"
 
 
-def test_tool_context_hides_detect_board_by_default():
+def test_tool_context_shows_specialized_tools():
+    # Niche helpers are always visible (native/text parity), grouped under a
+    # "Specialized tools" heading rather than hidden or conditionally added.
     ctx = ai_routes._build_mcp_tool_context()
-    assert "- detect_board:" not in ctx
-
-
-def test_tool_context_extra_tools_adds_detect_board():
-    ctx = ai_routes._build_mcp_tool_context(extra_tools=["detect_board"])
+    assert "Specialized tools (use only for specific problems):" in ctx
     assert "- detect_board:" in ctx
+    assert "- calculate_rotation_distance:" in ctx
+
+
+def test_tool_context_snippets_match_registered_tools():
+    # Every advertised snippet (main + specialized) must map to a real
+    # registered MCP tool, so a rename/typo can't silently advertise a tool
+    # that the executor doesn't know.
+    registered = {t["name"] for t in ai_routes._mcp_server._list_tools()}
+    advertised = set(ai_routes._MCP_TOOL_SNIPPETS) | set(
+        ai_routes._SPECIALIZED_TOOL_SNIPPETS
+    )
+    assert advertised <= registered, (
+        f"advertised tools not registered: {advertised - registered}"
+    )
+
+
+def test_tool_context_snippets_cover_schema_params():
+    # Text-protocol models learn tools ONLY from these snippets (no JSON
+    # schema is sent), so every inputSchema param of an advertised tool must
+    # appear in the snippet — or be explicitly skipped because its default is
+    # safe. This is the lock that keeps text and native protocols in sync:
+    # adding a param to a tool schema fails this test until the snippet is
+    # updated (or the param is consciously skipped with a reason).
+    schema_by_name = {t["name"]: t for t in ai_routes._mcp_server._list_tools()}
+    # Params intentionally omitted from snippets (safe defaults / niche use).
+    skipped: dict[str, set[str]] = {
+        "validate_klipper_config": {"filename"},  # default 'printer.cfg'
+        "validate_macro": {  # optional bed-bounds/no-go checks
+            "bed_x", "bed_y", "max_z",
+            "probe_offset_x", "probe_offset_y", "no_go_zones",
+        },
+        "generate_macro_template": {  # park/retract defaults are fine
+            "park_x", "park_y", "park_z",
+            "retract_distance", "retract_speed",
+        },
+        "calculate_rotation_distance": {  # niche math tool: method suffices
+            "pitch", "starts", "pulley_teeth", "belt_pitch",
+            "motor_steps", "microsteps", "steps_per_mm",
+        },
+    }
+    all_snippets = dict(ai_routes._MCP_TOOL_SNIPPETS)
+    all_snippets.update(ai_routes._SPECIALIZED_TOOL_SNIPPETS)
+    missing: dict[str, list[str]] = {}
+    for name, snippet in all_snippets.items():
+        params = set(schema_by_name[name]["inputSchema"].get("properties", {}))
+        params -= skipped.get(name, set())
+        absent = sorted(
+            p for p in params
+            if not re.search(rf"\b{re.escape(p)}\b", snippet)
+        )
+        if absent:
+            missing[name] = absent
+    assert not missing, (
+        "text snippets missing schema params (add them or skip explicitly): "
+        f"{missing}"
+    )

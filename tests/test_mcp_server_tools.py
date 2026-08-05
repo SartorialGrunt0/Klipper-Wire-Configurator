@@ -1,6 +1,6 @@
 """Tests for the embedded MCP server (mcp_server.py).
 
-Covers the DocIndex search engine, all 15 tool handlers, argument
+Covers the DocIndex search engine, all 14 tool handlers, argument
 coercion, and the JSON-RPC protocol surface (initialize, tools/list,
 tools/call, resources, ping).
 """
@@ -242,7 +242,7 @@ def test_list_klipper_docs(tmp_path):
     assert "Probe.md" in out
 
 
-# ── get_config_reference_section / get_section_schema ───────────────────
+# ── get_config_reference_section ────────────────────────────────────────
 
 
 def test_get_config_reference_section(tmp_path):
@@ -256,19 +256,7 @@ def test_get_config_reference_section_not_found(tmp_path):
     server, _ = _server(tmp_path)
     out = _call_tool(server, "get_config_reference_section", {"section_name": "warp_drive"})
     assert "not found" in out
-
-
-def test_get_section_schema(tmp_path):
-    server, _ = _server(tmp_path)
-    out = _call_tool(server, "get_section_schema", {"section_type": "extruder"})
-    assert "Section schema" in out
-    assert "[extruder]" in out
-
-
-def test_get_section_schema_unknown(tmp_path):
-    server, _ = _server(tmp_path)
-    out = _call_tool(server, "get_section_schema", {"section_type": "warp_drive"})
-    assert "No schema found" in out
+    assert "list_sections" in out  # nudge points at advertised tools only
 
 
 # ── validate_klipper_config ─────────────────────────────────────────────
@@ -306,9 +294,17 @@ def test_search_example_configs(tmp_path):
 
 
 def test_search_example_configs_empty_query(tmp_path):
-    server, _ = _server(tmp_path)
+    # Empty query is a browse: list everything (capped) instead of erroring.
+    server, root = _server(tmp_path)
+    mainboard = root / "config" / "Mainboard"
+    mainboard.mkdir(parents=True)
+    (mainboard / "generic-bigtreetech-manta-m4p.cfg").write_text(
+        "[mcu]\nserial: xyz\n",
+        encoding="utf-8",
+    )
     out = _call_tool(server, "search_example_configs", {"query": ""})
-    assert "Please provide a search query" in out
+    assert "All example configs:" in out
+    assert "generic-bigtreetech-manta-m4p.cfg" in out
 
 
 def test_search_example_configs_no_results(tmp_path):
@@ -362,6 +358,34 @@ def test_search_user_configs_no_results(tmp_path):
     server, _ = _server(tmp_path)
     out = _call_tool(server, "search_user_configs", {"query": "zzzznomatch"})
     assert "No user configs matching" in out
+    assert "list_user_configs" in out  # nudge to browse
+
+
+def test_search_user_configs_plural_fold(tmp_path):
+    # Shared tokenizer: plural query matches singular content term even when
+    # the filename carries no hint.
+    server, root = _server(tmp_path)
+    user_dir = root / "user_configs"
+    user_dir.mkdir(parents=True)
+    (user_dir / "printer.cfg").write_text(
+        "[gcode_macro PRINT_START]\ngcode: M117 printing macro\n",
+        encoding="utf-8",
+    )
+    out = _call_tool(server, "search_user_configs", {"query": "macros"})
+    assert "printer.cfg" in out
+
+
+def test_search_user_configs_alias_synonym(tmp_path):
+    # ALIAS_MAP synonym: "bltouch" matches content written as "bl_touch".
+    server, root = _server(tmp_path)
+    user_dir = root / "user_configs"
+    user_dir.mkdir(parents=True)
+    (user_dir / "probe.cfg").write_text(
+        "# bl_touch probe setup\n[mcu]\nserial: xyz\n",
+        encoding="utf-8",
+    )
+    out = _call_tool(server, "search_user_configs", {"query": "bltouch"})
+    assert "probe.cfg" in out
 
 
 # ── list_user_configs ────────────────────────────────────────────────────
@@ -483,6 +507,230 @@ def test_read_user_config_with_section_bracket_and_case(tmp_path):
     assert "[gcode_macro FIX_ME]" in out
     assert "M140 S60" in out
     assert "heater_pin: PB1" not in out
+
+
+def _write_batch_cfg(root):
+    user_dir = root / "user_configs"
+    user_dir.mkdir(parents=True)
+    (user_dir / "my_printer.cfg").write_text(
+        "# Extruder tuning\n"
+        "[extruder]\n"
+        "pressure_advance: 0.05\n"
+        "\n"
+        "[heater_bed]\n"
+        "heater_pin: PB1\n"
+        "\n"
+        "[mcu]\n"
+        "serial: /dev/serial/by-id/voron\n",
+        encoding="utf-8",
+    )
+    return "my_printer.cfg"
+
+
+def test_read_user_config_batch_sections_list(tmp_path):
+    # Native function-calling style: `sections` arrives as a real JSON list.
+    server, root = _server(tmp_path)
+    _write_batch_cfg(root)
+    out = _call_tool(server, "read_user_config", {
+        "filename": "my_printer.cfg",
+        "sections": ["extruder", "heater_bed"],
+    })
+    assert "[extruder]" in out
+    assert "pressure_advance: 0.05" in out
+    assert "[heater_bed]" in out
+    assert "heater_pin: PB1" in out
+    assert "serial: /dev/serial/by-id/voron" not in out  # [mcu] not requested
+
+
+def test_read_user_config_batch_sections_text_string(tmp_path):
+    # Text-protocol style: `_parse_kwargs` yields a plain string arg; the
+    # handler must split it itself.
+    server, root = _server(tmp_path)
+    _write_batch_cfg(root)
+    out = _call_tool(server, "read_user_config", {
+        "filename": "my_printer.cfg",
+        "sections": "extruder, heater_bed",
+    })
+    assert "[extruder]" in out
+    assert "pressure_advance: 0.05" in out
+    assert "[heater_bed]" in out
+    assert "heater_pin: PB1" in out
+
+
+def test_read_user_config_batch_sections_json_string(tmp_path):
+    # Text-protocol style: a JSON-array-as-string (brackets + quotes must be
+    # stripped per token).
+    server, root = _server(tmp_path)
+    _write_batch_cfg(root)
+    out = _call_tool(server, "read_user_config", {
+        "filename": "my_printer.cfg",
+        "sections": '["extruder", "[heater_bed]"]',
+    })
+    assert "[extruder]" in out
+    assert "pressure_advance: 0.05" in out
+    assert "[heater_bed]" in out
+    assert "heater_pin: PB1" in out
+
+
+def test_read_user_config_batch_sections_missing_reports(tmp_path):
+    server, root = _server(tmp_path)
+    _write_batch_cfg(root)
+    out = _call_tool(server, "read_user_config", {
+        "filename": "my_printer.cfg",
+        "sections": ["extruder", "[nope]"],
+    })
+    assert "pressure_advance: 0.05" in out          # valid section still returned
+    assert "not found" in out.lower()               # missing section reported
+    assert "nope" in out
+
+
+def test_read_user_config_whole_file_native_bool(tmp_path):
+    # Native style: `whole_file` arrives as a real boolean.
+    server, root = _server(tmp_path)
+    _write_batch_cfg(root)
+    out = _call_tool(server, "read_user_config", {
+        "filename": "my_printer.cfg", "whole_file": True,
+    })
+    assert "whole file" in out
+    assert "serial: /dev/serial/by-id/voron" in out
+
+
+def test_read_user_config_whole_file_text_string(tmp_path):
+    # Text-protocol style: `_coerce_args` must turn "true"/"false" strings
+    # into booleans before the handler decides.
+    server, root = _server(tmp_path)
+    _write_batch_cfg(root)
+    out = _call_tool(server, "read_user_config", {
+        "filename": "my_printer.cfg", "whole_file": "true",
+    })
+    assert "whole file" in out
+    assert "serial: /dev/serial/by-id/voron" in out
+
+    out_false = _call_tool(server, "read_user_config", {
+        "filename": "my_printer.cfg", "whole_file": "false",
+    })
+    # "false" must NOT be truthy — the default (omit-everything) label is
+    # different from the explicit whole-file label.
+    assert "whole file" not in out_false
+
+
+def test_read_user_config_whole_file_truncates_large(tmp_path):
+    # Huge whole-file reads are capped with a targeted-read notice (the real
+    # Trident printer.cfg is ~20K chars, so the 32K cap never touches it;
+    # this guards pathological multi-file dumps).
+    server, root = _server(tmp_path)
+    user_dir = root / "user_configs"
+    user_dir.mkdir(parents=True)
+    big = user_dir / "huge.cfg"
+    big.write_text("[printer]\nkinematics: corexy\n" + ("# filler\n" * 12000), encoding="utf-8")
+    assert big.stat().st_size > mcp_server.MAX_USER_CONFIG_READ_CHARS
+
+    out = _call_tool(server, "read_user_config", {"filename": "huge.cfg", "whole_file": True})
+    assert "truncated at" in out
+    assert "section='...'" in out
+    # Content beyond the cap must not leak into context.
+    assert "filler" in out  # some content present
+    assert len(out) < big.stat().st_size
+
+    out_files = _call_tool(server, "read_user_config", {"files": ["huge.cfg"]})
+    assert "truncated at" in out_files
+
+
+def test_read_user_config_files_list(tmp_path):
+    # Native style: `files` arrives as a real JSON list — read several WHOLE
+    # files in one call.
+    server, root = _server(tmp_path)
+    _write_batch_cfg(root)
+    aux = root / "user_configs" / "aux_fan.cfg"
+    aux.write_text("[fan_generic Aux_Fan]\npin: PB9\n", encoding="utf-8")
+    out = _call_tool(server, "read_user_config", {
+        "files": ["my_printer.cfg", "aux_fan.cfg"],
+    })
+    assert "whole file" in out
+    assert "pressure_advance: 0.05" in out       # printer.cfg content
+    assert "[fan_generic Aux_Fan]" in out        # aux_fan.cfg content
+    assert "pin: PB9" in out
+
+
+def test_read_user_config_files_text_string(tmp_path):
+    # Text-protocol style: comma/JSON-array string for `files`.
+    server, root = _server(tmp_path)
+    _write_batch_cfg(root)
+    aux = root / "user_configs" / "aux_fan.cfg"
+    aux.write_text("[fan_generic Aux_Fan]\npin: PB9\n", encoding="utf-8")
+    out = _call_tool(server, "read_user_config", {
+        "files": '["my_printer.cfg", "aux_fan.cfg"]',
+    })
+    assert "pressure_advance: 0.05" in out
+    assert "pin: PB9" in out
+
+
+def test_read_user_config_files_missing_reports(tmp_path):
+    server, root = _server(tmp_path)
+    _write_batch_cfg(root)
+    out = _call_tool(server, "read_user_config", {
+        "files": ["my_printer.cfg", "ghost.cfg"],
+    })
+    assert "pressure_advance: 0.05" in out
+    assert "not found" in out.lower()
+    assert "ghost.cfg" in out
+
+
+def test_get_config_reference_section_batch_list(tmp_path):
+    # Native style: `sections` list fetches several reference sections in one call.
+    server, _ = _server(tmp_path)
+    out = _call_tool(server, "get_config_reference_section", {
+        "sections": ["bed_mesh", "extruder"],
+    })
+    assert "[bed_mesh]" in out
+    assert "horizontal_move_z" in out
+    assert "[extruder]" in out
+    assert "heater_pin" in out
+
+
+def test_get_config_reference_section_batch_text_string(tmp_path):
+    # Text-protocol style: comma string for `sections`.
+    server, _ = _server(tmp_path)
+    out = _call_tool(server, "get_config_reference_section", {
+        "sections": "bed_mesh, extruder",
+    })
+    assert "horizontal_move_z" in out
+    assert "heater_pin" in out
+
+
+def test_get_config_reference_section_list_sections(tmp_path):
+    # `list_sections: true` returns ONLY the headers (lean index), like
+    # read_user_config — so the model can discover what's available before
+    # reading one section, without dumping the whole reference.
+    server, _ = _server(tmp_path)
+    out = _call_tool(server, "get_config_reference_section", {
+        "list_sections": True,
+    })
+    assert "[bed_mesh]" in out
+    assert "[extruder]" in out
+    assert "content not attached" in out
+    assert "horizontal_move_z" not in out       # no section content leaked
+
+
+def test_get_config_reference_section_list_sections_text_string(tmp_path):
+    # Text-protocol style: "true" string coerced by _coerce_args.
+    server, _ = _server(tmp_path)
+    out = _call_tool(server, "get_config_reference_section", {
+        "list_sections": "true",
+    })
+    assert "[bed_mesh]" in out
+    assert "[extruder]" in out
+
+
+def test_doc_index_list_config_reference_sections(tmp_path):
+    index = _index_for(tmp_path)
+    _make_doc(tmp_path, "Config_Reference.md", (
+        "# Config Reference\n\n"
+        "### [bed_mesh]\nmesh_min: 10, 10\n\n"
+        "### [extruder]\nheater_pin: PB6\n"
+    ))
+    index.load()
+    assert index.list_config_reference_sections() == ["bed_mesh", "extruder"]
 
 
 def test_read_user_config_with_section_not_found(tmp_path):
@@ -722,7 +970,7 @@ def test_tools_list(tmp_path):
     assert "validate_klipper_config" in names
     assert "generate_macro_template" in names
     assert "list_user_configs" in names
-    assert len(names) == 15
+    assert len(names) == 14  # get_section_schema removed (redundant w/ reference)
 
 
 def test_tools_call_unknown_tool(tmp_path):
@@ -788,3 +1036,77 @@ def test_coerce_args_leaves_real_types(tmp_path):
     server, _ = _server(tmp_path)
     coerced = server._coerce_args({"pitch": 2.5, "starts": 4, "flag": True})
     assert coerced == {"pitch": 2.5, "starts": 4, "flag": True}
+
+
+# ── Klipper doc-source resolution (klipper_paths) ───────────────────────
+
+
+def test_find_klipper_install_env_override_wins(tmp_path, monkeypatch):
+    # KWC_KLIPPER_DIR always wins, even without the native-deployment marker.
+    import klipper_paths
+
+    fake = tmp_path / "klipper"
+    (fake / "docs").mkdir(parents=True)
+    monkeypatch.setenv("KWC_KLIPPER_DIR", str(fake))
+    monkeypatch.setattr(klipper_paths, "DEPLOYMENT_CONFIG_PATH", tmp_path / "no-marker")
+    assert klipper_paths.find_klipper_install() == fake
+
+
+def test_find_klipper_install_requires_native_deployment(tmp_path, monkeypatch):
+    # No env override: a ~/klipper checkout must NOT be picked up on a dev
+    # box (no native deployment marker) — bundled docs stay the source.
+    import klipper_paths
+
+    fake = tmp_path / "klipper"
+    (fake / "docs").mkdir(parents=True)
+    monkeypatch.delenv("KWC_KLIPPER_DIR", raising=False)
+    monkeypatch.setattr(klipper_paths, "DEPLOYMENT_CONFIG_PATH", tmp_path / "no-marker")
+    monkeypatch.setattr(klipper_paths, "is_native_platform", lambda: True)
+    monkeypatch.setattr(klipper_paths, "_COMMON_KLIPPER_PATHS", (fake,))
+    assert klipper_paths.find_klipper_install() is None
+
+
+def test_find_klipper_install_uses_install_when_deployed(tmp_path, monkeypatch):
+    # Native deployment marker present + klipper at a common path -> used.
+    import klipper_paths
+
+    fake = tmp_path / "klipper"
+    (fake / "docs").mkdir(parents=True)
+    marker = tmp_path / ".klipper" / "config"
+    marker.mkdir(parents=True)
+    monkeypatch.delenv("KWC_KLIPPER_DIR", raising=False)
+    monkeypatch.setattr(klipper_paths, "DEPLOYMENT_CONFIG_PATH", marker)
+    monkeypatch.setattr(klipper_paths, "is_native_platform", lambda: True)
+    monkeypatch.setattr(klipper_paths, "_COMMON_KLIPPER_PATHS", (fake,))
+    assert klipper_paths.find_klipper_install() == fake
+
+
+def test_doc_index_load_dir_merges(tmp_path):
+    # KWC custom docs load alongside the official docset via load_dir().
+    _make_doc(tmp_path, "a.md", "# A\n\ncontent a")
+    index = _index_for(tmp_path)
+    assert index.get_doc_count() == 1
+    other = tmp_path / "custom"
+    other.mkdir()
+    (other / "b.md").write_text("# B\n\ncontent b", encoding="utf-8")
+    index.load_dir(other)
+    assert index.get_doc_count() == 2
+    assert index.list_docs()[0]["filename"] == "a.md"
+
+
+def test_get_index_includes_kwc_custom_docs():
+    # Production index: official docset + KWC-authored docs always present.
+    import mcp_server
+
+    idx = mcp_server.get_index()
+    names = {d["filename"] for d in idx.list_docs()}
+    assert "Klipper_GCode_Macro_AI_Summary.md" in names
+    assert "Klipper_Docs_AI_Summary.md" in names
+    assert "klippain_shaketune.md" in names
+
+
+def test_list_klipper_docs_notes_source(tmp_path):
+    server, _ = _server(tmp_path)
+    out = _call_tool(server, "list_klipper_docs", {})
+    assert "Source:" in out
+

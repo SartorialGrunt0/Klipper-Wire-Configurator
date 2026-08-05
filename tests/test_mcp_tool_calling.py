@@ -170,11 +170,11 @@ def test_extract_tool_calls_llamacpp_tool_use_prefix():
 
 def test_extract_tool_calls_bare_tool_json_line():
     # Unwrapped 'tool\n{json}' (no <|tool_call|> token) — Format 4 path.
-    text = 'tool\n{"name": "get_section_schema", "arguments": {"section_type": "bed_mesh"}}\n'
+    text = 'tool\n{"name": "read_user_config", "arguments": {"filename": "printer.cfg"}}\n'
     calls = _extract_tool_calls(text)
     assert calls == [{
-        "name": "get_section_schema",
-        "arguments": {"section_type": "bed_mesh"},
+        "name": "read_user_config",
+        "arguments": {"filename": "printer.cfg"},
     }]
 
 
