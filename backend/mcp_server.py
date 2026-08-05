@@ -27,14 +27,22 @@ from typing import Any
 
 # ── Paths ────────────────────────────────────────────────────────────
 
-BACKEND_DIR = Path(__file__).parent
-REFERENCE_DIR = BACKEND_DIR.parent / "reference"
-KLIPPER_DOCS_DIR = REFERENCE_DIR / "reference_docs" / "klipper_docs"
+# Hard-failover resolution: installed Klipper repo when present (docs track
+# the installed firmware), bundled copies otherwise. KWC-authored docs load
+# alongside from reference/kwc_docs/ (see klipper_paths.py).
+from klipper_paths import (  # noqa: E402
+    BACKEND_DIR,
+    CONFIG_EXAMPLES_DIR,
+    DOC_SOURCE,
+    KLIPPER_DOCS_DIR,
+    KWC_CUSTOM_DOCS_DIR,
+    REFERENCE_DIR,
+)
+
 DOC_CATALOG_PATH = KLIPPER_DOCS_DIR
 CONFIG_REFERENCE_PATH = KLIPPER_DOCS_DIR / "Config_Reference.md"
-GCODE_MACRO_SUMMARY_PATH = KLIPPER_DOCS_DIR / "Klipper_GCode_Macro_AI_Summary.md"
-DOCS_SUMMARY_PATH = KLIPPER_DOCS_DIR / "Klipper_Docs_AI_Summary.md"
-CONFIG_EXAMPLES_DIR = REFERENCE_DIR / "config"
+GCODE_MACRO_SUMMARY_PATH = KWC_CUSTOM_DOCS_DIR / "Klipper_GCode_Macro_AI_Summary.md"
+DOCS_SUMMARY_PATH = KWC_CUSTOM_DOCS_DIR / "Klipper_Docs_AI_Summary.md"
 # The system path for Klipper configs (e.g. /home/pi/.klipper/config)
 # Can be overridden via KLIPPER_CONFIG_PATH environment variable.
 SYSTEM_CONFIG_PATH = Path(os.environ.get("KLIPPER_CONFIG_PATH", "/home/pi/.klipper/config"))
@@ -49,6 +57,12 @@ SERVER_NAME = "klipper-wire-configurator"
 SERVER_VERSION = "1.0.0"
 MAX_SEARCH_RESULTS = 10
 MAX_READ_CHARS = 16_000
+# Whole-file user-config reads are capped generously — the real Trident
+# printer.cfg is ~20K chars (~5-6K tokens, ~17% of a 32K window) and whole-
+# file reads have passed the harness (AMBI-02 move-macros), so the cap only
+# guards pathological multi-file dumps. The truncation notice nudges the
+# model to targeted section reads instead of dumping huge files into context.
+MAX_USER_CONFIG_READ_CHARS = 32_000
 SNIPPET_CHARS = 300
 STOP_WORDS = frozenset({
     "a", "an", "and", "are", "as", "at", "be", "by", "can", "cfg",
@@ -98,6 +112,40 @@ def _fold_plural(word: str) -> str:
     return word
 
 
+def _expand_query_terms(text: str) -> list[str]:
+    """Tokenize a query/doc term, adding folded plurals and alias variants.
+
+    Shared by the docs index and user-config search so natural-language
+    queries match joined config terms (e.g. "probe offset" -> probe_offset).
+    """
+    tokens: list[str] = []
+    for t in re.findall(r"[a-z0-9]{2,}", text.lower()):
+        if t in STOP_WORDS or t.isdigit():
+            continue
+        tokens.append(t)
+        folded = _fold_plural(t)
+        if folded != t:
+            tokens.append(folded)
+        for alias in ALIAS_MAP.get(t, ()):
+            tokens.extend(
+                a for a in re.findall(r"[a-z0-9]{2,}", alias.lower())
+                if a not in STOP_WORDS and not a.isdigit()
+            )
+    return tokens
+
+
+def _cap_whole_file(content: str, cap: int = MAX_USER_CONFIG_READ_CHARS) -> str:
+    """Cap whole-file content injected into context, with a targeted-read nudge."""
+    if len(content) <= cap:
+        return content
+    return (
+        content[:cap]
+        + "\n\n# [truncated at "
+        + str(cap)
+        + " chars; use section='...' or list_sections=true to read targeted parts]"
+    )
+
+
 # ══════════════════════════════════════════════════════════════════════
 #  Search Engine
 # ══════════════════════════════════════════════════════════════════════
@@ -121,7 +169,21 @@ class DocIndex:
         if not self.docs_dir.is_dir():
             return
 
-        for path in sorted(self.docs_dir.glob("*.md")):
+        self._load_dir(self.docs_dir)
+        self._ready = True
+
+    def load_dir(self, extra_dir: Path) -> None:
+        """Merge markdown docs from an extra directory into the index.
+
+        Used for KWC-authored docs (reference/kwc_docs/) which always load
+        alongside whichever official docset is active (installed or bundled).
+        """
+        if not extra_dir.is_dir():
+            return
+        self._load_dir(extra_dir)
+
+    def _load_dir(self, docs_dir: Path) -> None:
+        for path in sorted(docs_dir.glob("*.md")):
             stem = path.stem
             try:
                 content = path.read_text(encoding="utf-8", errors="replace")
@@ -235,6 +297,13 @@ class DocIndex:
 
         return results
 
+    def list_config_reference_sections(self) -> list[str]:
+        """Return every config section header found in Config_Reference.md."""
+        content = self._docs.get("Config_Reference")
+        if content is None:
+            return []
+        return [m.group(1).strip() for m in CONFIG_SECTION_HEADER_RE.finditer(content)]
+
     def get_config_reference_section(self, section_name: str) -> dict[str, Any] | None:
         """Extract a named section from Config_Reference.md."""
         content = self._docs.get("Config_Reference")
@@ -279,20 +348,7 @@ class DocIndex:
         """Split text into word tokens (underscores/hyphens become separators),
         adding folded plurals and alias variants so natural-language queries
         match joined config terms (e.g. "probe offset" -> probe_offset)."""
-        tokens: list[str] = []
-        for t in re.findall(r"[a-z0-9]{2,}", text.lower()):
-            if t in STOP_WORDS or t.isdigit():
-                continue
-            tokens.append(t)
-            folded = _fold_plural(t)
-            if folded != t:
-                tokens.append(folded)
-            for alias in ALIAS_MAP.get(t, ()):
-                tokens.extend(
-                    a for a in re.findall(r"[a-z0-9]{2,}", alias.lower())
-                    if a not in STOP_WORDS and not a.isdigit()
-                )
-        return tokens
+        return _expand_query_terms(text)
 
     def _make_snippet(self, content: str, query: str) -> str:
         """Extract a relevant snippet around the first query match."""
@@ -327,11 +383,18 @@ _index: DocIndex | None = None
 
 
 def get_index() -> DocIndex:
-    """Get or create the shared DocIndex singleton."""
+    """Get or create the shared DocIndex singleton.
+
+    Loads the resolved official docset (installed Klipper docs when present,
+    bundled copies otherwise) plus the KWC-authored docs from
+    reference/kwc_docs/ so the macro/Jinja summary and other custom docs are
+    always available.
+    """
     global _index
     if _index is None:
         _index = DocIndex()
         _index.load()
+        _index.load_dir(KWC_CUSTOM_DOCS_DIR)
     return _index
 
 
@@ -417,7 +480,11 @@ class McpServer:
                 "description": (
                     "Extract a specific configuration section from Config_Reference.md by section name. "
                     "Returns the full section text with all parameters, defaults, and aliases. "
-                    "Example section names: 'bed_mesh', 'extruder', 'stepper_x', 'probe', 'heater_fan'"
+                    "Example section names: 'bed_mesh', 'extruder', 'stepper_x', 'probe', 'heater_fan'. "
+                    "Pass 'list_sections': true to get ONLY the section headers (lean index of "
+                    "what the reference supports) before picking one. "
+                    "To fetch SEVERAL sections in one call, pass 'sections' as a list "
+                    "(e.g. sections=['extruder', 'input_shaper'])."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -426,8 +493,24 @@ class McpServer:
                             "type": "string",
                             "description": "Klipper config section name (e.g. 'bed_mesh', 'extruder', 'stepper_x')",
                         },
+                        "list_sections": {
+                            "type": "boolean",
+                            "description": (
+                                "When true, return only the section headers of "
+                                "Config_Reference.md (e.g. '[printer]', '[bed_mesh]') "
+                                "instead of content — lean context to pick which "
+                                "section to read."
+                            ),
+                        },
+                        "sections": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Optional list of config section names to fetch in "
+                                "one call (e.g. ['extruder', 'input_shaper'])."
+                            ),
+                        },
                     },
-                    "required": ["section_name"],
                 },
             },
             {
@@ -452,24 +535,6 @@ class McpServer:
                         },
                     },
                     "required": ["config_text"],
-                },
-            },
-            {
-                "name": "get_section_schema",
-                "description": (
-                    "Get the supported parameters, types, defaults, and descriptions "
-                    "for a Klipper config section type. Use this to find exactly which "
-                    "parameters a section supports and what values are valid."
-                ),
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "section_type": {
-                            "type": "string",
-                            "description": "Section type name (e.g. 'extruder', 'bed_mesh', 'heater_fan', 'temperature_sensor')",
-                        },
-                    },
-                    "required": ["section_type"],
                 },
             },
             {
@@ -555,12 +620,16 @@ class McpServer:
                     "Read a user configuration file from the 'user_configs' directory. "
                     "Use search_user_configs first to find the exact filename. "
                     "Pass 'list_sections': true to get ONLY the section headers (lean "
-                    "context); then read the section you need with 'section' (e.g. "
-                    "section='extruder' or section='[gcode_macro FIX_ME]'). Omit both "
-                    "ONLY when you need the whole file as an overview. Do NOT read "
-                    "config for from-scratch macro creation unless you need a specific "
-                    "value. Call this FIRST whenever the user names a config file to "
-                    "edit or inspect — do not ask the user to provide the content."
+                    "context); then read the sections you need with 'section' (single, "
+                    "e.g. section='extruder') or 'sections' (batch, e.g. "
+                    "sections=['extruder', '[gcode_macro FIX_ME]']) to fetch several in "
+                    "ONE call — prefer batching when you need multiple sections. Pass "
+                    "'files' (e.g. files=['printer.cfg', 'aux_fan.cfg']) to read "
+                    "SEVERAL WHOLE files in one call. Pass 'whole_file': true to get one "
+                    "entire file (use only when you really need the whole overview). Do "
+                    "NOT read config for from-scratch macro creation unless you need a "
+                    "specific value. Call this FIRST whenever the user names a config "
+                    "file to edit or inspect — do not ask the user to provide the content."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -583,6 +652,32 @@ class McpServer:
                                 "Optional section header to read only that section "
                                 "(e.g. 'extruder' or '[gcode_macro FIX_ME]') instead "
                                 "of the whole file (partial context)."
+                            ),
+                        },
+                        "sections": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Optional list of section headers to read in one call "
+                                "(e.g. ['extruder', '[bed_mesh]']). Prefer this over "
+                                "repeated single-section reads when you need several."
+                            ),
+                        },
+                        "whole_file": {
+                            "type": "boolean",
+                            "description": (
+                                "When true, return the entire file content. Use only "
+                                "when you really need the whole overview; prefer "
+                                "section/sections for targeted reads."
+                            ),
+                        },
+                        "files": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Optional list of config filenames to read in one "
+                                "call, each returned as a whole file (e.g. "
+                                "['printer.cfg', 'aux_fan.cfg'])."
                             ),
                         },
                     },
@@ -767,7 +862,6 @@ class McpServer:
             "list_klipper_docs": self._handle_list_docs,
             "get_config_reference_section": self._handle_config_section,
             "validate_klipper_config": self._handle_validate,
-            "get_section_schema": self._handle_schema,
             "search_example_configs": self._handle_search_examples,
             "read_example_config": self._handle_read_example_config,
             "search_user_configs": self._handle_search_user_configs,
@@ -870,7 +964,8 @@ class McpServer:
             return "No documentation files found."
 
         lines: list[str] = [
-            f"# Klipper Documentation ({len(docs)} files)\n",
+            f"# Klipper Documentation ({len(docs)} files)",
+            f"# Source: {DOC_SOURCE}\n",
         ]
         for d in docs:
             config_tag = " [has config sections]" if d["has_config_sections"] else ""
@@ -885,6 +980,67 @@ class McpServer:
         # Accept both `section` and `section_name` — small local models often
         # guess the shorter key when the prompt only carries a one-line snippet.
         section = str(args.get("section_name") or args.get("section") or "").strip()
+
+        # Lean index mode: `list_sections: true` returns ONLY the section
+        # headers of Config_Reference.md (mirrors read_user_config), so the
+        # model can see what is available before asking for one section.
+        if args.get("list_sections"):
+            headers = self.index.list_config_reference_sections()
+            if not headers:
+                return "# Config_Reference.md\n# No config sections detected."
+            return (
+                f"# Config_Reference.md  ({len(headers)} config sections; "
+                "content not attached)\n\n"
+                + "\n".join(f"[{h}]" for h in headers)
+                + "\n\nRead a section with: get_config_reference_section("
+                f"section_name='{headers[0]}') — or another header above."
+            )
+
+        # Batch mode: `sections` = list of section names (or a comma/newline/
+        # JSON-array string in the text protocol) to fetch in ONE call.
+        sections_raw = args.get("sections")
+        if sections_raw:
+            if isinstance(sections_raw, str):
+                names = [
+                    s.strip().strip("[]").strip("\"'")
+                    for s in re.split(r"[,\n]", sections_raw)
+                    if s.strip()
+                ]
+            else:
+                names = [str(s).strip() for s in sections_raw if str(s).strip()]
+            parts: list[str] = []
+            missing: list[str] = []
+            for name in names:
+                result = self.index.get_config_reference_section(name)
+                if result is None:
+                    missing.append(name)
+                    continue
+                content = result["content"]
+                aliases = result["aliases"]
+                alias_line = (
+                    f"Also known as: {', '.join(a for a in aliases if a != result['section'])}"
+                    if len(aliases) > 1
+                    else ""
+                )
+                parts.append(
+                    f"# [{result['section']}]\n{alias_line}\n\n{content}"
+                    if alias_line
+                    else f"# [{result['section']}]\n\n{content}"
+                )
+            if missing:
+                parts.append(
+                    f"Sections not found in Config_Reference.md: {', '.join(missing)}. "
+                    "Use search_klipper_docs to find relevant documentation, or "
+                    "list_sections=true to see what the reference supports."
+                )
+            if not parts:
+                return (
+                    f'No sections matched in Config_Reference.md. '
+                    f"Use search_klipper_docs to find relevant documentation, or "
+                    f"list_sections=true to see the section headers."
+                )
+            return "\n\n".join(parts)
+
         if not section:
             return "Please provide a section name."
 
@@ -904,7 +1060,7 @@ class McpServer:
             return (
                 f'Section "[{section}]" not found in Config_Reference.md. '
                 f"Use search_klipper_docs to find relevant documentation, or "
-                f"use get_section_schema to look up supported section types."
+                f"list_sections=true to see the section headers."
             )
 
         content = result["content"]
@@ -1011,55 +1167,16 @@ class McpServer:
 
         return "\n".join(result)
 
-    def _handle_schema(self, args: dict[str, Any]) -> str:
-        section_type = args.get("section_type", "").strip().lower()
-        if not section_type:
-            return "Please provide a section type."
-
-        try:
-            from parser.config_schema import get_section_def
-
-            schema = get_section_def(section_type)
-            if not schema:
-                return f'No schema found for section type "{section_type}". Available types include: extruder, heater_fan, fan, temperature_sensor, probe, bed_mesh, filament_switch_sensor, gcode_macro, display, etc.'
-
-            lines: list[str] = [
-                f"# Section schema: [{section_type}]\n",
-                f"**{schema.description}**\n" if hasattr(schema, 'description') and schema.description else "",
-            ]
-
-            if hasattr(schema, 'parameters') and schema.parameters:
-                lines.append(f"## Parameters ({len(schema.parameters)})")
-                for param in schema.parameters:
-                    ptype = param.param_type if hasattr(param, 'param_type') else "unknown"
-                    default = f"  (default: {param.default})" if hasattr(param, 'default') and param.default else ""
-                    desc = param.description if hasattr(param, 'description') and param.description else ""
-                    lines.append(f"- **{param.name}**  [{ptype}]{default}")
-                    if desc:
-                        lines.append(f"  {desc}")
-                lines.append("")
-
-            return "\n".join(lines)
-
-        except ImportError:
-            return (
-                f'Schema lookup for "{section_type}" is not available '
-                f"because the full config schema module could not be loaded. "
-                f"Use get_config_reference_section or search_klipper_docs instead."
-            )
-
     def _handle_search_examples(self, args: dict[str, Any]) -> str:
         query = args.get("query", "").strip().lower()
         limit = min(int(args.get("limit", 10)), 30)
-
-        if not query:
-            return "Please provide a search query."
 
         examples_dir = CONFIG_EXAMPLES_DIR
         if not examples_dir.is_dir():
             return "Example config directory not found."
 
-        # Scan all .cfg files in the config examples tree
+        # Scan all .cfg files in the config examples tree. An empty query is a
+        # browse: list everything (capped at limit) instead of erroring.
         results: list[dict[str, Any]] = []
         query_terms = query.replace("-", " ").split()
 
@@ -1073,7 +1190,7 @@ class McpServer:
                 search_text = f"{category} {name} {cat_dir.name}".lower().replace("-", " ")
                 # Score by number of matching query terms
                 score = sum(1 for term in query_terms if term in search_text)
-                if score == 0:
+                if query_terms and score == 0:
                     continue
 
                 # Read first few non-comment lines for a preview snippet
@@ -1104,7 +1221,8 @@ class McpServer:
         # Sort by score descending, then alphabetically
         results.sort(key=lambda r: (-r["score"], r["category"], r["filename"]))
 
-        lines: list[str] = [f"Example configs matching: {query}\n"]
+        heading = f"Example configs matching: {query}" if query else "All example configs:"
+        lines: list[str] = [heading]
         for r in results[:limit]:
             lines.append(f"## {r['filename']}  [{r['category']}/{r['subcategory']}]")
             if r["snippet"]:
@@ -1175,7 +1293,9 @@ class McpServer:
             scan_paths.append(LOCAL_CONFIGS_DIR)
 
         results: list[dict[str, Any]] = []
-        query_terms = query.replace("-", " ").split()
+        # Shared tokenizer: folds plurals and applies ALIAS_MAP synonyms so
+        # natural-language queries match config terms (same as docs search).
+        query_terms = list(dict.fromkeys(_expand_query_terms(query)))
         seen_filenames: set[str] = set()
 
         for scan_dir in scan_paths:
@@ -1217,7 +1337,10 @@ class McpServer:
                 continue
 
         if not results:
-            return f'No user configs matching "{query}". Try different keywords.'
+            return (
+                f'No user configs matching "{query}". Try different keywords '
+                "or use list_user_configs to browse available files."
+            )
 
         results.sort(key=lambda r: (-r["score"], r["filename"]))
 
@@ -1266,13 +1389,9 @@ class McpServer:
         )
         return "\n".join(lines)
 
-    def _handle_read_user_config(self, args: dict[str, Any]) -> str:
-        # Accept `file` as an alias — small local models guess the shorter
-        # key when the prompt snippet carries only `filename=`.
-        raw = str(args.get("filename") or args.get("file") or "").strip()
-        if not raw:
-            return "Please provide a config filename (filename='printer.cfg')."
-
+    def _resolve_user_config_file(self, raw: str) -> Path | None:
+        """Resolve a user config filename (exact, then fuzzy) across the local
+        and system config directories. Returns the file path or None."""
         stem = Path(raw).stem.lower()
 
         # Search both local and system config directories
@@ -1282,8 +1401,6 @@ class McpServer:
         if SYSTEM_CONFIG_PATH.is_dir():
             scan_paths.append(SYSTEM_CONFIG_PATH)
 
-        candidate: Path | None = None
-
         # First try exact match (basename or relative path like
         # configs/my_extra_configs/config.cfg)
         for scan_dir in scan_paths:
@@ -1291,28 +1408,73 @@ class McpServer:
                 for cfg_file in scan_dir.rglob("*.cfg"):
                     rel = cfg_file.relative_to(scan_dir).as_posix()
                     if cfg_file.name.lower() == raw.lower() or rel.lower() == raw.lower():
-                        candidate = cfg_file
-                        break
+                        return cfg_file
             except OSError:
                 continue
-            if candidate:
-                break
 
         # If no exact match, try fuzzy match
-        if candidate is None:
-            query_tokens = set(stem.replace("-", " ").replace("_", " ").split())
-            for scan_dir in scan_paths:
-                try:
-                    for cfg_file in scan_dir.rglob("*.cfg"):
-                        file_tokens = set(cfg_file.stem.lower().replace("-", " ").replace("_", " ").split())
-                        if query_tokens and query_tokens <= file_tokens:
-                            candidate = cfg_file
-                            break
-                except OSError:
-                    continue
-                if candidate:
-                    break
+        query_tokens = set(stem.replace("-", " ").replace("_", " ").split())
+        for scan_dir in scan_paths:
+            try:
+                for cfg_file in scan_dir.rglob("*.cfg"):
+                    file_tokens = set(
+                        cfg_file.stem.lower().replace("-", " ").replace("_", " ").split()
+                    )
+                    if query_tokens and query_tokens <= file_tokens:
+                        return cfg_file
+            except OSError:
+                continue
+        return None
 
+    def _handle_read_user_config(self, args: dict[str, Any]) -> str:
+        # Accept `file` as an alias — small local models guess the shorter
+        # key when the prompt snippet carries only `filename=`.
+        raw = str(args.get("filename") or args.get("file") or "").strip()
+
+        # Batch whole-file mode: `files` = list of filenames to read in ONE
+        # call (or a comma/newline/JSON-array string in the text protocol).
+        files_raw = args.get("files")
+        if files_raw:
+            if isinstance(files_raw, str):
+                names = [
+                    s.strip().strip("[]").strip("\"'")
+                    for s in re.split(r"[,\n]", files_raw)
+                    if s.strip()
+                ]
+            else:
+                names = [str(s).strip() for s in files_raw if str(s).strip()]
+            parts: list[str] = []
+            missing: list[str] = []
+            for name in names:
+                candidate = self._resolve_user_config_file(name)
+                if candidate is None:
+                    missing.append(name)
+                    continue
+                try:
+                    content = candidate.read_bytes().decode("utf-8", errors="replace")
+                except OSError as exc:
+                    parts.append(f"Error reading {candidate.name}: {exc}")
+                    continue
+                parts.append(
+                    f"# {candidate.name}  (User Config - whole file)\n"
+                    f"# {len(content)} bytes\n\n" + _cap_whole_file(content)
+                )
+            if missing:
+                parts.append(
+                    f"User config files not found: {', '.join(missing)}. "
+                    "Use list_user_configs to see all files."
+                )
+            if not parts:
+                return (
+                    "No user config files matched. Use list_user_configs to see "
+                    "all files, or search_user_configs to find them."
+                )
+            return "\n\n".join(parts)
+
+        if not raw:
+            return "Please provide a config filename (filename='printer.cfg')."
+
+        candidate = self._resolve_user_config_file(raw)
         if candidate is None:
             return f'User config file "{raw}" not found. Use search_user_configs to find matching files.'
 
@@ -1323,6 +1485,8 @@ class McpServer:
 
         list_sections = bool(args.get("list_sections", False))
         section = args.get("section", "").strip()
+        whole_file = bool(args.get("whole_file", False))
+        sections_raw = args.get("sections")
 
         if list_sections:
             headers = self._list_config_sections(content)
@@ -1348,9 +1512,52 @@ class McpServer:
                 "context; the file may have more sections)\n\n"
             )
             result += section_text
+        elif sections_raw:
+            # Batch read: accept a list of section names (or a comma/newline
+            # separated string — small local models often pass a string).
+            if isinstance(sections_raw, str):
+                section_names = [
+                    s.strip().strip("[]").strip("\"'")
+                    for s in re.split(r"[,\n]", sections_raw)
+                    if s.strip()
+                ]
+            else:
+                section_names = [
+                    str(s).strip() for s in sections_raw if str(s).strip()
+                ]
+            parts: list[str] = []
+            missing: list[str] = []
+            for name in section_names:
+                section_text = self._extract_config_section(content, name)
+                if section_text is None:
+                    missing.append(name)
+                else:
+                    parts.append(
+                        f"# {candidate.name} (User Config - section [{name}] partial "
+                        "context; the file may have more sections)\n\n" + section_text
+                    )
+            if missing:
+                parts.append(
+                    f"Sections not found in {candidate.name}: {', '.join(missing)}. "
+                    "Use list_sections: true to see all headers."
+                )
+            if not parts:
+                return (
+                    f'No sections matched in {candidate.name}. '
+                    "Use search_user_configs to find the exact filename, or "
+                    "list_sections: true to see the headers."
+                )
+            result = "\n\n".join(parts)
+        elif whole_file:
+            # Explicit whole-file read (vs the legacy omit-everything default).
+            result = (
+                f"# {candidate.name}  (User Config - whole file)\n"
+                f"# {len(content)} bytes\n\n"
+            )
+            result += _cap_whole_file(content)
         else:
             result = f"# {candidate.name}  (User Config)\n# {len(content)} bytes\n\n"
-            result += content
+            result += _cap_whole_file(content)
 
         # Append validation results if available (filtered to the requested
         # section when reading partial context).

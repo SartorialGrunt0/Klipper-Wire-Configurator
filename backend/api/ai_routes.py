@@ -201,9 +201,13 @@ SYSTEM_PROMPT = (
     "return exactly:\n"
     "  # file: printer.cfg\n"
     "  [printer]\n"
-    "  -    max_accel: 10000\n"
-    "  +    max_accel: 12000\n"
+    "  -max_accel: 10000\n"
+    "  +max_accel: 12000\n"
     "  Other params in [printer] (kinematics, max_velocity, etc.) are NOT repeated.\n"
+    "  A pure addition (nothing removed) needs no '-' line — just the section header "
+    "plus the '+' lines. A pure deletion (nothing added) needs no '+' line — just "
+    "the section header plus the '-' lines. If a section is already correct and you "
+    "only need to show it, quoting it unchanged is allowed.\n"
     "- To ADD a new section, write the full section. To DELETE a section entirely, write "
     "`*[section_name]` on its own line inside the cfg block (* = delete). To comment a "
     "section out, keep it in the file with its header commented out: #[extruder].\n"
@@ -355,12 +359,9 @@ def _prepare_messages(messages: list[dict]) -> list[dict]:
         # no auto-fill, no task anchor.
         system_parts = [_build_mcp_tool_context()]
     else:
-        # When printer memory is blank the model is offered the auto-fill
-        # flow; expose detect_board (board/MCU identification) only then so
-        # it can identify the mainboard from the user's config.
-        tool_context = _build_mcp_tool_context(
-            extra_tools=["detect_board"] if memory_blank else None
-        )
+        # All tools are advertised unconditionally (native/text parity);
+        # detect_board and other niche helpers live under "Specialized tools".
+        tool_context = _build_mcp_tool_context()
         system_parts = [SYSTEM_PROMPT, tool_context, memory_context]
 
         # If printer memory is completely blank and there are user messages
@@ -429,66 +430,84 @@ def _prepare_messages(messages: list[dict]) -> list[dict]:
 # ── MCP Tool Integration ───────────────────────────────────────────
 
 
-_EXTRA_TOOL_SNIPPETS: dict[str, str] = {
+_SPECIALIZED_TOOL_SNIPPETS: dict[str, str] = {
     "detect_board": (
-        "Detect the likely printer board/MCU family from a config snippet — "
-        "feed it the user's config to identify the mainboard for printer memory"
+        "Detect the likely printer board/MCU family from a config snippet "
+        "(config_text='...') — feed it the user's config to identify the "
+        "mainboard for printer memory"
+    ),
+    "calculate_rotation_distance": (
+        "Calculate rotation_distance for a stepper "
+        "(method='leadscrew'|'belt'|'from_steps_per_mm')"
     ),
 }
 
 
-def _build_mcp_tool_context(extra_tools: list[str] | None = None) -> str:
-    """Build a compact 'Available Tools' section for the system prompt.
+_MCP_TOOL_SNIPPETS: dict[str, str] = {
+    "search_klipper_docs": (
+        "Search the bundled Klipper docs (query='...', limit=N) — ranked "
+        "results with snippets to find which doc covers a topic"
+    ),
+    "read_klipper_doc": (
+        "Read a bundled Klipper doc file (filename='Klipper_GCode_Macro_AI_Summary.md' "
+        "for macro/Jinja formatting: single-brace { } delimiters, {% if %}/{% endif %} "
+        "block closing, comment stripping; supports offset/limit pagination)"
+    ),
+    "list_klipper_docs": "List all bundled Klipper documentation files (filenames + headings)",
+    "get_config_reference_section": (
+        "Get Config_Reference section text and valid params "
+        "(section_name='bed_mesh'); list_sections=true returns ONLY the "
+        "section headers to pick from; sections=['a','b'] fetches several "
+        "in one call"
+    ),
+    "read_user_config": (
+        "Read a user config file (filename='printer.cfg' required): "
+        "section='extruder' for one section, sections=['a','b'] for several in "
+        "one call, list_sections=true for just the section headers, "
+        "whole_file=true for one whole file, files=['a.cfg','b.cfg'] for "
+        "several whole files. Call list_user_configs (no args) to see all "
+        "available user files."
+    ),
+    "list_user_configs": (
+        "List all user config files (from the Pi's native config path and "
+        "imported user configs). Use when the user names a macro or section "
+        "without saying which file it is in, then read the best candidate."
+    ),
+    "search_user_configs": (
+        "Search the user's config files by filename or content keyword "
+        "(query='level_bed'|'skr'|'bed_mesh', limit=N). Use when the user names "
+        "a macro or section without saying which file it is in."
+    ),
+    "search_example_configs": "Search example configs by board or printer (query='voron', limit=N)",
+    "read_example_config": "Read a full example config file (filename='generic-....cfg')",
+    "validate_klipper_config": (
+        "Validate config section block against the klipper config rules "
+        "(config_text='...' required)"
+    ),
+    "validate_macro": (
+        "Validate a gcode_macro against Klipper's Jinja rules (macro_text='...' required)"
+    ),
+    "generate_macro_template": (
+        "Generate a ready-to-use macro template (macro_name='PRINT_START'|'PRINT_END'|"
+        "'PAUSE'|'RESUME'|'CANCEL_PRINT'; include_bed_mesh option)"
+    ),
+}
 
-    Only the tools the model should actively choose are advertised, each as a
-    one-line snippet (the same pattern Pi/coding agents use — full schemas
-    stay in the registered tool set for the executor and native function
-    calling). Tools not listed here remain registered and callable, but the
-    model is not nudged toward them, which keeps attention on the tools that
-    matter for the current task.
 
-    Visible: docs search/read/list, Config_Reference, user config
-    list/search/read, example config search/read, macro template generation,
-    and the two validators.
-    Hidden (registered, not advertised): get_section_schema,
-      calculate_rotation_distance.
-    Conditionally advertised via extra_tools (trigger-specific flows, e.g.
-      detect_board only when printer memory is blank and auto-fill is offered).
+def _build_mcp_tool_context() -> str:
+    """Build the 'Available Tools' section for the system prompt.
 
-    extra_tools: additional tool names to advertise in the Tools list for
-    this request, from _EXTRA_TOOL_SNIPPETS.
+    Every registered tool is advertised so text-protocol and native providers
+    see the SAME tool surface (parity). The everyday tools get a one-line
+    snippet each; niche helpers (board detection, rotation_distance math) are
+    grouped under a "Specialized tools" heading so they stay visible without
+    distracting from the tools that matter for the current task.
+
+    Param-coverage note: every inputSchema param of an advertised tool must
+    appear in its snippet (enforced by test_api_routes
+    test_tool_context_snippets_cover_schema_params) so text-protocol models
+    can discover the same affordances as native function calling.
     """
-    snippets: dict[str, str] = {
-        "search_klipper_docs": "Search the bundled Klipper docs",
-        "read_klipper_doc": "Read a bundled Klipper doc file (filename='Klipper_GCode_Macro_AI_Summary.md' for macro/Jinja formatting: single-brace { } delimiters, {% if %}/{% endif %} block closing, comment stripping)",
-        "list_klipper_docs": "List all bundled Klipper documentation files (filenames + headings)",
-        "get_config_reference_section": "Get the Config_Reference section and valid params for a config section (pass section_name, e.g. section_name='bed_mesh')",
-        "read_user_config": (
-            "Read a user config file: read_user_config(filename='printer.cfg', "
-            "section='extruder') for one section, or (filename='printer.cfg', "
-            "list_sections=true) for the section headers of that file. This tool "
-            "requires a file name, call list_user_configs (no args) to see all "
-            "available user files."
-        ),
-        "list_user_configs": (
-            "List all user config files (from the Pi's native config path and "
-            "imported user configs). Use when the user names a macro or section "
-            "without saying which file it is in, then read the best candidate."
-        ),
-        "search_user_configs": (
-            "Search the user's config files by filename or content keyword "
-            "(e.g. 'level_bed', 'skr', 'bed_mesh'). Use when the user names a "
-            "macro or section without saying which file it is in."
-        ),
-        "search_example_configs": "Search example configs by board or printer",
-        "read_example_config": "Read a full example config file",
-        "validate_klipper_config": "Validate config section block against the klipper config rules",
-        "validate_macro": "Validate a gcode_macro against Klipper's Jinja rules",
-        "generate_macro_template": (
-            "Generate a ready-to-use macro template (PRINT_START, PRINT_END, "
-            "PAUSE, RESUME, CANCEL_PRINT; include_bed_mesh option)"
-        ),
-    }
 
     parts = [
         "# Available Tools",
@@ -511,12 +530,12 @@ def _build_mcp_tool_context(extra_tools: list[str] | None = None) -> str:
         "",
         "Tools:",
     ]
-    for name, snippet in snippets.items():
+    for name, snippet in _MCP_TOOL_SNIPPETS.items():
         parts.append(f"- {name}: {snippet}")
-    for name in extra_tools or []:
-        snippet = _EXTRA_TOOL_SNIPPETS.get(name)
-        if snippet:
-            parts.append(f"- {name}: {snippet}")
+    parts.append("")
+    parts.append("Specialized tools (use only for specific problems):")
+    for name, snippet in _SPECIALIZED_TOOL_SNIPPETS.items():
+        parts.append(f"- {name}: {snippet}")
     parts.append("")
     parts.append(
         "Klipper G-code commands and macro names (e.g. G28, M104, BED_MESH_CALIBRATE, "
@@ -1149,7 +1168,7 @@ def _build_tool_result_message(tool_call: dict, result_text: str) -> str:
     )
 
 
-MAX_MCP_TOOL_TURNS = 5
+MAX_MCP_TOOL_TURNS = 10
 # When a model ends its turn with only a tool call and no visible text
 # (tool-loop exhaustion, an unparseable call format, or a final tool-only
 # response), re-prompt it without tools to force a direct text answer.

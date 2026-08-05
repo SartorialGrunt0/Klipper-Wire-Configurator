@@ -40,8 +40,10 @@ from services.warning_acknowledgments import acknowledge_warning_for_section
 
 router = APIRouter()
 
-REFERENCE_DIR = Path(__file__).parent.parent.parent / "reference"
-KLIPPER_DOCS_DIR = REFERENCE_DIR / "reference_docs" / "klipper_docs"
+# Hard-failover doc/config sources (installed Klipper repo when present,
+# bundled copies otherwise) — shared with the MCP docs tools.
+from klipper_paths import CONFIG_EXAMPLES_DIR, KLIPPER_DOCS_DIR, REFERENCE_DIR  # noqa: E402
+
 PROJECTS_DIR = Path(__file__).parent.parent / "projects"
 
 # Where to persist imported config files for MCP tool access.
@@ -56,7 +58,7 @@ else:
 
 def _resolve_config_path(filename: str) -> Path | None:
     """Find a config file by name, searching type subdirectories first."""
-    config_dir = REFERENCE_DIR / "config"
+    config_dir = CONFIG_EXAMPLES_DIR
     # Check subdirectories
     for subdir in BOARD_TYPE_DIRS:
         candidate = config_dir / subdir / filename
