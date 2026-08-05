@@ -30,7 +30,6 @@ import {
 } from '../../utils/chatProviders';
 import { runReplyValidationPipeline, createPrinterMemoryReplyValidator } from '../../utils/replyValidation';
 import {
-  detectChatIntent,
   extractTargetedSectionHeaders,
   extractSectionText,
   findSectionHeaders,
@@ -47,6 +46,22 @@ import AiDraftPreviewDialog from './AiDraftPreviewDialog';
 import type { PendingAiChatRequest } from '../../types/ai';
 import type { AiChatRole } from '../../services/api';
 import type { SavedConversation } from '../../stores/chatHistoryStore';
+
+/**
+ * Frontend "handholding" gate (Phase 4/5 lean injection + file-targeting
+ * reinforcement).
+ *
+ * Default OFF: a capable model discovers config content and targets the
+ * right files through its MCP tools plus the backend SYSTEM_PROMPT edit
+ * protocol (validated by the harness — AMBI-01..08 pass with zero injected
+ * content and no frontend reinforcement). The regex-targeted injection can
+ * also steer the model toward the wrong section.
+ * Re-enable at build time with VITE_KWC_HANDHOLDING=1 for very small models
+ * with flaky tool calling: the guess-work section injection and explicit
+ * file-targeting instructions may help them stay grounded step-by-step.
+ */
+const HANDHOLDING_ENABLED =
+  (import.meta.env.VITE_KWC_HANDHOLDING as string | undefined) === '1';
 
 /**
  * Heuristic for failures worth auto-recovering from: network drops and
@@ -371,8 +386,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         // explicitly checks in "Include Files" are sent as context.
         const contextTargets = Array.from(new Set(selectedConfigContextFiles));
 
-        const chatIntent = detectChatIntent(userMsg.content);
-
         // Phase 4: collect the candidate files (checked in "Include Files" +
         // manually attached) with their content and labels. Content is sent
         // to the backend as contextFiles so ITS config-grounding fallback can
@@ -390,64 +403,74 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           candidateFiles.set(file.name, { text: file.content, label: 'User-attached local Klipper config file' });
         }
 
-        // Phase 4 carry-over: resolve the sections this message targets for
-        // each candidate file. Targeted sections replace any carried set;
-        // files with no new target keep the previous turn's sections so
-        // follow-up questions stay grounded. Carried entries are bounded to
-        // the last two turns and dropped when the file leaves the selection.
-        chatTurnRef.current += 1;
-        const currentTurn = chatTurnRef.current;
-        const usedSections = new Map<string, string[]>();
-        const nextCarried: Array<{ filename: string; headers: string[]; turn: number }> = [];
-        for (const [filename, candidate] of candidateFiles) {
-          const targetedHeaders = extractTargetedSectionHeaders(userMsg.content, candidate.text);
-          if (targetedHeaders.length > 0) {
-            usedSections.set(filename, targetedHeaders);
-            nextCarried.push({ filename, headers: targetedHeaders, turn: currentTurn });
-            continue;
-          }
-          const recent = [...carriedSectionsRef.current]
-            .filter((entry) => entry.filename === filename && currentTurn - entry.turn <= 2)
-            .sort((a, b) => b.turn - a.turn)[0];
-          if (recent) {
-            usedSections.set(filename, recent.headers);
-            nextCarried.push({ filename, headers: recent.headers, turn: currentTurn });
-          }
-        }
-        carriedSectionsRef.current = nextCarried;
-
-        // Inject the lean context this request actually needs.
-        // Phase 5: always lean — targeted sections when resolved, otherwise a
-        // compact section index. Never dump the whole file as a system message;
-        // the model fetches the sections it needs via read_user_config.
-        const appendFileContext = (filename: string, candidate: { text: string; label: string }) => {
-          const headers = usedSections.get(filename);
-          if (headers && headers.length > 0) {
-            for (const header of headers) {
-              const sectionText = extractSectionText(candidate.text, header);
-              if (sectionText != null) {
-                contextMessages.push({
-                  role: 'system',
-                  content: buildSectionContextMessage(filename, candidate.label, header, sectionText),
-                });
-              }
+        // Phase 4/5 lean-context injection (targeted sections + section
+        // index) is part of the handholding workflow — GATED OFF by default;
+        // the model discovers config content via its MCP tools (validated by
+        // the harness). Re-enable with VITE_KWC_HANDHOLDING=1.
+        if (HANDHOLDING_ENABLED) {
+          // Phase 4 carry-over: resolve the sections this message targets for
+          // each candidate file. Targeted sections replace any carried set;
+          // files with no new target keep the previous turn's sections so
+          // follow-up questions stay grounded. Carried entries are bounded to
+          // the last two turns and dropped when the file leaves the selection.
+          chatTurnRef.current += 1;
+          const currentTurn = chatTurnRef.current;
+          const usedSections = new Map<string, string[]>();
+          const nextCarried: Array<{ filename: string; headers: string[]; turn: number }> = [];
+          for (const [filename, candidate] of candidateFiles) {
+            const targetedHeaders = extractTargetedSectionHeaders(userMsg.content, candidate.text);
+            if (targetedHeaders.length > 0) {
+              usedSections.set(filename, targetedHeaders);
+              nextCarried.push({ filename, headers: targetedHeaders, turn: currentTurn });
+              continue;
             }
-            return;
+            const recent = [...carriedSectionsRef.current]
+              .filter((entry) => entry.filename === filename && currentTurn - entry.turn <= 2)
+              .sort((a, b) => b.turn - a.turn)[0];
+            if (recent) {
+              usedSections.set(filename, recent.headers);
+              nextCarried.push({ filename, headers: recent.headers, turn: currentTurn });
+            }
           }
-          contextMessages.push({
-            role: 'system',
-            content: buildConfigIndexMessage(filename, findSectionHeaders(candidate.text), candidate.label),
-          });
-        };
+          carriedSectionsRef.current = nextCarried;
 
-        for (const [filename, candidate] of candidateFiles) {
-          appendFileContext(filename, candidate);
+          // Inject the lean context this request actually needs.
+          // Phase 5: always lean — targeted sections when resolved, otherwise a
+          // compact section index. Never dump the whole file as a system message;
+          // the model fetches the sections it needs via read_user_config.
+          const appendFileContext = (filename: string, candidate: { text: string; label: string }) => {
+            const headers = usedSections.get(filename);
+            if (headers && headers.length > 0) {
+              for (const header of headers) {
+                const sectionText = extractSectionText(candidate.text, header);
+                if (sectionText != null) {
+                  contextMessages.push({
+                    role: 'system',
+                    content: buildSectionContextMessage(filename, candidate.label, header, sectionText),
+                  });
+                }
+              }
+              return;
+            }
+            contextMessages.push({
+              role: 'system',
+              content: buildConfigIndexMessage(filename, findSectionHeaders(candidate.text), candidate.label),
+            });
+          };
+
+          for (const [filename, candidate] of candidateFiles) {
+            appendFileContext(filename, candidate);
+          }
         }
 
-        // File targeting instructions — only edits carry the draft/mini-diff
-        // protocol; questions just get told where the config lives.
-        const miniDiffInstruction = ` To EDIT an existing section, return a mini-diff: the section header followed by only the lines that change, prefixing removed lines with '-' and added lines with '+', keeping their original indentation. The app applies these replacements exactly, so unchanged lines (like Jinja {% if %}/{% endif %} tags) are preserved automatically. Outputting any unchanged line causes the app to reject the reply as a full rewrite and retry — emit ONLY the lines that change. A pure addition (nothing removed) needs no '-' line: just the header plus the '+' lines. A pure deletion (nothing added) needs no '+' line: just the header plus the '-' lines. If a section is already correct and you only need to show it, quoting it unchanged is allowed. To ADD a new section, write it in full; to delete one, write '*[section_name]'.`;
-        if (chatIntent === 'edit') {
+        // File targeting instructions — the draft/mini-diff reinforcement.
+        // Part of the handholding workflow, GATED OFF by default: the backend
+        // SYSTEM_PROMPT already carries the '# file:' hint + mini-diff
+        // protocol (ai_routes.py), and intent detection was removed — the
+        // model decides whether a message is an edit or a question (harness
+        // AMBI-01..08 all pass without any frontend classifier).
+        if (HANDHOLDING_ENABLED) {
+          const miniDiffInstruction = ` To EDIT an existing section, return a mini-diff: the section header followed by only the lines that change, prefixing removed lines with '-' and added lines with '+', keeping their original indentation. The app applies these replacements exactly, so unchanged lines (like Jinja {% if %}/{% endif %} tags) are preserved automatically. Outputting any unchanged line causes the app to reject the reply as a full rewrite and retry — emit ONLY the lines that change. A pure addition (nothing removed) needs no '-' line: just the header plus the '+' lines. A pure deletion (nothing added) needs no '+' line: just the header plus the '-' lines. If a section is already correct and you only need to show it, quoting it unchanged is allowed. To ADD a new section, write it in full; to delete one, write '*[section_name]'.`;
           if (mentionedConfigFiles.length > 0) {
             contextMessages.push({
               role: 'system',
@@ -459,11 +482,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
               content: `Unless the user names a different file, apply edits to ${activeFile}. Return only changed, new, or deleted content in a fenced \`\`\`cfg code block. Start each fenced \`\`\`cfg block with a '# file: <filename>' hint line when targeting a specific file. To create a new file, use '# file: <newfilename>'. Do not return the whole file unless the user explicitly asks for a full replacement.${miniDiffInstruction}`,
             });
           }
-        } else if (mentionedConfigFiles.length > 0) {
-          contextMessages.push({
-            role: 'system',
-            content: `The user's question references these loaded config files: ${mentionedConfigFiles.join(', ')}. Their content is not attached unless a section index/context block above includes it — fetch the sections you need via read_user_config(filename=..., section=...) instead of asking the user to paste them.`,
-          });
         }
 
         // Context files sent to the backend for its config-grounding fallback

@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest';
 import {
-  detectChatIntent,
   findSectionHeaders,
   extractSectionText,
   extractTargetedSectionHeaders,
@@ -31,24 +30,6 @@ gcode:
 [fan_generic Aux_Fan]
 pin: PB3
 `;
-
-describe('detectChatIntent', () => {
-  it('classifies edit requests', () => {
-    expect(detectChatIntent('Modify my level_bed macro to call BED_MESH_CALIBRATE in adaptive')).toBe('edit');
-    expect(detectChatIntent('In printer.cfg change the [printer] max_accel to 12000')).toBe('edit');
-    expect(detectChatIntent('Add a [bed_mesh] section to my config')).toBe('edit');
-    expect(detectChatIntent('Delete the RESET_ACCEL macro')).toBe('edit');
-    expect(detectChatIntent('Fix my macro')).toBe('edit');
-  });
-
-  it('classifies questions', () => {
-    expect(detectChatIntent('What does horizontal_move_z do?')).toBe('question');
-    expect(detectChatIntent('What is the default value of pressure_advance?')).toBe('question');
-    expect(detectChatIntent('Help me set up my new printer from scratch')).toBe('question');
-    expect(detectChatIntent('List all parameters supported by the [probe] section')).toBe('question');
-    expect(detectChatIntent('')).toBe('question');
-  });
-});
 
 describe('findSectionHeaders / extractSectionText', () => {
   it('finds all section headers in file order', () => {
