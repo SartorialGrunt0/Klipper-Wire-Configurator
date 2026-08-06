@@ -49,12 +49,15 @@ Other useful flags:
                           printer memory is backed up, blanked to trigger the auto-fill
                           prompt, and restored automatically afterward
 
-Question bank: Q01-Q20 (core tools), MACRO-01..11 (macro authoring, editing,
-fixing, template options, and the individual validate_macro checks),
-TRIDENT-01..14 (real configs from reference/Trident_backup and the real
-backend/user_configs — read, edit, delete, manage, and fix the actual
-printer.cfg/aux_fan.cfg/PIS.cfg via the draft-block protocol; the files are
-attached as read-only context and never modified), and MEMORY-01..03
+Question bank: Q01-Q20 (core tools, minus the retired Q09), MACRO-01..11
+(macro authoring, editing, fixing, template options, and the individual
+validate_macro checks; MACRO-08 retired), TRIDENT-01..14 (real configs from
+reference/Trident_backup and the real backend/user_configs — read, edit,
+delete, manage, and fix the actual printer.cfg/aux_fan.cfg/PIS.cfg via the
+draft-block protocol; the files are attached as read-only context and never
+modified), MINIDIFF-01..04 (the mini-diff edit protocol), AMBI-01..08
+(ambiguity cases: new-file drafts, hypothetical edits, batch section reads,
+multi-topic explain-and-edit turns, content search), and MEMORY-01..03
 (printer-memory auto-fill, requires --include-memory).
 
 Stdlib only — no third-party dependencies.

@@ -20,7 +20,7 @@ Special thanks to the Klipper, Mainsail, Moonraker, Fluidd, and other teams whos
 - Add any Klipper component directly from the official Config Reference documentation.
 - Import example configurations organized by board type (Mainboard, Toolhead, Probe, Expander) with fuzzy search.
 - Delete, modify, or reposition components using drag-and-drop interactions.
-- Auto-detect and manage USB, UART, and CAN communcations with ID detection.
+- Auto-detect and manage USB, UART, and CAN communications with ID detection.
 
 ### Configuration Management
 
@@ -33,7 +33,7 @@ Special thanks to the Klipper, Mainsail, Moonraker, Fluidd, and other teams whos
 
 - Create, manage, and simulate macros that reflects your printer configuration.
 - Add an AI assistant that references official Klipper documentation, Config Reference excerpts, and your current config with explicit review and approval before applying ([read about it](docs/AI_CHAT.md)).
-- Build, download, and flash Katapult adn klipper firmware directly from the UI.
+- Build, download, and flash Katapult and Klipper firmware directly from the UI.
 
 ### Graphical UI
 

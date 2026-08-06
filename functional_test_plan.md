@@ -1,6 +1,6 @@
 # Functional Test Plan
 
-Last reviewed: 2026-07-31
+Last reviewed: 2026-08-05
 
 This plan verifies the requirements captured in [requirements-specifications.md](requirements-specifications.md). It separates strict automated suites, informational automation that produces diagnostics without hard assertions, and manual scenarios that still require a running UI or real hardware.
 
