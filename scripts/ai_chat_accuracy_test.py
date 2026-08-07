@@ -1442,6 +1442,7 @@ def chat_request(base_url: str, question: TestQuestion, settings: dict,
         "maxTokens": settings["max_tokens"],
         "temperature": settings["temperature"],
         "toolProtocol": settings.get("tool_protocol", "auto"),
+        "mergeSystemMessages": settings.get("merge_system_messages", False),
     }
     url = base_url.rstrip("/") + "/ai/chat"
     try:
@@ -1676,6 +1677,7 @@ def resolve_settings(args: argparse.Namespace) -> dict:
         "max_tokens": int(max_tokens),
         "temperature": float(temperature),
         "tool_protocol": args.tool_protocol or "auto",
+        "merge_system_messages": args.merge_system_messages,
         "base_url": base_url,
     }
 
@@ -1728,6 +1730,12 @@ def main() -> int:
                              "calling), 'native' (force OpenAI native "
                              "tool_calls for local llama.cpp servers too), "
                              "'text' (force the text protocol everywhere)")
+    parser.add_argument("--merge-system-messages", action="store_true",
+                        help="Set mergeSystemMessages on the /ai/chat request: "
+                             "collapse every system message into a single "
+                             "leading one. Needed only for servers whose chat "
+                             "template rejects non-leading system messages "
+                             "(e.g. strict llama.cpp templates).")
     parser.add_argument("--questions", default="", help="Subset, e.g. '1-5,8' (1-based)")
     parser.add_argument("--start", default=0, type=int,
                         help="Start at question N (1-based), running N..end. "

@@ -261,6 +261,14 @@ class ChatRequest(BaseModel):
     # "text" forces the text protocol everywhere. The frontend never sends
     # this; scripts/ai_chat_accuracy_test.py uses it for comparisons.
     toolProtocol: str = "auto"
+    # Merge every system message into a single leading system message.
+    # Default off: most OpenAI-compatible servers accept multiple system
+    # messages and the trailing task anchor is positionally meaningful
+    # (it points the model at the last user message after tool rounds).
+    # Some strict chat templates (e.g. models enforcing "system message
+    # must be at the beginning") reject any non-leading system message;
+    # set this True for those servers only.
+    mergeSystemMessages: bool = False
 
 
 class ChatStopRequest(BaseModel):
@@ -1367,12 +1375,20 @@ def _build_provider_payload(
     max_tokens: int = 4096,
     temperature: float | None = None,
     tools: list[dict] | None = None,
+    merge_system: bool = False,
 ) -> dict:
     """Build the request payload for the given provider.
 
     Handles Anthropic's separate system field and OpenAI-compatible
     formats with temperature settings. When tools is provided, native
     function-calling tool definitions are included.
+
+    merge_system: when True, collapse every system message into a single
+    leading system message. OpenAI-compatible servers that use strict
+    chat templates (e.g. ones that enforce "system message must be at the
+    beginning") reject multiple system messages; a single merged message
+    is valid everywhere. Anthropic always merges (its API takes a single
+    top-level system field).
     """
     if provider == "anthropic":
         # Anthropic takes a single top-level system field. Merge every system
@@ -1410,9 +1426,27 @@ def _build_provider_payload(
         # OpenAI-compatible chat providers use the standard messages format.
         # Low temperature makes tool call decisions more deterministic;
         # 0.1 is the historical default, overridable per request.
+        if merge_system:
+            # Some strict chat templates (e.g. models that enforce "system
+            # message must be at the beginning") reject any system message
+            # that isn't first. Merge every system message (main prompt,
+            # config context, and the trailing task anchor) into a single
+            # leading system message — valid everywhere, and preserves the
+            # anchor's content alongside the main prompt.
+            system_parts = []
+            filtered_messages = []
+            for msg in messages:
+                if msg["role"] == "system":
+                    system_parts.append(str(msg["content"]))
+                else:
+                    filtered_messages.append(msg)
+            if system_parts:
+                filtered_messages.insert(0, {"role": "system", "content": "\n\n".join(system_parts)})
+        else:
+            filtered_messages = messages
         payload = {
             "model": model,
-            "messages": messages,
+            "messages": filtered_messages,
             "temperature": temperature if temperature is not None else 0.1,
             "max_tokens": max_tokens,
         }
@@ -1603,6 +1637,7 @@ async def chat_proxy(req: ChatRequest):
                 max_tokens=req.maxTokens,
                 temperature=req.temperature,
                 tools=native_tools,
+                merge_system=req.mergeSystemMessages,
             )
 
             current_content, current_data = await _query_provider(

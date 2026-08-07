@@ -248,6 +248,49 @@ def test_build_provider_payload_openai_compatible():
     }
 
 
+def test_build_provider_payload_openai_merges_system_messages():
+    # Strict chat templates (e.g. ones that enforce "system message must be
+    # at the beginning") reject multiple system messages. When merge_system
+    # is set, the OpenAI-compatible builder must merge them into a single
+    # leading system message so every server accepts the payload.
+    payload = ai_routes._build_provider_payload(
+        'chatgpt',
+        [
+            {'role': 'system', 'content': 'System one.'},
+            {'role': 'user', 'content': 'hi'},
+            {'role': 'system', 'content': 'System two.'},
+        ],
+        'gpt-4o',
+        merge_system=True,
+    )
+    assert payload['model'] == 'gpt-4o'
+    assert payload['messages'] == [
+        {'role': 'system', 'content': 'System one.\n\nSystem two.'},
+        {'role': 'user', 'content': 'hi'},
+    ]
+    assert payload['max_tokens'] == 4096
+
+
+def test_build_provider_payload_openai_keeps_multiple_system_messages_by_default():
+    # Default (merge_system=False) must preserve the trailing task anchor
+    # as its own system message — it is positionally meaningful for models
+    # whose chat templates accept multiple system messages.
+    payload = ai_routes._build_provider_payload(
+        'chatgpt',
+        [
+            {'role': 'system', 'content': 'System one.'},
+            {'role': 'user', 'content': 'hi'},
+            {'role': 'system', 'content': 'System two.'},
+        ],
+        'gpt-4o',
+    )
+    assert payload['messages'] == [
+        {'role': 'system', 'content': 'System one.'},
+        {'role': 'user', 'content': 'hi'},
+        {'role': 'system', 'content': 'System two.'},
+    ]
+
+
 def test_build_provider_payload_anthropic_merges_system_messages():
     payload = ai_routes._build_provider_payload(
         'anthropic',
