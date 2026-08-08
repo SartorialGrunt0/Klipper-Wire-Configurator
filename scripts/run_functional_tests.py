@@ -72,12 +72,14 @@ AUTOMATED_SUITES = (
             "REQ-FW-04",
             "REQ-NATIVE-06",
         ),
-        description="Strict pass/fail validation of native firmware routes and flash-target services.",
+        description="Strict pass/fail validation of native firmware routes, flash-target services, flash profiles, and Klipper log excerpt handling.",
         selectors=(
             "tests/test_native_firmware_routes.py",
             "tests/test_flash_target_routes.py",
             "tests/test_flash_target_service.py",
             "tests/test_klipper_firmware_service.py",
+            "tests/test_flash_profile_service.py",
+            "tests/test_native_klipper_service.py",
         ),
     ),
     SuiteDefinition(
@@ -89,9 +91,88 @@ AUTOMATED_SUITES = (
             "REQ-AI-03",
             "REQ-AI-04",
         ),
-        description="Strict pass/fail validation of AI model listing, docs-grounded prompt preparation, and LM Studio MCP fallback behavior.",
+        description="Strict pass/fail validation of provider key gating, docs-grounded prompt preparation, provider payload building, response extraction, auto-search fallback, and the native tool-call loop.",
         selectors=(
             "tests/test_ai_chat_routes.py",
+        ),
+    ),
+    SuiteDefinition(
+        suite_id="FTA-004",
+        title="MCP tool-calling helper suite",
+        kind="pytest",
+        requirement_ids=(
+            "REQ-AI-04",
+            "REQ-AI-06",
+        ),
+        description="Strict pass/fail validation of text-based and native tool-call extraction, execution, and follow-up message building.",
+        selectors=(
+            "tests/test_mcp_tool_calling.py",
+        ),
+    ),
+    SuiteDefinition(
+        suite_id="FTA-005",
+        title="Core config editor API suite",
+        kind="pytest",
+        requirement_ids=(
+            "REQ-CONF-01",
+            "REQ-CONF-02",
+            "REQ-CONF-04",
+            "REQ-CONF-05",
+            "REQ-CONF-06",
+            "REQ-CONF-07",
+            "REQ-EDIT-05",
+            "REQ-VAL-02",
+            "REQ-OUT-01",
+        ),
+        description="Strict pass/fail validation of the core editor API: single/multi-file import, validate, export, generate, examples, schema, reference docs, project persistence, and warning acknowledgements.",
+        selectors=(
+            "tests/test_api_routes.py",
+        ),
+    ),
+    SuiteDefinition(
+        suite_id="FTA-006",
+        title="MCP server tool suite",
+        kind="pytest",
+        requirement_ids=(
+            "REQ-AI-04",
+            "REQ-AI-06",
+        ),
+        description="Strict pass/fail validation of the embedded MCP server: DocIndex search engine, all tool handlers, argument coercion, and the JSON-RPC protocol surface.",
+        selectors=(
+            "tests/test_mcp_server_tools.py",
+        ),
+    ),
+    SuiteDefinition(
+        suite_id="FTF-001",
+        title="Frontend pure-logic suite",
+        kind="vitest",
+        requirement_ids=(
+            "REQ-EDIT-04",
+            "REQ-GRAPH-01",
+            "REQ-GRAPH-02",
+            "REQ-GRAPH-03",
+            "REQ-MACRO-01",
+            "REQ-AI-04",
+        ),
+        description="Strict pass/fail validation of frontend utility logic: config diff, pin handling, section naming, validation status, draft merge, reply validation, graph building, edge routing, printer memory parsing, provider helpers, board markers, and the gcode simulator.",
+        selectors=(
+            "src/utils/__tests__",
+        ),
+    ),
+    SuiteDefinition(
+        suite_id="FTF-002",
+        title="Frontend store suite",
+        kind="vitest",
+        requirement_ids=(
+            "REQ-EDIT-01",
+            "REQ-EDIT-02",
+            "REQ-EDIT-05",
+            "REQ-CONF-03",
+            "REQ-GRAPH-02",
+        ),
+        description="Strict pass/fail validation of frontend zustand stores: config CRUD, includes, dirty tracking, rename/copy, validation aggregation, graph operations, undo/redo, auto-arrange, and printer memory persistence with mocked API.",
+        selectors=(
+            "src/stores/__tests__",
         ),
     ),
 )
@@ -216,6 +297,8 @@ def ensure_output_dir(output_root: Path) -> Path:
 def build_command(defn: SuiteDefinition) -> list[str]:
     if defn.kind == "pytest":
         return [sys.executable, "-m", "pytest", "-q", *defn.selectors]
+    if defn.kind == "vitest":
+        return ["npm", "--prefix", "frontend", "test", "--", *defn.selectors]
     if defn.kind == "script":
         return [sys.executable, defn.script_path]
     raise ValueError(f"Unsupported suite kind: {defn.kind}")
@@ -233,6 +316,16 @@ def extract_summary(defn: SuiteDefinition, combined_output: str, return_code: in
             return f"FAILED {failure_match.group(1)} | {short_summary.group(0)}"
         if short_summary:
             return short_summary.group(0)
+
+    if defn.kind == "vitest":
+        plain_text = re.sub(r"\x1b\[[0-9;]*m", "", text)
+        tests_match = re.search(r"^\s*Tests\s+\d+ passed.*$", plain_text, re.MULTILINE)
+        files_match = re.search(r"^\s*Test Files\s+\d+ passed.*$", plain_text, re.MULTILINE)
+        if tests_match:
+            pieces = [tests_match.group(0).strip()]
+            if files_match:
+                pieces.append(files_match.group(0).strip())
+            return " | ".join(pieces)
 
     if defn.suite_id == "FTI-001":
         summary_match = re.search(r"Summary:.*", text)
@@ -280,6 +373,8 @@ def run_suite(defn: SuiteDefinition, logs_dir: Path) -> SuiteResult:
     log_path.write_text(combined_output + ("\n" if combined_output else ""), encoding="utf-8")
 
     if defn.kind == "pytest":
+        status = "passed" if proc.returncode == 0 else "failed"
+    elif defn.kind == "vitest":
         status = "passed" if proc.returncode == 0 else "failed"
     else:
         status = "completed" if proc.returncode == 0 else "failed"

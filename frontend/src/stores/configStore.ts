@@ -488,7 +488,14 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           [newName]: {
             ...source,
             filename: newName,
-            sections: source.sections.map((sec) => ({ ...sec })),
+            sections: source.sections.map((sec) => ({
+              ...sec,
+              params: sec.params.map((p) => ({ ...p })),
+              header_comments: [...(sec.header_comments ?? [])],
+              trailing_comments: sec.trailing_comments
+                ? [...sec.trailing_comments]
+                : undefined,
+            })),
             includes: [...source.includes],
             header_comments: [...source.header_comments],
           },

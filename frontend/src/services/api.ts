@@ -269,6 +269,20 @@ export async function loadProject(name: string): Promise<{
   return request(`/projects/${encodeURIComponent(name)}`);
 }
 
+export async function saveConfigsToLocal(
+  files: Record<string, string>,
+): Promise<{ saved: string[]; file_count: number; errors?: string[] }> {
+  return request('/configs/save', {
+    method: 'POST',
+    body: JSON.stringify({ files }),
+  });
+}
+
+
+export async function loadSavedConfigs(): Promise<ProjectImportResult> {
+  return request('/project/load-saved');
+}
+
 /* ── Native (Pi) API ─────────────────────────────────── */
 
 export interface NativeStatus {
@@ -713,7 +727,7 @@ export async function deleteNativeLayout(): Promise<{ status: string }> {
   });
 }
 
-import type { LmStudioContextStatus, LmStudioMcpStatus } from '../types/ai';
+
 
 /* ── AI Chat ─────────────────────────────────────────── */
 
@@ -725,36 +739,175 @@ export interface AiChatRequest {
   model?: string;
   apiUrl?: string;
   apiProvider?: string;
-  lmStudioMcpPluginId?: string;
+  /** Client-generated id used to signal a user-initiated stop. */
+  requestId?: string;
+  /** Maximum number of tokens the provider should generate. */
+  maxTokens?: number;
+  /** Sampling temperature for the provider (0-2). Omit for provider default. */
+  temperature?: number;
+  /**
+   * Loaded user-config content (filename -> {content, label}) for the
+   * backend's config-grounding fallback. Held server-side only — it is NOT
+   * injected into the prompt; the backend uses it when the model answers a
+   * question without calling any tool.
+   */
+  contextFiles?: Record<string, { content: string; label: string }>;
+  /**
+   * Full-rewrite guard state (VITE_KWC_FULL_REWRITE_GUARD build flag).
+   * True = the frontend rejects full block writes and forces mini-diffs, so
+   * the backend uses the STRICT edit-protocol wording. False (default) =
+   * full writes accepted, softer wording. Kept in lock-step with the
+   * frontend acceptance behavior.
+   */
+  fullRewriteGuard?: boolean;
+}
+
+export interface AiToolCallDetail {
+  name: string;
+  /** JSON string of the tool arguments (capped server-side). */
+  arguments: string;
+  /** Text result of the tool execution (capped server-side). */
+  output: string;
+  outputTruncated?: boolean;
 }
 
 export interface AiChatResponse {
   content?: string;
   error?: string;
-  lmStudioMcp?: LmStudioMcpStatus;
-  lmStudioContext?: LmStudioContextStatus;
+  stopped?: boolean;
+  mcpToolTurns?: number;
+  mcpToolNames?: string[];
+  /** Executed tool calls with arguments + output, in execution order. */
+  toolCalls?: AiToolCallDetail[];
+  /** Number of empty-response re-prompts the backend performed before content. */
+  repromptCount?: number;
 }
 
-export interface ModelListResponse {
-  models: string[];
-  error?: string;
+/**
+ * Thrown when the user presses Stop and the backend confirms cancellation
+ * (or the client-side AbortController fires).
+ */
+export class ChatStoppedError extends Error {
+  constructor() {
+    super('Chat stopped by user.');
+    this.name = 'ChatStoppedError';
+  }
 }
 
-export async function listModels(apiUrl: string, apiKey: string = ''): Promise<ModelListResponse> {
-  const params = new URLSearchParams();
-  params.set('apiUrl', apiUrl);
-  if (apiKey) params.set('apiKey', apiKey);
-  const res = await fetch(`/ai/models?${params.toString()}`);
-  if (!res.ok) throw new Error(`Failed to list models: ${res.statusText}`);
-  return res.json();
+export async function listLocalModels(
+  apiUrl: string,
+  apiKey: string = '',
+): Promise<string[]> {
+  /**
+   * List available models from a local OpenAI-compatible server.
+   */
+  try {
+    const modelsUrl = new URL(apiUrl);
+    modelsUrl.pathname = '/v1/models';
+    
+    const params = new URLSearchParams();
+    if (apiKey && apiKey.trim()) params.set('apiKey', apiKey);
+    
+    const res = await fetch(`${modelsUrl.toString()}?${params.toString()}`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data.data && Array.isArray(data.data)) {
+        return data.data.map((m: any) => m.id);
+      }
+    }
+    
+    return [];
+  } catch (error) {
+    console.error('Failed to list local models:', error);
+    return [];
+  }
 }
 
-export async function aiChat(req: AiChatRequest): Promise<AiChatResponse> {
+export async function aiChat(req: AiChatRequest, signal?: AbortSignal): Promise<AiChatResponse> {
   const res = await fetch('/ai/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(req),
+    signal,
   });
   if (!res.ok) throw new Error(`AI chat failed: ${res.statusText}`);
-  return res.json();
+  const data = (await res.json()) as AiChatResponse;
+  if (data.stopped) throw new ChatStoppedError();
+  return data;
+}
+
+/**
+ * Best-effort request to cancel an in-flight /ai/chat call.
+ * The client-side AbortController already stops the UI wait; this tells
+ * the backend to stop spending provider calls / tool work.
+ */
+export async function stopChat(requestId: string): Promise<void> {
+  try {
+    await fetch('/ai/chat/stop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requestId }),
+    });
+  } catch {
+    // Best-effort only — ignore network failures here.
+  }
+}
+
+// ── AI state + chat history (local files, gitignored) ────────────────
+
+export interface AiStateFile {
+  settings?: unknown;
+  messages?: unknown[];
+}
+
+export interface AiHistoryFile {
+  conversations?: unknown[];
+}
+
+/** Load AI settings + the in-progress conversation from the local file. */
+export async function loadAiState(): Promise<AiStateFile> {
+  try {
+    const res = await fetch('/ai/state');
+    if (!res.ok) return {};
+    return (await res.json()) as AiStateFile;
+  } catch {
+    return {};
+  }
+}
+
+/** Persist AI settings + the in-progress conversation to the local file. */
+export async function saveAiState(state: AiStateFile): Promise<void> {
+  try {
+    await fetch('/ai/state', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(state),
+    });
+  } catch {
+    // Best-effort — a failed save shouldn't break the chat UI.
+  }
+}
+
+/** Load the saved chat history from the local file. */
+export async function loadAiHistory(): Promise<AiHistoryFile> {
+  try {
+    const res = await fetch('/ai/history');
+    if (!res.ok) return {};
+    return (await res.json()) as AiHistoryFile;
+  } catch {
+    return {};
+  }
+}
+
+/** Persist the saved chat history to the local file. */
+export async function saveAiHistory(history: AiHistoryFile): Promise<void> {
+  try {
+    await fetch('/ai/history', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(history),
+    });
+  } catch {
+    // Best-effort — a failed save shouldn't break the chat UI.
+  }
 }

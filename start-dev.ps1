@@ -192,11 +192,20 @@ try {
         Push-Location $backendDir
         try {
             python -m venv venv
-            & $venvPython -m pip install -r requirements.txt
         }
         finally {
             Pop-Location
         }
+    }
+    # Refresh Python dependencies on every start so pulls that add new
+    # requirements (e.g. jinja2) work without manually reinstalling.
+    Write-Host 'Refreshing backend Python dependencies...' -ForegroundColor Yellow
+    Push-Location $backendDir
+    try {
+        & $venvPython -m pip install -r requirements.txt
+    }
+    finally {
+        Pop-Location
     }
     if ($FakeNative) {
         Write-Host 'FakeNative mode enabled — backend will report as native platform.' -ForegroundColor Magenta

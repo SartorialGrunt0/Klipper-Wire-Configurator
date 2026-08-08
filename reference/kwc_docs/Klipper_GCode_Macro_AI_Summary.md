@@ -82,4 +82,15 @@ Primary sources: `G-Codes.md`, `Command_Templates.md`, `Config_Reference.md`, `S
 - Deprecated names in `Config_Changes.md`: `SET_EXTRUDER_STEP_DISTANCE` was replaced by `SET_EXTRUDER_ROTATION_DISTANCE`; `SYNC_STEPPER_TO_EXTRUDER` was replaced by `SYNC_EXTRUDER_MOTION`.
 - Example macro names in the docs are not built-ins unless the user's config defines them. Examples include `START_PRINT`, `END_PRINT`, `T0`, `T1`, `blink_led`, `MOVE_UP`, `load_filament`, and similar names created by `[gcode_macro ...]` sections.
 
+## Jinja formatting (Klipper specifics)
+
+Klipper evaluates `gcode:` bodies with a CUSTOM Jinja environment: statement tags `{% ... %}`, but expression/variable output uses **single braces `{ ... }`** — NOT stock Jinja's `{{ ... }}`. A double-braced `{{ printer.toolhead.x }}` is wrong and renders literally/broken. Write `{ printer.toolhead.position.x }`.
+
+- Every block opener MUST be closed, or the macro fails to LOAD (not just at runtime): `{% if %}` → `{% endif %}`, `{% for %}` → `{% endfor %}`, `{% while %}` → `{% endwhile %}`, `{% raw %}` → `{% endraw %}`. `{% elif %}` / `{% else %}` do not close a block. The Klippy error for a dropped closer is "Unexpected end of template … The innermost block that needs to be closed is 'X'" — fix by appending `{% endX %}` at the end of the gcode body.
+- Klipper strips `#` from every config line unconditionally BEFORE Jinja sees it; community macros write `\x23` inside Jinja strings to survive (`{% set s = "a\x23b" %}`). `;` is stripped only when preceded by whitespace or at line start, so `split(';', 1)` inside an expression survives while `G28 ; comment` does not.
+- `params` keys arrive UPPERCASE and as strings: `{% set temp = params.TEMP|default(200) %}`. `rawparams` is the raw, unparsed argument tail.
+- Printer state is read-only via `printer[...]`: `printer.toolhead.position`, `printer.toolhead.homed_axes` (a set — test membership with `"x" in printer.toolhead.homed_axes`), `printer["gcode_macro NAME"].variable` for variables saved with `SET_GCODE_VARIABLE`. Note: `printer.extruder.temperature` etc. exist only when the section exists.
+- Whitespace control `{%-` and `-%}` works as in stock Jinja. The `gcode:` key stays flush-left and the emitted G-code stays indented under it; the whole indented body is the template.
+- When EDITING an existing macro, keep every unchanged line (conditionals, G28, M104, comments). The app preserves unchanged lines automatically only for mini-diff edits — a full-section rewrite regenerates the macro and silently drops lines.
+
 Use this summary for compact grounding. For exact parameters, defaults, units, or module gates, defer to `G-Codes.md`, `Command_Templates.md`, and the matching workflow guide.

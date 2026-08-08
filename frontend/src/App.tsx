@@ -298,6 +298,69 @@ export default function App() {
     return unsub;
   }, []);
 
+  // Restore saved configs from disk on startup (non-native fallback).
+  // If native mode already loaded configs, this does nothing.
+  const savedConfigRestored = useRef(false);
+  useEffect(() => {
+    if (savedConfigRestored.current) return;
+
+    savedConfigRestored.current = true;  // Mark immediately to prevent double-load
+
+    const configStore = useConfigStore.getState();
+    const existingFiles = Object.keys(configStore.configFiles);
+    if (existingFiles.length > 0) {
+      // Native mode already loaded configs — skip restore
+      return;
+    }
+
+    (async () => {
+      try {
+        const result = await api.loadSavedConfigs();
+        if (!result.files || Object.keys(result.files).length === 0) return;
+
+        let schemas = configStore.schemas;
+        if (Object.keys(schemas).length === 0) {
+          try {
+            const schemaResult = await api.getSchema();
+            configStore.setSchemas(schemaResult.schemas);
+            schemas = schemaResult.schemas;
+          } catch { /* proceed without */ }
+        }
+
+        // Use loadConfigs to replace all configs at once (avoids duplicates)
+        const allConfigs: Record<string, import('./types/config').ConfigFile> = {};
+        const allValidations: Record<string, import('./types/config').ValidationResult> = {};
+
+        for (const [filename, fileResult] of Object.entries(result.files)) {
+          allConfigs[filename] = fileResult.config;
+          allValidations[filename] = fileResult.validation;
+        }
+
+        configStore.loadConfigs(allConfigs);
+
+        for (const [filename, validation] of Object.entries(allValidations)) {
+          configStore.setValidation(filename, validation);
+        }
+
+        for (const [filename, config] of Object.entries(allConfigs)) {
+          if (config.raw_text) {
+            configStore.setOriginalText(filename, config.raw_text);
+          }
+        }
+
+        // Clear graph first, then rebuild to avoid duplicate nodes
+        const graphStore = useGraphStore.getState();
+        graphStore.clearGraph();
+        const { buildProjectGraph } = await import('./utils/graphBuilder');
+        buildProjectGraph(allConfigs, graphStore, schemas, allValidations);
+
+        configStore.markClean();
+      } catch {
+        // No saved configs — that's fine, start empty
+      }
+    })();
+  }, []);
+
   // Auto-save layout (debounced) in native mode
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {

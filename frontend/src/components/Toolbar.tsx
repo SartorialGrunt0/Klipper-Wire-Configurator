@@ -108,6 +108,7 @@ export default function Toolbar({
   const [showVisibilityMenu, setShowVisibilityMenu] = useState(false);
   const [visibilityMenuPosition, setVisibilityMenuPosition] = useState({ top: 0, left: 0 });
   const aiConfigured = useAiStore((s) => s.isConfigured());
+  const chatStatus = useAiStore((s) => s.chatStatus);
   const [showFlash, setShowFlash] = useState(false);
   const hasOriginals = Object.keys(useConfigStore((s) => s.originalTexts)).length > 0;
   const isNative = useNativeStore((s) => s.isNative);
@@ -122,7 +123,7 @@ export default function Toolbar({
   const showImportButton = !hiddenItems.import;
   const showOpenFromPiButton = isNative && !hiddenItems.openFromPi;
   const showExportButton = !hiddenItems.export;
-  const showSaveButton = isNative && hasConfig && !hiddenItems.save;
+  const showSaveButton = hasConfig && !hiddenItems.save && (isNative === true || hasPendingChanges);
   const showRevertButton = hasPendingChanges && hasOriginals && !hiddenItems.revert;
   const showDiffButton = hasOriginals && !hiddenItems.diff;
   const showAiChatButton = !hiddenItems.aiChat;
@@ -347,7 +348,14 @@ export default function Toolbar({
       {showAiChatButton && (
         <button
           onClick={() => setShowChat(true)}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] transition-colors"
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+            chatStatus === 'success'
+              ? 'bg-green-600 text-white hover:bg-green-700'
+              : chatStatus === 'error'
+                ? 'bg-red-600 text-white hover:bg-red-700'
+                : 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)]'
+          }`}
+          title={chatStatus === 'success' ? 'AI Chat — response ready' : chatStatus === 'error' ? 'AI Chat — last request failed' : 'AI Chat'}
         >
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
             <path d="M8 1a7 7 0 110 14A7 7 0 018 1z" stroke="currentColor" strokeWidth="1.5"/>
@@ -526,17 +534,17 @@ export default function Toolbar({
       )}
       {showFlash && <FirmwareDialog onClose={() => setShowFlash(false)} />}
       {showRevert && <RevertDialog onClose={() => setShowRevert(false)} />}
-      {showChat && (
-        <ChatDialog
-          open={showChat}
-          onClose={() => {
-            setShowChat(false);
-            setPendingAiRequest(null);
-          }}
-          pendingRequest={pendingAiRequest}
-          onPendingRequestHandled={() => setPendingAiRequest(null)}
-        />
-      )}
+      {/* ChatDialog stays mounted when closed so an in-flight request keeps
+          running; `open` hides/shows the overlay. */}
+      <ChatDialog
+        open={showChat}
+        onClose={() => {
+          setShowChat(false);
+          setPendingAiRequest(null);
+        }}
+        pendingRequest={pendingAiRequest}
+        onPendingRequestHandled={() => setPendingAiRequest(null)}
+      />
     </div>
   );
 }

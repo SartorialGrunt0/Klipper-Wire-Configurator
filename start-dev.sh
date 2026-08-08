@@ -18,9 +18,18 @@ if [ ! -f "$BACKEND_DIR/venv/bin/python" ]; then
     echo "Creating backend venv..."
     cd "$BACKEND_DIR"
     python3 -m venv venv
-    venv/bin/pip install -r requirements.txt
 fi
 cd "$BACKEND_DIR"
+# piwheels fallback for 32-bit ARM: markupsafe (jinja2's dependency) has no
+# official armv7l wheels and would otherwise build from source (needs Rust).
+# Raspberry Pi OS configures piwheels by default; add it when missing.
+if ! venv/bin/pip config list 2>/dev/null | grep -qi piwheels; then
+    export PIP_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL:+$PIP_EXTRA_INDEX_URL }https://www.piwheels.org/simple"
+fi
+# Refresh Python dependencies on every start so pulls that add new
+# requirements (e.g. jinja2) work without manually reinstalling.
+echo "Refreshing backend Python dependencies..."
+venv/bin/pip install -r requirements.txt
 venv/bin/python main.py &
 BACKEND_PID=$!
 

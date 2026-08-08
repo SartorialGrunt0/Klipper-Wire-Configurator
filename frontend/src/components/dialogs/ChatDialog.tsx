@@ -1,633 +1,80 @@
-import React, { useState, useRef, useEffect, useCallback, type ComponentPropsWithoutRef } from 'react';
-import KeyboardArrowDownRounded from '@mui/icons-material/KeyboardArrowDownRounded';
-import UploadFileRounded from '@mui/icons-material/UploadFileRounded';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import remarkMath from 'remark-math';
-import rehypeKatex from 'rehype-katex';
-import { useAiStore, AiProvider, ChatMessage } from '../../stores/aiStore';
+/**
+ * AI Chat Dialog
+ *
+ * Orchestrates the full AI chat experience:
+ * - Unconfigured state shows ChatSettingsPanel (standalone mode)
+ * - Configured state shows title bar, optional inline settings,
+ *   message list, and input bar
+ * - Message submission runs validation retry loop via useAssistantDraft
+ *
+ * Single source of truth for settings editing state lives here,
+ * passed down to ChatSettingsPanel as props.
+ */
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { useAiStore, AiProvider, providerRequiresApiKey, type ChatMessage } from '../../stores/aiStore';
+import { useChatHistoryStore } from '../../stores/chatHistoryStore';
 import { useConfigStore } from '../../stores/configStore';
 import { useGraphStore } from '../../stores/graphStore';
+import { usePrinterMemoryStore, DEFAULT_PRINTER_MEMORY, type PrinterMemory } from '../../stores/printerMemoryStore';
 import * as api from '../../services/api';
-import AiDraftPreviewDialog from './AiDraftPreviewDialog';
-import { mergeAssistantSectionsIntoConfig, type AssistantDraftChange } from '../../utils/assistantDraftMerge';
-import { normalizeDiffText } from '../../utils/configDiff';
+import {
+  buildConfigIndexMessage,
+  extractMentionedConfigFilenames,
+} from '../../utils/chatUtils';
+import { extractPrinterMemoryBlock } from '../../utils/printerMemory';
+import {
+  PROVIDER_DEFAULTS,
+  isLocalProvider,
+  resolveProviderApiUrl,
+  getProviderModel,
+} from '../../utils/chatProviders';
+import { runReplyValidationPipeline, createPrinterMemoryReplyValidator } from '../../utils/replyValidation';
+import {
+  extractTargetedSectionHeaders,
+  extractSectionText,
+  findSectionHeaders,
+  buildSectionContextMessage,
+} from '../../utils/chatIntent';
 import { buildProjectGraph } from '../../utils/graphBuilder';
-import type { LmStudioContextStatus, LmStudioMcpStatus, PendingAiChatRequest } from '../../types/ai';
-import type { ConfigFile, ConfigSection, ValidationError, ValidationResult } from '../../types/config';
+import { useAssistantDraft, FULL_REWRITE_GUARD_ENABLED } from '../../hooks/useAssistantDraft';
+import ChatSettingsPanel from './ChatSettingsPanel';
+import ChatHistoryDialog from './ChatHistoryDialog';
+import PrinterMemoryDialog from './PrinterMemoryDialog';
+import ChatMessageList from './ChatMessageList';
+import ChatInputBar from './ChatInputBar';
+import AiDraftPreviewDialog from './AiDraftPreviewDialog';
+import type { PendingAiChatRequest } from '../../types/ai';
+import type { AiChatRole } from '../../services/api';
+import type { SavedConversation } from '../../stores/chatHistoryStore';
 
-interface ProviderInfo {
-  label: string;
-  defaultUrl: string;
-  requiresKey: boolean;
-  defaultHost: string;
-  defaultPort: string;
+/**
+ * Frontend "handholding" gate (Phase 4/5 lean injection + file-targeting
+ * reinforcement).
+ *
+ * Default OFF: a capable model discovers config content and targets the
+ * right files through its MCP tools plus the backend SYSTEM_PROMPT edit
+ * protocol (validated by the harness — AMBI-01..08 pass with zero injected
+ * content and no frontend reinforcement). The regex-targeted injection can
+ * also steer the model toward the wrong section.
+ * Re-enable at build time with VITE_KWC_HANDHOLDING=1 for very small models
+ * with flaky tool calling: the guess-work section injection and explicit
+ * file-targeting instructions may help them stay grounded step-by-step.
+ */
+const HANDHOLDING_ENABLED =
+  (import.meta.env.VITE_KWC_HANDHOLDING as string | undefined) === '1';
+
+/**
+ * Heuristic for failures worth auto-recovering from: network drops and
+ * timeouts mid-flight. Deterministic API errors (validation failures,
+ * bad keys) should surface as normal error banners, not auto-resends.
+ */
+function looksLikeTransientFailure(err: unknown): boolean {
+  if (err instanceof api.ChatStoppedError) return false;
+  const message = err instanceof Error ? err.message : String(err);
+  return /failed to fetch|networkerror|network error|timed out|timeout|econnreset|aborted/i.test(message);
 }
 
-const PROVIDER_OPTIONS: Array<{ value: AiProvider; label: string }> = [
-  { value: 'chatgpt', label: 'ChatGPT (OpenAI)' },
-  { value: 'google', label: 'Google (Gemini)' },
-  { value: 'anthropic', label: 'Anthropic (Claude)' },
-  { value: 'github', label: 'GitHub Copilot' },
-  { value: 'openai-compatible', label: 'OpenAI Compatible' },
-  { value: 'lm-studio', label: 'LM Studio (Local)' },
-  { value: 'ollama', label: 'Ollama (Local)' },
-];
-
-const PROVIDER_DEFAULTS: Record<AiProvider, ProviderInfo> = {
-  chatgpt: {
-    label: 'ChatGPT (OpenAI)',
-    defaultUrl: 'https://api.openai.com/v1/chat/completions',
-    requiresKey: true,
-    defaultHost: 'localhost',
-    defaultPort: '1234',
-  },
-  google: {
-    label: 'Google (Gemini)',
-    defaultUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
-    requiresKey: true,
-    defaultHost: 'localhost',
-    defaultPort: '1234',
-  },
-  anthropic: {
-    label: 'Anthropic (Claude)',
-    defaultUrl: 'https://api.anthropic.com/v1/messages',
-    requiresKey: true,
-    defaultHost: 'localhost',
-    defaultPort: '1234',
-  },
-  github: {
-    label: 'GitHub Copilot',
-    defaultUrl: 'https://models.github.ai/inference/chat/completions',
-    requiresKey: true,
-    defaultHost: 'localhost',
-    defaultPort: '1234',
-  },
-  'openai-compatible': {
-    label: 'OpenAI Compatible',
-    defaultUrl: 'http://localhost:1234/v1/chat/completions',
-    requiresKey: false,
-    defaultHost: 'localhost',
-    defaultPort: '1234',
-  },
-  'lm-studio': {
-    label: 'LM Studio (Local)',
-    defaultUrl: '',
-    requiresKey: false,
-    defaultHost: 'localhost',
-    defaultPort: '1234',
-  },
-  ollama: {
-    label: 'Ollama (Local)',
-    defaultUrl: '',
-    requiresKey: false,
-    defaultHost: 'localhost',
-    defaultPort: '11434',
-  },
-};
-
-const isLocalProvider = (provider: AiProvider) => provider === 'lm-studio' || provider === 'ollama';
-
-function buildLocalProviderApiUrl(host: string, port: string): string {
-  return `http://${host}:${port}/v1/chat/completions`;
-}
-
-function resolveProviderApiUrl(
-  provider: AiProvider,
-  apiUrl: string,
-  lmStudioHost: string,
-  lmStudioPort: string,
-  ollamaHost: string,
-  ollamaPort: string,
-): string {
-  if (provider === 'lm-studio') {
-    return buildLocalProviderApiUrl(lmStudioHost, lmStudioPort);
-  }
-
-  if (provider === 'ollama') {
-    return buildLocalProviderApiUrl(ollamaHost, ollamaPort);
-  }
-
-  return apiUrl;
-}
-
-function getProviderModel(
-  provider: AiProvider,
-  providerModels: Partial<Record<AiProvider, string>>,
-  fallbackModel = '',
-  fallbackProvider?: AiProvider,
-): string {
-  const providerModel = providerModels[provider]?.trim();
-  if (providerModel) {
-    return providerModel;
-  }
-  if (fallbackProvider === provider && fallbackModel.trim()) {
-    return fallbackModel;
-  }
-  return '';
-}
-
-function providerRequiresApiKey(provider: AiProvider): boolean {
-  return PROVIDER_DEFAULTS[provider].requiresKey;
-}
-
-type ParagraphProps = ComponentPropsWithoutRef<'p'>;
-type ListProps = ComponentPropsWithoutRef<'ul'>;
-type OrderedListProps = ComponentPropsWithoutRef<'ol'>;
-type ListItemProps = ComponentPropsWithoutRef<'li'>;
-type AnchorProps = ComponentPropsWithoutRef<'a'>;
-type BlockquoteProps = ComponentPropsWithoutRef<'blockquote'>;
-type TableProps = ComponentPropsWithoutRef<'table'>;
-type TableCellProps = ComponentPropsWithoutRef<'th'>;
-type TableDataCellProps = ComponentPropsWithoutRef<'td'>;
-type CodeProps = ComponentPropsWithoutRef<'code'> & {
-  children?: React.ReactNode;
-  className?: string;
-  inline?: boolean;
-  node?: unknown;
-};
-
-function MarkdownCode({ children, className, inline }: CodeProps) {
-  const content = String(children ?? '').replace(/\n$/, '');
-  const language = className?.match(/language-([^\s]+)/)?.[1] ?? '';
-  const isBlock = inline === false || Boolean(className) || content.includes('\n');
-  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle');
-  const resetTimerRef = useRef<number | null>(null);
-
-  useEffect(() => () => {
-    if (resetTimerRef.current !== null) {
-      window.clearTimeout(resetTimerRef.current);
-    }
-  }, []);
-
-  if (!isBlock) {
-    return (
-      <code className="rounded bg-[var(--color-bg-secondary)] px-1 py-0.5 font-mono text-[11px]">
-        {content}
-      </code>
-    );
-  }
-
-  const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(content);
-      setCopyState('copied');
-    } catch {
-      setCopyState('error');
-    } finally {
-      if (resetTimerRef.current !== null) {
-        window.clearTimeout(resetTimerRef.current);
-      }
-      resetTimerRef.current = window.setTimeout(() => {
-        setCopyState('idle');
-      }, 2000);
-    }
-  };
-
-  const buttonLabel = copyState === 'copied' ? 'Copied' : copyState === 'error' ? 'Copy failed' : 'Copy code';
-
-  return (
-    <div className="my-2 overflow-hidden rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)]">
-      <div className="flex items-center justify-between gap-2 border-b border-[var(--color-bg-tertiary)] px-3 py-1.5">
-        <span className="text-[10px] font-medium uppercase tracking-[0.16em] text-[var(--color-text-secondary)]">
-          {language || 'code'}
-        </span>
-        <button
-          type="button"
-          onClick={() => {
-            void handleCopy();
-          }}
-          className="rounded p-1 text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-primary)] hover:text-[var(--color-text-primary)]"
-          aria-label={buttonLabel}
-          title={buttonLabel}
-        >
-          {copyState === 'copied' ? (
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <path d="M3 8.5l3 3 7-7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          ) : (
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <rect x="5" y="3" width="8" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
-              <path d="M3.5 10.5H3A1.5 1.5 0 011.5 9V3A1.5 1.5 0 013 1.5h6A1.5 1.5 0 0110.5 3v0.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-            </svg>
-          )}
-        </button>
-      </div>
-      <pre className="overflow-x-auto p-3">
-        <code className="font-mono text-[11px]">{content}</code>
-      </pre>
-    </div>
-  );
-}
-
-interface AttachedConfigFile {
-  id: string;
-  name: string;
-  content: string;
-}
-
-const CONTEXT_TRUNCATION_LIMIT = 40000;
-const CONFIG_CODE_LANGUAGES = new Set(['', 'cfg', 'conf', 'ini', 'klipper', 'printercfg']);
-const ASSISTANT_FILE_HINT_RE = /^[#;]\s*file\s*:\s*(.+?)\s*$/i;
-const KLIPPER_DOC_FILENAME_RE = /(^|[^A-Za-z0-9_-])([A-Za-z0-9][A-Za-z0-9_-]*\.md)(?=$|[^A-Za-z0-9_.-])/g;
-const KLIPPER_DOC_REQUEST_RE = /\b(?:can you|could you|would you|please|provide|send|share|paste|show me|include|load|fetch|pull|give me|i need|i would need|i'd need)\b/i;
-const MAX_AUTO_FETCHED_KLIPPER_DOCS = 2;
-const MAX_ASSISTANT_DRAFT_VALIDATION_ATTEMPTS = 3;
-const MAX_ASSISTANT_HINT_USER_MESSAGES = 3;
-
-function truncateConfigContext(content: string): string {
-  if (content.length <= CONTEXT_TRUNCATION_LIMIT) {
-    return content;
-  }
-
-  return `${content.slice(0, CONTEXT_TRUNCATION_LIMIT)}\n\n# Context truncated after ${CONTEXT_TRUNCATION_LIMIT} characters.`;
-}
-
-function buildConfigContextMessage(filename: string, content: string, label: string): string {
-  return `${label}: ${filename}\n\n\`\`\`cfg\n${truncateConfigContext(content)}\n\`\`\``;
-}
-
-function extractConfigCodeBlocks(content: string): string[] {
-  const codeBlockPattern = /```([^\n`]*)\n([\s\S]*?)```/g;
-  const configBlocks: string[] = [];
-  const fallbackBlocks: string[] = [];
-
-  for (const match of content.matchAll(codeBlockPattern)) {
-    const language = match[1].trim().toLowerCase();
-    const block = match[2].trim();
-    if (!block) {
-      continue;
-    }
-
-    if (CONFIG_CODE_LANGUAGES.has(language)) {
-      configBlocks.push(block);
-      continue;
-    }
-
-    fallbackBlocks.push(block);
-  }
-
-  if (configBlocks.length > 0) {
-    return configBlocks;
-  }
-
-  return fallbackBlocks.length > 0 ? [fallbackBlocks[0]] : [];
-}
-
-function extractConfigCodeBlock(content: string): string | null {
-  return extractConfigCodeBlocks(content)[0] ?? null;
-}
-
-function extractEqualsSeparatedConfigLines(content: string): string[] {
-  const matches = extractConfigCodeBlocks(content)
-    .flatMap((block) => block.split(/\r?\n/))
-    .map((line) => line.trim())
-    .filter((line) => /^#?\s*[A-Za-z0-9_][A-Za-z0-9_-]*\s*=.*$/.test(line));
-
-  return Array.from(new Set(matches));
-}
-
-function buildConfigSeparatorRewritePrompt(offendingLines: string[]): string {
-  const examples = offendingLines
-    .slice(0, 5)
-    .map((line) => `- ${line}`)
-    .join('\n');
-
-  return [
-    'Rewrite your previous reply so every cfg parameter assignment uses a colon separator instead of an equals sign.',
-    'Keep the exact same files, section headers, parameter names, values, ordering, comments, and surrounding explanation.',
-    'Do not change gcode command arguments inside multiline values. Only change cfg parameter lines from `key = value` to `key: value`.',
-    'Return the full replacement reply.',
-    '',
-    'Examples that must be rewritten with colons:',
-    examples,
-  ].join('\n');
-}
-
-function appendWarningMessage(current: string | null, next: string): string {
-  return current ? `${current}\n${next}` : next;
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function extractMentionedConfigFilenames(texts: string[], availableFilenames: string[]): string[] {
-  const matches: string[] = [];
-
-  for (const filename of availableFilenames) {
-    const pattern = new RegExp(`(^|[^A-Za-z0-9_.-])${escapeRegExp(filename)}(?=$|[^A-Za-z0-9_.-])`, 'i');
-    if (texts.some((text) => pattern.test(text))) {
-      matches.push(filename);
-    }
-  }
-
-  return matches;
-}
-
-function extractAssistantFileHint(
-  configBlock: string,
-  availableFilenames: string[],
-): { configText: string; fileHint: string | null } {
-  const availableByLower = new Map(availableFilenames.map((filename) => [filename.toLowerCase(), filename]));
-  const lines = configBlock.split(/\r?\n/);
-  let fileHint: string | null = null;
-  let fileHintLineIndex = -1;
-
-  for (let index = 0; index < lines.length; index += 1) {
-    const trimmed = lines[index].trim();
-
-    if (!trimmed) {
-      continue;
-    }
-
-    const hintMatch = ASSISTANT_FILE_HINT_RE.exec(trimmed);
-    if (hintMatch) {
-      fileHint = availableByLower.get(hintMatch[1].trim().toLowerCase()) ?? null;
-      fileHintLineIndex = index;
-    }
-
-    break;
-  }
-
-  if (fileHintLineIndex === -1) {
-    return { configText: configBlock, fileHint };
-  }
-
-  return {
-    configText: lines.filter((_, index) => index !== fileHintLineIndex).join('\n').trim(),
-    fileHint,
-  };
-}
-
-function scoreAssistantTargetFile(config: ConfigFile, assistantSections: ConfigSection[]): {
-  exactMatches: number;
-  sectionTypeMatches: number;
-} {
-  const fullHeaders = new Set(config.sections.map((section) => section.full_header));
-  const sectionTypes = new Set(config.sections.map((section) => section.section_type));
-  let exactMatches = 0;
-  let sectionTypeMatches = 0;
-
-  assistantSections.forEach((section) => {
-    if (fullHeaders.has(section.full_header)) {
-      exactMatches += 1;
-      return;
-    }
-
-    if (sectionTypes.has(section.section_type)) {
-      sectionTypeMatches += 1;
-    }
-  });
-
-  return { exactMatches, sectionTypeMatches };
-}
-
-function resolveAssistantTargetFile(
-  assistantConfig: ConfigFile,
-  configFiles: Record<string, ConfigFile>,
-  activeFile: string,
-  hintedFilenames: string[],
-): string | null {
-  const availableFilenames = Object.keys(configFiles);
-  if (availableFilenames.length === 0) {
-    return null;
-  }
-
-  const uniqueHints = Array.from(new Set(hintedFilenames.filter((filename) => Boolean(configFiles[filename]))));
-  if (uniqueHints.length === 1) {
-    return uniqueHints[0];
-  }
-
-  const scores = availableFilenames
-    .map((filename) => {
-      const { exactMatches, sectionTypeMatches } = scoreAssistantTargetFile(
-        configFiles[filename],
-        assistantConfig.sections,
-      );
-
-      return {
-        filename,
-        exactMatches,
-        sectionTypeMatches,
-        hinted: uniqueHints.includes(filename),
-        active: filename === activeFile,
-      };
-    })
-    .sort((left, right) => {
-      if (right.exactMatches !== left.exactMatches) {
-        return right.exactMatches - left.exactMatches;
-      }
-      if (right.hinted !== left.hinted) {
-        return Number(right.hinted) - Number(left.hinted);
-      }
-      if (right.sectionTypeMatches !== left.sectionTypeMatches) {
-        return right.sectionTypeMatches - left.sectionTypeMatches;
-      }
-      if (right.active !== left.active) {
-        return Number(right.active) - Number(left.active);
-      }
-      return left.filename.localeCompare(right.filename);
-    });
-
-  const bestScore = scores[0];
-  if (bestScore.exactMatches > 0 || bestScore.sectionTypeMatches > 0) {
-    return bestScore.filename;
-  }
-
-  if (configFiles[activeFile]) {
-    return activeFile;
-  }
-
-  return availableFilenames[0] ?? null;
-}
-
-function getLmStudioMcpStatusPresentation(status: LmStudioMcpStatus): {
-  label: string;
-  className: string;
-  title: string;
-} {
-  const pluginText = status.pluginId ?? 'disabled';
-
-  if (!status.requested) {
-    return {
-      label: 'Docs MCP off',
-      className: 'border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]',
-      title: 'LM Studio docs MCP was disabled for this request.',
-    };
-  }
-
-  if (status.fallbackUsed) {
-    return {
-      label: 'Docs MCP fallback',
-      className: 'border-amber-500/30 bg-amber-500/10 text-amber-300',
-      title: `${status.fallbackReason ?? 'The proxy retried on the OpenAI-compatible endpoint.'} Plugin: ${pluginText}.`,
-    };
-  }
-
-  if (status.toolUsed) {
-    const toolText = status.toolNames.length > 0 ? ` Tools: ${status.toolNames.join(', ')}.` : '';
-    return {
-      label: 'Docs MCP used',
-      className: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300',
-      title: `LM Studio used ${pluginText} through /api/v1/chat.${toolText}`,
-    };
-  }
-
-  return {
-    label: 'Docs MCP not used',
-    className: 'border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]',
-    title: `LM Studio enabled ${pluginText}, but the model answered without calling it.`,
-  };
-}
-
-function formatCompactCount(value: number): string {
-  if (value >= 1_000_000) {
-    return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1).replace(/\.0$/, '')}M`;
-  }
-
-  if (value >= 1_000) {
-    return `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1).replace(/\.0$/, '')}k`;
-  }
-
-  return String(value);
-}
-
-function formatCount(value: number): string {
-  return value.toLocaleString();
-}
-
-function getLmStudioContextPresentation(status: LmStudioContextStatus): {
-  label: string;
-  className: string;
-  title: string;
-  fillRatio: number | null;
-} {
-  const fillRatio = typeof status.utilization === 'number'
-    ? Math.max(0, Math.min(status.utilization, 1))
-    : null;
-
-  let className = 'border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]';
-  if (status.truncated || (fillRatio !== null && fillRatio >= 0.9)) {
-    className = 'border-rose-500/30 bg-rose-500/10 text-rose-300';
-  } else if (fillRatio !== null && fillRatio >= 0.75) {
-    className = 'border-amber-500/30 bg-amber-500/10 text-amber-300';
-  } else if (fillRatio !== null && fillRatio >= 0.5) {
-    className = 'border-sky-500/30 bg-sky-500/10 text-sky-300';
-  } else if (fillRatio !== null) {
-    className = 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300';
-  }
-
-  const lines: string[] = [];
-  if (status.usedTokens !== null && status.contextWindow !== null && fillRatio !== null) {
-    lines.push(
-      `LM Studio context used for this turn: ${formatCount(status.usedTokens)} / ${formatCount(status.contextWindow)} tokens (${(fillRatio * 100).toFixed(1)}%).`,
-    );
-  } else if (status.usedTokens !== null) {
-    const basis = status.totalTokens !== null
-      ? 'total turn tokens'
-      : status.promptTokens !== null
-        ? 'prompt tokens'
-        : 'estimated prompt tokens';
-    lines.push(`LM Studio reported ${basis}: ${formatCount(status.usedTokens)}.`);
-    if (status.contextWindow === null) {
-      lines.push('LM Studio did not expose the model context window for this request, so this is not a true max-context percentage.');
-    }
-  } else {
-    lines.push(`LM Studio request size: ${formatCount(status.requestChars)} characters.`);
-    lines.push('LM Studio did not report token usage for this request.');
-  }
-
-  if (status.promptTokens !== null || status.completionTokens !== null || status.totalTokens !== null) {
-    const usageParts: string[] = [];
-    if (status.promptTokens !== null) {
-      usageParts.push(`prompt ${formatCount(status.promptTokens)}`);
-    }
-    if (status.completionTokens !== null) {
-      usageParts.push(`completion ${formatCount(status.completionTokens)}`);
-    }
-    if (status.totalTokens !== null) {
-      usageParts.push(`total ${formatCount(status.totalTokens)}`);
-    }
-    if (usageParts.length > 0) {
-      lines.push(`Usage: ${usageParts.join(', ')}.`);
-    }
-  }
-
-  if (status.estimatedPromptTokens !== null && status.promptTokens === null) {
-    lines.push('Prompt tokens are estimated from request size because LM Studio did not return usage stats for this route.');
-  }
-
-  lines.push(`Request text sent from the app: ${formatCount(status.requestChars)} characters.`);
-  if (status.truncated) {
-    lines.push('The app truncated the LM Studio request text before sending it.');
-  }
-
-  if (status.truncated) {
-    return {
-      label: 'Context capped',
-      className,
-      title: lines.join(' '),
-      fillRatio: fillRatio ?? 1,
-    };
-  }
-
-  if (fillRatio !== null) {
-    return {
-      label: `Context ${Math.round(fillRatio * 100)}%`,
-      className,
-      title: lines.join(' '),
-      fillRatio,
-    };
-  }
-
-  if (status.usedTokens !== null) {
-    return {
-      label: `Context ${formatCompactCount(status.usedTokens)} tok`,
-      className,
-      title: lines.join(' '),
-      fillRatio: null,
-    };
-  }
-
-  return {
-    label: 'Context size',
-    className,
-    title: lines.join(' '),
-    fillRatio: null,
-  };
-}
-
-function extractRequestedKlipperDocFilenames(content: string): string[] {
-  const requestedDocs = new Set<string>();
-  const segments = content
-    .split(/\r?\n+/)
-    .flatMap((line) => line.split(/(?<=[.!?])\s+/))
-    .map((segment) => segment.trim())
-    .filter(Boolean);
-
-  for (const segment of segments) {
-    if (!KLIPPER_DOC_REQUEST_RE.test(segment)) {
-      continue;
-    }
-
-    for (const match of segment.matchAll(KLIPPER_DOC_FILENAME_RE)) {
-      requestedDocs.add(match[2]);
-      if (requestedDocs.size >= MAX_AUTO_FETCHED_KLIPPER_DOCS) {
-        return Array.from(requestedDocs);
-      }
-    }
-  }
-
-  return Array.from(requestedDocs);
-}
-
-function buildAutoLoadedKlipperDocMessage(documents: api.KlipperDocResponse[]): string {
-  return [
-    'The app automatically fetched the full bundled Klipper markdown document(s) you requested. Answer the user\'s previous request directly now using these documents. Do not ask the user to paste the same documentation again unless you need a different source document.',
-    ...documents.map((document) => `Full bundled Klipper document: ${document.filename}\n\n${document.content}`),
-  ].join('\n\n---\n\n');
-}
+// ── Props ───────────────────────────────────────────────────────────
 
 interface ChatDialogProps {
   open: boolean;
@@ -636,191 +83,26 @@ interface ChatDialogProps {
   onPendingRequestHandled?: () => void;
 }
 
-interface AssistantDraftFilePreview {
-  filename: string;
-  originalText: string;
-  baseConfig: ConfigFile;
-  assistantConfig: ConfigFile;
-  mergedText: string;
-  changes: AssistantDraftChange[];
+interface AttachedConfigFile {
+  id: string;
+  name: string;
+  content: string;
 }
 
-interface AssistantDraftPreview {
-  filePreviews: AssistantDraftFilePreview[];
-  selectedChangeIds: string[];
-  previewUpdating: boolean;
+// ── Constants ───────────────────────────────────────────────────────
+
+// CONTEXT_TRUNCATION_LIMIT and truncateConfigContext live in
+// utils/chatUtils.ts — imported above to avoid duplicate definitions.
+
+// Parse the temperature edit field into a clamped sampling value.
+// Invalid input falls back to the 0.7 default; range is 0-2.
+function parseTemperature(value: string): number {
+  const parsed = parseFloat(value);
+  if (Number.isNaN(parsed)) return 0.7;
+  return Math.min(2, Math.max(0, parsed));
 }
 
-interface AssistantReplyAttempt {
-  assistantMessage: ChatMessage;
-  conversationMessages: ChatMessage[];
-  warningMessage: string | null;
-}
-
-interface AssistantDraftValidationIssueGroup {
-  filename: string;
-  errors: ValidationError[];
-}
-
-interface AssistantDraftValidationOutcome {
-  applicable: boolean;
-  blockingIssues: AssistantDraftValidationIssueGroup[];
-  failureReason: string | null;
-}
-
-interface SubmitMessageOptions {
-  hiddenFromUser?: boolean;
-}
-
-const RETRY_EXEMPT_DUPLICATE_SECTION_RE = /^Section \[[^\]]+\] (?:can only be defined once(?: across active included config files)?\.|is reused across active included config files\.)(?: Also defined in: .+)?$/;
-const RETRY_EXEMPT_SHARED_PIN_RE = /^Pin '.*' is used by multiple sections: .+$/;
-
-function isBlockingAssistantValidationIssue(error: ValidationError): boolean {
-  return error.severity === 'error' || error.severity === 'warning';
-}
-
-function isRetryExemptAssistantValidationIssue(error: ValidationError): boolean {
-  return RETRY_EXEMPT_DUPLICATE_SECTION_RE.test(error.message)
-    || RETRY_EXEMPT_SHARED_PIN_RE.test(error.message);
-}
-
-function hasOnlyRetryExemptAssistantValidationIssues(
-  blockingIssues: AssistantDraftValidationIssueGroup[],
-): boolean {
-  const issues = blockingIssues.flatMap((group) => group.errors);
-  return issues.length > 0 && issues.every((error) => isRetryExemptAssistantValidationIssue(error));
-}
-
-function shouldRetryAssistantValidation(
-  validationOutcome: AssistantDraftValidationOutcome,
-  attemptsUsed: number,
-): boolean {
-  if (validationOutcome.applicable) {
-    if (validationOutcome.blockingIssues.length === 0) {
-      return false;
-    }
-
-    return !(attemptsUsed > 1 && hasOnlyRetryExemptAssistantValidationIssues(validationOutcome.blockingIssues));
-  }
-
-  return attemptsUsed > 1 && Boolean(validationOutcome.failureReason);
-}
-
-function buildValidationErrorKey(filename: string, error: ValidationError): string {
-  return [filename, error.severity, error.section, error.param, error.message].join('::');
-}
-
-function collectNewValidationErrors(
-  baselineValidations: Record<string, ValidationResult>,
-  candidateValidations: Record<string, ValidationResult>,
-): AssistantDraftValidationIssueGroup[] {
-  const baselineCounts = new Map<string, number>();
-
-  Object.entries(baselineValidations).forEach(([filename, result]) => {
-    result.errors.forEach((error) => {
-      if (!isBlockingAssistantValidationIssue(error)) {
-        return;
-      }
-
-      const key = buildValidationErrorKey(filename, error);
-      baselineCounts.set(key, (baselineCounts.get(key) ?? 0) + 1);
-    });
-  });
-
-  const blockingByFile = new Map<string, ValidationError[]>();
-
-  Object.entries(candidateValidations)
-    .sort(([left], [right]) => left.localeCompare(right))
-    .forEach(([filename, result]) => {
-      result.errors.forEach((error) => {
-        if (!isBlockingAssistantValidationIssue(error)) {
-          return;
-        }
-
-        const key = buildValidationErrorKey(filename, error);
-        const remainingBaselineCount = baselineCounts.get(key) ?? 0;
-        if (remainingBaselineCount > 0) {
-          baselineCounts.set(key, remainingBaselineCount - 1);
-          return;
-        }
-
-        const existing = blockingByFile.get(filename);
-        if (existing) {
-          existing.push(error);
-          return;
-        }
-
-        blockingByFile.set(filename, [error]);
-      });
-    });
-
-  return Array.from(blockingByFile.entries()).map(([filename, errors]) => ({ filename, errors }));
-}
-
-function formatAssistantDraftValidationIssues(
-  blockingIssues: AssistantDraftValidationIssueGroup[],
-  failureReason: string | null,
-): string {
-  const lines: string[] = [];
-
-  if (failureReason) {
-    lines.push(`- ${failureReason}`);
-  }
-
-  blockingIssues.forEach(({ filename, errors }) => {
-    lines.push(`File: ${filename}`);
-    errors.forEach((error) => {
-      const location = error.param
-        ? `[${error.section}] ${error.param}`
-        : `[${error.section}]`;
-      lines.push(`- ${location}: ${error.message}`);
-    });
-  });
-
-  return lines.join('\n');
-}
-
-function buildAssistantDraftValidationFeedback(
-  blockingIssues: AssistantDraftValidationIssueGroup[],
-  invalidContent: string,
-  failureReason: string | null,
-  allowExplanationOnly = false,
-): string {
-  const formattedIssues = formatAssistantDraftValidationIssues(blockingIssues, failureReason)
-    || '- The previous reply did not include a complete applicable cfg draft.';
-
-  return [
-    'Your previous assistant reply included cfg changes that failed the app validation after being merged into the current Klipper config project.',
-    'Return a corrected replacement reply that fixes every problem below and still satisfies the user request.',
-    'If you return config changes, return only complete changed sections inside fenced cfg code blocks and keep any required "# file: <filename>" hint.',
-    allowExplanationOnly
-      ? 'If the remaining problems are duplicate sections or reused pins and you cannot resolve them safely from the current config, do not return another invalid cfg block. Instead, clearly explain the conflict, mention the exact section or pin involved, and say what must change before a valid config can be produced.'
-      : 'Do not ask the user to apply manual fixes for these validation issues.',
-    '',
-    'Validation problems to fix:',
-    formattedIssues,
-    '',
-    'Previous invalid reply:',
-    '````text',
-    invalidContent.trim() || 'No content returned.',
-    '````',
-  ].join('\n');
-}
-
-function buildAssistantDraftValidationErrorMessage(
-  blockingIssues: AssistantDraftValidationIssueGroup[],
-  failureReason: string | null,
-  attempts: number,
-): string {
-  const formattedIssues = formatAssistantDraftValidationIssues(blockingIssues, failureReason);
-  const attemptLabel = attempts === 1 ? 'attempt' : 'attempts';
-
-  if (!formattedIssues) {
-    return `AI draft failed validation after ${attempts} ${attemptLabel}.`;
-  }
-
-  return `AI draft failed validation after ${attempts} ${attemptLabel}.\n${formattedIssues}`;
-}
+// ── Component ───────────────────────────────────────────────────────
 
 const ChatDialog: React.FC<ChatDialogProps> = ({
   open,
@@ -828,6 +110,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   pendingRequest = null,
   onPendingRequestHandled,
 }) => {
+  // ── Stores ──────────────────────────────────────────────────────
   const { settings, setSettings, isConfigured, messages, setMessages, clearMessages } = useAiStore();
   const {
     configFiles,
@@ -841,228 +124,176 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     clearTextDraft,
     markDirty,
   } = useConfigStore();
+
+  // ── Draft Hook ──────────────────────────────────────────────────
+  const {
+    assistantDraftPreview,
+    assistantDraftPreviewLoading,
+    assistantDraftApplicableMessages,
+    setAssistantDraftPreview,
+    setAssistantDraftApplicableMessages,
+    handleApplyAssistantEdit,
+    handleAssistantDraftSelectionChange,
+    handleAcceptAssistantEdit,
+    handleNewChat,
+    requestAssistantMessage: draftRequestMessage,
+    createDraftReplyValidator,
+    flattenAssistantDraftChanges,
+    updateAssistantDraftApplicableMessages,
+  } = useAssistantDraft();
+
+  // ── Component State ─────────────────────────────────────────────
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Set when a transient failure (network drop / timeout mid-flight) leaves
+  // an unanswered user message; offers a one-click resend and auto-resends
+  // when the browser reports the connection is back.
+  const [connectionLost, setConnectionLost] = useState(false);
+  const connectionLostRef = useRef(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [selectedConfigContextFiles, setSelectedConfigContextFiles] = useState<string[]>(activeFile ? [activeFile] : []);
+  // EXPERIMENT (auto-attach off): don't auto-select the active file.
+  // Context only includes files the user explicitly checks in "Include Files".
+  const [selectedConfigContextFiles, setSelectedConfigContextFiles] = useState<string[]>([]);
   const [attachedConfigFiles, setAttachedConfigFiles] = useState<AttachedConfigFile[]>([]);
-  const [assistantDraftPreview, setAssistantDraftPreview] = useState<AssistantDraftPreview | null>(null);
-  const [assistantDraftPreviewLoading, setAssistantDraftPreviewLoading] = useState<string | null>(null);
-  const [assistantDraftApplicableMessages, setAssistantDraftApplicableMessages] = useState<Record<number, boolean>>({});
-  const [includeFilesMenuOpen, setIncludeFilesMenuOpen] = useState(false);
+  const [showChatHistory, setShowChatHistory] = useState(false);
+  const [showCarryOverPrompt, setShowCarryOverPrompt] = useState(false);
+  const [showPrinterMemory, setShowPrinterMemory] = useState(false);
+  const [proposedMemory, setProposedMemory] = useState<PrinterMemory | null>(null);
 
-  // Settings editing state
+  // Phase 4: carry the sections injected last turn so follow-up questions
+  // keep their grounding even when the new message names no section. Entries
+  // are bounded to the last two turns and dropped when the file leaves the
+  // selection.
+  const carriedSectionsRef = useRef<Array<{ filename: string; headers: string[]; turn: number }>>([]);
+  const chatTurnRef = useRef(0);
+
+  // ── Settings Editing State (single source of truth) ─────────────
   const [editApiKey, setEditApiKey] = useState(settings.apiKey);
   const [editProviderModels, setEditProviderModels] = useState(settings.providerModels);
-  const [editModel, setEditModel] = useState(() => (
-    getProviderModel(settings.apiProvider, settings.providerModels, settings.model, settings.apiProvider)
-  ));
+  const [editModel, setEditModel] = useState(() =>
+    getProviderModel(settings.apiProvider, settings.providerModels, settings.model, settings.apiProvider),
+  );
   const [editApiUrl, setEditApiUrl] = useState(settings.apiUrl);
   const [editApiProvider, setEditApiProvider] = useState<AiProvider>(settings.apiProvider);
-  const [editLmStudioHost, setEditLmStudioHost] = useState(settings.lmStudioHost);
-  const [editLmStudioPort, setEditLmStudioPort] = useState(settings.lmStudioPort);
-  const [editLmStudioMcpPluginId, setEditLmStudioMcpPluginId] = useState(settings.lmStudioMcpPluginId);
-  const [editOllamaHost, setEditOllamaHost] = useState(settings.ollamaHost);
-  const [editOllamaPort, setEditOllamaPort] = useState(settings.ollamaPort);
+  const [editHost, setEditHost] = useState(settings.host);
+  const [editPort, setEditPort] = useState(settings.port);
+  const [editMaxTokens, setEditMaxTokens] = useState(String(settings.maxTokens ?? 4096));
+  const [editTemperature, setEditTemperature] = useState(String(settings.temperature ?? 0.7));
 
-  // Available models from local server
-  const [availableModels, setAvailableModels] = useState<string[]>([]);
-  const [modelsLoading, setModelsLoading] = useState(false);
-  const [modelsError, setModelsError] = useState<string | null>(null);
   const resolvedEditApiUrl = resolveProviderApiUrl(
     editApiProvider,
     editApiUrl,
-    editLmStudioHost,
-    editLmStudioPort,
-    editOllamaHost,
-    editOllamaPort,
+    editHost,
+    editPort,
   );
 
-  const handleModelChange = useCallback((nextModel: string) => {
-    setEditModel(nextModel);
-    setEditProviderModels((prev) => ({
-      ...prev,
-      [editApiProvider]: nextModel,
-    }));
-  }, [editApiProvider]);
+  // ── Refs ────────────────────────────────────────────────────────
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const handledPendingRequestIdRef = useRef<string | null>(null);
+  // Live open state for async completions: the toolbar button only flashes
+  // green/red when the dialog is closed at the moment the request finishes.
+  const openRef = useRef(open);
+  openRef.current = open;
+  // Stop button: AbortController cancels the client fetch immediately;
+  // the backend /ai/chat/stop endpoint (via requestId) cancels the work.
+  const stopControllerRef = useRef<AbortController | null>(null);
+  const stopRequestIdRef = useRef<string | null>(null);
 
-  // Fetch available models from local server
-  const fetchAvailableModels = async (
-    provider: AiProvider = editApiProvider,
-    apiUrl: string = resolvedEditApiUrl,
-    apiKey: string = editApiKey,
-  ) => {
-    if (!isLocalProvider(provider)) {
-      setAvailableModels([]);
-      return;
-    }
-    setModelsLoading(true);
-    setModelsError(null);
-    try {
-      const result = await api.listModels(apiUrl, apiKey);
-      setAvailableModels(result.models || []);
-      if (result.error) setModelsError(result.error);
-    } catch (err: unknown) {
-      setModelsError(err instanceof Error ? err.message : 'Failed to fetch models');
-      setAvailableModels([]);
-    } finally {
-      setModelsLoading(false);
-    }
-  };
+  const loadedConfigFilenames = Object.keys(configFiles);
 
-  // Fetch models when local provider settings change
-  useEffect(() => {
-    if (isLocalProvider(editApiProvider)) {
-      void fetchAvailableModels(editApiProvider, resolvedEditApiUrl, editApiKey);
-    } else {
-      setAvailableModels([]);
-    }
-  }, [editApiProvider, resolvedEditApiUrl, editApiKey]);
-
-  // Sync when settings change
+  // ── Sync settings to edit state when dialog opens ───────────────
   useEffect(() => {
     if (open) {
       setEditApiKey(settings.apiKey);
       setEditProviderModels(settings.providerModels);
-      setEditModel(getProviderModel(
-        settings.apiProvider,
-        settings.providerModels,
-        settings.model,
-        settings.apiProvider,
-      ));
+      setEditModel(getProviderModel(settings.apiProvider, settings.providerModels, settings.model, settings.apiProvider));
       setEditApiUrl(settings.apiUrl);
       setEditApiProvider(settings.apiProvider);
-      setEditLmStudioHost(settings.lmStudioHost);
-      setEditLmStudioPort(settings.lmStudioPort);
-      setEditLmStudioMcpPluginId(settings.lmStudioMcpPluginId);
-      setEditOllamaHost(settings.ollamaHost);
-      setEditOllamaPort(settings.ollamaPort);
+      setEditHost(settings.host);
+      setEditPort(settings.port);
+      setEditMaxTokens(String(settings.maxTokens ?? 4096));
+      setEditTemperature(String(settings.temperature ?? 0.7));
       setError(null);
-      if (isLocalProvider(settings.apiProvider)) {
-        void fetchAvailableModels(
-          settings.apiProvider,
-          resolveProviderApiUrl(
-            settings.apiProvider,
-            settings.apiUrl,
-            settings.lmStudioHost,
-            settings.lmStudioPort,
-            settings.ollamaHost,
-            settings.ollamaPort,
-          ),
-          settings.apiKey,
-        );
-      }
+      // Opening the dialog consumes any background completion signal — the
+      // toolbar button returns to its default color (the user is looking at
+      // the conversation now).
+      useAiStore.getState().setChatStatus('idle');
     }
   }, [open, settings]);
 
-  useEffect(() => {
-    if (!open) {
-      setIncludeFilesMenuOpen(false);
-      return;
-    }
+  // ── EXPERIMENT (auto-attach off) ───────────────────────────────
+  // Removed the old "seed the active file into the selection when the
+  // dialog opens" effect. Context now only includes files the user
+  // explicitly checks in "Include Files" (or manually attaches).
 
-    setSelectedConfigContextFiles((prev) => {
-      if (prev.length > 0 || !activeFile) {
-        return prev;
-      }
-
-      return [activeFile];
-    });
-  }, [open, activeFile]);
-
+  // ── Prune config context files when files are removed ───────────
   useEffect(() => {
     const availableFiles = new Set(Object.keys(configFiles));
-
     setSelectedConfigContextFiles((prev) => {
-      const next = prev.filter((filename) => availableFiles.has(filename));
+      const next = prev.filter((f) => availableFiles.has(f));
       return next.length === prev.length ? prev : next;
     });
   }, [configFiles]);
 
-  useEffect(() => {
-    if (!includeFilesMenuOpen) {
-      return;
-    }
-
-    const handlePointerDown = (event: MouseEvent) => {
-      if (includeFilesMenuRef.current?.contains(event.target as Node)) {
-        return;
-      }
-
-      setIncludeFilesMenuOpen(false);
-    };
-
-    document.addEventListener('mousedown', handlePointerDown);
-    return () => {
-      document.removeEventListener('mousedown', handlePointerDown);
-    };
-  }, [includeFilesMenuOpen]);
-
-  // Auto-scroll to bottom
+  // ── Auto-scroll to bottom ───────────────────────────────────────
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  // ── Detect applicable assistant messages ────────────────────────
   useEffect(() => {
-    let cancelled = false;
-
     if (!open || !activeFile) {
       setAssistantDraftApplicableMessages({});
-      return () => {
-        cancelled = true;
-      };
-    }
-
-    const assistantMessages = messages
-      .map((msg, index) => ({ msg, index }))
-      .filter(({ msg }) => msg.role === 'assistant' && extractConfigCodeBlock(msg.content));
-
-    if (assistantMessages.length === 0) {
-      setAssistantDraftApplicableMessages({});
-      return () => {
-        cancelled = true;
-      };
-    }
-
-    void (async () => {
-      const availabilityEntries = await Promise.all(
-        assistantMessages.map(async ({ msg, index }) => [index, await canAssistantMessageAffectDraft(msg.content, index)] as const),
-      );
-
-      if (cancelled) {
-        return;
-      }
-
-      setAssistantDraftApplicableMessages(Object.fromEntries(availabilityEntries));
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [open, messages, activeFile, configFiles, textDrafts]);
-
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLDivElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const includeFilesMenuRef = useRef<HTMLDivElement>(null);
-  const assistantDraftPreviewRequestRef = useRef(0);
-  const handledPendingRequestIdRef = useRef<string | null>(null);
-
-  const loadedConfigFilenames = Object.keys(configFiles);
-
-  const handleAttachConfigFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || []);
-    if (files.length === 0) {
       return;
     }
+    void updateAssistantDraftApplicableMessages(messages);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, messages, activeFile, configFiles, textDrafts]);
 
+  // ── Settings Save ───────────────────────────────────────────────
+  const handleSaveSettings = useCallback(() => {
+    const nextModel = editModel.trim();
+    const nextProviderModels = { ...editProviderModels, [editApiProvider]: nextModel };
+    setSettings({
+      apiKey: editApiKey,
+      model: nextModel,
+      providerModels: nextProviderModels,
+      apiUrl: resolvedEditApiUrl,
+      apiProvider: editApiProvider,
+      host: editHost,
+      port: editPort,
+      maxTokens: Math.max(256, parseInt(editMaxTokens, 10) || 4096),
+      temperature: parseTemperature(editTemperature),
+    });
+    setShowSettings(false);
+  }, [
+    editApiKey,
+    editApiProvider,
+    editHost,
+    editMaxTokens,
+    editPort,
+    editModel,
+    editProviderModels,
+    editTemperature,
+    resolvedEditApiUrl,
+    setSettings,
+  ]);
+
+  // ── File Attach ─────────────────────────────────────────────────
+  const handleAttachConfigFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
     try {
-      const loadedFiles = await Promise.all(files.map(async (file, index) => ({
-        id: `${file.name}-${file.lastModified}-${index}`,
-        name: file.name,
-        content: await file.text(),
-      })));
+      const loadedFiles = await Promise.all(
+        files.map(async (file, index) => ({
+          id: `${file.name}-${file.lastModified}-${index}`,
+          name: file.name,
+          content: await file.text(),
+        })),
+      );
       setAttachedConfigFiles((prev) => [...prev, ...loadedFiles]);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to import config file.');
@@ -1075,865 +306,529 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     setAttachedConfigFiles((prev) => prev.filter((file) => file.id !== id));
   };
 
-  const getConfigText = async (filename: string): Promise<string | null> => {
-    if (!filename) {
-      return null;
-    }
-
-    const draftText = textDrafts[filename];
-    if (typeof draftText === 'string') {
-      return draftText;
-    }
-
-    const config = configFiles[filename];
-    if (!config) {
-      return null;
-    }
-
-    return api.exportConfig(config);
-  };
-
-  const getActiveConfigText = async (): Promise<string | null> => {
-    if (!activeFile) {
-      return null;
-    }
-
-    return getConfigText(activeFile);
-  };
-
-  const getConfigContexts = async (filenames: string[]): Promise<string[]> => {
-    if (filenames.length === 0) {
-      return [];
-    }
-
-    const contexts = await Promise.all(
-      Array.from(new Set(filenames)).map(async (filename) => {
-        const configText = await getConfigText(filename);
-        if (configText == null) {
-          return null;
-        }
-
-        const label = filename === activeFile
-          ? (
-            typeof textDrafts[activeFile] === 'string' && textEditorDirty
-              ? 'Active Klipper config draft with unapplied text-view changes'
-              : 'Active Klipper config draft'
-          )
-          : 'Loaded Klipper config file';
-
-        return buildConfigContextMessage(filename, configText, label);
-      }),
-    );
-
-    return contexts.filter((context): context is string => context != null);
-  };
-
-  const getSelectedConfigContexts = async (): Promise<string[]> => getConfigContexts(selectedConfigContextFiles);
-
-  const buildAssistantDraftMergedText = async (
-    baseConfig: ConfigFile,
-    assistantConfig: ConfigFile,
-    originalText: string,
-    selectedChangeIds: string[],
-  ): Promise<string> => {
-    if (selectedChangeIds.length === 0) {
-      return originalText;
-    }
-
-    const { mergedConfig } = mergeAssistantSectionsIntoConfig(baseConfig, assistantConfig, selectedChangeIds);
-    return api.exportConfig({ ...mergedConfig, raw_text: originalText });
-  };
-
-  const getAssistantMessageHintTexts = (
-    content: string,
-    messageIndex?: number,
-    messageHistory: ChatMessage[] = messages,
-  ): string[] => {
-    if (messageIndex == null) {
-      return [content];
-    }
-
-    const hintTexts = [content];
-    let collectedUserMessages = 0;
-
-    for (let index = messageIndex - 1; index >= 0; index -= 1) {
-      const candidate = messageHistory[index];
-      if (candidate?.role === 'user') {
-        hintTexts.push(candidate.content);
-        collectedUserMessages += 1;
-        if (collectedUserMessages >= MAX_ASSISTANT_HINT_USER_MESSAGES) {
-          break;
-        }
-      }
-    }
-
-    return hintTexts;
-  };
-
-  const flattenAssistantDraftChanges = (filePreviews: AssistantDraftFilePreview[]): AssistantDraftChange[] =>
-    filePreviews.flatMap((filePreview) => filePreview.changes);
-
-  const buildAssistantDraftTargetConfigs = async (
-    content: string,
-    messageIndex?: number,
-    messageHistory: ChatMessage[] = messages,
-  ): Promise<ConfigFile[]> => {
-    const configBlocks = extractConfigCodeBlocks(content);
-    if (configBlocks.length === 0) {
-      throw new Error('The assistant response did not include a config code block to review.');
-    }
-
-    const hintTexts = getAssistantMessageHintTexts(content, messageIndex, messageHistory);
-    const mentionedFilenames = extractMentionedConfigFilenames(hintTexts, loadedConfigFilenames);
-    const groupedTargets = new Map<string, ConfigFile>();
-
-    for (const configBlock of configBlocks) {
-      const { configText, fileHint } = extractAssistantFileHint(configBlock, loadedConfigFilenames);
-      if (!configText.trim()) {
-        continue;
-      }
-
-      const assistantParseFilename = fileHint ?? mentionedFilenames[0] ?? activeFile ?? loadedConfigFilenames[0] ?? 'printer.cfg';
-      const assistantResult = await api.parseConfigText(configText, assistantParseFilename);
-
-      if (assistantResult.config.sections.length === 0) {
-        continue;
-      }
-
-      const targetFile = resolveAssistantTargetFile(
-        assistantResult.config,
-        configFiles,
-        activeFile,
-        fileHint ? [fileHint] : mentionedFilenames,
-      );
-
-      if (!targetFile) {
-        throw new Error('Unable to determine which config file should receive the assistant changes.');
-      }
-
-      const existingTarget = groupedTargets.get(targetFile);
-      if (existingTarget) {
-        groupedTargets.set(targetFile, {
-          ...existingTarget,
-          includes: Array.from(new Set([...existingTarget.includes, ...assistantResult.config.includes])),
-          header_comments: existingTarget.header_comments.length > 0
-            ? existingTarget.header_comments
-            : assistantResult.config.header_comments,
-          sections: [...existingTarget.sections, ...assistantResult.config.sections],
-        });
-        continue;
-      }
-
-      groupedTargets.set(targetFile, {
-        ...assistantResult.config,
-        filename: targetFile,
-        includes: [...assistantResult.config.includes],
-        header_comments: [...assistantResult.config.header_comments],
-        sections: [...assistantResult.config.sections],
-      });
-    }
-
-    if (groupedTargets.size === 0) {
-      throw new Error('The assistant response did not include any complete config sections to merge.');
-    }
-
-    return Array.from(groupedTargets.values());
-  };
-
-  const prepareAssistantDraftPreview = async (
-    content: string,
-    messageIndex?: number,
-    messageHistory: ChatMessage[] = messages,
-  ): Promise<AssistantDraftPreview> => {
-    const assistantConfigs = await buildAssistantDraftTargetConfigs(content, messageIndex, messageHistory);
-    const filePreviews: AssistantDraftFilePreview[] = [];
-
-    for (const assistantConfig of assistantConfigs) {
-      const targetFile = assistantConfig.filename;
-      const baseText = await getConfigText(targetFile);
-      if (baseText == null) {
-        throw new Error(`Unable to load ${targetFile} for preview.`);
-      }
-
-      const baseResult = await api.parseConfigText(baseText, targetFile);
-      const baseConfig = { ...baseResult.config, raw_text: baseText };
-      const { mergedConfig, changes } = mergeAssistantSectionsIntoConfig(baseConfig, assistantConfig);
-      const mergedText = await api.exportConfig({ ...mergedConfig, raw_text: baseText });
-
-      if (normalizeDiffText(baseText) === normalizeDiffText(mergedText)) {
-        continue;
-      }
-
-      filePreviews.push({
-        filename: targetFile,
-        originalText: baseText,
-        baseConfig,
-        assistantConfig,
-        mergedText,
-        changes,
-      });
-    }
-
-    if (filePreviews.length === 0) {
-      throw new Error('The assistant response does not change the current draft.');
-    }
-
-    return {
-      filePreviews,
-      selectedChangeIds: flattenAssistantDraftChanges(filePreviews).map((change) => change.id),
-      previewUpdating: false,
-    };
-  };
-
-  const canAssistantMessageAffectDraft = async (
-    content: string,
-    messageIndex?: number,
-    messageHistory: ChatMessage[] = messages,
-  ): Promise<boolean> => {
-    try {
-      await prepareAssistantDraftPreview(content, messageIndex, messageHistory);
-      return true;
-    } catch {
-      return false;
-    }
-  };
-
-  const buildCurrentProjectConfigsForValidation = async (): Promise<Record<string, ConfigFile>> => {
-    const currentProjectConfigs: Record<string, ConfigFile> = { ...configFiles };
-    const draftEntries = Object.entries(textDrafts);
-
-    if (draftEntries.length === 0) {
-      return currentProjectConfigs;
-    }
-
-    const draftResults = await Promise.all(
-      draftEntries.map(async ([filename, draftText]) => {
-        const result = await api.parseConfigText(draftText, filename);
-        return [filename, draftText, result] as const;
-      }),
-    );
-
-    draftResults.forEach(([filename, draftText, draftResult]) => {
-      currentProjectConfigs[filename] = {
-        ...draftResult.config,
-        raw_text: draftText,
-      };
-    });
-
-    return currentProjectConfigs;
-  };
-
-  const getAssistantDraftValidationOutcome = async (
-    content: string,
-    messageIndex?: number,
-    messageHistory: ChatMessage[] = messages,
-    requireApplicable = false,
-  ): Promise<AssistantDraftValidationOutcome> => {
-    let preview: AssistantDraftPreview;
-
-    try {
-      preview = await prepareAssistantDraftPreview(content, messageIndex, messageHistory);
-    } catch (err: unknown) {
-      if (!requireApplicable) {
-        return {
-          applicable: false,
-          blockingIssues: [],
-          failureReason: null,
-        };
-      }
-
-      return {
-        applicable: false,
-        blockingIssues: [],
-        failureReason: err instanceof Error
-          ? err.message
-          : 'The reply did not include a complete applicable cfg draft.',
-      };
-    }
-
-    const baselineProjectConfigs = await buildCurrentProjectConfigsForValidation();
-    preview.filePreviews.forEach((filePreview) => {
-      baselineProjectConfigs[filePreview.filename] = filePreview.baseConfig;
-    });
-
-    const candidateProjectConfigs = { ...baselineProjectConfigs };
-    const mergedConfigs = await Promise.all(
-      preview.filePreviews.map(async (filePreview) => {
-        const result = await api.parseConfigText(filePreview.mergedText, filePreview.filename);
-        return [
-          filePreview.filename,
-          {
-            ...result.config,
-            raw_text: filePreview.mergedText,
-          },
-        ] as const;
-      }),
-    );
-
-    mergedConfigs.forEach(([filename, config]) => {
-      candidateProjectConfigs[filename] = config;
-    });
-
-    const [baselineValidations, candidateValidations] = await Promise.all([
-      api.validateProject(baselineProjectConfigs),
-      api.validateProject(candidateProjectConfigs),
-    ]);
-
-    return {
-      applicable: true,
-      blockingIssues: collectNewValidationErrors(baselineValidations, candidateValidations),
-      failureReason: null,
-    };
-  };
-
-  const requestAssistantMessage = async (
-    chatRequestBase: {
-      apiKey: string;
-      model: string;
-      apiUrl: string;
-      apiProvider: AiProvider;
-      lmStudioMcpPluginId?: string;
+  // ── Helper: get config text (draft or saved) ────────────────────
+  const getConfigText = useCallback(
+    async (filename: string): Promise<string | null> => {
+      if (!filename) return null;
+      const draftText = textDrafts[filename];
+      if (typeof draftText === 'string') return draftText;
+      const config = configFiles[filename];
+      if (!config) return null;
+      return api.exportConfig(config);
     },
-    conversationMessages: Array<{ role: api.AiChatRole; content: string }>,
-  ): Promise<AssistantReplyAttempt> => {
-    const response = await api.aiChat({
-      ...chatRequestBase,
-      messages: conversationMessages,
-    });
+    [configFiles, textDrafts],
+  );
 
-    if (response.error) {
-      throw new Error(response.error);
-    }
+  const getConfigContextLabel = useCallback(
+    (filename: string): string =>
+      filename === activeFile
+        ? (typeof textDrafts[activeFile] === 'string' && textEditorDirty
+          ? 'Active Klipper config draft with unapplied text-view changes'
+          : 'Active Klipper config draft')
+        : 'Loaded Klipper config file',
+    [activeFile, textDrafts, textEditorDirty],
+  );
 
-    let assistantMessage: ChatMessage = {
-      role: 'assistant',
-      content: response.content || 'No response.',
-      lmStudioMcp: response.lmStudioMcp,
-      lmStudioContext: response.lmStudioContext,
-    };
-    let conversationTrail: ChatMessage[] = [{ role: 'assistant', content: assistantMessage.content }];
-    let warningMessage: string | null = null;
+  // ── Submit Message ──────────────────────────────────────────────
+  const submitMessage = useCallback(
+    async (messageText: string, options?: { hiddenFromUser?: boolean; retry?: boolean; editIndex?: number }) => {
+      const trimmedMessage = messageText.trim();
+      if (!trimmedMessage || loading) return;
 
-    const requestedKlipperDocs = extractRequestedKlipperDocFilenames(assistantMessage.content);
-    if (requestedKlipperDocs.length === 0) {
-      return {
-        assistantMessage,
-        conversationMessages: conversationTrail,
-        warningMessage,
-      };
-    }
+      // Fresh stop handle for this request (covers the whole pipeline,
+      // including validation retries and auto-doc re-queries).
+      const stopController = new AbortController();
+      const stopRequestId = (typeof crypto !== 'undefined' && 'randomUUID' in crypto)
+        ? crypto.randomUUID()
+        : `chat-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      stopControllerRef.current = stopController;
+      stopRequestIdRef.current = stopRequestId;
 
-    try {
-      const docResults = await Promise.allSettled(
-        requestedKlipperDocs.map((filename) => api.getKlipperDoc(filename)),
-      );
-      const loadedDocs = docResults
-        .flatMap((result) => (result.status === 'fulfilled' ? [result.value] : []));
-
-      if (loadedDocs.length === 0) {
-        warningMessage = `The assistant requested full Klipper docs (${requestedKlipperDocs.join(', ')}), but none of those bundled markdown files were available from the backend.`;
-        return {
-          assistantMessage,
-          conversationMessages: conversationTrail,
-          warningMessage,
-        };
+      const userMsg = { role: 'user' as const, content: trimmedMessage, hiddenFromUser: options?.hiddenFromUser === true };
+      const previousMessages = options?.hiddenFromUser ? [] : messages;
+      // On retry the conversation already ends with the failed user message —
+      // reuse it as-is so the request includes the failed question in context
+      // without duplicating it.
+      // On edit the message at editIndex is replaced with the new text and the
+      // conversation is truncated there, so the model regenerates from the
+      // edited question with full prior context.
+      let newMessages: ChatMessage[];
+      if (options?.editIndex !== undefined) {
+        newMessages = [...messages.slice(0, options.editIndex), userMsg];
+      } else {
+        newMessages = options?.retry ? messages : [...previousMessages, userMsg];
       }
-
-      const autoLoadedDocsMessage = buildAutoLoadedKlipperDocMessage(loadedDocs);
-      const followUpResponse = await api.aiChat({
-        ...chatRequestBase,
-        messages: [
-          ...conversationMessages,
-          ...conversationTrail.map((message) => ({ role: message.role, content: message.content })),
-          { role: 'user', content: autoLoadedDocsMessage },
-        ],
-      });
-
-      if (followUpResponse.error) {
-        throw new Error(followUpResponse.error);
-      }
-
-      assistantMessage = {
-        role: 'assistant',
-        content: followUpResponse.content || assistantMessage.content,
-        lmStudioMcp: followUpResponse.lmStudioMcp ?? assistantMessage.lmStudioMcp,
-        lmStudioContext: followUpResponse.lmStudioContext ?? assistantMessage.lmStudioContext,
-        autoLoadedDocs: loadedDocs.map((document) => document.filename),
-      };
-      conversationTrail = [
-        ...conversationTrail,
-        { role: 'user', content: autoLoadedDocsMessage },
-        { role: 'assistant', content: assistantMessage.content },
-      ];
-    } catch (autoDocErr: unknown) {
-      const autoDocMessage = autoDocErr instanceof Error
-        ? autoDocErr.message
-        : 'Automatic Klipper doc loading failed.';
-      warningMessage = `Automatic full-doc follow-up failed: ${autoDocMessage}`;
-    }
-
-    const equalsSeparatedLines = extractEqualsSeparatedConfigLines(assistantMessage.content);
-    if (equalsSeparatedLines.length > 0) {
-      const rewritePrompt = buildConfigSeparatorRewritePrompt(equalsSeparatedLines);
+      setMessages(newMessages);
+      setInput('');
+      if (inputRef.current) inputRef.current.textContent = '';
+      setLoading(true);
+      setError(null);
+      connectionLostRef.current = false;
+      setConnectionLost(false);
 
       try {
-        const rewriteResponse = await api.aiChat({
-          ...chatRequestBase,
-          messages: [
-            ...conversationMessages,
-            ...conversationTrail.map((message) => ({ role: message.role, content: message.content })),
-            { role: 'user', content: rewritePrompt },
+        const chatRequestBase = {
+          apiKey: editApiKey,
+          model: editModel,
+          apiUrl: resolvedEditApiUrl,
+          apiProvider: editApiProvider,
+          requestId: stopRequestId,
+          maxTokens: Math.max(256, parseInt(editMaxTokens, 10) || 4096),
+          temperature: parseTemperature(editTemperature),
+          fullRewriteGuard: FULL_REWRITE_GUARD_ENABLED,
+        };
+
+        // Build context messages
+        const contextMessages: Array<{ role: 'system'; content: string }> = [];
+        const mentionedConfigFiles = extractMentionedConfigFilenames([userMsg.content], loadedConfigFilenames);
+        // EXPERIMENT (auto-attach off): mentioned files are NOT auto-injected.
+        // The targeting instructions below still name them so the model can
+        // fetch content itself via read_user_config. Only files the user
+        // explicitly checks in "Include Files" are sent as context.
+        const contextTargets = Array.from(new Set(selectedConfigContextFiles));
+
+        // Phase 4: collect the candidate files (checked in "Include Files" +
+        // manually attached) with their content and labels. Content is sent
+        // to the backend as contextFiles so ITS config-grounding fallback can
+        // inject the exact loaded content if the model answers without
+        // calling any tool — but nothing is dumped into the prompt up front
+        // beyond what the intent path below decides.
+        const candidateFiles = new Map<string, { text: string; label: string }>();
+        for (const filename of contextTargets) {
+          const fileText = await getConfigText(filename);
+          if (fileText != null) {
+            candidateFiles.set(filename, { text: fileText, label: getConfigContextLabel(filename) });
+          }
+        }
+        for (const file of attachedConfigFiles) {
+          candidateFiles.set(file.name, { text: file.content, label: 'User-attached local Klipper config file' });
+        }
+
+        // Phase 4/5 lean-context injection (targeted sections + section
+        // index) is part of the handholding workflow — GATED OFF by default;
+        // the model discovers config content via its MCP tools (validated by
+        // the harness). Re-enable with VITE_KWC_HANDHOLDING=1.
+        if (HANDHOLDING_ENABLED) {
+          // Phase 4 carry-over: resolve the sections this message targets for
+          // each candidate file. Targeted sections replace any carried set;
+          // files with no new target keep the previous turn's sections so
+          // follow-up questions stay grounded. Carried entries are bounded to
+          // the last two turns and dropped when the file leaves the selection.
+          chatTurnRef.current += 1;
+          const currentTurn = chatTurnRef.current;
+          const usedSections = new Map<string, string[]>();
+          const nextCarried: Array<{ filename: string; headers: string[]; turn: number }> = [];
+          for (const [filename, candidate] of candidateFiles) {
+            const targetedHeaders = extractTargetedSectionHeaders(userMsg.content, candidate.text);
+            if (targetedHeaders.length > 0) {
+              usedSections.set(filename, targetedHeaders);
+              nextCarried.push({ filename, headers: targetedHeaders, turn: currentTurn });
+              continue;
+            }
+            const recent = [...carriedSectionsRef.current]
+              .filter((entry) => entry.filename === filename && currentTurn - entry.turn <= 2)
+              .sort((a, b) => b.turn - a.turn)[0];
+            if (recent) {
+              usedSections.set(filename, recent.headers);
+              nextCarried.push({ filename, headers: recent.headers, turn: currentTurn });
+            }
+          }
+          carriedSectionsRef.current = nextCarried;
+
+          // Inject the lean context this request actually needs.
+          // Phase 5: always lean — targeted sections when resolved, otherwise a
+          // compact section index. Never dump the whole file as a system message;
+          // the model fetches the sections it needs via read_user_config.
+          const appendFileContext = (filename: string, candidate: { text: string; label: string }) => {
+            const headers = usedSections.get(filename);
+            if (headers && headers.length > 0) {
+              for (const header of headers) {
+                const sectionText = extractSectionText(candidate.text, header);
+                if (sectionText != null) {
+                  contextMessages.push({
+                    role: 'system',
+                    content: buildSectionContextMessage(filename, candidate.label, header, sectionText),
+                  });
+                }
+              }
+              return;
+            }
+            contextMessages.push({
+              role: 'system',
+              content: buildConfigIndexMessage(filename, findSectionHeaders(candidate.text), candidate.label),
+            });
+          };
+
+          for (const [filename, candidate] of candidateFiles) {
+            appendFileContext(filename, candidate);
+          }
+        }
+
+        // File targeting instructions — the draft/mini-diff reinforcement.
+        // Part of the handholding workflow, GATED OFF by default: the backend
+        // SYSTEM_PROMPT already carries the '# file:' hint + mini-diff
+        // protocol (ai_routes.py), and intent detection was removed — the
+        // model decides whether a message is an edit or a question (harness
+        // AMBI-01..08 all pass without any frontend classifier).
+        if (HANDHOLDING_ENABLED) {
+          const miniDiffInstruction = ` To EDIT an existing section, prefer a mini-diff: the section header followed by only the lines that change, prefixing removed lines with '-' and added lines with '+', keeping their original indentation. The app applies these replacements exactly, so unchanged lines (like Jinja {% if %}/{% endif %} tags) are preserved automatically. Outputting any unchanged line risks a full rewrite where those lines could be dropped — prefer emitting ONLY the lines that change. A pure addition (nothing removed) needs no '-' line: just the header plus the '+' lines. A pure deletion (nothing added) needs no '+' line: just the header plus the '-' lines. If a section is already correct and you only need to show it, quoting it unchanged is allowed. To ADD a new section, write it in full; to delete one, write '*[section_name]'.`;
+          if (mentionedConfigFiles.length > 0) {
+            contextMessages.push({
+              role: 'system',
+              content: `Apply requested edits to these loaded files: ${mentionedConfigFiles.join(', ')}. Start each fenced \`\`\`cfg block with a '# file: <filename>' hint line; use one separate block per file. To create a new file, use '# file: <newfilename>' with a name that does not exist yet.${miniDiffInstruction}`,
+            });
+          } else if (activeFile) {
+            contextMessages.push({
+              role: 'system',
+              content: `Unless the user names a different file, apply edits to ${activeFile}. Return only changed, new, or deleted content in a fenced \`\`\`cfg code block. Start each fenced \`\`\`cfg block with a '# file: <filename>' hint line when targeting a specific file. To create a new file, use '# file: <newfilename>'. Do not return the whole file unless the user explicitly asks for a full replacement.${miniDiffInstruction}`,
+            });
+          }
+        }
+
+        // Context files sent to the backend for its config-grounding fallback
+        // (content never lands in the prompt here — the model must fetch).
+        const contextFilesPayload: Record<string, { content: string; label: string }> = {};
+        for (const [filename, candidate] of candidateFiles) {
+          contextFilesPayload[filename] = { content: candidate.text, label: candidate.label };
+        }
+
+        const requestConversation: Array<{ role: AiChatRole; content: string }> = [
+          ...contextMessages,
+          ...newMessages.map((m) => ({ role: m.role, content: m.content })),
+        ];
+        const validationConversation = [...newMessages];
+
+        // First request
+        const assistantAttempt = await draftRequestMessage(
+          { ...chatRequestBase, contextFiles: contextFilesPayload },
+          requestConversation,
+          undefined,
+          { signal: stopController.signal },
+        );
+
+        // ── Unified validation retry pipeline ───────────────────
+        // Runs the config-draft validator and the printer-memory validator
+        // in sequence. Each validator decides whether the reply applies to
+        // it, what feedback to send for retries, and how to handle max
+        // attempts (throw vs. warn). Previously these were two separate
+        // retry loops with independent conversation bookkeeping.
+        const pipelineResult = await runReplyValidationPipeline({
+          requestFn: (conversation) => draftRequestMessage(
+            { ...chatRequestBase, contextFiles: contextFilesPayload },
+            conversation,
+            undefined,
+            { signal: stopController.signal },
+          ),
+          requestConversation,
+          validationConversation,
+          initialAttempt: assistantAttempt,
+          validators: [
+            createDraftReplyValidator(),
+            createPrinterMemoryReplyValidator(),
           ],
         });
 
-        if (rewriteResponse.error) {
-          throw new Error(rewriteResponse.error);
+        if (pipelineResult.warnings) setError(pipelineResult.warnings);
+        setMessages([...newMessages, pipelineResult.finalMessage]);
+        setAssistantDraftApplicableMessages({}); // Will be re-evaluated by the useEffect
+        // Background completion signal: if the dialog is closed when the reply
+        // lands, flag the toolbar button so the user knows it's ready.
+        if (!openRef.current) {
+          useAiStore.getState().setChatStatus('success');
         }
-
-        assistantMessage = {
-          role: 'assistant',
-          content: rewriteResponse.content || assistantMessage.content,
-          lmStudioMcp: rewriteResponse.lmStudioMcp ?? assistantMessage.lmStudioMcp,
-          lmStudioContext: rewriteResponse.lmStudioContext ?? assistantMessage.lmStudioContext,
-          autoLoadedDocs: assistantMessage.autoLoadedDocs,
-        };
-        conversationTrail = [
-          ...conversationTrail,
-          { role: 'user', content: rewritePrompt },
-          { role: 'assistant', content: assistantMessage.content },
-        ];
-
-        if (extractEqualsSeparatedConfigLines(assistantMessage.content).length > 0) {
-          warningMessage = appendWarningMessage(
-            warningMessage,
-            'The assistant was asked to rewrite cfg assignments with colons, but the replacement reply still included equals-sign separators.',
-          );
+      } catch (err: unknown) {
+        const stopped = stopController.signal.aborted || err instanceof api.ChatStoppedError;
+        if (stopped) {
+          // User pressed Stop — keep the user message in history, no error banner.
+          setAssistantDraftApplicableMessages({});
+        } else {
+          const message = err instanceof Error ? err.message : 'Failed to get response.';
+          setError(message);
+          // Keep the user message in history (no rollback) so a follow-up or
+          // retry sends the full conversation — including the failed question —
+          // back to the model. Previously the message was rolled back, so the
+          // model never saw what the user had asked.
+          if (looksLikeTransientFailure(err)) {
+            connectionLostRef.current = true;
+            setConnectionLost(true);
+          } else {
+            // Unrecoverable failure (validation retry limit, API error): signal
+            // the toolbar button red if the dialog is closed.
+            if (!openRef.current) {
+              useAiStore.getState().setChatStatus('error');
+            }
+          }
         }
-      } catch (rewriteErr: unknown) {
-        const rewriteMessage = rewriteErr instanceof Error
-          ? rewriteErr.message
-          : 'Automatic cfg separator rewrite failed.';
-        warningMessage = appendWarningMessage(
-          warningMessage,
-          `Automatic cfg separator rewrite failed: ${rewriteMessage}`,
-        );
+      } finally {
+        stopControllerRef.current = null;
+        stopRequestIdRef.current = null;
+        setLoading(false);
       }
-    }
+    },
+    [
+      activeFile,
+      attachedConfigFiles,
+      createDraftReplyValidator,
+      draftRequestMessage,
+      setAssistantDraftApplicableMessages,
+      editApiKey,
+      editApiProvider,
+      editMaxTokens,
+      editTemperature,
+      editModel,
+      loading,
+      loadedConfigFilenames,
+      messages,
+      resolvedEditApiUrl,
+      selectedConfigContextFiles,
+      setMessages,
+    ],
+  );
 
-    return {
-      assistantMessage,
-      conversationMessages: conversationTrail,
-      warningMessage,
+  // ── Handle Send ─────────────────────────────────────────────────
+  const handleSend = useCallback(() => {
+    void submitMessage(input);
+  }, [input, submitMessage]);
+
+  // ── Handle Stop ────────────────────────────────────────────────
+  // Abort the client fetch immediately (stops the UI wait) and tell the
+  // backend to cancel the in-flight provider calls / tool work.
+  const handleStop = useCallback(() => {
+    stopControllerRef.current?.abort();
+    const requestId = stopRequestIdRef.current;
+    if (requestId) {
+      void api.stopChat(requestId);
+    }
+  }, []);
+
+  // ── Handle Retry ────────────────────────────────────────────────
+  // Re-submit the last user message after a failure (timeout, unloaded
+  // model, API error). The stored conversation already ends with the
+  // failed message, so the retry request carries the full history — plus
+  // rebuilt config/doc context — back to the model.
+  const handleRetry = useCallback(() => {
+    const { messages: currentMessages } = useAiStore.getState();
+    const last = currentMessages[currentMessages.length - 1];
+    if (last?.role === 'user' && !loading) {
+      void submitMessage(last.content, { retry: true });
+    }
+  }, [loading, submitMessage]);
+
+  // ── Handle Edit & Regenerate ──────────────────────────────────────
+  // Replace the user message at `index` with the new text and regenerate.
+  const handleEditMessage = useCallback(
+    (index: number, newText: string) => {
+      const { messages: currentMessages } = useAiStore.getState();
+      const target = currentMessages[index];
+      if (target?.role !== 'user' || loading) return;
+      void submitMessage(newText, { editIndex: index });
+    },
+    [loading, submitMessage],
+  );
+
+  // ── Connection-loss recovery ────────────────────────────────────
+  // If a transient failure left an unanswered question, auto-resend it
+  // once the browser reports the network is back (LAN drops on a Pi are
+  // usually brief). Manual Retry remains available via the error banner.
+  useEffect(() => {
+    const handleOnline = () => {
+      if (!connectionLostRef.current || loading) return;
+      const { messages: currentMessages } = useAiStore.getState();
+      const last = currentMessages[currentMessages.length - 1];
+      if (last?.role === 'user') {
+        connectionLostRef.current = false;
+        setConnectionLost(false);
+        void submitMessage(last.content, { retry: true });
+      }
     };
-  };
+    window.addEventListener('online', handleOnline);
+    return () => window.removeEventListener('online', handleOnline);
+  }, [loading, submitMessage]);
 
-  const handleApplyAssistantEdit = async (content: string, messageIndex?: number) => {
-    setAssistantDraftPreviewLoading(content);
+  // ── Chat History ────────────────────────────────────────────────
+  const saveCurrentConversation = useCallback(() => {
+    const { settings, messages } = useAiStore.getState();
+    if (messages.length > 0) {
+      useChatHistoryStore.getState().saveConversation(
+        messages,
+        settings,
+        attachedConfigFiles.map(({ name, content }) => ({ name, content })),
+      );
+    }
+  }, [attachedConfigFiles]);
+
+  const handleNewChatWithSave = useCallback(() => {
+    const { messages: currentMessages } = useAiStore.getState();
+    const last = currentMessages[currentMessages.length - 1];
+    // If the conversation ends with an unanswered user message (timeout,
+    // unloaded model, stop, or validation failure), offer to carry the
+    // context into the new chat instead of silently dropping it.
+    if (currentMessages.length > 0 && last?.role === 'user') {
+      setShowCarryOverPrompt(true);
+      return;
+    }
+    saveCurrentConversation();
+    handleNewChat();
+    setAttachedConfigFiles([]);
+  }, [saveCurrentConversation, handleNewChat]);
+
+  // Carry the existing conversation into the "new" chat so the next prompt
+  // appends to it — the model keeps all prior context.
+  const handleCarryOverContext = useCallback(() => {
+    saveCurrentConversation();
+    setAssistantDraftPreview(null);
+    setAttachedConfigFiles([]);
     setError(null);
+    setShowCarryOverPrompt(false);
+  }, [saveCurrentConversation]);
 
-    try {
-      setAssistantDraftPreview(await prepareAssistantDraftPreview(content, messageIndex));
-    } catch (err: unknown) {
+  const handleStartFreshChat = useCallback(() => {
+    saveCurrentConversation();
+    handleNewChat();
+    setAttachedConfigFiles([]);
+    setError(null);
+    setShowCarryOverPrompt(false);
+  }, [saveCurrentConversation, handleNewChat]);
+
+  const handleLoadConversation = useCallback(
+    (conversation: SavedConversation) => {
+      // Save current conversation before loading a different one
+      saveCurrentConversation();
+      setMessages(conversation.messages);
+      setSettings(conversation.settings);
       setAssistantDraftPreview(null);
-      setError(err instanceof Error ? err.message : 'Failed to prepare assistant changes.');
-    } finally {
-      setAssistantDraftPreviewLoading(null);
-    }
-  };
-
-  const handleAssistantDraftSelectionChange = async (selectedChangeIds: string[]) => {
-    const currentPreview = assistantDraftPreview;
-    if (!currentPreview) {
-      return;
-    }
-
-    if (
-      selectedChangeIds.length === currentPreview.selectedChangeIds.length &&
-      selectedChangeIds.every((id, index) => id === currentPreview.selectedChangeIds[index])
-    ) {
-      return;
-    }
-
-    const requestId = ++assistantDraftPreviewRequestRef.current;
-    setAssistantDraftPreview({
-      ...currentPreview,
-      selectedChangeIds,
-      previewUpdating: true,
-    });
-
-    try {
-      const filePreviews = await Promise.all(
-        currentPreview.filePreviews.map(async (filePreview) => ({
-          ...filePreview,
-          mergedText: await buildAssistantDraftMergedText(
-            filePreview.baseConfig,
-            filePreview.assistantConfig,
-            filePreview.originalText,
-            selectedChangeIds,
-          ),
+      // Restore config files that were attached during the original chat so
+      // continuing the conversation keeps the same file context.
+      setAttachedConfigFiles(
+        (conversation.attachedConfigFiles ?? []).map((file, index) => ({
+          id: `${file.name}-${index}`,
+          name: file.name,
+          content: file.content,
         })),
       );
+    },
+    [saveCurrentConversation, setMessages, setSettings],
+  );
 
-      if (requestId !== assistantDraftPreviewRequestRef.current) {
-        return;
+  // ── Printer Memory ──────────────────────────────────────────────
+
+  const handleReviewPrinterMemory = useCallback(
+    (content: string) => {
+      const memory = extractPrinterMemoryBlock(content);
+      if (memory) {
+        setProposedMemory(memory as unknown as PrinterMemory);
+        setShowPrinterMemory(true);
       }
+    },
+    [],
+  );
 
-      setAssistantDraftPreview((preview) => {
-        if (!preview) {
-          return preview;
-        }
+  const handleAcceptPrinterMemoryProposal = useCallback(
+    async (memory: PrinterMemory) => {
+      try {
+        const { save } = usePrinterMemoryStore.getState();
+        await save(memory);
+        setProposedMemory(null);
+        setShowPrinterMemory(false);
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to save printer memory');
+      }
+    },
+    [],
+  );
 
-        return {
-          ...preview,
-          selectedChangeIds,
-          filePreviews,
-          previewUpdating: false,
-        };
-      });
+  // ── Handle Key Down ─────────────────────────────────────────────
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        handleSend();
+      }
+    },
+    [handleSend],
+  );
+
+  // ── Handle "Apply and Review Changes" ───────────────────────────
+  const handleApplyEdit = useCallback(
+    async (content: string, messageIndex?: number) => {
       setError(null);
-    } catch (err: unknown) {
-      if (requestId !== assistantDraftPreviewRequestRef.current) {
-        return;
+      try {
+        await handleApplyAssistantEdit(content, messageIndex);
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to prepare assistant changes.');
       }
+    },
+    [handleApplyAssistantEdit],
+  );
 
-      setAssistantDraftPreview((preview) => {
-        if (!preview) {
-          return preview;
-        }
-
-        return {
-          ...preview,
-          previewUpdating: false,
-        };
-      });
-      setError(err instanceof Error ? err.message : 'Failed to update the assistant preview.');
-    }
-  };
-
-  const handleAcceptAssistantEdit = async () => {
-    if (!assistantDraftPreview) {
-      return;
-    }
-
+  // ── Handle Accept Draft ─────────────────────────────────────────
+  const handleAcceptDraft = useCallback(async () => {
     try {
-      const selectedChangeIds = new Set(assistantDraftPreview.selectedChangeIds);
-      const updatedConfigs = { ...configFiles };
-      const updatedValidation = { ...validation };
-      const touchedFiles: string[] = [];
-
-      for (const filePreview of assistantDraftPreview.filePreviews) {
-        const hasSelectedChanges = filePreview.changes.some((change) => selectedChangeIds.has(change.id));
-        if (!hasSelectedChanges) {
-          continue;
-        }
-
-        if (normalizeDiffText(filePreview.originalText) === normalizeDiffText(filePreview.mergedText)) {
-          continue;
-        }
-
-        const result = await api.parseConfigText(filePreview.mergedText, filePreview.filename);
-        updatedConfigs[filePreview.filename] = result.config;
-        updatedValidation[filePreview.filename] = result.validation;
-        touchedFiles.push(filePreview.filename);
-      }
-
-      if (touchedFiles.length === 0) {
-        setAssistantDraftPreview(null);
-        setError(null);
-        return;
-      }
-
-      touchedFiles.forEach((filename) => {
-        setConfigFile(filename, updatedConfigs[filename]);
-        setValidation(filename, updatedValidation[filename]);
-      });
-
-      touchedFiles.forEach((filename) => clearTextDraft(filename));
-      markDirty();
-
+      await handleAcceptAssistantEdit();
       const graphStore = useGraphStore.getState();
       graphStore.clearGraph();
-      buildProjectGraph(updatedConfigs, graphStore, schemas, updatedValidation);
-
-      setAssistantDraftPreview(null);
+      // Read config files AND validation directly from the store so newly
+      // created files and fresh validation results (added by
+      // handleAcceptAssistantEdit via setConfigFile/setValidation) are
+      // included in the graph rebuild instead of stale closure values.
+      const latestConfigFiles = useConfigStore.getState().configFiles;
+      const latestValidation = useConfigStore.getState().validation;
+      buildProjectGraph(latestConfigFiles, graphStore, schemas, latestValidation);
       setError(null);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to accept assistant changes.');
     }
-  };
+  }, [handleAcceptAssistantEdit, schemas]);
 
-  const handleNewChat = () => {
-    clearMessages();
-    setAssistantDraftPreview(null);
-    setError(null);
-    setInput('');
-    if (inputRef.current) {
-      inputRef.current.textContent = '';
-    }
-  };
-
-  const submitMessage = useCallback(async (messageText: string, options?: SubmitMessageOptions) => {
-    const trimmedMessage = messageText.trim();
-    if (!trimmedMessage || loading) {
-      return;
-    }
-
-    const userMsg: ChatMessage = {
-      role: 'user',
-      content: trimmedMessage,
-      hiddenFromUser: options?.hiddenFromUser === true,
-    };
-    // Hidden (auto-submitted) requests start a fresh session so stale history from
-    // prior sessions doesn't interfere with draft applicability checks.
-    const previousMessages = options?.hiddenFromUser ? [] : messages;
-    const newMessages = [...previousMessages, userMsg];
-    setMessages(newMessages);
-    setInput('');
-    if (inputRef.current) {
-      inputRef.current.textContent = '';
-    }
-    setLoading(true);
-    setError(null);
-
-    try {
-      const contextMessages: Array<{ role: 'system'; content: string }> = [];
-      const chatRequestBase = {
-        apiKey: editApiKey,
-        model: editModel,
-        apiUrl: resolvedEditApiUrl,
-        apiProvider: editApiProvider,
-        lmStudioMcpPluginId: editApiProvider === 'lm-studio' ? editLmStudioMcpPluginId : undefined,
-      };
-      const mentionedConfigFiles = extractMentionedConfigFilenames([userMsg.content], loadedConfigFilenames);
-      const selectedConfigContexts = await getConfigContexts([
-        ...selectedConfigContextFiles,
-        ...mentionedConfigFiles,
-      ]);
-
-      for (const configContext of selectedConfigContexts) {
-        contextMessages.push({ role: 'system', content: configContext });
-      }
-
-      for (const attachedFile of attachedConfigFiles) {
-        contextMessages.push({
-          role: 'system',
-          content: buildConfigContextMessage(attachedFile.name, attachedFile.content, 'User-attached local Klipper config file'),
-        });
-      }
-
-      if (mentionedConfigFiles.length > 0) {
-        contextMessages.push({
-          role: 'system',
-          content: `The user explicitly referenced these loaded config files: ${mentionedConfigFiles.join(', ')}. Apply requested edits to those files instead of defaulting to the active text-view file. When you return cfg sections for a specific file, add a first comment line exactly like "# file: <filename>" before the changed sections. If changes span multiple files, return one separate fenced cfg block per file.`,
-        });
-      } else if (activeFile) {
-        contextMessages.push({
-          role: 'system',
-          content: `If the user asks you to modify ${activeFile}, or does not name a different config file, return only the changed or new sections for ${activeFile} inside a single fenced code block labeled cfg. Include full section headers and the full contents of each changed section. If a different loaded config file is clearly requested, target that file instead and start that cfg block with a first comment line exactly like "# file: <filename>". If changes span multiple files, return one separate fenced cfg block per file. Do not return the entire file unless the user explicitly asks for a full replacement.`,
-        });
-      }
-
-      let requestConversation: Array<{ role: api.AiChatRole; content: string }> = [
-        ...contextMessages,
-        ...newMessages.map((message) => ({ role: message.role, content: message.content })),
-      ];
-      let validationConversation: ChatMessage[] = [...newMessages];
-      let assistantAttempt = await requestAssistantMessage(chatRequestBase, requestConversation);
-      let pendingWarningMessage = assistantAttempt.warningMessage;
-      let candidateConversation = [...validationConversation, ...assistantAttempt.conversationMessages];
-      let validationOutcome = await getAssistantDraftValidationOutcome(
-        assistantAttempt.assistantMessage.content,
-        candidateConversation.length - 1,
-        candidateConversation,
-        false,
-      );
-      let attemptsUsed = 1;
-
-      while (shouldRetryAssistantValidation(validationOutcome, attemptsUsed)) {
-        if (attemptsUsed >= MAX_ASSISTANT_DRAFT_VALIDATION_ATTEMPTS) {
-          throw new Error(
-            buildAssistantDraftValidationErrorMessage(
-              validationOutcome.blockingIssues,
-              validationOutcome.failureReason,
-              attemptsUsed,
-            ),
-          );
-        }
-
-        const allowExplanationOnly = hasOnlyRetryExemptAssistantValidationIssues(validationOutcome.blockingIssues);
-
-        const validationFeedback = buildAssistantDraftValidationFeedback(
-          validationOutcome.blockingIssues,
-          assistantAttempt.assistantMessage.content,
-          validationOutcome.failureReason,
-          allowExplanationOnly,
-        );
-
-        requestConversation = [
-          ...requestConversation,
-          ...assistantAttempt.conversationMessages.map((message) => ({ role: message.role, content: message.content })),
-          { role: 'user', content: validationFeedback },
-        ];
-        validationConversation = [...candidateConversation, { role: 'user', content: validationFeedback }];
-        assistantAttempt = await requestAssistantMessage(chatRequestBase, requestConversation);
-        pendingWarningMessage = assistantAttempt.warningMessage ?? pendingWarningMessage;
-        candidateConversation = [...validationConversation, ...assistantAttempt.conversationMessages];
-        attemptsUsed += 1;
-        validationOutcome = await getAssistantDraftValidationOutcome(
-          assistantAttempt.assistantMessage.content,
-          candidateConversation.length - 1,
-          candidateConversation,
-          !allowExplanationOnly,
-        );
-      }
-
-      if (
-        validationOutcome.applicable
-        && validationOutcome.blockingIssues.length > 0
-        && hasOnlyRetryExemptAssistantValidationIssues(validationOutcome.blockingIssues)
-      ) {
-        const advisoryWarning = [
-          `AI draft still has duplicate section or pin-conflict validation issues after ${attemptsUsed} attempts. The assistant response was returned so it can explain the conflict.`,
-          formatAssistantDraftValidationIssues(validationOutcome.blockingIssues, null),
-        ].join('\n');
-        pendingWarningMessage = pendingWarningMessage
-          ? `${pendingWarningMessage}\n${advisoryWarning}`
-          : advisoryWarning;
-      }
-
-      if (!validationOutcome.applicable && validationOutcome.failureReason) {
-        throw new Error(
-          buildAssistantDraftValidationErrorMessage(
-            validationOutcome.blockingIssues,
-            validationOutcome.failureReason,
-            attemptsUsed,
-          ),
-        );
-      }
-
-      if (pendingWarningMessage) {
-        setError(pendingWarningMessage);
-      }
-
-      setMessages([...newMessages, assistantAttempt.assistantMessage]);
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Failed to get response.';
-      setError(message);
-      // Remove the user message that failed so it doesn't pollute history
-      setMessages(previousMessages);
-    } finally {
-      setLoading(false);
-    }
-  }, [
-    activeFile,
-    attachedConfigFiles,
-    clearMessages,
-    configFiles,
-    editApiKey,
-    editApiProvider,
-    editLmStudioMcpPluginId,
-    editModel,
-    getAssistantDraftValidationOutcome,
-    getConfigContexts,
-    inputRef,
-    loadedConfigFilenames,
-    loading,
-    messages,
-    requestAssistantMessage,
-    resolvedEditApiUrl,
-    selectedConfigContextFiles,
-    setMessages,
-  ]);
-
-  const handleSend = () => {
-    void submitMessage(input);
-  };
-
+  // ── Pending Request Handling ────────────────────────────────────
   useEffect(() => {
-    if (!open || !pendingRequest || loading || !isConfigured()) {
-      return;
-    }
-
-    if (handledPendingRequestIdRef.current === pendingRequest.id) {
-      return;
-    }
-
+    if (!open || !pendingRequest || loading || !isConfigured()) return;
+    if (handledPendingRequestIdRef.current === pendingRequest.id) return;
     handledPendingRequestIdRef.current = pendingRequest.id;
     onPendingRequestHandled?.();
     void submitMessage(pendingRequest.prompt, { hiddenFromUser: pendingRequest.hiddenFromUser });
-  }, [isConfigured, loading, onPendingRequestHandled, open, pendingRequest, submitMessage]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isConfigured, loading, onPendingRequestHandled, open, pendingRequest]);
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
-    }
+  // ── Shared settings panel props ─────────────────────────────────
+  const settingsPanelProps = {
+    editApiKey,
+    setEditApiKey,
+    editModel,
+    setEditModel,
+    editApiUrl,
+    setEditApiUrl,
+    editApiProvider,
+    setEditApiProvider,
+    editHost,
+    setEditHost,
+    editPort,
+    setEditPort,
+    editMaxTokens,
+    setEditMaxTokens,
+    editTemperature,
+    setEditTemperature,
+    resolvedEditApiUrl,
+    onSaveSettings: handleSaveSettings,
   };
 
-  const handleSaveSettings = () => {
-    const nextModel = editModel.trim();
-    const hadEnabledChat = isConfigured();
-    const nextProviderModels = {
-      ...editProviderModels,
-      [editApiProvider]: nextModel,
-    };
-    setSettings({
-      apiKey: editApiKey,
-      model: nextModel,
-      providerModels: nextProviderModels,
-      apiUrl: resolvedEditApiUrl,
-      apiProvider: editApiProvider,
-      lmStudioHost: editLmStudioHost,
-      lmStudioPort: editLmStudioPort,
-      lmStudioMcpPluginId: editLmStudioMcpPluginId,
-      ollamaHost: editOllamaHost,
-      ollamaPort: editOllamaPort,
-    });
-    if (isLocalProvider(editApiProvider)) {
-      void fetchAvailableModels(editApiProvider, resolvedEditApiUrl, editApiKey);
-    }
-    if (!nextModel && !hadEnabledChat) {
-      onClose();
-      return;
-    }
-    setShowSettings(false);
-  };
+  // ═════════════════════════════════════════════════════════════════
+  // RENDER
+  // ═════════════════════════════════════════════════════════════════
 
-  const hasSelectedModel = !!editModel.trim();
+  // The dialog stays MOUNTED when closed so an in-flight request keeps
+  // running (validation retries, connection-recovery listener, WIP state).
+  // Closing only hides the overlay; reopening shows the finished reply.
+  if (!open) {
+    return null;
+  }
 
-  // Compute whether the save button should be enabled
-  const isSaveEnabled = (() => {
-    if (!providerRequiresApiKey(editApiProvider)) {
-      return true;
-    }
-    return !!editApiKey.trim();
-  })();
-
-  // Update URL when provider changes
-  const handleProviderChange = (provider: AiProvider) => {
-    const nextProviderModels = {
-      ...editProviderModels,
-      [editApiProvider]: editModel,
-    };
-
-    setEditProviderModels(nextProviderModels);
-    setEditApiProvider(provider);
-    setEditModel(getProviderModel(provider, nextProviderModels, settings.model, settings.apiProvider));
-    const defaults = PROVIDER_DEFAULTS[provider];
-    if (!isLocalProvider(provider)) {
-      setEditApiUrl(defaults.defaultUrl);
-    }
-  };
-
-  // Unconfigured state — show settings panel in the center
+  // ── Unconfigured State ──────────────────────────────────────────
   if (!isConfigured()) {
-    const showLocalFields = isLocalProvider(editApiProvider);
-    const showLmStudioMcpField = editApiProvider === 'lm-studio';
-
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
         <div
-          className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[520px] overflow-hidden"
+          className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[600px] overflow-hidden"
           onClick={(e) => e.stopPropagation()}
         >
           <div className="flex items-center justify-between p-4 border-b border-[var(--color-bg-tertiary)]">
@@ -1942,173 +837,23 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
               ✕
             </button>
           </div>
-
           <div className="p-6">
-            {/* Greyed-out placeholder */}
-            <div
-              className="flex items-center justify-center py-12 opacity-30 pointer-events-none mb-4"
-            >
-              <div className="text-center">
-                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" className="mx-auto mb-3 text-[var(--color-text-secondary)]">
-                  <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2v10z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-                </svg>
-                <p className="text-sm text-[var(--color-text-secondary)]">Configure your AI settings below to enable chat</p>
-              </div>
-            </div>
-
-            {/* Settings form */}
-            <div className="space-y-4">
-              {/* API Provider selector */}
-              <div>
-                <label className="block text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-1.5">
-                  AI Provider
-                </label>
-                <select
-                  className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-                  value={editApiProvider}
-                  onChange={(e) => handleProviderChange(e.target.value as AiProvider)}
-                >
-                  {PROVIDER_OPTIONS.map((p) => (
-                    <option key={p.value} value={p.value}>{p.label}</option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Model name (text input) */}
-              <div>
-                <label className="block text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-1.5">
-                  Model
-                </label>
-                <input
-                  type="text"
-                  className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-                  value={editModel}
-                  onChange={(e) => handleModelChange(e.target.value)}
-                  placeholder="e.g. gpt-4o, llama3.1, phi3"
-                />
-              </div>
-
-              {!showLocalFields && (
-                <div>
-                  <label className="block text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-1.5">
-                    API URL
-                  </label>
-                  <input
-                    type="text"
-                    className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-                    value={editApiUrl}
-                    onChange={(e) => setEditApiUrl(e.target.value)}
-                    placeholder="https://api.openai.com/v1/chat/completions"
-                  />
-                </div>
-              )}
-
-              {/* Local server host/port fields */}
-              {showLocalFields && (
-                <div className="flex gap-3">
-                  <div className="flex-1">
-                    <label className="block text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-1.5">
-                      Host
-                    </label>
-                    <input
-                      type="text"
-                      className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-                      value={editApiProvider === 'lm-studio' ? editLmStudioHost : editOllamaHost}
-                      onChange={(e) => {
-                        const newHost = e.target.value;
-                        if (editApiProvider === 'lm-studio') setEditLmStudioHost(newHost);
-                        else setEditOllamaHost(newHost);
-                      }}
-                      placeholder="localhost"
-                    />
-                  </div>
-                  <div className="w-20">
-                    <label className="block text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-1.5">
-                      Port
-                    </label>
-                    <input
-                      type="text"
-                      className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-                      value={editApiProvider === 'lm-studio' ? editLmStudioPort : editOllamaPort}
-                      onChange={(e) => {
-                        const newPort = e.target.value;
-                        if (editApiProvider === 'lm-studio') setEditLmStudioPort(newPort);
-                        else setEditOllamaPort(newPort);
-                      }}
-                      placeholder="1234"
-                    />
-                  </div>
-                </div>
-              )}
-
-              {showLocalFields && (
-                <p className="text-[10px] text-[var(--color-text-secondary)]">
-                  Chat requests use {resolvedEditApiUrl} and model discovery uses the same host and port.
-                </p>
-              )}
-
-              {showLmStudioMcpField && (
-                <div>
-                  <label className="block text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-1.5">
-                    LM Studio MCP Plugin ID
-                  </label>
-                  <input
-                    type="text"
-                    className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-                    value={editLmStudioMcpPluginId}
-                    onChange={(e) => setEditLmStudioMcpPluginId(e.target.value)}
-                    placeholder="mcp/klipper-docs"
-                  />
-                  <p className="mt-1 text-[10px] text-[var(--color-text-secondary)]">
-                    Leave blank to disable MCP docs lookup for LM Studio.
-                  </p>
-                </div>
-              )}
-
-              {/* API Key (always shown) */}
-              <div>
-                <label className="block text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-1.5">
-                  API Key
-                </label>
-                <input
-                  type="password"
-                  className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-                  value={editApiKey}
-                  onChange={(e) => setEditApiKey(e.target.value)}
-                  placeholder={showLocalFields ? "Leave blank if no auth required" : "sk-..."}
-                />
-                <p className="text-[10px] text-[var(--color-text-secondary)] mt-1">
-                  Your API key is stored only in your browser
-                </p>
-              </div>
-            </div>
-          </div>
-
-          <div className="flex justify-end gap-2 p-4 border-t border-[var(--color-bg-tertiary)]">
-            <button
-              onClick={onClose}
-              className="px-4 py-2 rounded-lg text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-primary)] transition-colors"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={handleSaveSettings}
-              disabled={!isSaveEnabled}
-              className="px-4 py-2 rounded-lg text-xs font-medium bg-[var(--color-accent)] text-white hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              {hasSelectedModel ? 'Save & Enable Chat' : 'Save Settings'}
-            </button>
+            <ChatSettingsPanel
+              standalone
+              {...settingsPanelProps}
+              onClose={onClose}
+            />
           </div>
         </div>
       </div>
     );
   }
 
-  // Configured state — full chat interface
+  // ── Configured State ────────────────────────────────────────────
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
       <div
-        className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[560px] overflow-hidden flex flex-col"
+        className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[620px] overflow-hidden flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Title bar */}
@@ -2121,14 +866,31 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           </div>
           <div className="flex items-center gap-2">
             <button
-              onClick={handleNewChat}
+              onClick={() => {
+                setShowPrinterMemory(true);
+                // Clear any stale proposal when opening manually
+                setProposedMemory(null);
+              }}
+              className="px-2 py-1 rounded text-[10px] font-medium bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
+              title="View and edit printer memory"
+            >
+              Printer Memory
+            </button>
+            <button
+              onClick={() => setShowChatHistory(true)}
+              className="px-2 py-1 rounded text-[10px] font-medium bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
+              title="View and load past conversations"
+            >
+              Chat History
+            </button>
+            <button
+              onClick={handleNewChatWithSave}
               disabled={loading || messages.length === 0}
               className="px-2 py-1 rounded text-[10px] font-medium bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] disabled:opacity-40 disabled:cursor-not-allowed"
               title="Start a new chat"
             >
               New Chat
             </button>
-            {/* Settings toggle */}
             <button
               onClick={() => setShowSettings(!showSettings)}
               className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
@@ -2145,313 +907,29 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           </div>
         </div>
 
-        {/* Inline settings panel (toggleable) */}
+        {/* Inline Settings Panel */}
         {showSettings && (
-          <div className="px-4 pb-4 border-b border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)]">
-            <div className="space-y-3 pt-3">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">AI Settings</span>
-                <button
-                  onClick={handleSaveSettings}
-                  disabled={!isSaveEnabled}
-                  className="text-[10px] px-2 py-1 rounded bg-[var(--color-accent)] text-white hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
-                >
-                  Save
-                </button>
-              </div>
-              <div className="space-y-2">
-                {/* Provider selector */}
-                <div>
-                  <label className="block text-[10px] text-[var(--color-text-secondary)] mb-1">Provider</label>
-                  <select
-                    className="w-full px-3 py-1.5 rounded text-xs font-mono bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-                    value={editApiProvider}
-                    onChange={(e) => handleProviderChange(e.target.value as AiProvider)}
-                  >
-                    {PROVIDER_OPTIONS.map((p) => (
-                      <option key={p.value} value={p.value}>{p.label}</option>
-                    ))}
-                  </select>
-                </div>
-                {/* Model selector */}
-                <div>
-                  <label className="block text-[10px] text-[var(--color-text-secondary)] mb-1">Model</label>
-                  {isLocalProvider(editApiProvider) ? (
-                    <>
-                      {availableModels.length > 0 ? (
-                        <select
-                          className="w-full px-3 py-1.5 rounded text-xs font-mono bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-                          value={editModel}
-                          onChange={(e) => handleModelChange(e.target.value)}
-                        >
-                          {availableModels.map((m) => (
-                            <option key={m} value={m}>{m}</option>
-                          ))}
-                        </select>
-                      ) : (
-                        <input
-                          type="text"
-                          className="w-full px-3 py-1.5 rounded text-xs font-mono bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-                          value={editModel}
-                          onChange={(e) => handleModelChange(e.target.value)}
-                          placeholder="Model name"
-                        />
-                      )}
-                      <button
-                        onClick={() => {
-                          void fetchAvailableModels(editApiProvider, resolvedEditApiUrl, editApiKey);
-                        }}
-                        className="mt-1 text-[10px] text-[var(--color-accent)] hover:underline"
-                      >
-                        Refresh models
-                      </button>
-                    </>
-                  ) : (
-                    <input
-                      type="text"
-                      className="w-full px-3 py-1.5 rounded text-xs font-mono bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-                      value={editModel}
-                      onChange={(e) => handleModelChange(e.target.value)}
-                      placeholder="e.g. gemini-2.5-pro, claude-sonnet-4, gpt-4o"
-                    />
-                  )}
-                </div>
-                {isLocalProvider(editApiProvider) && modelsLoading && (
-                  <p className="text-[10px] text-[var(--color-text-secondary)]">Loading models...</p>
-                )}
-                {modelsError && (
-                  <p className="text-[10px] text-[var(--color-error)]">Error: {modelsError}</p>
-                )}
-                {!isLocalProvider(editApiProvider) && (
-                  <div>
-                    <label className="block text-[10px] text-[var(--color-text-secondary)] mb-1">API URL</label>
-                    <input
-                      type="text"
-                      className="w-full px-3 py-1.5 rounded text-xs font-mono bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-                      value={editApiUrl}
-                      onChange={(e) => setEditApiUrl(e.target.value)}
-                    />
-                  </div>
-                )}
-                {/* Local server host/port */}
-                {isLocalProvider(editApiProvider) && (
-                  <div className="flex gap-2">
-                    <div className="flex-1">
-                      <label className="block text-[10px] text-[var(--color-text-secondary)] mb-1">Host</label>
-                      <input
-                        type="text"
-                        className="w-full px-3 py-1.5 rounded text-xs font-mono bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-                        value={editApiProvider === 'lm-studio' ? editLmStudioHost : editOllamaHost}
-                        onChange={(e) => {
-                          const newHost = e.target.value;
-                          if (editApiProvider === 'lm-studio') setEditLmStudioHost(newHost);
-                          else setEditOllamaHost(newHost);
-                        }}
-                        placeholder="localhost"
-                      />
-                    </div>
-                    <div className="w-20">
-                      <label className="block text-[10px] text-[var(--color-text-secondary)] mb-1">Port</label>
-                      <input
-                        type="text"
-                        className="w-full px-3 py-1.5 rounded text-xs font-mono bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-                        value={editApiProvider === 'lm-studio' ? editLmStudioPort : editOllamaPort}
-                        onChange={(e) => {
-                          const newPort = e.target.value;
-                          if (editApiProvider === 'lm-studio') setEditLmStudioPort(newPort);
-                          else setEditOllamaPort(newPort);
-                        }}
-                        placeholder="1234"
-                      />
-                    </div>
-                  </div>
-                )}
-                {isLocalProvider(editApiProvider) && (
-                  <p className="text-[10px] text-[var(--color-text-secondary)]">
-                    Chat requests use {resolvedEditApiUrl} and model discovery uses the same host and port.
-                  </p>
-                )}
-                {editApiProvider === 'lm-studio' && (
-                  <div>
-                    <label className="block text-[10px] text-[var(--color-text-secondary)] mb-1">LM Studio MCP Plugin ID</label>
-                    <input
-                      type="text"
-                      className="w-full px-3 py-1.5 rounded text-xs font-mono bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-                      value={editLmStudioMcpPluginId}
-                      onChange={(e) => setEditLmStudioMcpPluginId(e.target.value)}
-                      placeholder="mcp/klipper-docs"
-                    />
-                    <p className="mt-1 text-[10px] text-[var(--color-text-secondary)]">
-                      Leave blank to disable MCP docs lookup for LM Studio.
-                    </p>
-                  </div>
-                )}
-                {/* API Key (always shown) */}
-                <div>
-                  <label className="block text-[10px] text-[var(--color-text-secondary)] mb-1">API Key</label>
-                  <input
-                    type="password"
-                    className="w-full px-3 py-1.5 rounded text-xs font-mono bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-                    value={editApiKey}
-                    onChange={(e) => setEditApiKey(e.target.value)}
-                    placeholder={isLocalProvider(editApiProvider) ? "Leave blank if no auth required" : "sk-..."}
-                  />
-                </div>
-              </div>
-            </div>
-          </div>
+          <ChatSettingsPanel standalone={false} {...settingsPanelProps} />
         )}
 
         {/* Messages area */}
         <div className="flex-1 overflow-y-auto p-4" style={{ minHeight: 350, maxHeight: 450 }}>
-          {messages.length === 0 && (
-            <div className="flex items-center justify-center h-full text-[var(--color-text-secondary)]">
-              <div className="text-center">
-                <p className="text-xs">Ask a question about your Klipper configuration!</p>
-              </div>
-            </div>
-          )}
-          {messages.map((msg, i) => (
-            (() => {
-              if (msg.role === 'user' && msg.hiddenFromUser) {
-                return null;
-              }
-              const assistantConfigBlock = msg.role === 'assistant' ? extractConfigCodeBlock(msg.content) : null;
-              const hasApplicableAssistantDraft = assistantDraftApplicableMessages[i] === true;
-              const lmStudioMcpStatus = msg.role === 'assistant' ? msg.lmStudioMcp : undefined;
-              const lmStudioContextStatus = msg.role === 'assistant' ? msg.lmStudioContext : undefined;
-              const lmStudioMcpPresentation = lmStudioMcpStatus ? getLmStudioMcpStatusPresentation(lmStudioMcpStatus) : null;
-              const lmStudioContextPresentation = lmStudioContextStatus ? getLmStudioContextPresentation(lmStudioContextStatus) : null;
-              return (
-                <div
-                  key={i}
-                  className={`mb-2 ${msg.role === 'user' ? 'text-right' : 'text-left'}`}
-                >
-                  <div
-                    className={`inline-block max-w-[80%] px-3 py-2 rounded-lg text-xs leading-6 ${
-                      msg.role === 'user'
-                        ? 'bg-[var(--color-accent)] text-white'
-                        : 'bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] border border-[var(--color-bg-tertiary)]'
-                    }`}
-                    style={{ wordBreak: 'break-word' }}
-                  >
-                    {msg.role === 'assistant' ? (
-                      <ReactMarkdown
-                        remarkPlugins={[remarkMath, remarkGfm]}
-                        rehypePlugins={[rehypeKatex]}
-                        components={{
-                          p: ({ children }: ParagraphProps) => <p className="mb-2 last:mb-0">{children}</p>,
-                          ul: ({ children }: ListProps) => <ul className="mb-2 list-disc pl-5 last:mb-0">{children}</ul>,
-                          ol: ({ children }: OrderedListProps) => <ol className="mb-2 list-decimal pl-5 last:mb-0">{children}</ol>,
-                          li: ({ children }: ListItemProps) => <li className="mb-1 last:mb-0">{children}</li>,
-                          a: ({ children, href }: AnchorProps) => (
-                            <a className="text-[var(--color-accent)] underline" href={href} target="_blank" rel="noreferrer">
-                              {children}
-                            </a>
-                          ),
-                          blockquote: ({ children }: BlockquoteProps) => (
-                            <blockquote className="my-2 border-l-2 border-[var(--color-bg-tertiary)] pl-3 text-[var(--color-text-secondary)]">
-                              {children}
-                            </blockquote>
-                          ),
-                          table: ({ children }: TableProps) => (
-                            <div className="my-2 overflow-x-auto">
-                              <table className="min-w-full border-collapse text-left text-[11px]">{children}</table>
-                            </div>
-                          ),
-                          th: ({ children }: TableCellProps) => (
-                            <th className="border border-[var(--color-bg-tertiary)] px-2 py-1 font-semibold">{children}</th>
-                          ),
-                          td: ({ children }: TableDataCellProps) => (
-                            <td className="border border-[var(--color-bg-tertiary)] px-2 py-1 align-top">{children}</td>
-                          ),
-                          code: MarkdownCode,
-                        }}
-                      >
-                        {msg.content}
-                      </ReactMarkdown>
-                    ) : (
-                      <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
-                    )}
-                    {msg.role === 'assistant' && (lmStudioMcpPresentation || lmStudioContextPresentation) && (
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        {lmStudioMcpPresentation && (
-                          <span
-                            className={`inline-flex items-center rounded-full border px-2 py-1 text-[10px] font-medium ${lmStudioMcpPresentation.className}`}
-                            title={lmStudioMcpPresentation.title}
-                          >
-                            {lmStudioMcpPresentation.label}
-                          </span>
-                        )}
-                        {lmStudioContextPresentation && (
-                          <span
-                            className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-1 text-[10px] font-medium ${lmStudioContextPresentation.className}`}
-                            title={lmStudioContextPresentation.title}
-                          >
-                            <span className="relative h-3 w-3 shrink-0 rounded-full" aria-hidden="true">
-                              <span className="absolute inset-0 rounded-full bg-current opacity-15" />
-                              {lmStudioContextPresentation.fillRatio !== null && lmStudioContextPresentation.fillRatio > 0 && (
-                                <span
-                                  className="absolute inset-0 rounded-full"
-                                  style={{
-                                    background: `conic-gradient(currentColor ${Math.max(lmStudioContextPresentation.fillRatio * 360, 6)}deg, transparent 0deg)`,
-                                  }}
-                                />
-                              )}
-                            </span>
-                            {lmStudioContextPresentation.label}
-                          </span>
-                        )}
-                      </div>
-                    )}
-                    {msg.role === 'assistant' && Array.isArray(msg.autoLoadedDocs) && msg.autoLoadedDocs.length > 0 && (
-                      <div className="mt-3 flex">
-                        <span
-                          className="inline-flex items-center rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-1 text-[10px] font-medium text-sky-300"
-                          title={`The app automatically fetched full Klipper docs for this answer: ${msg.autoLoadedDocs.join(', ')}`}
-                        >
-                          Auto-loaded docs: {msg.autoLoadedDocs.join(', ')}
-                        </span>
-                      </div>
-                    )}
-                    {msg.role === 'assistant' && assistantConfigBlock && activeFile && hasApplicableAssistantDraft && (
-                      <div className="mt-3 flex justify-end">
-                        <button
-                          onClick={() => {
-                            void handleApplyAssistantEdit(msg.content, i);
-                          }}
-                          disabled={assistantDraftPreviewLoading === msg.content}
-                          className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-[10px] font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-60"
-                          title="Preview how the assistant sections would merge into the matching config file"
-                        >
-                          {assistantDraftPreviewLoading === msg.content ? 'Preparing Review...' : 'Apply and Review Changes'}
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              );
-            })()
-          ))}
-          {loading && (
-            <div className="text-left mb-2">
-              <div className="inline-block px-3 py-2 rounded-lg text-xs bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">
-                <span className="inline-flex gap-0.5">
-                  <span className="animate-bounce">●</span>
-                  <span className="animate-bounce" style={{ animationDelay: '0.15s' }}>●</span>
-                  <span className="animate-bounce" style={{ animationDelay: '0.3s' }}>●</span>
-                </span>
-              </div>
-            </div>
-          )}
-          {error && (
-            <div className="text-left mb-2 text-[var(--color-error)]">
-              <span className="text-[10px]">{error}</span>
-            </div>
-          )}
-          <div ref={messagesEndRef} />
+          <ChatMessageList
+            messages={messages}
+            loading={loading}
+            error={connectionLost ? 'Connection lost — the last question will resend automatically when the network returns.' : error}
+            onRetry={handleRetry}
+            activeFile={activeFile}
+            assistantDraftApplicableMessages={assistantDraftApplicableMessages}
+            assistantDraftPreviewLoading={assistantDraftPreviewLoading}
+            onApplyEdit={handleApplyEdit}
+            onReviewPrinterMemory={handleReviewPrinterMemory}
+            onEditMessage={handleEditMessage}
+            messagesEndRef={messagesEndRef}
+          />
         </div>
 
+        {/* File input (hidden) */}
         <input
           ref={fileInputRef}
           type="file"
@@ -2462,145 +940,91 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         />
 
         {/* Input bar */}
-        <div className="border-t border-[var(--color-bg-tertiary)]">
-          <div className="flex flex-wrap items-center gap-2 px-4 pt-3 pb-2 text-[10px] text-[var(--color-text-secondary)]">
-            <div className="relative" ref={includeFilesMenuRef}>
-              <button
-                type="button"
-                onClick={() => setIncludeFilesMenuOpen((prev) => !prev)}
-                className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 font-medium transition-colors ${
-                  includeFilesMenuOpen
-                    ? 'border-[var(--color-accent)] text-[var(--color-accent)]'
-                    : 'border-[var(--color-bg-tertiary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]'
-                }`}
-                title="Choose which loaded config files to include in chat context"
-              >
-                Include Files
-                <KeyboardArrowDownRounded
-                  sx={{ fontSize: 16 }}
-                  className={`transition-transform ${includeFilesMenuOpen ? 'rotate-180' : ''}`}
-                />
-              </button>
-              {includeFilesMenuOpen && (
-                <div className="absolute bottom-full left-0 z-20 mb-2 w-72 rounded-lg border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] p-2 shadow-2xl">
-                  <div className="mb-2 flex items-center justify-between gap-2 border-b border-[var(--color-bg-tertiary)] pb-2">
-                    <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-secondary)]">
-                      Loaded .cfg files
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => fileInputRef.current?.click()}
-                      className="rounded-md border border-[var(--color-bg-tertiary)] p-1 text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
-                      title="Import local .cfg files"
-                    >
-                      <UploadFileRounded sx={{ fontSize: 16 }} />
-                    </button>
-                  </div>
-                  {loadedConfigFilenames.length > 0 ? (
-                    <div className="max-h-56 space-y-1 overflow-y-auto pr-1">
-                      {loadedConfigFilenames.map((filename) => {
-                        const checked = selectedConfigContextFiles.includes(filename);
-                        const isActiveSelection = filename === activeFile;
-
-                        return (
-                          <label
-                            key={filename}
-                            className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-[var(--color-bg-primary)]"
-                          >
-                            <input
-                              type="checkbox"
-                              checked={checked}
-                              onChange={(e) => {
-                                setSelectedConfigContextFiles((prev) => {
-                                  if (e.target.checked) {
-                                    return prev.includes(filename) ? prev : [...prev, filename];
-                                  }
-
-                                  return prev.filter((value) => value !== filename);
-                                });
-                              }}
-                              className="rounded border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)]"
-                            />
-                            <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--color-text-primary)]">
-                              {filename}
-                            </span>
-                            {isActiveSelection && (
-                              <span className="rounded-full bg-[var(--color-bg-primary)] px-1.5 py-0.5 text-[9px] font-medium text-[var(--color-text-secondary)]">
-                                Active
-                              </span>
-                            )}
-                          </label>
-                        );
-                      })}
-                    </div>
-                  ) : (
-                    <p className="px-2 py-3 text-[10px] text-[var(--color-text-secondary)]">
-                      No loaded .cfg files. Use the import button to attach local files.
-                    </p>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-          {attachedConfigFiles.length > 0 && (
-            <div className="flex flex-wrap gap-2 px-4 pb-2">
-              {attachedConfigFiles.map((file) => (
-                <button
-                  key={file.id}
-                  onClick={() => handleRemoveAttachedFile(file.id)}
-                  className="rounded-full border border-[var(--color-bg-tertiary)] px-2 py-1 text-[10px] text-[var(--color-text-secondary)] hover:border-[var(--color-error)] hover:text-[var(--color-error)] transition-colors"
-                  title="Remove imported file from chat context"
-                >
-                  {file.name} ×
-                </button>
-              ))}
-            </div>
-          )}
-        <div className="flex items-center gap-2 p-4 pt-2">
-          <div
-            ref={inputRef as React.RefObject<HTMLDivElement>}
-            className={`flex-1 px-3 py-2 rounded-lg text-xs bg-[var(--color-bg-primary)] border text-[var(--color-text-primary)] focus:outline-none transition-colors resize-none ${
-              loading
-                ? 'border-[var(--color-bg-tertiary)] opacity-50 cursor-not-allowed'
-                : 'border-[var(--color-bg-tertiary)] focus:border-[var(--color-accent)]'
-            }`}
-            contentEditable
-            suppressContentEditableWarning
-            onKeyDown={handleKeyDown}
-            onInput={(e) => {
-              const target = e.target as HTMLDivElement;
-              setInput(target.textContent || '');
-            }}
-            data-placeholder="Type your message..."
-            style={{ minHeight: 36, maxHeight: 120, overflow: 'auto' }}
-          />
-          <button
-            onClick={handleSend}
-            disabled={loading || !input.trim()}
-            className="px-4 py-2 rounded-lg text-xs font-medium bg-[var(--color-accent)] text-white hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            {loading ? '...' : 'Send'}
-          </button>
-          </div>
-        </div>
+        <ChatInputBar
+          input={input}
+          loading={loading}
+          selectedConfigContextFiles={selectedConfigContextFiles}
+          loadedConfigFilenames={loadedConfigFilenames}
+          activeFile={activeFile}
+          attachedConfigFiles={attachedConfigFiles}
+          onInputChange={setInput}
+          onSend={handleSend}
+          onStop={handleStop}
+          onKeyDown={handleKeyDown}
+          onAttachFiles={handleAttachConfigFiles}
+          onRemoveAttachedFile={handleRemoveAttachedFile}
+          onSelectedContextFilesChange={setSelectedConfigContextFiles}
+          inputRef={inputRef}
+          fileInputRef={fileInputRef}
+        />
       </div>
 
+      {/* Draft Preview Dialog */}
       {assistantDraftPreview && (
         <AiDraftPreviewDialog
-          filePreviews={assistantDraftPreview.filePreviews.map((filePreview) => ({
-            filename: filePreview.filename,
-            originalText: filePreview.originalText,
-            mergedText: filePreview.mergedText,
+          filePreviews={assistantDraftPreview.filePreviews.map((fp) => ({
+            filename: fp.filename,
+            originalText: fp.originalText,
+            mergedText: fp.mergedText,
           }))}
           changes={flattenAssistantDraftChanges(assistantDraftPreview.filePreviews)}
           selectedChangeIds={assistantDraftPreview.selectedChangeIds}
           previewUpdating={assistantDraftPreview.previewUpdating}
-          onSelectionChange={(selectedChangeIds) => {
-            void handleAssistantDraftSelectionChange(selectedChangeIds);
-          }}
-          onAccept={handleAcceptAssistantEdit}
+          repairedSections={assistantDraftPreview.repairedSections}
+          onSelectionChange={(ids) => { void handleAssistantDraftSelectionChange(ids); }}
+          onAccept={() => { void handleAcceptDraft(); }}
           onClose={() => setAssistantDraftPreview(null)}
         />
+      )}
+
+      {/* Chat History Dialog */}
+      {showChatHistory && (
+        <ChatHistoryDialog
+          onClose={() => setShowChatHistory(false)}
+          onLoadConversation={handleLoadConversation}
+          currentMessageCount={messages.length}
+        />
+      )}
+
+      {/* Printer Memory Dialog */}
+      {showPrinterMemory && (
+        <PrinterMemoryDialog
+          open={showPrinterMemory}
+          onClose={() => { setShowPrinterMemory(false); setProposedMemory(null); }}
+          proposedMemory={proposedMemory}
+          onAcceptProposal={handleAcceptPrinterMemoryProposal}
+        />
+      )}
+
+      {/* Interrupted-conversation carry-over prompt */}
+      {showCarryOverPrompt && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50" onClick={() => setShowCarryOverPrompt(false)}>
+          <div
+            className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[420px] p-5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="text-sm font-semibold mb-1">Your last message didn't get a response</h2>
+            <p className="text-[11px] text-[var(--color-text-secondary)] leading-relaxed mb-4">
+              The conversation was interrupted — the model may have timed out or been unloaded.
+              Keep the previous conversation so your next message still has full context, or
+              start completely fresh.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={handleStartFreshChat}
+                className="px-3 py-1.5 rounded text-xs font-medium border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
+              >
+                Start Fresh
+              </button>
+              <button
+                onClick={handleCarryOverContext}
+                className="px-3 py-1.5 rounded text-xs font-medium bg-blue-600 text-white hover:bg-blue-500 transition-colors"
+              >
+                Keep Context &amp; Continue
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

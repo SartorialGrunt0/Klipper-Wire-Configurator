@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useEffect } from 'react';
 import type { AssistantDraftChange } from '../../utils/assistantDraftMerge';
 import { createConfigPatch, parsePatch } from '../../utils/configDiff';
 
@@ -13,6 +13,8 @@ interface AiDraftPreviewDialogProps {
   changes: AssistantDraftChange[];
   selectedChangeIds: string[];
   previewUpdating: boolean;
+  /** Macro section headers whose trailing Jinja closers were auto-appended. */
+  repairedSections?: string[];
   onSelectionChange: (selectedChangeIds: string[]) => void;
   onAccept: () => void;
   onClose: () => void;
@@ -23,10 +25,31 @@ export default function AiDraftPreviewDialog({
   changes,
   selectedChangeIds,
   previewUpdating,
+  repairedSections = [],
   onSelectionChange,
   onAccept,
   onClose,
 }: AiDraftPreviewDialogProps) {
+  // ── Debug logging ────────────────────────────────────────────────
+  useEffect(() => {
+    console.group('[AIDraft] Preview dialog opened / updated');
+    console.debug('File previews:', filePreviews.map(f => ({
+      filename: f.filename,
+      originalLength: f.originalText.length,
+      mergedLength: f.mergedText.length,
+      sizeDiff: f.mergedText.length - f.originalText.length,
+    })));
+    console.debug('Changes from assistant:', changes.map(c => ({
+      id: c.id,
+      mode: c.mode,
+      filename: c.filename,
+      fullHeader: c.fullHeader,
+    })));
+    console.debug('Selected change IDs:', selectedChangeIds);
+    console.debug('Preview updating:', previewUpdating);
+    console.groupEnd();
+  }, [filePreviews, changes, selectedChangeIds, previewUpdating]);
+
   const selectedIdSet = useMemo(() => new Set(selectedChangeIds), [selectedChangeIds]);
   const selectedCount = selectedChangeIds.length;
   const fileDiffs = useMemo(
@@ -47,6 +70,7 @@ export default function AiDraftPreviewDialog({
         changedLineCount: diffLines.filter(
           (line) => line.type === 'added' || line.type === 'removed',
         ).length,
+        isNewFile: !filePreview.originalText.trim(),
       };
     }),
     [filePreviews],
@@ -105,6 +129,14 @@ export default function AiDraftPreviewDialog({
             </svg>
           </button>
         </div>
+
+        {repairedSections.length > 0 && (
+          <div className="border-b border-[var(--color-bg-tertiary)] bg-[var(--color-bg-tertiary)]/40 px-4 py-2 text-[11px] text-[var(--color-text-secondary)]">
+            Auto-repaired missing Jinja closers in:{' '}
+            {repairedSections.map((header) => `[${header}]`).join(', ')} — the closing tags were
+            appended at the end of the gcode body. Review the green additions in the diff below.
+          </div>
+        )}
 
         <div className="border-b border-[var(--color-bg-tertiary)] px-4 py-3">
           <div className="mb-2 flex flex-wrap items-center gap-2">
@@ -165,9 +197,13 @@ export default function AiDraftPreviewDialog({
                   {selected ? '✓' : ''}
                 </span>
                 <span
-                  className={change.mode === 'add' ? 'text-green-400' : 'text-[var(--color-accent)]'}
+                  className={
+                    change.mode === 'add' ? 'text-green-400' :
+                    change.mode === 'delete' ? 'text-red-400' :
+                    'text-[var(--color-accent)]'
+                  }
                 >
-                  {change.mode === 'add' ? 'new' : 'update'}
+                  {change.mode === 'add' ? 'new' : change.mode === 'delete' ? 'delete' : 'update'}
                 </span>
                 <span className="text-[var(--color-text-secondary)]">{change.filename}</span>
                 <span>{change.fullHeader}</span>
@@ -198,8 +234,13 @@ export default function AiDraftPreviewDialog({
                   className="overflow-hidden rounded-lg border border-[var(--color-bg-tertiary)]"
                 >
                   <div className="flex items-center justify-between border-b border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-3 py-2">
-                    <span className="text-[11px] font-semibold text-[var(--color-text-primary)]">
+                    <span className="flex items-center gap-2 text-[11px] font-semibold text-[var(--color-text-primary)]">
                       {fileDiff.filename}
+                      {fileDiff.isNewFile && (
+                        <span className="rounded-full bg-green-500/20 px-1.5 py-0.5 text-[10px] font-medium text-green-400">
+                          New file
+                        </span>
+                      )}
                     </span>
                     <span className="text-[10px] text-[var(--color-text-secondary)]">
                       {fileDiff.changedLineCount > 0

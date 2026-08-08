@@ -18,8 +18,12 @@ if not exist "%BACKEND_DIR%\venv\Scripts\python.exe" (
     echo Creating backend venv...
     cd /d "%BACKEND_DIR%"
     python -m venv venv
-    venv\Scripts\pip.exe install -r requirements.txt
 )
+cd /d "%BACKEND_DIR%"
+REM Refresh Python dependencies on every start so pulls that add new
+REM requirements (e.g. jinja2) work without manually reinstalling.
+echo Refreshing backend Python dependencies...
+venv\Scripts\pip.exe install -r requirements.txt
 start "Klipper Wire Configurator - Backend" cmd /k cd /d "%BACKEND_DIR%" ^&^& venv\Scripts\python.exe main.py
 
 REM Wait a moment for backend to start

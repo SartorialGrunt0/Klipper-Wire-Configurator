@@ -7,6 +7,7 @@ Special thanks to the Klipper, Mainsail, Moonraker, Fluidd, and other teams whos
 ## Table of contents
 
 - [Features](#features)
+- [AI Chat](docs/AI_CHAT.md)
 - [Installing](#installing/uninstalling)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
@@ -19,7 +20,7 @@ Special thanks to the Klipper, Mainsail, Moonraker, Fluidd, and other teams whos
 - Add any Klipper component directly from the official Config Reference documentation.
 - Import example configurations organized by board type (Mainboard, Toolhead, Probe, Expander) with fuzzy search.
 - Delete, modify, or reposition components using drag-and-drop interactions.
-- Auto-detect and manage USB, UART, and CAN communcations with ID detection.
+- Auto-detect and manage USB, UART, and CAN communications with ID detection.
 
 ### Configuration Management
 
@@ -31,8 +32,8 @@ Special thanks to the Klipper, Mainsail, Moonraker, Fluidd, and other teams whos
 ### Advanced Features
 
 - Create, manage, and simulate macros that reflects your printer configuration.
-- Add an AI assistant that references official Klipper documentation, Config Reference excerpts, and your current config with explicit review and approval before applying.
-- Build, download, and flash Katapult adn klipper firmware directly from the UI.
+- Add an AI assistant that references official Klipper documentation, Config Reference excerpts, and your current config with explicit review and approval before applying ([read about it](docs/AI_CHAT.md)).
+- Build, download, and flash Katapult and Klipper firmware directly from the UI.
 
 ### Graphical UI
 
@@ -73,6 +74,12 @@ Special thanks to the Klipper, Mainsail, Moonraker, Fluidd, and other teams whos
 
 <img src="images/AI_Chat.png" width="100%">
 <div style="height: 45%;"></div>
+
+## AI Chat
+
+The AI assistant answers Klipper questions and drafts config changes, macros, and printer-memory updates using the bundled Klipper documentation, example configs, and your loaded project files. Nothing the assistant produces touches your config until you review and approve it in the draft preview dialog.
+
+The full [AI Chat guide](docs/AI_CHAT.md) covers configuration, how a request flows from prompt to file edit, the draft-block file-edit protocol, printer memory, and the accuracy test results for the models we've benchmarked.
 
 ## Prerequisites
 

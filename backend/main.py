@@ -9,6 +9,9 @@ from fastapi.responses import FileResponse
 from api.routes import router
 from api.native_routes import router as native_router
 from api.ai_routes import router as ai_router
+from api.printer_memory_routes import router as printer_memory_router
+from mcp_server import McpServer, get_index
+from fastapi.responses import JSONResponse
 
 app = FastAPI(title="Klipper Wire Configurator", version="1.0.0")
 
@@ -20,9 +23,43 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── Shared MCP server instance (embedded, zero extra RAM) ──
+mcp_server = McpServer()
+
+
+@app.post("/api/mcp")
+async def mcp_endpoint(request: dict):
+    """MCP JSON-RPC endpoint for the /ai/chat proxy and external HTTP clients.
+
+    Allows the AI chat proxy to call MCP tools without spawning a subprocess.
+    External MCP clients that support HTTP transport (e.g. pi, some VS Code
+    extensions) can also connect here.
+
+    For stdio-based MCP clients (Claude Desktop, etc.):
+        python -m backend.mcp_server
+    """
+    result = mcp_server.handle_jsonrpc(request)
+    if result is None:
+        return JSONResponse(content={}, status_code=202)
+    return result
+
+
+@app.get("/api/mcp/health")
+async def mcp_health():
+    """MCP server health check — returns index stats."""
+    index = get_index()
+    return {
+        "status": "ok",
+        "documents_indexed": index.get_doc_count(),
+        "server": "klipper-wire-configurator",
+        "protocol": "2024-11-05",
+    }
+
+
 app.include_router(router, prefix="/api")
 app.include_router(native_router, prefix="/api/native")
 app.include_router(ai_router)
+app.include_router(printer_memory_router, prefix="/api")
 
 PROJECTS_DIR = Path(os.environ.get("KWC_PROJECTS_DIR", "./projects"))
 PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -54,4 +91,8 @@ if __name__ == "__main__":
     import uvicorn
 
     port = int(os.environ.get("KWC_PORT", "8099"))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
+    # Reload is opt-in (KWC_RELOAD=1). The uvicorn reloader spawns a second
+    # process that can split incoming requests across two in-memory states
+    # (e.g. the AI chat stop registry), so it is disabled by default.
+    reload = os.environ.get("KWC_RELOAD", "0") == "1"
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=reload)

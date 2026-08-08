@@ -483,6 +483,13 @@ export function createMachineProfile(
   };
 }
 
+// ⚠️ SYNC WARNING — mirrored geometry
+// The helpers below (isPointInBounds, isPointInMoveBounds, findZoneHit,
+// lineSegmentIntersectsRect, findPathZoneHit) are mirrored in the backend at
+// backend/services/macro_sim.py, where the validate_macro MCP tool uses them
+// for move-bounds and no-go zone checks. If you change the geometry HERE,
+// apply the same change to macro_sim.py — otherwise the AI validator and the
+// Macro Designer will disagree about what is in bounds.
 export function isPointInBounds(profile: MachineProfile, x: number, y: number): boolean {
   if (profile.shape === 'round' && profile.radius !== null) {
     const dx = x - profile.centerX;

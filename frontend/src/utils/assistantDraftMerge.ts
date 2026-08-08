@@ -4,7 +4,7 @@ export interface AssistantDraftChange {
   id: string;
   filename: string;
   fullHeader: string;
-  mode: 'update' | 'add';
+  mode: 'update' | 'add' | 'delete';
 }
 
 function buildAssistantDraftChangeId(
@@ -49,11 +49,65 @@ function cloneSection(section: ConfigSection): ConfigSection {
   };
 }
 
+/**
+ * Special section type used by the AI to signal "delete this entire section."
+ *
+ * The AI outputs `*[section_name]` inside a cfg block. Before parsing,
+ * the frontend preprocesses this into:
+ *
+ *   [delete_section]
+ *   section: section_name
+ *
+ * The `delete_section` type is not a real Klipper section — it's a meta-
+ * instruction that tells the merge logic to remove the named section.
+ * The `*` symbol keeps deletion visually distinct from `#[header]`
+ * (which means "comment out / disable").
+ */
+const DELETE_SECTION_TYPE = 'delete_section';
+
+/**
+ * Regex to match `*[section_name]` deletion markers inside raw cfg block text.
+ */
+export const DELETE_MARKER_RE = /^\*\[([^\]]+)\]\s*$/gm;
+
+/**
+ * Preprocess raw cfg block text, converting `*[section_name]` lines into
+ * `[delete_section]\nsection: section_name` blocks for parsing.
+ */
+export function preprocessDeleteMarkers(text: string): string {
+  return text.replace(DELETE_MARKER_RE, (_match, sectionName: string) => {
+    return `[delete_section]\nsection: ${sectionName.trim()}`;
+  });
+}
+
+/**
+ * Detect whether a section from the assistant represents a deletion signal.
+ *
+ * A delete section has `section_type === "delete_section"` with a `section`
+ * param naming the target to remove.
+ */
+function isDeleteSection(section: ConfigSection): boolean {
+  if (section.section_type !== DELETE_SECTION_TYPE) {
+    return false;
+  }
+  const targetParam = section.params.find((p) => p.key === 'section');
+  return targetParam != null && targetParam.value.trim().length > 0;
+}
+
+/**
+ * Get the target section name from a delete_section entry.
+ */
+function getDeleteTarget(section: ConfigSection): string | null {
+  const targetParam = section.params.find((p) => p.key === 'section');
+  return targetParam?.value.trim() ?? null;
+}
+
+
 function pickMatchingParamIndex(
   params: ConfigParam[],
   key: string,
   isCommentedOut: boolean,
-  usedIndexes: Set<number>,
+  usedIndexes: Map<number, number>,
 ): number | null {
   const exactStateMatch = params.findIndex(
     (param, index) => !usedIndexes.has(index) && param.key === key && param.is_commented_out === isCommentedOut,
@@ -76,44 +130,132 @@ function pickMatchingParamIndex(
 }
 
 function mergeAssistantParams(existingParams: ConfigParam[], assistantParams: ConfigParam[]): ConfigParam[] {
-  const mergedParams = existingParams.map((param) => cloneParam(param));
-  const usedIndexes = new Set<number>();
-  let insertIndex = mergedParams.length;
+  // Phase 1: Match AI params to existing params using the same
+  // priority logic as the original code (exact state match first,
+  // then active, then any). Each AI param matches at most ONE
+  // existing param so we don't force-uncomment #serial lines.
+  //
+  // unlinkedAiKeys: AI param keys that didn't match any existing
+  //   param — these are new params or key renames (e.g. typo fixes)
+  //   and will be appended at the end.
+  // matchedExistingIndexes: maps an existing param index to the index of
+  //   the assistant param that matched it. We need the SPECIFIC pairing so
+  //   that sections with duplicate keys (e.g. the three `serial` lines in
+  //   [mcu], `#max_accel` + active `max_accel` in [printer]) update each
+  //   line with ITS matching AI param rather than the last same-key one.
+  const unlinkedAiKeys = new Set(
+    assistantParams
+      .filter((p) => p.key !== '_comment_')
+      .map((p) => p.key),
+  );
+  const matchedExistingIndexes = new Map<number, number>();
 
-  assistantParams.forEach((assistantParam) => {
-    const nextParam = cloneParam(assistantParam);
-
-    if (assistantParam.key === '_comment_') {
-      mergedParams.splice(insertIndex, 0, nextParam);
-      insertIndex += 1;
+  assistantParams.forEach((aiParam, aiIndex) => {
+    if (aiParam.key === '_comment_') {
       return;
     }
 
-    const matchingIndex = pickMatchingParamIndex(
-      mergedParams,
-      assistantParam.key,
-      assistantParam.is_commented_out,
-      usedIndexes,
+    const matchIndex = pickMatchingParamIndex(
+      existingParams,
+      aiParam.key,
+      aiParam.is_commented_out,
+      matchedExistingIndexes,
     );
 
-    if (matchingIndex != null) {
-      const existingParam = mergedParams[matchingIndex];
-      mergedParams[matchingIndex] = {
-        ...existingParam,
-        ...nextParam,
-        comment: nextParam.comment || existingParam.comment,
-        separator: nextParam.separator ?? existingParam.separator,
-      };
-      usedIndexes.add(matchingIndex);
-      insertIndex = matchingIndex + 1;
+    if (matchIndex !== null) {
+      matchedExistingIndexes.set(matchIndex, aiIndex);
+      unlinkedAiKeys.delete(aiParam.key);
+    }
+  });
+
+  // Phase 2: Walk existing params in order.
+  // - Comments (_comment_) are always preserved in place.
+  // - Matched params are updated with AI values, but preserve the
+  //   existing param's is_commented_out state so #comment lines
+  //   stay commented.
+  // - Unmatched existing params whose key IS present in the AI's
+  //   output are kept unchanged (the AI mentioned this key but
+  //   didn't match THIS specific instance — e.g. duplicate lines).
+  // - Unmatched existing params whose key is NOT in the AI's
+  //   output are excluded (the AI intentionally removed them).
+  const aiKeySet = new Set(
+    assistantParams
+      .filter((p) => p.key !== '_comment_')
+      .map((p) => p.key),
+  );
+  const result: ConfigParam[] = [];
+  const usedAiKeys = new Set<string>();
+
+  existingParams.forEach((existingParam, index) => {
+    if (existingParam.key === '_comment_') {
+      result.push(cloneParam(existingParam));
       return;
     }
 
-    mergedParams.splice(insertIndex, 0, nextParam);
-    insertIndex += 1;
+    const matchedAiIndex = matchedExistingIndexes.get(index);
+    if (matchedAiIndex !== undefined) {
+      // This existing param was matched by a SPECIFIC assistant param —
+      // use that exact pairing (not "the last param with this key", which
+      // conflates duplicate-key lines like the [mcu] #serial alternatives).
+      const aiParam = assistantParams[matchedAiIndex];
+      if (aiParam) {
+        const clonedAi = cloneParam(aiParam);
+        result.push({
+          ...cloneParam(existingParam),
+          ...clonedAi,
+          is_commented_out: existingParam.is_commented_out, // preserve comment state
+          comment: clonedAi.comment || existingParam.comment,
+          separator: clonedAi.separator ?? existingParam.separator,
+        });
+        usedAiKeys.add(existingParam.key);
+        return;
+      }
+    }
+
+    if (aiKeySet.has(existingParam.key)) {
+      // AI mentioned this key but matched a different instance —
+      // keep this existing param unchanged.
+      result.push(cloneParam(existingParam));
+      return;
+    }
+
+    // Unmatched existing param whose key is NOT in the AI's output —
+    // excluded (AI intentionally removed it).
+    // This handles typo fixes (baude→baud), param renames, deletions.
   });
 
-  return mergedParams;
+  // Phase 3: Append unlinked AI params (new params / key renames).
+  // Track pushed keys to prevent duplicates.
+  for (const param of assistantParams) {
+    if (param.key === '_comment_') {
+      continue;
+    }
+    if (!usedAiKeys.has(param.key) && unlinkedAiKeys.has(param.key)) {
+      result.push(cloneParam(param));
+      usedAiKeys.add(param.key);
+    }
+  }
+
+  // Phase 4: Append AI comments/blank lines that aren't duplicates
+  // of existing comments or other AI comments.
+  const pushedCommentValues = new Set<string>();
+  for (const param of assistantParams) {
+    if (param.key !== '_comment_') {
+      continue;
+    }
+    if (pushedCommentValues.has(param.value)) {
+      continue;
+    }
+    const inExisting = existingParams.some(
+      (ep) => ep.key === '_comment_' && ep.value === param.value,
+    );
+    if (!inExisting) {
+      result.push(cloneParam(param));
+      pushedCommentValues.add(param.value);
+    }
+  }
+
+  return result;
 }
 
 function mergeAssistantSection(existingSection: ConfigSection, assistantSection: ConfigSection): ConfigSection {
@@ -144,6 +286,7 @@ export function mergeAssistantSectionsIntoConfig(
   const insertsByAnchor = new Map<number, ConfigSection[]>();
   const seenHeaders = new Map<string, number>();
   const selectedIdSet = selectedChangeIds == null ? null : new Set(selectedChangeIds);
+  const deletedIndexes = new Set<number>();
   const changes: AssistantDraftChange[] = [];
   let lastAnchorIndex = baseSections.length > 0 ? baseSections.length - 1 : -1;
 
@@ -152,6 +295,37 @@ export function mergeAssistantSectionsIntoConfig(
     seenHeaders.set(assistantSection.full_header, seenCount + 1);
     const changeId = buildAssistantDraftChangeId(baseConfig.filename, assistantSection, assistantSectionIndex);
     const shouldApply = selectedIdSet == null || selectedIdSet.has(changeId);
+
+    // Check if this assistant section signals a deletion
+    if (isDeleteSection(assistantSection)) {
+      const targetName = getDeleteTarget(assistantSection);
+      if (targetName) {
+        const existingIndex = sectionIndex.get(targetName)?.[0];
+        if (existingIndex != null) {
+          changes.push({
+            id: changeId,
+            filename: baseConfig.filename,
+            fullHeader: targetName,
+            mode: 'delete',
+          });
+          if (shouldApply) {
+            deletedIndexes.add(existingIndex);
+          }
+          return;
+        }
+        // Target section not found in base config — still record the
+        // proposed deletion as a change so the UI shows it (user can
+        // see what the AI suggested even if it's a no-op).
+        changes.push({
+          id: changeId,
+          filename: baseConfig.filename,
+          fullHeader: targetName,
+          mode: 'delete',
+        });
+        return;
+      }
+      return;
+    }
 
     const existingIndex = sectionIndex.get(assistantSection.full_header)?.[seenCount];
     if (existingIndex != null) {
@@ -192,8 +366,41 @@ export function mergeAssistantSectionsIntoConfig(
     mergedSections.push(...leadingSections);
   }
 
+  // Collect header_comments from deleted sections so divider banners,
+  // explanatory comments, and separator lines above a deleted section
+  // are preserved in the output rather than removed along with the section.
+  const pendingDeletedComments: string[] = [];
+
   baseSections.forEach((section, index) => {
-    mergedSections.push(replacements.get(index) ?? section);
+    if (deletedIndexes.has(index)) {
+      // Collect the deleted section's header_comments for preservation
+      if (section.header_comments?.length) {
+        pendingDeletedComments.push(...section.header_comments);
+      }
+      // Emit any new sections that were anchored at this index
+      // (e.g. replacing a deleted [probe] with a new [bltouch])
+      const anchoredSections = insertsByAnchor.get(index);
+      if (anchoredSections) {
+        mergedSections.push(...anchoredSections);
+      }
+      return;
+    }
+
+    // Clone or get the merged section (must be a fresh object to mutate safely)
+    const mergedSection = replacements.has(index)
+      ? (replacements.get(index) as ConfigSection)
+      : cloneSection(section);
+
+    // Prepend preserved comments from any previously deleted section(s)
+    if (pendingDeletedComments.length > 0) {
+      mergedSection.header_comments = [
+        ...pendingDeletedComments,
+        ...mergedSection.header_comments,
+      ];
+      pendingDeletedComments.length = 0;
+    }
+
+    mergedSections.push(mergedSection);
     const anchoredSections = insertsByAnchor.get(index);
     if (anchoredSections) {
       mergedSections.push(...anchoredSections);

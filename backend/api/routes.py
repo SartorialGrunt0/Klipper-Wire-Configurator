@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import List
 
@@ -39,14 +40,25 @@ from services.warning_acknowledgments import acknowledge_warning_for_section
 
 router = APIRouter()
 
-REFERENCE_DIR = Path(__file__).parent.parent.parent / "reference"
-KLIPPER_DOCS_DIR = REFERENCE_DIR / "reference_docs" / "klipper_docs"
+# Hard-failover doc/config sources (installed Klipper repo when present,
+# bundled copies otherwise) — shared with the MCP docs tools.
+from klipper_paths import CONFIG_EXAMPLES_DIR, KLIPPER_DOCS_DIR, REFERENCE_DIR  # noqa: E402
+
 PROJECTS_DIR = Path(__file__).parent.parent / "projects"
+
+# Where to persist imported config files for MCP tool access.
+# On a Pi with Klipper installed, saves to the system config path.
+# Otherwise, falls back to a local directory.
+_CONFIG_SYSTEM_PATH = Path(os.environ.get("KLIPPER_CONFIG_PATH", "/home/pi/.klipper/config"))
+if _CONFIG_SYSTEM_PATH.is_dir():
+    CONFIG_STORAGE_DIR = _CONFIG_SYSTEM_PATH
+else:
+    CONFIG_STORAGE_DIR = Path(__file__).parent.parent / "user_configs"
 
 
 def _resolve_config_path(filename: str) -> Path | None:
     """Find a config file by name, searching type subdirectories first."""
-    config_dir = REFERENCE_DIR / "config"
+    config_dir = CONFIG_EXAMPLES_DIR
     # Check subdirectories
     for subdir in BOARD_TYPE_DIRS:
         candidate = config_dir / subdir / filename
@@ -73,6 +85,21 @@ def _resolve_klipper_doc_path(filename: str) -> Path:
 # ── Import / Parse ──────────────────────────────────────────────
 
 
+def _save_config_file(filename: str, text: str) -> None:
+    """Persist an imported config file to the config storage directory.
+
+    Creates the directory if it doesn't exist. Files are available to the
+    MCP server's search_user_configs / read_user_config tools immediately.
+    Uses binary mode to preserve exact original line endings.
+    """
+    try:
+        CONFIG_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+        dest = CONFIG_STORAGE_DIR / filename
+        dest.write_bytes(text.encode("utf-8"))
+    except OSError:
+        pass  # Non-critical — import parsing still succeeds
+
+
 @router.post("/import")
 async def import_config(file: UploadFile = File(...)):
     """Import and parse a .cfg file."""
@@ -80,6 +107,8 @@ async def import_config(file: UploadFile = File(...)):
     text = content.decode("utf-8", errors="replace")
     # Strip any path prefix the browser may include (e.g. "config/printer.cfg" → "printer.cfg")
     filename = Path(file.filename or "printer.cfg").name or "printer.cfg"
+
+    _save_config_file(filename, text)
 
     config = parse_config(text, filename)
     validation = validate_config(config)
@@ -112,6 +141,9 @@ async def import_project(files: List[UploadFile] = File(...)):
         # Only process .cfg files
         if not filename.endswith(".cfg"):
             continue
+
+        # Persist to disk for MCP tool access
+        _save_config_file(filename, text)
 
         config = parse_config(text, filename)
         configs[filename] = config
@@ -473,6 +505,113 @@ async def load_project(name: str):
         "name": safe_name,
         "configs": configs,
         "layout": layout,
+    }
+
+
+@router.post("/configs/save")
+async def save_configs(data: dict):
+    """Save config files to the local config storage directory.
+
+    Accepts a dict of filename → config text, persists each file to
+    CONFIG_STORAGE_DIR. Used by non-native mode to persist changes
+    made after import.
+    """
+    files: dict[str, str] = data.get("files", {})
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+
+    saved = []
+    errors = []
+    for filename, text in files.items():
+        # Validate filename (no path traversal)
+        if ".." in filename or filename.startswith("/") or filename.startswith("\\"):
+            errors.append(f"Invalid filename: {filename}")
+            continue
+        try:
+            _save_config_file(filename, text)
+            saved.append(filename)
+        except OSError as e:
+            errors.append(f"{filename}: {e}")
+
+    result: dict[str, object] = {"saved": saved, "file_count": len(saved)}
+    if errors:
+        result["errors"] = errors
+        if not saved:
+            raise HTTPException(status_code=500, detail="Failed to save files: " + "; ".join(errors))
+    return result
+
+
+@router.get("/project/load-saved")
+async def load_saved_configs():
+    """Load all config files previously saved to CONFIG_STORAGE_DIR.
+
+    Re-parses and re-validates each .cfg file found there, returning
+    results in the same format as /import-project so the frontend can
+    restore them on startup.
+    """
+    if not CONFIG_STORAGE_DIR.is_dir():
+        return {"files": {}, "main_file": None, "mcus": [], "includes": [], "file_count": 0}
+
+    configs = {}
+    board_infos = {}
+    filenames: list[str] = []
+
+    try:
+        for cfg_file in sorted(CONFIG_STORAGE_DIR.glob("*.cfg")):
+            # Read in binary mode to preserve exact original content
+            text = cfg_file.read_bytes().decode("utf-8", errors="replace")
+            config = parse_config(text, cfg_file.name)
+            configs[cfg_file.name] = config
+            board_infos[cfg_file.name] = detect_board_from_config(config)
+            filenames.append(cfg_file.name)
+    except OSError:
+        return {"files": {}, "main_file": None, "mcus": [], "includes": [], "file_count": 0}
+
+    if not configs:
+        return {"files": {}, "main_file": None, "mcus": [], "includes": [], "file_count": 0}
+
+    validations = validate_project_configs(configs)
+
+    results = {
+        filename: {
+            "config": config.to_dict(),
+            "validation": validations[filename].to_dict(),
+            "board_info": board_infos[filename],
+        }
+        for filename, config in configs.items()
+    }
+
+    # Detect main file
+    main_file = "printer.cfg" if "printer.cfg" in configs else filenames[0]
+
+    # Discover MCUs
+    mcus = []
+    for filename, config in configs.items():
+        for sec in config.sections:
+            if sec.section_type == "mcu":
+                mcus.append({
+                    "name": sec.section_name or "",
+                    "file": filename,
+                    "params": {p.key: p.value for p in sec.params if not p.is_commented_out},
+                })
+
+    # Resolve includes
+    resolved_includes = []
+    if main_file and main_file in configs:
+        for inc in configs[main_file].includes:
+            inc_basename = inc.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+            resolved_includes.append({
+                "path": inc,
+                "resolved": inc_basename in configs,
+                "filename": inc_basename if inc_basename in configs else None,
+            })
+
+    return {
+        "files": results,
+        "main_file": main_file,
+        "mcus": mcus,
+        "includes": resolved_includes,
+        "file_count": len(filenames),
     }
 
 
