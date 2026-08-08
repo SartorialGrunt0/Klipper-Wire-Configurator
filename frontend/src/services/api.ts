@@ -752,6 +752,14 @@ export interface AiChatRequest {
    * question without calling any tool.
    */
   contextFiles?: Record<string, { content: string; label: string }>;
+  /**
+   * Full-rewrite guard state (VITE_KWC_FULL_REWRITE_GUARD build flag).
+   * True = the frontend rejects full block writes and forces mini-diffs, so
+   * the backend uses the STRICT edit-protocol wording. False (default) =
+   * full writes accepted, softer wording. Kept in lock-step with the
+   * frontend acceptance behavior.
+   */
+  fullRewriteGuard?: boolean;
 }
 
 export interface AiToolCallDetail {

@@ -1443,6 +1443,7 @@ def chat_request(base_url: str, question: TestQuestion, settings: dict,
         "temperature": settings["temperature"],
         "toolProtocol": settings.get("tool_protocol", "auto"),
         "mergeSystemMessages": settings.get("merge_system_messages", False),
+        "fullRewriteGuard": settings.get("full_rewrite_guard", False),
     }
     url = base_url.rstrip("/") + "/ai/chat"
     try:
@@ -1678,6 +1679,7 @@ def resolve_settings(args: argparse.Namespace) -> dict:
         "temperature": float(temperature),
         "tool_protocol": args.tool_protocol or "auto",
         "merge_system_messages": args.merge_system_messages,
+        "full_rewrite_guard": args.full_rewrite_guard,
         "base_url": base_url,
     }
 
@@ -1736,6 +1738,13 @@ def main() -> int:
                              "leading one. Needed only for servers whose chat "
                              "template rejects non-leading system messages "
                              "(e.g. strict llama.cpp templates).")
+    parser.add_argument("--full-rewrite-guard", action="store_true",
+                        help="Set fullRewriteGuard on the /ai/chat request: "
+                             "the frontend rejects full block writes of "
+                             "existing macro/Jinja sections and the backend "
+                             "uses the STRICT mini-diff edit-protocol wording. "
+                             "Default off — full writes accepted, softer "
+                             "wording. Use to A/B the guard + prompt pair.")
     parser.add_argument("--questions", default="", help="Subset, e.g. '1-5,8' (1-based)")
     parser.add_argument("--start", default=0, type=int,
                         help="Start at question N (1-based), running N..end. "

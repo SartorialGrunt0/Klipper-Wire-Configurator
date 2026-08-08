@@ -209,6 +209,23 @@ def test_search_klipper_docs_no_results(tmp_path):
     assert "No results found" in out
 
 
+def test_search_klipper_docs_config_reference_section(tmp_path):
+    # A hit inside Config_Reference.md must carry the enclosing section so
+    # the model can jump straight to get_config_reference_section.
+    server, _ = _server(tmp_path)
+    out = _call_tool(server, "search_klipper_docs", {"query": "heater_pin"})
+    assert "Config_Reference.md [extruder]" in out
+    assert "score" in out
+
+
+def test_search_klipper_docs_config_reference_top_of_file(tmp_path):
+    # A match in the Config_Reference preamble (before any ### [section])
+    # must be labelled "(top of file)" rather than a wrong section name.
+    server, _ = _server(tmp_path)
+    out = _call_tool(server, "search_klipper_docs", {"query": "Config Reference"})
+    assert "Config_Reference.md (top of file)" in out
+
+
 def test_read_klipper_doc(tmp_path):
     server, _ = _server(tmp_path)
     out = _call_tool(server, "read_klipper_doc", {"filename": "Bed_Mesh.md"})
@@ -386,6 +403,36 @@ def test_search_user_configs_alias_synonym(tmp_path):
     )
     out = _call_tool(server, "search_user_configs", {"query": "bltouch"})
     assert "probe.cfg" in out
+
+
+def test_search_user_configs_section_annotation(tmp_path):
+    # A content match inside a section must carry the enclosing section so
+    # the model can jump straight to read_user_config with section=.
+    server, root = _server(tmp_path)
+    user_dir = root / "user_configs"
+    user_dir.mkdir(parents=True)
+    (user_dir / "printer.cfg").write_text(
+        "[extruder]\nheater_pin: PA1\nsensor_pin: PA2\n",
+        encoding="utf-8",
+    )
+    out = _call_tool(server, "search_user_configs", {"query": "heater_pin"})
+    assert "printer.cfg [extruder]" in out
+    assert "read_user_config" in out
+
+
+def test_search_user_configs_top_of_file(tmp_path):
+    # A match in the file preamble (before any [section]) must be labelled
+    # "(top of file)" — includes are directives, not sections.
+    server, root = _server(tmp_path)
+    user_dir = root / "user_configs"
+    user_dir.mkdir(parents=True)
+    (user_dir / "printer.cfg").write_text(
+        "[include moonraker_obico_macros.cfg]\n[mcu]\nserial: xyz\n",
+        encoding="utf-8",
+    )
+    out = _call_tool(server, "search_user_configs", {"query": "moonraker"})
+    assert "printer.cfg (top of file)" in out
+    assert "printer.cfg [mcu]" not in out  # include line is preamble, not a section
 
 
 # ── list_user_configs ────────────────────────────────────────────────────

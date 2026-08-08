@@ -286,16 +286,35 @@ class DocIndex:
         results: list[dict[str, Any]] = []
         for stem, score in ranked[:limit]:
             content = self._docs[stem]
-            snippet = self._make_snippet(content, query)
+            snippet, match_pos = self._make_snippet(content, query)
+            section = None
+            if stem == "Config_Reference" and match_pos >= 0:
+                section = self._enclosing_config_reference_section(content, match_pos)
             results.append({
                 "id": stem,
                 "filename": f"{stem}.md",
                 "score": round(score, 1),
                 "snippet": snippet,
+                "match_pos": match_pos,
+                "section": section,
                 "size_bytes": len(content),
             })
 
         return results
+
+    def _enclosing_config_reference_section(self, content: str, pos: int) -> str | None:
+        """Return the Config_Reference.md section header enclosing ``pos``.
+
+        Walks the ``### [section]`` headers and returns the last one that
+        starts at or before the given character offset, or None when the
+        offset falls in the preamble (before the first section).
+        """
+        last: str | None = None
+        for m in CONFIG_SECTION_HEADER_RE.finditer(content):
+            if m.start() > pos:
+                break
+            last = m.group(1).strip()
+        return last
 
     def list_config_reference_sections(self) -> list[str]:
         """Return every config section header found in Config_Reference.md."""
@@ -350,8 +369,13 @@ class DocIndex:
         match joined config terms (e.g. "probe offset" -> probe_offset)."""
         return _expand_query_terms(text)
 
-    def _make_snippet(self, content: str, query: str) -> str:
-        """Extract a relevant snippet around the first query match."""
+    def _make_snippet(self, content: str, query: str) -> tuple[str, int]:
+        """Extract a relevant snippet around the first query match.
+
+        Returns (snippet, match_pos) where match_pos is the character offset
+        of the first query term in ``content``, or -1 when nothing matched
+        (used to annotate search hits with their enclosing section).
+        """
         query_lower = query.lower()
         pos = content.lower().find(query_lower)
         if pos < 0:
@@ -362,7 +386,7 @@ class DocIndex:
                     break
 
         if pos < 0:
-            return content[:SNIPPET_CHARS].strip() + ("..." if len(content) > SNIPPET_CHARS else "")
+            return content[:SNIPPET_CHARS].strip() + ("..." if len(content) > SNIPPET_CHARS else ""), -1
 
         start = max(0, pos - SNIPPET_CHARS // 2)
         end = min(len(content), pos + len(query) + SNIPPET_CHARS // 2)
@@ -372,7 +396,7 @@ class DocIndex:
             snippet = "..." + snippet
         if end < len(content):
             snippet = snippet + "..."
-        return snippet
+        return snippet, pos
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -422,7 +446,10 @@ class McpServer:
                 "name": "search_klipper_docs",
                 "description": (
                     "Search all bundled Klipper documentation by query. "
-                    "Returns up to 10 ranked results with source filename, score, and snippet."
+                    "Returns up to 10 ranked results with source filename, score, and snippet. "
+                    "Hits inside Config_Reference.md include the enclosing config section "
+                    "(e.g. '## Config_Reference.md [extruder]') so you can jump straight to "
+                    "get_config_reference_section; preamble matches are marked '(top of file)'."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -582,7 +609,11 @@ class McpServer:
                 "name": "search_user_configs",
                 "description": (
                     "Search the user's local configuration files (in the 'user_configs' directory). "
-                    "Returns matching filenames with a preview snippet."
+                    "Returns matching filenames with a preview snippet. "
+                    "Hits inside a section are annotated with the enclosing Klipper section "
+                    "(e.g. '## printer.cfg [extruder]') so you can jump straight to "
+                    "read_user_config with section=; preamble matches (includes, header "
+                    "comments) are marked '(top of file)'."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -921,7 +952,13 @@ class McpServer:
 
         lines: list[str] = [f"Search results for: {query}\n"]
         for r in results:
-            lines.append(f"## {r['filename']}  (score: {r['score']})")
+            label = r["filename"]
+            if r.get("section"):
+                label = f"{r['filename']} [{r['section']}]"
+            elif r.get("match_pos", -1) >= 0 and r["filename"] == "Config_Reference.md":
+                # Match landed in the Config_Reference preamble — no section yet.
+                label = f"{r['filename']} (top of file)"
+            lines.append(f"## {label}  (score: {r['score']})")
             lines.append(f"{r['snippet']}\n")
 
         return "\n".join(lines)
@@ -1322,6 +1359,19 @@ class McpServer:
                             continue
                         score = content_score * 0.5
 
+                    # Locate the first content match so results can be
+                    # annotated with their enclosing [section] (or
+                    # "(top of file)" for preamble matches).
+                    content_lower = text.lower()
+                    match_pos = -1
+                    for term in query_terms:
+                        idx = content_lower.find(term)
+                        if idx >= 0 and (match_pos < 0 or idx < match_pos):
+                            match_pos = idx
+                    section = None
+                    if match_pos >= 0:
+                        section = self._enclosing_user_config_section(text, match_pos)
+
                     content_lines = [
                         l.strip() for l in text.split("\n")
                         if l.strip() and not l.strip().startswith("#")
@@ -1332,6 +1382,8 @@ class McpServer:
                         "filename": rel_path,
                         "score": round(score, 1),
                         "snippet": snippet,
+                        "match_pos": match_pos,
+                        "section": section,
                     })
             except OSError:
                 continue
@@ -1346,12 +1398,39 @@ class McpServer:
 
         lines: list[str] = [f"User configs matching: {query}\n"]
         for r in results[:limit]:
-            lines.append(f"## {r['filename']}")
+            label = r["filename"]
+            if r.get("section"):
+                label = f"{r['filename']} [{r['section']}]"
+            elif r.get("match_pos", -1) >= 0:
+                # Content matched before the first [section] — includes,
+                # header comments, or other preamble.
+                label = f"{r['filename']} (top of file)"
+            lines.append(f"## {label}")
             if r["snippet"]:
                 lines.append(f"> {r['snippet']}\n")
         lines.append(f"\n{len(results)} match(es) total. Use read_user_config to read the full file.")
 
         return "\n".join(lines)
+
+    @staticmethod
+    def _enclosing_user_config_section(text: str, pos: int) -> str | None:
+        """Return the Klipper [section] header enclosing ``pos``.
+
+        Walks the ``[name]`` header lines and returns the last one that
+        starts at or before the given character offset, or None when the
+        offset falls before the first section (file preamble). Include
+        directives (``[include file.cfg]``) are not sections and are
+        skipped, so a match inside an include list is treated as preamble.
+        """
+        last: str | None = None
+        for m in CONFIG_ALIAS_RE.finditer(text):
+            name = m.group(1).strip()
+            if name.lower().startswith("include "):
+                continue
+            if m.start() > pos:
+                break
+            last = name
+        return last
 
     def _handle_list_user_configs(self, args: dict[str, Any]) -> str:
         """List user config files from both the system path and local fallback.

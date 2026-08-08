@@ -72,9 +72,26 @@ def test_system_prompt_includes_config_and_macro_guardrails():
 
 
 def test_system_prompt_mentions_mini_diff_edit_protocol():
-    assert 'emit a mini-diff' in ai_routes.SYSTEM_PROMPT
+    assert 'prefer a mini-diff' in ai_routes.SYSTEM_PROMPT
     assert '-    BED_MESH_CALIBRATE' in ai_routes.SYSTEM_PROMPT
     assert '+    BED_MESH_CALIBRATE ADAPTIVE=1' in ai_routes.SYSTEM_PROMPT
+
+
+def test_system_prompt_full_rewrite_guard_strict_wording():
+    # With fullRewriteGuard on, the edit protocol uses the STRICT wording
+    # (full block writes cause rejection + retry) so the model complies with
+    # the frontend's enforced mini-diff loop.
+    strict = ai_routes._build_system_prompt(full_rewrite_guard=True)
+    assert 'emit a mini-diff' in strict
+    assert 'causes the app to reject the reply as a full rewrite and retry' in strict
+    # The soft default wording must be gone in strict mode.
+    assert 'prefer a mini-diff' not in strict
+    assert 'risks a full rewrite where those lines could be dropped' not in strict
+    # Default (guard off) keeps the soft wording.
+    assert 'prefer a mini-diff' in ai_routes._build_system_prompt()
+    # Everything else in the prompt is untouched by the wording swap.
+    assert '-    BED_MESH_CALIBRATE' in strict
+    assert '+    BED_MESH_CALIBRATE ADAPTIVE=1' in strict
 
 
 def test_system_prompt_mentions_tools_are_not_gcode_commands():

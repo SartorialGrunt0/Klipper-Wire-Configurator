@@ -3,6 +3,15 @@
  *
  * Extracted from ChatDialog.tsx to reduce component complexity and make
  * the validation flow testable in isolation.
+ *
+ * Full-rewrite guard flag: the guard (buildFullRewriteSectionIssues) forces
+ * existing macro/Jinja sections to be re-emitted as mini-diffs. It was
+ * introduced as a bandaid for a backend tool-call parsing bug that ate
+ * G28/{% endif %} lines out of correct model replies (fixed in ai_routes.py
+ * CALL_SYNTAX_RE); Apply & Review already surfaces full rewrites as diffs the
+ * user can inspect. GATED OFF by default so the model may return a full block
+ * write and it is accepted. Re-enable with VITE_KWC_FULL_REWRITE_GUARD=1 if
+ * silent line-loss in full rewrites resurfaces.
  */
 import { useState, useRef, useCallback } from 'react';
 import type { ChatMessage } from '../stores/aiStore';
@@ -39,6 +48,15 @@ import { normalizeDiffText } from '../utils/configDiff';
 import { isMiniDiffBlock, applyMiniDiffBlock } from '../utils/miniDiff';
 import { repairUnclosedJinjaInConfigText } from '../utils/jinjaBlockRepair';
 import type { ReplyValidator } from '../utils/replyValidation';
+
+// Full-rewrite guard flag: when disabled (default), the model may return an
+// existing macro/Jinja section as a full block write and it is accepted;
+// Apply & Review surfaces the diff for the user to inspect. Re-enable with
+// VITE_KWC_FULL_REWRITE_GUARD=1 to force mini-diff re-emission (see the
+// module docstring for why this defaulted off). Also sent to the backend so
+// the system prompt wording stays in lock-step.
+export const FULL_REWRITE_GUARD_ENABLED =
+  (import.meta.env.VITE_KWC_FULL_REWRITE_GUARD as string | undefined) === '1';
 
 // ── Internal Types ──────────────────────────────────────────────────
 
@@ -82,6 +100,8 @@ interface ChatRequestBase {
   temperature?: number;
   /** Loaded user-config content for the backend config-grounding fallback. */
   contextFiles?: Record<string, { content: string; label: string }>;
+  /** Full-rewrite guard state — sent to the backend to select prompt wording. */
+  fullRewriteGuard?: boolean;
 }
 
 interface SubmitMessageOptions {
@@ -439,17 +459,22 @@ export function useAssistantDraft() {
       // rewrite can still have dropped other lines (G28, M104), and the
       // protocol retry is what preserves them. The repair remains the
       // backstop for mini-diff rounds and new-section writes.
+      // GATED OFF by default (VITE_KWC_FULL_REWRITE_GUARD=1 re-enables):
+      // the backend tool-call parsing bug that caused macro line-loss is
+      // fixed, and Apply & Review shows the full diff to the user.
       const fullRewriteIssues: AssistantDraftValidationIssueGroup[] = [];
-      for (const fp of preview.filePreviews) {
-        const errors = buildFullRewriteSectionIssues(
-          fp.baseConfig.sections,
-          fp.assistantConfig.sections,
-          preview.fullRewriteSections
-            .filter((target) => target.filename === fp.filename)
-            .map((target) => ({ fullHeader: target.fullHeader })),
-        );
-        if (errors.length > 0) {
-          fullRewriteIssues.push({ filename: fp.filename, errors });
+      if (FULL_REWRITE_GUARD_ENABLED) {
+        for (const fp of preview.filePreviews) {
+          const errors = buildFullRewriteSectionIssues(
+            fp.baseConfig.sections,
+            fp.assistantConfig.sections,
+            preview.fullRewriteSections
+              .filter((target) => target.filename === fp.filename)
+              .map((target) => ({ fullHeader: target.fullHeader })),
+          );
+          if (errors.length > 0) {
+            fullRewriteIssues.push({ filename: fp.filename, errors });
+          }
         }
       }
 

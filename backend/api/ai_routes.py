@@ -156,6 +156,46 @@ XML_TOOL_CALLS_CLEANUP_RE = re.compile(
     re.DOTALL,
 )
 
+MINI_DIFF_EDIT_PROTOCOL_SOFT = (
+    "- To EDIT an existing section, prefer a mini-diff: the section header followed by only the "
+    "lines that change, prefixing removed lines with '-' and added lines with '+', keeping "
+    "their original indentation. The app applies these exact replacements to the current "
+    "file — do not reproduce unchanged lines. Outputting any unchanged line (Jinja tags "
+    "such as {% if %}/{% endif %}, G-codes, or comments) risks a full rewrite where those "
+    "lines could be dropped — prefer emitting ONLY the lines that change. "
+)
+
+MINI_DIFF_EDIT_PROTOCOL_STRICT = (
+    "- To EDIT an existing section, emit a mini-diff: the section header followed by only the "
+    "lines that change, prefixing removed lines with '-' and added lines with '+', keeping "
+    "their original indentation. The app applies these exact replacements to the current "
+    "file — do not reproduce unchanged lines. Outputting any unchanged line (Jinja tags "
+    "such as {% if %}/{% endif %}, G-codes, or comments) causes the app to reject the "
+    "reply as a full rewrite and retry — emit ONLY the lines that change. "
+)
+
+
+def _build_system_prompt(full_rewrite_guard: bool = False) -> str:
+    """Return SYSTEM_PROMPT with the edit-protocol sentence matching the
+    frontend's full-rewrite-guard state.
+
+    - full_rewrite_guard=True (retry loop enforces mini-diffs): the STRICT
+      wording — emitting a full block write causes the app to reject and
+      retry, so the model must emit ONLY changed lines.
+    - full_rewrite_guard=False (default; the app accepts full block writes
+      and Apply & Review surfaces the diff): the SOFTER wording — mini-diff
+      is preferred because unchanged lines could otherwise be dropped.
+    Kept in lock-step with the frontend VITE_KWC_FULL_REWRITE_GUARD build
+    flag so a future flip changes acceptance behavior AND prompt wording
+    together.
+    """
+    if full_rewrite_guard:
+        return SYSTEM_PROMPT.replace(
+            MINI_DIFF_EDIT_PROTOCOL_SOFT, MINI_DIFF_EDIT_PROTOCOL_STRICT
+        )
+    return SYSTEM_PROMPT
+
+
 SYSTEM_PROMPT = (
     "You are an expert Klipper firmware, configuration, and macro assistant. "
     "You help users by answering questions, editing configs, and drafting macros "
@@ -184,12 +224,8 @@ SYSTEM_PROMPT = (
     "blocks. Start each block with a '# file: <filename>' hint line when the target file is "
     "not obvious. Do not return the whole file unless the user explicitly asks for a full "
     "replacement.\n"
-    "- To EDIT an existing section, emit a mini-diff: the section header followed by only the "
-    "lines that change, prefixing removed lines with '-' and added lines with '+', keeping "
-    "their original indentation. The app applies these exact replacements to the current "
-    "file — do not reproduce unchanged lines. Outputting any unchanged line (Jinja tags "
-    "such as {% if %}/{% endif %}, G-codes, or comments) causes the app to reject the "
-    "reply as a full rewrite and retry — emit ONLY the lines that change. Example: if the "
+    + MINI_DIFF_EDIT_PROTOCOL_SOFT
+    + "Example: if the "
     "user asks to add ADAPTIVE=1 to the Level_Bed macro, return exactly:\n"
     "  # file: printer.cfg\n"
     "  [gcode_macro Level_Bed]\n"
@@ -269,6 +305,15 @@ class ChatRequest(BaseModel):
     # must be at the beginning") reject any non-leading system message;
     # set this True for those servers only.
     mergeSystemMessages: bool = False
+    # Full-rewrite guard state (frontend VITE_KWC_FULL_REWRITE_GUARD build
+    # flag). True = the frontend retry loop rejects full block writes of
+    # existing macro/Jinja sections and forces mini-diff re-emission, so the
+    # system prompt uses the STRICT edit-protocol wording. False (default) =
+    # full block writes are accepted (Apply & Review shows the diff), so the
+    # prompt uses the softer wording. Kept in lock-step with the frontend so
+    # a flip changes acceptance AND prompt together. The harness sends this
+    # via --full-rewrite-guard for A/B runs.
+    fullRewriteGuard: bool = False
 
 
 class ChatStopRequest(BaseModel):
@@ -346,11 +391,12 @@ def _get_openai_compatible_default_url(provider: str) -> str:
     return defaults.get(provider, "")
 
 
-def _prepare_messages(messages: list[dict]) -> list[dict]:
+def _prepare_messages(messages: list[dict], full_rewrite_guard: bool = False) -> list[dict]:
     """Build a clean system prompt with MCP tool descriptions, printer memory,
     and user messages.
     """
     minimal = _minimal_prompt_enabled()
+    system_prompt = _build_system_prompt(full_rewrite_guard)
     no_system = _no_system_prompt_enabled()
 
     # ── Inject printer memory context ──
@@ -370,7 +416,7 @@ def _prepare_messages(messages: list[dict]) -> list[dict]:
         # All tools are advertised unconditionally (native/text parity);
         # detect_board and other niche helpers live under "Specialized tools".
         tool_context = _build_mcp_tool_context()
-        system_parts = [SYSTEM_PROMPT, tool_context, memory_context]
+        system_parts = [system_prompt, tool_context, memory_context]
 
         # If printer memory is completely blank and there are user messages
         # to work with, add an auto-fill instruction asking the AI to
@@ -406,7 +452,7 @@ def _prepare_messages(messages: list[dict]) -> list[dict]:
         if role not in {"system", "user", "assistant"} or not content:
             continue
         if role == "system":
-            if content != SYSTEM_PROMPT:
+            if content != system_prompt:
                 system_parts.append(content)
             continue
         prepared.append({"role": role, "content": content})
@@ -1570,7 +1616,7 @@ def _build_api_base_url(api_url: str) -> str:
 @router.post("/ai/chat")
 async def chat_proxy(req: ChatRequest):
     """Proxy chat messages to the user's configured API provider."""
-    messages = _prepare_messages(req.messages)
+    messages = _prepare_messages(req.messages, full_rewrite_guard=req.fullRewriteGuard)
 
     # ── Log request summary ──
     msg_count = len(messages)

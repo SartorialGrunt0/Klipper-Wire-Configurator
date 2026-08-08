@@ -36,7 +36,7 @@ import {
   buildSectionContextMessage,
 } from '../../utils/chatIntent';
 import { buildProjectGraph } from '../../utils/graphBuilder';
-import { useAssistantDraft } from '../../hooks/useAssistantDraft';
+import { useAssistantDraft, FULL_REWRITE_GUARD_ENABLED } from '../../hooks/useAssistantDraft';
 import ChatSettingsPanel from './ChatSettingsPanel';
 import ChatHistoryDialog from './ChatHistoryDialog';
 import PrinterMemoryDialog from './PrinterMemoryDialog';
@@ -375,6 +375,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           requestId: stopRequestId,
           maxTokens: Math.max(256, parseInt(editMaxTokens, 10) || 4096),
           temperature: parseTemperature(editTemperature),
+          fullRewriteGuard: FULL_REWRITE_GUARD_ENABLED,
         };
 
         // Build context messages
@@ -470,7 +471,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         // model decides whether a message is an edit or a question (harness
         // AMBI-01..08 all pass without any frontend classifier).
         if (HANDHOLDING_ENABLED) {
-          const miniDiffInstruction = ` To EDIT an existing section, return a mini-diff: the section header followed by only the lines that change, prefixing removed lines with '-' and added lines with '+', keeping their original indentation. The app applies these replacements exactly, so unchanged lines (like Jinja {% if %}/{% endif %} tags) are preserved automatically. Outputting any unchanged line causes the app to reject the reply as a full rewrite and retry — emit ONLY the lines that change. A pure addition (nothing removed) needs no '-' line: just the header plus the '+' lines. A pure deletion (nothing added) needs no '+' line: just the header plus the '-' lines. If a section is already correct and you only need to show it, quoting it unchanged is allowed. To ADD a new section, write it in full; to delete one, write '*[section_name]'.`;
+          const miniDiffInstruction = ` To EDIT an existing section, prefer a mini-diff: the section header followed by only the lines that change, prefixing removed lines with '-' and added lines with '+', keeping their original indentation. The app applies these replacements exactly, so unchanged lines (like Jinja {% if %}/{% endif %} tags) are preserved automatically. Outputting any unchanged line risks a full rewrite where those lines could be dropped — prefer emitting ONLY the lines that change. A pure addition (nothing removed) needs no '-' line: just the header plus the '+' lines. A pure deletion (nothing added) needs no '+' line: just the header plus the '-' lines. If a section is already correct and you only need to show it, quoting it unchanged is allowed. To ADD a new section, write it in full; to delete one, write '*[section_name]'.`;
           if (mentionedConfigFiles.length > 0) {
             contextMessages.push({
               role: 'system',
