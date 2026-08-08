@@ -218,8 +218,18 @@ SYSTEM_PROMPT = (
     "guessing.\n\n"
     "Edit protocol:\n"
     "- Before editing or answering about a config file, fetch its current "
-    "content with the available tools if it is not already in your context. "
-    "Never ask the user to paste content the tools can fetch.\n"
+    "content with read_user_config (or list_user_configs to see which files "
+    "exist) if it is not already in your context. Never ask the user to paste "
+    "content the tools can fetch.\n"
+    "- When the user asks to ADD or SETUP a section or parameter, verify the "
+    "exact section name and its valid parameters BEFORE writing the draft: "
+    "list the supported sections with list_config_reference_sections, then "
+    "fetch the exact one with get_config_reference_section(section_name=...) "
+    "(or search_klipper_docs). A section absent from the user's config may "
+    "still be valid Klipper. Do not invent section names or parameters from "
+    "memory. If the user did not specify values, use the documented defaults "
+    "or a safe standard value and SAY what you chose — do not ask the user "
+    "to provide values the reference already documents.\n"
     "- For config edits, return only changed, new, or deleted content in fenced cfg code "
     "blocks. Start each block with a '# file: <filename>' hint line when the target file is "
     "not obvious. Do not return the whole file unless the user explicitly asks for a full "
@@ -508,11 +518,18 @@ _MCP_TOOL_SNIPPETS: dict[str, str] = {
         "block closing, comment stripping; supports offset/limit pagination)"
     ),
     "list_klipper_docs": "List all bundled Klipper documentation files (filenames + headings)",
+    "list_config_reference_sections": (
+        "List every Klipper config section supported by Config_Reference "
+        "(e.g. [printer], [bed_mesh], [gcode_arcs]); use BEFORE adding or "
+        "editing a section to get the exact name, then read it with "
+        "get_config_reference_section(section_name=...)"
+    ),
     "get_config_reference_section": (
-        "Get Config_Reference section text and valid params "
-        "(section_name='bed_mesh'); list_sections=true returns ONLY the "
-        "section headers to pick from; sections=['a','b'] fetches several "
-        "in one call"
+        "VERIFY a config section's valid name and parameters in "
+        "Config_Reference (section_name='firmware_retraction'); use BEFORE "
+        "adding or editing a section — never invent section names or params "
+        "from memory. list_sections=true returns ONLY the section headers "
+        "to pick from; sections=['a','b'] fetches several in one call"
     ),
     "read_user_config": (
         "Read a user config file (filename='printer.cfg' required): "
@@ -526,6 +543,11 @@ _MCP_TOOL_SNIPPETS: dict[str, str] = {
         "List all user config files (from the Pi's native config path and "
         "imported user configs). Use when the user names a macro or section "
         "without saying which file it is in, then read the best candidate."
+    ),
+    "list_user_config_sections": (
+        "List the section headers inside one user config file "
+        "(filename='printer.cfg'); use to see what a file already contains "
+        "before editing, then read_user_config(section=...)"
     ),
     "search_user_configs": (
         "Search the user's config files by filename or content keyword "
@@ -571,7 +593,14 @@ def _build_mcp_tool_context() -> str:
         "the user for information, prefer a tool that can fetch or verify "
         "it — read_user_config for config files, search_klipper_docs or "
         "get_config_reference_section for docs, validate_klipper_config / "
-        "validate_macro for drafts. Do not guess when a tool can answer.",
+        "validate_macro for drafts. Do not guess when a tool can answer. "
+        "read_user_config / list_user_config_sections show only what ALREADY "
+        "exists in the user's files; list_config_reference_sections / "
+        "get_config_reference_section / search_klipper_docs show what Klipper "
+        "SUPPORTS. When the user asks to ADD or SETUP a section or parameter, "
+        "look it up with list_config_reference_sections (then "
+        "get_config_reference_section) or search_klipper_docs first — a valid "
+        "Klipper section may not be in the user's config yet.",
         "",
         "Text format (used by providers without native function calling): put a JSON ",
         "code block tagged `tool` in your reply:",

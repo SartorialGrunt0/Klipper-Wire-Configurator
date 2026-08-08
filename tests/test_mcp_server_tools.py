@@ -834,6 +834,78 @@ def test_read_user_config_list_sections_none(tmp_path):
     assert "No sections detected" in out
 
 
+# ── list_user_config_sections ───────────────────────────────────────────
+
+
+def test_list_user_config_sections(tmp_path):
+    server, root = _server(tmp_path)
+    user_dir = root / "user_configs"
+    user_dir.mkdir(parents=True)
+    (user_dir / "my_printer.cfg").write_text(
+        "# banner\n"
+        "[extruder]\n"
+        "pressure_advance: 0.05\n"
+        "\n"
+        "[gcode_macro FIX_ME]\n"
+        "gcode:\n"
+        "    M140 S60\n",
+        encoding="utf-8",
+    )
+    out = _call_tool(server, "list_user_config_sections", {"filename": "my_printer.cfg"})
+    assert "section index" in out
+    assert "file content not attached" in out
+    assert "[extruder]" in out
+    assert "[gcode_macro FIX_ME]" in out
+    # Lean: headers only, no param values.
+    assert "pressure_advance" not in out
+    assert "M140 S60" not in out
+
+
+def test_list_user_config_sections_missing_file(tmp_path):
+    server, _ = _server(tmp_path)
+    out = _call_tool(server, "list_user_config_sections", {"filename": "nope.cfg"})
+    assert "not found" in out
+
+
+def test_list_user_config_sections_no_filename(tmp_path):
+    server, _ = _server(tmp_path)
+    out = _call_tool(server, "list_user_config_sections", {})
+    assert "filename" in out
+
+
+def test_list_config_reference_sections(tmp_path):
+    # The full manifest of Klipper-supported sections must be available as a
+    # lean list so the model can discover the exact section name before
+    # reading it — the ADD/SETUP discovery path.
+    server, _ = _server(tmp_path)
+    out = _call_tool(server, "list_config_reference_sections", {})
+    assert "Config Reference sections" in out
+    assert "[bed_mesh]" in out
+    assert "[extruder]" in out
+    # Lean: headers only, no param content.
+    assert "horizontal_move_z" not in out
+    assert "heater_pin" not in out
+
+
+def test_search_config_reference_anchors_correct_section(tmp_path):
+    # Regression: a query token must anchor at ALPHANUMERIC word boundaries —
+    # "g2" must NOT match inside "G28" in an unrelated [stepper] section, and
+    # the result must anchor in the section that actually contains G2/G3.
+    server, _ = _server(tmp_path)
+    _make_doc(tmp_path / "docs", "Config_Reference.md", (
+        "# Config Reference\n\n"
+        "### [stepper]\n"
+        "home: issue a G28 command to home.\n"
+        "\n"
+        "### [gcode_arcs]\n"
+        "Support for gcode arc (G2/G3) commands.\n"
+    ))
+    server.index.load()
+    out = _call_tool(server, "search_klipper_docs", {"query": "G2 G3 arcs", "limit": 3})
+    assert "Config_Reference.md [gcode_arcs]" in out
+    assert "Config_Reference.md [stepper]" not in out
+
+
 # ── detect_board ────────────────────────────────────────────────────────
 
 
@@ -1017,7 +1089,9 @@ def test_tools_list(tmp_path):
     assert "validate_klipper_config" in names
     assert "generate_macro_template" in names
     assert "list_user_configs" in names
-    assert len(names) == 14  # get_section_schema removed (redundant w/ reference)
+    assert "list_config_reference_sections" in names
+    assert "list_user_config_sections" in names
+    assert len(names) == 16  # get_section_schema removed (redundant w/ reference)
 
 
 def test_tools_call_unknown_tool(tmp_path):

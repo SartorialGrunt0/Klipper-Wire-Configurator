@@ -1137,6 +1137,116 @@ def build_ambiguity_questions() -> list[TestQuestion]:
     ]
 
 
+def build_setup_questions() -> list[TestQuestion]:
+    """New-section setup: the requested section does NOT exist in the config
+    yet, so the model must consult the docs (get_config_reference_section /
+    search_klipper_docs) rather than read_user_config, then emit the section
+    in full. Regression (2026-08-07): gemma-4-12b answered these by
+    hallucinating pressure_advance into [extruder] for firmware_retraction,
+    or claiming the section "does not exist" without calling any search tool.
+
+    The pass gate is the section header — if the model returns
+    [firmware_retraction] / [idle_timeout] (even from memory, no tools), it
+    passes; a pressure_advance-in-extruder or "does not exist" answer fails.
+    Tools are expected but not required, matching 'correct output = pass'.
+
+    No context files: like the frontend (handholding off), the config is
+    NOT in the prompt — the model must fetch it with read_user_config /
+    list_user_configs and verify the section against the docs with
+    get_config_reference_section / search_klipper_docs. The backend's
+    user_configs dir must contain printer.cfg (it does on both dev hosts).
+    """
+    return [
+        TestQuestion(
+            qid="SETUP-01",
+            title="New section: setup firmware_retraction (safe default)",
+            text=("can you setup firmware_retraction in my config? pick a safe "
+                  "default value for a direct drive extruder."),
+            context_files=(),
+            expected_tools=("get_config_reference_section", "search_klipper_docs",
+                            "read_user_config"),
+            require_tool=False,
+            criteria=(
+                # The gate: it must return the [firmware_retraction] section —
+                # NOT pressure_advance in [extruder], NOT "doesn't exist".
+                ("contains", "[firmware_retraction]"),
+                # A REAL param of [firmware_retraction] (retract_length) with
+                # a value — catches fabricated param names the model invents
+                # when it never checks the docs (observed 2026-08-07:
+                # default_min_extra_distance etc. are NOT Klipper params).
+                ("regex", r"retract_length\s*[:=]\s*\d+(?:\.\d+)?"),
+            ),
+        ),
+        TestQuestion(
+            qid="SETUP-02",
+            title="New section: setup idle_timeout (safe default)",
+            text=("can you setup idle timeout for my config? pick a safe default."),
+            context_files=(),
+            expected_tools=("read_user_config", "list_user_configs",
+                            "get_config_reference_section", "search_klipper_docs"),
+            require_tool=False,
+            criteria=(
+                # Gate: must return the [idle_timeout] section (the real
+                # user_configs/printer.cfg already has one at line ~400), not
+                # claim it does not exist or ask the user for a value.
+                ("contains", "[idle_timeout]"),
+                ("regex", r"timeout\s*[:=]\s*\d+"),
+            ),
+        ),
+        TestQuestion(
+            qid="SETUP-03",
+            title="New section: enable gcode arcs (G2/G3)",
+            text="can you enable gcode arcs in my config?",
+            context_files=(),
+            expected_tools=("get_config_reference_section", "search_klipper_docs",
+                            "read_user_config"),
+            require_tool=False,
+            criteria=(
+                # Gate: must return the [gcode_arcs] section (NOT claim it
+                # needs a firmware change or "doesn't exist"). The section is
+                # valid EMPTY — resolution defaults to 1.0 (Config_Reference
+                # lists it as an optional commented param), so requiring a
+                # written param would be a false fail for a correct answer.
+                ("contains", "[gcode_arcs]"),
+                # It must NOT be the pressure_advance-in-extruder style
+                # hallucination (wrong section for the request).
+                ("not_contains", "pressure_advance"),
+            ),
+        ),
+        TestQuestion(
+            qid="SETUP-04",
+            title="New section: setup save_variables (safe default)",
+            text=("can you setup save_variables in my config? pick a safe default."),
+            context_files=(),
+            expected_tools=("get_config_reference_section", "search_klipper_docs",
+                            "read_user_config"),
+            require_tool=False,
+            criteria=(
+                # Gate: must return the [save_variables] section.
+                ("contains", "[save_variables]"),
+                # A REAL param of [save_variables] (filename is required) —
+                # the documented default is ~/variables.cfg.
+                ("regex", r"filename\s*[:=]\s*\S+"),
+            ),
+        ),
+        TestQuestion(
+            qid="SETUP-05",
+            title="New section: setup respond (M118/RESPOND)",
+            text="can you setup the respond section in my config?",
+            context_files=(),
+            expected_tools=("get_config_reference_section", "search_klipper_docs",
+                            "read_user_config"),
+            require_tool=False,
+            criteria=(
+                # Gate: must return the [respond] section.
+                ("contains", "[respond]"),
+                # A REAL param of [respond] (default_type or default_prefix).
+                ("regex", r"default_(?:type|prefix)\s*[:=]\s*\S+"),
+            ),
+        ),
+    ]
+
+
 _MEMORY_CONFIG_SNIPPET = """[mcu]
 serial: /dev/serial/by-id/usb-Klipper_stm32f446xx_3D002B000E50505734393820-if00
 
@@ -1224,12 +1334,14 @@ ALL_TOOLS = (
     "search_klipper_docs",
     "read_klipper_doc",
     "list_klipper_docs",
+    "list_config_reference_sections",
     "get_config_reference_section",
     "validate_klipper_config",
     "search_example_configs",
     "read_example_config",
     "search_user_configs",
     "list_user_configs",
+    "list_user_config_sections",
     "read_user_config",
     "detect_board",
     "calculate_rotation_distance",
@@ -1296,9 +1408,13 @@ def criterion_ok(kind: str, value: str, content: str,
     if kind == "mini_diff":
         # value = expected section header, e.g. "[gcode_macro Level_Bed]".
         # Passes when a cfg block in the reply contains that header and
-        # uses the mini-diff protocol: at least one '-' and one '+' line, and
-        # no full-section Jinja reproduction ({% endif %} / {% endfor %}) —
-        # unchanged lines must be preserved by the app, not re-emitted.
+        # uses the mini-diff protocol: at least one '+' line (additions) —
+        # a pure add-only edit is valid and needs no '-' anchor (the app
+        # appends '+' lines at the end of the section), matching the
+        # frontend protocol. An all-'-' block with no '+' is a delete-only
+        # edit, also valid. No full-section Jinja reproduction
+        # ({% endif %} / {% endfor %}) — unchanged lines must be preserved
+        # by the app, not re-emitted.
         # Mirrors the frontend's block extraction: fenced cfg blocks first,
         # then fall back to the raw text when it looks like config (file
         # hints / section headers), because models sometimes omit fences.
@@ -1310,8 +1426,8 @@ def criterion_ok(kind: str, value: str, content: str,
             if target not in block.lower():
                 continue
             has_minus = re.search(r"^\s*-(?=\s|\S)", block, re.MULTILINE) is not None
-            has_plus = re.search(r"^\s*\+(?=\s|\S)", block, re.MULTILINE) is not None
-            if has_minus and has_plus:
+            has_plus = re.search(r"^\s*\+", block, re.MULTILINE) is not None
+            if has_plus or has_minus:
                 if "{% endif %}" in block or "{% endfor %}" in block:
                     return False
                 return True
@@ -1762,7 +1878,7 @@ def main() -> int:
                              "printer memory, blank it, run MEMORY-01..03, then restore it")
     args = parser.parse_args()
 
-    questions = build_questions() + build_macro_questions() + build_trident_questions() + build_ambiguity_questions()
+    questions = build_questions() + build_macro_questions() + build_trident_questions() + build_ambiguity_questions() + build_setup_questions()
     if args.include_memory:
         questions += build_memory_questions()
     if args.list_questions:

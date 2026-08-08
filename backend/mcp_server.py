@@ -158,6 +158,13 @@ class DocIndex:
         self._docs: dict[str, str] = {}          # filename stem → full content
         self._headings: dict[str, list[str]] = {}  # filename stem → heading texts
         self._inverted: dict[str, list[tuple[str, int]]] = {}  # word → [(stem, count)]
+        # Section-level index for Config_Reference.md: stem → list of
+        # (section_name, start, end, token Counter). Lets search score and
+        # anchor snippets per SECTION instead of over the whole 200K-char doc
+        # (a doc-level TF hit in an unrelated section previously produced a
+        # misleading snippet + section annotation — e.g. "G2 G3 arcs" anchored
+        # in [stepper] via a G28 substring).
+        self._section_index: dict[str, list[tuple[str, int, int, Counter]]] = {}
         self._ready = False
 
     def load(self) -> None:
@@ -165,6 +172,7 @@ class DocIndex:
         self._docs.clear()
         self._headings.clear()
         self._inverted.clear()
+        self._section_index.clear()
 
         if not self.docs_dir.is_dir():
             return
@@ -200,6 +208,22 @@ class DocIndex:
             tokens = self._tokenize(content)
             for word, count in Counter(tokens).most_common():
                 self._inverted.setdefault(word, []).append((stem, count))
+
+            # Build a per-section index for Config_Reference.md (and any
+            # doc with `### [section]` headers) so search can score and
+            # anchor snippets at section granularity.
+            sections = list(CONFIG_SECTION_HEADER_RE.finditer(content))
+            if sections:
+                section_entries: list[tuple[str, int, int, Counter]] = []
+                for idx, match in enumerate(sections):
+                    start = match.start()
+                    end = sections[idx + 1].start() if idx + 1 < len(sections) else len(content)
+                    header_name = match.group(1).strip()
+                    section_text = content[start:end]
+                    section_entries.append((
+                        header_name, start, end, Counter(self._tokenize(section_text)),
+                    ))
+                self._section_index[stem] = section_entries
 
         self._ready = True
 
@@ -260,6 +284,30 @@ class DocIndex:
                 # log-scaled TF, capped
                 scores[stem] = scores.get(stem, 0.0) + min(1.0 + (count / 5.0), 5.0)
 
+        # Per-section scoring: for docs with a section index (Config_Reference),
+        # the doc ranks by its BEST-matching section and the snippet anchors
+        # inside that section's span. A term that appears in many sections no
+        # longer inflates the whole-doc score, and the snippet can't land in
+        # an unrelated section (e.g. "G2 G3 arcs" anchoring in [stepper]).
+        best_sections: dict[str, tuple[str, int, int]] = {}  # stem -> (name, start, end)
+        for stem, entries in self._section_index.items():
+            best: tuple[float, str, int, int] | None = None
+            for name, start, end, counter in entries:
+                section_score = 0.0
+                for word in query_tokens:
+                    count = counter.get(word, 0)
+                    if count:
+                        section_score += min(1.0 + (count / 5.0), 5.0)
+                if best is None or section_score > best[0]:
+                    best = (section_score, name, start, end)
+            if best is not None and best[0] > 0:
+                best_sections[stem] = (best[1], best[2], best[3])
+                # Keep the higher of the whole-doc score and the best-section
+                # score for RANKING (a doc may legitimately match in several
+                # sections); the section index only decides where the snippet
+                # anchors and what the [section] annotation says.
+                scores[stem] = max(scores.get(stem, 0.0), best[0])
+
         # Boost filename matches (exact or substring)
         query_lower = query.lower().replace(" ", "_").replace("-", "_")
         for stem in self._docs:
@@ -286,10 +334,16 @@ class DocIndex:
         results: list[dict[str, Any]] = []
         for stem, score in ranked[:limit]:
             content = self._docs[stem]
-            snippet, match_pos = self._make_snippet(content, query)
-            section = None
-            if stem == "Config_Reference" and match_pos >= 0:
-                section = self._enclosing_config_reference_section(content, match_pos)
+            best_hit = best_sections.get(stem)
+            if best_hit is not None:
+                name, start, end = best_hit
+                snippet, match_pos = self._make_snippet(content, query, start, end)
+                section = name
+            else:
+                snippet, match_pos = self._make_snippet(content, query)
+                section = None
+                if stem == "Config_Reference" and match_pos >= 0:
+                    section = self._enclosing_config_reference_section(content, match_pos)
             results.append({
                 "id": stem,
                 "filename": f"{stem}.md",
@@ -369,32 +423,56 @@ class DocIndex:
         match joined config terms (e.g. "probe offset" -> probe_offset)."""
         return _expand_query_terms(text)
 
-    def _make_snippet(self, content: str, query: str) -> tuple[str, int]:
+    def _make_snippet(
+        self,
+        content: str,
+        query: str,
+        start: int = 0,
+        end: int | None = None,
+    ) -> tuple[str, int]:
         """Extract a relevant snippet around the first query match.
+
+        Anchors at WHOLE-TOKEN matches (word boundaries), never substrings —
+        a query token like ``g2`` must not match inside ``G28``. When a
+        section span is given (``start``/``end``), the anchor is confined to
+        that span and the returned ``match_pos`` is absolute (doc-relative).
 
         Returns (snippet, match_pos) where match_pos is the character offset
         of the first query term in ``content``, or -1 when nothing matched
         (used to annotate search hits with their enclosing section).
         """
-        query_lower = query.lower()
-        pos = content.lower().find(query_lower)
-        if pos < 0:
-            # Fall back to first meaningful paragraph
+        if end is None:
+            end = len(content)
+        span = content[start:end]
+        span_lower = span.lower()
+
+        pos_rel = span_lower.find(query.lower())
+        if pos_rel < 0:
+            # Fall back to the first whole-token match (word boundaries only).
             for word in self._tokenize(query):
-                pos = content.lower().find(word)
-                if pos >= 0:
+                pattern = re.compile(
+                    rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])",
+                    re.IGNORECASE,
+                )
+                match = pattern.search(span)
+                if match:
+                    pos_rel = match.start()
                     break
 
-        if pos < 0:
-            return content[:SNIPPET_CHARS].strip() + ("..." if len(content) > SNIPPET_CHARS else ""), -1
+        if pos_rel < 0:
+            return (
+                content[start:end].strip()[:SNIPPET_CHARS]
+                + ("..." if (end - start) > SNIPPET_CHARS else ""),
+                -1,
+            )
 
-        start = max(0, pos - SNIPPET_CHARS // 2)
-        end = min(len(content), pos + len(query) + SNIPPET_CHARS // 2)
-
-        snippet = content[start:end].strip()
-        if start > 0:
+        pos = start + pos_rel
+        snippet_start = max(start, pos - SNIPPET_CHARS // 2)
+        snippet_end = min(end, pos + len(query) + SNIPPET_CHARS // 2)
+        snippet = content[snippet_start:snippet_end].strip()
+        if snippet_start > start:
             snippet = "..." + snippet
-        if end < len(content):
+        if snippet_end < end:
             snippet = snippet + "..."
         return snippet, pos
 
@@ -497,6 +575,21 @@ class McpServer:
             {
                 "name": "list_klipper_docs",
                 "description": "List all available Klipper documentation files with their headings and metadata.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            {
+                "name": "list_config_reference_sections",
+                "description": (
+                    "List every config section supported by Klipper (from "
+                    "Config_Reference.md), e.g. '[printer]', '[bed_mesh]', "
+                    "'[gcode_arcs]'. Use this BEFORE adding or editing a "
+                    "section to discover the exact section name, then fetch "
+                    "it with get_config_reference_section(section_name=...). "
+                    "No arguments."
+                ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
@@ -643,6 +736,30 @@ class McpServer:
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
+                },
+            },
+            {
+                "name": "list_user_config_sections",
+                "description": (
+                    "List the section headers inside one user config file "
+                    "(filename='printer.cfg' required), e.g. '[printer]', "
+                    "'[extruder]', '[gcode_macro PRINT_START]'. Use this to see "
+                    "what a file already contains before editing or answering — "
+                    "then read a section with read_user_config(section=...). "
+                    "Mirrors list_config_reference_sections but for the user's files."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "filename": {
+                            "type": "string",
+                            "description": (
+                                "Config filename (e.g. 'printer.cfg' or "
+                                "'configs/my_config.cfg')"
+                            ),
+                        },
+                    },
+                    "required": ["filename"],
                 },
             },
             {
@@ -891,12 +1008,14 @@ class McpServer:
             "search_klipper_docs": self._handle_search,
             "read_klipper_doc": self._handle_read,
             "list_klipper_docs": self._handle_list_docs,
+            "list_config_reference_sections": self._handle_list_config_reference_sections,
             "get_config_reference_section": self._handle_config_section,
             "validate_klipper_config": self._handle_validate,
             "search_example_configs": self._handle_search_examples,
             "read_example_config": self._handle_read_example_config,
             "search_user_configs": self._handle_search_user_configs,
             "list_user_configs": self._handle_list_user_configs,
+            "list_user_config_sections": self._handle_list_user_config_sections,
             "read_user_config": self._handle_read_user_config,
             "detect_board": self._handle_detect_board,
             "calculate_rotation_distance": self._handle_calculate_rotation_distance,
@@ -1011,6 +1130,26 @@ class McpServer:
                 f"- **{d['filename']}**  ({d['size_bytes']:,} bytes, {heading_count} headings){config_tag}"
             )
 
+        return "\n".join(lines)
+
+    def _handle_list_config_reference_sections(self, args: dict[str, Any]) -> str:
+        """List every section header in Config_Reference.md (lean manifest).
+
+        Mirrors list_user_config_sections: the model discovers what the
+        reference SUPPORTS before picking one to read with
+        get_config_reference_section(section_name=...). Additions/setup
+        requests should start here rather than guessing a section name or
+        searching the whole 200K-char doc.
+        """
+        sections = self.index.list_config_reference_sections()
+        if not sections:
+            return "No config reference sections found."
+        lines = [
+            f"# Config Reference sections ({len(sections)})",
+            "# Klipper config sections supported by this version — pick the exact "
+            "section name, then read it with get_config_reference_section(section_name=...).\n",
+        ]
+        lines.extend(f"[{name}]" for name in sections)
         return "\n".join(lines)
 
     def _handle_config_section(self, args: dict[str, Any]) -> str:
@@ -1466,6 +1605,32 @@ class McpServer:
             "\nUse read_user_config (filename=...) to read one. "
             "Use search_user_configs to find files by keyword."
         )
+        return "\n".join(lines)
+
+    def _handle_list_user_config_sections(self, args: dict[str, Any]) -> str:
+        """List the section headers inside one user config file."""
+        raw = str(args.get("filename") or args.get("file") or "").strip()
+        if not raw:
+            return "Please provide a config filename (filename='printer.cfg')."
+        candidate = self._resolve_user_config_file(raw)
+        if candidate is None:
+            return (
+                f'User config file "{raw}" not found. Use list_user_configs to '
+                "see available files, or search_user_configs to find them."
+            )
+        try:
+            content = candidate.read_bytes().decode("utf-8", errors="replace")
+        except OSError as exc:
+            return f"Error reading {candidate.name}: {exc}"
+        headers = self._list_config_sections(content)
+        if not headers:
+            return f"# {candidate.name}  (User Config)\n# No sections detected."
+        lines = [
+            f"# {candidate.name}  (section index; file content not attached)",
+            "# Sections in this file — read one with "
+            "read_user_config(filename=..., section='<name>').\n",
+        ]
+        lines.extend(f"[{header}]" for header in headers)
         return "\n".join(lines)
 
     def _resolve_user_config_file(self, raw: str) -> Path | None:
