@@ -37,15 +37,17 @@ from klipper_paths import (  # noqa: E402
     KLIPPER_DOCS_DIR,
     KWC_CUSTOM_DOCS_DIR,
     REFERENCE_DIR,
+    resolve_config_path,
 )
 
 DOC_CATALOG_PATH = KLIPPER_DOCS_DIR
 CONFIG_REFERENCE_PATH = KLIPPER_DOCS_DIR / "Config_Reference.md"
 GCODE_MACRO_SUMMARY_PATH = KWC_CUSTOM_DOCS_DIR / "Klipper_GCode_Macro_AI_Summary.md"
 DOCS_SUMMARY_PATH = KWC_CUSTOM_DOCS_DIR / "Klipper_Docs_AI_Summary.md"
-# The system path for Klipper configs (e.g. /home/pi/.klipper/config)
-# Can be overridden via KLIPPER_CONFIG_PATH environment variable.
-SYSTEM_CONFIG_PATH = Path(os.environ.get("KLIPPER_CONFIG_PATH", "/home/pi/.klipper/config"))
+# The system path for Klipper configs. Resolution priority: KLIPPER_CONFIG_PATH
+# env override, then the modern ~/printer_data/config layout (matches native
+# mode), then the legacy /home/pi/.klipper/config layout.
+SYSTEM_CONFIG_PATH = resolve_config_path()
 # Local fallback directory for imported configs when not running on a Pi.
 LOCAL_CONFIGS_DIR = BACKEND_DIR / "user_configs"
 

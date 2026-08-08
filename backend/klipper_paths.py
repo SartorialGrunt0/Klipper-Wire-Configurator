@@ -17,7 +17,7 @@ rule).
 import os
 from pathlib import Path
 
-from services.native_services import is_native_platform
+from services.native_services import get_default_config_path, is_native_platform
 
 BACKEND_DIR = Path(__file__).parent
 REFERENCE_DIR = BACKEND_DIR.parent / "reference"
@@ -31,11 +31,29 @@ _COMMON_KLIPPER_PATHS = (
     Path("/usr/share/klipper"),
 )
 
+
+def resolve_config_path() -> Path:
+    """Resolve the Klipper config directory used by user-config tooling.
+
+    Priority: KLIPPER_CONFIG_PATH env override (always wins), then the
+    modern ~/printer_data/config layout (same default as native mode via
+    native_services.get_default_config_path), then the legacy
+    /home/pi/.klipper/config layout. Falls back to the legacy path even
+    when nothing exists, so dev checkouts keep the existing "no system
+    configs" behavior.
+    """
+    env_path = os.environ.get("KLIPPER_CONFIG_PATH")
+    if env_path:
+        return Path(env_path)
+    modern = Path(get_default_config_path())
+    if modern.is_dir():
+        return modern
+    return Path("/home/pi/.klipper/config")
+
+
 # The Pi deployment marker: this dir only exists when KWC is natively
-# installed alongside Klipper (same default as mcp_server.SYSTEM_CONFIG_PATH).
-DEPLOYMENT_CONFIG_PATH = Path(
-    os.environ.get("KLIPPER_CONFIG_PATH", "/home/pi/.klipper/config")
-)
+# installed alongside Klipper (same resolution as mcp_server.SYSTEM_CONFIG_PATH).
+DEPLOYMENT_CONFIG_PATH = resolve_config_path()
 
 
 def _deployment_looks_native() -> bool:
