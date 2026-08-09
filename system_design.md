@@ -137,10 +137,10 @@ The backend parser/exporter is the source of truth for config text. The graph an
 
 Single-file import path:
 
-1. [frontend/src/components/dialogs/ImportDialog.tsx](frontend/src/components/dialogs/ImportDialog.tsx) collects selected files.
+1. [frontend/src/components/dialogs/ImportDialog.tsx](frontend/src/components/dialogs/ImportDialog.tsx) collects selected files (file picker, drag-drop, or folder) and shows a staged list with per-file checkboxes so files can be deselected before importing. Selected files whose names collide with already-loaded project files require an explicit overwrite confirmation.
 2. [frontend/src/services/api.ts](frontend/src/services/api.ts) posts to `/api/import` or `/api/import-project`.
-3. [backend/api/routes.py](backend/api/routes.py) parses files with [backend/parser/config_parser.py](backend/parser/config_parser.py), validates with [backend/parser/validator.py](backend/parser/validator.py), and detects board metadata with [backend/services/board_detector.py](backend/services/board_detector.py).
-4. The frontend writes config/validation into `configStore` and rebuilds the graph with [frontend/src/utils/graphBuilder.ts](frontend/src/utils/graphBuilder.ts).
+3. [backend/api/routes.py](backend/api/routes.py) parses files with [backend/parser/config_parser.py](backend/parser/config_parser.py), validates with [backend/parser/validator.py](backend/parser/validator.py), and detects board metadata with [backend/services/board_detector.py](backend/services/board_detector.py). **Import never writes to disk** — parsed content is returned to the frontend only; persistence happens exclusively through the Save/Apply flow.
+4. The frontend writes config/validation into `configStore` as *unsaved changes* (merging into whatever is already loaded — import never clears the project) and rebuilds the graph with [frontend/src/utils/graphBuilder.ts](frontend/src/utils/graphBuilder.ts). Existing diff baselines (`originalTexts`) are preserved so Save shows import-vs-Pi; files that were never loaded before have no baseline and render as "new file".
 
 ### 6.2 Generate a blank or example config
 

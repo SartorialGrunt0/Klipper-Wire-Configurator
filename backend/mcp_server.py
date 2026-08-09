@@ -39,6 +39,7 @@ from klipper_paths import (  # noqa: E402
     REFERENCE_DIR,
     resolve_config_path,
 )
+from services.native_services import is_backup_config_file  # noqa: E402
 
 DOC_CATALOG_PATH = KLIPPER_DOCS_DIR
 CONFIG_REFERENCE_PATH = KLIPPER_DOCS_DIR / "Config_Reference.md"
@@ -51,7 +52,8 @@ DOCS_SUMMARY_PATH = KWC_CUSTOM_DOCS_DIR / "Klipper_Docs_AI_Summary.md"
 # override, then the saved native setting, then the modern
 # ~/printer_data/config layout, then the legacy /home/pi/.klipper/config.
 SYSTEM_CONFIG_PATH = resolve_config_path()
-# Local fallback directory for imported configs when not running on a Pi.
+# Local storage dir for browser-mode Save (non-native); also scanned by the
+# user-config tools alongside the system path.
 LOCAL_CONFIGS_DIR = BACKEND_DIR / "user_configs"
 
 
@@ -1492,6 +1494,9 @@ class McpServer:
         for scan_dir in scan_paths:
             try:
                 for cfg_file in scan_dir.rglob("*.cfg"):
+                    # Klipper SAVE_CONFIG backups are never user configs.
+                    if is_backup_config_file(cfg_file.name):
+                        continue
                     if cfg_file.name in seen_filenames:
                         continue
                     seen_filenames.add(cfg_file.name)
@@ -1605,6 +1610,9 @@ class McpServer:
             label = "pi-native" if scan_dir == system_path else "imported"
             try:
                 for cfg_file in scan_dir.rglob("*.cfg"):
+                    # Klipper SAVE_CONFIG backups are never user configs.
+                    if is_backup_config_file(cfg_file.name):
+                        continue
                     rel = cfg_file.relative_to(scan_dir).as_posix()
                     if rel not in seen:
                         seen[rel] = label
@@ -1667,6 +1675,9 @@ class McpServer:
         for scan_dir in scan_paths:
             try:
                 for cfg_file in scan_dir.rglob("*.cfg"):
+                    # Klipper SAVE_CONFIG backups are never user configs.
+                    if is_backup_config_file(cfg_file.name):
+                        continue
                     rel = cfg_file.relative_to(scan_dir).as_posix()
                     if cfg_file.name.lower() == raw.lower() or rel.lower() == raw.lower():
                         return cfg_file
@@ -1678,6 +1689,8 @@ class McpServer:
         for scan_dir in scan_paths:
             try:
                 for cfg_file in scan_dir.rglob("*.cfg"):
+                    if is_backup_config_file(cfg_file.name):
+                        continue
                     file_tokens = set(
                         cfg_file.stem.lower().replace("-", " ").replace("_", " ").split()
                     )
