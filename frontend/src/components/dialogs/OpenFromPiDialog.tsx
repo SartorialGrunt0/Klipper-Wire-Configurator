@@ -69,9 +69,14 @@ export default function OpenFromPiDialog({ onClose }: OpenFromPiDialogProps) {
     }
   }, []);
 
+  // Load the initial path's files on mount only. Reloads happen explicitly
+  // in handlePathChange; auto-reloading on every configPath change would
+  // double-fetch during Browse (setConfigPath fires the effect AND the
+  // handler calls loadFiles) and race Import's status transitions.
   useEffect(() => {
     loadFiles(configPath);
-  }, [configPath, loadFiles]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handlePathChange = useCallback(() => {
     setConfigPath(pathInput);
