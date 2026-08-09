@@ -114,8 +114,16 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
         });
       }
 
-      // Build unified project graph from all configs at once (existing + new)
+      // Import stages files as unsaved changes (originalTexts is left as the
+      // Pi-loaded baseline so Save diffs import-vs-Pi). Flip the dirty flag so
+      // the Save button lights up.
+      useConfigStore.getState().markDirty();
+
+      // Build unified project graph from all configs at once (existing + new).
+      // buildProjectGraph is additive — clear the graph first or every node
+      // from the previous build duplicates.
       const graphStore = useGraphStore.getState();
+      graphStore.clearGraph();
       const allValidations: Record<string, import('../../types/config').ValidationResult> = {
         ...useConfigStore.getState().validation,
       };
