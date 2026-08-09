@@ -5,6 +5,7 @@ import { useGraphStore } from '../../stores/graphStore';
 import * as api from '../../services/api';
 import { buildProjectGraph } from '../../utils/graphBuilder';
 import { buildInitialSelection, findOverlappingFiles } from '../../utils/importSelection';
+import { countChangedLines, createConfigPatch } from '../../utils/configDiff';
 import type { ConfigFile } from '../../types/config';
 
 interface ImportDialogProps {
@@ -114,10 +115,27 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
         });
       }
 
-      // Import stages files as unsaved changes (originalTexts is left as the
-      // Pi-loaded baseline so Save diffs import-vs-Pi). Flip the dirty flag so
-      // the Save button lights up.
-      useConfigStore.getState().markDirty();
+      // Import stages files as unsaved changes (originalTexts stays the
+      // Pi-loaded baseline, so Save diffs import-vs-Pi). Light up the Save
+      // button only when the import actually differs from that baseline —
+      // re-importing identical content leaves it grey, exactly like a no-op edit.
+      const state = useConfigStore.getState();
+      let hasChanges = false;
+      for (const [filename, fileResult] of Object.entries(projectResult.files)) {
+        const original = state.originalTexts[filename];
+        if (original === undefined) {
+          hasChanges = true; // brand-new file = pending addition
+          break;
+        }
+        const current = await api.exportConfig(fileResult.config);
+        if (countChangedLines(createConfigPatch(filename, original, current)) > 0) {
+          hasChanges = true;
+          break;
+        }
+      }
+      if (hasChanges) {
+        useConfigStore.getState().markDirty();
+      }
 
       // Build unified project graph from all configs at once (existing + new).
       // buildProjectGraph is additive — clear the graph first or every node
