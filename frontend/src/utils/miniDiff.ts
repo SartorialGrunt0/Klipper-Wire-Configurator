@@ -9,6 +9,11 @@
  * lines — including Jinja tags inside macros — are preserved automatically
  * and can never be dropped or reworded by the model.
  *
+ * Markers are matched with leading-whitespace tolerance (`^\s*`): models
+ * sometimes indent the '-'/'+' to align with a gcode body indentation. The
+ * content AFTER the marker keeps its own indentation and is matched
+ * indent-tolerantly against the base file.
+ *
  * Three shapes are supported:
  * - edit: '-' removal line(s) with optional '+' additions below them
  *   (replace matched lines);
@@ -21,8 +26,8 @@
  * block (the legacy protocol) and passes through untouched.
  */
 
-export const MINI_DIFF_REMOVAL_RE = /^-(.*)$/;
-export const MINI_DIFF_ADDITION_RE = /^\+(.*)$/;
+export const MINI_DIFF_REMOVAL_RE = /^\s*-(.*)$/;
+export const MINI_DIFF_ADDITION_RE = /^\s*\+(.*)$/;
 
 export type MiniDiffLineKind = 'removal' | 'addition' | 'context';
 

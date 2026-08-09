@@ -44,9 +44,14 @@ describe('classifyMiniDiffLine', () => {
     expect(classifyMiniDiffLine('')).toBe('context');
   });
 
-  it('does not treat indented +/- lines as diff markers', () => {
-    // Mini-diff markers sit at column 0; indented lines are config content.
-    expect(classifyMiniDiffLine('    - a comment')).toBe('context');
+  it('treats indented +/- lines as diff markers when they lead the line', () => {
+    // Markers are matched with leading-whitespace tolerance: models indent
+    // the '-'/'+' to align with a gcode body indentation. The content after
+    // the marker is what matters; a mid-line '-' (e.g. 'G1 X-10') is still
+    // plain content.
+    expect(classifyMiniDiffLine('    - a comment')).toBe('removal');
+    expect(classifyMiniDiffLine('  -  Level_Bed')).toBe('removal');
+    expect(classifyMiniDiffLine('  +  BED_MESH_CALIBRATE ADAPTIVE=1')).toBe('addition');
     expect(classifyMiniDiffLine('      G1 X-10')).toBe('context');
   });
 });
@@ -224,6 +229,43 @@ max_accel: 18000 #Ellis Tuned
     // The other params survive (this was the mangling case).
     expect(result.text).toContain('kinematics: corexy');
     expect(result.text).toContain('max_velocity: 600');
+  });
+
+  it('detects indented markers and ignores context lines in a gcode body', () => {
+    // Regression: the model emitted the mini-diff with the '-'/'+' markers
+    // INDENTED to align with the gcode body (plus context lines and '...'
+    // placeholders). Column-0-only detection missed it, the block fell
+    // through to full-section handling, and the whole macro was replaced
+    // with the literal snippet.
+    const base = `[gcode_macro PRINT_START]
+gcode:
+    RESPOND TYPE=error MSG='Level_Bed'
+    Level_Bed
+    BED_MESH_PROFILE LOAD=default
+    M104 S0
+`;
+    const result = applyMiniDiffBlock(
+      `[gcode_macro PRINT_START]
+gcode:
+  ...
+  RESPOND TYPE=error MSG='Level_Bed'
+  -  Level_Bed
+  +  BED_MESH_CALIBRATE ADAPTIVE=1
+  BED_MESH_PROFILE LOAD=default
+  ...
+`,
+      base,
+    );
+    expect(result.applied).toBe(true);
+    expect(result.text).toContain("RESPOND TYPE=error MSG='Level_Bed'");
+    expect(result.text).toContain('BED_MESH_CALIBRATE ADAPTIVE=1');
+    expect(result.text).not.toContain('-  Level_Bed');
+    expect(result.text).not.toContain('+  BED_MESH_CALIBRATE');
+    expect(result.text).not.toContain('...');
+    // Unchanged lines survive verbatim.
+    expect(result.text).toContain("RESPOND TYPE=error MSG='Level_Bed'");
+    expect(result.text).toContain('BED_MESH_PROFILE LOAD=default');
+    expect(result.text).toContain('M104 S0');
   });
 
   it('inherits the file indentation when the base line is indented', () => {

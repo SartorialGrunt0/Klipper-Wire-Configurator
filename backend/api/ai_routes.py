@@ -158,8 +158,10 @@ XML_TOOL_CALLS_CLEANUP_RE = re.compile(
 
 MINI_DIFF_EDIT_PROTOCOL_SOFT = (
     "- To EDIT an existing section, prefer a mini-diff: the section header followed by only the "
-    "lines that change, prefixing removed lines with '-' and added lines with '+', keeping "
-    "their original indentation. The app applies these exact replacements to the current "
+    "lines that change, prefixing removed lines with '-' and added lines with '+'. The '-'/'+' "
+    "marker must be the FIRST character of the line (column 0) — never indent the marker itself "
+    "to align with the body; only the content AFTER the marker keeps its original indentation. "
+    "The app applies these exact replacements to the current "
     "file — do not reproduce unchanged lines. Outputting any unchanged line (Jinja tags "
     "such as {% if %}/{% endif %}, G-codes, or comments) risks a full rewrite where those "
     "lines could be dropped — prefer emitting ONLY the lines that change. "
@@ -167,8 +169,10 @@ MINI_DIFF_EDIT_PROTOCOL_SOFT = (
 
 MINI_DIFF_EDIT_PROTOCOL_STRICT = (
     "- To EDIT an existing section, emit a mini-diff: the section header followed by only the "
-    "lines that change, prefixing removed lines with '-' and added lines with '+', keeping "
-    "their original indentation. The app applies these exact replacements to the current "
+    "lines that change, prefixing removed lines with '-' and added lines with '+'. The '-'/'+' "
+    "marker must be the FIRST character of the line (column 0) — never indent the marker itself "
+    "to align with the body; only the content AFTER the marker keeps its original indentation. "
+    "The app applies these exact replacements to the current "
     "file — do not reproduce unchanged lines. Outputting any unchanged line (Jinja tags "
     "such as {% if %}/{% endif %}, G-codes, or comments) causes the app to reject the "
     "reply as a full rewrite and retry — emit ONLY the lines that change. "
