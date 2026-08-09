@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useConfigStore } from '../stores/configStore';
 import { useNativeStore } from '../stores/nativeStore';
 import { useAiStore } from '../stores/aiStore';
+import { getSaveButtonClass } from '../utils/saveButtonClass';
 import type { PendingAiChatRequest } from '../types/ai';
 import ImportDialog from './dialogs/ImportDialog';
 import ExportDialog from './dialogs/ExportDialog';
@@ -233,26 +234,8 @@ export default function Toolbar({
   };
 
   // Compute Save button color based on dirty state and validation
-  const getSaveButtonClass = () => {
-    if (!isConfigDirty) {
-      // No changes — normal grey
-      return 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)]';
-    }
-    const hasErrors = Object.values(validation).some((v) =>
-      v.errors.some((e) => e.severity === 'error'),
-    );
-    const hasWarnings = Object.values(validation).some((v) =>
-      v.errors.some((e) => e.severity === 'warning'),
-    );
-    if (hasErrors) {
-      return 'bg-red-600 text-white hover:bg-red-700';
-    }
-    if (hasWarnings) {
-      return 'bg-[var(--color-warning)] text-[var(--color-bg-primary)] hover:opacity-90';
-    }
-    // Valid changes
-    return 'bg-green-600 text-white hover:bg-green-700';
-  };
+  // (shared with the Apply/Save dialog so both always agree)
+  const saveButtonClass = getSaveButtonClass(isConfigDirty, validation);
   return (
     <div className="flex items-center gap-2 min-w-max">
       {/* Import */}
@@ -303,7 +286,7 @@ export default function Toolbar({
       {showSaveButton && (
         <button
           onClick={() => setShowApply(true)}
-          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${getSaveButtonClass()}`}
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${saveButtonClass}`}
         >
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
             <path d="M3 8l3.5 3.5L13 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>

@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { createTwoFilesPatch } from 'diff';
 import { useConfigStore } from '../../stores/configStore';
 import { useNativeStore } from '../../stores/nativeStore';
+import { getSaveButtonClass } from '../../utils/saveButtonClass';
 import * as api from '../../services/api';
 import type { ConfigFile } from '../../types/config';
 import type { NativeStatus } from '../../services/api';
@@ -175,6 +176,11 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
   const storeSnapshot = useRef(useConfigStore.getState());
   const { configFiles, originalTexts } = storeSnapshot.current;
   const { configPath } = useNativeStore();
+  // Live state for the Save-button color — matches the toolbar button so the
+  // dialog's actions always agree with it (grey/green/yellow/red).
+  const isDirty = useConfigStore((s) => s.isDirty);
+  const validation = useConfigStore((s) => s.validation);
+  const saveButtonClass = getSaveButtonClass(isDirty, validation);
   const filenames = Object.keys(configFiles);
 
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set(filenames));
@@ -671,7 +677,7 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
             <button
               onClick={handleApply}
               disabled={status === 'exporting' || status === 'applying' || selectedFiles.size === 0}
-              className="px-4 py-1.5 rounded-md text-xs font-medium bg-red-500 text-white hover:bg-red-600 transition-colors disabled:opacity-50"
+              className={`px-4 py-1.5 rounded-md text-xs font-medium transition-colors disabled:opacity-50 ${saveButtonClass}`}
             >
               {status === 'exporting' ? 'Exporting...' : status === 'applying' ? 'Writing...' : 'Save Changes'}
             </button>
@@ -693,7 +699,7 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
             <button
               onClick={handleFirmwareRestart}
               disabled={restartStatus === 'restarting' || restartStatus === 'success' || printerStatusLoading || printerIsPrinting}
-              className="px-4 py-1.5 rounded-md text-xs font-medium bg-amber-500 text-black hover:bg-amber-600 transition-colors disabled:opacity-50"
+              className={`px-4 py-1.5 rounded-md text-xs font-medium transition-colors disabled:opacity-50 ${saveButtonClass}`}
             >
               {printerStatusLoading
                 ? 'Checking printer...'
