@@ -13,8 +13,6 @@ import * as api from '../../services/api';
 import {
   PROVIDER_OPTIONS,
   PROVIDER_DEFAULTS,
-  buildLocalProviderApiUrl,
-  isHttpsUrl,
   isLocalProvider,
 } from '../../utils/chatProviders';
 
@@ -28,10 +26,6 @@ export interface ChatSettingsPanelProps {
   setEditApiUrl: (v: string) => void;
   editApiProvider: AiProvider;
   setEditApiProvider: (v: AiProvider) => void;
-  editHost: string;
-  setEditHost: (v: string) => void;
-  editPort: string;
-  setEditPort: (v: string) => void;
   editMaxTokens: string;
   setEditMaxTokens: (v: string) => void;
   editTemperature: string;
@@ -56,10 +50,6 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
   setEditApiUrl,
   editApiProvider,
   setEditApiProvider,
-  editHost,
-  setEditHost,
-  editPort,
-  setEditPort,
   editMaxTokens,
   setEditMaxTokens,
   editTemperature,
@@ -143,18 +133,11 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
     const providerDefaultModel = PROVIDER_DEFAULTS[provider]?.defaultModel;
     const modelToUse = editModel.trim() || providerDefaultModel || settings.model;
     setEditModel(modelToUse);
-    if (isLocalProvider(provider)) {
-      setEditApiUrl(buildLocalProviderApiUrl(editHost, editPort));
-    } else {
-      setEditApiUrl(PROVIDER_DEFAULTS[provider].defaultUrl);
-    }
+    setEditApiUrl(PROVIDER_DEFAULTS[provider].defaultUrl);
   };
 
   const isSaveEnabled = !providerRequiresApiKey(editApiProvider) || !!editApiKey.trim();
   const hasSelectedModel = !!editModel.trim();
-  // Host/port quick-entry only applies to local http servers; an https URL
-  // means a cloud OpenAI-compatible API (model field becomes free text).
-  const showLocalFields = isLocalProvider(editApiProvider) && !isHttpsUrl(editApiUrl);
 
   // ── Shared Input Fields ────────────────────────────────────────────
 
@@ -229,47 +212,10 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
         className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
         value={editApiUrl}
         onChange={(e) => setEditApiUrl(e.target.value)}
-        placeholder={isLocalProvider(editApiProvider)
-          ? 'http://localhost:11434/v1/chat/completions — or https://api.deepseek.com/v1/chat/completions'
-          : 'https://api.openai.com/v1/chat/completions'}
+        placeholder="e.g. http://localhost:11434/v1/chat/completions or https://api.deepseek.com/v1/chat/completions"
       />
     </div>
   );
-
-  const hostPortFields = showLocalFields ? (
-    <>
-      <div className="flex gap-3">
-        <div className="flex-1">
-          <label className="block text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-1.5">Host</label>
-          <input
-            type="text"
-            className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-            value={editHost}
-            onChange={(e) => {
-              const nextHost = e.target.value;
-              setEditHost(nextHost);
-              setEditApiUrl(buildLocalProviderApiUrl(nextHost, editPort));
-            }}
-            placeholder="localhost"
-          />
-        </div>
-        <div className="w-20">
-          <label className="block text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-1.5">Port</label>
-          <input
-            type="text"
-            className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-            value={editPort}
-            onChange={(e) => {
-              const nextPort = e.target.value;
-              setEditPort(nextPort);
-              setEditApiUrl(buildLocalProviderApiUrl(editHost, nextPort));
-            }}
-            placeholder="1234"
-          />
-        </div>
-      </div>
-    </>
-  ) : null;
 
   const apiKeyField = (
     <div>
@@ -347,8 +293,7 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
     <div className="space-y-4">
       {providerSelector}
       {modelField}
-      {!showLocalFields && apiUrlField}
-      {hostPortFields}
+      {apiUrlField}
       {apiKeyField}
       {maxTokensAndTemperatureRow}
     </div>
@@ -452,8 +397,7 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
           {modelsError && (
             <p className="text-[10px] text-[var(--color-error)]">Error: {modelsError}</p>
           )}
-          {!showLocalFields && apiUrlField}
-          {hostPortFields}
+          {apiUrlField}
           <div>
             <label className="block text-[10px] text-[var(--color-text-secondary)] mb-1">
               API Key{!providerRequiresApiKey(editApiProvider) && ' (optional)'}
