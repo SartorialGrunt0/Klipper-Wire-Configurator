@@ -288,6 +288,13 @@ class AiProvider(str, Enum):
     github = "github"
     openai_compatible = "openai-compatible"
 
+class ModelsRequest(BaseModel):
+    """Model-list proxy request — mirrors the fields the chat proxy needs."""
+    apiKey: str = ""
+    apiUrl: str = "https://api.openai.com/v1/chat/completions"
+    apiProvider: AiProvider = AiProvider.chatgpt
+
+
 class ChatRequest(BaseModel):
     messages: list[dict]
     apiKey: str
@@ -1646,6 +1653,98 @@ def _build_api_base_url(api_url: str) -> str:
     return urlunparse((parsed.scheme, parsed.netloc, "", "", "", "")).rstrip("/")
 
 
+def _models_url_from_chat_url(api_url: str) -> str:
+    """Derive the provider's model-list URL from its chat-completions URL.
+
+    Every provider we proxy exposes model listing at the same base as chat,
+    with the trailing chat path swapped for /models:
+
+      https://api.openai.com/v1/chat/completions
+          -> https://api.openai.com/v1/models
+      https://generativelanguage.googleapis.com/v1beta/openai/chat/completions
+          -> https://generativelanguage.googleapis.com/v1beta/openai/models
+      https://models.github.ai/inference/chat/completions
+          -> https://models.github.ai/inference/models
+      https://api.anthropic.com/v1/messages
+          -> https://api.anthropic.com/v1/models
+      http://localhost:11434/v1/chat/completions
+          -> http://localhost:11434/v1/models
+    """
+    parsed = urlparse(api_url)
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    path = parsed.path
+    for suffix in ("/chat/completions", "/completions", "/messages"):
+        if path.endswith(suffix):
+            path = path[: -len(suffix)]
+            break
+    models_path = f"{path.rstrip('/')}/models"
+    return urlunparse((parsed.scheme, parsed.netloc, models_path, "", "", ""))
+
+
+def _provider_auth_headers(provider: str, api_url: str, api_key: str) -> dict:
+    """Build auth headers for the configured provider.
+
+    Anthropic uses x-api-key; local OpenAI-compatible servers make auth
+    optional (include a Bearer token only when a key was provided);
+    everything else uses a Bearer token.
+    """
+    if provider == "anthropic":
+        return {
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+        }
+    if _is_local_provider(provider, api_url):
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        return headers
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+
+@router.post("/ai/models")
+async def list_models(req: ModelsRequest):
+    """Proxy the provider's model-list endpoint (server-side).
+
+    The browser can't reliably call cloud /v1/models endpoints directly
+    (CORS) and must not put the API key in a query string. This route
+    derives the model URL from the chat URL and fetches it with the same
+    auth the chat proxy uses, returning just the model ids.
+    """
+    provider = req.apiProvider.value if hasattr(req.apiProvider, "value") else req.apiProvider
+    models_url = _models_url_from_chat_url(req.apiUrl)
+    if not models_url:
+        return {"models": []}
+
+    headers = _provider_auth_headers(provider, req.apiUrl, req.apiKey)
+    timeout = httpx.Timeout(connect=15.0, read=30.0, write=30.0, pool=30.0)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            res = await client.get(models_url, headers=headers)
+            res.raise_for_status()
+            data = res.json()
+    except httpx.TimeoutException:
+        logger.warning("Model list timeout | url=%s", models_url)
+        return {"models": [], "error": "Timed out listing models"}
+    except httpx.HTTPError as e:
+        logger.warning("Model list failed | url=%s error=%s", models_url, e)
+        return {"models": [], "error": f"Failed to list models: {e}"}
+
+    ids: list[str] = []
+    if isinstance(data, dict):
+        entries = data.get("data")
+        if isinstance(entries, list):
+            for m in entries:
+                if isinstance(m, dict) and isinstance(m.get("id"), str):
+                    ids.append(m["id"])
+    logger.info("Model list | provider=%s url=%s count=%d", provider, models_url, len(ids))
+    return {"models": ids}
+
+
 @router.post("/ai/chat")
 async def chat_proxy(req: ChatRequest):
     """Proxy chat messages to the user's configured API provider."""
@@ -1670,27 +1769,12 @@ async def chat_proxy(req: ChatRequest):
     if not _is_local_provider(req.apiProvider, req.apiUrl) and not req.apiKey:
         return {"error": "AI settings not configured. Please configure your API key in settings."}
 
-    # Build headers based on provider
-    if req.apiProvider == "anthropic":
-        # Anthropic uses x-api-key header instead of Bearer
-        headers = {
-            "x-api-key": req.apiKey,
-            "anthropic-version": "2023-06-01",
-            "Content-Type": "application/json",
-        }
-    elif _is_local_provider(req.apiProvider, req.apiUrl):
-        # LM Studio and Ollama: auth optional, include key if provided
-        headers = {
-            "Content-Type": "application/json",
-        }
-        if req.apiKey:
-            headers["Authorization"] = f"Bearer {req.apiKey}"
-    else:
-        # OpenAI, Google (OpenAI-compat), GitHub Copilot, and OpenAI Compatible all use Bearer auth
-        headers = {
-            "Authorization": f"Bearer {req.apiKey}",
-            "Content-Type": "application/json",
-        }
+    # Build headers based on provider (shared with the /ai/models proxy).
+    headers = _provider_auth_headers(
+        req.apiProvider.value if hasattr(req.apiProvider, "value") else req.apiProvider,
+        req.apiUrl,
+        req.apiKey,
+    )
 
     # Native function calling for cloud providers only; local providers keep
     # the text-based ```tool protocol since local tool support varies.

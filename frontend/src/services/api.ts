@@ -794,32 +794,40 @@ export class ChatStoppedError extends Error {
   }
 }
 
-export async function listLocalModels(
+export interface ListModelsResponse {
+  models: string[];
+  error?: string;
+}
+
+/**
+ * List models available from the configured provider.
+ *
+ * Goes through the backend (/ai/models) instead of the browser hitting the
+ * provider directly: cloud endpoints would CORS-fail from the SPA, and the
+ * API key belongs in a request body, not a query string. The backend derives
+ * the provider's model-list URL from the chat URL and returns just the ids.
+ */
+export async function listModels(
+  provider: string,
   apiUrl: string,
-  apiKey: string = '',
-): Promise<string[]> {
-  /**
-   * List available models from a local OpenAI-compatible server.
-   */
+  apiKey = '',
+): Promise<ListModelsResponse> {
   try {
-    const modelsUrl = new URL(apiUrl);
-    modelsUrl.pathname = '/v1/models';
-    
-    const params = new URLSearchParams();
-    if (apiKey && apiKey.trim()) params.set('apiKey', apiKey);
-    
-    const res = await fetch(`${modelsUrl.toString()}?${params.toString()}`);
-    if (res.ok) {
-      const data = await res.json();
-      if (data.data && Array.isArray(data.data)) {
-        return data.data.map((m: any) => m.id);
-      }
+    const res = await fetch('/ai/models', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ apiProvider: provider, apiUrl, apiKey }),
+    });
+    if (!res.ok) {
+      return { models: [], error: `Failed to list models (HTTP ${res.status})` };
     }
-    
-    return [];
-  } catch (error) {
-    console.error('Failed to list local models:', error);
-    return [];
+    const data = (await res.json()) as ListModelsResponse;
+    return {
+      models: Array.isArray(data.models) ? data.models : [],
+      error: data.error,
+    };
+  } catch {
+    return { models: [], error: 'Failed to reach the backend' };
   }
 }
 

@@ -502,6 +502,138 @@ def test_is_local_provider():
     assert ai_routes._is_local_provider('openai-compatible') is True
 
 
+def test_models_url_from_chat_url():
+    # OpenAI / OpenAI-compatible chat URLs -> /models at the same base.
+    assert ai_routes._models_url_from_chat_url(
+        'https://api.openai.com/v1/chat/completions'
+    ) == 'https://api.openai.com/v1/models'
+    assert ai_routes._models_url_from_chat_url(
+        'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions'
+    ) == 'https://generativelanguage.googleapis.com/v1beta/openai/models'
+    assert ai_routes._models_url_from_chat_url(
+        'https://models.github.ai/inference/chat/completions'
+    ) == 'https://models.github.ai/inference/models'
+    # Anthropic's chat URL ends in /v1/messages.
+    assert ai_routes._models_url_from_chat_url(
+        'https://api.anthropic.com/v1/messages'
+    ) == 'https://api.anthropic.com/v1/models'
+    # Local servers keep their base.
+    assert ai_routes._models_url_from_chat_url(
+        'http://localhost:11434/v1/chat/completions'
+    ) == 'http://localhost:11434/v1/models'
+    # Blank / malformed URLs yield no models URL.
+    assert ai_routes._models_url_from_chat_url('') == ''
+    assert ai_routes._models_url_from_chat_url('not a url') == ''
+
+
+# ── /ai/models proxy ────────────────────────────────────────────────────
+
+
+def test_list_models_route_proxies_openai(monkeypatch):
+    def fake_get(url, headers):
+        assert url == 'https://api.openai.com/v1/models'
+        assert headers.get('Authorization') == 'Bearer openai-token'
+        return DummyResponse(
+            {'data': [{'id': 'gpt-4o'}, {'id': 'gpt-4o-mini'}, {'id': 'o3'}]},
+            method='GET',
+            url=url,
+        )
+
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda *args, **kwargs: FakeAsyncClient(get_handler=fake_get))
+
+    response = client.post(
+        '/ai/models',
+        json={
+            'apiKey': 'openai-token',
+            'apiUrl': 'https://api.openai.com/v1/chat/completions',
+            'apiProvider': 'chatgpt',
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {'models': ['gpt-4o', 'gpt-4o-mini', 'o3']}
+
+
+def test_list_models_route_anthropic_uses_x_api_key(monkeypatch):
+    def fake_get(url, headers):
+        assert url == 'https://api.anthropic.com/v1/models'
+        assert headers.get('x-api-key') == 'anthropic-token'
+        assert headers.get('anthropic-version') == '2023-06-01'
+        return DummyResponse(
+            {'data': [{'id': 'claude-sonnet-4'}, {'id': 'claude-haiku'}]},
+            method='GET',
+            url=url,
+        )
+
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda *args, **kwargs: FakeAsyncClient(get_handler=fake_get))
+
+    response = client.post(
+        '/ai/models',
+        json={
+            'apiKey': 'anthropic-token',
+            'apiUrl': 'https://api.anthropic.com/v1/messages',
+            'apiProvider': 'anthropic',
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {'models': ['claude-sonnet-4', 'claude-haiku']}
+
+
+def test_list_models_route_local_optional_auth(monkeypatch):
+    # Local servers don't require a key — no Authorization header is sent.
+    def fake_get(url, headers):
+        assert url == 'http://192.168.1.133:8080/v1/models'
+        assert 'Authorization' not in headers
+        return DummyResponse(
+            {'data': [{'id': 'qwen2.5-coder-7b'}]},
+            method='GET',
+            url=url,
+        )
+
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda *args, **kwargs: FakeAsyncClient(get_handler=fake_get))
+
+    response = client.post(
+        '/ai/models',
+        json={
+            'apiKey': '',
+            'apiUrl': 'http://192.168.1.133:8080/v1/chat/completions',
+            'apiProvider': 'openai-compatible',
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {'models': ['qwen2.5-coder-7b']}
+
+
+def test_list_models_route_graceful_error(monkeypatch):
+    def fake_get(url, headers):
+        return DummyResponse(
+            {'error': 'nope'},
+            status_code=401,
+            method='GET',
+            url=url,
+        )
+
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda *args, **kwargs: FakeAsyncClient(get_handler=fake_get))
+
+    response = client.post(
+        '/ai/models',
+        json={
+            'apiKey': 'bad-token',
+            'apiUrl': 'https://api.openai.com/v1/chat/completions',
+            'apiProvider': 'chatgpt',
+        },
+    )
+
+    # A failed provider call must degrade gracefully — the settings UI shows
+    # the error instead of the model dropdown.
+    assert response.status_code == 200
+    body = response.json()
+    assert body['models'] == []
+    assert 'Failed to list models' in body['error']
+
+
 def test_resolve_native_tools_auto_split():
     # "auto" keeps the provider-based split: local http -> text protocol,
     # cloud https -> native function calling.

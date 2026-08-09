@@ -16,7 +16,6 @@ import {
   buildLocalProviderApiUrl,
   isHttpsUrl,
   isLocalProvider,
-  resolveProviderApiUrl,
 } from '../../utils/chatProviders';
 
 export interface ChatSettingsPanelProps {
@@ -41,6 +40,11 @@ export interface ChatSettingsPanelProps {
   onSaveSettings: () => void;
   onClose?: () => void;
 }
+
+// How long to wait after the user stops typing before auto-refreshing the
+// model list. 1s keeps keystroke bursts (host/port/api key) from firing a
+// request per character.
+const MODELS_DEBOUNCE_MS = 1000;
 
 const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
   standalone,
@@ -70,66 +74,68 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState<string | null>(null);
   const modelsFetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const latestUrlRef = useRef(resolvedEditApiUrl);
-  latestUrlRef.current = resolvedEditApiUrl;
 
   const fetchAvailableModels = async (
     provider: AiProvider = editApiProvider,
     apiUrl: string = resolvedEditApiUrl,
     apiKey: string = editApiKey,
   ) => {
-    // Model discovery only makes sense against a local server we can reach
-    // from the browser. Cloud OpenAI-compatible endpoints (https) would
-    // CORS-fail and leak the key as a query param — the model field is a
-    // plain text input for those instead.
-    if (!isLocalProvider(provider) || isHttpsUrl(apiUrl)) {
-      setAvailableModels([]);
-      return;
-    }
     setModelsLoading(true);
     setModelsError(null);
-    try {
-      const result = await api.listLocalModels(apiUrl, apiKey);
-      setAvailableModels(result);
-      if (result.length === 0) {
-        setModelsError('No models found at this endpoint. Make sure a model is loaded.');
-      } else {
-        // The server is the source of truth for local models. If the current
-        // selection is not actually served (e.g. a cloud placeholder like
-        // 'gpt-4o' left over from another provider, or a stale saved name),
-        // select the first available model so the dropdown shows exactly what
-        // will be saved — otherwise the user sees one model but Save persists
-        // the stale one, and chat requests fail with a model-not-found error.
-        setEditModel((prev) => {
-          const current = prev.trim();
-          if (!current || !result.includes(current)) {
-            return result[0];
-          }
-          return prev;
-        });
-      }
-    } catch (err: unknown) {
-      setModelsError(err instanceof Error ? err.message : 'Failed to fetch models');
-      setAvailableModels([]);
-    } finally {
-      setModelsLoading(false);
+    // Model discovery is proxied through the backend (/ai/models) so it works
+    // for every provider — cloud APIs (OpenAI, Gemini, Claude, GitHub Models)
+    // would CORS-fail from the browser, and the key must not ride in a query
+    // string. The model field stays a plain text input until a list arrives.
+    const { models, error } = await api.listModels(provider, apiUrl, apiKey);
+    setAvailableModels(models);
+    if (error) {
+      setModelsError(error);
+    } else if (models.length === 0) {
+      setModelsError('No models found at this endpoint. Make sure a model is loaded.');
+    } else {
+      // The server is the source of truth for models. If the current
+      // selection is not actually served (e.g. a stale saved name, or a
+      // cloud placeholder like 'gpt-4o' left over from another provider),
+      // select the first available model so the dropdown shows exactly what
+      // will be saved — otherwise the user sees one model but Save persists
+      // the stale one, and chat requests fail with a model-not-found error.
+      setEditModel((prev) => {
+        const current = prev.trim();
+        if (!current || !models.includes(current)) {
+          return models[0];
+        }
+        return prev;
+      });
     }
+    setModelsLoading(false);
   };
 
   useEffect(() => {
-    if (isLocalProvider(editApiProvider)) {
-      void fetchAvailableModels(editApiProvider, resolvedEditApiUrl, editApiKey);
-    } else {
+    // Auto-refresh the model list, debounced so it fires once the user stops
+    // typing (host, port, api key) rather than on every keystroke.
+    if (modelsFetchTimerRef.current) clearTimeout(modelsFetchTimerRef.current);
+    const trimmedKey = editApiKey.trim();
+    if (
+      (providerRequiresApiKey(editApiProvider) && !trimmedKey)
+      || !resolvedEditApiUrl.trim()
+    ) {
+      // No point hitting the endpoint without the key it needs (cloud
+      // providers 401), or with no URL at all.
       setAvailableModels([]);
+      setModelsError(null);
+      return;
     }
+    modelsFetchTimerRef.current = setTimeout(() => {
+      void fetchAvailableModels(editApiProvider, resolvedEditApiUrl, trimmedKey);
+    }, MODELS_DEBOUNCE_MS);
+    return () => {
+      if (modelsFetchTimerRef.current) clearTimeout(modelsFetchTimerRef.current);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editApiProvider, resolvedEditApiUrl, editApiKey]);
 
   const handleModelChange = (nextModel: string) => {
     setEditModel(nextModel);
-    if (isLocalProvider(editApiProvider)) {
-      void fetchAvailableModels(editApiProvider, resolvedEditApiUrl, editApiKey);
-    }
   };
 
   const handleProviderChange = (provider: AiProvider) => {
@@ -175,7 +181,7 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
         Model
       </label>
       <div className="flex gap-2">
-        {showLocalFields && availableModels.length > 0 ? (
+        {availableModels.length > 0 ? (
           <select
             className="flex-1 px-3 py-2 rounded-lg text-xs font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
             value={editModel}
@@ -194,19 +200,17 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
             placeholder="e.g. gpt-4o, gemini-2.5-pro, llama3.1"
           />
         )}
-        {showLocalFields && (
-          <button
-            type="button"
-            onClick={() => void fetchAvailableModels(editApiProvider, resolvedEditApiUrl, editApiKey)}
-            disabled={modelsLoading}
-            className="px-3 py-2 rounded-lg text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-primary)] hover:text-[var(--color-text-primary)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-            title="Refresh available models from the server"
-          >
-            {modelsLoading ? 'Loading...' : 'Refresh models'}
-          </button>
-        )}
+        <button
+          type="button"
+          onClick={() => void fetchAvailableModels(editApiProvider, resolvedEditApiUrl, editApiKey)}
+          disabled={modelsLoading}
+          className="px-3 py-2 rounded-lg text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-primary)] hover:text-[var(--color-text-primary)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          title="Refresh available models from the server"
+        >
+          {modelsLoading ? 'Loading...' : 'Refresh models'}
+        </button>
       </div>
-      {showLocalFields && modelsLoading && (
+      {modelsLoading && (
         <p className="text-[10px] text-[var(--color-text-secondary)] mt-1">Loading models...</p>
       )}
       {modelsError && (
@@ -245,11 +249,6 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
               const nextHost = e.target.value;
               setEditHost(nextHost);
               setEditApiUrl(buildLocalProviderApiUrl(nextHost, editPort));
-              setModelsError(null);
-              if (modelsFetchTimerRef.current) clearTimeout(modelsFetchTimerRef.current);
-              modelsFetchTimerRef.current = setTimeout(() => {
-                void fetchAvailableModels(editApiProvider, latestUrlRef.current, editApiKey);
-              }, 500);
             }}
             placeholder="localhost"
           />
@@ -264,19 +263,11 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
               const nextPort = e.target.value;
               setEditPort(nextPort);
               setEditApiUrl(buildLocalProviderApiUrl(editHost, nextPort));
-              setModelsError(null);
-              if (modelsFetchTimerRef.current) clearTimeout(modelsFetchTimerRef.current);
-              modelsFetchTimerRef.current = setTimeout(() => {
-                void fetchAvailableModels(editApiProvider, latestUrlRef.current, editApiKey);
-              }, 500);
             }}
             placeholder="1234"
           />
         </div>
       </div>
-      <p className="text-[10px] text-[var(--color-text-secondary)]">
-        Chat requests use {resolvedEditApiUrl} and model discovery uses the same host and port.
-      </p>
     </>
   ) : null;
 
@@ -356,7 +347,7 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
     <div className="space-y-4">
       {providerSelector}
       {modelField}
-      {apiUrlField}
+      {!showLocalFields && apiUrlField}
       {hostPortFields}
       {apiKeyField}
       {maxTokensAndTemperatureRow}
@@ -424,7 +415,7 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
           </div>
           <div>
             <label className="block text-[10px] text-[var(--color-text-secondary)] mb-1">Model</label>
-            {showLocalFields && availableModels.length > 0 ? (
+            {availableModels.length > 0 ? (
               <div className="flex gap-2">
                 <select
                   className="flex-1 px-3 py-1.5 rounded text-xs font-mono bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
@@ -455,13 +446,13 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
               />
             )}
           </div>
-          {showLocalFields && modelsLoading && (
+          {modelsLoading && (
             <p className="text-[10px] text-[var(--color-text-secondary)]">Loading models...</p>
           )}
           {modelsError && (
             <p className="text-[10px] text-[var(--color-error)]">Error: {modelsError}</p>
           )}
-          {apiUrlField}
+          {!showLocalFields && apiUrlField}
           {hostPortFields}
           <div>
             <label className="block text-[10px] text-[var(--color-text-secondary)] mb-1">
