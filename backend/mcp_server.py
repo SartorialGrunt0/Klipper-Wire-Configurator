@@ -44,12 +44,24 @@ DOC_CATALOG_PATH = KLIPPER_DOCS_DIR
 CONFIG_REFERENCE_PATH = KLIPPER_DOCS_DIR / "Config_Reference.md"
 GCODE_MACRO_SUMMARY_PATH = KWC_CUSTOM_DOCS_DIR / "Klipper_GCode_Macro_AI_Summary.md"
 DOCS_SUMMARY_PATH = KWC_CUSTOM_DOCS_DIR / "Klipper_Docs_AI_Summary.md"
-# The system path for Klipper configs. Resolution priority: KLIPPER_CONFIG_PATH
-# env override, then the modern ~/printer_data/config layout (matches native
-# mode), then the legacy /home/pi/.klipper/config layout.
+# The import-time system path for Klipper configs (see resolve_config_path).
+# Handlers re-resolve per call via _system_config_path() so a path change
+# made in the frontend ("Open from Pi" → PUT /native/settings) takes effect
+# without a backend restart. Resolution priority: KLIPPER_CONFIG_PATH env
+# override, then the saved native setting, then the modern
+# ~/printer_data/config layout, then the legacy /home/pi/.klipper/config.
 SYSTEM_CONFIG_PATH = resolve_config_path()
 # Local fallback directory for imported configs when not running on a Pi.
 LOCAL_CONFIGS_DIR = BACKEND_DIR / "user_configs"
+
+
+def _system_config_path() -> Path:
+    """Resolve the system config dir per call so a path change made in the
+    frontend ("Open from Pi" → PUT /native/settings) takes effect without a
+    backend restart. Falls back to the import-time SYSTEM_CONFIG_PATH when
+    settings resolve to the default (env override / modern / legacy chain).
+    """
+    return resolve_config_path()
 
 
 # ── Constants ─────────────────────────────────────────────────────────
@@ -1465,8 +1477,9 @@ class McpServer:
 
         # Collect config files from both the system path and local fallback
         scan_paths: list[Path] = []
-        if SYSTEM_CONFIG_PATH.is_dir():
-            scan_paths.append(SYSTEM_CONFIG_PATH)
+        system_path = _system_config_path()
+        if system_path.is_dir():
+            scan_paths.append(system_path)
         if LOCAL_CONFIGS_DIR.is_dir():
             scan_paths.append(LOCAL_CONFIGS_DIR)
 
@@ -1581,14 +1594,15 @@ class McpServer:
         the scanned root so nested files are addressable by read_user_config.
         """
         scan_paths: list[Path] = []
-        if SYSTEM_CONFIG_PATH.is_dir():
-            scan_paths.append(SYSTEM_CONFIG_PATH)
+        system_path = _system_config_path()
+        if system_path.is_dir():
+            scan_paths.append(system_path)
         if LOCAL_CONFIGS_DIR.is_dir():
             scan_paths.append(LOCAL_CONFIGS_DIR)
 
         seen: dict[str, str] = {}
         for scan_dir in scan_paths:
-            label = "pi-native" if scan_dir == SYSTEM_CONFIG_PATH else "imported"
+            label = "pi-native" if scan_dir == system_path else "imported"
             try:
                 for cfg_file in scan_dir.rglob("*.cfg"):
                     rel = cfg_file.relative_to(scan_dir).as_posix()
@@ -1644,8 +1658,9 @@ class McpServer:
         scan_paths: list[Path] = []
         if LOCAL_CONFIGS_DIR.is_dir():
             scan_paths.append(LOCAL_CONFIGS_DIR)
-        if SYSTEM_CONFIG_PATH.is_dir():
-            scan_paths.append(SYSTEM_CONFIG_PATH)
+        system_path = _system_config_path()
+        if system_path.is_dir():
+            scan_paths.append(system_path)
 
         # First try exact match (basename or relative path like
         # configs/my_extra_configs/config.cfg)

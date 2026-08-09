@@ -17,7 +17,11 @@ rule).
 import os
 from pathlib import Path
 
-from services.native_services import get_default_config_path, is_native_platform
+from services.native_services import (
+    get_default_config_path,
+    is_native_platform,
+    load_settings,
+)
 
 BACKEND_DIR = Path(__file__).parent
 REFERENCE_DIR = BACKEND_DIR.parent / "reference"
@@ -36,7 +40,9 @@ def resolve_config_path() -> Path:
     """Resolve the Klipper config directory used by user-config tooling.
 
     Priority: KLIPPER_CONFIG_PATH env override (always wins), then the
-    modern ~/printer_data/config layout (same default as native mode via
+    saved native setting (the path the user picked in the "Open from Pi"
+    menu — load_settings reads settings.json), then the modern
+    ~/printer_data/config layout (same default as native mode via
     native_services.get_default_config_path), then the legacy
     /home/pi/.klipper/config layout. Falls back to the legacy path even
     when nothing exists, so dev checkouts keep the existing "no system
@@ -45,7 +51,14 @@ def resolve_config_path() -> Path:
     env_path = os.environ.get("KLIPPER_CONFIG_PATH")
     if env_path:
         return Path(env_path)
-    modern = Path(get_default_config_path())
+    # load_settings always returns a config_path (defaults to the modern
+    # path); only honor it when the user actually picked a different one in
+    # the "Open from Pi" menu. Otherwise fall through to the layout checks.
+    default = get_default_config_path()
+    saved = load_settings().get("config_path")
+    if saved and saved != default:
+        return Path(saved)
+    modern = Path(default)
     if modern.is_dir():
         return modern
     return Path("/home/pi/.klipper/config")

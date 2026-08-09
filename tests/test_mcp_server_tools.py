@@ -69,6 +69,9 @@ def _server(tmp_path):
     # Isolated user config storage.
     mcp_server.LOCAL_CONFIGS_DIR = tmp_path / "user_configs"
     mcp_server.SYSTEM_CONFIG_PATH = tmp_path / "system_config"
+    # Handlers resolve per call via _system_config_path(); point it at the
+    # isolated dir so tests don't read the real host settings.
+    mcp_server._system_config_path = lambda: tmp_path / "system_config"
     mcp_server.CONFIG_EXAMPLES_DIR = tmp_path / "config"
     (tmp_path / "config").mkdir(parents=True, exist_ok=True)
     return server, tmp_path

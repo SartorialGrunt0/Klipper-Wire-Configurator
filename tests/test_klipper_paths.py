@@ -21,6 +21,10 @@ def test_env_override_wins(tmp_path, monkeypatch):
     modern = tmp_path / "modern"
     modern.mkdir()
     monkeypatch.setattr(klipper_paths, "get_default_config_path", lambda: str(modern))
+    # Even when a saved native setting exists, the env override wins.
+    saved = tmp_path / "saved"
+    saved.mkdir()
+    monkeypatch.setattr(klipper_paths, "load_settings", lambda: {"config_path": str(saved)})
     assert klipper_paths.resolve_config_path() == override
 
 
@@ -28,6 +32,34 @@ def test_prefers_modern_layout(tmp_path, monkeypatch):
     modern = tmp_path / "printer_data" / "config"
     modern.mkdir(parents=True)
     monkeypatch.setattr(klipper_paths, "get_default_config_path", lambda: str(modern))
+    # No saved override -> modern layout.
+    monkeypatch.setattr(klipper_paths, "load_settings", lambda: {"config_path": str(modern)})
+    monkeypatch.delenv("KLIPPER_CONFIG_PATH", raising=False)
+    assert klipper_paths.resolve_config_path() == modern
+
+
+def test_saved_native_setting_wins_over_modern(tmp_path, monkeypatch):
+    # The user picked a custom path in the "Open from Pi" menu (settings.json
+    # has a config_path different from the modern default) — it must win over
+    # the automatic modern layout so the AI tools scan the same directory the
+    # native file browser uses.
+    modern = tmp_path / "printer_data" / "config"
+    modern.mkdir(parents=True)
+    saved = tmp_path / "custom_config"
+    saved.mkdir()
+    monkeypatch.setattr(klipper_paths, "get_default_config_path", lambda: str(modern))
+    monkeypatch.setattr(klipper_paths, "load_settings", lambda: {"config_path": str(saved)})
+    monkeypatch.delenv("KLIPPER_CONFIG_PATH", raising=False)
+    assert klipper_paths.resolve_config_path() == saved
+
+
+def test_saved_native_setting_equal_to_default_falls_through(tmp_path, monkeypatch):
+    # settings.json may hold the default value explicitly; it must not change
+    # resolution (modern layout when present, legacy fallback otherwise).
+    modern = tmp_path / "printer_data" / "config"
+    modern.mkdir(parents=True)
+    monkeypatch.setattr(klipper_paths, "get_default_config_path", lambda: str(modern))
+    monkeypatch.setattr(klipper_paths, "load_settings", lambda: {"config_path": str(modern)})
     monkeypatch.delenv("KLIPPER_CONFIG_PATH", raising=False)
     assert klipper_paths.resolve_config_path() == modern
 
@@ -37,5 +69,7 @@ def test_falls_back_to_legacy_layout(tmp_path, monkeypatch):
     # it also does not exist, preserving "no system configs" behavior.
     missing = tmp_path / "nope"
     monkeypatch.setattr(klipper_paths, "get_default_config_path", lambda: str(missing))
+    # Saved setting absent/equal to default -> legacy fallback applies.
+    monkeypatch.setattr(klipper_paths, "load_settings", lambda: {"config_path": str(missing)})
     monkeypatch.delenv("KLIPPER_CONFIG_PATH", raising=False)
     assert klipper_paths.resolve_config_path() == Path("/home/pi/.klipper/config")
