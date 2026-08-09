@@ -79,6 +79,11 @@ export default function OpenFromPiDialog({ onClose }: OpenFromPiDialogProps) {
   }, [pathInput, setConfigPath, loadFiles]);
 
   const handleImport = useCallback(async () => {
+    // Persist the typed path first so every downstream operation (diff,
+    // Apply/Save, Revert, AI tools) maps back to the path the user entered,
+    // even when they did not click "Browse" first.
+    setConfigPath(pathInput);
+
     const filenames = Object.entries(selected)
       .filter(([, v]) => v)
       .map(([k]) => k);
