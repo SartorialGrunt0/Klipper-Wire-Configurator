@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback } from 'react';
+import JSZip from 'jszip';
 import { useConfigStore } from '../../stores/configStore';
 import { useGraphStore } from '../../stores/graphStore';
 import * as api from '../../services/api';
@@ -158,11 +159,36 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
   }, [setConfigFile, setValidation]);
 
   const handleFiles = useCallback(async (files: File[], isFolder: boolean) => {
-    // Filter to only .cfg files
-    const cfgFiles = files.filter((f) => f.name.endsWith('.cfg'));
+    // Split picks into direct .cfg files and .zip archives
+    const cfgFiles: File[] = [];
+    const zipFiles: File[] = [];
+    for (const f of files) {
+      if (f.name.endsWith('.zip')) zipFiles.push(f);
+      else if (f.name.endsWith('.cfg')) cfgFiles.push(f);
+    }
+
+    // Extract .cfg entries from any zip archives (flatten paths — the
+    // backend strips path prefixes anyway, e.g. config/printer.cfg → printer.cfg)
+    for (const zipFile of zipFiles) {
+      try {
+        const zip = await JSZip.loadAsync(zipFile);
+        const cfgEntries = Object.values(zip.files).filter(
+          (e) => !e.dir && e.name.endsWith('.cfg'),
+        );
+        for (const entry of cfgEntries) {
+          const blob = await entry.async('blob');
+          const basename = entry.name.split('/').pop() ?? entry.name;
+          cfgFiles.push(new File([blob], basename, { type: 'text/plain' }));
+        }
+      } catch {
+        // Unreadable/corrupt zip — fall through; if no .cfg files survive,
+        // the no-cfg error below surfaces it.
+      }
+    }
+
     if (cfgFiles.length === 0) {
       setStatus('error');
-      setMessage('No .cfg files found. Only Klipper .cfg files can be imported.');
+      setMessage('No .cfg files found. Only Klipper .cfg files (or a .zip archive containing them) can be imported.');
       return;
     }
 
@@ -263,7 +289,7 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
         handleFiles(allFiles, isFolder);
       } else {
         setStatus('error');
-        setMessage('No files found. Drop .cfg files or a config folder.');
+        setMessage('No files found. Drop .cfg files, a config folder, or a .zip archive.');
       }
     },
     [handleFiles],
@@ -299,7 +325,7 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
               <path d="M5 25v8a2 2 0 002 2h26a2 2 0 002-2v-8" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
             </svg>
             <p className="text-sm text-[var(--color-text-secondary)] mb-2">
-              Drop config files or folder here
+              Drop config files, a folder, or a .zip archive here
             </p>
             <p className="text-[10px] text-[var(--color-text-secondary)] opacity-60 mb-3">
               Import your entire Klipper config directory — printer.cfg + all included .cfg files
@@ -326,7 +352,7 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
           <input
             ref={fileInputRef}
             type="file"
-            accept=".cfg"
+            accept=".cfg,.zip"
             multiple
             className="hidden"
             onChange={(e) => {

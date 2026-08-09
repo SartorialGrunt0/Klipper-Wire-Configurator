@@ -43,7 +43,7 @@ export default function ExportDialog({ onClose }: ExportDialogProps) {
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set(filenames));
   const [exportStatus, setExportStatus] = useState<'idle' | 'loading' | 'error'>('idle');
   const [exportMessage, setExportMessage] = useState('');
-  const [exportFormat, setExportFormat] = useState<'files' | 'zip'>('files');
+  const [exportFormat, setExportFormat] = useState<'files' | 'zip'>('zip');
 
   // Current exported texts (for diffing)
   const [currentTexts, setCurrentTexts] = useState<Record<string, string>>({});
