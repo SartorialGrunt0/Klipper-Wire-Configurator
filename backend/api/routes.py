@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import List
 
@@ -46,14 +45,10 @@ from klipper_paths import CONFIG_EXAMPLES_DIR, KLIPPER_DOCS_DIR, REFERENCE_DIR  
 
 PROJECTS_DIR = Path(__file__).parent.parent / "projects"
 
-# Where to persist imported config files for MCP tool access.
-# On a Pi with Klipper installed, saves to the system config path.
-# Otherwise, falls back to a local directory.
-_CONFIG_SYSTEM_PATH = Path(os.environ.get("KLIPPER_CONFIG_PATH", "/home/pi/.klipper/config"))
-if _CONFIG_SYSTEM_PATH.is_dir():
-    CONFIG_STORAGE_DIR = _CONFIG_SYSTEM_PATH
-else:
-    CONFIG_STORAGE_DIR = Path(__file__).parent.parent / "user_configs"
+# Local storage dir for browser-mode saves (non-native Save).
+# Import never writes to disk — only the Save/Apply flow persists files —
+# so this is deliberately KWC's own store, never the system config path.
+CONFIG_STORAGE_DIR = Path(__file__).parent.parent / "user_configs"
 
 
 def _resolve_config_path(filename: str) -> Path | None:
@@ -86,11 +81,12 @@ def _resolve_klipper_doc_path(filename: str) -> Path:
 
 
 def _save_config_file(filename: str, text: str) -> None:
-    """Persist an imported config file to the config storage directory.
+    """Persist a config file to the local config storage directory.
 
-    Creates the directory if it doesn't exist. Files are available to the
-    MCP server's search_user_configs / read_user_config tools immediately.
-    Uses binary mode to preserve exact original line endings.
+    Used by browser-mode Save (/configs/save) only. Import never writes to
+    disk — the Save/Apply flow is the only thing that persists files.
+    Creates the directory if it doesn't exist. Uses binary mode to preserve
+    exact original line endings.
     """
     try:
         CONFIG_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
@@ -107,8 +103,6 @@ async def import_config(file: UploadFile = File(...)):
     text = content.decode("utf-8", errors="replace")
     # Strip any path prefix the browser may include (e.g. "config/printer.cfg" → "printer.cfg")
     filename = Path(file.filename or "printer.cfg").name or "printer.cfg"
-
-    _save_config_file(filename, text)
 
     config = parse_config(text, filename)
     validation = validate_config(config)
@@ -141,9 +135,6 @@ async def import_project(files: List[UploadFile] = File(...)):
         # Only process .cfg files
         if not filename.endswith(".cfg"):
             continue
-
-        # Persist to disk for MCP tool access
-        _save_config_file(filename, text)
 
         config = parse_config(text, filename)
         configs[filename] = config

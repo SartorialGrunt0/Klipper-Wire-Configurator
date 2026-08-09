@@ -104,8 +104,32 @@ def test_import_single_cfg(monkeypatch, tmp_path):
     assert 'mcu' in section_types
     assert 'validation' in body
     assert 'board_info' in body
-    # The imported file is persisted for MCP tool access.
-    assert (tmp_path / 'printer.cfg').exists()
+    # Imports are staged in the session only — nothing may be written to disk.
+    assert not (tmp_path / 'printer.cfg').exists()
+
+
+def test_import_single_cfg_writes_nothing_to_disk(monkeypatch, tmp_path):
+    monkeypatch.setattr(routes, 'CONFIG_STORAGE_DIR', tmp_path)
+
+    response = client.post(
+        '/api/import',
+        files={'file': ('printer.cfg', SIMPLE_CFG.encode(), 'text/plain')},
+    )
+
+    assert response.status_code == 200
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_import_project_writes_nothing_to_disk(monkeypatch, tmp_path):
+    monkeypatch.setattr(routes, 'CONFIG_STORAGE_DIR', tmp_path)
+
+    response = client.post(
+        '/api/import-project',
+        files=[('files', ('printer.cfg', PROJECT_CFG.encode(), 'text/plain'))],
+    )
+
+    assert response.status_code == 200
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_import_project_multi_file(monkeypatch, tmp_path):
