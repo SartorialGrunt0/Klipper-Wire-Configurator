@@ -71,7 +71,7 @@ export default function OpenFromPiDialog({ onClose }: OpenFromPiDialogProps) {
 
   // Load the initial path's files on mount only. Reloads happen explicitly
   // in handlePathChange; auto-reloading on every configPath change would
-  // double-fetch during Browse (setConfigPath fires the effect AND the
+  // double-fetch during Refresh (setConfigPath fires the effect AND the
   // handler calls loadFiles) and race Import's status transitions.
   useEffect(() => {
     loadFiles(configPath);
@@ -86,7 +86,7 @@ export default function OpenFromPiDialog({ onClose }: OpenFromPiDialogProps) {
   const handleImport = useCallback(async () => {
     // Persist the typed path first so every downstream operation (diff,
     // Apply/Save, Revert, AI tools) maps back to the path the user entered,
-    // even when they did not click "Browse" first.
+    // even when they did not click "Refresh" first.
     setConfigPath(pathInput);
 
     const filenames = Object.entries(selected)
@@ -209,7 +209,7 @@ export default function OpenFromPiDialog({ onClose }: OpenFromPiDialogProps) {
               onClick={handlePathChange}
               className="px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] transition-colors"
             >
-              Browse
+              Refresh
             </button>
           </div>
         </div>
