@@ -792,21 +792,37 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
           </div>
         </div>
         <div className="flex-1 overflow-y-auto py-1">
-          {filenames.map((fn) => (
-            <button
-              key={fn}
-              onClick={() => handleFileSwitch(fn)}
-              onContextMenu={(e) => handleFileContextMenu(e, fn)}
-              title={fn}
-              className={`w-full text-left px-3 py-1.5 text-xs font-medium transition-colors truncate ${
-                fn === activeFile
-                  ? 'bg-[var(--color-accent)] text-[var(--color-bg-primary)]'
-                  : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text-primary)]'
-              }`}
-            >
-              {fn}
-            </button>
-          ))}
+          {filenames.map((fn) => {
+            const v = validation[fn];
+            const fileErrors = v?.errors.filter((e) => e.severity === 'error') ?? [];
+            const fileWarnings = v?.errors.filter((e) => e.severity === 'warning') ?? [];
+            return (
+              <button
+                key={fn}
+                onClick={() => handleFileSwitch(fn)}
+                onContextMenu={(e) => handleFileContextMenu(e, fn)}
+                title={fn}
+                className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs font-medium transition-colors ${
+                  fn === activeFile
+                    ? 'bg-[var(--color-accent)] text-[var(--color-bg-primary)]'
+                    : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text-primary)]'
+                }`}
+              >
+                <span className="min-w-0 flex-1 truncate">{fn}</span>
+                {fileErrors.length > 0 ? (
+                  <span
+                    className="w-2 h-2 rounded-full bg-[var(--color-error)] shrink-0"
+                    title={`${fileErrors.length} error${fileErrors.length > 1 ? 's' : ''}`}
+                  />
+                ) : fileWarnings.length > 0 ? (
+                  <span
+                    className="w-2 h-2 rounded-full bg-[var(--color-warning)] shrink-0"
+                    title={`${fileWarnings.length} warning${fileWarnings.length > 1 ? 's' : ''}`}
+                  />
+                ) : null}
+              </button>
+            );
+          })}
         </div>
       </div>
       )}
@@ -1221,6 +1237,10 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
             {sectionEntries.map((entry) => {
               const isExpanded = !!expandedSections[entry.id];
               const hasParams = entry.params.length > 0;
+              const activeValidation = validation[activeFile];
+              const sectionIssues = (activeValidation?.errors ?? []).filter((e) => e.section === entry.title);
+              const hasSecError = sectionIssues.some((e) => e.severity === 'error');
+              const hasSecWarning = sectionIssues.some((e) => e.severity === 'warning');
               return (
                 <div key={entry.id} className="px-2 py-0.5">
                   <div className="flex items-start gap-1">
@@ -1237,10 +1257,15 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
                     </button>
                     <button
                       onClick={() => jumpToLine(entry.line)}
-                      className={`min-w-0 flex-1 rounded-md px-2 py-1 text-left text-xs hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text-primary)] ${entry.isCommented ? 'text-[var(--color-text-secondary)]/70' : 'text-[var(--color-text-secondary)]'}`}
+                      className={`min-w-0 flex-1 flex items-center gap-2 rounded-md px-2 py-1 text-left text-xs hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text-primary)] ${entry.isCommented ? 'text-[var(--color-text-secondary)]/70' : 'text-[var(--color-text-secondary)]'}`}
                     >
-                      <span className="mr-1 font-mono text-[10px] text-[var(--color-accent)]">{entry.line}</span>
-                      <span className="truncate">{entry.title}</span>
+                      <span className="shrink-0 font-mono text-[10px] text-[var(--color-accent)]">{entry.line}</span>
+                      <span className="min-w-0 flex-1 truncate">{entry.title}</span>
+                      {hasSecError ? (
+                        <span className="w-2 h-2 rounded-full bg-[var(--color-error)] shrink-0" title="This section has validation errors" />
+                      ) : hasSecWarning ? (
+                        <span className="w-2 h-2 rounded-full bg-[var(--color-warning)] shrink-0" title="This section has warnings" />
+                      ) : null}
                     </button>
                   </div>
                   {isExpanded && hasParams && (

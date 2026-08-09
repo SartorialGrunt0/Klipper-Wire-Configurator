@@ -248,7 +248,7 @@ export default function Toolbar({
       return 'bg-red-600 text-white hover:bg-red-700';
     }
     if (hasWarnings) {
-      return 'bg-orange-500 text-white hover:bg-orange-600';
+      return 'bg-[var(--color-warning)] text-[var(--color-bg-primary)] hover:opacity-90';
     }
     // Valid changes
     return 'bg-green-600 text-white hover:bg-green-700';
