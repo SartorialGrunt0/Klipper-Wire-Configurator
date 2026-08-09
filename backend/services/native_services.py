@@ -221,6 +221,23 @@ def get_default_config_path() -> str:
     return f"/home/{user}/printer_data/config"
 
 
+# Klipper's SAVE_CONFIG writes timestamped backups (printer-YYYYMMDD_HHMMSS.cfg)
+# into the config dir. KWC treats those as noise: they must never appear in
+# config listings, get auto-opened, or be offered to the AI as editable files.
+# The pattern is deliberately narrow — 8-digit date + underscore + digits —
+# so example configs named printer-<model>-<year>.cfg never match.
+_BACKUP_CONFIG_RE = re.compile(r"^printer-\d{8}_\d+\.cfg$", re.IGNORECASE)
+
+
+def is_backup_config_file(name: str) -> bool:
+    """Return True when ``name`` is a Klipper SAVE_CONFIG backup file.
+
+    Applies to the basename so paths like ``backups/printer-20250810_142619.cfg``
+    are matched the same as the bare filename.
+    """
+    return bool(_BACKUP_CONFIG_RE.match(Path(name).name))
+
+
 def list_config_files(config_dir: str) -> list[dict]:
     """List .cfg files in the given directory and its subdirectories.
 
@@ -236,6 +253,11 @@ def list_config_files(config_dir: str) -> list[dict]:
     for f in sorted(path.rglob("*.cfg")):
         if not f.is_file():
             continue
+        rel = f.relative_to(path)
+        # Klipper SAVE_CONFIG backups (printer-YYYYMMDD_HHMMSS.cfg) are noise —
+        # exclude them from listings so no UI or AI surface ever offers them.
+        if is_backup_config_file(rel.as_posix()):
+            continue
         # Guard against symlinks inside the config dir pointing outside it.
         # Resolve once and reuse for both the containment check and stat calls.
         resolved_f = f.resolve()
@@ -243,7 +265,6 @@ def list_config_files(config_dir: str) -> list[dict]:
             resolved_f.relative_to(resolved_base)
         except ValueError:
             continue
-        rel = f.relative_to(path)
         stat = resolved_f.stat()
         files.append({
             "name": rel.as_posix(),

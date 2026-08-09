@@ -5,6 +5,7 @@ import { useMacroDesignerStore } from '../../stores/macroDesignerStore';
 import { useNativeStore } from '../../stores/nativeStore';
 import * as api from '../../services/api';
 import { buildProjectGraph } from '../../utils/graphBuilder';
+import { isBackupConfigFilename } from '../../utils/backupFiles';
 import type { ConfigFile, ValidationResult } from '../../types/config';
 
 interface OpenFromPiDialogProps {
@@ -45,9 +46,8 @@ export default function OpenFromPiDialog({ onClose }: OpenFromPiDialogProps) {
     const basename = (p: string) => p.split('/').pop() ?? p;
     try {
       const result = await api.listNativeConfigFiles(path);
-      // Filter out backup files like printer-20251130_014641.cfg
-      const isBackup = (name: string) => /^printer-\d{8}_\d+\.cfg$/i.test(name);
-      const visible = result.files.filter((f) => !isBackup(basename(f.name)));
+      // Filter out Klipper SAVE_CONFIG backups like printer-20251130_014641.cfg
+      const visible = result.files.filter((f) => !isBackupConfigFilename(f.name));
       setFiles(visible);
       // Auto-select all .cfg files, deselect known non-klipper ones
       const sel: Record<string, boolean> = {};

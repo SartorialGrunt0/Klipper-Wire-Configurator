@@ -35,6 +35,7 @@ import MacroDesignerDialog from './components/dialogs/MacroDesignerDialog';
 import type { AppEdge, AppNode, ValidationStatus } from './types/graph';
 import type { MacroDesignerPersistedState } from './types/macroDesigner';
 import { combineValidationStatuses } from './utils/validationStatus';
+import { isBackupConfigFilename } from './utils/backupFiles';
 import { useMacroDesignerStore } from './stores/macroDesignerStore';
 
 function getSectionValidationKey(configFile: string | undefined, sectionHeader: string): string {
@@ -206,8 +207,8 @@ export default function App() {
             // Auto-select .cfg files, skip non-klipper and backup files
             const filenames = cfgFiles
               .filter((f) => {
+                if (isBackupConfigFilename(f.name)) return false;
                 const name = f.name.toLowerCase();
-                if (/^printer-\d{8}_\d+\.cfg$/i.test(name)) return false;
                 return !(
                   name === 'moonraker.conf' || name === 'crowsnest.conf' ||
                   name === 'klipperscreen.conf' || name === 'sonar.conf' ||
