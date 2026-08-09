@@ -200,6 +200,10 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
   const [diffLoading, setDiffLoading] = useState(true);
 
   const hasAnyOriginals = filenames.some((fn) => fn in originalTexts);
+  // New files (imported but never saved/Pi-loaded) have no original — show
+  // them with a "new file" badge in the diff panel instead of hiding it.
+  const hasAnyNewFiles = filenames.some((fn) => !(fn in originalTexts));
+  const showDiffPanel = hasAnyOriginals || hasAnyNewFiles;
 
   // Export all configs once on mount to get current text for diff.
   useEffect(() => {
@@ -464,7 +468,7 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
       <div
         className="bg-[var(--color-bg-secondary)] rounded-xl shadow-2xl flex flex-col border border-[var(--color-bg-tertiary)] overflow-hidden"
-        style={{ width: hasAnyOriginals ? 900 : 480, maxHeight: '85vh' }}
+        style={{ width: showDiffPanel ? 900 : 480, maxHeight: '85vh' }}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -500,7 +504,7 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
         {/* Body */}
         <div className="flex flex-1 overflow-hidden">
           {/* Left: file list */}
-          <div className={`flex flex-col ${hasAnyOriginals ? 'w-52 shrink-0 border-r border-[var(--color-bg-tertiary)]' : 'flex-1'}`}>
+          <div className={`flex flex-col ${showDiffPanel ? 'w-52 shrink-0 border-r border-[var(--color-bg-tertiary)]' : 'flex-1'}`}>
             <div className="flex-1 overflow-y-auto p-4">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-xs text-[var(--color-text-secondary)]">
@@ -537,8 +541,8 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
             </div>
           </div>
 
-          {/* Right: diff panel (only when originals exist) */}
-          {hasAnyOriginals && (
+          {/* Right: diff panel (when originals exist or files are new) */}
+          {showDiffPanel && (
             <div className="flex-1 overflow-auto p-4 space-y-4">
               {diffLoading ? (
                 <p className="text-xs text-[var(--color-text-secondary)] text-center py-8">Generating diff...</p>

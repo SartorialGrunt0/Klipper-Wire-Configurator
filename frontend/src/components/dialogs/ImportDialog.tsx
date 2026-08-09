@@ -3,6 +3,7 @@ import { useConfigStore } from '../../stores/configStore';
 import { useGraphStore } from '../../stores/graphStore';
 import * as api from '../../services/api';
 import { buildProjectGraph } from '../../utils/graphBuilder';
+import { buildInitialSelection, findOverlappingFiles } from '../../utils/importSelection';
 import type { ConfigFile } from '../../types/config';
 
 interface ImportDialogProps {
@@ -33,13 +34,18 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
   const [message, setMessage] = useState('');
   const [results, setResults] = useState<ImportResult[]>([]);
   const [projectSummary, setProjectSummary] = useState<ProjectSummary | null>(null);
-  const [clearExisting, setClearExisting] = useState(true);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
 
-  // File selection state — for folder imports, let user deselect files
+  // File selection state — staged file list lets user deselect before import
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [fileSelection, setFileSelection] = useState<Record<string, boolean>>({});
+
+  // Files awaiting overwrite confirmation (name collision with loaded project)
+  const [overwriteConfirm, setOverwriteConfirm] = useState<{
+    files: File[];
+    overlaps: string[];
+  } | null>(null);
 
   const [expandedFile, setExpandedFile] = useState<string | null>(null);
   const { setConfigFile, setValidation } = useConfigStore();
@@ -61,17 +67,16 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
         } catch { /* proceed without schemas */ }
       }
 
-      // Clear existing data if requested
-      if (clearExisting) {
-        useConfigStore.getState().clearAll();
-        useGraphStore.getState().clearGraph();
-      }
-
+      // Import NEVER clears the existing project. Imported files merge into
+      // whatever is already loaded; name collisions were confirmed above.
       // Use project-level import for all cases (single or multi-file)
       const projectResult = await api.importProject(files);
 
       // Store all parsed configs in configStore
-      const allConfigs: Record<string, ConfigFile> = {};
+      // Seed with existing configs so the rebuilt graph shows old + new files
+      const allConfigs: Record<string, ConfigFile> = {
+        ...useConfigStore.getState().configFiles,
+      };
       const importResults: ImportResult[] = [];
 
       for (const [filename, fileResult] of Object.entries(projectResult.files)) {
@@ -79,10 +84,10 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
         setValidation(filename, fileResult.validation);
         allConfigs[filename] = fileResult.config;
 
-        // Capture original text for diff comparison (use raw_text from parser)
-        if (fileResult.config.raw_text) {
-          useConfigStore.getState().setOriginalText(filename, fileResult.config.raw_text);
-        }
+        // NOTE: do NOT set originalText here. Import stages files into the
+        // session as unsaved changes; the diff baseline must remain whatever
+        // was loaded from the Pi (Open from Pi), so Save shows import-vs-Pi.
+        // New files keep no original → they render as "new file" in Save.
 
         // Find MCU names in this file
         const mcuNames = projectResult.project.mcus
@@ -108,9 +113,11 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
         });
       }
 
-      // Build unified project graph from all configs at once
+      // Build unified project graph from all configs at once (existing + new)
       const graphStore = useGraphStore.getState();
-      const allValidations: Record<string, import('../../types/config').ValidationResult> = {};
+      const allValidations: Record<string, import('../../types/config').ValidationResult> = {
+        ...useConfigStore.getState().validation,
+      };
       for (const [filename, fileResult] of Object.entries(projectResult.files)) {
         allValidations[filename] = fileResult.validation;
       }
@@ -148,7 +155,7 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
       setStatus('error');
       setMessage(err instanceof Error ? err.message : 'Import failed');
     }
-  }, [setConfigFile, setValidation, clearExisting]);
+  }, [setConfigFile, setValidation]);
 
   const handleFiles = useCallback(async (files: File[], isFolder: boolean) => {
     // Filter to only .cfg files
@@ -159,27 +166,15 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
       return;
     }
 
-    // For folder imports with multiple files, show selection UI first
-    if (isFolder && cfgFiles.length > 1) {
-      setPendingFiles(cfgFiles);
-      const sel: Record<string, boolean> = {};
-      for (const f of cfgFiles) {
-        // Auto-deselect known non-klipper config files
-        const name = f.name.toLowerCase();
-        const skip = name === 'moonraker.conf' || name === 'crowsnest.conf' ||
-                     name === 'klipperscreen.conf' || name === 'sonar.conf' ||
-                     name === 'webcam.txt' || name.endsWith('.bak') ||
-                     name.endsWith('.old');
-        sel[f.name] = !skip;
-      }
-      setFileSelection(sel);
-      setStatus('selecting');
-      setMessage(`Found ${cfgFiles.length} .cfg files. Deselect any you don't want to import.`);
-      return;
-    }
-
-    doImport(cfgFiles);
-  }, [doImport]);
+    // Always show the staged file list with per-file checkboxes (checked by
+    // default) so the user can deselect before importing — for single files,
+    // multi-file picks, drag-drop, and folders alike.
+    setOverwriteConfirm(null);
+    setPendingFiles(cfgFiles);
+    setFileSelection(buildInitialSelection(cfgFiles.map((f) => f.name)));
+    setStatus('selecting');
+    setMessage(`Found ${cfgFiles.length} .cfg file${cfgFiles.length > 1 ? 's' : ''}. Deselect any you don't want to import.`);
+  }, []);
 
   const handleConfirmSelection = useCallback(() => {
     const selectedFiles = pendingFiles.filter((f) => fileSelection[f.name] !== false);
@@ -188,8 +183,31 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
       setMessage('No files selected for import.');
       return;
     }
+
+    // If any selected file already exists in the loaded project, require an
+    // explicit overwrite confirmation listing exactly which files collide.
+    const overlaps = findOverlappingFiles(
+      fileSelection,
+      Object.keys(useConfigStore.getState().configFiles),
+    );
+    if (overlaps.length > 0) {
+      setOverwriteConfirm({ files: selectedFiles, overlaps });
+      return;
+    }
+
     doImport(selectedFiles);
   }, [pendingFiles, fileSelection, doImport]);
+
+  const confirmOverwrite = useCallback(() => {
+    if (!overwriteConfirm) return;
+    const { files } = overwriteConfirm;
+    setOverwriteConfirm(null);
+    doImport(files);
+  }, [overwriteConfirm, doImport]);
+
+  const cancelOverwrite = useCallback(() => {
+    setOverwriteConfirm(null);
+  }, []);
 
   const toggleFile = useCallback((filename: string) => {
     setFileSelection((prev) => ({ ...prev, [filename]: !prev[filename] }));
@@ -265,19 +283,6 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
         </div>
 
         <div className="p-6">
-          {/* Clear existing toggle */}
-          <label className="flex items-center gap-2 mb-4 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={clearExisting}
-              onChange={(e) => setClearExisting(e.target.checked)}
-              className="rounded border-[var(--color-bg-tertiary)]"
-            />
-            <span className="text-xs text-[var(--color-text-secondary)]">
-              Clear existing project before importing
-            </span>
-          </label>
-
           {/* Drop zone */}
           <div
             onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
@@ -343,7 +348,7 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
             }}
           />
 
-          {/* File selection UI — shown when importing a folder */}
+          {/* File selection UI — shown for every import so files can be deselected */}
           {status === 'selecting' && pendingFiles.length > 0 && (
             <div className="mt-4">
               <div className="flex items-center justify-between mb-2">
@@ -378,13 +383,48 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
                   );
                 })}
               </div>
-              <div className="flex justify-end mt-3">
-                <button
-                  onClick={handleConfirmSelection}
-                  className="px-4 py-2 rounded-lg text-xs font-medium bg-[var(--color-accent)] text-white hover:opacity-90 transition-opacity"
-                >
-                  Import {Object.values(fileSelection).filter(Boolean).length} Files
-                </button>
+              {/* Overwrite confirmation — a selected file already exists in the project */}
+              {overwriteConfirm && (
+                <div className="mt-3 p-3 rounded-lg bg-amber-500/10 border border-amber-500/30">
+                  <p className="text-xs text-amber-400 font-medium mb-1.5">
+                    {overwriteConfirm.overlaps.length} file{overwriteConfirm.overlaps.length !== 1 ? 's' : ''} already exist in this project and will be overwritten:
+                  </p>
+                  <div className="max-h-24 overflow-y-auto space-y-0.5">
+                    {overwriteConfirm.overlaps.map((name) => (
+                      <div key={name} className="text-xs font-mono text-[var(--color-text-primary)]">
+                        {name}
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-[var(--color-text-secondary)] mt-1.5 opacity-70">
+                    This stages the imported files as unsaved changes — nothing is written to disk until you Save.
+                  </p>
+                </div>
+              )}
+              <div className="flex justify-end gap-2 mt-3">
+                {overwriteConfirm ? (
+                  <>
+                    <button
+                      onClick={cancelOverwrite}
+                      className="px-4 py-2 rounded-lg text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-primary)] transition-colors"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={confirmOverwrite}
+                      className="px-4 py-2 rounded-lg text-xs font-medium bg-amber-500 text-white hover:bg-amber-600 transition-colors"
+                    >
+                      Overwrite {overwriteConfirm.overlaps.length} & Import
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    onClick={handleConfirmSelection}
+                    className="px-4 py-2 rounded-lg text-xs font-medium bg-[var(--color-accent)] text-white hover:opacity-90 transition-opacity"
+                  >
+                    Import {Object.values(fileSelection).filter(Boolean).length} Files
+                  </button>
+                )}
               </div>
             </div>
           )}
