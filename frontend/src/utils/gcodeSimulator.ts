@@ -625,6 +625,8 @@ type TemplateStaticContext = {
     axis_minimum: Record<string, number>;
     axis_maximum: Record<string, number>;
   };
+  homePosition?: Record<string, number>;
+  livePosition?: () => { x: number; y: number; z: number; e: number };
 };
 
 type TemplateLineSegment =
@@ -778,6 +780,7 @@ function buildTemplateStaticContext(
   allMacros: MacroSourceItem[],
   configFiles?: Record<string, ConfigFile>,
   profile?: MachineProfile,
+  livePosition?: () => { x: number; y: number; z: number; e: number },
 ): TemplateStaticContext {
   const printerObjects: Record<string, unknown> = {};
   const configSections: Record<string, unknown> = {};
@@ -787,6 +790,9 @@ function buildTemplateStaticContext(
         axis_minimum: { x: profile.minX, y: profile.minY, z: profile.minZ },
         axis_maximum: { x: profile.maxX, y: profile.maxY, z: profile.maxZ },
       }
+    : undefined;
+  const homePosition = profile
+    ? { x: profile.homeX, y: profile.homeY, z: profile.homeZ }
     : undefined;
 
   if (configFiles) {
@@ -815,7 +821,7 @@ function buildTemplateStaticContext(
     });
   });
 
-  return { printerObjects, configSections, machineBounds };
+  return { printerObjects, configSections, machineBounds, homePosition, livePosition };
 }
 
 function createInitialPlannerState(allMacros: MacroSourceItem[]): PlannerState {
@@ -1056,7 +1062,7 @@ function stripEnclosingParens(expression: string): string {
   return trimmed;
 }
 
-function splitTopLevelByKeyword(expression: string, keyword: 'and' | 'or'): string[] {
+function splitTopLevelByKeyword(expression: string, keyword: 'and' | 'or' | 'else' | 'if'): string[] {
   const parts: string[] = [];
   let start = 0;
   let depthParen = 0;
@@ -1371,6 +1377,7 @@ function buildTemplatePrinterContext(
     homed_axes: getHomedAxesString(plannerState.homedAxes),
     home_axes: getHomedAxesString(plannerState.homedAxes),
     extruder: plannerState.activeExtruder,
+    ...(staticContext.livePosition ? { position: staticContext.livePosition() } : {}),
     ...(staticContext.machineBounds
       ? {
           axis_minimum: staticContext.machineBounds.axis_minimum,
@@ -1382,6 +1389,24 @@ function buildTemplatePrinterContext(
     ...asRecord(printer.gcode_move),
     absolute_coordinates: plannerState.absoluteMoves,
     absolute_extrude: plannerState.absoluteExtrusion,
+    ...(staticContext.homePosition ? { homing_origin: staticContext.homePosition } : {}),
+  });
+  setContextVariants(printer, 'print_stats', {
+    ...asRecord(printer.print_stats),
+    state: 'standby',
+    info: {
+      ...asRecord(asRecord(printer.print_stats).info),
+      current_layer: null,
+      current_speed: 0,
+    },
+  });
+  setContextVariants(printer, 'idle_timeout', {
+    ...asRecord(printer.idle_timeout),
+    state: 'Idle',
+  });
+  setContextVariants(printer, 'quad_gantry_level', {
+    ...asRecord(printer.quad_gantry_level),
+    applied: false,
   });
   setContextVariants(printer, 'fan', {
     ...asRecord(printer.fan),
@@ -1631,6 +1656,28 @@ function evaluateTemplateExpression(
     return TEMPLATE_UNRESOLVED;
   }
 
+  // Inline ternary: <true> if <cond> else <false> — split on a top-level
+  // 'else' first (shortest match so nested ternaries keep their own), then
+  // find the top-level 'if' in the true-branch.
+  const elseParts = splitTopLevelByKeyword(trimmed, 'else');
+  if (elseParts.length > 1) {
+    const trueExpression = elseParts[0];
+    const falseExpression = elseParts.slice(1).join(' else ');
+    const ifParts = splitTopLevelByKeyword(trueExpression, 'if');
+    if (ifParts.length > 1) {
+      const condition = ifParts[ifParts.length - 1];
+      const trueValueExpression = ifParts.slice(0, ifParts.length - 1).join(' if ');
+      const conditionValue = evaluateTemplateExpression(condition, invocation, plannerState, staticContext);
+      const conditionBoolean = coerceBoolean(conditionValue);
+      if (conditionBoolean === null) {
+        return TEMPLATE_UNRESOLVED;
+      }
+      return conditionBoolean
+        ? evaluateTemplateExpression(trueValueExpression, invocation, plannerState, staticContext)
+        : evaluateTemplateExpression(falseExpression, invocation, plannerState, staticContext);
+    }
+  }
+
   const orParts = splitTopLevelByKeyword(trimmed, 'or');
   if (orParts.length > 1) {
     let hasUnresolvedBranch = false;
@@ -1668,6 +1715,13 @@ function evaluateTemplateExpression(
     const left = evaluateValueExpression(trimmed.slice(0, definedOperator.index).trim(), invocation, plannerState, staticContext);
     const isDefined = !isUnresolved(left);
     return definedOperator.operator.includes('not') ? !isDefined : isDefined;
+  }
+
+  const noneOperator = findTopLevelOperator(trimmed, [' is not none', ' is none']);
+  if (noneOperator) {
+    const left = evaluateValueExpression(trimmed.slice(0, noneOperator.index).trim(), invocation, plannerState, staticContext);
+    const isNone = left === null || isUnresolved(left);
+    return noneOperator.operator.includes('not') ? !isNone : isNone;
   }
 
   const membershipOperator = findTopLevelOperator(trimmed, [' not in ', ' in ']);
@@ -2374,7 +2428,12 @@ export function buildSimulationSteps(
   const stack: string[] = [];
   const plannerState = createInitialPlannerState(allMacros);
   let previewState = createInitialRuntimeState(profile, root.title);
-  const staticContext = buildTemplateStaticContext(allMacros, configFiles, profile);
+  const staticContext = buildTemplateStaticContext(
+    allMacros,
+    configFiles,
+    profile,
+    () => ({ x: previewState.x, y: previewState.y, z: previewState.z, e: previewState.e }),
+  );
   let visit: (macro: MacroSourceItem, allowHomingOverride?: boolean, invocation?: MacroInvocationContext) => void;
 
   const appendSimulationSteps = (nextSteps: SimulationStep[]) => {

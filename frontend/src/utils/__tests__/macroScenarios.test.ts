@@ -314,4 +314,85 @@ describe('machine-state template fidelity', () => {
     expect(plan.warnings).toEqual([]);
     expect(trace.some((entry) => entry.includes('-10'))).toBe(true);
   });
+
+  it('tracks live toolhead position as moves execute', () => {
+    const profile = makeProfile();
+    const macros = [
+      makeMacro(
+        'G1 X100 Y50 F3000\nRESPOND MSG={printer.toolhead.position.x}',
+        'READ_POS',
+        'read_pos',
+      ),
+    ];
+
+    const { plan, trace } = runSimulation(macros[0], macros, profile);
+
+    expect(plan.warnings).toEqual([]);
+    // The RESPOND runs after the move: position.x should be 100.
+    expect(trace.some((entry) => entry.includes('100'))).toBe(true);
+  });
+
+  it('resolves printer.gcode_move.homing_origin from the profile home', () => {
+    const profile = makeProfile({ homeX: 0, homeY: 0, homeZ: 0 });
+    const macros = [
+      makeMacro(
+        '{% set origin = printer.gcode_move.homing_origin %}\nRESPOND MSG={origin.x}',
+        'READ_ORIGIN',
+        'read_origin',
+      ),
+    ];
+
+    const { plan, trace } = runSimulation(macros[0], macros, profile);
+
+    expect(plan.warnings).toEqual([]);
+    expect(trace.some((entry) => entry.includes('0'))).toBe(true);
+  });
+
+  it('resolves printer.print_stats.info.current_layer as null when not printing', () => {
+    const profile = makeProfile();
+    const macros = [
+      makeMacro(
+        '{% set layer = printer.print_stats.info.current_layer if printer.print_stats.info.current_layer is not none else -1 %}\nRESPOND MSG={layer}',
+        'READ_LAYER',
+        'read_layer',
+      ),
+    ];
+
+    const { plan, trace } = runSimulation(macros[0], macros, profile);
+
+    expect(plan.warnings).toEqual([]);
+    expect(trace.some((entry) => entry.includes('-1'))).toBe(true);
+  });
+
+  it('resolves printer.quad_gantry_level.applied as false', () => {
+    const profile = makeProfile();
+    const macros = [
+      makeMacro(
+        '{% if printer.quad_gantry_level.applied == False %}\nRESPOND MSG="not applied"\n{% endif %}',
+        'READ_QGL',
+        'read_qgl',
+      ),
+    ];
+
+    const { plan, trace } = runSimulation(macros[0], macros, profile);
+
+    expect(plan.warnings).toEqual([]);
+    expect(trace.some((entry) => entry.includes('not applied'))).toBe(true);
+  });
+
+  it('resolves printer.idle_timeout.state', () => {
+    const profile = makeProfile();
+    const macros = [
+      makeMacro(
+        '{% if printer.idle_timeout.state|upper == "IDLE" %}\nRESPOND MSG="idle"\n{% endif %}',
+        'READ_IDLE',
+        'read_idle',
+      ),
+    ];
+
+    const { plan, trace } = runSimulation(macros[0], macros, profile);
+
+    expect(plan.warnings).toEqual([]);
+    expect(trace.some((entry) => entry.includes('idle'))).toBe(true);
+  });
 });
