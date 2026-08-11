@@ -640,6 +640,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
     setToolheadDragPos(null);
     setEditMode(false);
     setEditDraft(null);
+    setSeededRuntime(null);
   }, [selectedKey]);
 
   useEffect(() => {
@@ -1347,6 +1348,25 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
       ? `${result.eventSummary} — ${result.warnings.join(' ')}`
       : `${result.eventSummary} (seeded)`);
   }, [configFiles, machineProfile, seededRuntime, seedInput, selectedItem, setRuntime]);
+
+  const handleResetMachineState = useCallback(() => {
+    cancelAnimation(true);
+    setIsRunning(false);
+    setSeededRuntime(null);
+    setToolheadDragPos(null);
+    setSelectedLogWarning(null);
+    setRuntimeHistory([]);
+    setSimulationLog([]);
+    setLastMovementTrace(null);
+    setSimulationZIndicator(null);
+    setStepIndex(0);
+    setGoToX('');
+    setGoToY('');
+    setGoToZ('');
+    const fresh = createInitialRuntimeState(machineProfile, selectedItem?.title || 'reset');
+    setRuntime(fresh);
+    setMessage('Machine state reset: toolhead centered, not homed, heaters off.');
+  }, [cancelAnimation, machineProfile, selectedItem, setRuntime]);
 
   const handleGoTo = () => {
     const currentPosition = getCurrentToolheadPosition();
@@ -2086,11 +2106,21 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                 <div className="min-w-[360px] basis-[24rem] flex-shrink-0 rounded-lg border border-[var(--color-bg-tertiary)] bg-[rgba(15,23,42,0.72)] px-3 py-2 text-[10px] text-[var(--color-text-secondary)]">
                   <div className="mb-1 flex items-center justify-between gap-3">
                     <div className="text-[10px] font-semibold uppercase tracking-[0.16em]">Machine state</div>
-                    <div className="inline-flex overflow-hidden rounded-md border border-[var(--color-bg-tertiary)]">
+                    <div className="flex items-center gap-2">
                       <button
                         type="button"
-                        disabled={!editMode || !displayedItem}
-                        onClick={() => handleSetMoveMode('absolute')}
+                        disabled={editMode || !displayedItem}
+                        onClick={handleResetMachineState}
+                        className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-0.5 text-[10px] text-[var(--color-text-primary)] hover:border-red-400/60 hover:text-red-300 disabled:opacity-40"
+                        title="Stop simulation, clear seeded commands, reset toolhead to centered/cold"
+                      >
+                        Reset
+                      </button>
+                      <div className="inline-flex overflow-hidden rounded-md border border-[var(--color-bg-tertiary)]">
+                        <button
+                          type="button"
+                          disabled={!editMode || !displayedItem}
+                          onClick={() => handleSetMoveMode('absolute')}
                         className={`px-2.5 py-0.5 text-[10px] font-semibold transition-colors disabled:opacity-60 ${activeMoveMode === 'absolute' ? 'bg-[var(--color-accent)] text-[var(--color-bg-primary)]' : 'text-[var(--color-text-primary)]'}`}
                       >
                         Absolute
@@ -2103,6 +2133,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                       >
                         Relative
                       </button>
+                    </div>
                     </div>
                   </div>
                   <div className="grid grid-cols-[minmax(13rem,1.25fr)_minmax(0,1fr)] gap-x-5 gap-y-1 font-mono tabular-nums text-[var(--color-text-primary)]">
@@ -2414,11 +2445,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                         Seeded: X {formatNumber(seededRuntime.x)} Y {formatNumber(seededRuntime.y)} Z {formatNumber(seededRuntime.z)}
                         {seededRuntime.homedAxes.length ? ` | homed: ${seededRuntime.homedAxes.join('')}` : ' | not homed'}
                       </span>
-                      <button onClick={() => {
-                        setSeededRuntime(null);
-                        setSelectedLogWarning(null);
-                        setMessage('Machine state reset to default (center, not homed, heaters off).');
-                      }} className="shrink-0 rounded-md border border-[var(--color-bg-tertiary)] px-2 py-0.5 text-[10px] text-[var(--color-text-primary)] hover:border-red-400/60 hover:text-red-300">Reset</button>
+                      <button onClick={handleResetMachineState} className="shrink-0 rounded-md border border-[var(--color-bg-tertiary)] px-2 py-0.5 text-[10px] text-[var(--color-text-primary)] hover:border-red-400/60 hover:text-red-300">Reset</button>
                     </div>
                   )}
                 </div>
