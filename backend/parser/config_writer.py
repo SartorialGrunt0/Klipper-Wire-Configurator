@@ -269,8 +269,15 @@ def _render_value_line(prefix: str, line: str) -> str:
 def _build_multiline_prefix(raw_line: str, original_value_line: str, fallback: str) -> str:
     if not raw_line:
         return fallback
-    if not original_value_line:
-        return raw_line
+    # The original raw line's leading whitespace IS the block indent.
+    # (Value lines now carry their own indentation, so we can't recover it
+    # by subtracting the value from the raw line anymore.)
+    prefix = raw_line[: len(raw_line) - len(raw_line.lstrip(" \t"))]
+    if prefix:
+        return prefix
+    # Fall back for lines with no leading whitespace (e.g. a flat body or
+    # the section's first line): preserve the old subtraction-based logic
+    # so first-line handling keeps working.
     if raw_line.endswith(original_value_line):
         return raw_line[:-len(original_value_line)]
     return fallback

@@ -2492,6 +2492,25 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                     value={displayedItem?.gcode || ''}
                     disabled={!editMode}
                     onChange={(event) => updateEditedItem({ gcode: parseMacroGcodeFromEditorView(event.target.value) })}
+                    onKeyDown={(event) => {
+                      // Carry forward the current line's leading whitespace on
+                      // Enter, so new commands inside an indented block keep
+                      // the block's indentation instead of dropping to col 0.
+                      if (event.key === 'Enter' && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey) {
+                        const el = event.currentTarget;
+                        const start = el.selectionStart;
+                        const end = el.selectionEnd;
+                        const before = el.value.slice(0, start);
+                        const lineStart = before.lastIndexOf('\n') + 1;
+                        const indent = before.slice(lineStart).match(/^[ \t]*/)?.[0] ?? '';
+                        event.preventDefault();
+                        const next = before + '\n' + indent + el.value.slice(end);
+                        updateEditedItem({ gcode: parseMacroGcodeFromEditorView(next) });
+                        requestAnimationFrame(() => {
+                          el.selectionStart = el.selectionEnd = start + 1 + indent.length;
+                        });
+                      }
+                    }}
                     rows={12}
                     spellCheck={false}
                     className="w-full resize-y overflow-y-auto rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-3 py-3 font-mono text-xs leading-5 text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none disabled:opacity-70"

@@ -81,6 +81,49 @@ def test_write_section_frontend_value_with_indentation_is_not_doubled():
     assert '            M117' not in rendered
 
 
+def test_new_command_typed_at_column_0_inherits_block_indent():
+    """A line inserted at column 0 (textarea Enter drops there) must be
+    written with the surrounding block's indentation — a column-0 gcode
+    line inside a section is a parse error in real Klipper."""
+    original = parse_config(INDENTED_MACRO, 'printer.cfg')
+    edited = parse_config(INDENTED_MACRO, 'printer.cfg')
+    param = get_gcode_param(edited)
+    param.value = (
+        '\n    G28\n'
+        'G1 X50\n'  # user typed at column 0
+        '    {% if printer.extruder.temperature > 170 %}\n'
+        '        M117 Nozzle hot\n'
+        '    {% else %}\n'
+        '        M117 Nozzle cold\n'
+        '    {% endif %}'
+    )
+
+    rendered = write_section(edited.sections[0], original.sections[0])
+    assert '    G1 X50' in rendered
+    assert '\nG1 X50\n' not in rendered  # never left at column 0
+    # Re-parse the rendered output: value must keep the new command
+    reparsed = parse_config(rendered, 'printer.cfg')
+    assert '    G1 X50' in get_gcode_param(reparsed).value
+
+
+def test_flat_body_stays_flat_when_edited():
+    """A macro whose body is intentionally unindented must not gain
+    indentation on edit."""
+    flat = """[gcode_macro FLAT]
+gcode:
+G28
+M117 hi
+"""
+    original = parse_config(flat, 'printer.cfg')
+    edited = parse_config(flat, 'printer.cfg')
+    get_gcode_param(edited, 'FLAT').value = '\nG28\nM117 changed'
+    rendered = write_section(edited.sections[0], original.sections[0])
+    assert 'G28' in rendered
+    assert 'M117 changed' in rendered
+    assert '\n    G28' not in rendered  # no indent added to flat body
+    assert '\nG28\n' in rendered
+
+
 def test_tab_indented_body_round_trips():
     cfg = """[gcode_macro TABS]
 gcode:
