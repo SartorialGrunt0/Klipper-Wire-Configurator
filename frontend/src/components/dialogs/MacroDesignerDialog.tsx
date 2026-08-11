@@ -37,6 +37,7 @@ import {
   computeTrapezoidalProfile,
   createInitialRuntimeState,
   executeSimulationStep,
+  parseParams,
   trapezoidalPositionAtTime,
 } from '../../utils/gcodeSimulator';
 import { logMacroDesignerEvent } from '../../utils/macroDesignerLog';
@@ -339,6 +340,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
   const [runtime, setRuntime] = useState<MacroRuntimeState | null>(null);
   const [stepIndex, setStepIndex] = useState(0);
   const [planWarnings, setPlanWarnings] = useState<string[]>([]);
+  const [simulationParamsInput, setSimulationParamsInput] = useState('');
   const [isRunning, setIsRunning] = useState(false);
   const [moveFeedRate, setMoveFeedRate] = useState('');
   const [nozzleTarget, setNozzleTarget] = useState('200');
@@ -515,12 +517,17 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
     return { x: r.x, y: viewBounds.viewMaxY - r.y };
   }, [machineProfile, rotation, viewBounds.viewMaxY]);
 
+  const simulationRootParams = useMemo(() => parseParams(simulationParamsInput.trim().split(/\s+/)), [simulationParamsInput]);
+
   const simulationPlan = useMemo(() => {
     if (!selectedItem) {
       return { steps: [], warnings: [] };
     }
-    return buildSimulationSteps(selectedItem, allMacroItems, machineProfile, configFiles);
-  }, [allMacroItems, configFiles, machineProfile, selectedItem]);
+    return buildSimulationSteps(selectedItem, allMacroItems, machineProfile, configFiles, {
+      params: simulationRootParams,
+      rawparams: simulationParamsInput.trim(),
+    });
+  }, [allMacroItems, configFiles, machineProfile, selectedItem, simulationRootParams, simulationParamsInput]);
 
   const simulationTimeline = useMemo<SimulationTimelineState>(() => {
     if (!selectedItem) {
@@ -2295,6 +2302,19 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                       <span>Max {formatNumber(machineProfile.maxVelocity)} mm/s</span>
                       <span>Accel {formatNumber(machineProfile.maxAccel)} mm/s²</span>
                     </div>
+                  </div>
+                  <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-3 py-2">
+                    <label htmlFor="simulation-params" className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--color-text-secondary)]">Params</label>
+                    <input
+                      id="simulation-params"
+                      type="text"
+                      value={simulationParamsInput}
+                      onChange={(event) => setSimulationParamsInput(event.target.value)}
+                      placeholder="TEMP=60 FAN=255"
+                      spellCheck={false}
+                      className="min-w-0 flex-1 rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-2 py-1 font-mono text-[11px] text-[var(--color-text-primary)] placeholder:text-[var(--color-text-secondary)] focus:border-[var(--color-accent)] focus:outline-none"
+                    />
+                    <span className="text-[10px] text-[var(--color-text-secondary)]">Applied to root macro</span>
                   </div>
                   <div className="mt-3 rounded-lg border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-3 py-2">
                     <div className="flex items-start justify-between gap-3">

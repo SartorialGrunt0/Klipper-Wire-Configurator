@@ -4,24 +4,27 @@
  *
  * Usage (from frontend/):
  *   MACRO_GCODE='{% set t = params.TEMP|default(60) %}' npx vitest run src/utils/__tests__/macroProbe.test.ts
- *   MACRO_TITLE=PRINT_START MACRO_GCODE='G28\nG1 X100 Y50 F1200' npx vitest run src/utils/__tests__/macroProbe.test.ts
+ *   MACRO_TITLE=PRINT_START MACRO_GCODE='M104 S{params.TEMP}' MACRO_PARAMS='TEMP=80' npx vitest run src/utils/__tests__/macroProbe.test.ts
  *
  * Prints the plan as JSON to stdout: steps (moves/probes/commands),
  * warnings, and the final simulated toolhead state. This is the same
  * engine the Macro Designer dialog uses (buildSimulationSteps), so a
  * repro here is a repro in the UI. Pass the macro as a single string;
- * use \n for newlines.
+ * use \n for newlines. MACRO_PARAMS accepts Klipper-style space
+ * separated KEY=VALUE pairs applied to the root macro invocation.
  */
 import { describe, it } from 'vitest';
 import {
   buildSimulationSteps,
   createInitialRuntimeState,
   executeSimulationStep,
+  parseParams,
 } from '@/utils/gcodeSimulator';
 import type { MachineProfile } from '@/types/macroDesigner';
 
 const gcode = process.env.MACRO_GCODE || '';
 const title = process.env.MACRO_TITLE || 'PROBE';
+const rootParams = parseParams((process.env.MACRO_PARAMS || '').trim().split(/\s+/));
 
 function makeProfile(): MachineProfile {
   return {
@@ -56,7 +59,10 @@ describe('macro designer probe', () => {
       gcode,
     };
 
-    const plan = buildSimulationSteps(root, [root], profile);
+    const plan = buildSimulationSteps(root, [root], profile, undefined, {
+      params: rootParams,
+      rawparams: (process.env.MACRO_PARAMS || '').trim(),
+    });
 
     let state = createInitialRuntimeState(profile, title);
     const trace: Array<{ kind: string; summary: string; warnings: string[] }> = [];

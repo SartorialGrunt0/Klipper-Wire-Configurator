@@ -7,7 +7,7 @@ import {
   parseGcodeLine,
   trapezoidalPositionAtTime,
 } from '@/utils/gcodeSimulator';
-import type { MachineProfile, MacroSourceItem } from '@/types/macroDesigner';
+import type { MachineProfile, MacroSourceItem, SimulationStep } from '@/types/macroDesigner';
 
 function makeProfile(overrides: Partial<MachineProfile> = {}): MachineProfile {
   return {
@@ -292,6 +292,75 @@ describe('unresolved template symbols (P0-3 crash guard)', () => {
       "{% set msg = '%d' % [printer.foo.bar] %}\nRESPOND MSG={msg}",
       { title: 'PRINTF_UNRESOLVED' },
     );
+    expect(() => buildSimulationSteps(macro, [macro], profile)).not.toThrow();
+  });
+});
+
+describe('root macro invocation params (P0-2)', () => {
+  it('resolves params.* references from the root invocation', () => {
+    const profile = makeProfile();
+    const macro = makeMacro(
+      'M104 S{params.TEMP}',
+      { title: 'SET_TEMP' },
+    );
+    const plan = buildSimulationSteps(macro, [macro], profile, undefined, {
+      params: { TEMP: '80' },
+      rawparams: 'TEMP=80',
+    });
+    // The M104 target should be 80, not unresolved.
+    expect(plan.steps.length).toBe(1);
+    expect(plan.warnings).toEqual([]);
+    expect(plan.steps[0].kind).toBe('command');
+    const step = plan.steps[0] as Extract<SimulationStep, { kind: 'command' }>;
+    expect(step.command.raw).toContain('S80');
+  });
+
+  it('propagates params written on a nested macro call line', () => {
+    const profile = makeProfile();
+    const root = makeMacro(
+      'MY_HEATER TEMP=90',
+      { title: 'ROOT', key: 'root' },
+    );
+    const nested = makeMacro(
+      'M104 S{params.TEMP}',
+      { title: 'MY_HEATER', key: 'nested' },
+    );
+    const plan = buildSimulationSteps(root, [root, nested], profile, undefined, {
+      params: { TEMP: '50' },
+      rawparams: 'TEMP=50',
+    });
+    // Params are per-invocation (Klipper semantics): the nested macro
+    // receives TEMP from its own call line, not from the root.
+    expect(plan.steps[0].kind).toBe('command');
+    const step = plan.steps[0] as Extract<SimulationStep, { kind: 'command' }>;
+    expect(step.command.raw).toContain('S90');
+  });
+
+  it('does not inherit root params into a bare nested call (Klipper semantics)', () => {
+    const profile = makeProfile();
+    const root = makeMacro(
+      'MY_HEATER',
+      { title: 'ROOT', key: 'root' },
+    );
+    const nested = makeMacro(
+      'M104 S{params.TEMP}',
+      { title: 'MY_HEATER', key: 'nested' },
+    );
+    const plan = buildSimulationSteps(root, [root, nested], profile, undefined, {
+      params: { TEMP: '90' },
+      rawparams: 'TEMP=90',
+    });
+    // A bare call passes no params; the reference stays unresolved but
+    // must not throw (P0-3 regression guard).
+    expect(plan.steps[0].kind).toBe('command');
+    expect(plan.steps).toHaveLength(1);
+  });
+
+  it('treats an empty params object the same as before (no params)', () => {
+    const profile = makeProfile();
+    const macro = makeMacro('M104 S{params.TEMP}', { title: 'NO_PARAMS' });
+    // No rootInvocation supplied — the reference stays unresolved, but
+    // must not throw (regression guard for the Symbol crash).
     expect(() => buildSimulationSteps(macro, [macro], profile)).not.toThrow();
   });
 });

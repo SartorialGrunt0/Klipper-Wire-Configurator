@@ -14,7 +14,7 @@ import type {
 import { logMacroDesignerEvent } from './macroDesignerLog';
 import { findPathZoneHit, findZoneHit, isPointInBounds, isPointInMoveBounds, parseMacroVariables } from './macroDesigner';
 
-function parseParams(tokens: string[]): Record<string, string> {
+export function parseParams(tokens: string[]): Record<string, string> {
   const params: Record<string, string> = {};
   for (const token of tokens) {
     if (!token) continue;
@@ -2307,6 +2307,7 @@ export function buildSimulationSteps(
   allMacros: MacroSourceItem[],
   profile: MachineProfile,
   configFiles?: Record<string, ConfigFile>,
+  rootInvocation?: { params?: Record<string, string>; rawparams?: string },
 ): SimulationBuildResult {
   const macroLookup = buildMacroLookup(allMacros);
   const warnings: string[] = [];
@@ -2545,13 +2546,18 @@ export function buildSimulationSteps(
     stack.pop();
   };
 
-  visit(root, true, { params: {}, rawparams: '', locals: {} });
+  visit(root, true, {
+    params: rootInvocation?.params ?? {},
+    rawparams: rootInvocation?.rawparams ?? '',
+    locals: {},
+  });
   logMacroDesignerEvent({
     event: 'sim:plan',
     macro: root.title,
     stepCount: steps.length,
     warningCount: warnings.length,
     warnings: warnings.slice(0, 10),
+    rootParams: rootInvocation?.params ?? {},
     nestedMacros: stack.length > 0 ? stack : undefined,
   });
   return { steps, warnings };
