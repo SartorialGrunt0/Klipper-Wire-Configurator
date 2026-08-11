@@ -2551,42 +2551,6 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                     </div>
                   </div>
                 </div>
-                <div className="rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] p-3">
-                  <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-text-secondary)]">Canvas selection</div>
-                  {selectedZone ? (
-                    <div className="space-y-2 text-xs">
-                      <div className="rounded-lg border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-3 py-2 text-[11px] text-[var(--color-text-primary)]">
-                        <div className="font-semibold text-[var(--color-text-primary)]">{selectedZone.name}</div>
-                        <div className="mt-1 text-[var(--color-text-secondary)]">
-                          X {formatNumber(selectedZone.x)} | Y {formatNumber(selectedZone.y)} | W {formatNumber(selectedZone.width)} | H {formatNumber(selectedZone.height)}
-                        </div>
-                      </div>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <button onClick={() => openExactPositionDialog('zone', selectedZone.id)} className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1 text-xs text-[var(--color-text-primary)]">Set exact position</button>
-                        <button onClick={() => {
-                          deleteNoGoZone(selectedZone.id);
-                          setMessage(`Deleted ${selectedZone.name}.`);
-                        }} className="rounded-md border border-red-400/60 px-3 py-1 text-xs text-red-300">Delete</button>
-                      </div>
-                    </div>
-                  ) : isDockSelected && dockPosition ? (
-                    <div className="space-y-2 text-xs">
-                      <div className="rounded-lg border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-3 py-2 text-[11px] text-[var(--color-text-primary)]">
-                        <div className="font-semibold text-[var(--color-text-primary)]">Dock</div>
-                        <div className="mt-1 text-[var(--color-text-secondary)]">X {formatNumber(dockPosition.x)} | Y {formatNumber(dockPosition.y)}</div>
-                      </div>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <button onClick={() => openExactPositionDialog('dock')} className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1 text-xs text-[var(--color-text-primary)]">Set exact position</button>
-                        <button onClick={() => {
-                          setDockPosition(null);
-                          setMessage('Dock deleted.');
-                        }} className="rounded-md border border-red-400/60 px-3 py-1 text-xs text-red-300">Delete</button>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="text-[11px] text-[var(--color-text-secondary)]">Right-click a no-go zone or dock on the grid and choose Set exact position to edit it in a popup.</div>
-                  )}
-                </div>
                 {message && <div className="rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-3 py-2 text-[11px] text-[var(--color-text-secondary)]">{message}</div>}
               </div>
             ) : (
