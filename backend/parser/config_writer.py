@@ -240,7 +240,7 @@ def _format_param(param: ConfigParam) -> str:
         result = first
         for vl in value_lines[1:]:
             if vl.strip():
-                result += f"\n{prefix}  {vl}"
+                result += "\n" + _render_value_line(f"{prefix}  ", vl)
             else:
                 result += "\n"
         return result + comment_suffix
@@ -250,6 +250,20 @@ def _format_param(param: ConfigParam) -> str:
         return f"{prefix}{param.key} = {param.value}{comment_suffix}"
     else:
         return f"{prefix}{param.key}: {param.value}{comment_suffix}"
+
+
+def _render_value_line(prefix: str, line: str) -> str:
+    """Render one multi-line value line under *prefix*.
+
+    If the line already carries its own leading whitespace (gcode bodies are
+    conventionally indented and the parser now preserves that), use it
+    verbatim instead of stacking another prefix on top.
+    """
+    if not line:
+        return prefix.rstrip()
+    if line[0] in (" ", "\t"):
+        return line
+    return f"{prefix}{line}"
 
 
 def _build_multiline_prefix(raw_line: str, original_value_line: str, fallback: str) -> str:
@@ -286,19 +300,19 @@ def _format_multiline_param_preserving_original(param: ConfigParam, original_par
                     rendered_lines[new_idx] = original_raw_lines[orig_idx]
                 else:
                     prefix = first_prefix if new_idx == 0 else continuation_fallback
-                    rendered_lines[new_idx] = f"{prefix}{new_value_lines[new_idx]}" if new_value_lines[new_idx] else prefix.rstrip()
+                    rendered_lines[new_idx] = _render_value_line(prefix, new_value_lines[new_idx])
             continue
 
         for new_idx in range(j1, j2):
             if new_idx == 0:
-                rendered_lines[new_idx] = f"{first_prefix}{new_value_lines[new_idx]}" if new_value_lines[new_idx] else first_prefix.rstrip()
+                rendered_lines[new_idx] = _render_value_line(first_prefix, new_value_lines[new_idx])
                 continue
 
             orig_idx = i1 + min(new_idx - j1, max(0, i2 - i1 - 1))
             prefix = continuation_fallback
             if 0 <= orig_idx < len(original_raw_lines) and orig_idx < len(original_value_lines):
                 prefix = _build_multiline_prefix(original_raw_lines[orig_idx], original_value_lines[orig_idx], continuation_fallback)
-            rendered_lines[new_idx] = f"{prefix}{new_value_lines[new_idx]}" if new_value_lines[new_idx] else prefix.rstrip()
+            rendered_lines[new_idx] = _render_value_line(prefix, new_value_lines[new_idx])
 
     return "\n".join(rendered_lines)
 

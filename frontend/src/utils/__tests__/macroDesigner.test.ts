@@ -187,6 +187,14 @@ describe('gcode normalization round-trip', () => {
   it('preserves comment lines inside the gcode body', () => {
     expect(normalizeMacroGcodeForConfig('# comment\nG28\n')).toBe('\n# comment\nG28');
   });
+
+  it('preserves indentation through the editor round-trip', () => {
+    const indented = '    G28\n    {% if printer.extruder.temperature > 170 %}\n        M117 hot\n    {% else %}\n        M117 cold\n    {% endif %}';
+    // Editor display value → what gets written to config
+    expect(normalizeMacroGcodeForConfig(indented)).toBe(`\n${indented}`);
+    // What the user types (with gcode: directive) → stored editor value
+    expect(parseMacroGcodeFromEditorView(`gcode:\n${indented}`)).toBe(indented);
+  });
 });
 
 describe('variables round-trip', () => {
