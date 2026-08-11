@@ -37,6 +37,7 @@ import {
   computeTrapezoidalProfile,
   createInitialRuntimeState,
   executeSimulationStep,
+  executeStandaloneCommand,
   parseParams,
   trapezoidalPositionAtTime,
 } from '../../utils/gcodeSimulator';
@@ -368,6 +369,8 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
   const [runtimeHistory, setRuntimeHistory] = useState<MacroRuntimeState[]>([]);
   const [simulationLog, setSimulationLog] = useState<SimulationLogEntry[]>([]);
   const [selectedLogWarning, setSelectedLogWarning] = useState<string | null>(null);
+  const [seedInput, setSeedInput] = useState('');
+  const [seededRuntime, setSeededRuntime] = useState<MacroRuntimeState | null>(null);
   const [goToX, setGoToX] = useState('');
   const [goToY, setGoToY] = useState('');
   const [goToZ, setGoToZ] = useState('');
@@ -526,8 +529,8 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
     return buildSimulationSteps(selectedItem, allMacroItems, machineProfile, configFiles, {
       params: simulationRootParams,
       rawparams: simulationParamsInput.trim(),
-    });
-  }, [allMacroItems, configFiles, machineProfile, selectedItem, simulationRootParams, simulationParamsInput]);
+    }, seededRuntime ?? undefined);
+  }, [allMacroItems, configFiles, machineProfile, selectedItem, simulationRootParams, simulationParamsInput, seededRuntime]);
 
   const simulationTimeline = useMemo<SimulationTimelineState>(() => {
     if (!selectedItem) {
@@ -539,7 +542,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
       };
     }
 
-    const initialRuntime = createInitialRuntimeState(machineProfile, selectedItem.title);
+    const initialRuntime = seededRuntime ?? createInitialRuntimeState(machineProfile, selectedItem.title);
     const states: MacroRuntimeState[] = [initialRuntime];
     const logs: SimulationLogEntry[] = [];
     const lastTraceByStep: Array<MovementTrace | null> = [null];
@@ -578,7 +581,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
       lastTraceByStep,
       zIndicatorByStep,
     };
-  }, [machineProfile, selectedItem, simulationPlan.steps]);
+  }, [machineProfile, selectedItem, seededRuntime, simulationPlan.steps]);
 
   const cancelAnimation = useCallback((skipCompletion = false) => {
     if (animFrameRef.current !== null) {
@@ -1320,6 +1323,30 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
   const handleTimelineScrub = (event: React.ChangeEvent<HTMLInputElement>) => {
     syncSimulationPosition(Number(event.target.value));
   };
+
+  const handleSeedCommand = useCallback(() => {
+    const line = seedInput.trim();
+    if (!line) return;
+    const baseState = seededRuntime ?? createInitialRuntimeState(machineProfile, selectedItem?.title || 'seed');
+    const result = executeStandaloneCommand(line, baseState, machineProfile, configFiles);
+    setSeededRuntime(result.nextState);
+    setRuntime(result.nextState);
+    setRuntimeHistory((prev) => [...prev, result.nextState]);
+    setSelectedLogWarning(result.warnings.length ? result.warnings.join(' ') : null);
+    setSimulationLog((prev) => [...prev, {
+      id: `seed-${Date.now()}`,
+      raw: line,
+      sourceName: 'seed',
+      lineNumber: 0,
+      summary: result.eventSummary,
+      warnings: result.warnings,
+      timelineStepIndex: -1,
+    }]);
+    setSeedInput('');
+    setMessage(result.warnings.length
+      ? `${result.eventSummary} — ${result.warnings.join(' ')}`
+      : `${result.eventSummary} (seeded)`);
+  }, [configFiles, machineProfile, seededRuntime, seedInput, selectedItem, setRuntime]);
 
   const handleGoTo = () => {
     const currentPosition = getCurrentToolheadPosition();
@@ -2365,6 +2392,35 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                   <div className="mt-2 min-h-[2.75rem] rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2.5 py-2 text-[11px] text-[var(--color-text-secondary)]">
                     {simulationOutputSummary}
                   </div>
+                  <div className="mt-2 flex items-center gap-2">
+                    <input
+                      value={seedInput}
+                      onChange={(event) => setSeedInput(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          event.preventDefault();
+                          handleSeedCommand();
+                        }
+                      }}
+                      disabled={isRunning}
+                      placeholder="Seed a command, e.g. G28 or M104 S200"
+                      className="min-w-0 flex-1 rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 font-mono text-[11px] text-[var(--color-text-primary)] disabled:opacity-40"
+                    />
+                    <button onClick={handleSeedCommand} disabled={isRunning || !seedInput.trim()} className="shrink-0 rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-[11px] font-semibold text-[var(--color-bg-primary)] disabled:opacity-40">Send</button>
+                  </div>
+                  {seededRuntime && (
+                    <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-[var(--color-text-secondary)]">
+                      <span className="min-w-0 truncate">
+                        Seeded: X {formatNumber(seededRuntime.x)} Y {formatNumber(seededRuntime.y)} Z {formatNumber(seededRuntime.z)}
+                        {seededRuntime.homedAxes.length ? ` | homed: ${seededRuntime.homedAxes.join('')}` : ' | not homed'}
+                      </span>
+                      <button onClick={() => {
+                        setSeededRuntime(null);
+                        setSelectedLogWarning(null);
+                        setMessage('Machine state reset to default (center, not homed, heaters off).');
+                      }} className="shrink-0 rounded-md border border-[var(--color-bg-tertiary)] px-2 py-0.5 text-[10px] text-[var(--color-text-primary)] hover:border-red-400/60 hover:text-red-300">Reset</button>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>

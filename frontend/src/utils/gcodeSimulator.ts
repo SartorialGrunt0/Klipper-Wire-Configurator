@@ -849,6 +849,9 @@ function createInitialPlannerState(allMacros: MacroSourceItem[]): PlannerState {
 
 const HOMING_AXES: Array<'X' | 'Y' | 'Z'> = ['X', 'Y', 'Z'];
 
+// Klipper's default [extruder] min_extrude_temp.
+const DEFAULT_MIN_EXTRUDE_TEMP = 170;
+
 function getHomedAxesString(homedAxes: Set<'X' | 'Y' | 'Z'>): string {
   return HOMING_AXES.filter((axis) => homedAxes.has(axis)).map((axis) => axis.toLowerCase()).join('');
 }
@@ -2421,13 +2424,24 @@ export function buildSimulationSteps(
   profile: MachineProfile,
   configFiles?: Record<string, ConfigFile>,
   rootInvocation?: { params?: Record<string, string>; rawparams?: string },
+  initialState?: MacroRuntimeState,
 ): SimulationBuildResult {
   const macroLookup = buildMacroLookup(allMacros);
   const warnings: string[] = [];
   const steps: SimulationStep[] = [];
   const stack: string[] = [];
   const plannerState = createInitialPlannerState(allMacros);
-  let previewState = createInitialRuntimeState(profile, root.title);
+  if (initialState) {
+    plannerState.homedAxes = new Set(initialState.homedAxes.map((axis) => axis.toUpperCase() as 'X' | 'Y' | 'Z'));
+    plannerState.bedCurrent = initialState.bed.current;
+    plannerState.bedTarget = initialState.bed.target;
+    plannerState.nozzleCurrent = initialState.nozzle.current;
+    plannerState.nozzleTarget = initialState.nozzle.target;
+    plannerState.fanSpeed = initialState.fanSpeed;
+    plannerState.absoluteMoves = initialState.absoluteMoves;
+    plannerState.absoluteExtrusion = initialState.absoluteExtrusion;
+  }
+  let previewState = initialState ?? createInitialRuntimeState(profile, root.title);
   const staticContext = buildTemplateStaticContext(
     allMacros,
     configFiles,
@@ -2692,6 +2706,7 @@ function applyLinearMove(
   state: MacroRuntimeState,
   params: Record<string, string>,
   profile: MachineProfile,
+  configFiles?: Record<string, ConfigFile>,
 ): SimulationTickResult {
   const xValue = asNumber(params.X);
   const yValue = asNumber(params.Y);
@@ -2728,6 +2743,43 @@ function applyLinearMove(
     };
   }
 
+  // Klipper refuses moves on axes that have not been homed yet ("Must home
+  // axis first"). Only axes explicitly requested in this move are checked.
+  const movedAxes = [
+    xValue !== null ? 'X' : null,
+    yValue !== null ? 'Y' : null,
+    zValue !== null ? 'Z' : null,
+  ].filter((axis): axis is 'X' | 'Y' | 'Z' => axis !== null);
+  const homedSet = new Set(state.homedAxes.map((axis) => axis.toUpperCase()));
+  const unhomedAxes = movedAxes.filter((axis) => !homedSet.has(axis));
+  if (unhomedAxes.length > 0) {
+    warnings.push(`Move requires homed ${unhomedAxes.join(', ')} axis (must home first).`);
+  }
+
+  // Klipper refuses extrusion below min_extrude_temp (default 170C).
+  const extrudeDelta = nextE - state.e;
+  if (extrudeDelta > 0 && state.nozzle.current < DEFAULT_MIN_EXTRUDE_TEMP) {
+    warnings.push(
+      `Extrusion requires nozzle temperature above ${DEFAULT_MIN_EXTRUDE_TEMP}C (currently ${state.nozzle.current.toFixed(0)}C).`,
+    );
+  }
+
+  if (unhomedAxes.length > 0 || (extrudeDelta > 0 && state.nozzle.current < DEFAULT_MIN_EXTRUDE_TEMP)) {
+    // Klipper raises an error and the move does not execute.
+    return {
+      nextState: {
+        ...state,
+        feedRate: fValue ?? state.feedRate,
+        nozzle: { ...state.nozzle, current: updateTargetTemperature(state.nozzle.current, state.nozzle.target) },
+        bed: { ...state.bed, current: updateTargetTemperature(state.bed.current, state.bed.target) },
+        activeProbePoint: null,
+        activeBuiltInCommand: null,
+      },
+      warnings,
+      eventSummary: 'Move refused',
+    };
+  }
+
   if (!isPointInMoveBounds(profile, nextX, nextY)) {
     warnings.push(`Move to X${nextX.toFixed(2)} Y${nextY.toFixed(2)} exceeds the moveable area.`);
   }
@@ -2740,7 +2792,6 @@ function applyLinearMove(
   }
 
   const distance = Math.sqrt((nextX - state.x) ** 2 + (nextY - state.y) ** 2 + (nextZ - state.z) ** 2);
-  const extrudeDelta = nextE - state.e;
   if (distance < 1e-6 && extrudeDelta > profile.maxExtrudeCrossSection) {
     warnings.push(
       `Extrude-only move E${extrudeDelta.toFixed(2)} exceeds max_extrude_cross_section ${profile.maxExtrudeCrossSection.toFixed(2)}.`,
@@ -2786,6 +2837,29 @@ function setLedState(state: MacroRuntimeState, params: Record<string, string>): 
       [ledName]: next,
     },
   };
+}
+
+export function executeStandaloneCommand(
+  line: string,
+  state: MacroRuntimeState,
+  profile: MachineProfile,
+  configFiles?: Record<string, ConfigFile>,
+): { nextState: MacroRuntimeState; warnings: string[]; eventSummary: string } {
+  const parsed = parseGcodeLine(line, 0, 'seed');
+  if (!parsed) {
+    return { nextState: state, warnings: [], eventSummary: 'No command recognized' };
+  }
+  const steps = expandCommandToSteps(parsed, profile, configFiles, state);
+  let current = state;
+  const warnings: string[] = [];
+  let lastSummary = parsed.raw;
+  for (const step of steps) {
+    const result = executeSimulationStep(current, step, profile, configFiles);
+    current = result.nextState;
+    warnings.push(...result.warnings);
+    lastSummary = result.eventSummary || lastSummary;
+  }
+  return { nextState: current, warnings, eventSummary: lastSummary };
 }
 
 export function executeSimulationStep(
@@ -2853,7 +2927,7 @@ export function executeSimulationStep(
   switch (command.command) {
     case 'G0':
     case 'G1':
-      return applyLinearMove(state, command.params, profile);
+      return applyLinearMove(state, command.params, profile, configFiles);
     case 'G28': {
       const requestedAxes = Object.keys(command.params).map((key) => key.toUpperCase());
       const homeAllAxes = requestedAxes.length === 0;
@@ -2908,6 +2982,8 @@ export function executeSimulationStep(
       const target = asNumber(command.params.S) ?? nextState.nozzle.target;
       if (target < 0 || target > profile.nozzleMaxTemp) {
         warnings.push(`Requested nozzle temperature ${target} exceeds the configured range.`);
+        eventSummary = `Refuse nozzle target ${target}C (out of range)`;
+        break;
       }
       nextState = {
         ...nextState,
@@ -2928,6 +3004,8 @@ export function executeSimulationStep(
       const target = asNumber(command.params.S) ?? nextState.bed.target;
       if (target < 0 || target > profile.bedMaxTemp) {
         warnings.push(`Requested bed temperature ${target} exceeds the configured range.`);
+        eventSummary = `Refuse bed target ${target}C (out of range)`;
+        break;
       }
       nextState = {
         ...nextState,

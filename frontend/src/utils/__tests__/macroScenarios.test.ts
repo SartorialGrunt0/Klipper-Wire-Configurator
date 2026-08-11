@@ -3,6 +3,7 @@ import {
   buildSimulationSteps,
   createInitialRuntimeState,
   executeSimulationStep,
+  executeStandaloneCommand,
 } from '@/utils/gcodeSimulator';
 import type { ConfigFile, ConfigParam, ConfigSection } from '@/types/config';
 import type { MachineProfile, MacroSourceItem, SimulationStep } from '@/types/macroDesigner';
@@ -105,6 +106,8 @@ describe('macro designer scenarios', () => {
           'M140 S{bed_temp}',
           'M104 S{nozzle_temp}',
           'G28',
+          'M190 S{bed_temp}',
+          'M109 S{nozzle_temp}',
           'G1 X150 Y150 Z5 F3000',
           'G92 E0',
           'G1 E5 F600',
@@ -165,7 +168,7 @@ describe('macro designer scenarios', () => {
     const profile = makeProfile();
     const macros = [
       makeMacro(
-        '{% for i in range(3) %}\nG1 X{10 + i * 50} Y50 F1200\n{% endfor %}',
+        'G28\n{% for i in range(3) %}\nG1 X{10 + i * 50} Y50 F1200\n{% endfor %}',
         'SWEEP',
         'sweep',
       ),
@@ -286,7 +289,7 @@ describe('machine-state template fidelity', () => {
     const profile = makeProfile({ maxX: 350, maxY: 350, maxZ: 300 });
     const macros = [
       makeMacro(
-        'G1 X{printer.toolhead.axis_maximum.x} Y{printer.toolhead.axis_maximum.y} F3000',
+        'G28\nG1 X{printer.toolhead.axis_maximum.x} Y{printer.toolhead.axis_maximum.y} F3000',
         'READ_MAX',
         'read_max',
       ),
@@ -319,7 +322,7 @@ describe('machine-state template fidelity', () => {
     const profile = makeProfile();
     const macros = [
       makeMacro(
-        'G1 X100 Y50 F3000\nRESPOND MSG={printer.toolhead.position.x}',
+        'G28\nG1 X100 Y50 F3000\nRESPOND MSG={printer.toolhead.position.x}',
         'READ_POS',
         'read_pos',
       ),
@@ -394,5 +397,111 @@ describe('machine-state template fidelity', () => {
 
     expect(plan.warnings).toEqual([]);
     expect(trace.some((entry) => entry.includes('idle'))).toBe(true);
+  });
+
+  it('initial machine state is dead: centered, unhomed, heaters off', () => {
+    const profile = makeProfile();
+    const state = createInitialRuntimeState(profile, 'ANY');
+
+    expect(state.x).toBe(profile.centerX);
+    expect(state.y).toBe(profile.centerY);
+    expect(state.homedAxes).toEqual([]);
+    expect(state.bed.target).toBe(0);
+    expect(state.nozzle.target).toBe(0);
+  });
+
+  it('refuses a move on unhomed axes with a warning', () => {
+    const profile = makeProfile();
+    const macros = [
+      makeMacro('G1 X100 Y50 F3000', 'MOVE_UNHOMED', 'move_unhomed'),
+    ];
+
+    const { plan, state, stepWarnings } = runSimulation(macros[0], macros, profile);
+
+    expect(plan.warnings).toEqual([]);
+    expect(stepWarnings.some((w) => w.toLowerCase().includes('homed'))).toBe(true);
+    // Klipper refuses the move: position stays at the initial center.
+    expect(state.x).toBe(profile.centerX);
+    expect(state.y).toBe(profile.centerY);
+  });
+
+  it('allows a move after G28 homes the axes', () => {
+    const profile = makeProfile();
+    const macros = [
+      makeMacro('G28\nG1 X100 Y50 F3000', 'MOVE_HOMED', 'move_homed'),
+    ];
+
+    const { plan, state, stepWarnings } = runSimulation(macros[0], macros, profile);
+
+    expect(plan.warnings).toEqual([]);
+    expect(stepWarnings.length).toBe(0);
+    expect(state.x).toBeCloseTo(100, 5);
+    expect(state.y).toBeCloseTo(50, 5);
+  });
+
+  it('refuses extrusion while the nozzle is cold', () => {
+    const profile = makeProfile();
+    const macros = [
+      makeMacro('G28\nG1 E5 F600', 'COLD_EXTRUDE', 'cold_extrude'),
+    ];
+
+    const { plan, state, stepWarnings } = runSimulation(macros[0], macros, profile);
+
+    expect(plan.warnings).toEqual([]);
+    expect(stepWarnings.some((w) => w.toLowerCase().includes('extrusion'))).toBe(true);
+    expect(state.e).toBe(0);
+  });
+
+  it('allows extrusion after the nozzle is hot (M109)', () => {
+    const profile = makeProfile();
+    const macros = [
+      makeMacro('G28\nM109 S200\nG1 E0.5 F600', 'HOT_EXTRUDE', 'hot_extrude'),
+    ];
+
+    const { plan, state, stepWarnings } = runSimulation(macros[0], macros, profile);
+
+    expect(plan.warnings).toEqual([]);
+    expect(stepWarnings.length).toBe(0);
+    expect(state.e).toBeCloseTo(0.5, 5);
+  });
+
+  it('refuses an out-of-range nozzle target and keeps the old one', () => {
+    const profile = makeProfile();
+    const macros = [
+      makeMacro('M104 S999', 'BAD_TEMP', 'bad_temp'),
+    ];
+
+    const { plan, state, trace, stepWarnings } = runSimulation(macros[0], macros, profile);
+
+    expect(plan.warnings).toEqual([]);
+    expect(stepWarnings.some((w) => w.toLowerCase().includes('exceeds'))).toBe(true);
+    expect(trace.some((entry) => entry.includes('Refuse nozzle target'))).toBe(true);
+    expect(state.nozzle.target).toBe(0);
+  });
+
+  it('standalone seeded state flows into the next simulation run', () => {
+    const profile = makeProfile();
+    const macros = [
+      makeMacro('G1 X80 Y90 F3000', 'SEEDED_MOVE', 'seeded_move'),
+    ];
+
+    // Simulate what the dialog does: seed G28 via executeStandaloneCommand,
+    // then use the resulting state as the initial state for the macro run.
+    const seedResult = executeStandaloneCommand('G28', createInitialRuntimeState(profile, macros[0].title), profile);
+    expect(seedResult.warnings).toEqual([]);
+    expect(seedResult.nextState.homedAxes).toEqual(['X', 'Y', 'Z']);
+
+    const plan = buildSimulationSteps(macros[0], macros, profile, undefined, { params: {}, rawparams: '' }, seedResult.nextState);
+    let state = seedResult.nextState;
+    const stepWarnings: string[] = [];
+    for (const step of plan.steps) {
+      const result = executeSimulationStep(state, step, profile);
+      state = result.nextState;
+      stepWarnings.push(...result.warnings);
+    }
+
+    expect(stepWarnings.length).toBe(0);
+    expect(state.x).toBeCloseTo(80, 5);
+    expect(state.y).toBeCloseTo(90, 5);
   });
 });
