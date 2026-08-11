@@ -11,6 +11,7 @@ import type {
   SimulationStep,
   SimulationTickResult,
 } from '../types/macroDesigner';
+import { logMacroDesignerEvent } from './macroDesignerLog';
 import { findPathZoneHit, findZoneHit, isPointInBounds, isPointInMoveBounds, parseMacroVariables } from './macroDesigner';
 
 function parseParams(tokens: string[]): Record<string, string> {
@@ -2544,6 +2545,14 @@ export function buildSimulationSteps(
   };
 
   visit(root, true, { params: {}, rawparams: '', locals: {} });
+  logMacroDesignerEvent({
+    event: 'sim:plan',
+    macro: root.title,
+    stepCount: steps.length,
+    warningCount: warnings.length,
+    warnings: warnings.slice(0, 10),
+    nestedMacros: stack.length > 0 ? stack : undefined,
+  });
   return { steps, warnings };
 }
 

@@ -39,6 +39,7 @@ import {
   executeSimulationStep,
   trapezoidalPositionAtTime,
 } from '../../utils/gcodeSimulator';
+import { logMacroDesignerEvent } from '../../utils/macroDesignerLog';
 import type { TrapezoidalProfile } from '../../utils/gcodeSimulator';
 
 interface MacroDesignerDialogProps {
@@ -968,6 +969,19 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
         existingTargetSection?.line_number,
       );
     }
+
+    logMacroDesignerEvent({
+      event: 'apply',
+      title: item.title,
+      destinationFile,
+      action: existingTargetSection ? (sameHeader ? 'update' : 'rename') : 'add',
+      structuralChanged: Boolean(existingTargetSection) && structuralChanged,
+      gcodeChanged: Boolean(existingTargetSection) && existingGcode !== selectedGcode,
+      headerComments: macroSection.header_comments.length,
+      trailingComments: macroSection.trailing_comments?.length ?? 0,
+      targetLine: macroSection.line_number,
+      source: item.source,
+    });
 
     const graphStore = useGraphStore.getState();
     const alreadyInGraph = graphStore.nodes.some((node) => {

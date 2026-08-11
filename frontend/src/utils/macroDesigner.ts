@@ -7,6 +7,7 @@ import type {
   NoGoZone,
   SimulationPoint,
 } from '../types/macroDesigner';
+import { logMacroDesignerEvent } from './macroDesignerLog';
 
 const DELTA_KINEMATICS = new Set(['delta', 'rotary_delta']);
 const SPECIAL_MACRO_PARAM_KEYS = new Set(['gcode', 'rename_existing', 'description']);
@@ -589,7 +590,7 @@ export function createGcodeMacroSection(
     is_commented_out: false,
     separator: ':',
   });
-  return {
+  const section = {
     section_type: 'gcode_macro',
     section_name: sanitizeMacroName(item.title),
     full_header: `gcode_macro ${sanitizeMacroName(item.title)}`,
@@ -599,6 +600,16 @@ export function createGcodeMacroSection(
     trailing_comments: existingSection?.trailing_comments ?? [],
     is_commented_out: false,
   };
+  logMacroDesignerEvent({
+    event: 'section:build',
+    title: item.title,
+    targetFile: item.sourceFile,
+    carriedComments: Boolean(existingSection?.header_comments?.length || existingSection?.trailing_comments?.length),
+    headerComments: section.header_comments.length,
+    trailingComments: section.trailing_comments.length,
+    lineNumber: section.line_number,
+  });
+  return section;
 }
 
 export function areEquivalentMacroItems(left: MacroSourceItem, right: MacroSourceItem): boolean {
@@ -619,15 +630,28 @@ export function findMatchingTargetMacroSection(
   const macroSection = createGcodeMacroSection(item);
   const sections = configFiles[targetFile]?.sections || [];
 
-  return sections.find((candidate) => {
+  let matchedByLine = false;
+  const match = sections.find((candidate) => {
     if (candidate.full_header !== macroSection.full_header) {
       return false;
     }
     if (item.source === 'config' && item.sourceFile === targetFile && macroSection.line_number > 0) {
-      return candidate.line_number === macroSection.line_number;
+      matchedByLine = candidate.line_number === macroSection.line_number;
+      return matchedByLine;
     }
     return true;
   }) || null;
+
+  logMacroDesignerEvent({
+    event: 'section:match',
+    title: item.title,
+    targetFile,
+    matched: Boolean(match),
+    byLine: matchedByLine,
+    headerOnly: Boolean(match) && !matchedByLine,
+    candidateCount: sections.filter((s) => s.full_header === macroSection.full_header).length,
+  });
+  return match;
 }
 
 export function isMacroItemUnchangedInSection(item: MacroSourceItem, section: ConfigSection | null): boolean {
@@ -638,10 +662,19 @@ export function isMacroItemUnchangedInSection(item: MacroSourceItem, section: Co
   const existingGcode = normalizeMacroGcodeForConfig(getSectionParamValue(section, 'gcode'));
   const selectedGcode = normalizeMacroGcodeForConfig(item.gcode);
 
-  return (
+  const unchanged = (
     existingGcode === selectedGcode
     && normalizePlainText(getSectionParamValue(section, 'rename_existing')) === normalizePlainText(item.renameExisting)
     && normalizePlainText(getSectionParamValue(section, 'description')) === normalizePlainText(item.description)
     && normalizePlainText(serializeMacroVariables(section)) === normalizePlainText(item.variables)
   );
+
+  if (unchanged) {
+    logMacroDesignerEvent({
+      event: 'section:unchanged',
+      title: item.title,
+      targetFile: item.sourceFile,
+    });
+  }
+  return unchanged;
 }
