@@ -583,6 +583,10 @@ type ProbeSamplingPlan = {
 type TemplateStaticContext = {
   printerObjects: Record<string, unknown>;
   configSections: Record<string, unknown>;
+  machineBounds?: {
+    axis_minimum: Record<string, number>;
+    axis_maximum: Record<string, number>;
+  };
 };
 
 type TemplateLineSegment =
@@ -735,9 +739,17 @@ function buildConfigSectionContext(section: ConfigFile['sections'][number]): Rec
 function buildTemplateStaticContext(
   allMacros: MacroSourceItem[],
   configFiles?: Record<string, ConfigFile>,
+  profile?: MachineProfile,
 ): TemplateStaticContext {
   const printerObjects: Record<string, unknown> = {};
   const configSections: Record<string, unknown> = {};
+
+  const machineBounds = profile
+    ? {
+        axis_minimum: { x: profile.minX, y: profile.minY, z: profile.minZ },
+        axis_maximum: { x: profile.maxX, y: profile.maxY, z: profile.maxZ },
+      }
+    : undefined;
 
   if (configFiles) {
     Object.values(configFiles).forEach((configFile) => {
@@ -765,7 +777,7 @@ function buildTemplateStaticContext(
     });
   });
 
-  return { printerObjects, configSections };
+  return { printerObjects, configSections, machineBounds };
 }
 
 function createInitialPlannerState(allMacros: MacroSourceItem[]): PlannerState {
@@ -1321,6 +1333,12 @@ function buildTemplatePrinterContext(
     homed_axes: getHomedAxesString(plannerState.homedAxes),
     home_axes: getHomedAxesString(plannerState.homedAxes),
     extruder: plannerState.activeExtruder,
+    ...(staticContext.machineBounds
+      ? {
+          axis_minimum: staticContext.machineBounds.axis_minimum,
+          axis_maximum: staticContext.machineBounds.axis_maximum,
+        }
+      : {}),
   });
   setContextVariants(printer, 'gcode_move', {
     ...asRecord(printer.gcode_move),
@@ -1350,6 +1368,9 @@ function buildTemplatePrinterContext(
   setContextVariants(printer, 'configfile', {
     ...asRecord(printer.configfile),
     config: staticContext.configSections,
+    // Real Klipper exposes settings via printer.configfile.settings
+    // (e.g. printer.configfile.settings.printer.max_velocity).
+    settings: staticContext.configSections,
   });
 
   if (plannerState.activeExtruder) {
@@ -2315,7 +2336,7 @@ export function buildSimulationSteps(
   const stack: string[] = [];
   const plannerState = createInitialPlannerState(allMacros);
   let previewState = createInitialRuntimeState(profile, root.title);
-  const staticContext = buildTemplateStaticContext(allMacros, configFiles);
+  const staticContext = buildTemplateStaticContext(allMacros, configFiles, profile);
   let visit: (macro: MacroSourceItem, allowHomingOverride?: boolean, invocation?: MacroInvocationContext) => void;
 
   const appendSimulationSteps = (nextSteps: SimulationStep[]) => {
