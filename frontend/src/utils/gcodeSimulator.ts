@@ -21,7 +21,7 @@ export function parseParams(tokens: string[]): Record<string, string> {
     const eqIndex = token.indexOf('=');
     if (eqIndex !== -1) {
       const key = token.slice(0, eqIndex).trim().toUpperCase();
-      const value = token.slice(eqIndex + 1).trim().replace(/^"|"$/g, '');
+      const value = token.slice(eqIndex + 1).trim().replace(/^["']|["']$/g, '');
       if (key) params[key] = value;
       continue;
     }
@@ -32,6 +32,44 @@ export function parseParams(tokens: string[]): Record<string, string> {
     }
   }
   return params;
+}
+
+/**
+ * Split a command line into tokens the way Klipper's shlex parser does:
+ * whitespace-separated, but quote groups (single or double) stay intact
+ * even when embedded mid-token (e.g. MSG='hello world' is one token).
+ */
+function splitCommandTokens(line: string): string[] {
+  const tokens: string[] = [];
+  let current = '';
+  let quote: string | null = null;
+  for (let i = 0; i < line.length; i += 1) {
+    const char = line[i];
+    if (quote) {
+      current += char;
+      if (char === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      current += char;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (current) {
+        tokens.push(current);
+        current = '';
+      }
+      continue;
+    }
+    current += char;
+  }
+  if (current) {
+    tokens.push(current);
+  }
+  return tokens;
 }
 
 function isTemplateDirective(line: string): boolean {
@@ -63,7 +101,7 @@ export function parseGcodeLine(line: string, lineNumber: number, sourceName: str
   // the real Y value.
   const withoutComment = line.replace(/;.*$/, '').replace(/\s*#.*$/, '').trim();
   if (!withoutComment) return null;
-  const tokens = withoutComment.match(/(?:"[^"]*"|\S+)/g) || [];
+  const tokens = splitCommandTokens(withoutComment);
   const [commandToken, ...paramTokens] = tokens;
   if (!commandToken) return null;
   return {
