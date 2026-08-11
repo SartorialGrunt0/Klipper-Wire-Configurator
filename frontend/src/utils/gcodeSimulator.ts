@@ -1975,7 +1975,7 @@ function evaluateTemplateCall(
 
   switch (name.toLowerCase()) {
     case 'range': {
-      const numericArgs = args.map((arg) => Number(arg));
+      const numericArgs = args.map((arg) => (isUnresolved(arg) ? NaN : Number(arg)));
       if (numericArgs.length === 0 || numericArgs.some((arg) => !Number.isFinite(arg)) || numericArgs.length > 3) {
         return TEMPLATE_UNRESOLVED;
       }
@@ -2005,12 +2005,13 @@ function evaluateTemplateCall(
 }
 
 function formatPrintfValue(specifier: string, precision: number | null, value: unknown): string {
+  const numericValue = isUnresolved(value) ? NaN : value;
   switch (specifier) {
     case 'd':
     case 'i':
-      return `${Math.trunc(Number(value) || 0)}`;
+      return `${Math.trunc(Number(numericValue) || 0)}`;
     case 'f': {
-      const numeric = Number(value);
+      const numeric = Number(numericValue);
       if (!Number.isFinite(numeric)) {
         return '0';
       }

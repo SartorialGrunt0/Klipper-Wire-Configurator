@@ -251,3 +251,47 @@ describe('executeSimulationStep', () => {
     expect(result.nextState.activeProbePoint).toEqual({ x: 100, y: 100, label: 'PROBE' });
   });
 });
+
+describe('unresolved template symbols (P0-3 crash guard)', () => {
+  it('does not throw when range() receives an unresolved symbol arg', () => {
+    const profile = makeProfile();
+    // params.COUNT is not supplied → resolves to the TEMPLATE_UNRESOLVED
+    // symbol; Number(Symbol) previously threw inside evaluateTemplateCall.
+    const macro = makeMacro(
+      '{% for i in range(params.COUNT) %}\nG1 X{10 + i}\n{% endfor %}',
+      { title: 'RANGE_UNRESOLVED' },
+    );
+    expect(() => buildSimulationSteps(macro, [macro], profile)).not.toThrow();
+  });
+
+  it('does not throw when range() receives an unresolved reference', () => {
+    const profile = makeProfile();
+    // printer.foo is not a known object → unresolved symbol.
+    const macro = makeMacro(
+      '{% for i in range(printer.foo.bar) %}\nG1 X{i}\n{% endfor %}',
+      { title: 'RANGE_REF_UNRESOLVED' },
+    );
+    expect(() => buildSimulationSteps(macro, [macro], profile)).not.toThrow();
+  });
+
+  it('degrades to a warning rather than crashing on unresolved range bounds', () => {
+    const profile = makeProfile();
+    const macro = makeMacro(
+      '{% for i in range(printer.foo.bar) %}\nG1 X{i}\n{% endfor %}',
+      { title: 'RANGE_WARN' },
+    );
+    const plan = buildSimulationSteps(macro, [macro], profile);
+    expect(Array.isArray(plan.warnings)).toBe(true);
+  });
+
+  it('does not throw when printf formatting receives an unresolved symbol in a list', () => {
+    const profile = makeProfile();
+    // '%d' % [unresolved] — the list keeps the Symbol inside, bypassing
+    // the binary-operator guard; Number(Symbol) previously threw.
+    const macro = makeMacro(
+      "{% set msg = '%d' % [printer.foo.bar] %}\nRESPOND MSG={msg}",
+      { title: 'PRINTF_UNRESOLVED' },
+    );
+    expect(() => buildSimulationSteps(macro, [macro], profile)).not.toThrow();
+  });
+});
