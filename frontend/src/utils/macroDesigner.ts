@@ -553,3 +553,95 @@ export function findPathZoneHit(
     lineSegmentIntersectsRect(x1, y1, x2, y2, zone.x, zone.y, zone.width, zone.height)
   ) || null;
 }
+
+export function getSectionParamValue(section: ConfigSection | undefined, key: string): string {
+  return section?.params.find((param) => param.key === key && !param.is_commented_out)?.value || '';
+}
+
+export function normalizePlainText(value: string): string {
+  return value.replace(/\r\n?/g, '\n').trim();
+}
+
+/**
+ * Build a [gcode_macro X] ConfigSection from a MacroSourceItem.
+ *
+ * When `existingSection` is supplied (the section this item will replace),
+ * its header/trailing comments and line number are carried over so Apply
+ * does not wipe comments above/below the macro or move the section to the
+ * end of the file.
+ */
+export function createGcodeMacroSection(
+  item: MacroSourceItem,
+  existingSection?: ConfigSection | null,
+): ConfigSection {
+  const params = [];
+  if (item.description.trim()) {
+    params.push({ key: 'description', value: item.description.trim(), comment: '', is_commented_out: false, separator: ':' });
+  }
+  if (item.renameExisting.trim()) {
+    params.push({ key: 'rename_existing', value: item.renameExisting.trim(), comment: '', is_commented_out: false, separator: ':' });
+  }
+  params.push(...parseMacroVariables(item.variables));
+  params.push({
+    key: 'gcode',
+    value: normalizeMacroGcodeForConfig(item.gcode) || '\n',
+    comment: '',
+    is_commented_out: false,
+    separator: ':',
+  });
+  return {
+    section_type: 'gcode_macro',
+    section_name: sanitizeMacroName(item.title),
+    full_header: `gcode_macro ${sanitizeMacroName(item.title)}`,
+    line_number: item.sourceLine ?? existingSection?.line_number ?? 0,
+    params,
+    header_comments: existingSection?.header_comments ?? [],
+    trailing_comments: existingSection?.trailing_comments ?? [],
+    is_commented_out: false,
+  };
+}
+
+export function areEquivalentMacroItems(left: MacroSourceItem, right: MacroSourceItem): boolean {
+  return (
+    sanitizeMacroName(left.title) === sanitizeMacroName(right.title)
+    && normalizePlainText(left.renameExisting) === normalizePlainText(right.renameExisting)
+    && normalizePlainText(left.description) === normalizePlainText(right.description)
+    && normalizePlainText(left.variables) === normalizePlainText(right.variables)
+    && normalizeMacroGcodeForConfig(left.gcode) === normalizeMacroGcodeForConfig(right.gcode)
+  );
+}
+
+export function findMatchingTargetMacroSection(
+  configFiles: Record<string, ConfigFile>,
+  item: MacroSourceItem,
+  targetFile: string,
+): ConfigSection | null {
+  const macroSection = createGcodeMacroSection(item);
+  const sections = configFiles[targetFile]?.sections || [];
+
+  return sections.find((candidate) => {
+    if (candidate.full_header !== macroSection.full_header) {
+      return false;
+    }
+    if (item.source === 'config' && item.sourceFile === targetFile && macroSection.line_number > 0) {
+      return candidate.line_number === macroSection.line_number;
+    }
+    return true;
+  }) || null;
+}
+
+export function isMacroItemUnchangedInSection(item: MacroSourceItem, section: ConfigSection | null): boolean {
+  if (!section) {
+    return false;
+  }
+
+  const existingGcode = normalizeMacroGcodeForConfig(getSectionParamValue(section, 'gcode'));
+  const selectedGcode = normalizeMacroGcodeForConfig(item.gcode);
+
+  return (
+    existingGcode === selectedGcode
+    && normalizePlainText(getSectionParamValue(section, 'rename_existing')) === normalizePlainText(item.renameExisting)
+    && normalizePlainText(getSectionParamValue(section, 'description')) === normalizePlainText(item.description)
+    && normalizePlainText(serializeMacroVariables(section)) === normalizePlainText(item.variables)
+  );
+}

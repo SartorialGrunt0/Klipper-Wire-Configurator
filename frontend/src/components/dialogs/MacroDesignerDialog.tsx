@@ -3,7 +3,7 @@ import { useConfigStore } from '../../stores/configStore';
 import { useGraphStore } from '../../stores/graphStore';
 import { createDefaultDraft, useMacroDesignerStore } from '../../stores/macroDesignerStore';
 import * as api from '../../services/api';
-import type { ConfigFile, ConfigSection } from '../../types/config';
+import type { ConfigFile } from '../../types/config';
 import type {
   MacroDraft,
   MachineProfile,
@@ -13,17 +13,22 @@ import type {
   SimulationTickResult,
 } from '../../types/macroDesigner';
 import {
+  areEquivalentMacroItems,
   buildConfigMacroItemKey,
+  createGcodeMacroSection,
   createMachineProfile,
   deriveAvailableBuiltInMacros,
   deriveCurrentMacroItems,
+  findMatchingTargetMacroSection,
   findPathZoneHit,
   findZoneHit,
   fuzzyFilterItems,
+  getSectionParamValue,
+  isMacroItemUnchangedInSection,
   isPointInMoveBounds,
   normalizeMacroGcodeForConfig,
+  normalizePlainText,
   parseMacroGcodeFromEditorView,
-  parseMacroVariables,
   sanitizeMacroName,
   serializeMacroVariables,
 } from '../../utils/macroDesigner';
@@ -163,52 +168,6 @@ const SUPPORTED_GCODE_COMMANDS: SupportedGcodeCommand[] = [
 
 const PLAYBACK_ITEM_KEY = 'playback:loaded';
 
-function createGcodeMacroSection(item: MacroSourceItem): ConfigSection {
-  const params = [];
-  if (item.description.trim()) {
-    params.push({ key: 'description', value: item.description.trim(), comment: '', is_commented_out: false, separator: ':' });
-  }
-  if (item.renameExisting.trim()) {
-    params.push({ key: 'rename_existing', value: item.renameExisting.trim(), comment: '', is_commented_out: false, separator: ':' });
-  }
-  params.push(...parseMacroVariables(item.variables));
-  params.push({
-    key: 'gcode',
-    value: normalizeMacroGcodeForConfig(item.gcode) || '\n',
-    comment: '',
-    is_commented_out: false,
-    separator: ':',
-  });
-  return {
-    section_type: 'gcode_macro',
-    section_name: sanitizeMacroName(item.title),
-    full_header: `gcode_macro ${sanitizeMacroName(item.title)}`,
-    line_number: item.sourceLine ?? 0,
-    params,
-    header_comments: [],
-    trailing_comments: [],
-    is_commented_out: false,
-  };
-}
-
-function getSectionParamValue(section: ConfigSection | undefined, key: string): string {
-  return section?.params.find((param) => param.key === key && !param.is_commented_out)?.value || '';
-}
-
-function normalizePlainText(value: string): string {
-  return value.replace(/\r\n?/g, '\n').trim();
-}
-
-function areEquivalentMacroItems(left: MacroSourceItem, right: MacroSourceItem): boolean {
-  return (
-    sanitizeMacroName(left.title) === sanitizeMacroName(right.title)
-    && normalizePlainText(left.renameExisting) === normalizePlainText(right.renameExisting)
-    && normalizePlainText(left.description) === normalizePlainText(right.description)
-    && normalizePlainText(left.variables) === normalizePlainText(right.variables)
-    && normalizeMacroGcodeForConfig(left.gcode) === normalizeMacroGcodeForConfig(right.gcode)
-  );
-}
-
 function createStandaloneDraftItem(draft: MacroDraft): MacroSourceItem {
   return {
     key: `draft:${draft.id}`,
@@ -221,41 +180,6 @@ function createStandaloneDraftItem(draft: MacroDraft): MacroSourceItem {
     draftId: draft.id,
     isDraft: true,
   };
-}
-
-function findMatchingTargetMacroSection(
-  configFiles: Record<string, ConfigFile>,
-  item: MacroSourceItem,
-  targetFile: string,
-): ConfigSection | null {
-  const macroSection = createGcodeMacroSection(item);
-  const sections = configFiles[targetFile]?.sections || [];
-
-  return sections.find((candidate) => {
-    if (candidate.full_header !== macroSection.full_header) {
-      return false;
-    }
-    if (item.source === 'config' && item.sourceFile === targetFile && macroSection.line_number > 0) {
-      return candidate.line_number === macroSection.line_number;
-    }
-    return true;
-  }) || null;
-}
-
-function isMacroItemUnchangedInSection(item: MacroSourceItem, section: ConfigSection | null): boolean {
-  if (!section) {
-    return false;
-  }
-
-  const existingGcode = normalizeMacroGcodeForConfig(getSectionParamValue(section, 'gcode'));
-  const selectedGcode = normalizeMacroGcodeForConfig(item.gcode);
-
-  return (
-    existingGcode === selectedGcode
-    && normalizePlainText(getSectionParamValue(section, 'rename_existing')) === normalizePlainText(item.renameExisting)
-    && normalizePlainText(getSectionParamValue(section, 'description')) === normalizePlainText(item.description)
-    && normalizePlainText(serializeMacroVariables(section)) === normalizePlainText(item.variables)
-  );
 }
 
 function getMacroItemBadges(item: MacroSourceItem): string[] {
@@ -1011,8 +935,8 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
       return false;
     }
 
-    const macroSection = createGcodeMacroSection(item);
     const existingTargetSection = findMatchingTargetMacroSection(configFiles, item, destinationFile);
+    const macroSection = createGcodeMacroSection(item, existingTargetSection);
     if (existingTargetSection && isMacroItemUnchangedInSection(item, existingTargetSection)) {
       return false;
     }
