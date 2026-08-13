@@ -631,7 +631,8 @@ type TemplateStaticContext = {
 
 type TemplateLineSegment =
   | { kind: 'text'; text: string }
-  | { kind: 'directive'; directive: string };
+  | { kind: 'directive'; directive: string }
+  | { kind: 'comment'; comment: string };
 
 type NumberedTemplateLine = {
   text: string;
@@ -1850,7 +1851,7 @@ function tokenizeTemplateLine(line: string): TemplateLineSegment[] {
   }
 
   const segments: TemplateLineSegment[] = [];
-  const pattern = /\{%([\s\S]*?)%\}/g;
+  const pattern = /\{%([\s\S]*?)%\}|{#([\s\S]*?)#}/g;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
@@ -1858,7 +1859,11 @@ function tokenizeTemplateLine(line: string): TemplateLineSegment[] {
     if (match.index > lastIndex) {
       segments.push({ kind: 'text', text: line.slice(lastIndex, match.index) });
     }
-    segments.push({ kind: 'directive', directive: match[1] });
+    if (match[1] !== undefined) {
+      segments.push({ kind: 'directive', directive: match[1] });
+    } else {
+      segments.push({ kind: 'comment', comment: match[2] });
+    }
     lastIndex = pattern.lastIndex;
   }
 
@@ -1895,6 +1900,132 @@ function collectTemplateLoopBody(lines: NumberedTemplateLine[], startIndex: numb
   }
 
   return { body, endIndex: lines.length };
+}
+
+function collectInlineLoopBodySegments(segments: TemplateLineSegment[], startIndex: number): { body: TemplateLineSegment[]; endIndex: number } {
+  const body: TemplateLineSegment[] = [];
+  let depth = 0;
+
+  for (let index = startIndex + 1; index < segments.length; index += 1) {
+    const segment = segments[index];
+    if (segment.kind === 'directive') {
+      const trimmed = segment.directive.trim();
+      if (/^for\b/i.test(trimmed)) {
+        depth += 1;
+      } else if (/^endfor$/i.test(trimmed)) {
+        if (depth === 0) {
+          return { body, endIndex: index };
+        }
+        depth -= 1;
+      }
+    }
+    body.push(segment);
+  }
+
+  return { body, endIndex: segments.length };
+}
+
+/**
+ * Render a template line that mixes directives/comments with gcode text
+ * (e.g. `{% set HOME_CURRENT = 1 %}  ## comment` or
+ * `M104 {% for p in params %}{'%s%s' % (p, params[p])}{% endfor %}`).
+ * Mirrors the line-level control-flow switch on the same conditionalStack,
+ * so inline if/endif/for/endfor balance just like whole-line directives.
+ * Text segments only render while the branch is active; directives always
+ * execute so the stack stays balanced.
+ */
+function renderInlineTemplateSegments(
+  segments: TemplateLineSegment[],
+  invocation: MacroInvocationContext,
+  plannerState: PlannerState,
+  staticContext: TemplateStaticContext,
+  conditionalStack: Array<{ parentActive: boolean; branchTaken: boolean; active: boolean }>,
+): string {
+  let rendered = '';
+  const isBranchActive = () => conditionalStack.every((entry) => entry.active);
+
+  for (let index = 0; index < segments.length; index += 1) {
+    const segment = segments[index];
+    if (segment.kind === 'comment') {
+      continue;
+    }
+    if (segment.kind === 'text') {
+      if (isBranchActive()) {
+        rendered += renderInlineTemplateExpressions(segment.text, invocation, plannerState, staticContext);
+      }
+      continue;
+    }
+
+    const templateControl = parseTemplateDirective(segment.directive, invocation, plannerState, staticContext);
+    if (!templateControl) {
+      continue;
+    }
+
+    switch (templateControl.kind) {
+      case 'set':
+        if (isBranchActive() && templateControl.name && !isUnresolved(templateControl.value)) {
+          invocation.locals[templateControl.name] = templateControl.value;
+        }
+        break;
+      case 'if': {
+        const parentActive = isBranchActive();
+        const conditionMatched = templateControl.result !== false;
+        conditionalStack.push({ parentActive, branchTaken: conditionMatched, active: parentActive && conditionMatched });
+        break;
+      }
+      case 'elif': {
+        const current = conditionalStack[conditionalStack.length - 1];
+        if (!current) {
+          break;
+        }
+        const conditionMatched = templateControl.result !== false;
+        current.active = current.parentActive && !current.branchTaken && conditionMatched;
+        current.branchTaken = current.branchTaken || conditionMatched;
+        break;
+      }
+      case 'else': {
+        const current = conditionalStack[conditionalStack.length - 1];
+        if (!current) {
+          break;
+        }
+        current.active = current.parentActive && !current.branchTaken;
+        current.branchTaken = true;
+        break;
+      }
+      case 'endif':
+        conditionalStack.pop();
+        break;
+      case 'for': {
+        const { body, endIndex } = collectInlineLoopBodySegments(segments, index);
+        if (isBranchActive()) {
+          const iterable = coerceTemplateIterable(templateControl.iterable);
+          const loopVariables = templateControl.loopVariables || [];
+          const savedValues = loopVariables.map((name) => ({
+            name,
+            hasValue: Object.prototype.hasOwnProperty.call(invocation.locals, name),
+            value: invocation.locals[name],
+          }));
+          iterable.forEach((entry) => {
+            assignLoopVariables(invocation.locals, loopVariables, entry);
+            rendered += renderInlineTemplateSegments(body, invocation, plannerState, staticContext, conditionalStack);
+          });
+          savedValues.forEach(({ name, hasValue, value }) => {
+            if (hasValue) {
+              invocation.locals[name] = value;
+            } else {
+              delete invocation.locals[name];
+            }
+          });
+        }
+        index = endIndex;
+        break;
+      }
+      case 'endfor':
+        break;
+    }
+  }
+
+  return rendered;
 }
 
 function coerceTemplateIterable(value: unknown): unknown[] {
@@ -2588,9 +2719,14 @@ export function buildSimulationSteps(
     const visitLines = (templateLines: NumberedTemplateLine[]) => {
       for (let lineIndex = 0; lineIndex < templateLines.length; lineIndex += 1) {
         const line = templateLines[lineIndex];
-        const wholeLineDirective = extractWholeLineTemplateDirective(line.text);
-        if (wholeLineDirective) {
-          const templateControl = parseTemplateDirective(wholeLineDirective, invocation, plannerState, staticContext);
+        const segments = tokenizeTemplateLine(line.text);
+        const directiveSegments = segments.filter((segment) => segment.kind === 'directive');
+        const hasMeaningfulText = segments.some((segment) => segment.kind === 'text' && segment.text.trim() !== '');
+        const hasTemplateSegments = segments.some((segment) => segment.kind !== 'text');
+        const isWholeLineDirective = directiveSegments.length === 1 && !hasMeaningfulText;
+
+        if (isWholeLineDirective) {
+          const templateControl = parseTemplateDirective(directiveSegments[0].directive, invocation, plannerState, staticContext);
           if (!templateControl) {
             continue;
           }
@@ -2660,6 +2796,23 @@ export function buildSimulationSteps(
             case 'endfor':
               continue;
           }
+        }
+
+        // A line mixing template directives/comments with text (e.g.
+        // `{% set HOME_CURRENT = 1 %}  ## comment` or a M104 line with an
+        // inline `{% for %}`): execute directives in order, render text
+        // through the same expression evaluator, then run the result like
+        // Klipper does — the rendered line is the gcode.
+        if (hasTemplateSegments) {
+          const rendered = renderInlineTemplateSegments(segments, invocation, plannerState, staticContext, conditionalStack);
+          const trimmed = rendered.trim();
+          if (trimmed && !trimmed.startsWith('#') && !trimmed.startsWith(';')) {
+            const parsed = parseGcodeLine(trimmed, line.lineNumber, macro.title);
+            if (parsed) {
+              appendParsedCommand(parsed, macro, allowHomingOverride);
+            }
+          }
+          continue;
         }
 
         if (!isBranchActive()) {

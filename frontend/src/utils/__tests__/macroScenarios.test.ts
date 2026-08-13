@@ -505,3 +505,119 @@ describe('machine-state template fidelity', () => {
     expect(state.y).toBeCloseTo(90, 5);
   });
 });
+
+describe('inline template segments on mixed lines (2026-08-12 fix)', () => {
+  it('directive with trailing comment executes the set (sensorless.cfg _HOME_X pattern)', () => {
+    const profile = makeProfile();
+    const macros = [
+      makeMacro(
+        [
+          '{% set HOME_CURRENT = 1 %}  ## Change this to the value you used when calibrating stallguard.',
+          'SET_TMC_CURRENT STEPPER=stepper_x CURRENT={HOME_CURRENT}',
+        ].join('\n'),
+        '_HOME_X',
+        'home_x',
+      ),
+    ];
+
+    const { plan, stepWarnings, trace } = runSimulation(macros[0], macros, profile);
+
+    expect(plan.warnings).toEqual([]);
+    expect(stepWarnings.some((w) => w.includes('Unsupported command'))).toBe(false);
+    expect(trace).toContain('SET_TMC_CURRENT');
+    // The rendered command carries the resolved CURRENT=1 from the set above.
+    const setCurrentStep = plan.steps.find((step) => step.kind === 'command' && step.command.command === 'SET_TMC_CURRENT');
+    expect(commandRaw(setCurrentStep!)).toContain('CURRENT=1');
+  });
+
+  it('multiple directives on one line all execute', () => {
+    const profile = makeProfile();
+    const macros = [
+      makeMacro(
+        [
+          '{% set a = 1 %} {% set b = 2 %}',
+          'M117 {a}-{b}',
+        ].join('\n'),
+        'MULTI_SET',
+        'multi_set',
+      ),
+    ];
+
+    const { plan, stepWarnings, trace } = runSimulation(macros[0], macros, profile);
+
+    expect(plan.warnings).toEqual([]);
+    expect(stepWarnings.some((w) => w.includes('Unsupported command'))).toBe(false);
+    expect(trace.some((entry) => entry.includes('1-2'))).toBe(true);
+  });
+
+  it('inline if/endif on one line renders conditionally', () => {
+    const profile = makeProfile();
+    const macros = [
+      makeMacro('{% if 1 == 1 %} G28 {% endif %}', 'INLINE_IF_TRUE', 'inline_if_true'),
+      makeMacro('{% if 1 == 2 %} G28 {% endif %}', 'INLINE_IF_FALSE', 'inline_if_false'),
+    ];
+
+    const runTrue = runSimulation(macros[0], macros, profile);
+    const runFalse = runSimulation(macros[1], macros, profile);
+
+    expect(runTrue.plan.warnings).toEqual([]);
+    expect(runTrue.stepWarnings.some((w) => w.includes('Unsupported command'))).toBe(false);
+    expect(runTrue.trace).toContain('Home axes');
+
+    expect(runFalse.plan.warnings).toEqual([]);
+    expect(runFalse.stepWarnings.some((w) => w.includes('Unsupported command'))).toBe(false);
+    expect(runFalse.trace).not.toContain('Home axes');
+  });
+
+  it('jinja {# #} comment lines are ignored', () => {
+    const profile = makeProfile();
+    const macros = [
+      makeMacro(
+        [
+          '{# home current note #}',
+          'G28',
+        ].join('\n'),
+        'JINJA_COMMENT',
+        'jinja_comment',
+      ),
+    ];
+
+    const { plan, stepWarnings, trace } = runSimulation(macros[0], macros, profile);
+
+    expect(plan.warnings).toEqual([]);
+    expect(stepWarnings.some((w) => w.includes('Unsupported command'))).toBe(false);
+    expect(trace).toContain('Home axes');
+  });
+
+  it('inline for loop expands into a command line (M109 override pattern)', () => {
+    const profile = makeProfile();
+    const macros = [
+      makeMacro(
+        "M104 {% for p in params %}{'%s%s' % (p, params[p])}{% endfor %}  ; Set hotend temp",
+        'M104',
+        'm104',
+      ),
+    ];
+
+    const { plan, stepWarnings, trace } = runSimulation(macros[0], macros, profile, { S: '80' }, 'S=80');
+
+    expect(plan.warnings).toEqual([]);
+    expect(stepWarnings.some((w) => w.includes('Unsupported command'))).toBe(false);
+    expect(trace).toContain('Set nozzle target 80C');
+  });
+
+  it('a bare nested macro call still sees no root params (unchanged semantics)', () => {
+    const profile = makeProfile();
+    const macros = [
+      makeMacro('MY_HEATER', 'ROOT', 'root'),
+      makeMacro('M117 {params.TEMP}', 'MY_HEATER', 'my_heater'),
+    ];
+
+    const { plan, stepWarnings } = runSimulation(macros[0], macros, profile, { TEMP: '80' }, 'TEMP=80');
+
+    expect(plan.warnings).toEqual([]);
+    // Bare call: params are NOT inherited — TEMP stays unresolved, but the
+    // sim must not crash or emit an unsupported-command warning.
+    expect(stepWarnings.some((w) => w.includes('Unsupported command'))).toBe(false);
+  });
+});
