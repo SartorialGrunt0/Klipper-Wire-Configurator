@@ -2372,7 +2372,6 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                       spellCheck={false}
                       className="min-w-0 flex-1 rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-2 py-1 font-mono text-[11px] text-[var(--color-text-primary)] placeholder:text-[var(--color-text-secondary)] focus:border-[var(--color-accent)] focus:outline-none"
                     />
-                    <span className="text-[10px] text-[var(--color-text-secondary)]">Applied to root macro</span>
                   </div>
                   <div className="mt-3 rounded-lg border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-3 py-2">
                     <div className="flex items-start justify-between gap-3">
