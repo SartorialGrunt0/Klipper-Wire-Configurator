@@ -284,6 +284,28 @@ describe('unresolved template symbols (P0-3 crash guard)', () => {
     expect(Array.isArray(plan.warnings)).toBe(true);
   });
 
+  it('skips the loop body when range() is unresolvable', () => {
+    const profile = makeProfile();
+    const macro = makeMacro(
+      '{% for i in range(params.LAYERS) %}\nG1 X10\n{% endfor %}\nG28',
+      { title: 'RANGE_SKIP_BODY' },
+    );
+    const result = buildSimulationSteps(macro, [macro], profile);
+    const moveSteps = result.steps.filter((s): s is Extract<typeof s, { kind: 'move' }> => s.kind === 'move');
+    expect(moveSteps).toHaveLength(0);
+  });
+
+  it('keeps numeric range() working', () => {
+    const profile = makeProfile();
+    const macro = makeMacro(
+      '{% for i in range(0, 3) %}\nM117 pass {{ i }}\n{% endfor %}',
+      { title: 'RANGE_NUMERIC' },
+    );
+    const result = buildSimulationSteps(macro, [macro], profile);
+    const respondSteps = result.steps.filter((s) => s.kind === 'command' && s.command.command === 'M117');
+    expect(respondSteps.length).toBe(3);
+  });
+
   it('does not throw when printf formatting receives an unresolved symbol in a list', () => {
     const profile = makeProfile();
     // '%d' % [unresolved] — the list keeps the Symbol inside, bypassing
