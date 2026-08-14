@@ -226,7 +226,10 @@ export function buildOrthogonalPath(pts: Point[]): string {
       // two oversized curves meeting on a short run look like a kink/wave
       // instead of a clean 90° bend.
       const cr = Math.min(CORNER_R, inLen / 3, outLen / 3);
-      if (cr < 1) {
+      // Sharp 90° corners on short runs: rounding a tiny jog (e.g. the
+      // near-aligned straight-run bend) creates an S-wave kink right at the
+      // node. Only round when both adjacent runs have room for the curve.
+      if (cr < 1 || inLen < 2 * CORNER_R || outLen < 2 * CORNER_R) {
         // Degenerate corner — skip rounding
         d += ` L ${x} ${y}`;
       } else {

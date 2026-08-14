@@ -75,11 +75,11 @@ describe('buildOrthogonalPath', () => {
     expect(path.endsWith('L 50 50')).toBe(true);
   });
 
-  it('clamps the corner radius so short segments keep a straight run', () => {
-    // 18px segments: radius is capped at 18/3 = 6, leaving 6px of straight
-    // run on each side instead of two curves swallowing the whole segment.
+  it('keeps corners sharp on short segments instead of an S-wave kink', () => {
+    // 18px segments: rounding would eat the whole run into a wavy kink, so
+    // the corner stays a crisp 90°.
     expect(buildOrthogonalPath([[0, 0], [0, 18], [18, 18]])).toBe(
-      'M 0 0 L 0 12 Q 0 18 6 18 L 18 18',
+      'M 0 0 L 0 18 L 18 18',
     );
   });
 
@@ -87,6 +87,18 @@ describe('buildOrthogonalPath', () => {
     const path = buildOrthogonalPath([[0, 0], [0, 100], [100, 100]]);
     expect(path).toContain('L 0 90');
     expect(path).toContain('Q 0 100 10 100');
+  });
+
+  it('keeps a crisp 90° jog for near-aligned vertical handles', () => {
+    // Mainboard bottom (760,196) -> SBC top (755,1060): 5px offset triggers
+    // the straight-run bias, which jogs right at the target. The jog must be
+    // a sharp bend, not a rounded S-wave.
+    const srcRect = { x: 560, y: 140, w: 400, h: 56 };
+    const tgtRect = { x: 660, y: 1060, w: 190, h: 56 };
+    const result = getAvoidancePath(760, 196, 755, 1060, 'bottom', 'top', [], srcRect, tgtRect);
+    expect(result.path).toBe('M 760 196 L 760 1040 L 755 1040 L 755 1060');
+    // No curved corners anywhere on the near-aligned jog.
+    expect(result.path).not.toContain('Q');
   });
 });
 
