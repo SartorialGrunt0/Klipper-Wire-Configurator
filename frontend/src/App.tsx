@@ -166,6 +166,7 @@ export default function App() {
   const [showAddMenu, setShowAddMenu] = useState(false);
   const [showMacroDesigner, setShowMacroDesigner] = useState(false);
   const [showUnsavedDialog, setShowUnsavedDialog] = useState(false);
+  const [textApplyError, setTextApplyError] = useState('');
   const textEditorRef = useRef<TextEditorHandle>(null);
   const clearTextDraft = useConfigStore((state) => state.clearTextDraft);
   const dragHoverHardwareIdRef = useRef<string | null>(null);
@@ -1058,19 +1059,26 @@ export default function App() {
         <UnsavedChangesDialog
           onApply={async () => {
             try {
+              setTextApplyError('');
               await textEditorRef.current?.applyChanges();
               setShowUnsavedDialog(false);
               setShowTextView(false);
             } catch (error) {
               console.error('Failed to apply text-view changes before leaving text view:', error);
+              setTextApplyError(error instanceof Error ? error.message : 'Failed to apply changes.');
             }
           }}
           onDiscard={() => {
+            setTextApplyError('');
             clearTextDraft();
             setShowUnsavedDialog(false);
             setShowTextView(false);
           }}
-          onCancel={() => setShowUnsavedDialog(false)}
+          onCancel={() => {
+            setTextApplyError('');
+            setShowUnsavedDialog(false);
+          }}
+          error={textApplyError}
         />
       )}
     </div>

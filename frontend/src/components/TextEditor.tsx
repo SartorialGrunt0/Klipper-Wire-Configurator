@@ -4,8 +4,7 @@ import { useGraphStore } from '../stores/graphStore';
 import * as api from '../services/api';
 import { buildProjectGraph } from '../utils/graphBuilder';
 import ApplyWarningDialog from './dialogs/ApplyWarningDialog';
-import type { ExampleConfig, HardwareType, CommunicationType, ConfigFile, ConfigSection } from '../types/config';
-import { getBoardTypeMarker } from '../utils/boardTypeMarker';
+import type { ExampleConfig, ConfigFile, ConfigSection } from '../types/config';
 
 interface SearchResult {
   file: string;
@@ -70,16 +69,28 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
 
   const [editText, setEditText] = useState('');
 
-  // Helper: export config text via backend (preserves comments, whitespace, #*# markers)
+  // Helper: export config text via backend (preserves comments, whitespace, #*# markers).
+  // Falls back to offline re-serialization when the backend is unreachable; callers use
+  // `usedFallback` to warn that applying may normalize formatting.
   const exportTextRef = useRef<number>(0);
-  const exportConfigText = useCallback(async (cf: typeof config): Promise<string> => {
-    if (!cf) return '';
+  const exportConfigText = useCallback(async (cf: typeof config): Promise<{ text: string; usedFallback: boolean }> => {
+    if (!cf) return { text: '', usedFallback: false };
     try {
-      return await api.exportConfig(cf);
+      return { text: await api.exportConfig(cf), usedFallback: false };
     } catch {
-      return configToText(cf);
+      return { text: configToText(cf), usedFallback: true };
     }
   }, []);
+
+  // Tracks which files are currently showing fallback-derived text (per-file, component-lifetime)
+  const [fallbackExportFiles, setFallbackExportFiles] = useState<Record<string, boolean>>({});
+  const markFallbackExport = useCallback((filename: string, usedFallback: boolean) => {
+    setFallbackExportFiles((prev) => (prev[filename] === usedFallback ? prev : { ...prev, [filename]: usedFallback }));
+  }, []);
+  const fallbackExportUsed = !!fallbackExportFiles[activeFile];
+
+  // Surface backend failures from Apply so they aren't silent no-ops
+  const [applyError, setApplyError] = useState('');
 
   // When config changes and text is not dirty, re-export via backend
   useEffect(() => {
@@ -92,12 +103,13 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
       return;
     }
     const requestId = ++exportTextRef.current;
-    exportConfigText(config).then((text) => {
+    exportConfigText(config).then(({ text, usedFallback }) => {
       if (requestId === exportTextRef.current) {
         setEditText(text);
+        markFallbackExport(activeFile, usedFallback);
       }
     });
-  }, [activeDraftText, config, exportConfigText]);
+  }, [activeDraftText, activeFile, config, exportConfigText, markFallbackExport]);
 
   const [showSearch, setShowSearch] = useState(false);
   const [showFileSidebar, setShowFileSidebar] = useState(true);
@@ -116,9 +128,11 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
   const searchInputRef = useRef<HTMLInputElement>(null);
   const editorScrollRef = useRef<HTMLDivElement>(null);
   const liveValidateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const liveValidateRequestRef = useRef(0);
 
   // File management state
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; file: string } | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<{ file: string } | null>(null);
   const [renameDialog, setRenameDialog] = useState<{ file: string; value: string } | null>(null);
   const [showAddConfig, setShowAddConfig] = useState(false);
   const [addConfigStep, setAddConfigStep] = useState<'choose' | 'blank-name' | 'reference-pick'>('choose');
@@ -136,21 +150,28 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
     }
   }, []);
 
-  // Debounced live validation: parse the current text and validate it as the user types
+  // Debounced live validation: parse the current text and validate it as the user types.
+  // A request-id guard drops stale responses (older text resolving after newer edits),
+  // and failures clear the issue list so the panel never shows validation for old text.
   useEffect(() => {
     if (liveValidateTimerRef.current) clearTimeout(liveValidateTimerRef.current);
+    const requestId = ++liveValidateRequestRef.current;
     liveValidateTimerRef.current = setTimeout(async () => {
       try {
         const result = await api.parseConfigText(editText, activeFile);
+        if (requestId !== liveValidateRequestRef.current) return;
         setLiveParsedConfig(result.config);
         setLiveValidation(result.validation.errors || []);
       } catch {
-        // Parse failed — don't update validation
+        if (requestId !== liveValidateRequestRef.current) return;
+        // Parse failed — don't keep stale validation on screen
         setLiveParsedConfig(null);
+        setLiveValidation([]);
       }
     }, 800);
     return () => {
       if (liveValidateTimerRef.current) clearTimeout(liveValidateTimerRef.current);
+      liveValidateRequestRef.current++;
     };
   }, [editText, activeFile]);
 
@@ -227,11 +248,7 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
     async function exportAll() {
       const result: Record<string, string> = {};
       for (const [fn, cf] of Object.entries(configFiles)) {
-        try {
-          result[fn] = await api.exportConfig(cf);
-        } catch {
-          result[fn] = configToText(cf);
-        }
+        result[fn] = (await exportConfigText(cf)).text;
         if (cancelled) return;
       }
       if (!cancelled) setAllFilesText(result);
@@ -342,11 +359,13 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
     }
     const cf = configFiles[filename];
     if (cf) {
-      setEditText(await exportConfigText(cf));
+      const { text, usedFallback } = await exportConfigText(cf);
+      setEditText(text);
+      markFallbackExport(filename, usedFallback);
       return;
     }
     setEditText('');
-  }, [activeFile, configFiles, exportConfigText, setActiveFile, textDrafts]);
+  }, [activeFile, configFiles, exportConfigText, markFallbackExport, setActiveFile, textDrafts]);
 
   const handleTextChange = (newText: string) => {
     setEditText(newText);
@@ -390,9 +409,11 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
 
   const doApply = useCallback(async () => {
     try {
+      setApplyError('');
       await applyDraftTexts([[activeFile, editText]]);
     } catch (err) {
       console.error('Parse error:', err);
+      setApplyError(err instanceof Error ? err.message : 'Failed to apply changes.');
     }
   }, [activeFile, applyDraftTexts, editText]);
 
@@ -401,7 +422,14 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
     if (draftEntries.length === 0) {
       return;
     }
-    await applyDraftTexts(draftEntries);
+    try {
+      setApplyError('');
+      await applyDraftTexts(draftEntries);
+    } catch (err) {
+      console.error('Failed to apply text-view changes:', err);
+      setApplyError(err instanceof Error ? err.message : 'Failed to apply changes.');
+      throw err;
+    }
   }, [applyDraftTexts, textDrafts]);
 
   const handleApply = useCallback(async () => {
@@ -449,7 +477,9 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
       } else {
         const cf = configFiles[file];
         if (!cf) return;
-        setEditText(await exportConfigText(cf));
+        const { text, usedFallback } = await exportConfigText(cf);
+        setEditText(text);
+        markFallbackExport(file, usedFallback);
       }
     }
     // Select the matching line after state settles
@@ -545,16 +575,14 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
     setActiveFile(copyName);
     const cf = useConfigStore.getState().configFiles[copyName];
     if (cf) {
-      setEditText(await exportConfigText(cf));
+      const { text, usedFallback } = await exportConfigText(cf);
+      setEditText(text);
+      markFallbackExport(copyName, usedFallback);
     }
     setContextMenu(null);
   };
 
-  const handleDeleteFile = async () => {
-    if (!contextMenu) return;
-    if (contextMenu.file === 'printer.cfg') return; // Cannot delete printer.cfg
-    const fileToDelete = contextMenu.file;
-    setContextMenu(null);
+  const doDeleteFile = useCallback(async (fileToDelete: string) => {
     // Remove graph nodes associated with this file
     const graphState = useGraphStore.getState();
     const nodesToRemove = graphState.nodes.filter(
@@ -575,11 +603,13 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
       } else {
         const cf = useConfigStore.getState().configFiles[next];
         if (cf) {
-          setEditText(await exportConfigText(cf));
+          const { text, usedFallback } = await exportConfigText(cf);
+          setEditText(text);
+          markFallbackExport(next, usedFallback);
         }
       }
     }
-  };
+  }, [exportConfigText, markFallbackExport, removeConfigFile, setActiveFile]);
 
   // Add Configuration handlers
   const handleAddConfigBlank = () => {
@@ -619,113 +649,14 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
     return () => clearTimeout(timer);
   }, [referenceSearch, addConfigStep]);
 
-  // Feature section types (same as graphBuilder/graphStore)
-  const FEAT_TYPES = new Set([
-    'bed_mesh', 'z_tilt', 'quad_gantry_level', 'screws_tilt_adjust',
-    'bed_screws', 'bed_tilt', 'skew_correction', 'axis_twist_compensation',
-    'safe_z_home', 'homing_override', 'endstop_phase',
-    'input_shaper', 'resonance_tester',
-    'virtual_sdcard', 'pause_resume', 'firmware_retraction', 'force_move',
-    'idle_timeout', 'gcode_macro', 'delayed_gcode', 'gcode_arcs',
-    'respond', 'exclude_object', 'save_variables', 'display_status',
-  ]);
-
-  /**
-   * Create graph nodes (hardware + children + edges) for a newly-added config file.
-   * Detects MCU sections to classify the hardware type and creates communication
-   * edges back to the SBC node.
-   */
-  const buildGraphForNewFile = (filename: string, sections: Array<{ section_type: string; section_name: string; full_header: string; header_comments?: string[]; params: Array<{ key: string; value: string; is_commented_out: boolean }> }>) => {
-    const graphStore = useGraphStore.getState();
-    const schemas = useConfigStore.getState().schemas;
-
-    // Detect MCU sections
-    const mcuSections = sections.filter((s) => s.section_type === 'mcu');
-    const hasMcu = mcuSections.length > 0;
-
-    // If no MCU section, this file doesn't define a hardware node
-    if (!hasMcu) return;
-
-    // Classify hardware type from MCU name
-    const primaryMcu = mcuSections[0];
-    const mcuName = primaryMcu.section_name || '';
-    let hwType: HardwareType = getBoardTypeMarker(primaryMcu.header_comments) || 'mainboard';
-    if (hwType === 'mainboard' && mcuName) {
-      const lower = mcuName.toLowerCase();
-      if (lower.includes('host') || lower.includes('rpi') || lower.includes('cb1') || lower.includes('linux')) {
-        hwType = 'sbc';
-      } else if (lower.includes('ebb') || lower.includes('toolhead') || lower.includes('th')) {
-        hwType = 'toolhead';
-      } else {
-        hwType = 'expander';
-      }
+  // Validation shown for a file: live draft validation while the active file is being
+  // edited, otherwise the last applied validation — keeps sidebar dots consistent with
+  // the live issue panel instead of showing two sources of truth.
+  const getFileValidation = (fn: string) => {
+    if (fn === activeFile && typeof textDrafts[activeFile] === 'string') {
+      return { errors: liveValidation };
     }
-
-    // Detect communication type from MCU params
-    let commType: CommunicationType = 'usb';
-    for (const param of primaryMcu.params) {
-      if (param.is_commented_out) continue;
-      if (param.key === 'canbus_uuid' || param.key === 'canbus_interface') { commType = 'canbus'; break; }
-      if (param.key === 'serial') {
-        const val = param.value || '';
-        if (val.includes('/dev/serial/by-id/usb-')) { commType = 'usb'; break; }
-        if (/\/dev\/tty(S|AMA|ACM|USB)/.test(val)) { commType = 'uart'; break; }
-      }
-    }
-
-    // Check if a hardware node already exists for this file
-    const existingHwNode = graphStore.nodes.find(
-      (n) => n.type === 'hardware' && (n.data as Record<string, unknown>).configFile === filename,
-    );
-    if (existingHwNode) return;
-
-    // Determine label
-    const label = mcuName || filename.replace(/\.cfg$/, '');
-
-    // Check if this should be primary (no existing primary mainboard)
-    const hasPrimary = graphStore.nodes.some(
-      (n) => n.type === 'hardware' && !!(n.data as Record<string, unknown>).isPrimary,
-    );
-    const isPrimary = hwType === 'mainboard' && !hasPrimary;
-
-    // Create hardware node
-    const nodeId = graphStore.addHardwareNode(hwType, label, filename, undefined, mcuName);
-    if (isPrimary) {
-      graphStore.updateNodeData(nodeId, { isPrimary: true });
-    }
-
-    // Create sub-component/feature child nodes
-    for (const sec of sections) {
-      if (sec.section_type === 'include') continue;
-      const schema = schemas[sec.section_type];
-      const displayName = schema?.display_name || sec.section_type;
-      const sLabel = sec.section_name ? `${displayName}: ${sec.section_name}` : displayName;
-      if (FEAT_TYPES.has(sec.section_type)) {
-        graphStore.addFeatureNode(nodeId, sec.section_type, sLabel, sec.full_header);
-      } else {
-        graphStore.addSubComponentNode(nodeId, sec.section_type, sLabel, sec.full_header);
-      }
-    }
-
-    // Ensure SBC node exists
-    let sbcNode = graphStore.nodes.find(
-      (n) => n.type === 'hardware' && (n.data as Record<string, unknown>).hardwareType === 'sbc',
-    );
-    if (!sbcNode && hwType !== 'sbc') {
-      const sbcId = graphStore.addHardwareNode('sbc', 'SBC', '', undefined, 'host_mcu');
-      sbcNode = graphStore.nodes.find((n) => n.id === sbcId)!;
-    }
-
-    // Add communication edge from SBC to hardware
-    if (sbcNode && hwType !== 'sbc') {
-      graphStore.addCommunicationEdge(sbcNode.id, nodeId, commType);
-    }
-
-    // Collapse the hardware node by default (matches import behavior)
-    graphStore.toggleHardwareCollapse(nodeId);
-
-    // Auto-arrange so everything is visible
-    graphStore.autoArrange();
+    return validation[fn];
   };
 
   const handleAddConfigFromReference = async (example: ExampleConfig) => {
@@ -751,11 +682,21 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
       setActiveFile(name);
       const cf = useConfigStore.getState().configFiles[name];
       if (cf) {
-        setEditText(await exportConfigText(cf));
+        const { text, usedFallback } = await exportConfigText(cf);
+        setEditText(text);
+        markFallbackExport(name, usedFallback);
       }
 
-      // Build graph nodes for the newly added config file
-      buildGraphForNewFile(name, res.config.sections);
+      // Rebuild the whole graph so the new file's hardware/features appear —
+      // mirrors the apply/import path (clearGraph first avoids duplicate nodes).
+      const graphStore = useGraphStore.getState();
+      graphStore.clearGraph();
+      buildProjectGraph(
+        useConfigStore.getState().configFiles,
+        graphStore,
+        useConfigStore.getState().schemas,
+        useConfigStore.getState().validation,
+      );
     } catch (err) {
       console.error('Failed to load reference config:', err);
     }
@@ -793,7 +734,7 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
         </div>
         <div className="flex-1 overflow-y-auto py-1">
           {filenames.map((fn) => {
-            const v = validation[fn];
+            const v = getFileValidation(fn);
             const fileErrors = v?.errors.filter((e) => e.severity === 'error') ?? [];
             const fileWarnings = v?.errors.filter((e) => e.severity === 'warning') ?? [];
             return (
@@ -860,12 +801,41 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
           </button>
           <div className="h-px bg-[var(--color-bg-tertiary)] my-1" />
           <button
-            onClick={handleDeleteFile}
+            onClick={() => {
+              if (contextMenu.file === 'printer.cfg') return;
+              setConfirmDelete({ file: contextMenu.file });
+              setContextMenu(null);
+            }}
             disabled={contextMenu.file === 'printer.cfg'}
             className="w-full text-left px-3 py-1.5 text-xs text-[var(--color-error)] hover:bg-[var(--color-bg-tertiary)] transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
           >
             Delete
           </button>
+        </div>
+      )}
+
+      {/* Delete confirmation dialog */}
+      {confirmDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setConfirmDelete(null)}>
+          <div className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl p-5 w-80" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-sm font-semibold text-[var(--color-text-primary)] mb-2">Delete File</h3>
+            <p className="text-xs text-[var(--color-text-secondary)] mb-4">
+              Delete <span className="font-mono text-[var(--color-text-primary)]">{confirmDelete.file}</span> and its graph nodes? This can&apos;t be undone.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setConfirmDelete(null)} className="px-3 py-1.5 rounded text-xs bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)]">Cancel</button>
+              <button
+                onClick={() => {
+                  const file = confirmDelete.file;
+                  setConfirmDelete(null);
+                  void doDeleteFile(file);
+                }}
+                className="px-3 py-1.5 rounded text-xs bg-[var(--color-error)] text-[var(--color-bg-primary)]"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -1049,6 +1019,36 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
             </button>
           </div>
         </div>
+
+        {/* Apply error banner */}
+        {applyError && (
+          <div className="shrink-0 border-b border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-3 py-1.5 flex items-center gap-2">
+            <span className="text-xs text-[var(--color-error)] flex-1">Apply failed: {applyError}</span>
+            <button
+              onClick={() => setApplyError('')}
+              title="Dismiss"
+              className="text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
+        {/* Lossy export fallback banner */}
+        {fallbackExportUsed && (
+          <div className="shrink-0 border-b border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-3 py-1.5 flex items-center gap-2">
+            <span className="text-xs text-[var(--color-warning)] flex-1">
+              Using offline text export — applying may normalize comments and formatting.
+            </span>
+            <button
+              onClick={() => markFallbackExport(activeFile, false)}
+              title="Dismiss"
+              className="text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]"
+            >
+              ✕
+            </button>
+          </div>
+        )}
 
         {/* Search panel */}
         {showSearch && (
@@ -1237,7 +1237,7 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
             {sectionEntries.map((entry) => {
               const isExpanded = !!expandedSections[entry.id];
               const hasParams = entry.params.length > 0;
-              const activeValidation = validation[activeFile];
+              const activeValidation = getFileValidation(activeFile);
               const sectionIssues = (activeValidation?.errors ?? []).filter((e) => e.section === entry.title);
               const hasSecError = sectionIssues.some((e) => e.severity === 'error');
               const hasSecWarning = sectionIssues.some((e) => e.severity === 'warning');

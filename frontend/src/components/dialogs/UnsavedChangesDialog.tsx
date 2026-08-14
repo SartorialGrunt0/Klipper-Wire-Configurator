@@ -2,9 +2,10 @@ interface UnsavedChangesDialogProps {
   onApply: () => void;
   onDiscard: () => void;
   onCancel: () => void;
+  error?: string;
 }
 
-export default function UnsavedChangesDialog({ onApply, onDiscard, onCancel }: UnsavedChangesDialogProps) {
+export default function UnsavedChangesDialog({ onApply, onDiscard, onCancel, error }: UnsavedChangesDialogProps) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onCancel}>
       <div
@@ -17,6 +18,9 @@ export default function UnsavedChangesDialog({ onApply, onDiscard, onCancel }: U
             You have un-applied changes in the text editor. Would you like to apply them before switching views?
           </p>
         </div>
+        {error && (
+          <p className="px-4 pt-3 text-xs text-[var(--color-error)]">{error}</p>
+        )}
         <div className="flex items-center justify-end gap-2 p-3">
           <button
             onClick={onDiscard}
