@@ -15,6 +15,8 @@ export interface NodeRect {
 
 /** Extra space around each obstacle box */
 const CLEARANCE = 28;
+/** Extra space around the connected source/target cards (they can be approached closely) */
+const CONNECTED_CLEARANCE = 2;
 /** SVG corner radius at waypoint turns */
 const CORNER_R = 10;
 /** Distance to extend from handle before routing */
@@ -23,6 +25,10 @@ const STUB_LEN = 20;
 const STRAIGHT_RUN_BIAS_THRESHOLD = 16;
 
 type Point = [number, number];
+
+interface CheckRect extends NodeRect {
+  clearance: number;
+}
 
 export function getPathMidpoint(pts: Point[]): Point {
   if (pts.length === 0) return [0, 0];
@@ -68,12 +74,12 @@ export function getPathMidpoint(pts: Point[]): Point {
 function segmentIntersectsRect(
   x1: number, y1: number,
   x2: number, y2: number,
-  rect: NodeRect,
+  rect: CheckRect,
 ): boolean {
-  const rx = rect.x - CLEARANCE;
-  const ry = rect.y - CLEARANCE;
-  const rw = rect.w + CLEARANCE * 2;
-  const rh = rect.h + CLEARANCE * 2;
+  const rx = rect.x - rect.clearance;
+  const ry = rect.y - rect.clearance;
+  const rw = rect.w + rect.clearance * 2;
+  const rh = rect.h + rect.clearance * 2;
 
   const dx = x2 - x1;
   const dy = y2 - y1;
@@ -145,14 +151,59 @@ export function simplifyWaypoints(pts: Point[]): Point[] {
   return result;
 }
 
-/** Check if any segment of a path intersects a rectangle */
-function pathIntersectsRect(pts: Point[], rect: NodeRect): boolean {
-  for (let i = 0; i < pts.length - 1; i++) {
+/**
+ * Check if any segment of a path intersects a rectangle.
+ *
+ * When `skipStubSegments` is true, the first and last segments (the 20px
+ * handle stubs) are exempt — they touch the connected card's edge by design
+ * and must not be treated as crossings.
+ */
+function pathIntersectsRect(pts: Point[], rect: CheckRect, skipStubSegments = false): boolean {
+  const start = skipStubSegments ? 1 : 0;
+  const end = skipStubSegments ? pts.length - 2 : pts.length - 1;
+  for (let i = start; i < end; i++) {
     if (segmentIntersectsRect(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], rect)) {
       return true;
     }
   }
   return false;
+}
+
+function pathLength(pts: Point[]): number {
+  return pts.reduce(
+    (sum, p, i) =>
+      i === 0
+        ? 0
+        : sum + Math.abs(p[0] - pts[i - 1][0]) + Math.abs(p[1] - pts[i - 1][1]),
+    0,
+  );
+}
+
+/** Coordinate of the far side of the target card for same-side handle routing */
+function farSideCoordinate(side: string, tx: number, ty: number, targetRect?: NodeRect): number {
+  switch (side) {
+    case 'right': return (targetRect ? targetRect.x + targetRect.w : tx) + CLEARANCE;
+    case 'left': return (targetRect ? targetRect.x : tx) - CLEARANCE;
+    case 'bottom': return (targetRect ? targetRect.y + targetRect.h : ty) + CLEARANCE;
+    case 'top': return (targetRect ? targetRect.y : ty) - CLEARANCE;
+    default: return (targetRect ? targetRect.x + targetRect.w : tx) + CLEARANCE;
+  }
+}
+
+/**
+ * Whether a horizontal lane at `laneY` (spanning x0..x1) may be used, given
+ * the handle directions of the connected cards. A top handle must be entered
+ * from above, a bottom handle from below — routing a lane the other way would
+ * force the line to double back on itself at the stub.
+ */
+function laneAllowed(side: string, isTop: boolean): boolean {
+  if (side === 'top') return isTop;
+  if (side === 'bottom') return !isTop;
+  return true;
+}
+
+function isFiniteNumber(n: number): boolean {
+  return Number.isFinite(n);
 }
 
 // ── Orthogonal path builder with rounded corners ───────────────────────────
@@ -171,7 +222,10 @@ export function buildOrthogonalPath(pts: Point[]): string {
       const outDy = Math.sign(ny - y);
       const inLen = Math.sqrt((x - px) ** 2 + (y - py) ** 2);
       const outLen = Math.sqrt((nx - x) ** 2 + (ny - y) ** 2);
-      const cr = Math.min(CORNER_R, inLen / 2, outLen / 2);
+      // Clamp the radius so a corner never consumes an entire short segment —
+      // two oversized curves meeting on a short run look like a kink/wave
+      // instead of a clean 90° bend.
+      const cr = Math.min(CORNER_R, inLen / 3, outLen / 3);
       if (cr < 1) {
         // Degenerate corner — skip rounding
         d += ` L ${x} ${y}`;
@@ -201,6 +255,10 @@ export interface AvoidanceResult {
 /**
  * Returns an SVG path + label anchor from (sx,sy) to (tx,ty) that avoids
  * all obstacle rectangles. Respects handle directions for clean entry/exit.
+ *
+ * `sourceRect`/`targetRect` are the bounding boxes of the connected cards.
+ * They are not treated as hard obstacles (the punch-through bandaid), but the
+ * fallback detour lane is placed to clear them whenever geometry allows.
  */
 export function getAvoidancePath(
   sx: number,
@@ -210,6 +268,8 @@ export function getAvoidancePath(
   sourceSide: string,
   targetSide: string,
   obstacles: NodeRect[],
+  sourceRect?: NodeRect,
+  targetRect?: NodeRect,
 ): AvoidanceResult {
   // Create exit/entry stub points in handle direction
   const exit = stubPoint(sx, sy, sourceSide);
@@ -217,6 +277,7 @@ export function getAvoidancePath(
 
   const srcHoriz = isHorizontalSide(sourceSide);
   const tgtHoriz = isHorizontalSide(targetSide);
+  const sameSide = sourceSide === targetSide;
 
   const candidates: Point[][] = [];
   const addCandidate = (middle: Point[]) => {
@@ -225,8 +286,19 @@ export function getAvoidancePath(
     ));
   };
 
-  // Route between exit and entry points based on handle orientations
-  if (srcHoriz && tgtHoriz) {
+  if (sameSide) {
+    // Same-side handles (right→right etc.): the normal mid-lane dogleg would
+    // cross the target card to reach the handle. Route around the card's far
+    // side so the approach comes from outside.
+    const far = farSideCoordinate(sourceSide, tx, ty, targetRect);
+    if (srcHoriz) {
+      // right→right / left→left: go out, vertical at the far X, then in
+      addCandidate([[far, exit[1]], [far, entry[1]]]);
+    } else {
+      // top→top / bottom→bottom: go out, horizontal at the far Y, then in
+      addCandidate([[exit[0], far], [entry[0], far]]);
+    }
+  } else if (srcHoriz && tgtHoriz) {
     // Both horizontal handles: H → V → H
     const laneDelta = Math.abs(exit[1] - entry[1]);
     if (laneDelta <= STRAIGHT_RUN_BIAS_THRESHOLD) {
@@ -252,24 +324,85 @@ export function getAvoidancePath(
     addCandidate([[exit[0], entry[1]]]);
   }
 
+  const checkObstacles: CheckRect[] = obstacles.map((r) => ({ ...r, clearance: CLEARANCE }));
+
+  // For same-side far-side candidates also make sure the route doesn't cross
+  // the connected cards themselves (that's the whole point of going around).
+  // Zero clearance here: the route legitimately runs beside the cards, and an
+  // inflated box would false-positive those clean parallel runs.
+  const sameSideCheckRects: CheckRect[] = [
+    ...checkObstacles,
+    ...(sourceRect ? [{ ...sourceRect, clearance: 0 }] : []),
+    ...(targetRect ? [{ ...targetRect, clearance: 0 }] : []),
+  ];
+
   for (const waypoints of candidates) {
-    const blocking = obstacles.filter((r) => pathIntersectsRect(waypoints, r));
+    const blocking = checkObstacles.filter((r) => pathIntersectsRect(waypoints, r));
     if (blocking.length === 0) {
-      const [labelX, labelY] = getPathMidpoint(waypoints);
-      return {
-        path: buildOrthogonalPath(waypoints),
-        labelX,
-        labelY,
-        waypoints: waypoints as [number, number][],
-      };
+      if (!sameSide) {
+        const [labelX, labelY] = getPathMidpoint(waypoints);
+        return {
+          path: buildOrthogonalPath(waypoints),
+          labelX,
+          labelY,
+          waypoints: waypoints as [number, number][],
+        };
+      }
+      // Same-side routes must also clear the connected cards (stub segments
+      // excepted — they attach to the card edge by design).
+      const crossesConnected = sameSideCheckRects.some((r) => pathIntersectsRect(waypoints, r, true));
+      if (!crossesConnected) {
+        const [labelX, labelY] = getPathMidpoint(waypoints);
+        return {
+          path: buildOrthogonalPath(waypoints),
+          labelX,
+          labelY,
+          waypoints: waypoints as [number, number][],
+        };
+      }
     }
   }
 
-  const blocking = obstacles.filter((rect) => candidates.some((pts) => pathIntersectsRect(pts, rect)));
+  // Avoidance: route above or below the union of blocking obstacles. The lane
+  // also clears the connected cards when they lie in the lane's horizontal
+  // path, so the detour doesn't dive through the source/target cards.
+  const blocking = checkObstacles.filter((rect) => candidates.some((pts) => pathIntersectsRect(pts, rect)));
 
-  // Avoidance: route above or below the union of blocking obstacles
-  const unionTop = Math.min(...blocking.map((r) => r.y)) - CLEARANCE;
-  const unionBottom = Math.max(...blocking.map((r) => r.y + r.h)) + CLEARANCE;
+  const laneRects: CheckRect[] = [
+    ...blocking,
+    ...(sourceRect ? [{ ...sourceRect, clearance: CONNECTED_CLEARANCE }] : []),
+    ...(targetRect ? [{ ...targetRect, clearance: CONNECTED_CLEARANCE }] : []),
+  ];
+
+  const laneX0 = Math.min(exit[0], entry[0]);
+  const laneX1 = Math.max(exit[0], entry[0]);
+  const inLanePath = (r: CheckRect) =>
+    Math.max(laneX0, r.x - r.clearance) < Math.min(laneX1, r.x + r.w + r.clearance);
+  const laneRectsInPath = laneRects.filter(inLanePath);
+  const unionRects = laneRectsInPath.length > 0 ? laneRectsInPath : laneRects;
+
+  if (unionRects.length === 0) {
+    // Nothing to avoid — return the basic dogleg so the path stays orthogonal.
+    const basicMiddle: Point[] = srcHoriz === tgtHoriz
+      ? (srcHoriz
+          ? [[(exit[0] + entry[0]) / 2, exit[1]], [(exit[0] + entry[0]) / 2, entry[1]]]
+          : [[exit[0], (exit[1] + entry[1]) / 2], [entry[0], (exit[1] + entry[1]) / 2]])
+      : [[entry[0], exit[1]]];
+    const waypoints = simplifyWaypoints([[sx, sy], exit, ...basicMiddle, entry, [tx, ty]]);
+    const [labelX, labelY] = getPathMidpoint(waypoints);
+    return {
+      path: buildOrthogonalPath(waypoints),
+      labelX,
+      labelY,
+      waypoints: waypoints as [number, number][],
+    };
+  }
+
+  let unionTop = Math.min(...unionRects.map((r) => r.y - r.clearance));
+  let unionBottom = Math.max(...unionRects.map((r) => r.y + r.h + r.clearance));
+  if (!isFiniteNumber(unionTop)) unionTop = Math.min(exit[1], entry[1]) - CLEARANCE;
+  if (!isFiniteNumber(unionBottom)) unionBottom = Math.max(exit[1], entry[1]) + CLEARANCE;
+
   const mx = (sx + tx) / 2;
 
   const aboveWaypoints: Point[] = simplifyWaypoints([
@@ -283,20 +416,22 @@ export function getAvoidancePath(
     entry, [tx, ty],
   ]);
 
-  // Estimate path length to pick shorter route
-  const pathLength = (pts: Point[]) =>
-    pts.reduce(
-      (sum, p, i) =>
-        i === 0
-          ? 0
-          : sum +
-            Math.abs(p[0] - pts[i - 1][0]) +
-            Math.abs(p[1] - pts[i - 1][1]),
-      0,
-    );
+  // Respect handle directions: a top handle must be approached from above, a
+  // bottom handle from below. When the source and target disagree (e.g. bottom
+  // → top with a blocker between), fall back to the best-effort shorter route.
+  const aboveOk = laneAllowed(sourceSide, true) && laneAllowed(targetSide, true);
+  const belowOk = laneAllowed(sourceSide, false) && laneAllowed(targetSide, false);
 
-  const useAbove = pathLength(aboveWaypoints) <= pathLength(belowWaypoints);
-  const chosen = useAbove ? aboveWaypoints : belowWaypoints;
+  const laneCandidates: Point[][] = [];
+  if (aboveOk) laneCandidates.push(aboveWaypoints);
+  if (belowOk) laneCandidates.push(belowWaypoints);
+  if (laneCandidates.length === 0) {
+    laneCandidates.push(aboveWaypoints, belowWaypoints);
+  }
+  const chosen = laneCandidates.reduce((best, pts) => (
+    pathLength(pts) < pathLength(best) ? pts : best
+  ));
+
   const [labelX, labelY] = getPathMidpoint(chosen);
 
   return {

@@ -5,20 +5,28 @@
  * Dragging a horizontal handle moves it up/down; a vertical handle left/right.
  * The path stays orthogonal throughout.
  *
- * Double-clicking the edge resets to auto-routing.
+ * - The whole segment body is draggable (not just the midpoint dot).
+ * - On release the waypoints are simplified, so dragging a segment to align
+ *   with its neighbour collapses the corner — a natural "straighten".
+ * - Double-clicking the edge resets to auto-routing.
  */
 
 import { useState, useCallback, useRef, useMemo } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import type React from 'react';
 import { useGraphStore } from '../stores/graphStore';
-import { getAvoidancePath, getPathMidpoint, buildOrthogonalPath, type NodeRect } from './edgeRouting';
+import { getAvoidancePath, getPathMidpoint, buildOrthogonalPath, simplifyWaypoints, type NodeRect } from './edgeRouting';
 
 type Point = [number, number];
 
 export interface SegHandle {
   x: number;
   y: number;
+  /** Segment endpoints (axis-aligned), for whole-segment hit targets */
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
   segIndex: number;
   isHorizontal: boolean;
 }
@@ -47,6 +55,8 @@ export function useBendPath(
   sourceSide: string,
   targetSide: string,
   obstacles: NodeRect[],
+  sourceRect: NodeRect | undefined,
+  targetRect: NodeRect | undefined,
   storedMiddle: Array<{ x: number; y: number }> | undefined,
 ): BendPathResult {
   const { screenToFlowPosition } = useReactFlow();
@@ -80,9 +90,9 @@ export function useBendPath(
       const [labelX, labelY] = getPathMidpoint(full);
       return { path: p, labelX, labelY, waypoints: full };
     }
-    const r = getAvoidancePath(sourceX, sourceY, targetX, targetY, sourceSide, targetSide, obstacles);
+    const r = getAvoidancePath(sourceX, sourceY, targetX, targetY, sourceSide, targetSide, obstacles, sourceRect, targetRect);
     return { path: r.path, labelX: r.labelX, labelY: r.labelY, waypoints: r.waypoints as Point[] };
-  }, [effectiveMiddle, sourceX, sourceY, targetX, targetY, sourceSide, targetSide, obstacles]);
+  }, [effectiveMiddle, sourceX, sourceY, targetX, targetY, sourceSide, targetSide, obstacles, sourceRect, targetRect]);
 
   // Segment handles: one per draggable segment (not first/last stub segments)
   const handles = useMemo((): SegHandle[] => {
@@ -96,6 +106,10 @@ export function useBendPath(
       result.push({
         x: (p1[0] + p2[0]) / 2,
         y: (p1[1] + p2[1]) / 2,
+        x1: p1[0],
+        y1: p1[1],
+        x2: p2[0],
+        y2: p2[1],
         segIndex: i,
         isHorizontal: dx >= dy,
       });
@@ -149,8 +163,11 @@ export function useBendPath(
 
   const onHandlePointerUp = useCallback((_e: React.PointerEvent<SVGElement>) => {
     if (localMiddleRef.current) {
+      // Simplify on release: collinear/duplicate waypoints collapse, which
+      // turns "drag a segment onto its neighbour" into a straight line.
+      const simplified = simplifyWaypoints(localMiddleRef.current);
       updateEdgeData(edgeId, {
-        customMiddlePoints: localMiddleRef.current.map(([x, y]) => ({ x, y })),
+        customMiddlePoints: simplified.map(([x, y]) => ({ x, y })),
       } as Record<string, unknown>);
     }
     setLocalMiddle(null);

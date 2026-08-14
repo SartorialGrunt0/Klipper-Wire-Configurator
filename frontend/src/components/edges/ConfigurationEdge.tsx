@@ -3,9 +3,11 @@ import {
   BaseEdge,
   useNodes,
   type EdgeProps,
+  type Node,
 } from '@xyflow/react';
 import { type NodeRect } from '../../utils/edgeRouting';
-import { useBendPath, type SegHandle } from '../../utils/edgeBend';
+import { useBendPath } from '../../utils/edgeBend';
+import EdgeBendHandles from './EdgeBendHandles';
 
 const HARDWARE_COLORS: Record<string, string> = {
   sbc: 'var(--color-sbc)',
@@ -17,6 +19,15 @@ const HARDWARE_COLORS: Record<string, string> = {
   accelerometer: 'var(--color-accelerometer)',
   other: 'var(--color-other)',
 };
+
+function rectForNode(n: Node): NodeRect {
+  return {
+    x: n.position.x,
+    y: n.position.y,
+    w: (n.style?.width as number) ?? 400,
+    h: (n.style?.height as number) ?? 160,
+  };
+}
 
 function ConfigurationEdge(props: EdgeProps) {
   const { id, sourceX, sourceY, targetX, targetY, data, source, target, sourcePosition, targetPosition } = props;
@@ -44,15 +55,20 @@ function ConfigurationEdge(props: EdgeProps) {
     return (edgeData?.color as string) || '#64748b';
   }, [allNodes, source, target, edgeData]);
 
-  const obstacles = useMemo<NodeRect[]>(() => {
-    return allNodes
-      .filter((n) => n.type === 'hardware' && n.id !== source && n.id !== target && !n.parentId)
-      .map((n) => ({
-        x: n.position.x,
-        y: n.position.y,
-        w: (n.style?.width as number) ?? 400,
-        h: (n.style?.height as number) ?? 160,
-      }));
+  const { obstacles, sourceRect, targetRect } = useMemo<{
+    obstacles: NodeRect[];
+    sourceRect?: NodeRect;
+    targetRect?: NodeRect;
+  }>(() => {
+    const sourceNode = allNodes.find((n) => n.id === source);
+    const targetNode = allNodes.find((n) => n.id === target);
+    return {
+      obstacles: allNodes
+        .filter((n) => n.type === 'hardware' && n.id !== source && n.id !== target && !n.parentId)
+        .map(rectForNode),
+      sourceRect: sourceNode && sourceNode.type === 'hardware' ? rectForNode(sourceNode) : undefined,
+      targetRect: targetNode && targetNode.type === 'hardware' ? rectForNode(targetNode) : undefined,
+    };
   }, [allNodes, source, target]);
 
   const {
@@ -67,6 +83,8 @@ function ConfigurationEdge(props: EdgeProps) {
     sourceX, sourceY, targetX, targetY,
     sourcePosition, targetPosition,
     obstacles,
+    sourceRect,
+    targetRect,
     edgeData?.customMiddlePoints,
   );
 
@@ -93,26 +111,16 @@ function ConfigurationEdge(props: EdgeProps) {
         onDoubleClick={onEdgeDoubleClick}
       />
       {/* Segment drag handles */}
-      {handles.map((h: SegHandle) => (
-        <circle
-          key={h.segIndex}
-          cx={h.x}
-          cy={h.y}
-          r={5}
-          fill="var(--color-bg-secondary)"
-          stroke={color}
-          strokeWidth={1.5}
-          style={{
-            cursor: h.isHorizontal ? 'ns-resize' : 'ew-resize',
-            pointerEvents: showHandles ? 'all' : 'none',
-            opacity: showHandles ? 1 : 0,
-            transition: 'opacity 0.15s ease',
-          }}
-          onPointerDown={(e) => { setIsDragging(true); onHandlePointerDown(h.segIndex, h.isHorizontal, e); }}
-          onPointerMove={onHandlePointerMove}
-          onPointerUp={(e) => { setIsDragging(false); onHandlePointerUp(e); }}
-        />
-      ))}
+      <EdgeBendHandles
+        handles={handles}
+        color={color}
+        visible={showHandles}
+        onPointerDown={onHandlePointerDown}
+        onPointerMove={onHandlePointerMove}
+        onPointerUp={onHandlePointerUp}
+        onDragStart={() => setIsDragging(true)}
+        onDragEnd={() => setIsDragging(false)}
+      />
     </g>
   );
 }

@@ -74,6 +74,20 @@ describe('buildOrthogonalPath', () => {
     expect(path).toContain('Q');
     expect(path.endsWith('L 50 50')).toBe(true);
   });
+
+  it('clamps the corner radius so short segments keep a straight run', () => {
+    // 18px segments: radius is capped at 18/3 = 6, leaving 6px of straight
+    // run on each side instead of two curves swallowing the whole segment.
+    expect(buildOrthogonalPath([[0, 0], [0, 18], [18, 18]])).toBe(
+      'M 0 0 L 0 12 Q 0 18 6 18 L 18 18',
+    );
+  });
+
+  it('keeps the full radius on long segments', () => {
+    const path = buildOrthogonalPath([[0, 0], [0, 100], [100, 100]]);
+    expect(path).toContain('L 0 90');
+    expect(path).toContain('Q 0 100 10 100');
+  });
 });
 
 describe('getAvoidancePath', () => {
@@ -103,4 +117,73 @@ describe('getAvoidancePath', () => {
     expect(result.waypoints[1][0]).toBeGreaterThan(0);
     expect(result.waypoints[1][1]).toBeCloseTo(0);
   });
+
+  it('routes same-side handles around the far side of the target card', () => {
+    // Source right handle at (100,200); target right handle at (150,40)
+    // (up-right). Cards side by side with overlapping Y spans.
+    const sourceRect = { x: -180, y: 120, w: 280, h: 160 };
+    const targetRect = { x: -130, y: -40, w: 280, h: 160 };
+    const result = getAvoidancePath(100, 200, 150, 40, 'right', 'right', [], sourceRect, targetRect);
+
+    // The approach to the target must come from outside the card (from the
+    // right), not through its body.
+    const middle = result.waypoints.slice(1, -1);
+    const lastTurn = middle[middle.length - 1];
+    expect(lastTurn[0]).toBeGreaterThan(150);
+    expect(lastTurn[1]).toBeCloseTo(40);
+    // The path must not cross the target card (stub segments excepted).
+    expect(pathCrossesRect(result.waypoints, targetRect)).toBe(false);
+  });
+
+  it('routes same-side handles around the far side for bottom→bottom', () => {
+    const sourceRect = { x: -140, y: 40, w: 280, h: 160 };
+    const targetRect = { x: 260, y: 140, w: 280, h: 160 };
+    const result = getAvoidancePath(100, 200, 400, 300, 'bottom', 'bottom', [], sourceRect, targetRect);
+
+    expect(pathCrossesRect(result.waypoints, targetRect)).toBe(false);
+    // Lane must run below both cards.
+    expect(Math.max(...result.waypoints.map(([, y]) => y))).toBeGreaterThanOrEqual(328);
+  });
+
+  it('places the detour lane above the target card when the lane would dive through it', () => {
+    // Source right handle, target top handle, blocker between them.
+    const sourceRect = { x: -180, y: 40, w: 280, h: 160 };
+    const targetRect = { x: 260, y: 0, w: 280, h: 160 };
+    const result = getAvoidancePath(100, 120, 400, 0, 'right', 'top', [
+      { x: 140, y: 20, w: 120, h: 200 },
+    ], sourceRect, targetRect);
+
+    // Lane must be above the target's top edge so the drop into the handle
+    // doesn't pass through the card.
+    expect(Math.min(...result.waypoints.map(([, y]) => y))).toBeLessThan(0);
+    expect(pathCrossesRect(result.waypoints, targetRect)).toBe(false);
+  });
+
+  it('keeps a clean exit when a lane direction conflicts with the target', () => {
+    // Source bottom (wants lane below), target top (wants lane above) with a
+    // blocker between: no single lane satisfies both, so best effort is used
+    // but the path still starts and ends at the handles without crashing.
+    const sourceRect = { x: -140, y: 40, w: 280, h: 160 };
+    const targetRect = { x: 0, y: 0, w: 280, h: 160 };
+    const result = getAvoidancePath(100, 200, 140, 0, 'bottom', 'top', [
+      { x: 0, y: 40, w: 240, h: 120 },
+    ], sourceRect, targetRect);
+
+    expect(result.path.startsWith('M 100 200')).toBe(true);
+    expect(result.path.endsWith('L 140 0')).toBe(true);
+  });
 });
+
+/** True when any non-stub segment of the waypoints crosses the given rect. */
+function pathCrossesRect(waypoints: [number, number][], rect: { x: number; y: number; w: number; h: number }): boolean {
+  for (let i = 1; i < waypoints.length - 2; i++) {
+    const [x1, y1] = waypoints[i];
+    const [x2, y2] = waypoints[i + 1];
+    // Axis-aligned segment vs rect overlap (inclusive on boundaries so a
+    // line that touches the card counts as a crossing in these tests).
+    const xOverlap = Math.max(Math.min(x1, x2), rect.x) < Math.min(Math.max(x1, x2), rect.x + rect.w);
+    const yOverlap = Math.max(Math.min(y1, y2), rect.y) < Math.min(Math.max(y1, y2), rect.y + rect.h);
+    if (xOverlap && yOverlap) return true;
+  }
+  return false;
+}
