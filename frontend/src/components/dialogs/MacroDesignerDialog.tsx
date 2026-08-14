@@ -3,7 +3,7 @@ import { useConfigStore } from '../../stores/configStore';
 import { useGraphStore } from '../../stores/graphStore';
 import { createDefaultDraft, useMacroDesignerStore } from '../../stores/macroDesignerStore';
 import * as api from '../../services/api';
-import type { ConfigFile, ConfigSection } from '../../types/config';
+import type { ConfigFile } from '../../types/config';
 import type {
   MacroDraft,
   MachineProfile,
@@ -13,17 +13,22 @@ import type {
   SimulationTickResult,
 } from '../../types/macroDesigner';
 import {
+  areEquivalentMacroItems,
   buildConfigMacroItemKey,
+  createGcodeMacroSection,
   createMachineProfile,
   deriveAvailableBuiltInMacros,
   deriveCurrentMacroItems,
+  findMatchingTargetMacroSection,
   findPathZoneHit,
   findZoneHit,
   fuzzyFilterItems,
+  getSectionParamValue,
+  isMacroItemUnchangedInSection,
   isPointInMoveBounds,
   normalizeMacroGcodeForConfig,
+  normalizePlainText,
   parseMacroGcodeFromEditorView,
-  parseMacroVariables,
   sanitizeMacroName,
   serializeMacroVariables,
 } from '../../utils/macroDesigner';
@@ -32,8 +37,11 @@ import {
   computeTrapezoidalProfile,
   createInitialRuntimeState,
   executeSimulationStep,
+  executeStandaloneCommand,
+  parseParams,
   trapezoidalPositionAtTime,
 } from '../../utils/gcodeSimulator';
+import { logMacroDesignerEvent } from '../../utils/macroDesignerLog';
 import type { TrapezoidalProfile } from '../../utils/gcodeSimulator';
 
 interface MacroDesignerDialogProps {
@@ -163,52 +171,6 @@ const SUPPORTED_GCODE_COMMANDS: SupportedGcodeCommand[] = [
 
 const PLAYBACK_ITEM_KEY = 'playback:loaded';
 
-function createGcodeMacroSection(item: MacroSourceItem): ConfigSection {
-  const params = [];
-  if (item.description.trim()) {
-    params.push({ key: 'description', value: item.description.trim(), comment: '', is_commented_out: false, separator: ':' });
-  }
-  if (item.renameExisting.trim()) {
-    params.push({ key: 'rename_existing', value: item.renameExisting.trim(), comment: '', is_commented_out: false, separator: ':' });
-  }
-  params.push(...parseMacroVariables(item.variables));
-  params.push({
-    key: 'gcode',
-    value: normalizeMacroGcodeForConfig(item.gcode) || '\n',
-    comment: '',
-    is_commented_out: false,
-    separator: ':',
-  });
-  return {
-    section_type: 'gcode_macro',
-    section_name: sanitizeMacroName(item.title),
-    full_header: `gcode_macro ${sanitizeMacroName(item.title)}`,
-    line_number: item.sourceLine ?? 0,
-    params,
-    header_comments: [],
-    trailing_comments: [],
-    is_commented_out: false,
-  };
-}
-
-function getSectionParamValue(section: ConfigSection | undefined, key: string): string {
-  return section?.params.find((param) => param.key === key && !param.is_commented_out)?.value || '';
-}
-
-function normalizePlainText(value: string): string {
-  return value.replace(/\r\n?/g, '\n').trim();
-}
-
-function areEquivalentMacroItems(left: MacroSourceItem, right: MacroSourceItem): boolean {
-  return (
-    sanitizeMacroName(left.title) === sanitizeMacroName(right.title)
-    && normalizePlainText(left.renameExisting) === normalizePlainText(right.renameExisting)
-    && normalizePlainText(left.description) === normalizePlainText(right.description)
-    && normalizePlainText(left.variables) === normalizePlainText(right.variables)
-    && normalizeMacroGcodeForConfig(left.gcode) === normalizeMacroGcodeForConfig(right.gcode)
-  );
-}
-
 function createStandaloneDraftItem(draft: MacroDraft): MacroSourceItem {
   return {
     key: `draft:${draft.id}`,
@@ -221,41 +183,6 @@ function createStandaloneDraftItem(draft: MacroDraft): MacroSourceItem {
     draftId: draft.id,
     isDraft: true,
   };
-}
-
-function findMatchingTargetMacroSection(
-  configFiles: Record<string, ConfigFile>,
-  item: MacroSourceItem,
-  targetFile: string,
-): ConfigSection | null {
-  const macroSection = createGcodeMacroSection(item);
-  const sections = configFiles[targetFile]?.sections || [];
-
-  return sections.find((candidate) => {
-    if (candidate.full_header !== macroSection.full_header) {
-      return false;
-    }
-    if (item.source === 'config' && item.sourceFile === targetFile && macroSection.line_number > 0) {
-      return candidate.line_number === macroSection.line_number;
-    }
-    return true;
-  }) || null;
-}
-
-function isMacroItemUnchangedInSection(item: MacroSourceItem, section: ConfigSection | null): boolean {
-  if (!section) {
-    return false;
-  }
-
-  const existingGcode = normalizeMacroGcodeForConfig(getSectionParamValue(section, 'gcode'));
-  const selectedGcode = normalizeMacroGcodeForConfig(item.gcode);
-
-  return (
-    existingGcode === selectedGcode
-    && normalizePlainText(getSectionParamValue(section, 'rename_existing')) === normalizePlainText(item.renameExisting)
-    && normalizePlainText(getSectionParamValue(section, 'description')) === normalizePlainText(item.description)
-    && normalizePlainText(serializeMacroVariables(section)) === normalizePlainText(item.variables)
-  );
 }
 
 function getMacroItemBadges(item: MacroSourceItem): string[] {
@@ -414,6 +341,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
   const [runtime, setRuntime] = useState<MacroRuntimeState | null>(null);
   const [stepIndex, setStepIndex] = useState(0);
   const [planWarnings, setPlanWarnings] = useState<string[]>([]);
+  const [simulationParamsInput, setSimulationParamsInput] = useState('');
   const [isRunning, setIsRunning] = useState(false);
   const [moveFeedRate, setMoveFeedRate] = useState('');
   const [nozzleTarget, setNozzleTarget] = useState('200');
@@ -441,6 +369,8 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
   const [runtimeHistory, setRuntimeHistory] = useState<MacroRuntimeState[]>([]);
   const [simulationLog, setSimulationLog] = useState<SimulationLogEntry[]>([]);
   const [selectedLogWarning, setSelectedLogWarning] = useState<string | null>(null);
+  const [seedInput, setSeedInput] = useState('');
+  const [seededRuntime, setSeededRuntime] = useState<MacroRuntimeState | null>(null);
   const [goToX, setGoToX] = useState('');
   const [goToY, setGoToY] = useState('');
   const [goToZ, setGoToZ] = useState('');
@@ -590,12 +520,17 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
     return { x: r.x, y: viewBounds.viewMaxY - r.y };
   }, [machineProfile, rotation, viewBounds.viewMaxY]);
 
+  const simulationRootParams = useMemo(() => parseParams(simulationParamsInput.trim().split(/\s+/)), [simulationParamsInput]);
+
   const simulationPlan = useMemo(() => {
     if (!selectedItem) {
       return { steps: [], warnings: [] };
     }
-    return buildSimulationSteps(selectedItem, allMacroItems, machineProfile, configFiles);
-  }, [allMacroItems, configFiles, machineProfile, selectedItem]);
+    return buildSimulationSteps(selectedItem, allMacroItems, machineProfile, configFiles, {
+      params: simulationRootParams,
+      rawparams: simulationParamsInput.trim(),
+    }, seededRuntime ?? undefined);
+  }, [allMacroItems, configFiles, machineProfile, selectedItem, simulationRootParams, simulationParamsInput, seededRuntime]);
 
   const simulationTimeline = useMemo<SimulationTimelineState>(() => {
     if (!selectedItem) {
@@ -607,7 +542,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
       };
     }
 
-    const initialRuntime = createInitialRuntimeState(machineProfile, selectedItem.title);
+    const initialRuntime = seededRuntime ?? createInitialRuntimeState(machineProfile, selectedItem.title);
     const states: MacroRuntimeState[] = [initialRuntime];
     const logs: SimulationLogEntry[] = [];
     const lastTraceByStep: Array<MovementTrace | null> = [null];
@@ -646,7 +581,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
       lastTraceByStep,
       zIndicatorByStep,
     };
-  }, [machineProfile, selectedItem, simulationPlan.steps]);
+  }, [machineProfile, selectedItem, seededRuntime, simulationPlan.steps]);
 
   const cancelAnimation = useCallback((skipCompletion = false) => {
     if (animFrameRef.current !== null) {
@@ -705,6 +640,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
     setToolheadDragPos(null);
     setEditMode(false);
     setEditDraft(null);
+    setSeededRuntime(null);
   }, [selectedKey]);
 
   useEffect(() => {
@@ -1011,8 +947,8 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
       return false;
     }
 
-    const macroSection = createGcodeMacroSection(item);
     const existingTargetSection = findMatchingTargetMacroSection(configFiles, item, destinationFile);
+    const macroSection = createGcodeMacroSection(item, existingTargetSection);
     if (existingTargetSection && isMacroItemUnchangedInSection(item, existingTargetSection)) {
       return false;
     }
@@ -1044,6 +980,19 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
         existingTargetSection?.line_number,
       );
     }
+
+    logMacroDesignerEvent({
+      event: 'apply',
+      title: item.title,
+      destinationFile,
+      action: existingTargetSection ? (sameHeader ? 'update' : 'rename') : 'add',
+      structuralChanged: Boolean(existingTargetSection) && structuralChanged,
+      gcodeChanged: Boolean(existingTargetSection) && existingGcode !== selectedGcode,
+      headerComments: macroSection.header_comments.length,
+      trailingComments: macroSection.trailing_comments?.length ?? 0,
+      targetLine: macroSection.line_number,
+      source: item.source,
+    });
 
     const graphStore = useGraphStore.getState();
     const alreadyInGraph = graphStore.nodes.some((node) => {
@@ -1375,6 +1324,49 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
   const handleTimelineScrub = (event: React.ChangeEvent<HTMLInputElement>) => {
     syncSimulationPosition(Number(event.target.value));
   };
+
+  const handleSeedCommand = useCallback(() => {
+    const line = seedInput.trim();
+    if (!line) return;
+    const baseState = seededRuntime ?? createInitialRuntimeState(machineProfile, selectedItem?.title || 'seed');
+    const result = executeStandaloneCommand(line, baseState, machineProfile, configFiles);
+    setSeededRuntime(result.nextState);
+    setRuntime(result.nextState);
+    setRuntimeHistory((prev) => [...prev, result.nextState]);
+    setSelectedLogWarning(result.warnings.length ? result.warnings.join(' ') : null);
+    setSimulationLog((prev) => [...prev, {
+      id: `seed-${Date.now()}`,
+      raw: line,
+      sourceName: 'seed',
+      lineNumber: 0,
+      summary: result.eventSummary,
+      warnings: result.warnings,
+      timelineStepIndex: -1,
+    }]);
+    setSeedInput('');
+    setMessage(result.warnings.length
+      ? `${result.eventSummary} — ${result.warnings.join(' ')}`
+      : `${result.eventSummary} (seeded)`);
+  }, [configFiles, machineProfile, seededRuntime, seedInput, selectedItem, setRuntime]);
+
+  const handleResetMachineState = useCallback(() => {
+    cancelAnimation(true);
+    setIsRunning(false);
+    setSeededRuntime(null);
+    setToolheadDragPos(null);
+    setSelectedLogWarning(null);
+    setRuntimeHistory([]);
+    setSimulationLog([]);
+    setLastMovementTrace(null);
+    setSimulationZIndicator(null);
+    setStepIndex(0);
+    setGoToX('');
+    setGoToY('');
+    setGoToZ('');
+    const fresh = createInitialRuntimeState(machineProfile, selectedItem?.title || 'reset');
+    setRuntime(fresh);
+    setMessage('Machine state reset: toolhead centered, not homed, heaters off.');
+  }, [cancelAnimation, machineProfile, selectedItem, setRuntime]);
 
   const handleGoTo = () => {
     const currentPosition = getCurrentToolheadPosition();
@@ -1931,7 +1923,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55" onClick={handleCloseRequest}>
-      <div className="h-[min(92vh,980px)] w-[min(98vw,1680px)] overflow-hidden rounded-2xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] shadow-2xl" onClick={(event) => event.stopPropagation()}>
+      <div className="h-[min(94vh,1100px)] w-[min(99vw,1920px)] overflow-hidden rounded-2xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] shadow-2xl" onClick={(event) => event.stopPropagation()}>
         <input
           ref={playbackFileInputRef}
           type="file"
@@ -2098,7 +2090,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
               </div>
             </div>
 
-            <div className="flex min-h-0 flex-1 flex-col">
+            <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
               <div className="mx-4 mt-3 flex flex-shrink-0 gap-3">
                 <div className="flex-1 rounded-lg border border-[var(--color-bg-tertiary)] bg-[rgba(15,23,42,0.72)] px-3 py-2 text-[10px] text-[var(--color-text-secondary)]">
                   <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.16em]">Legend</div>
@@ -2114,11 +2106,21 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                 <div className="min-w-[360px] basis-[24rem] flex-shrink-0 rounded-lg border border-[var(--color-bg-tertiary)] bg-[rgba(15,23,42,0.72)] px-3 py-2 text-[10px] text-[var(--color-text-secondary)]">
                   <div className="mb-1 flex items-center justify-between gap-3">
                     <div className="text-[10px] font-semibold uppercase tracking-[0.16em]">Machine state</div>
-                    <div className="inline-flex overflow-hidden rounded-md border border-[var(--color-bg-tertiary)]">
+                    <div className="flex items-center gap-2">
                       <button
                         type="button"
-                        disabled={!editMode || !displayedItem}
-                        onClick={() => handleSetMoveMode('absolute')}
+                        disabled={editMode || !displayedItem}
+                        onClick={handleResetMachineState}
+                        className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-0.5 text-[10px] text-[var(--color-text-primary)] hover:border-red-400/60 hover:text-red-300 disabled:opacity-40"
+                        title="Stop simulation, clear seeded commands, reset toolhead to centered/cold"
+                      >
+                        Reset
+                      </button>
+                      <div className="inline-flex overflow-hidden rounded-md border border-[var(--color-bg-tertiary)]">
+                        <button
+                          type="button"
+                          disabled={!editMode || !displayedItem}
+                          onClick={() => handleSetMoveMode('absolute')}
                         className={`px-2.5 py-0.5 text-[10px] font-semibold transition-colors disabled:opacity-60 ${activeMoveMode === 'absolute' ? 'bg-[var(--color-accent)] text-[var(--color-bg-primary)]' : 'text-[var(--color-text-primary)]'}`}
                       >
                         Absolute
@@ -2131,6 +2133,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                       >
                         Relative
                       </button>
+                    </div>
                     </div>
                   </div>
                   <div className="grid grid-cols-[minmax(13rem,1.25fr)_minmax(0,1fr)] gap-x-5 gap-y-1 font-mono tabular-nums text-[var(--color-text-primary)]">
@@ -2160,7 +2163,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
               </div>
 
               {/* SVG Grid */}
-              <div className="relative m-4 mt-2 min-h-0 flex-1 overflow-hidden border border-[var(--color-bg-tertiary)] bg-[linear-gradient(180deg,rgba(15,23,42,0.9),rgba(30,41,59,0.95))]">
+              <div className="relative m-4 mt-2 min-h-[16rem] flex-1 overflow-hidden border border-[var(--color-bg-tertiary)] bg-[linear-gradient(180deg,rgba(15,23,42,0.9),rgba(30,41,59,0.95))]">
                 <svg
                   ref={svgRef}
                   viewBox={viewBox}
@@ -2358,6 +2361,18 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                       <span>Accel {formatNumber(machineProfile.maxAccel)} mm/s²</span>
                     </div>
                   </div>
+                  <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-3 py-2">
+                    <label htmlFor="simulation-params" className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--color-text-secondary)]">Params</label>
+                    <input
+                      id="simulation-params"
+                      type="text"
+                      value={simulationParamsInput}
+                      onChange={(event) => setSimulationParamsInput(event.target.value)}
+                      placeholder="TEMP=60 FAN=255"
+                      spellCheck={false}
+                      className="min-w-0 flex-1 rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-2 py-1 font-mono text-[11px] text-[var(--color-text-primary)] placeholder:text-[var(--color-text-secondary)] focus:border-[var(--color-accent)] focus:outline-none"
+                    />
+                  </div>
                   <div className="mt-3 rounded-lg border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-3 py-2">
                     <div className="flex items-start justify-between gap-3">
                       <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--color-text-secondary)]">Timeline</span>
@@ -2387,7 +2402,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                   {planWarnings.length > 0 && (
                     <div className="mt-2 rounded-md border border-amber-400/25 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-100">{planWarnings.join(' ')}</div>
                   )}
-                  <div ref={executionOutputRef} className="mt-2 h-[26vh] min-h-[7rem] max-h-[12rem] overflow-y-auto rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1 font-mono text-[11px]">
+                  <div ref={executionOutputRef} className="mt-2 h-[20vh] min-h-[5rem] max-h-[10rem] overflow-y-auto rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1 font-mono text-[11px]">
                     {simulationLog.length === 0 ? (
                       <div className="text-[var(--color-text-secondary)]">No commands executed.</div>
                     ) : simulationLog.map((entry) => (
@@ -2407,6 +2422,31 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                   <div className="mt-2 min-h-[2.75rem] rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2.5 py-2 text-[11px] text-[var(--color-text-secondary)]">
                     {simulationOutputSummary}
                   </div>
+                  <div className="mt-2 flex items-center gap-2">
+                    <input
+                      value={seedInput}
+                      onChange={(event) => setSeedInput(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          event.preventDefault();
+                          handleSeedCommand();
+                        }
+                      }}
+                      disabled={isRunning}
+                      placeholder="Seed a command, e.g. G28 or M104 S200"
+                      className="min-w-0 flex-1 rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 font-mono text-[11px] text-[var(--color-text-primary)] disabled:opacity-40"
+                    />
+                    <button onClick={handleSeedCommand} disabled={isRunning || !seedInput.trim()} className="shrink-0 rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-[11px] font-semibold text-[var(--color-bg-primary)] disabled:opacity-40">Send</button>
+                  </div>
+                  {seededRuntime && (
+                    <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-[var(--color-text-secondary)]">
+                      <span className="min-w-0 truncate">
+                        Seeded: X {formatNumber(seededRuntime.x)} Y {formatNumber(seededRuntime.y)} Z {formatNumber(seededRuntime.z)}
+                        {seededRuntime.homedAxes.length ? ` | homed: ${seededRuntime.homedAxes.join('')}` : ' | not homed'}
+                      </span>
+                      <button onClick={handleResetMachineState} className="shrink-0 rounded-md border border-[var(--color-bg-tertiary)] px-2 py-0.5 text-[10px] text-[var(--color-text-primary)] hover:border-red-400/60 hover:text-red-300">Reset</button>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -2451,6 +2491,25 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                     value={displayedItem?.gcode || ''}
                     disabled={!editMode}
                     onChange={(event) => updateEditedItem({ gcode: parseMacroGcodeFromEditorView(event.target.value) })}
+                    onKeyDown={(event) => {
+                      // Carry forward the current line's leading whitespace on
+                      // Enter, so new commands inside an indented block keep
+                      // the block's indentation instead of dropping to col 0.
+                      if (event.key === 'Enter' && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey) {
+                        const el = event.currentTarget;
+                        const start = el.selectionStart;
+                        const end = el.selectionEnd;
+                        const before = el.value.slice(0, start);
+                        const lineStart = before.lastIndexOf('\n') + 1;
+                        const indent = before.slice(lineStart).match(/^[ \t]*/)?.[0] ?? '';
+                        event.preventDefault();
+                        const next = before + '\n' + indent + el.value.slice(end);
+                        updateEditedItem({ gcode: parseMacroGcodeFromEditorView(next) });
+                        requestAnimationFrame(() => {
+                          el.selectionStart = el.selectionEnd = start + 1 + indent.length;
+                        });
+                      }
+                    }}
                     rows={12}
                     spellCheck={false}
                     className="w-full resize-y overflow-y-auto rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-3 py-3 font-mono text-xs leading-5 text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none disabled:opacity-70"
@@ -2592,42 +2651,6 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                       </div>
                     </div>
                   </div>
-                </div>
-                <div className="rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] p-3">
-                  <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-text-secondary)]">Canvas selection</div>
-                  {selectedZone ? (
-                    <div className="space-y-2 text-xs">
-                      <div className="rounded-lg border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-3 py-2 text-[11px] text-[var(--color-text-primary)]">
-                        <div className="font-semibold text-[var(--color-text-primary)]">{selectedZone.name}</div>
-                        <div className="mt-1 text-[var(--color-text-secondary)]">
-                          X {formatNumber(selectedZone.x)} | Y {formatNumber(selectedZone.y)} | W {formatNumber(selectedZone.width)} | H {formatNumber(selectedZone.height)}
-                        </div>
-                      </div>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <button onClick={() => openExactPositionDialog('zone', selectedZone.id)} className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1 text-xs text-[var(--color-text-primary)]">Set exact position</button>
-                        <button onClick={() => {
-                          deleteNoGoZone(selectedZone.id);
-                          setMessage(`Deleted ${selectedZone.name}.`);
-                        }} className="rounded-md border border-red-400/60 px-3 py-1 text-xs text-red-300">Delete</button>
-                      </div>
-                    </div>
-                  ) : isDockSelected && dockPosition ? (
-                    <div className="space-y-2 text-xs">
-                      <div className="rounded-lg border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-3 py-2 text-[11px] text-[var(--color-text-primary)]">
-                        <div className="font-semibold text-[var(--color-text-primary)]">Dock</div>
-                        <div className="mt-1 text-[var(--color-text-secondary)]">X {formatNumber(dockPosition.x)} | Y {formatNumber(dockPosition.y)}</div>
-                      </div>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <button onClick={() => openExactPositionDialog('dock')} className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1 text-xs text-[var(--color-text-primary)]">Set exact position</button>
-                        <button onClick={() => {
-                          setDockPosition(null);
-                          setMessage('Dock deleted.');
-                        }} className="rounded-md border border-red-400/60 px-3 py-1 text-xs text-red-300">Delete</button>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="text-[11px] text-[var(--color-text-secondary)]">Right-click a no-go zone or dock on the grid and choose Set exact position to edit it in a popup.</div>
-                  )}
                 </div>
                 {message && <div className="rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-3 py-2 text-[11px] text-[var(--color-text-secondary)]">{message}</div>}
               </div>

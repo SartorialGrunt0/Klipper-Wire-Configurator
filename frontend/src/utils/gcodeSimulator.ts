@@ -11,16 +11,17 @@ import type {
   SimulationStep,
   SimulationTickResult,
 } from '../types/macroDesigner';
+import { logMacroDesignerEvent } from './macroDesignerLog';
 import { findPathZoneHit, findZoneHit, isPointInBounds, isPointInMoveBounds, parseMacroVariables } from './macroDesigner';
 
-function parseParams(tokens: string[]): Record<string, string> {
+export function parseParams(tokens: string[]): Record<string, string> {
   const params: Record<string, string> = {};
   for (const token of tokens) {
     if (!token) continue;
     const eqIndex = token.indexOf('=');
     if (eqIndex !== -1) {
       const key = token.slice(0, eqIndex).trim().toUpperCase();
-      const value = token.slice(eqIndex + 1).trim().replace(/^"|"$/g, '');
+      const value = token.slice(eqIndex + 1).trim().replace(/^["']|["']$/g, '');
       if (key) params[key] = value;
       continue;
     }
@@ -31,6 +32,44 @@ function parseParams(tokens: string[]): Record<string, string> {
     }
   }
   return params;
+}
+
+/**
+ * Split a command line into tokens the way Klipper's shlex parser does:
+ * whitespace-separated, but quote groups (single or double) stay intact
+ * even when embedded mid-token (e.g. MSG='hello world' is one token).
+ */
+function splitCommandTokens(line: string): string[] {
+  const tokens: string[] = [];
+  let current = '';
+  let quote: string | null = null;
+  for (let i = 0; i < line.length; i += 1) {
+    const char = line[i];
+    if (quote) {
+      current += char;
+      if (char === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      current += char;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (current) {
+        tokens.push(current);
+        current = '';
+      }
+      continue;
+    }
+    current += char;
+  }
+  if (current) {
+    tokens.push(current);
+  }
+  return tokens;
 }
 
 function isTemplateDirective(line: string): boolean {
@@ -62,7 +101,7 @@ export function parseGcodeLine(line: string, lineNumber: number, sourceName: str
   // the real Y value.
   const withoutComment = line.replace(/;.*$/, '').replace(/\s*#.*$/, '').trim();
   if (!withoutComment) return null;
-  const tokens = withoutComment.match(/(?:"[^"]*"|\S+)/g) || [];
+  const tokens = splitCommandTokens(withoutComment);
   const [commandToken, ...paramTokens] = tokens;
   if (!commandToken) return null;
   return {
@@ -582,11 +621,18 @@ type ProbeSamplingPlan = {
 type TemplateStaticContext = {
   printerObjects: Record<string, unknown>;
   configSections: Record<string, unknown>;
+  machineBounds?: {
+    axis_minimum: Record<string, number>;
+    axis_maximum: Record<string, number>;
+  };
+  homePosition?: Record<string, number>;
+  livePosition?: () => { x: number; y: number; z: number; e: number };
 };
 
 type TemplateLineSegment =
   | { kind: 'text'; text: string }
-  | { kind: 'directive'; directive: string };
+  | { kind: 'directive'; directive: string }
+  | { kind: 'comment'; comment: string };
 
 type NumberedTemplateLine = {
   text: string;
@@ -734,9 +780,21 @@ function buildConfigSectionContext(section: ConfigFile['sections'][number]): Rec
 function buildTemplateStaticContext(
   allMacros: MacroSourceItem[],
   configFiles?: Record<string, ConfigFile>,
+  profile?: MachineProfile,
+  livePosition?: () => { x: number; y: number; z: number; e: number },
 ): TemplateStaticContext {
   const printerObjects: Record<string, unknown> = {};
   const configSections: Record<string, unknown> = {};
+
+  const machineBounds = profile
+    ? {
+        axis_minimum: { x: profile.minX, y: profile.minY, z: profile.minZ },
+        axis_maximum: { x: profile.maxX, y: profile.maxY, z: profile.maxZ },
+      }
+    : undefined;
+  const homePosition = profile
+    ? { x: profile.homeX, y: profile.homeY, z: profile.homeZ }
+    : undefined;
 
   if (configFiles) {
     Object.values(configFiles).forEach((configFile) => {
@@ -764,7 +822,7 @@ function buildTemplateStaticContext(
     });
   });
 
-  return { printerObjects, configSections };
+  return { printerObjects, configSections, machineBounds, homePosition, livePosition };
 }
 
 function createInitialPlannerState(allMacros: MacroSourceItem[]): PlannerState {
@@ -791,6 +849,34 @@ function createInitialPlannerState(allMacros: MacroSourceItem[]): PlannerState {
 }
 
 const HOMING_AXES: Array<'X' | 'Y' | 'Z'> = ['X', 'Y', 'Z'];
+
+// Klipper's default [extruder] min_extrude_temp.
+const DEFAULT_MIN_EXTRUDE_TEMP = 170;
+
+/**
+ * Resolve the [extruder] min_extrude_temp for the simulated machine.
+ *
+ * Klipper refuses extrusion while the nozzle is below the configured
+ * min_extrude_temp (default 170C). Read it from the actual config so a
+ * machine that overrides it simulates faithfully, instead of always
+ * assuming the default.
+ */
+function getMinExtrudeTemp(configFiles?: Record<string, ConfigFile>): number {
+  if (configFiles) {
+    for (const configFile of Object.values(configFiles)) {
+      const extruder = configFile.sections.find((section) => section.section_type === 'extruder');
+      if (!extruder) {
+        continue;
+      }
+      const param = extruder.params.find((p) => p.key === 'min_extrude_temp' && !p.is_commented_out);
+      const parsed = param ? asNumber(param.value) : null;
+      if (parsed !== null && Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+  }
+  return DEFAULT_MIN_EXTRUDE_TEMP;
+}
 
 function getHomedAxesString(homedAxes: Set<'X' | 'Y' | 'Z'>): string {
   return HOMING_AXES.filter((axis) => homedAxes.has(axis)).map((axis) => axis.toLowerCase()).join('');
@@ -1005,7 +1091,7 @@ function stripEnclosingParens(expression: string): string {
   return trimmed;
 }
 
-function splitTopLevelByKeyword(expression: string, keyword: 'and' | 'or'): string[] {
+function splitTopLevelByKeyword(expression: string, keyword: 'and' | 'or' | 'else' | 'if'): string[] {
   const parts: string[] = [];
   let start = 0;
   let depthParen = 0;
@@ -1320,11 +1406,36 @@ function buildTemplatePrinterContext(
     homed_axes: getHomedAxesString(plannerState.homedAxes),
     home_axes: getHomedAxesString(plannerState.homedAxes),
     extruder: plannerState.activeExtruder,
+    ...(staticContext.livePosition ? { position: staticContext.livePosition() } : {}),
+    ...(staticContext.machineBounds
+      ? {
+          axis_minimum: staticContext.machineBounds.axis_minimum,
+          axis_maximum: staticContext.machineBounds.axis_maximum,
+        }
+      : {}),
   });
   setContextVariants(printer, 'gcode_move', {
     ...asRecord(printer.gcode_move),
     absolute_coordinates: plannerState.absoluteMoves,
     absolute_extrude: plannerState.absoluteExtrusion,
+    ...(staticContext.homePosition ? { homing_origin: staticContext.homePosition } : {}),
+  });
+  setContextVariants(printer, 'print_stats', {
+    ...asRecord(printer.print_stats),
+    state: 'standby',
+    info: {
+      ...asRecord(asRecord(printer.print_stats).info),
+      current_layer: null,
+      current_speed: 0,
+    },
+  });
+  setContextVariants(printer, 'idle_timeout', {
+    ...asRecord(printer.idle_timeout),
+    state: 'Idle',
+  });
+  setContextVariants(printer, 'quad_gantry_level', {
+    ...asRecord(printer.quad_gantry_level),
+    applied: false,
   });
   setContextVariants(printer, 'fan', {
     ...asRecord(printer.fan),
@@ -1349,6 +1460,9 @@ function buildTemplatePrinterContext(
   setContextVariants(printer, 'configfile', {
     ...asRecord(printer.configfile),
     config: staticContext.configSections,
+    // Real Klipper exposes settings via printer.configfile.settings
+    // (e.g. printer.configfile.settings.printer.max_velocity).
+    settings: staticContext.configSections,
   });
 
   if (plannerState.activeExtruder) {
@@ -1571,6 +1685,28 @@ function evaluateTemplateExpression(
     return TEMPLATE_UNRESOLVED;
   }
 
+  // Inline ternary: <true> if <cond> else <false> — split on a top-level
+  // 'else' first (shortest match so nested ternaries keep their own), then
+  // find the top-level 'if' in the true-branch.
+  const elseParts = splitTopLevelByKeyword(trimmed, 'else');
+  if (elseParts.length > 1) {
+    const trueExpression = elseParts[0];
+    const falseExpression = elseParts.slice(1).join(' else ');
+    const ifParts = splitTopLevelByKeyword(trueExpression, 'if');
+    if (ifParts.length > 1) {
+      const condition = ifParts[ifParts.length - 1];
+      const trueValueExpression = ifParts.slice(0, ifParts.length - 1).join(' if ');
+      const conditionValue = evaluateTemplateExpression(condition, invocation, plannerState, staticContext);
+      const conditionBoolean = coerceBoolean(conditionValue);
+      if (conditionBoolean === null) {
+        return TEMPLATE_UNRESOLVED;
+      }
+      return conditionBoolean
+        ? evaluateTemplateExpression(trueValueExpression, invocation, plannerState, staticContext)
+        : evaluateTemplateExpression(falseExpression, invocation, plannerState, staticContext);
+    }
+  }
+
   const orParts = splitTopLevelByKeyword(trimmed, 'or');
   if (orParts.length > 1) {
     let hasUnresolvedBranch = false;
@@ -1608,6 +1744,13 @@ function evaluateTemplateExpression(
     const left = evaluateValueExpression(trimmed.slice(0, definedOperator.index).trim(), invocation, plannerState, staticContext);
     const isDefined = !isUnresolved(left);
     return definedOperator.operator.includes('not') ? !isDefined : isDefined;
+  }
+
+  const noneOperator = findTopLevelOperator(trimmed, [' is not none', ' is none']);
+  if (noneOperator) {
+    const left = evaluateValueExpression(trimmed.slice(0, noneOperator.index).trim(), invocation, plannerState, staticContext);
+    const isNone = left === null || isUnresolved(left);
+    return noneOperator.operator.includes('not') ? !isNone : isNone;
   }
 
   const membershipOperator = findTopLevelOperator(trimmed, [' not in ', ' in ']);
@@ -1733,7 +1876,7 @@ function tokenizeTemplateLine(line: string): TemplateLineSegment[] {
   }
 
   const segments: TemplateLineSegment[] = [];
-  const pattern = /\{%([\s\S]*?)%\}/g;
+  const pattern = /\{%([\s\S]*?)%\}|{#([\s\S]*?)#}/g;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
@@ -1741,7 +1884,11 @@ function tokenizeTemplateLine(line: string): TemplateLineSegment[] {
     if (match.index > lastIndex) {
       segments.push({ kind: 'text', text: line.slice(lastIndex, match.index) });
     }
-    segments.push({ kind: 'directive', directive: match[1] });
+    if (match[1] !== undefined) {
+      segments.push({ kind: 'directive', directive: match[1] });
+    } else {
+      segments.push({ kind: 'comment', comment: match[2] });
+    }
     lastIndex = pattern.lastIndex;
   }
 
@@ -1778,6 +1925,132 @@ function collectTemplateLoopBody(lines: NumberedTemplateLine[], startIndex: numb
   }
 
   return { body, endIndex: lines.length };
+}
+
+function collectInlineLoopBodySegments(segments: TemplateLineSegment[], startIndex: number): { body: TemplateLineSegment[]; endIndex: number } {
+  const body: TemplateLineSegment[] = [];
+  let depth = 0;
+
+  for (let index = startIndex + 1; index < segments.length; index += 1) {
+    const segment = segments[index];
+    if (segment.kind === 'directive') {
+      const trimmed = segment.directive.trim();
+      if (/^for\b/i.test(trimmed)) {
+        depth += 1;
+      } else if (/^endfor$/i.test(trimmed)) {
+        if (depth === 0) {
+          return { body, endIndex: index };
+        }
+        depth -= 1;
+      }
+    }
+    body.push(segment);
+  }
+
+  return { body, endIndex: segments.length };
+}
+
+/**
+ * Render a template line that mixes directives/comments with gcode text
+ * (e.g. `{% set HOME_CURRENT = 1 %}  ## comment` or
+ * `M104 {% for p in params %}{'%s%s' % (p, params[p])}{% endfor %}`).
+ * Mirrors the line-level control-flow switch on the same conditionalStack,
+ * so inline if/endif/for/endfor balance just like whole-line directives.
+ * Text segments only render while the branch is active; directives always
+ * execute so the stack stays balanced.
+ */
+function renderInlineTemplateSegments(
+  segments: TemplateLineSegment[],
+  invocation: MacroInvocationContext,
+  plannerState: PlannerState,
+  staticContext: TemplateStaticContext,
+  conditionalStack: Array<{ parentActive: boolean; branchTaken: boolean; active: boolean }>,
+): string {
+  let rendered = '';
+  const isBranchActive = () => conditionalStack.every((entry) => entry.active);
+
+  for (let index = 0; index < segments.length; index += 1) {
+    const segment = segments[index];
+    if (segment.kind === 'comment') {
+      continue;
+    }
+    if (segment.kind === 'text') {
+      if (isBranchActive()) {
+        rendered += renderInlineTemplateExpressions(segment.text, invocation, plannerState, staticContext);
+      }
+      continue;
+    }
+
+    const templateControl = parseTemplateDirective(segment.directive, invocation, plannerState, staticContext);
+    if (!templateControl) {
+      continue;
+    }
+
+    switch (templateControl.kind) {
+      case 'set':
+        if (isBranchActive() && templateControl.name && !isUnresolved(templateControl.value)) {
+          invocation.locals[templateControl.name] = templateControl.value;
+        }
+        break;
+      case 'if': {
+        const parentActive = isBranchActive();
+        const conditionMatched = templateControl.result !== false;
+        conditionalStack.push({ parentActive, branchTaken: conditionMatched, active: parentActive && conditionMatched });
+        break;
+      }
+      case 'elif': {
+        const current = conditionalStack[conditionalStack.length - 1];
+        if (!current) {
+          break;
+        }
+        const conditionMatched = templateControl.result !== false;
+        current.active = current.parentActive && !current.branchTaken && conditionMatched;
+        current.branchTaken = current.branchTaken || conditionMatched;
+        break;
+      }
+      case 'else': {
+        const current = conditionalStack[conditionalStack.length - 1];
+        if (!current) {
+          break;
+        }
+        current.active = current.parentActive && !current.branchTaken;
+        current.branchTaken = true;
+        break;
+      }
+      case 'endif':
+        conditionalStack.pop();
+        break;
+      case 'for': {
+        const { body, endIndex } = collectInlineLoopBodySegments(segments, index);
+        if (isBranchActive()) {
+          const iterable = coerceTemplateIterable(templateControl.iterable);
+          const loopVariables = templateControl.loopVariables || [];
+          const savedValues = loopVariables.map((name) => ({
+            name,
+            hasValue: Object.prototype.hasOwnProperty.call(invocation.locals, name),
+            value: invocation.locals[name],
+          }));
+          iterable.forEach((entry) => {
+            assignLoopVariables(invocation.locals, loopVariables, entry);
+            rendered += renderInlineTemplateSegments(body, invocation, plannerState, staticContext, conditionalStack);
+          });
+          savedValues.forEach(({ name, hasValue, value }) => {
+            if (hasValue) {
+              invocation.locals[name] = value;
+            } else {
+              delete invocation.locals[name];
+            }
+          });
+        }
+        index = endIndex;
+        break;
+      }
+      case 'endfor':
+        break;
+    }
+  }
+
+  return rendered;
 }
 
 function coerceTemplateIterable(value: unknown): unknown[] {
@@ -1974,7 +2247,7 @@ function evaluateTemplateCall(
 
   switch (name.toLowerCase()) {
     case 'range': {
-      const numericArgs = args.map((arg) => Number(arg));
+      const numericArgs = args.map((arg) => (isUnresolved(arg) ? NaN : Number(arg)));
       if (numericArgs.length === 0 || numericArgs.some((arg) => !Number.isFinite(arg)) || numericArgs.length > 3) {
         return TEMPLATE_UNRESOLVED;
       }
@@ -2004,12 +2277,13 @@ function evaluateTemplateCall(
 }
 
 function formatPrintfValue(specifier: string, precision: number | null, value: unknown): string {
+  const numericValue = isUnresolved(value) ? NaN : value;
   switch (specifier) {
     case 'd':
     case 'i':
-      return `${Math.trunc(Number(value) || 0)}`;
+      return `${Math.trunc(Number(numericValue) || 0)}`;
     case 'f': {
-      const numeric = Number(value);
+      const numeric = Number(numericValue);
       if (!Number.isFinite(numeric)) {
         return '0';
       }
@@ -2305,14 +2579,31 @@ export function buildSimulationSteps(
   allMacros: MacroSourceItem[],
   profile: MachineProfile,
   configFiles?: Record<string, ConfigFile>,
+  rootInvocation?: { params?: Record<string, string>; rawparams?: string },
+  initialState?: MacroRuntimeState,
 ): SimulationBuildResult {
   const macroLookup = buildMacroLookup(allMacros);
   const warnings: string[] = [];
   const steps: SimulationStep[] = [];
   const stack: string[] = [];
   const plannerState = createInitialPlannerState(allMacros);
-  let previewState = createInitialRuntimeState(profile, root.title);
-  const staticContext = buildTemplateStaticContext(allMacros, configFiles);
+  if (initialState) {
+    plannerState.homedAxes = new Set(initialState.homedAxes.map((axis) => axis.toUpperCase() as 'X' | 'Y' | 'Z'));
+    plannerState.bedCurrent = initialState.bed.current;
+    plannerState.bedTarget = initialState.bed.target;
+    plannerState.nozzleCurrent = initialState.nozzle.current;
+    plannerState.nozzleTarget = initialState.nozzle.target;
+    plannerState.fanSpeed = initialState.fanSpeed;
+    plannerState.absoluteMoves = initialState.absoluteMoves;
+    plannerState.absoluteExtrusion = initialState.absoluteExtrusion;
+  }
+  let previewState = initialState ?? createInitialRuntimeState(profile, root.title);
+  const staticContext = buildTemplateStaticContext(
+    allMacros,
+    configFiles,
+    profile,
+    () => ({ x: previewState.x, y: previewState.y, z: previewState.z, e: previewState.e }),
+  );
   let visit: (macro: MacroSourceItem, allowHomingOverride?: boolean, invocation?: MacroInvocationContext) => void;
 
   const appendSimulationSteps = (nextSteps: SimulationStep[]) => {
@@ -2453,9 +2744,14 @@ export function buildSimulationSteps(
     const visitLines = (templateLines: NumberedTemplateLine[]) => {
       for (let lineIndex = 0; lineIndex < templateLines.length; lineIndex += 1) {
         const line = templateLines[lineIndex];
-        const wholeLineDirective = extractWholeLineTemplateDirective(line.text);
-        if (wholeLineDirective) {
-          const templateControl = parseTemplateDirective(wholeLineDirective, invocation, plannerState, staticContext);
+        const segments = tokenizeTemplateLine(line.text);
+        const directiveSegments = segments.filter((segment) => segment.kind === 'directive');
+        const hasMeaningfulText = segments.some((segment) => segment.kind === 'text' && segment.text.trim() !== '');
+        const hasTemplateSegments = segments.some((segment) => segment.kind !== 'text');
+        const isWholeLineDirective = directiveSegments.length === 1 && !hasMeaningfulText;
+
+        if (isWholeLineDirective) {
+          const templateControl = parseTemplateDirective(directiveSegments[0].directive, invocation, plannerState, staticContext);
           if (!templateControl) {
             continue;
           }
@@ -2527,6 +2823,23 @@ export function buildSimulationSteps(
           }
         }
 
+        // A line mixing template directives/comments with text (e.g.
+        // `{% set HOME_CURRENT = 1 %}  ## comment` or a M104 line with an
+        // inline `{% for %}`): execute directives in order, render text
+        // through the same expression evaluator, then run the result like
+        // Klipper does — the rendered line is the gcode.
+        if (hasTemplateSegments) {
+          const rendered = renderInlineTemplateSegments(segments, invocation, plannerState, staticContext, conditionalStack);
+          const trimmed = rendered.trim();
+          if (trimmed && !trimmed.startsWith('#') && !trimmed.startsWith(';')) {
+            const parsed = parseGcodeLine(trimmed, line.lineNumber, macro.title);
+            if (parsed) {
+              appendParsedCommand(parsed, macro, allowHomingOverride);
+            }
+          }
+          continue;
+        }
+
         if (!isBranchActive()) {
           continue;
         }
@@ -2543,7 +2856,20 @@ export function buildSimulationSteps(
     stack.pop();
   };
 
-  visit(root, true, { params: {}, rawparams: '', locals: {} });
+  visit(root, true, {
+    params: rootInvocation?.params ?? {},
+    rawparams: rootInvocation?.rawparams ?? '',
+    locals: {},
+  });
+  logMacroDesignerEvent({
+    event: 'sim:plan',
+    macro: root.title,
+    stepCount: steps.length,
+    warningCount: warnings.length,
+    warnings: warnings.slice(0, 10),
+    rootParams: rootInvocation?.params ?? {},
+    nestedMacros: stack.length > 0 ? stack : undefined,
+  });
   return { steps, warnings };
 }
 
@@ -2558,6 +2884,7 @@ function applyLinearMove(
   state: MacroRuntimeState,
   params: Record<string, string>,
   profile: MachineProfile,
+  configFiles?: Record<string, ConfigFile>,
 ): SimulationTickResult {
   const xValue = asNumber(params.X);
   const yValue = asNumber(params.Y);
@@ -2594,6 +2921,45 @@ function applyLinearMove(
     };
   }
 
+  // Klipper refuses moves on axes that have not been homed yet ("Must home
+  // axis first"). Only axes explicitly requested in this move are checked.
+  const movedAxes = [
+    xValue !== null ? 'X' : null,
+    yValue !== null ? 'Y' : null,
+    zValue !== null ? 'Z' : null,
+  ].filter((axis): axis is 'X' | 'Y' | 'Z' => axis !== null);
+  const homedSet = new Set(state.homedAxes.map((axis) => axis.toUpperCase()));
+  const unhomedAxes = movedAxes.filter((axis) => !homedSet.has(axis));
+  if (unhomedAxes.length > 0) {
+    warnings.push(`Move requires homed ${unhomedAxes.join(', ')} axis (must home first).`);
+  }
+
+  // Klipper refuses extrusion below min_extrude_temp (default 170C,
+  // overridable via [extruder] min_extrude_temp).
+  const minExtrudeTemp = getMinExtrudeTemp(configFiles);
+  const extrudeDelta = nextE - state.e;
+  if (extrudeDelta > 0 && state.nozzle.current < minExtrudeTemp) {
+    warnings.push(
+      `Extrusion requires nozzle temperature above ${minExtrudeTemp}C (currently ${state.nozzle.current.toFixed(0)}C).`,
+    );
+  }
+
+  if (unhomedAxes.length > 0 || (extrudeDelta > 0 && state.nozzle.current < minExtrudeTemp)) {
+    // Klipper raises an error and the move does not execute.
+    return {
+      nextState: {
+        ...state,
+        feedRate: fValue ?? state.feedRate,
+        nozzle: { ...state.nozzle, current: updateTargetTemperature(state.nozzle.current, state.nozzle.target) },
+        bed: { ...state.bed, current: updateTargetTemperature(state.bed.current, state.bed.target) },
+        activeProbePoint: null,
+        activeBuiltInCommand: null,
+      },
+      warnings,
+      eventSummary: 'Move refused',
+    };
+  }
+
   if (!isPointInMoveBounds(profile, nextX, nextY)) {
     warnings.push(`Move to X${nextX.toFixed(2)} Y${nextY.toFixed(2)} exceeds the moveable area.`);
   }
@@ -2606,7 +2972,6 @@ function applyLinearMove(
   }
 
   const distance = Math.sqrt((nextX - state.x) ** 2 + (nextY - state.y) ** 2 + (nextZ - state.z) ** 2);
-  const extrudeDelta = nextE - state.e;
   if (distance < 1e-6 && extrudeDelta > profile.maxExtrudeCrossSection) {
     warnings.push(
       `Extrude-only move E${extrudeDelta.toFixed(2)} exceeds max_extrude_cross_section ${profile.maxExtrudeCrossSection.toFixed(2)}.`,
@@ -2652,6 +3017,29 @@ function setLedState(state: MacroRuntimeState, params: Record<string, string>): 
       [ledName]: next,
     },
   };
+}
+
+export function executeStandaloneCommand(
+  line: string,
+  state: MacroRuntimeState,
+  profile: MachineProfile,
+  configFiles?: Record<string, ConfigFile>,
+): { nextState: MacroRuntimeState; warnings: string[]; eventSummary: string } {
+  const parsed = parseGcodeLine(line, 0, 'seed');
+  if (!parsed) {
+    return { nextState: state, warnings: [], eventSummary: 'No command recognized' };
+  }
+  const steps = expandCommandToSteps(parsed, profile, configFiles, state);
+  let current = state;
+  const warnings: string[] = [];
+  let lastSummary = parsed.raw;
+  for (const step of steps) {
+    const result = executeSimulationStep(current, step, profile, configFiles);
+    current = result.nextState;
+    warnings.push(...result.warnings);
+    lastSummary = result.eventSummary || lastSummary;
+  }
+  return { nextState: current, warnings, eventSummary: lastSummary };
 }
 
 export function executeSimulationStep(
@@ -2719,7 +3107,7 @@ export function executeSimulationStep(
   switch (command.command) {
     case 'G0':
     case 'G1':
-      return applyLinearMove(state, command.params, profile);
+      return applyLinearMove(state, command.params, profile, configFiles);
     case 'G28': {
       const requestedAxes = Object.keys(command.params).map((key) => key.toUpperCase());
       const homeAllAxes = requestedAxes.length === 0;
@@ -2774,6 +3162,8 @@ export function executeSimulationStep(
       const target = asNumber(command.params.S) ?? nextState.nozzle.target;
       if (target < 0 || target > profile.nozzleMaxTemp) {
         warnings.push(`Requested nozzle temperature ${target} exceeds the configured range.`);
+        eventSummary = `Refuse nozzle target ${target}C (out of range)`;
+        break;
       }
       nextState = {
         ...nextState,
@@ -2794,6 +3184,8 @@ export function executeSimulationStep(
       const target = asNumber(command.params.S) ?? nextState.bed.target;
       if (target < 0 || target > profile.bedMaxTemp) {
         warnings.push(`Requested bed temperature ${target} exceeds the configured range.`);
+        eventSummary = `Refuse bed target ${target}C (out of range)`;
+        break;
       }
       nextState = {
         ...nextState,

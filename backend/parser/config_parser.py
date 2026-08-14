@@ -113,7 +113,7 @@ COMMENTED_PARAM_RE = re.compile(r"^#\s*(\w[\w]*)\s*([:=])\s*(.*?)(?:\s*#(.*))?$"
 SAVE_CONFIG_BANNER_RE = re.compile(r"^#\*#\s*<.*SAVE_CONFIG.*>\s*$")
 SAVE_CONFIG_SECTION_RE = re.compile(r"^#\*#\s*\[([^\]]+)\]\s*(?:#.*)?$")
 SAVE_CONFIG_PARAM_RE = re.compile(r"^#\*#\s*(\w[\w]*)\s*([:=])\s*(.*?)(?:\s*#(.*))?$")
-CONTINUATION_RE = re.compile(r"^[ \t]+(\S.*)$")
+CONTINUATION_RE = re.compile(r"^([ \t]+\S.*)$")
 
 # Section types that take a name parameter
 NAMED_SECTION_TYPES = {
