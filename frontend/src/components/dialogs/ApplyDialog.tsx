@@ -292,6 +292,16 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
       return;
     }
 
+    // Text view holds the last-good model while a file fails to parse — block
+    // saving so the user's latest (unparseable) text can't be silently dropped.
+    const parseErrors = useConfigStore.getState().textParseErrors;
+    const blockedFile = files.find((fn) => parseErrors[fn]);
+    if (blockedFile) {
+      setStatus('error');
+      setMessage(`Cannot save "${blockedFile}": the text in the editor can't be parsed. Fix it in the text view first.`);
+      return;
+    }
+
     setStatus('exporting');
     setRestartStatus('idle');
     setRestartMessage('');

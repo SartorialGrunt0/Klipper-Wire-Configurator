@@ -26,10 +26,8 @@ import CommunicationEdge from './components/edges/CommunicationEdge';
 import ConfigurationEdge from './components/edges/ConfigurationEdge';
 import SettingsPanel from './components/SettingsPanel';
 import TextEditor from './components/TextEditor';
-import type { TextEditorHandle } from './components/TextEditor';
 import Toolbar from './components/Toolbar';
 import AddMenu from './components/AddMenu';
-import UnsavedChangesDialog from './components/dialogs/UnsavedChangesDialog';
 import MacroDesignerDialog from './components/dialogs/MacroDesignerDialog';
 
 import type { AppEdge, AppNode, ValidationStatus } from './types/graph';
@@ -165,10 +163,6 @@ export default function App() {
   const [showTextView, setShowTextView] = useState(false);
   const [showAddMenu, setShowAddMenu] = useState(false);
   const [showMacroDesigner, setShowMacroDesigner] = useState(false);
-  const [showUnsavedDialog, setShowUnsavedDialog] = useState(false);
-  const [textApplyError, setTextApplyError] = useState('');
-  const textEditorRef = useRef<TextEditorHandle>(null);
-  const clearTextDraft = useConfigStore((state) => state.clearTextDraft);
   const dragHoverHardwareIdRef = useRef<string | null>(null);
 
   // Load section schemas on mount
@@ -942,11 +936,8 @@ export default function App() {
               onOpenMacroDesigner={() => setShowMacroDesigner(true)}
               onToggleTextView={() => {
                 if (showTextView) {
-                  // Switching FROM text TO graph — check for unsaved changes
-                  if (textEditorRef.current?.isDirty()) {
-                    setShowUnsavedDialog(true);
-                    return;
-                  }
+                  // Text edits apply to the model live, so switching views is
+                  // always safe — nothing to apply, nothing to lose.
                   setShowTextView(false);
                 } else {
                   // Switching TO text view — close the settings panel
@@ -966,7 +957,7 @@ export default function App() {
         {/* Graph or Text view */}
         <div className="flex-1 relative">
           {showTextView ? (
-            <TextEditor ref={textEditorRef} />
+            <TextEditor />
           ) : (
             <ReactFlow
               nodes={nodes}
@@ -1054,33 +1045,6 @@ export default function App() {
         )}
       </div>
 
-      {/* Unsaved changes dialog */}
-      {showUnsavedDialog && (
-        <UnsavedChangesDialog
-          onApply={async () => {
-            try {
-              setTextApplyError('');
-              await textEditorRef.current?.applyChanges();
-              setShowUnsavedDialog(false);
-              setShowTextView(false);
-            } catch (error) {
-              console.error('Failed to apply text-view changes before leaving text view:', error);
-              setTextApplyError(error instanceof Error ? error.message : 'Failed to apply changes.');
-            }
-          }}
-          onDiscard={() => {
-            setTextApplyError('');
-            clearTextDraft();
-            setShowUnsavedDialog(false);
-            setShowTextView(false);
-          }}
-          onCancel={() => {
-            setTextApplyError('');
-            setShowUnsavedDialog(false);
-          }}
-          error={textApplyError}
-        />
-      )}
     </div>
   );
 }

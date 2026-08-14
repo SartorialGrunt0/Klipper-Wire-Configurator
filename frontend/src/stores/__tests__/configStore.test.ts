@@ -61,8 +61,7 @@ beforeEach(() => {
     selectedSection: null,
     originalTexts: {},
     isDirty: false,
-    textEditorDirty: false,
-    textDrafts: {},
+    textParseErrors: {},
   });
 });
 
@@ -298,38 +297,24 @@ describe('configStore includes', () => {
   });
 });
 
-describe('configStore dirty / draft tracking', () => {
-  it('setTextDraft marks the editor dirty; clearTextDraft clears it', () => {
+describe('configStore dirty / text parse error tracking', () => {
+  it('setTextParseError records per-file errors; null clears them', () => {
     const store = useConfigStore.getState();
     store.setConfigFile('printer.cfg', makeConfigFile());
-    useConfigStore.getState().setTextDraft('printer.cfg', 'new text');
-    expect(useConfigStore.getState().textEditorDirty).toBe(true);
-    expect(useConfigStore.getState().textDrafts['printer.cfg']).toBe('new text');
+    useConfigStore.getState().setTextParseError('printer.cfg', 'boom');
+    expect(useConfigStore.getState().textParseErrors['printer.cfg']).toBe('boom');
 
-    useConfigStore.getState().clearTextDraft('printer.cfg');
-    expect(useConfigStore.getState().textEditorDirty).toBe(false);
-    expect(useConfigStore.getState().textDrafts['printer.cfg']).toBeUndefined();
+    useConfigStore.getState().setTextParseError('printer.cfg', null);
+    expect(useConfigStore.getState().textParseErrors['printer.cfg']).toBeUndefined();
   });
 
-  it('setTextDraft with identical text is a no-op', () => {
+  it('markClean clears the dirty flag', () => {
     const store = useConfigStore.getState();
     store.setConfigFile('printer.cfg', makeConfigFile());
-    useConfigStore.getState().setTextDraft('printer.cfg', 'same');
-    const before = useConfigStore.getState().textDrafts;
-    useConfigStore.getState().setTextDraft('printer.cfg', 'same');
-    expect(useConfigStore.getState().textDrafts).toBe(before);
-  });
-
-  it('markClean clears dirty flags and drafts', () => {
-    const store = useConfigStore.getState();
-    store.setConfigFile('printer.cfg', makeConfigFile());
-    store.setTextDraft('printer.cfg', 'draft');
     store.markDirty();
     useConfigStore.getState().markClean();
     const state = useConfigStore.getState();
     expect(state.isDirty).toBe(false);
-    expect(state.textEditorDirty).toBe(false);
-    expect(state.textDrafts).toEqual({});
   });
 });
 

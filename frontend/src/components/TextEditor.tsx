@@ -1,9 +1,7 @@
-import { useState, useCallback, useMemo, useRef, useEffect, useImperativeHandle, forwardRef } from 'react';
+import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { useConfigStore } from '../stores/configStore';
 import { useGraphStore } from '../stores/graphStore';
 import * as api from '../services/api';
-import { buildProjectGraph } from '../utils/graphBuilder';
-import ApplyWarningDialog from './dialogs/ApplyWarningDialog';
 import ConfigReferenceDialog from './dialogs/ConfigReferenceDialog';
 import type { ExampleConfig, ConfigFile, ConfigSection } from '../types/config';
 
@@ -13,11 +11,6 @@ interface SearchResult {
   lineText: string;
   matchStart: number;
   matchEnd: number;
-}
-
-export interface TextEditorHandle {
-  isDirty: () => boolean;
-  applyChanges: () => Promise<void>;
 }
 
 interface TextIssue {
@@ -44,7 +37,7 @@ interface ConfigSectionEntry {
   isCommented: boolean;
 }
 
-const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref) {
+function TextEditor() {
   const {
     configFiles,
     activeFile,
@@ -55,18 +48,14 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
     renameConfigFile,
     copyConfigFile,
     removeConfigFile,
-    setTextEditorDirty,
-    textDrafts,
-    setTextDraft,
-    clearTextDraft,
-    schemas,
+    setTextParseError,
     validation,
   } = useConfigStore();
-  const isDirty = useConfigStore((s) => s.textEditorDirty);
+  const isDirty = useConfigStore((s) => s.isDirty);
+  const parseError = useConfigStore((s) => s.textParseErrors[activeFile]);
 
   const config = configFiles[activeFile];
   const filenames = Object.keys(configFiles);
-  const activeDraftText = textDrafts[activeFile];
 
   const [editText, setEditText] = useState('');
 
@@ -90,13 +79,18 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
   }, []);
   const fallbackExportUsed = !!fallbackExportFiles[activeFile];
 
-  // Surface backend failures from Apply so they aren't silent no-ops
-  const [applyError, setApplyError] = useState('');
+  // Surface backend export failures (fallback banner below covers the lossy case)
 
-  // When config changes and text is not dirty, re-export via backend
+  // True while a config change originated from this editor's own debounced
+  // apply — the export effect must not echo it back into the textarea
+  // (that would fight the user's typing and reset the cursor).
+  const applyingRef = useRef(false);
+
+  // When config changes from OUTSIDE the text editor (undo/redo, import,
+  // graph edits, file switch), re-export the model text into the textarea.
   useEffect(() => {
-    if (typeof activeDraftText === 'string') {
-      setEditText(activeDraftText);
+    if (applyingRef.current) {
+      applyingRef.current = false;
       return;
     }
     if (!config) {
@@ -110,14 +104,13 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
         markFallbackExport(activeFile, usedFallback);
       }
     });
-  }, [activeDraftText, activeFile, config, exportConfigText, markFallbackExport]);
+  }, [activeFile, config, exportConfigText, markFallbackExport]);
 
   const [showSearch, setShowSearch] = useState(false);
   const [showFileSidebar, setShowFileSidebar] = useState(true);
   const [showSectionsSidebar, setShowSectionsSidebar] = useState(true);
   const [showReferenceViewer, setShowReferenceViewer] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [showApplyWarning, setShowApplyWarning] = useState(false);
   const [liveValidation, setLiveValidation] = useState<Array<{ severity: string; section: string; param: string; message: string }>>([]);
   const [liveParsedConfig, setLiveParsedConfig] = useState<ConfigFile | null>(null);
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({});
@@ -149,9 +142,14 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
     }
   }, []);
 
-  // Debounced live validation: parse the current text and validate it as the user types.
-  // A request-id guard drops stale responses (older text resolving after newer edits),
-  // and failures clear the issue list so the panel never shows validation for old text.
+  // Debounced live sync: parse the current text as the user types and apply it
+  // straight into the model (config store + graph). Parse succeeds with any
+  // validation issues → the model updates and validation rides along (same as
+  // the settings panel — the Save button colors accordingly, no gate).
+  // Parse FAILS → the last-good model is held, the textarea keeps the user's
+  // text, and the error is surfaced inline + as a save-blocking flag.
+  // A request-id guard drops stale responses (older text resolving after
+  // newer edits or a file switch).
   useEffect(() => {
     if (liveValidateTimerRef.current) clearTimeout(liveValidateTimerRef.current);
     const requestId = ++liveValidateRequestRef.current;
@@ -161,18 +159,42 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
         if (requestId !== liveValidateRequestRef.current) return;
         setLiveParsedConfig(result.config);
         setLiveValidation(result.validation.errors || []);
-      } catch {
+        setTextParseError(activeFile, null);
+
+        const currentConfig = useConfigStore.getState().configFiles[activeFile];
+        const comparable = (cf: ConfigFile) => {
+          const { raw_text: _rawText, ...rest } = cf;
+          return JSON.stringify(rest);
+        };
+        // No-op echo (identical parse — e.g. native textarea undo returning to
+        // an already-applied state, or re-parse of unchanged text) → skip the
+        // store write, history push, and graph sync so we don't churn the undo
+        // stack or re-render the whole app.
+        if (currentConfig && comparable(currentConfig) === comparable(result.config)) {
+          return;
+        }
+
+        applyingRef.current = true;
+        useGraphStore.getState().pushHistory();
+        // raw_text = editText so the backend export returns the user's text
+        // verbatim — the text the user typed is the canonical content.
+        setConfigFile(activeFile, { ...result.config, raw_text: editText });
+        setValidation(activeFile, result.validation);
+        markDirty();
+        useGraphStore.getState().syncGraphWithConfig(activeFile);
+      } catch (err) {
         if (requestId !== liveValidateRequestRef.current) return;
-        // Parse failed — don't keep stale validation on screen
+        // Parse failed — don't keep stale validation on screen, hold last-good model
         setLiveParsedConfig(null);
         setLiveValidation([]);
+        setTextParseError(activeFile, err instanceof Error ? err.message : 'Unable to parse configuration text.');
       }
     }, 800);
     return () => {
       if (liveValidateTimerRef.current) clearTimeout(liveValidateTimerRef.current);
       liveValidateRequestRef.current++;
     };
-  }, [editText, activeFile]);
+  }, [activeFile, editText, markDirty, setConfigFile, setTextParseError, setValidation]);
 
   // Collect inline issues from live validation of the current text
   const inlineIssues = useMemo((): TextIssue[] => {
@@ -326,109 +348,16 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
     }
   }, [showSearch]);
 
-  // Sync when switching files
-  const handleFileSwitch = useCallback(async (filename: string) => {
+  // Sync when switching files — the config→text effect re-exports the new
+  // file's model text into the textarea.
+  const handleFileSwitch = useCallback((filename: string) => {
     if (filename === activeFile) return;
     setActiveFile(filename);
-    const draftText = textDrafts[filename];
-    if (typeof draftText === 'string') {
-      setEditText(draftText);
-      return;
-    }
-    const cf = configFiles[filename];
-    if (cf) {
-      const { text, usedFallback } = await exportConfigText(cf);
-      setEditText(text);
-      markFallbackExport(filename, usedFallback);
-      return;
-    }
-    setEditText('');
-  }, [activeFile, configFiles, exportConfigText, markFallbackExport, setActiveFile, textDrafts]);
+  }, [activeFile, setActiveFile]);
 
   const handleTextChange = (newText: string) => {
     setEditText(newText);
-    setTextEditorDirty(true);
-    setTextDraft(activeFile, newText);
   };
-
-  const applyDraftTexts = useCallback(async (draftEntries: Array<[string, string]>) => {
-    if (draftEntries.length === 0) {
-      return;
-    }
-
-    const parsedResults = await Promise.all(
-      draftEntries.map(async ([filename, draftText]) => {
-        const result = await api.parseConfigText(draftText, filename);
-        return [filename, result] as const;
-      }),
-    );
-
-    const updatedConfigs = { ...configFiles };
-    const updatedValidation = { ...validation };
-
-    parsedResults.forEach(([filename, result]) => {
-      updatedConfigs[filename] = result.config;
-      updatedValidation[filename] = result.validation;
-    });
-
-    parsedResults.forEach(([filename, result]) => {
-      setConfigFile(filename, result.config);
-      setValidation(filename, result.validation);
-      clearTextDraft(filename);
-    });
-
-    markDirty();
-    setTextEditorDirty(false);
-
-    const graphStore = useGraphStore.getState();
-    graphStore.clearGraph();
-    buildProjectGraph(updatedConfigs, graphStore, schemas, updatedValidation);
-  }, [clearTextDraft, configFiles, markDirty, schemas, setConfigFile, setTextEditorDirty, setValidation, validation]);
-
-  const doApply = useCallback(async () => {
-    try {
-      setApplyError('');
-      await applyDraftTexts([[activeFile, editText]]);
-    } catch (err) {
-      console.error('Parse error:', err);
-      setApplyError(err instanceof Error ? err.message : 'Failed to apply changes.');
-    }
-  }, [activeFile, applyDraftTexts, editText]);
-
-  const applyAllChanges = useCallback(async () => {
-    const draftEntries = Object.entries(textDrafts);
-    if (draftEntries.length === 0) {
-      return;
-    }
-    try {
-      setApplyError('');
-      await applyDraftTexts(draftEntries);
-    } catch (err) {
-      console.error('Failed to apply text-view changes:', err);
-      setApplyError(err instanceof Error ? err.message : 'Failed to apply changes.');
-      throw err;
-    }
-  }, [applyDraftTexts, textDrafts]);
-
-  const handleApply = useCallback(async () => {
-    // Check for active issues
-    if (inlineIssues.length > 0) {
-      setShowApplyWarning(true);
-      return;
-    }
-    await doApply();
-  }, [inlineIssues, doApply]);
-
-  const handleApplyAnyway = useCallback(async () => {
-    setShowApplyWarning(false);
-    await doApply();
-  }, [doApply]);
-
-  // Expose isDirty and applyChanges to parent
-  useImperativeHandle(ref, () => ({
-    isDirty: () => isDirty,
-    applyChanges: applyAllChanges,
-  }), [applyAllChanges, isDirty]);
 
   const jumpToLine = useCallback((line: number) => {
     if (!textareaRef.current || line < 1) return;
@@ -446,19 +375,9 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
     syncLineNumbersScroll();
   }, [syncLineNumbersScroll]);
 
-  const handleSearchResultClick = async (file: string, line: number) => {
+  const handleSearchResultClick = (file: string, line: number) => {
     if (file !== activeFile) {
       setActiveFile(file);
-      const draftText = textDrafts[file];
-      if (typeof draftText === 'string') {
-        setEditText(draftText);
-      } else {
-        const cf = configFiles[file];
-        if (!cf) return;
-        const { text, usedFallback } = await exportConfigText(cf);
-        setEditText(text);
-        markFallbackExport(file, usedFallback);
-      }
     }
     // Select the matching line after state settles
     setTimeout(() => {
@@ -551,12 +470,6 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
     }
     copyConfigFile(contextMenu.file, copyName);
     setActiveFile(copyName);
-    const cf = useConfigStore.getState().configFiles[copyName];
-    if (cf) {
-      const { text, usedFallback } = await exportConfigText(cf);
-      setEditText(text);
-      markFallbackExport(copyName, usedFallback);
-    }
     setContextMenu(null);
   };
 
@@ -570,24 +483,12 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
       graphState.removeNode(n.id);
     }
     removeConfigFile(fileToDelete);
-    // Switch to another file
+    // Switch to another file — the config→text effect re-exports the new file
     const remaining = Object.keys(useConfigStore.getState().configFiles);
     if (remaining.length > 0) {
-      const next = remaining[0];
-      setActiveFile(next);
-      const draftText = useConfigStore.getState().textDrafts[next];
-      if (typeof draftText === 'string') {
-        setEditText(draftText);
-      } else {
-        const cf = useConfigStore.getState().configFiles[next];
-        if (cf) {
-          const { text, usedFallback } = await exportConfigText(cf);
-          setEditText(text);
-          markFallbackExport(next, usedFallback);
-        }
-      }
+      setActiveFile(remaining[0]);
     }
-  }, [exportConfigText, markFallbackExport, removeConfigFile, setActiveFile]);
+  }, [removeConfigFile, setActiveFile]);
 
   // Add Configuration handlers
   const handleAddConfigBlank = () => {
@@ -627,15 +528,9 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
     return () => clearTimeout(timer);
   }, [referenceSearch, addConfigStep]);
 
-  // Validation shown for a file: live draft validation while the active file is being
-  // edited, otherwise the last applied validation — keeps sidebar dots consistent with
-  // the live issue panel instead of showing two sources of truth.
-  const getFileValidation = (fn: string) => {
-    if (fn === activeFile && typeof textDrafts[activeFile] === 'string') {
-      return { errors: liveValidation };
-    }
-    return validation[fn];
-  };
+  // Validation shown for a file: the store validation — text edits apply to
+  // the model on every successful parse, so the store is always current.
+  const getFileValidation = (fn: string) => validation[fn];
 
   const handleAddConfigFromReference = async (example: ExampleConfig) => {
     try {
@@ -658,23 +553,12 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
         header_comments: res.config.header_comments || [],
       });
       setActiveFile(name);
-      const cf = useConfigStore.getState().configFiles[name];
-      if (cf) {
-        const { text, usedFallback } = await exportConfigText(cf);
-        setEditText(text);
-        markFallbackExport(name, usedFallback);
-      }
 
       // Rebuild the whole graph so the new file's hardware/features appear —
-      // mirrors the apply/import path (clearGraph first avoids duplicate nodes).
+      // mirrors the import path (clearGraph first avoids duplicate nodes).
       const graphStore = useGraphStore.getState();
       graphStore.clearGraph();
-      buildProjectGraph(
-        useConfigStore.getState().configFiles,
-        graphStore,
-        useConfigStore.getState().schemas,
-        useConfigStore.getState().validation,
-      );
+      graphStore.syncGraphWithConfig(name);
     } catch (err) {
       console.error('Failed to load reference config:', err);
     }
@@ -984,39 +868,14 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
               </svg>
               Search
             </button>
-            <button
-              onClick={handleApply}
-              disabled={!isDirty}
-              className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
-                isDirty
-                  ? 'bg-[var(--color-accent)] text-[var(--color-bg-primary)] hover:bg-[var(--color-accent-hover)]'
-                  : 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] cursor-not-allowed'
-              }`}
-            >
-              Apply Changes
-            </button>
           </div>
         </div>
-
-        {/* Apply error banner */}
-        {applyError && (
-          <div className="shrink-0 border-b border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-3 py-1.5 flex items-center gap-2">
-            <span className="text-xs text-[var(--color-error)] flex-1">Apply failed: {applyError}</span>
-            <button
-              onClick={() => setApplyError('')}
-              title="Dismiss"
-              className="text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]"
-            >
-              ✕
-            </button>
-          </div>
-        )}
 
         {/* Lossy export fallback banner */}
         {fallbackExportUsed && (
           <div className="shrink-0 border-b border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-3 py-1.5 flex items-center gap-2">
             <span className="text-xs text-[var(--color-warning)] flex-1">
-              Using offline text export — applying may normalize comments and formatting.
+              Using offline text export — edits may normalize comments and formatting.
             </span>
             <button
               onClick={() => markFallbackExport(activeFile, false)}
@@ -1025,6 +884,15 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
             >
               ✕
             </button>
+          </div>
+        )}
+
+        {/* Parse failure banner — the model holds last-good; Save blocks until this clears */}
+        {parseError && (
+          <div className="shrink-0 border-b border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-3 py-1.5 flex items-center gap-2">
+            <span className="text-xs text-[var(--color-error)] flex-1">
+              Couldn&apos;t parse this file — showing the last valid configuration. Fix the text to re-enable saving.
+            </span>
           </div>
         )}
 
@@ -1166,13 +1034,8 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
         </div>
 
         {/* Apply warning dialog */}
-        {showApplyWarning && (
-          <ApplyWarningDialog
-            issues={inlineIssues}
-            onProceed={handleApplyAnyway}
-            onCancel={() => setShowApplyWarning(false)}
-          />
-        )}
+        {/* Removed — text edits apply to the model directly; validation rides
+            along and colors the Save button instead of gating anything. */}
 
         {showReferenceViewer && (
           <ConfigReferenceDialog onClose={() => setShowReferenceViewer(false)} />
@@ -1264,7 +1127,7 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
       )}
     </div>
   );
-});
+}
 
 export default TextEditor;
 
