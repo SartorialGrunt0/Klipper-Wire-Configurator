@@ -4,6 +4,7 @@ import { useGraphStore } from '../stores/graphStore';
 import * as api from '../services/api';
 import { buildProjectGraph } from '../utils/graphBuilder';
 import ApplyWarningDialog from './dialogs/ApplyWarningDialog';
+import ConfigReferenceDialog from './dialogs/ConfigReferenceDialog';
 import type { ExampleConfig, ConfigFile, ConfigSection } from '../types/config';
 
 interface SearchResult {
@@ -115,8 +116,6 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
   const [showFileSidebar, setShowFileSidebar] = useState(true);
   const [showSectionsSidebar, setShowSectionsSidebar] = useState(true);
   const [showReferenceViewer, setShowReferenceViewer] = useState(false);
-  const [configReferenceText, setConfigReferenceText] = useState('');
-  const [configReferenceError, setConfigReferenceError] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [showApplyWarning, setShowApplyWarning] = useState(false);
   const [liveValidation, setLiveValidation] = useState<Array<{ severity: string; section: string; param: string; message: string }>>([]);
@@ -326,27 +325,6 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
       searchInputRef.current.focus();
     }
   }, [showSearch]);
-
-  useEffect(() => {
-    if (!showReferenceViewer || configReferenceText) return;
-    api.getConfigReference()
-      .then((res) => {
-        const text = res.content;
-        setConfigReferenceText(text);
-        setConfigReferenceError('');
-      })
-      .catch(async () => {
-        try {
-          const res = await fetch('/reference/docs/Config_Reference.md');
-          if (!res.ok) throw new Error('missing');
-          const text = await res.text();
-          setConfigReferenceText(text);
-          setConfigReferenceError('');
-        } catch {
-          setConfigReferenceError('Config reference could not be loaded.');
-        }
-      });
-  }, [configReferenceText, showReferenceViewer]);
 
   // Sync when switching files
   const handleFileSwitch = useCallback(async (filename: string) => {
@@ -1197,24 +1175,7 @@ const TextEditor = forwardRef<TextEditorHandle>(function TextEditor(_props, ref)
         )}
 
         {showReferenceViewer && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setShowReferenceViewer(false)}>
-            <div className="h-[80vh] w-[80vw] max-w-[1100px] rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] p-4 shadow-2xl" onClick={(e) => e.stopPropagation()}>
-              <div className="mb-3 flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">Config_Reference.md</h3>
-                <button onClick={() => setShowReferenceViewer(false)} className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-xs text-[var(--color-text-primary)]">Close</button>
-              </div>
-              <div className="h-[calc(100%-44px)] overflow-auto rounded-lg border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] p-4">
-                {configReferenceError && <div className="text-xs text-[var(--color-error)]">{configReferenceError}</div>}
-                {!configReferenceError && !configReferenceText && <div className="text-xs text-[var(--color-text-secondary)]">Loading…</div>}
-                {!!configReferenceText && (
-                  <div
-                    className="prose prose-invert max-w-none text-xs leading-5 text-[var(--color-text-primary)]"
-                    dangerouslySetInnerHTML={{ __html: renderSimpleMarkdown(configReferenceText) }}
-                  />
-                )}
-              </div>
-            </div>
-          </div>
+          <ConfigReferenceDialog onClose={() => setShowReferenceViewer(false)} />
         )}
       </div>
 
@@ -1380,51 +1341,4 @@ function buildHighlightedHtml(text: string): string {
     }
     return escaped || ' ';
   }).join('\n');
-}
-
-function renderSimpleMarkdown(markdown: string): string {
-  const lines = markdown.replace(/\r\n?/g, '\n').split('\n');
-  const html: string[] = [];
-  let inCode = false;
-  for (const rawLine of lines) {
-    const line = rawLine.trimEnd();
-    if (line.startsWith('```')) {
-      if (!inCode) {
-        html.push('<pre><code>');
-      } else {
-        html.push('</code></pre>');
-      }
-      inCode = !inCode;
-      continue;
-    }
-    if (inCode) {
-      html.push(`${escapeHtml(rawLine)}\n`);
-      continue;
-    }
-    if (/^###\s+/.test(line)) {
-      html.push(`<h3>${escapeHtml(line.replace(/^###\s+/, ''))}</h3>`);
-      continue;
-    }
-    if (/^##\s+/.test(line)) {
-      html.push(`<h2>${escapeHtml(line.replace(/^##\s+/, ''))}</h2>`);
-      continue;
-    }
-    if (/^#\s+/.test(line)) {
-      html.push(`<h1>${escapeHtml(line.replace(/^#\s+/, ''))}</h1>`);
-      continue;
-    }
-    if (/^\s*[-*]\s+/.test(line)) {
-      html.push(`<div>• ${escapeHtml(line.replace(/^\s*[-*]\s+/, ''))}</div>`);
-      continue;
-    }
-    if (!line) {
-      html.push('<br/>');
-      continue;
-    }
-    html.push(`<div>${escapeHtml(line)}</div>`);
-  }
-  if (inCode) {
-    html.push('</code></pre>');
-  }
-  return html.join('');
 }
