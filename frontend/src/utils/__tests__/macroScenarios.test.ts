@@ -77,7 +77,7 @@ function runSimulation(
   const trace: string[] = [];
   const stepWarnings: string[] = [];
   for (const step of plan.steps) {
-    const result = executeSimulationStep(state, step, profile);
+    const result = executeSimulationStep(state, step, profile, configFiles);
     state = result.nextState;
     trace.push(result.eventSummary);
     stepWarnings.push(...result.warnings);
@@ -619,5 +619,66 @@ describe('inline template segments on mixed lines (2026-08-12 fix)', () => {
     // Bare call: params are NOT inherited — TEMP stays unresolved, but the
     // sim must not crash or emit an unsupported-command warning.
     expect(stepWarnings.some((w) => w.includes('Unsupported command'))).toBe(false);
+  });
+
+  it('honors a configured [extruder] min_extrude_temp above the default', () => {
+    const profile = makeProfile();
+    // Machine overrides min_extrude_temp to 200C (Klipper default is 170).
+    const configFiles = {
+      'printer.cfg': makeConfigFile([
+        makeSection({
+          section_type: 'extruder',
+          section_name: 'extruder',
+          full_header: 'extruder',
+          params: [makeParam('min_extrude_temp', '200')],
+        }),
+      ]),
+    };
+    const macros = [
+      makeMacro(
+        [
+          'G28',
+          'M109 S180', // nozzle hot but below the configured 200C floor
+          'G1 E5 F600',
+        ].join('\n'),
+        'EXTRUDE_COLD',
+        'extrude_cold',
+      ),
+    ];
+
+    const { state, stepWarnings } = runSimulation(macros[0], macros, profile, {}, '', configFiles);
+
+    expect(stepWarnings.some((w) => w.includes('above 200C'))).toBe(true);
+    expect(state.e).toBe(0); // move refused — no extrusion happened
+  });
+
+  it('allows extrusion between default and configured min_extrude_temp', () => {
+    const profile = makeProfile();
+    const configFiles = {
+      'printer.cfg': makeConfigFile([
+        makeSection({
+          section_type: 'extruder',
+          section_name: 'extruder',
+          full_header: 'extruder',
+          params: [makeParam('min_extrude_temp', '200')],
+        }),
+      ]),
+    };
+    const macros = [
+      makeMacro(
+        [
+          'G28',
+          'M109 S210', // above the configured 200C floor
+          'G1 E5 F600',
+        ].join('\n'),
+        'EXTRUDE_HOT',
+        'extrude_hot',
+      ),
+    ];
+
+    const { state, stepWarnings } = runSimulation(macros[0], macros, profile, {}, '', configFiles);
+
+    expect(stepWarnings.some((w) => w.includes('above 200C'))).toBe(false);
+    expect(state.e).toBeGreaterThan(0); // extrusion succeeded
   });
 });

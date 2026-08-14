@@ -853,6 +853,31 @@ const HOMING_AXES: Array<'X' | 'Y' | 'Z'> = ['X', 'Y', 'Z'];
 // Klipper's default [extruder] min_extrude_temp.
 const DEFAULT_MIN_EXTRUDE_TEMP = 170;
 
+/**
+ * Resolve the [extruder] min_extrude_temp for the simulated machine.
+ *
+ * Klipper refuses extrusion while the nozzle is below the configured
+ * min_extrude_temp (default 170C). Read it from the actual config so a
+ * machine that overrides it simulates faithfully, instead of always
+ * assuming the default.
+ */
+function getMinExtrudeTemp(configFiles?: Record<string, ConfigFile>): number {
+  if (configFiles) {
+    for (const configFile of Object.values(configFiles)) {
+      const extruder = configFile.sections.find((section) => section.section_type === 'extruder');
+      if (!extruder) {
+        continue;
+      }
+      const param = extruder.params.find((p) => p.key === 'min_extrude_temp' && !p.is_commented_out);
+      const parsed = param ? asNumber(param.value) : null;
+      if (parsed !== null && Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+  }
+  return DEFAULT_MIN_EXTRUDE_TEMP;
+}
+
 function getHomedAxesString(homedAxes: Set<'X' | 'Y' | 'Z'>): string {
   return HOMING_AXES.filter((axis) => homedAxes.has(axis)).map((axis) => axis.toLowerCase()).join('');
 }
@@ -2909,15 +2934,17 @@ function applyLinearMove(
     warnings.push(`Move requires homed ${unhomedAxes.join(', ')} axis (must home first).`);
   }
 
-  // Klipper refuses extrusion below min_extrude_temp (default 170C).
+  // Klipper refuses extrusion below min_extrude_temp (default 170C,
+  // overridable via [extruder] min_extrude_temp).
+  const minExtrudeTemp = getMinExtrudeTemp(configFiles);
   const extrudeDelta = nextE - state.e;
-  if (extrudeDelta > 0 && state.nozzle.current < DEFAULT_MIN_EXTRUDE_TEMP) {
+  if (extrudeDelta > 0 && state.nozzle.current < minExtrudeTemp) {
     warnings.push(
-      `Extrusion requires nozzle temperature above ${DEFAULT_MIN_EXTRUDE_TEMP}C (currently ${state.nozzle.current.toFixed(0)}C).`,
+      `Extrusion requires nozzle temperature above ${minExtrudeTemp}C (currently ${state.nozzle.current.toFixed(0)}C).`,
     );
   }
 
-  if (unhomedAxes.length > 0 || (extrudeDelta > 0 && state.nozzle.current < DEFAULT_MIN_EXTRUDE_TEMP)) {
+  if (unhomedAxes.length > 0 || (extrudeDelta > 0 && state.nozzle.current < minExtrudeTemp)) {
     // Klipper raises an error and the move does not execute.
     return {
       nextState: {
