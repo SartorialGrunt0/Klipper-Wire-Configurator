@@ -1923,7 +1923,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55" onClick={handleCloseRequest}>
-      <div className="h-[min(92vh,980px)] w-[min(98vw,1680px)] overflow-hidden rounded-2xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] shadow-2xl" onClick={(event) => event.stopPropagation()}>
+      <div className="h-[min(94vh,1100px)] w-[min(99vw,1920px)] overflow-hidden rounded-2xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] shadow-2xl" onClick={(event) => event.stopPropagation()}>
         <input
           ref={playbackFileInputRef}
           type="file"
@@ -2090,7 +2090,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
               </div>
             </div>
 
-            <div className="flex min-h-0 flex-1 flex-col">
+            <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
               <div className="mx-4 mt-3 flex flex-shrink-0 gap-3">
                 <div className="flex-1 rounded-lg border border-[var(--color-bg-tertiary)] bg-[rgba(15,23,42,0.72)] px-3 py-2 text-[10px] text-[var(--color-text-secondary)]">
                   <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.16em]">Legend</div>
@@ -2163,7 +2163,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
               </div>
 
               {/* SVG Grid */}
-              <div className="relative m-4 mt-2 min-h-0 flex-1 overflow-hidden border border-[var(--color-bg-tertiary)] bg-[linear-gradient(180deg,rgba(15,23,42,0.9),rgba(30,41,59,0.95))]">
+              <div className="relative m-4 mt-2 min-h-[16rem] flex-1 overflow-hidden border border-[var(--color-bg-tertiary)] bg-[linear-gradient(180deg,rgba(15,23,42,0.9),rgba(30,41,59,0.95))]">
                 <svg
                   ref={svgRef}
                   viewBox={viewBox}
@@ -2402,7 +2402,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                   {planWarnings.length > 0 && (
                     <div className="mt-2 rounded-md border border-amber-400/25 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-100">{planWarnings.join(' ')}</div>
                   )}
-                  <div ref={executionOutputRef} className="mt-2 h-[26vh] min-h-[7rem] max-h-[12rem] overflow-y-auto rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1 font-mono text-[11px]">
+                  <div ref={executionOutputRef} className="mt-2 h-[20vh] min-h-[5rem] max-h-[10rem] overflow-y-auto rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1 font-mono text-[11px]">
                     {simulationLog.length === 0 ? (
                       <div className="text-[var(--color-text-secondary)]">No commands executed.</div>
                     ) : simulationLog.map((entry) => (
