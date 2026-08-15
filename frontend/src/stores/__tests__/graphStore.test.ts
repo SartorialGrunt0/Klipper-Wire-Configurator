@@ -416,6 +416,76 @@ describe('graphStore undo/redo', () => {
     useGraphStore.getState().undo();
     expect(useGraphStore.getState().nodes).toHaveLength(0);
   });
+
+  it('pushHistory before a sidebar config mutation makes it undoable', () => {
+    // Simulates the Phase 3 pattern: MCU rename / suppress toggle / primary
+    // toggle push history at handler start, then mutate configFiles + node data.
+    useConfigStore.getState().setConfigFile('printer.cfg', {
+      filename: 'printer.cfg',
+      sections: [
+        { section_type: 'mcu', section_name: 'mainboard', full_header: 'mcu mainboard', line_number: 1, params: [{ key: 'serial', value: '/dev/ttyACM0', comment: '', is_commented_out: false }], header_comments: [], trailing_comments: [], is_commented_out: false },
+        { section_type: 'stepper_x', section_name: '', full_header: 'stepper_x', line_number: 2, params: [{ key: 'step_pin', value: 'mainboard:PA0', comment: '', is_commented_out: false }], header_comments: [], trailing_comments: [], is_commented_out: false },
+      ],
+      includes: [],
+      header_comments: [],
+      raw_text: '',
+    });
+    useConfigStore.getState().markClean();
+    useGraphStore.getState().addNode(makeHwNode('mainboard', { mcuName: 'mainboard' }));
+    useGraphStore.getState().pushHistory();
+
+    // MCU rename: header [mcu mainboard] → [mcu], pins re-prefixed
+    const cf = useConfigStore.getState().configFiles['printer.cfg'];
+    useConfigStore.getState().updateConfigFile('printer.cfg', {
+      ...cf,
+      sections: cf.sections.map((s) =>
+        s.full_header === 'mcu mainboard'
+          ? { ...s, section_name: '', full_header: 'mcu' }
+          : s.full_header === 'stepper_x'
+            ? { ...s, params: s.params.map((p) => ({ ...p, value: 'PA0' })) }
+            : s,
+      ),
+    });
+    useGraphStore.getState().updateNodeData('mainboard', { mcuName: '' } as Partial<AppNode['data']>);
+    expect(useConfigStore.getState().isDirty).toBe(true);
+
+    // Undo restores config content AND node data
+    useGraphStore.getState().undo();
+    const restored = useConfigStore.getState().configFiles['printer.cfg'];
+    expect(restored.sections[0].full_header).toBe('mcu mainboard');
+    expect(restored.sections[1].params[0].value).toBe('mainboard:PA0');
+    expect(useGraphStore.getState().nodes[0].data.mcuName).toBe('mainboard');
+  });
+
+  it('suppress toggle is undoable (config section + node flag restored)', () => {
+    useConfigStore.getState().setConfigFile('printer.cfg', {
+      filename: 'printer.cfg',
+      sections: [
+        { section_type: 'fan', section_name: '', full_header: 'fan', line_number: 1, params: [{ key: 'pin', value: 'PA1', comment: '', is_commented_out: false }], header_comments: [], trailing_comments: [], is_commented_out: false },
+      ],
+      includes: [],
+      header_comments: [],
+      raw_text: '',
+    });
+    useConfigStore.getState().markClean();
+    useGraphStore.getState().addNode(makeChildNode('fan1', 'hw1', 'fan'));
+    useGraphStore.getState().pushHistory();
+
+    // Suppress: comment all params + set node flag
+    const cf = useConfigStore.getState().configFiles['printer.cfg'];
+    useConfigStore.getState().updateConfigFile('printer.cfg', {
+      ...cf,
+      sections: cf.sections.map((s) => ({ ...s, is_commented_out: true, params: s.params.map((p) => ({ ...p, is_commented_out: true })) })),
+    });
+    useGraphStore.getState().updateNodeData('fan1', { isSuppressed: true } as Partial<AppNode['data']>);
+
+    useGraphStore.getState().undo();
+    const restored = useConfigStore.getState().configFiles['printer.cfg'];
+    expect(restored.sections[0].is_commented_out).toBe(false);
+    expect(restored.sections[0].params[0].is_commented_out).toBe(false);
+    // Node flag restored to its pre-toggle state (absent → undefined)
+    expect(useGraphStore.getState().nodes[0].data.isSuppressed).toBeUndefined();
+  });
 });
 
 describe('graphStore auto-arrange', () => {

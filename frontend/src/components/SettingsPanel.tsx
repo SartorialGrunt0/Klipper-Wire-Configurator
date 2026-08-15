@@ -445,6 +445,7 @@ export default function SettingsPanel() {
   // Toggle primary MCU - handles pin prefix updates, MCU section renaming, and config file renaming
   const handleTogglePrimary = useCallback(() => {
     if (!selectedNodeId) return;
+    useGraphStore.getState().pushHistory();
     const currentIsPrimary = (hwData as Record<string, unknown>)?.isPrimary as boolean;
     const { renameConfigFile } = useConfigStore.getState();
 
@@ -599,27 +600,14 @@ export default function SettingsPanel() {
     setMcuNamePrompt(null);
   }, [mcuNamePrompt, applyMcuNameChange, nodes, updateNodeData]);
 
-  // Handle MCU name dialog cancel — revert the primary toggle
+  // Handle MCU name dialog cancel — revert the primary toggle losslessly.
+  // handleTogglePrimary pushed history before any mutation, so undo() restores
+  // isPrimary flags, mcuName, file names, and pin prefixes in one step.
   const handleMcuNameCancel = useCallback(() => {
     if (!mcuNamePrompt) return;
-    if (mcuNamePrompt.purpose === 'demote') {
-      // Revert: re-promote if it was a swap, or re-promote if simple demote
-      updateNodeData(mcuNamePrompt.nodeId, { isPrimary: true } as Partial<AppNode['data']>);
-      // If there was a newly promoted node, demote it back
-      const currentPrimary = nodes.find(
-        (n) => n.type === 'hardware' && n.id !== mcuNamePrompt.nodeId &&
-          !!(n.data as Record<string, unknown>).isPrimary,
-      );
-      if (currentPrimary) {
-        // Revert its MCU prefix strip
-        const itsOldMcuName = (currentPrimary.data as Record<string, unknown>).mcuName as string || '';
-        // If it was just promoted and had its name stripped, it's now '' — we can't easily revert
-        // For now, just toggle the flags back
-        updateNodeData(currentPrimary.id, { isPrimary: false } as Partial<AppNode['data']>);
-      }
-    }
+    useGraphStore.getState().undo();
     setMcuNamePrompt(null);
-  }, [mcuNamePrompt, nodes, updateNodeData]);
+  }, [mcuNamePrompt]);
 
   // Toggle MCU mode for SBC
   const handleToggleMcu = useCallback(() => {
@@ -652,6 +640,7 @@ export default function SettingsPanel() {
   }, [isSuppressable, selectedNode, selectedSection]);
   const handleToggleSuppress = useCallback(() => {
     if (!selectedNodeId || !isSuppressable) return;
+    useGraphStore.getState().pushHistory();
     const newSuppressed = !nodeIsSuppressed;
 
     if (selectedNode?.type === 'subComponent' || selectedNode?.type === 'feature') {
@@ -720,6 +709,7 @@ export default function SettingsPanel() {
   // Apply section text edits back to config
   const handleApplySectionText = useCallback(async () => {
     if (!sectionHeader) return;
+    useGraphStore.getState().pushHistory();
     try {
       const filename = sectionConfigFile || Object.entries(configFiles).find(([_, cf]) =>
         cf.sections.some((s) => s.full_header === sectionHeader && (effectiveSectionLineNumber == null || effectiveSectionLineNumber === 0 || s.line_number === effectiveSectionLineNumber))
@@ -854,6 +844,7 @@ export default function SettingsPanel() {
                   <button
                     key={type}
                     onClick={() => {
+                      useGraphStore.getState().pushHistory();
                       updateEdgeData(selectedEdgeId, { commType: type } as Partial<AppEdge['data']>);
                       // Toggle MCU params: comment/uncomment based on selected comm type
                       if (mcuSection && targetConfigFile) {
