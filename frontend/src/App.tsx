@@ -16,6 +16,14 @@ import '@xyflow/react/dist/style.css';
 import { useGraphStore } from './stores/graphStore';
 import { useConfigStore } from './stores/configStore';
 import { useNativeStore } from './stores/nativeStore';
+import {
+  CONTAINER_WIDTH,
+  CONTAINER_HEADER_HEIGHT,
+  CHILD_SLOT_HEIGHT,
+  CONTAINER_PADDING_BOTTOM,
+  COLLAPSED_HEIGHT,
+  COLLAPSED_WIDTH,
+} from './constants/graphLayout';
 import * as api from './services/api';
 import HardwareNode from './components/nodes/HardwareNode';
 import SubComponentNode from './components/nodes/SubComponentNode';
@@ -90,12 +98,12 @@ const edgeTypes: EdgeTypes = {
   configuration: ConfigurationEdge,
 };
 
-const HARDWARE_DRAG_PREVIEW_WIDTH = 400;
-const HARDWARE_DRAG_PREVIEW_HEADER_HEIGHT = 110;
-const HARDWARE_DRAG_PREVIEW_SLOT_HEIGHT = 40;
-const HARDWARE_DRAG_PREVIEW_PADDING_BOTTOM = 16;
-const HARDWARE_DRAG_PREVIEW_COLLAPSED_HEIGHT = 56;
-const HARDWARE_DRAG_PREVIEW_COLLAPSED_WIDTH = 200;
+const HARDWARE_DRAG_PREVIEW_WIDTH = CONTAINER_WIDTH;
+const HARDWARE_DRAG_PREVIEW_HEADER_HEIGHT = CONTAINER_HEADER_HEIGHT;
+const HARDWARE_DRAG_PREVIEW_SLOT_HEIGHT = CHILD_SLOT_HEIGHT;
+const HARDWARE_DRAG_PREVIEW_PADDING_BOTTOM = CONTAINER_PADDING_BOTTOM;
+const HARDWARE_DRAG_PREVIEW_COLLAPSED_HEIGHT = COLLAPSED_HEIGHT;
+const HARDWARE_DRAG_PREVIEW_COLLAPSED_WIDTH = COLLAPSED_WIDTH;
 
 function computeHardwareDragPreviewSize(nodes: Node[], hardwareId: string) {
   const children = nodes.filter((node) => node.parentId === hardwareId);

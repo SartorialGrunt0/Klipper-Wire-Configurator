@@ -13,6 +13,25 @@ import type { HardwareType, CommunicationType, ConfigFile, ConfigSection } from 
 import { useConfigStore } from './configStore';
 import { updateSectionPins, updateAllSectionPins } from '../utils/pinUtils';
 import { buildUniqueSectionDraft } from '../utils/sectionNaming';
+import {
+  CONTAINER_WIDTH,
+  CONTAINER_HEADER_HEIGHT,
+  CHILD_SLOT_HEIGHT,
+  CONTAINER_PADDING_BOTTOM,
+  CHILD_LEFT_X,
+  CHILD_RIGHT_X,
+  COLLAPSED_HEIGHT,
+  COLLAPSED_WIDTH,
+  TILE_HEADER_HEIGHT,
+  GROUP_ITEM_HEIGHT,
+  GROUP_BODY_PADDING,
+  TILE_GAP,
+  HARDWARE_Z_INDEX,
+  SELECTED_PARENT_Z_INDEX,
+  CHILD_NODE_Z_INDEX,
+  ACTIVE_CHILD_Z_INDEX,
+  GRID_SIZE,
+} from '../constants/graphLayout';
 
 const STEPPER_SECTION_RE = /^stepper_[a-z]+(\d+)?$/;
 const EXTRUDER_SECTION_RE = /^extruder(\d+)?$/;
@@ -88,43 +107,6 @@ function detectNodeCommType(nodeData: Record<string, unknown>): CommunicationTyp
   }
   return 'usb';
 }
-
-// ── Container layout constants ────────────────────────────────
-/** Total width of a hardware container node */
-const CONTAINER_WIDTH = 400;
-/** Height reserved for the hardware node header/info area */
-const CONTAINER_HEADER_HEIGHT = 110;
-/** Vertical slot size per child node (compact tiles) */
-const CHILD_SLOT_HEIGHT = 40;
-/** Padding below last child row */
-const CONTAINER_PADDING_BOTTOM = 16;
-/** X position (relative to parent) for left-column children (features) */
-const CHILD_LEFT_X = 12;
-/** X position (relative to parent) for right-column children (sub-components) */
-const CHILD_RIGHT_X = 208;
-/** Height of a hardware node when collapsed (just the header) */
-const COLLAPSED_HEIGHT = 56;
-/** Width of a hardware node when collapsed */
-const COLLAPSED_WIDTH = 200;
-
-/** Height of a compact tile's header row */
-const TILE_HEADER_HEIGHT = 36;
-/** Height per item row in an expanded GroupNode body */
-const GROUP_ITEM_HEIGHT = 22;
-/** Vertical padding inside the expanded GroupNode body (top + bottom) */
-const GROUP_BODY_PADDING = 12;
-/** Gap between tiles in a column */
-const TILE_GAP = 4;
-/** Base stacking for top-level hardware cards */
-const HARDWARE_Z_INDEX = 0;
-/** Elevated stacking for the selected parent hardware card */
-const SELECTED_PARENT_Z_INDEX = 100;
-/** Child cards should always render above major component cards */
-const CHILD_NODE_Z_INDEX = 200;
-/** Selected child cards stay above sibling cards and action overlays */
-const ACTIVE_CHILD_Z_INDEX = 300;
-/** Shared canvas snap size for manual placement and auto-arrange anchors */
-const GRID_SIZE = 20;
 
 function snapToGrid(value: number): number {
   return Math.round(value / GRID_SIZE) * GRID_SIZE;

@@ -3,6 +3,13 @@ import { createPortal } from 'react-dom';
 import { Handle, Position, type NodeProps, useConnection } from '@xyflow/react';
 import type { HardwareNodeData } from '../../types/graph';
 import { useGraphStore } from '../../stores/graphStore';
+import {
+  CONTAINER_WIDTH,
+  CONTAINER_HEADER_HEIGHT,
+  CHILD_SLOT_HEIGHT,
+  CONTAINER_PADDING_BOTTOM,
+  COLLAPSED_HEIGHT,
+} from '../../constants/graphLayout';
 import NodeActions from './NodeActions';
 import WarningBadge from './WarningBadge';
 import type { ValidationStatus } from '../../types/graph';
@@ -29,11 +36,11 @@ const HARDWARE_SHAPES: Record<string, string> = {
   other: 'rounded-md',
 };
 
-const PREVIEW_WIDTH = 400;
-const PREVIEW_HEADER_HEIGHT = 110;
-const PREVIEW_SLOT_HEIGHT = 40;
-const PREVIEW_PADDING_BOTTOM = 16;
-const PREVIEW_COLLAPSED_HEIGHT = 56;
+const PREVIEW_WIDTH = CONTAINER_WIDTH;
+const PREVIEW_HEADER_HEIGHT = CONTAINER_HEADER_HEIGHT;
+const PREVIEW_SLOT_HEIGHT = CHILD_SLOT_HEIGHT;
+const PREVIEW_PADDING_BOTTOM = CONTAINER_PADDING_BOTTOM;
+const PREVIEW_COLLAPSED_HEIGHT = COLLAPSED_HEIGHT;
 
 function HardwareNode({ data, selected, id }: NodeProps) {
   const nodeData = data as unknown as HardwareNodeData;
