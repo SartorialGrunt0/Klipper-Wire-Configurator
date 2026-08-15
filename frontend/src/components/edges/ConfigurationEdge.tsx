@@ -8,17 +8,7 @@ import {
 import { type NodeRect } from '../../utils/edgeRouting';
 import { useBendPath } from '../../utils/edgeBend';
 import EdgeBendHandles from './EdgeBendHandles';
-
-const HARDWARE_COLORS: Record<string, string> = {
-  sbc: 'var(--color-sbc)',
-  mainboard: 'var(--color-mainboard)',
-  toolhead: 'var(--color-toolhead)',
-  expander: 'var(--color-expander)',
-  config_file: '#0f766e',
-  probe: 'var(--color-probe)',
-  accelerometer: 'var(--color-accelerometer)',
-  other: 'var(--color-other)',
-};
+import { HARDWARE_COLORS } from '../../constants/graphColors';
 
 function rectForNode(n: Node): NodeRect {
   return {

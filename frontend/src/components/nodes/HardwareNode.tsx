@@ -10,31 +10,10 @@ import {
   CONTAINER_PADDING_BOTTOM,
   COLLAPSED_HEIGHT,
 } from '../../constants/graphLayout';
+import { HARDWARE_COLORS, HARDWARE_SHAPES } from '../../constants/graphColors';
 import NodeActions from './NodeActions';
 import WarningBadge from './WarningBadge';
 import type { ValidationStatus } from '../../types/graph';
-
-const HARDWARE_COLORS: Record<string, string> = {
-  sbc: 'var(--color-sbc)',
-  mainboard: 'var(--color-mainboard)',
-  toolhead: 'var(--color-toolhead)',
-  expander: 'var(--color-expander)',
-  config_file: '#0f766e',
-  probe: 'var(--color-probe)',
-  accelerometer: 'var(--color-accelerometer)',
-  other: 'var(--color-other)',
-};
-
-const HARDWARE_SHAPES: Record<string, string> = {
-  sbc: 'rounded-xl',
-  mainboard: 'rounded-lg',
-  toolhead: 'rounded-2xl',
-  expander: 'rounded-lg',
-  config_file: 'rounded-md',
-  probe: 'rounded-xl',
-  accelerometer: 'rounded-lg',
-  other: 'rounded-md',
-};
 
 const PREVIEW_WIDTH = CONTAINER_WIDTH;
 const PREVIEW_HEADER_HEIGHT = CONTAINER_HEADER_HEIGHT;

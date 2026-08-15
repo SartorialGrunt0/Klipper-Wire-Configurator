@@ -9,6 +9,7 @@ import { updateAllSectionPins } from '../utils/pinUtils';
 import { buildUniqueSectionDraft } from '../utils/sectionNaming';
 import { getValidationStatusColor } from '../utils/validationStatus';
 import { resolveSection } from '../utils/sectionResolver';
+import { hasFeatureSectionType as hasFeatureSectionTypeInFiles } from '../utils/featureSections';
 import { acknowledgeWarning } from '../services/api';
 import WarningBadge from './nodes/WarningBadge';
 import McuNameDialog from './dialogs/McuNameDialog';
@@ -310,8 +311,8 @@ export default function SettingsPanel() {
     return configFiles[filename]?.sections || [];
   }, [hwData?.configFile, sectionConfigFile, nodeConfigFile, activeFile, configFiles]);
 
-  const hasFeatureSectionType = useCallback((sectionType: string) => sectionType !== 'gcode_macro' && Object.values(configFiles).some(
-    (configFile) => configFile.sections.some((section) => section.section_type === sectionType),
+  const hasFeatureSectionType = useCallback((sectionType: string) => (
+    hasFeatureSectionTypeInFiles(configFiles, sectionType)
   ), [configFiles]);
 
   const handleAddSubComponent = useCallback((sectionType: string) => {

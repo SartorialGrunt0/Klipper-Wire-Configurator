@@ -4,6 +4,7 @@ import { useGraphStore } from '../stores/graphStore';
 import * as api from '../services/api';
 import { applyBoardTypeMarkerToMcuSections, buildBoardTypeMarker } from '../utils/boardTypeMarker';
 import { buildUniqueSectionDraft } from '../utils/sectionNaming';
+import { hasFeatureSectionType as hasFeatureSectionTypeInFiles } from '../utils/featureSections';
 import type { ConfigSection, CommunicationType, ExampleConfig, HardwareType } from '../types/config';
 import McuNameDialog from './dialogs/McuNameDialog';
 
@@ -108,9 +109,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
     const data = n.data as Record<string, unknown>;
     return data.hardwareType !== 'sbc' || !!data.isMcu;
   });
-  const hasFeatureSectionType = (sectionType: string) => sectionType !== 'gcode_macro' && Object.values(configFiles).some(
-    (configFile) => configFile.sections.some((section) => section.section_type === sectionType),
-  );
+  const hasFeatureSectionType = (sectionType: string) => hasFeatureSectionTypeInFiles(configFiles, sectionType);
 
   // Derive kinematics from the selected parent's config file (fall back to all files)
   const kinematics = (() => {

@@ -32,6 +32,7 @@ import {
   ACTIVE_CHILD_Z_INDEX,
   GRID_SIZE,
 } from '../constants/graphLayout';
+import { getHardwareHexColor } from '../constants/graphColors';
 
 const STEPPER_SECTION_RE = /^stepper_[a-z]+(\d+)?$/;
 const EXTRUDER_SECTION_RE = /^extruder(\d+)?$/;
@@ -63,22 +64,6 @@ function getComponentGroup(sectionType: string, isFeature = false): string {
   if (STEPPER_SECTION_RE.test(sectionType)) return 'stepper';
   if (EXTRUDER_SECTION_RE.test(sectionType)) return 'extruder';
   return COMPONENT_GROUP_MAP[sectionType] || (isFeature ? sectionType : 'other');
-}
-
-// Hardware type → color mapping (shared with edge coloring)
-const HW_COLORS: Record<string, string> = {
-  sbc: '#22c55e',
-  mainboard: '#38bdf8',
-  toolhead: '#f472b6',
-  expander: '#a78bfa',
-  config_file: '#0f766e',
-  probe: '#ec4899',
-  accelerometer: '#84cc16',
-  other: '#64748b',
-};
-
-function getHardwareColor(hwType: string): string {
-  return HW_COLORS[hwType] || HW_COLORS.other;
 }
 
 /**
@@ -572,7 +557,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         const tgtConfigFile = tgtData.configFile as string;
         const srcIsPrimary = Boolean(srcData.isPrimary) || srcConfigFile === 'printer.cfg';
         const tgtIsPrimary = Boolean(tgtData.isPrimary) || tgtConfigFile === 'printer.cfg';
-        const color = getHardwareColor(srcHwType);
+        const color = getHardwareHexColor(srcHwType);
         // Normalize direction: the edge always points FROM the included
         // (non-primary) node TO the including (primary) node, mirroring
         // graphBuilder's convention. Draw direction is arbitrary; showing it
@@ -616,7 +601,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 
     // Default: configuration edge
     const id = nextEdgeId();
-    const color = getHardwareColor((tgtData?.hardwareType as string) || (srcData?.hardwareType as string) || 'other');
+    const color = getHardwareHexColor((tgtData?.hardwareType as string) || (srcData?.hardwareType as string) || 'other');
     const newEdge: AppEdge = {
       id,
       source: connection.source,
@@ -1811,7 +1796,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 
   addConfigurationEdge: (sourceId, targetId, hwType, sourceHandle?, targetHandle?) => {
     const id = nextEdgeId();
-    const color = getHardwareColor(hwType);
+    const color = getHardwareHexColor(hwType);
     const edge: Edge = {
       id,
       source: sourceId,
