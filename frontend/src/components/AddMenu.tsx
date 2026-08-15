@@ -90,6 +90,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
   const [templateSearch, setTemplateSearch] = useState('');
   const [templates, setTemplates] = useState<ExampleConfig[]>([]);
   const [templateLoading, setTemplateLoading] = useState(false);
+  const [templateError, setTemplateError] = useState<string | null>(null);
 
   // MCU name prompt state
   const [mcuNamePrompt, setMcuNamePrompt] = useState<{
@@ -288,6 +289,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
     // If a template was selected, load it and populate sections/graph
     if (templateFilename) {
       setTemplateLoading(true);
+      setTemplateError(null);
       api.getExample(templateFilename).then((res) => {
         const config = res.config;
 
@@ -341,7 +343,13 @@ export default function AddMenu({ onClose }: AddMenuProps) {
       }).catch((err) => {
         console.error('Template load error:', err);
         setTemplateLoading(false);
-        onClose();
+        // Surface the failure instead of silently closing. The node/file
+        // created optimistically above is removed so a retry starts clean.
+        try {
+          useGraphStore.getState().removeNode(nodeId);
+          useConfigStore.getState().removeConfigFile(configFile);
+        } catch { /* best-effort cleanup */ }
+        setTemplateError(`Failed to load template "${templateFilename}": ${(err as Error)?.message || 'unknown error'}`);
       });
     } else {
       // Add communication edge from SBC to this hardware node (blank config)
@@ -502,6 +510,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
                     setHwPickerStep(null);
                     setTemplateSearch('');
                     setTemplates([]);
+                    setTemplateError(null);
                   }}
                   className="px-2.5 py-1.5 rounded-lg text-xs font-medium bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:border-[var(--color-accent)]"
                 >
@@ -533,6 +542,11 @@ export default function AddMenu({ onClose }: AddMenuProps) {
               </div>
 
               <div className="space-y-1 max-h-72 overflow-y-auto pr-1">
+                {templateError && (
+                  <div className="px-3 py-2.5 rounded-lg border border-red-500/30 bg-red-500/10 text-xs text-red-400 mb-2">
+                    {templateError}
+                  </div>
+                )}
                 {templateLoading && (
                   <div className="px-3 py-2 text-xs text-[var(--color-text-secondary)]">
                     Loading templates...
