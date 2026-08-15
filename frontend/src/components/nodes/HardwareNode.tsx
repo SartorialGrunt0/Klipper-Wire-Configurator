@@ -1,4 +1,5 @@
-import { memo, useEffect, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Handle, Position, type NodeProps, useConnection } from '@xyflow/react';
 import type { HardwareNodeData } from '../../types/graph';
 import { useGraphStore } from '../../stores/graphStore';
@@ -54,6 +55,10 @@ function HardwareNode({ data, selected, id }: NodeProps) {
 
   const [isHovered, setIsHovered] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  // The confirm is portaled to document.body: child cards render at z-index
+  // 200–300 inside this container's stacking context, so an in-tree popover
+  // would appear behind them.
+  const nodeRef = useRef<HTMLDivElement | null>(null);
   // Show handles on all nodes while any connection drag is in progress
   const { inProgress: isConnecting } = useConnection();
   const showHandles = isHovered || isConnecting;
@@ -89,6 +94,7 @@ function HardwareNode({ data, selected, id }: NodeProps) {
 
   return (
     <div
+      ref={nodeRef}
       className={`kwc-node kwc-hardware-container ${shape} ${selected ? 'selected' : ''} ${nodeData.hasErrors ? 'kwc-error' : ''} ${validationStatus === 'warning' ? 'kwc-warning' : ''}`}
       style={{
         borderColor: color,
@@ -103,9 +109,14 @@ function HardwareNode({ data, selected, id }: NodeProps) {
       onMouseLeave={() => setIsHovered(false)}
     >
 
-      {showDeleteConfirm && (
+      {showDeleteConfirm && createPortal(
         <div
-          className="absolute right-2 top-12 z-40 w-56 rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] p-3 shadow-2xl"
+          className="fixed z-[1000] w-56 rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] p-3 shadow-2xl"
+          style={{
+            top: (nodeRef.current?.getBoundingClientRect().top ?? 0) + 44,
+            // Anchor the popover's right edge just inside the node's right edge
+            right: Math.max(8, window.innerWidth - (nodeRef.current?.getBoundingClientRect().right ?? window.innerWidth) + 8),
+          }}
           onClick={(event) => event.stopPropagation()}
         >
           <p className="text-[11px] leading-5 text-[var(--color-text-primary)]">
@@ -128,7 +139,8 @@ function HardwareNode({ data, selected, id }: NodeProps) {
               Delete
             </button>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
 
       {previewExpanded && (
