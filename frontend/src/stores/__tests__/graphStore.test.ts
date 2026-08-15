@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
+import type { Connection } from '@xyflow/react';
 import type { AppNode, AppEdge } from '@/types/graph';
 import { useGraphStore } from '@/stores/graphStore';
 import { useConfigStore } from '@/stores/configStore';
@@ -529,3 +530,83 @@ describe('graphStore auto-arrange', () => {
     expect(cf).toBeDefined();
     expect(cf.sections).toHaveLength(0);
   });
+
+describe('graphStore configuration edge redraw/delete', () => {
+  function setupToolheadMainboard() {
+    useConfigStore.getState().setConfigFile('printer.cfg', {
+      filename: 'printer.cfg',
+      sections: [
+        { section_type: 'include', section_name: 'toolhead_board.cfg', full_header: 'include toolhead_board.cfg', line_number: 1, params: [], header_comments: [], trailing_comments: [], is_commented_out: false },
+        { section_type: 'mcu', section_name: '', full_header: 'mcu', line_number: 2, params: [], header_comments: [], trailing_comments: [], is_commented_out: false },
+        { section_type: 'printer', section_name: '', full_header: 'printer', line_number: 3, params: [], header_comments: [], trailing_comments: [], is_commented_out: false },
+      ],
+      includes: ['toolhead_board.cfg'],
+      header_comments: [],
+      raw_text: '[include toolhead_board.cfg]\n[mcu]\nserial: /dev/ttyACM0\n[printer]\nkinematics: cartesian\n',
+    });
+    useConfigStore.getState().setConfigFile('toolhead_board.cfg', {
+      filename: 'toolhead_board.cfg',
+      sections: [
+        { section_type: 'mcu', section_name: 'toolhead', full_header: 'mcu toolhead', line_number: 1, params: [], header_comments: [], trailing_comments: [], is_commented_out: false },
+      ],
+      includes: [],
+      header_comments: [],
+      raw_text: '[mcu toolhead]\nserial: /dev/serial/by-id/ebbtool\n',
+    });
+    useConfigStore.getState().markClean();
+    useGraphStore.getState().addNode(makeHwNode('mainboard', { configFile: 'printer.cfg' }));
+    useGraphStore.getState().addNode(makeHwNode('toolhead', { configFile: 'toolhead_board.cfg' }));
+    // Pre-existing configuration edge (built by graphBuilder on import)
+    return useGraphStore.getState().addConfigurationEdge('toolhead', 'mainboard', 'toolhead');
+  }
+
+  it('redrawing a configuration edge between an already-connected pair does not mark dirty', () => {
+    setupToolheadMainboard();
+    expect(useConfigStore.getState().isDirty).toBe(false);
+
+    // User redraws the line toolhead → mainboard (same pair, same direction)
+    useGraphStore.getState().onConnect({ source: 'toolhead', target: 'mainboard', sourceHandle: null, targetHandle: null });
+
+    // Config untouched: include still active, not dirty, diff would be blank
+    expect(useConfigStore.getState().isDirty).toBe(false);
+    const cf = useConfigStore.getState().configFiles['printer.cfg'];
+    expect(cf.includes).toEqual(['toolhead_board.cfg']);
+    expect(cf.sections[0].is_commented_out).toBe(false);
+    // Edge was replaced (new id), still one configuration edge
+    const edges = useGraphStore.getState().edges;
+    expect(edges).toHaveLength(1);
+    const redrawnSamePair = edges[0];
+    expect(redrawnSamePair?.data?.edgeType).toBe('configuration');
+  });
+
+  it('redrawing in the OPPOSITE direction then deleting still comments out the include', () => {
+    setupToolheadMainboard();
+    const originalEdgeId = useGraphStore.getState().edges[0].id;
+
+    // User redraws the line the other way: mainboard → toolhead
+    useGraphStore.getState().onConnect({ source: 'mainboard', target: 'toolhead', sourceHandle: null, targetHandle: null });
+    expect(useConfigStore.getState().isDirty).toBe(false);
+    const redrawnEdgeId = useGraphStore.getState().edges[0].id;
+    expect(redrawnEdgeId).not.toBe(originalEdgeId);
+    const redrawn = useGraphStore.getState().edges[0];
+    expect(redrawn?.source).toBe('mainboard');
+    expect(redrawn?.target).toBe('toolhead');
+
+    // Now delete the line — include must be commented out in printer.cfg
+    // (the file that owns the include), regardless of edge direction.
+    useGraphStore.getState().onEdgesChange([{ type: 'remove', id: redrawnEdgeId }]);
+    const cf = useConfigStore.getState().configFiles['printer.cfg'];
+    expect(cf.includes).toEqual([]);
+    expect(cf.sections[0].is_commented_out).toBe(true);
+    expect(useConfigStore.getState().isDirty).toBe(true);
+  });
+
+  it('deleting an edge drawn toolhead → mainboard still comments out the include', () => {
+    const edgeId = setupToolheadMainboard();
+
+    useGraphStore.getState().onEdgesChange([{ type: 'remove', id: edgeId }]);
+    const cf = useConfigStore.getState().configFiles['printer.cfg'];
+    expect(cf.includes).toEqual([]);
+    expect(cf.sections[0].is_commented_out).toBe(true);
+  });
+});

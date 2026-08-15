@@ -512,7 +512,18 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         if (srcNode?.type !== 'hardware' || tgtNode?.type !== 'hardware') return;
         const srcFile = (srcNode.data as Record<string, unknown>).configFile as string;
         const tgtFile = (tgtNode.data as Record<string, unknown>).configFile as string;
-        useConfigStore.getState().removeInclude(tgtFile, srcFile);
+        // Mirror onConnect's include direction: the include always lives in the
+        // primary (printer.cfg) file, NOT determined by edge drag direction.
+        // A redrawn edge can flip source/target, so keying off direction here
+        // would try to comment an include inside the wrong file and silently
+        // leave [include toolhead_board.cfg] active.
+        const srcIsPrimary = Boolean((srcNode.data as Record<string, unknown>).isPrimary) || srcFile === 'printer.cfg';
+        const tgtIsPrimary = Boolean((tgtNode.data as Record<string, unknown>).isPrimary) || tgtFile === 'printer.cfg';
+        if (srcIsPrimary && !tgtIsPrimary) {
+          useConfigStore.getState().removeInclude(srcFile, tgtFile);
+        } else {
+          useConfigStore.getState().removeInclude(tgtFile, srcFile);
+        }
       });
     }
     set((s) => ({
@@ -591,24 +602,21 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         set((s) => ({
           edges: [...s.edges.filter((e) => !existing.some((ex) => ex.id === e.id)), newEdge],
         }));
-        // Remove old includes for these files (from old connection)
-        existing.forEach((ex) => {
-          const exSrc = nodes.find((n) => n.id === ex.source);
-          const exTgt = nodes.find((n) => n.id === ex.target);
-          if (exSrc && exTgt) {
-            const exSrcFile = (exSrc.data as Record<string, unknown>).configFile as string;
-            const exTgtFile = (exTgt.data as Record<string, unknown>).configFile as string;
-            useConfigStore.getState().removeInclude(exTgtFile, exSrcFile);
-            useConfigStore.getState().removeInclude(exSrcFile, exTgtFile);
+        // Only touch the include relationship when this pair wasn't already
+        // connected. Redrawing an existing edge (e.g. toolhead↔mainboard)
+        // would otherwise remove→re-add the identical include, marking the
+        // config dirty with a blank diff. Direction never matters here: the
+        // include target is decided by which node holds printer.cfg, so
+        // redrawing the same pair in either direction changes nothing.
+        if (existing.length === 0) {
+          // Include handling:
+          // - If one side is primary/printer.cfg, always include non-primary in printer.cfg.
+          // - Otherwise preserve drag direction (target includes source).
+          if (srcIsPrimary && !tgtIsPrimary) {
+            useConfigStore.getState().addInclude(srcConfigFile, tgtConfigFile);
+          } else {
+            useConfigStore.getState().addInclude(tgtConfigFile, srcConfigFile);
           }
-        });
-        // Include handling:
-        // - If one side is primary/printer.cfg, always include non-primary in printer.cfg.
-        // - Otherwise preserve drag direction (target includes source).
-        if (srcIsPrimary && !tgtIsPrimary) {
-          useConfigStore.getState().addInclude(srcConfigFile, tgtConfigFile);
-        } else {
-          useConfigStore.getState().addInclude(tgtConfigFile, srcConfigFile);
         }
       }
       return;
