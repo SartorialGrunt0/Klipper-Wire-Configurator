@@ -800,4 +800,56 @@ describe('graphStore configuration edge redraw/delete', () => {
     useGraphStore.getState().syncGraphWithConfig('printer.cfg');
     expect(useGraphStore.getState().edges.filter((e) => (e.data as Record<string, unknown>)?.edgeType === 'configuration')).toHaveLength(1);
   });
+
+  it('snapChildrenToColumns respects expanded group heights (variable slots)', () => {
+    // Parent with two feature-group children. One group is selected (expanded)
+    // with 3 children, so its slot height is variable: TILE_HEADER_HEIGHT +
+    // 3*GROUP_ITEM_HEIGHT + GROUP_BODY_PADDING + TILE_GAP = 36+66+12+4 = 118.
+    // The other group is a compact tile (slot = CHILD_SLOT_HEIGHT = 40).
+    const hw = makeHwNode('hw1', { configFile: 'printer.cfg', mcuName: 'mainboard' });
+    const bigGroup: AppNode = {
+      id: 'bigGroup',
+      type: 'group',
+      position: { x: 12, y: 110 },
+      parentId: 'hw1',
+      data: {
+        label: 'Features',
+        componentGroup: 'other',
+        isFeature: true,
+        sectionHeader: 'features',
+        configFile: 'printer.cfg',
+        children: [{ sectionHeader: 'bed_mesh' }, { sectionHeader: 'z_tilt' }, { sectionHeader: 'skew' }],
+        hasErrors: false,
+      },
+    } as unknown as AppNode;
+    const smallGroup: AppNode = {
+      id: 'smallGroup',
+      type: 'group',
+      position: { x: 12, y: 230 },
+      parentId: 'hw1',
+      data: {
+        label: 'Macros',
+        componentGroup: 'other',
+        isFeature: true,
+        sectionHeader: 'macros',
+        configFile: 'printer.cfg',
+        children: [],
+        hasErrors: false,
+      },
+    } as unknown as AppNode;
+
+    useGraphStore.setState({ nodes: [hw, bigGroup, smallGroup], edges: [] });
+    useGraphStore.getState().setSelectedNode('bigGroup');
+
+    // Drag the small group below the big one; it must snap BELOW the big
+    // group's expanded height (110 + 118 = 228), not to a fixed slot.
+    useGraphStore.getState().snapChildrenToColumns('hw1', 'smallGroup', 400);
+
+    const snappedSmall = useGraphStore.getState().nodes.find((n) => n.id === 'smallGroup');
+    const snappedBig = useGraphStore.getState().nodes.find((n) => n.id === 'bigGroup');
+    expect(snappedBig?.position.y).toBe(110);
+    expect(snappedSmall?.position.y).toBeGreaterThanOrEqual(110 + 118);
+    // Big group keeps its expanded height slot (variable), not CHILD_SLOT_HEIGHT
+    expect(snappedSmall!.position.y).not.toBe(110 + 40);
+  });
 });

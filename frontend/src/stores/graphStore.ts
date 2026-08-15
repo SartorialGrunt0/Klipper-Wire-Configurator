@@ -1397,6 +1397,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   snapChildrenToColumns: (parentId, draggedNodeId, draggedY) => {
     set((s) => {
       const newNodes = [...s.nodes] as AppNode[];
+      const selectedId = s.selectedNodeId;
 
       // Classify children into left (features) and right (components) columns
       const leftChildren: AppNode[] = [];
@@ -1413,14 +1414,18 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       }
 
       // For the column containing the dragged node, sort by Y but use the
-      // dragged node's new Y to determine its insertion position
+      // dragged node's new Y to determine its insertion position. Positions
+      // accumulate variable slot heights (getNodeSlotHeight) so expanded
+      // groups don't overlap the tiles stacked after them — mirroring
+      // reflowParentChildren instead of the fixed CHILD_SLOT_HEIGHT.
       const sortColumn = (col: AppNode[]) => {
         col.sort((a, b) => {
           const ay = a.id === draggedNodeId ? draggedY : a.position.y;
           const by = b.id === draggedNodeId ? draggedY : b.position.y;
           return ay - by;
         });
-        col.forEach((child, i) => {
+        let yOffset = CONTAINER_HEADER_HEIGHT;
+        for (const child of col) {
           const idx = newNodes.findIndex((n) => n.id === child.id);
           if (idx >= 0) {
             const isLeft = leftChildren.includes(child);
@@ -1428,26 +1433,35 @@ export const useGraphStore = create<GraphState>((set, get) => ({
               ...newNodes[idx],
               position: {
                 x: isLeft ? CHILD_LEFT_X : CHILD_RIGHT_X,
-                y: CONTAINER_HEADER_HEIGHT + i * CHILD_SLOT_HEIGHT,
+                y: yOffset,
               },
             };
+            yOffset += getNodeSlotHeight(newNodes[idx], selectedId);
           }
-        });
+        }
       };
 
       sortColumn(leftChildren);
       sortColumn(rightChildren);
 
-      // Resize parent
-      const sz = computeHardwareSize(leftChildren.length, rightChildren.length);
+      // Resize parent to fit the taller column (variable heights, like reflow)
+      const totalLeft = leftChildren.reduce(
+        (acc, child) => acc + getNodeSlotHeight(child, selectedId),
+        CONTAINER_HEADER_HEIGHT,
+      ) - CONTAINER_HEADER_HEIGHT;
+      const totalRight = rightChildren.reduce(
+        (acc, child) => acc + getNodeSlotHeight(child, selectedId),
+        CONTAINER_HEADER_HEIGHT,
+      ) - CONTAINER_HEADER_HEIGHT;
       const pIdx = newNodes.findIndex((n) => n.id === parentId);
       if (pIdx >= 0) {
         const pData = newNodes[pIdx].data as Record<string, unknown>;
         const isCollapsed = !!pData.collapsed;
         if (!isCollapsed) {
+          const newHeight = CONTAINER_HEADER_HEIGHT + Math.max(totalLeft, totalRight, 0) + CONTAINER_PADDING_BOTTOM;
           newNodes[pIdx] = {
             ...newNodes[pIdx],
-            style: { ...newNodes[pIdx].style, width: sz.width, height: sz.height },
+            style: { ...newNodes[pIdx].style, width: CONTAINER_WIDTH, height: Math.max(newHeight, 160) },
           };
         }
       }
