@@ -708,7 +708,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
             });
 
           // Create the new config file
-          configStore.setConfigFile(newConfigFile, {
+          configStore.updateConfigFile(newConfigFile, {
             filename: newConfigFile,
             sections: newSections,
             includes: [],
@@ -1598,7 +1598,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 
       // Ensure target config file exists
       if (!configState.configFiles[newConfigFile]) {
-        configState.setConfigFile(newConfigFile, {
+        configState.updateConfigFile(newConfigFile, {
           filename: newConfigFile,
           sections: [],
           includes: [],
@@ -1643,7 +1643,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
           const updatedSection = updateSectionPins(section, oldMcuName, newMcuName, schemas);
           const cf = configState.configFiles[oldConfigFile];
           if (cf) {
-            configState.setConfigFile(oldConfigFile, {
+            configState.updateConfigFile(oldConfigFile, {
               ...cf,
               sections: cf.sections.map((s) => matchesSectionRef(s, ref) ? updatedSection : s),
             });

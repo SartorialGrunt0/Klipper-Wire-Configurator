@@ -241,9 +241,9 @@ export default function AddMenu({ onClose }: AddMenuProps) {
       : `${effectiveLabel.toLowerCase().replace(/\s+/g, '_')}.cfg`;
 
     // Ensure the config file exists in configStore
-    const { setConfigFile } = useConfigStore.getState();
+    const { updateConfigFile } = useConfigStore.getState();
     if (!configFiles[configFile]) {
-      setConfigFile(configFile, {
+      updateConfigFile(configFile, {
         filename: configFile,
         sections: [],
         includes: [],
@@ -312,7 +312,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
         }
 
         // Set config file with the parsed sections
-        setConfigFile(configFile, {
+        updateConfigFile(configFile, {
           filename: configFile,
           sections: applyBoardTypeMarkerToMcuSections(config.sections, hwType, finalMcuName),
           includes: config.includes || [],

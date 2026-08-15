@@ -43,6 +43,7 @@ function TextEditor() {
     activeFile,
     setActiveFile,
     setConfigFile,
+    updateConfigFile,
     setValidation,
     markDirty,
     renameConfigFile,
@@ -518,7 +519,7 @@ function TextEditor() {
       setFileError(`"${name}" already exists. Choose a different name.`);
       return;
     }
-    setConfigFile(name, {
+    updateConfigFile(name, {
       filename: name,
       sections: [],
       includes: [],
@@ -566,7 +567,7 @@ function TextEditor() {
           name = `${base}_${counter}.cfg`;
         }
       }
-      setConfigFile(name, {
+      updateConfigFile(name, {
         filename: name,
         sections: res.config.sections,
         includes: res.config.includes || [],

@@ -97,7 +97,7 @@ export default function SettingsPanel() {
     activeFile,
     schemas,
     validation,
-    setConfigFile,
+    updateConfigFile,
     updateSectionParam,
     addParam,
     removeParam,
@@ -402,7 +402,7 @@ export default function SettingsPanel() {
 
     // Update pin prefixes on non-MCU sections
     const finalSections = updateAllSectionPins(updatedSections, oldMcuName, newMcuName, allSchemas);
-    configState.setConfigFile(cfName, { ...cf, sections: finalSections });
+    configState.updateConfigFile(cfName, { ...cf, sections: finalSections });
     void configState.revalidateFile(cfName);
 
     // Also update pins in any other config files referenced by child nodes
@@ -422,7 +422,7 @@ export default function SettingsPanel() {
       const otherCf = configState.configFiles[otherCfName];
       if (!otherCf) continue;
       const updatedOther = updateAllSectionPins(otherCf.sections, oldMcuName, newMcuName, allSchemas);
-      configState.setConfigFile(otherCfName, { ...otherCf, sections: updatedOther });
+      configState.updateConfigFile(otherCfName, { ...otherCf, sections: updatedOther });
       void configState.revalidateFile(otherCfName);
     }
 
@@ -670,7 +670,7 @@ export default function SettingsPanel() {
         const cs = useConfigStore.getState();
         const cf = cs.configFiles[cfName];
         if (cf) {
-          cs.setConfigFile(cfName, {
+          cs.updateConfigFile(cfName, {
             ...cf,
             sections: cf.sections.map((s) => {
               if (s.full_header !== secHeader) return s;
@@ -702,7 +702,7 @@ export default function SettingsPanel() {
           const cs = useConfigStore.getState();
           const cf = cs.configFiles[cfName];
           if (cf) {
-            cs.setConfigFile(cfName, {
+            cs.updateConfigFile(cfName, {
               ...cf,
               sections: cf.sections.map((s) => {
                 if (s.full_header !== secHeader) return s;
@@ -752,7 +752,8 @@ export default function SettingsPanel() {
         sections: currentConfig.sections.map((candidate, index) => index === targetIndex ? nextSection : candidate),
       };
 
-      setConfigFile(filename, nextConfig);
+      updateConfigFile(filename, nextConfig);
+      void revalidateFile(filename);
 
       if (selectedNodeId && selectedNode && selectedNode.type !== 'hardware' && selectedNode.type !== 'group') {
         const displayName = schemas[nextSection.section_type]?.display_name || nextSection.section_type;
@@ -801,7 +802,7 @@ export default function SettingsPanel() {
     } catch (err) {
       console.error('Parse error:', err);
     }
-  }, [sectionEditText, activeFile, sectionHeader, sectionConfigFile, configFiles, nodeSectionLineNumber, setConfigFile, selectedNodeId, selectedNode, selectedSection, schemas, updateNodeData, setSelectedSection, revalidateFile]);
+  }, [sectionEditText, activeFile, sectionHeader, sectionConfigFile, configFiles, nodeSectionLineNumber, updateConfigFile, selectedNodeId, selectedNode, selectedSection, schemas, updateNodeData, setSelectedSection, revalidateFile]);
 
   const handleAcknowledgeWarning = useCallback(async () => {
     if (!section || !sectionConfigFile) return;
@@ -996,7 +997,7 @@ export default function SettingsPanel() {
           const configState = useConfigStore.getState();
           const configFileData = configState.configFiles[hwData.configFile];
           if (!configFileData) return;
-          configState.setConfigFile(hwData.configFile, {
+          configState.updateConfigFile(hwData.configFile, {
             ...configFileData,
             sections: applyBoardTypeMarkerToMcuSections(
               configFileData.sections,
