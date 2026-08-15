@@ -10,6 +10,7 @@ import { buildUniqueSectionDraft } from '../utils/sectionNaming';
 import { getValidationStatusColor } from '../utils/validationStatus';
 import { resolveSection } from '../utils/sectionResolver';
 import { hasFeatureSectionType as hasFeatureSectionTypeInFiles } from '../utils/featureSections';
+import { toggleSectionSuppressed } from '../utils/sectionSuppress';
 import { acknowledgeWarning } from '../services/api';
 import WarningBadge from './nodes/WarningBadge';
 import McuNameDialog from './dialogs/McuNameDialog';
@@ -659,13 +660,7 @@ export default function SettingsPanel() {
             ...cf,
             sections: cf.sections.map((s) => {
               if (s.full_header !== secHeader) return s;
-              return {
-                ...s,
-                is_commented_out: newSuppressed,
-                params: s.params.map((p) =>
-                  p.key === '_comment_' ? p : { ...p, is_commented_out: newSuppressed },
-                ),
-              };
+              return toggleSectionSuppressed(s, newSuppressed);
             }),
           });
           void cs.revalidateFile(cfName);
@@ -691,13 +686,7 @@ export default function SettingsPanel() {
               ...cf,
               sections: cf.sections.map((s) => {
                 if (s.full_header !== secHeader) return s;
-                return {
-                  ...s,
-                  is_commented_out: newSuppressed,
-                  params: s.params.map((p) =>
-                    p.key === '_comment_' ? p : { ...p, is_commented_out: newSuppressed },
-                  ),
-                };
+                return toggleSectionSuppressed(s, newSuppressed);
               }),
             });
             void cs.revalidateFile(cfName);
