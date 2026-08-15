@@ -442,6 +442,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       activeFile: 'printer.cfg',
       validation: {},
       selectedSection: null,
+      selectedSectionFile: null,
+      selectedSectionLine: null,
       originalTexts: {},
       isDirty: false,
       textParseErrors: {},
@@ -452,6 +454,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       configFiles: configs,
       activeFile: Object.keys(configs)[0] || 'printer.cfg',
       isDirty: false,
+      selectedSection: null,
+      selectedSectionFile: null,
+      selectedSectionLine: null,
       textParseErrors: {},
     }),
 

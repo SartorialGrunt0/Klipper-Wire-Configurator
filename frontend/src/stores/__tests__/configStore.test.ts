@@ -187,12 +187,18 @@ describe('configStore file operations', () => {
     store.setConfigFile('a.cfg', makeConfigFile());
     store.markDirty();
     store.setTextParseError('a.cfg', 'stale boom');
+    store.setSelectedSection('extruder', 'a.cfg', 12);
     useConfigStore.getState().loadConfigs({ 'new.cfg': makeConfigFile() });
     const state = useConfigStore.getState();
     expect(Object.keys(state.configFiles)).toEqual(['new.cfg']);
     expect(state.activeFile).toBe('new.cfg');
     expect(state.isDirty).toBe(false);
     expect(state.textParseErrors).toEqual({});
+    // The stale section selection must not survive into the new project,
+    // or it resolves against the wrong file and the sidebar shows it.
+    expect(state.selectedSection).toBeNull();
+    expect(state.selectedSectionFile).toBeNull();
+    expect(state.selectedSectionLine).toBeNull();
   });
 
   it('clearAll resets everything', () => {
@@ -200,12 +206,16 @@ describe('configStore file operations', () => {
     store.setConfigFile('a.cfg', makeConfigFile());
     store.markDirty();
     store.setTextParseError('a.cfg', 'stale boom');
+    store.setSelectedSection('extruder', 'a.cfg', 12);
     useConfigStore.getState().clearAll();
     const state = useConfigStore.getState();
     expect(state.configFiles).toEqual({});
     expect(state.activeFile).toBe('printer.cfg');
     expect(state.isDirty).toBe(false);
     expect(state.textParseErrors).toEqual({});
+    expect(state.selectedSection).toBeNull();
+    expect(state.selectedSectionFile).toBeNull();
+    expect(state.selectedSectionLine).toBeNull();
   });
 });
 
