@@ -4,32 +4,15 @@ import type { SubComponentNodeData } from '../../types/graph';
 import NodeActions from './NodeActions';
 import WarningBadge from './WarningBadge';
 import type { ValidationStatus } from '../../types/graph';
-
-const GROUP_COLORS: Record<string, string> = {
-  stepper: '#3b82f6',
-  stepper_driver: '#6366f1',
-  extruder: '#f97316',
-  heater: '#ef4444',
-  fan: '#06b6d4',
-  probe: '#ec4899',
-  temperature: '#f59e0b',
-  accelerometer: '#84cc16',
-  led: '#a855f7',
-  servo: '#14b8a6',
-  pin: '#64748b',
-  display: '#8b5cf6',
-  filament_sensor: '#d946ef',
-  sensor: '#0ea5e9',
-  mcu: '#22c55e',
-  other: '#6b7280',
-};
+import { SUBCOMPONENT_COLORS } from '../../constants/graphColors';
 
 function SubComponentNode({ data, selected, id }: NodeProps) {
   const nodeData = data as unknown as SubComponentNodeData;
-  const color = GROUP_COLORS[nodeData.componentGroup] || GROUP_COLORS.other;
+  const color = SUBCOMPONENT_COLORS[nodeData.componentGroup] || SUBCOMPONENT_COLORS.other;
   const isSuppressed = !!(nodeData as Record<string, unknown>).isSuppressed;
   const isEmbedded = !!nodeData.parentHardwareId;
-  const isOrphan = !isEmbedded;
+  const isStandalone = !!(nodeData as Record<string, unknown>).isStandalone;
+  const isOrphan = !isEmbedded && !isStandalone;
   const validationStatus = (nodeData.validationStatus || 'valid') as ValidationStatus;
   const effectiveValidationStatus = isOrphan ? 'error' : validationStatus;
   const hasErrors = nodeData.hasErrors || isOrphan;

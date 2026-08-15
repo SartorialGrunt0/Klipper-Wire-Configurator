@@ -11,8 +11,28 @@ import {
 import type { AppNode, AppEdge, GroupNodeData } from '../types/graph';
 import type { HardwareType, CommunicationType, ConfigFile, ConfigSection } from '../types/config';
 import { useConfigStore } from './configStore';
-import { updateSectionPins } from '../utils/pinUtils';
+import { updateSectionPins, updateAllSectionPins } from '../utils/pinUtils';
 import { buildUniqueSectionDraft } from '../utils/sectionNaming';
+import {
+  CONTAINER_WIDTH,
+  CONTAINER_HEADER_HEIGHT,
+  CHILD_SLOT_HEIGHT,
+  CONTAINER_PADDING_BOTTOM,
+  CHILD_LEFT_X,
+  CHILD_RIGHT_X,
+  COLLAPSED_HEIGHT,
+  COLLAPSED_WIDTH,
+  TILE_HEADER_HEIGHT,
+  GROUP_ITEM_HEIGHT,
+  GROUP_BODY_PADDING,
+  TILE_GAP,
+  HARDWARE_Z_INDEX,
+  SELECTED_PARENT_Z_INDEX,
+  CHILD_NODE_Z_INDEX,
+  ACTIVE_CHILD_Z_INDEX,
+  GRID_SIZE,
+} from '../constants/graphLayout';
+import { getHardwareHexColor } from '../constants/graphColors';
 
 const STEPPER_SECTION_RE = /^stepper_[a-z]+(\d+)?$/;
 const EXTRUDER_SECTION_RE = /^extruder(\d+)?$/;
@@ -46,22 +66,6 @@ function getComponentGroup(sectionType: string, isFeature = false): string {
   return COMPONENT_GROUP_MAP[sectionType] || (isFeature ? sectionType : 'other');
 }
 
-// Hardware type → color mapping (shared with edge coloring)
-const HW_COLORS: Record<string, string> = {
-  sbc: '#22c55e',
-  mainboard: '#38bdf8',
-  toolhead: '#f472b6',
-  expander: '#a78bfa',
-  config_file: '#0f766e',
-  probe: '#ec4899',
-  accelerometer: '#84cc16',
-  other: '#64748b',
-};
-
-function getHardwareColor(hwType: string): string {
-  return HW_COLORS[hwType] || HW_COLORS.other;
-}
-
 /**
  * Detect the communication type for a hardware node by inspecting its MCU section
  * in the config store. Returns the comm type if determinable, or 'usb' as fallback.
@@ -88,43 +92,6 @@ function detectNodeCommType(nodeData: Record<string, unknown>): CommunicationTyp
   }
   return 'usb';
 }
-
-// ── Container layout constants ────────────────────────────────
-/** Total width of a hardware container node */
-const CONTAINER_WIDTH = 400;
-/** Height reserved for the hardware node header/info area */
-const CONTAINER_HEADER_HEIGHT = 110;
-/** Vertical slot size per child node (compact tiles) */
-const CHILD_SLOT_HEIGHT = 40;
-/** Padding below last child row */
-const CONTAINER_PADDING_BOTTOM = 16;
-/** X position (relative to parent) for left-column children (features) */
-const CHILD_LEFT_X = 12;
-/** X position (relative to parent) for right-column children (sub-components) */
-const CHILD_RIGHT_X = 208;
-/** Height of a hardware node when collapsed (just the header) */
-const COLLAPSED_HEIGHT = 56;
-/** Width of a hardware node when collapsed */
-const COLLAPSED_WIDTH = 200;
-
-/** Height of a compact tile's header row */
-const TILE_HEADER_HEIGHT = 36;
-/** Height per item row in an expanded GroupNode body */
-const GROUP_ITEM_HEIGHT = 22;
-/** Vertical padding inside the expanded GroupNode body (top + bottom) */
-const GROUP_BODY_PADDING = 12;
-/** Gap between tiles in a column */
-const TILE_GAP = 4;
-/** Base stacking for top-level hardware cards */
-const HARDWARE_Z_INDEX = 0;
-/** Elevated stacking for the selected parent hardware card */
-const SELECTED_PARENT_Z_INDEX = 100;
-/** Child cards should always render above major component cards */
-const CHILD_NODE_Z_INDEX = 200;
-/** Selected child cards stay above sibling cards and action overlays */
-const ACTIVE_CHILD_Z_INDEX = 300;
-/** Shared canvas snap size for manual placement and auto-arrange anchors */
-const GRID_SIZE = 20;
 
 function snapToGrid(value: number): number {
   return Math.round(value / GRID_SIZE) * GRID_SIZE;
@@ -254,6 +221,7 @@ interface GraphState {
   addEdge: (edge: AppEdge) => void;
   removeEdge: (id: string) => void;
   updateEdgeData: (id: string, data: Partial<AppEdge['data']>) => void;
+  repointConfigEdge: (id: string, newSourceId: string, newTargetId: string) => void;
   selectedEdgeId: string | null;
   setSelectedEdge: (id: string | null) => void;
 
@@ -400,6 +368,57 @@ function sortNodesParentsFirst(nodes: AppNode[]): AppNode[] {
   return result;
 }
 
+/**
+ * Remove the config-model sections (or config file for hardware) backing a
+ * node. Shared by removeNode and onNodesChange so the Delete key and the ✕
+ * button can't drift apart. Does NOT touch the graph store — callers decide
+ * when to pushHistory and how to apply the node removal.
+ *
+ * For hardware nodes the config FILE is only deleted when no other hardware
+ * node still references it — two boards can share one multi-MCU file, and
+ * deleting one board must not delete the other's sections.
+ */
+function cleanupRemovedNodeConfig(
+  node: AppNode,
+  configStore: ReturnType<typeof useConfigStore.getState>,
+  allNodes: AppNode[],
+): void {
+  const d = node.data as Record<string, unknown>;
+  const configFile = d.configFile as string | undefined;
+  if (!configFile) return;
+
+  if (node.type === 'subComponent' || node.type === 'feature') {
+    const sectionHeader = d.sectionHeader as string | undefined;
+    if (sectionHeader) {
+      configStore.removeSection(configFile, sectionHeader, d.sectionLineNumber as number | undefined);
+    }
+  } else if (node.type === 'group') {
+    const children = d.children as Array<{ sectionHeader: string; sectionLineNumber?: number; configFile?: string }> | undefined;
+    if (children) {
+      for (const child of children) {
+        const childFile = child.configFile || configFile;
+        if (child.sectionHeader) {
+          configStore.removeSection(childFile, child.sectionHeader, child.sectionLineNumber);
+        }
+      }
+    }
+  } else if (node.type === 'hardware') {
+    // Only delete the config file if no OTHER hardware node references it
+    const stillReferenced = allNodes.some(
+      (n) => n.id !== node.id && n.type === 'hardware'
+        && (n.data as Record<string, unknown>).configFile === configFile,
+    );
+    if (!stillReferenced) {
+      configStore.removeConfigFile(configFile);
+    }
+  }
+}
+
+/** Module-level flag: deleteElements fires edge removes before node removes in
+ *  the same batch. Set while that batch is in flight so onNodesChange skips its
+ *  duplicate history push (the edge push already captured the full state). */
+let edgeRemoveBatchPending = false;
+
 export const useGraphStore = create<GraphState>((set, get) => ({
   nodes: [],
   edges: [],
@@ -408,15 +427,49 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   selectedEdgeId: null,
   fitViewTrigger: 0,
 
-  onNodesChange: (changes) =>
+  onNodesChange: (changes) => {
+    // ReactFlow dispatches Delete-key node removals through onNodesChange as
+    // { type: 'remove' } changes. Route them through the same config cleanup
+    // as removeNode so the section is deleted from the config model (not just
+    // the graph) and the action is undoable — otherwise the section
+    // resurrects on the next syncGraphWithConfig and Ctrl+Z does nothing.
+    //
+    // deleteElements fires edge removes BEFORE node removes (same batch), and
+    // onEdgesChange already pushed a full history snapshot that includes the
+    // edges. Pushing again here would snapshot the POST-edge-removal state,
+    // so Ctrl+Z would restore the node but not its connection lines. Skip the
+    // duplicate push when an edge-remove batch is pending; trash-can deletes
+    // (removeNode) are unaffected (single push).
+    const removes = changes.filter((c) => c.type === 'remove');
+    if (removes.length > 0) {
+      if (!edgeRemoveBatchPending) {
+        get().pushHistory();
+      }
+      edgeRemoveBatchPending = false;
+      const configStore = useConfigStore.getState();
+      const nodesSnapshot = get().nodes;
+      for (const change of removes) {
+        const id = (change as { id: string }).id;
+        const node = nodesSnapshot.find((n) => n.id === id);
+        if (node) cleanupRemovedNodeConfig(node, configStore, nodesSnapshot);
+      }
+    }
     set((s) => ({
       nodes: sortNodesParentsFirst(applyNodeChanges(changes, s.nodes) as AppNode[]),
-    })),
+    }));
+  },
 
   onEdgesChange: (changes) => {
     // Clean up includes for removed configuration edges between hardware nodes
     const removes = changes.filter((c) => c.type === 'remove');
     if (removes.length > 0) {
+      // Mark this batch so onNodesChange (fired later by deleteElements) knows
+      // the history push already captured the full pre-delete state. Cleared
+      // on a microtask: deleteElements fires edge+node triggers synchronously,
+      // so the flag is only visible to that same batch — a standalone edge
+      // delete (no node changes follow) must not leak the flag forward.
+      edgeRemoveBatchPending = true;
+      queueMicrotask(() => { edgeRemoveBatchPending = false; });
       get().pushHistory();
       const { nodes, edges } = get();
       removes.forEach((c) => {
@@ -427,7 +480,18 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         if (srcNode?.type !== 'hardware' || tgtNode?.type !== 'hardware') return;
         const srcFile = (srcNode.data as Record<string, unknown>).configFile as string;
         const tgtFile = (tgtNode.data as Record<string, unknown>).configFile as string;
-        useConfigStore.getState().removeInclude(tgtFile, srcFile);
+        // Mirror onConnect's include direction: the include always lives in the
+        // primary (printer.cfg) file, NOT determined by edge drag direction.
+        // A redrawn edge can flip source/target, so keying off direction here
+        // would try to comment an include inside the wrong file and silently
+        // leave [include toolhead_board.cfg] active.
+        const srcIsPrimary = Boolean((srcNode.data as Record<string, unknown>).isPrimary) || srcFile === 'printer.cfg';
+        const tgtIsPrimary = Boolean((tgtNode.data as Record<string, unknown>).isPrimary) || tgtFile === 'printer.cfg';
+        if (srcIsPrimary && !tgtIsPrimary) {
+          useConfigStore.getState().removeInclude(srcFile, tgtFile);
+        } else {
+          useConfigStore.getState().removeInclude(tgtFile, srcFile);
+        }
       });
     }
     set((s) => ({
@@ -493,11 +557,20 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         const tgtConfigFile = tgtData.configFile as string;
         const srcIsPrimary = Boolean(srcData.isPrimary) || srcConfigFile === 'printer.cfg';
         const tgtIsPrimary = Boolean(tgtData.isPrimary) || tgtConfigFile === 'printer.cfg';
-        const color = getHardwareColor(srcHwType);
+        const color = getHardwareHexColor(srcHwType);
+        // Normalize direction: the edge always points FROM the included
+        // (non-primary) node TO the including (primary) node, mirroring
+        // graphBuilder's convention. Draw direction is arbitrary; showing it
+        // verbatim would label the primary as "source" half the time.
+        // When the primary was drawn as source, swap so the non-primary
+        // (included) node becomes the source.
+        const swapDirection = srcIsPrimary && !tgtIsPrimary;
+        const normalizedSource = swapDirection ? connection.target : connection.source;
+        const normalizedTarget = swapDirection ? connection.source : connection.target;
         const newEdge: AppEdge = {
           id,
-          source: connection.source,
-          target: connection.target,
+          source: normalizedSource,
+          target: normalizedTarget,
           sourceHandle: connection.sourceHandle ?? undefined,
           targetHandle: connection.targetHandle ?? undefined,
           data: { edgeType: 'configuration', sourceHardwareType: srcHwType as HardwareType, color },
@@ -506,24 +579,21 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         set((s) => ({
           edges: [...s.edges.filter((e) => !existing.some((ex) => ex.id === e.id)), newEdge],
         }));
-        // Remove old includes for these files (from old connection)
-        existing.forEach((ex) => {
-          const exSrc = nodes.find((n) => n.id === ex.source);
-          const exTgt = nodes.find((n) => n.id === ex.target);
-          if (exSrc && exTgt) {
-            const exSrcFile = (exSrc.data as Record<string, unknown>).configFile as string;
-            const exTgtFile = (exTgt.data as Record<string, unknown>).configFile as string;
-            useConfigStore.getState().removeInclude(exTgtFile, exSrcFile);
-            useConfigStore.getState().removeInclude(exSrcFile, exTgtFile);
+        // Only touch the include relationship when this pair wasn't already
+        // connected. Redrawing an existing edge (e.g. toolhead↔mainboard)
+        // would otherwise remove→re-add the identical include, marking the
+        // config dirty with a blank diff. Direction never matters here: the
+        // include target is decided by which node holds printer.cfg, so
+        // redrawing the same pair in either direction changes nothing.
+        if (existing.length === 0) {
+          // Include handling:
+          // - If one side is primary/printer.cfg, always include non-primary in printer.cfg.
+          // - Otherwise preserve drag direction (target includes source).
+          if (srcIsPrimary && !tgtIsPrimary) {
+            useConfigStore.getState().addInclude(srcConfigFile, tgtConfigFile);
+          } else {
+            useConfigStore.getState().addInclude(tgtConfigFile, srcConfigFile);
           }
-        });
-        // Include handling:
-        // - If one side is primary/printer.cfg, always include non-primary in printer.cfg.
-        // - Otherwise preserve drag direction (target includes source).
-        if (srcIsPrimary && !tgtIsPrimary) {
-          useConfigStore.getState().addInclude(srcConfigFile, tgtConfigFile);
-        } else {
-          useConfigStore.getState().addInclude(tgtConfigFile, srcConfigFile);
         }
       }
       return;
@@ -531,7 +601,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 
     // Default: configuration edge
     const id = nextEdgeId();
-    const color = getHardwareColor((tgtData?.hardwareType as string) || (srcData?.hardwareType as string) || 'other');
+    const color = getHardwareHexColor((tgtData?.hardwareType as string) || (srcData?.hardwareType as string) || 'other');
     const newEdge: AppEdge = {
       id,
       source: connection.source,
@@ -556,36 +626,9 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 
     // Remove corresponding config sections for each removed node
     const configStore = useConfigStore.getState();
+    const allNodes = state.nodes;
     for (const rn of removedNodes) {
-      const d = rn.data as Record<string, unknown>;
-      const configFile = d.configFile as string | undefined;
-      if (!configFile) continue;
-
-      if (rn.type === 'subComponent' || rn.type === 'feature') {
-        const sectionHeader = d.sectionHeader as string | undefined;
-        if (sectionHeader) {
-          configStore.removeSection(configFile, sectionHeader, d.sectionLineNumber as number | undefined);
-        }
-      } else if (rn.type === 'group') {
-        const children = d.children as Array<{ sectionHeader: string; sectionLineNumber?: number; configFile?: string }> | undefined;
-        if (children) {
-          for (const child of children) {
-            const childFile = child.configFile || configFile;
-            if (child.sectionHeader) {
-              configStore.removeSection(childFile, child.sectionHeader, child.sectionLineNumber);
-            }
-          }
-        }
-      }
-    }
-
-    // If removing a hardware node, delete its entire config file
-    if (node?.type === 'hardware') {
-      const d = node.data as Record<string, unknown>;
-      const configFile = d.configFile as string | undefined;
-      if (configFile) {
-        configStore.removeConfigFile(configFile);
-      }
+      cleanupRemovedNodeConfig(rn, configStore, allNodes);
     }
 
     set((s) => {
@@ -687,11 +730,14 @@ export const useGraphStore = create<GraphState>((set, get) => ({
           fileCounter++;
         }
 
-        // Copy sections from source config, renaming MCU section
+        // Copy sections from source config, renaming MCU section. Drop
+        // [include] (a clone shouldn't re-include the source's children) and
+        // [printer] (unique to the primary board — duplicating it into a
+        // non-primary file is invalid).
         const srcCf = configStore.configFiles[srcConfigFile];
         if (srcCf) {
           const newSections = srcCf.sections
-            .filter((s) => s.section_type !== 'include')
+            .filter((s) => s.section_type !== 'include' && s.section_type !== 'printer')
             .map((s) => {
               if (s.section_type === 'mcu') {
                 return {
@@ -707,10 +753,15 @@ export const useGraphStore = create<GraphState>((set, get) => ({
               };
             });
 
+          // Rewrite pin prefixes (step_pin: mainboard:PA0 → mainboard_2:PA0)
+          // so the clone references the NEW mcu, not a stale pointer to the
+          // source board. Mirrors reparentNode's MCU-context change.
+          const finalSections = updateAllSectionPins(newSections, srcMcuName, newMcuName, configStore.schemas);
+
           // Create the new config file
-          configStore.setConfigFile(newConfigFile, {
+          configStore.updateConfigFile(newConfigFile, {
             filename: newConfigFile,
-            sections: newSections,
+            sections: finalSections,
             includes: [],
             header_comments: [...srcCf.header_comments],
           });
@@ -883,6 +934,55 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       ) as AppEdge[],
     })),
 
+  repointConfigEdge: (id, newSourceId, newTargetId) => {
+    const { edges, nodes } = get();
+    const edge = edges.find((e) => e.id === id);
+    if (!edge) return;
+    const configStore = useConfigStore.getState();
+
+    // Snapshot BEFORE any mutation so one undo restores edge + includes.
+    get().pushHistory();
+
+    // Resolve the file include that the OLD edge represents, then comment it out
+    const oldSrc = nodes.find((n) => n.id === edge.source);
+    const oldTgt = nodes.find((n) => n.id === edge.target);
+    const oldSrcFile = (oldSrc?.data as Record<string, unknown> | undefined)?.configFile as string | undefined;
+    const oldTgtFile = (oldTgt?.data as Record<string, unknown> | undefined)?.configFile as string | undefined;
+    if (oldSrcFile && oldTgtFile && oldSrcFile !== oldTgtFile) {
+      const oldSrcPrimary = Boolean((oldSrc?.data as Record<string, unknown> | undefined)?.isPrimary) || oldSrcFile === 'printer.cfg';
+      if (oldSrcPrimary) {
+        configStore.removeInclude(oldSrcFile, oldTgtFile);
+      } else {
+        configStore.removeInclude(oldTgtFile, oldSrcFile);
+      }
+    }
+
+    // Update the edge to point at the new pair (normalized: included → primary)
+    const newSrc = nodes.find((n) => n.id === newSourceId);
+    const newTgt = nodes.find((n) => n.id === newTargetId);
+    const newSrcFile = (newSrc?.data as Record<string, unknown> | undefined)?.configFile as string | undefined;
+    const newTgtFile = (newTgt?.data as Record<string, unknown> | undefined)?.configFile as string | undefined;
+    const newSrcPrimary = Boolean((newSrc?.data as Record<string, unknown> | undefined)?.isPrimary) || newSrcFile === 'printer.cfg';
+    const newTgtPrimary = Boolean((newTgt?.data as Record<string, unknown> | undefined)?.isPrimary) || newTgtFile === 'printer.cfg';
+    const normalizedSource = newTgtPrimary && !newSrcPrimary ? newTargetId : newSourceId;
+    const normalizedTarget = newTgtPrimary && !newSrcPrimary ? newSourceId : newTargetId;
+
+    set((s) => ({
+      edges: s.edges.map((e) =>
+        e.id === id ? { ...e, source: normalizedSource, target: normalizedTarget } : e,
+      ) as AppEdge[],
+    }));
+
+    // Add the include for the new pair (primary includes non-primary)
+    if (newSrcFile && newTgtFile && newSrcFile !== newTgtFile) {
+      if (newSrcPrimary && !newTgtPrimary) {
+        configStore.addInclude(newSrcFile, newTgtFile);
+      } else {
+        configStore.addInclude(newTgtFile, newSrcFile);
+      }
+    }
+  },
+
   addHardwareNode: (hwType, label, configFile, position, mcuName) => {
     const id = nextNodeId();
     const pos = position || { x: Math.random() * 600, y: Math.random() * 400 };
@@ -939,6 +1039,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
           configFile: resolvedFile,
           hasErrors: false,
           validationStatus: 'valid',
+          isStandalone: true,
         },
       };
       set((s) => ({ nodes: [...s.nodes, node as AppNode] }));
@@ -1029,6 +1130,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
           configFile: resolvedFile,
           hasErrors: false,
           validationStatus: 'valid',
+          isStandalone: true,
         },
       };
       set((s) => ({ nodes: [...s.nodes, node as AppNode] }));
@@ -1295,6 +1397,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   snapChildrenToColumns: (parentId, draggedNodeId, draggedY) => {
     set((s) => {
       const newNodes = [...s.nodes] as AppNode[];
+      const selectedId = s.selectedNodeId;
 
       // Classify children into left (features) and right (components) columns
       const leftChildren: AppNode[] = [];
@@ -1311,14 +1414,18 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       }
 
       // For the column containing the dragged node, sort by Y but use the
-      // dragged node's new Y to determine its insertion position
+      // dragged node's new Y to determine its insertion position. Positions
+      // accumulate variable slot heights (getNodeSlotHeight) so expanded
+      // groups don't overlap the tiles stacked after them — mirroring
+      // reflowParentChildren instead of the fixed CHILD_SLOT_HEIGHT.
       const sortColumn = (col: AppNode[]) => {
         col.sort((a, b) => {
           const ay = a.id === draggedNodeId ? draggedY : a.position.y;
           const by = b.id === draggedNodeId ? draggedY : b.position.y;
           return ay - by;
         });
-        col.forEach((child, i) => {
+        let yOffset = CONTAINER_HEADER_HEIGHT;
+        for (const child of col) {
           const idx = newNodes.findIndex((n) => n.id === child.id);
           if (idx >= 0) {
             const isLeft = leftChildren.includes(child);
@@ -1326,26 +1433,35 @@ export const useGraphStore = create<GraphState>((set, get) => ({
               ...newNodes[idx],
               position: {
                 x: isLeft ? CHILD_LEFT_X : CHILD_RIGHT_X,
-                y: CONTAINER_HEADER_HEIGHT + i * CHILD_SLOT_HEIGHT,
+                y: yOffset,
               },
             };
+            yOffset += getNodeSlotHeight(newNodes[idx], selectedId);
           }
-        });
+        }
       };
 
       sortColumn(leftChildren);
       sortColumn(rightChildren);
 
-      // Resize parent
-      const sz = computeHardwareSize(leftChildren.length, rightChildren.length);
+      // Resize parent to fit the taller column (variable heights, like reflow)
+      const totalLeft = leftChildren.reduce(
+        (acc, child) => acc + getNodeSlotHeight(child, selectedId),
+        CONTAINER_HEADER_HEIGHT,
+      ) - CONTAINER_HEADER_HEIGHT;
+      const totalRight = rightChildren.reduce(
+        (acc, child) => acc + getNodeSlotHeight(child, selectedId),
+        CONTAINER_HEADER_HEIGHT,
+      ) - CONTAINER_HEADER_HEIGHT;
       const pIdx = newNodes.findIndex((n) => n.id === parentId);
       if (pIdx >= 0) {
         const pData = newNodes[pIdx].data as Record<string, unknown>;
         const isCollapsed = !!pData.collapsed;
         if (!isCollapsed) {
+          const newHeight = CONTAINER_HEADER_HEIGHT + Math.max(totalLeft, totalRight, 0) + CONTAINER_PADDING_BOTTOM;
           newNodes[pIdx] = {
             ...newNodes[pIdx],
-            style: { ...newNodes[pIdx].style, width: sz.width, height: sz.height },
+            style: { ...newNodes[pIdx].style, width: CONTAINER_WIDTH, height: Math.max(newHeight, 160) },
           };
         }
       }
@@ -1598,7 +1714,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 
       // Ensure target config file exists
       if (!configState.configFiles[newConfigFile]) {
-        configState.setConfigFile(newConfigFile, {
+        configState.updateConfigFile(newConfigFile, {
           filename: newConfigFile,
           sections: [],
           includes: [],
@@ -1643,7 +1759,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
           const updatedSection = updateSectionPins(section, oldMcuName, newMcuName, schemas);
           const cf = configState.configFiles[oldConfigFile];
           if (cf) {
-            configState.setConfigFile(oldConfigFile, {
+            configState.updateConfigFile(oldConfigFile, {
               ...cf,
               sections: cf.sections.map((s) => matchesSectionRef(s, ref) ? updatedSection : s),
             });
@@ -1694,7 +1810,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 
   addConfigurationEdge: (sourceId, targetId, hwType, sourceHandle?, targetHandle?) => {
     const id = nextEdgeId();
-    const color = getHardwareColor(hwType);
+    const color = getHardwareHexColor(hwType);
     const edge: Edge = {
       id,
       source: sourceId,
@@ -1939,17 +2055,31 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     }
 
     // 4. Sync include directives → configuration edges
-    // Find the hardware node for this config file
-    const thisHwNode = get().nodes.find((n) => {
+    // Find the hardware node for this config file. printer.cfg can host BOTH the
+    // primary mainboard [mcu] and the SBC host_mcu — when multiple hardware
+    // nodes share the file, the include edge must attach to the PRIMARY node
+    // (isPrimary), not whichever node happens to appear first (graphBuilder
+    // inserts the SBC first, which caused phantom edges to the SBC).
+    const matchingHwNodes = get().nodes.filter((n) => {
       if (n.type !== 'hardware') return false;
       const nodeFile = (n.data as Record<string, unknown>).configFile as string || '';
       const nodeBasename = nodeFile.replace(/^.*[\\/]/, '');
       const filenameBasename = filename.replace(/^.*[\\/]/, '');
       return nodeFile === filename || nodeBasename === filenameBasename;
     });
+    const thisHwNode = matchingHwNodes.find(
+      (n) => Boolean((n.data as Record<string, unknown>).isPrimary),
+    ) ?? matchingHwNodes[0];
 
     if (thisHwNode) {
       const includes = cf.includes || [];
+
+      // Helper: is this edge a config edge connecting the same two hardware nodes
+      // (either direction)? Mirrors onConnect's pair normalization — direction
+      // never matters, the include always lives in the primary file.
+      const isPairEdge = (e: AppEdge, aId: string, bId: string) =>
+        (e.data as Record<string, unknown>)?.edgeType === 'configuration' &&
+        ((e.source === aId && e.target === bId) || (e.source === bId && e.target === aId));
 
       // Remove configuration edges no longer backed by an include directive
       const existingIncomingEdges = get().edges.filter(
@@ -1971,7 +2101,13 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         }
       }
 
-      // Add configuration edges for newly-added include directives
+      // Add configuration edges for newly-added include directives.
+      // The include belongs to THIS hardware node's file, but the edge that
+      // represents it must connect the two hardware nodes of the involved
+      // files — resolved by filename, never by assuming thisHwNode is the
+      // primary. When the include lives in printer.cfg (owned by the SBC
+      // node), the edge must still land on the PRIMARY node so a redraw
+      // doesn't spawn a duplicate phantom edge to the SBC.
       for (const inc of includes) {
         const incBasename = inc.replace(/^.*[\\/]/, '');
         const includedHwNode = get().nodes.find((n) => {
@@ -1981,15 +2117,20 @@ export const useGraphStore = create<GraphState>((set, get) => ({
           return nodeBasename === incBasename || nodeFile === inc;
         });
         if (!includedHwNode || includedHwNode.id === thisHwNode.id) continue;
-        const edgeExists = get().edges.some(
-          (e) =>
-            (e.data as Record<string, unknown>)?.edgeType === 'configuration' &&
-            e.source === includedHwNode.id &&
-            e.target === thisHwNode.id,
-        );
+        // Resolve the include target: the primary (printer.cfg) node if one of
+        // the pair is primary, otherwise thisHwNode (the file declaring it).
+        const includedData = includedHwNode.data as Record<string, unknown>;
+        const thisData = thisHwNode.data as Record<string, unknown>;
+        const includedFile = includedData.configFile as string || '';
+        const thisFile = thisData.configFile as string || '';
+        const includedIsPrimary = Boolean(includedData.isPrimary) || includedFile === 'printer.cfg';
+        const thisIsPrimary = Boolean(thisData.isPrimary) || thisFile === 'printer.cfg';
+        const edgeSource = thisIsPrimary && !includedIsPrimary ? includedHwNode.id : thisHwNode.id;
+        const edgeTarget = thisIsPrimary && !includedIsPrimary ? thisHwNode.id : includedHwNode.id;
+        const edgeExists = get().edges.some((e) => isPairEdge(e, edgeSource, edgeTarget));
         if (!edgeExists) {
           const hwType = (includedHwNode.data as Record<string, unknown>).hardwareType as HardwareType;
-          get().addConfigurationEdge(includedHwNode.id, thisHwNode.id, hwType);
+          get().addConfigurationEdge(edgeSource, edgeTarget, hwType);
         }
       }
 

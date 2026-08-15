@@ -5,9 +5,12 @@ import { useNativeStore } from '../stores/nativeStore';
 import type { ParamSchema, ConfigParam, ConfigSection, HardwareType, SectionSchema } from '../types/config';
 import type { HardwareNodeData, SubComponentNodeData, FeatureNodeData, GroupChildItem, AppNode, AppEdge, ValidationStatus } from '../types/graph';
 import { applyBoardTypeMarkerToMcuSections } from '../utils/boardTypeMarker';
-import { updateAllSectionPins } from '../utils/pinUtils';
 import { buildUniqueSectionDraft } from '../utils/sectionNaming';
 import { getValidationStatusColor } from '../utils/validationStatus';
+import { resolveSection } from '../utils/sectionResolver';
+import { hasFeatureSectionType as hasFeatureSectionTypeInFiles } from '../utils/featureSections';
+import { toggleSectionSuppressed } from '../utils/sectionSuppress';
+import { applyMcuRenameToFiles, planPrimarySwap, applyNodeUpdates, applyGroupChildRenames, mcuHeaderFor } from '../utils/mcuPrimary';
 import { acknowledgeWarning } from '../services/api';
 import WarningBadge from './nodes/WarningBadge';
 import McuNameDialog from './dialogs/McuNameDialog';
@@ -92,12 +95,14 @@ function isAllowedSharedPin(users: PinUse[]): boolean {
 export default function SettingsPanel() {
   const {
     selectedSection,
+    selectedSectionFile,
+    selectedSectionLine,
     setSelectedSection,
     configFiles,
     activeFile,
     schemas,
     validation,
-    setConfigFile,
+    updateConfigFile,
     updateSectionParam,
     addParam,
     removeParam,
@@ -138,6 +143,11 @@ export default function SettingsPanel() {
     return typeof data?.sectionLineNumber === 'number' ? data.sectionLineNumber as number : null;
   }, [selectedNode]);
 
+  // Prefer the line carried with the section selection (sidebar rows carry
+  // the exact (file, line) of the section they open); fall back to the
+  // selected node's line for direct node clicks.
+  const effectiveSectionLineNumber = selectedSectionLine ?? nodeSectionLineNumber;
+
   // Resolve the config file this node belongs to
   const nodeConfigFile = useMemo(() => {
     if (!selectedNode) return null;
@@ -157,21 +167,8 @@ export default function SettingsPanel() {
 
   const resolvedSectionInfo = useMemo(() => {
     if (!sectionHeader) return null;
-    // If we know the config file, look there first
-    if (nodeConfigFile) {
-      const cf = configFiles[nodeConfigFile];
-      if (cf) {
-        const found = cf.sections.find((s) => s.full_header === sectionHeader && (nodeSectionLineNumber == null || nodeSectionLineNumber === 0 || s.line_number === nodeSectionLineNumber));
-        if (found) return { section: found, filename: nodeConfigFile };
-      }
-    }
-    // Fallback: search across all config files
-    for (const [filename, cf] of Object.entries(configFiles)) {
-      const found = cf.sections.find((s) => s.full_header === sectionHeader && (nodeSectionLineNumber == null || nodeSectionLineNumber === 0 || s.line_number === nodeSectionLineNumber));
-      if (found) return { section: found, filename };
-    }
-    return null;
-  }, [sectionHeader, nodeConfigFile, configFiles, nodeSectionLineNumber]);
+    return resolveSection(configFiles, sectionHeader, selectedSectionFile, selectedSectionLine);
+  }, [sectionHeader, selectedSectionFile, selectedSectionLine, configFiles]);
 
   const section = resolvedSectionInfo?.section || null;
   const sectionConfigFile = resolvedSectionInfo?.filename || null;
@@ -266,9 +263,9 @@ export default function SettingsPanel() {
   const handleParamChange = useCallback(
     (key: string, value: string) => {
       if (!sectionHeader) return;
-      updateSectionParam(resolveFilename(), sectionHeader, key, value, nodeSectionLineNumber ?? undefined);
+      updateSectionParam(resolveFilename(), sectionHeader, key, value, effectiveSectionLineNumber ?? undefined);
     },
-    [sectionHeader, resolveFilename, updateSectionParam, nodeSectionLineNumber],
+    [sectionHeader, resolveFilename, updateSectionParam, effectiveSectionLineNumber],
   );
 
   const handleParamCommit = useCallback(() => {
@@ -284,17 +281,17 @@ export default function SettingsPanel() {
         value: paramSchema.default || '',
         comment: '',
         is_commented_out: false,
-      }, nodeSectionLineNumber ?? undefined);
+      }, effectiveSectionLineNumber ?? undefined);
     },
-    [sectionHeader, resolveFilename, addParam, nodeSectionLineNumber],
+    [sectionHeader, resolveFilename, addParam, effectiveSectionLineNumber],
   );
 
   const handleRemoveParam = useCallback(
     (key: string) => {
       if (!sectionHeader) return;
-      removeParam(resolveFilename(), sectionHeader, key, nodeSectionLineNumber ?? undefined);
+      removeParam(resolveFilename(), sectionHeader, key, effectiveSectionLineNumber ?? undefined);
     },
-    [sectionHeader, resolveFilename, removeParam, nodeSectionLineNumber],
+    [sectionHeader, resolveFilename, removeParam, effectiveSectionLineNumber],
   );
 
   // For hardware nodes: show overview with add buttons
@@ -315,8 +312,8 @@ export default function SettingsPanel() {
     return configFiles[filename]?.sections || [];
   }, [hwData?.configFile, sectionConfigFile, nodeConfigFile, activeFile, configFiles]);
 
-  const hasFeatureSectionType = useCallback((sectionType: string) => sectionType !== 'gcode_macro' && Object.values(configFiles).some(
-    (configFile) => configFile.sections.some((section) => section.section_type === sectionType),
+  const hasFeatureSectionType = useCallback((sectionType: string) => (
+    hasFeatureSectionTypeInFiles(configFiles, sectionType)
   ), [configFiles]);
 
   const handleAddSubComponent = useCallback((sectionType: string) => {
@@ -386,26 +383,7 @@ export default function SettingsPanel() {
     if (!cf) return;
     const allSchemas = configState.schemas;
 
-    // Rename MCU section header: [mcu oldName] → [mcu newName] (or [mcu] ↔ [mcu name])
-    const oldMcuHeader = oldMcuName ? `mcu ${oldMcuName}` : 'mcu';
-    const newMcuHeader = newMcuName ? `mcu ${newMcuName}` : 'mcu';
-    const updatedSections = cf.sections.map((sec) => {
-      if (sec.full_header === oldMcuHeader) {
-        return {
-          ...sec,
-          section_name: newMcuName,
-          full_header: newMcuHeader,
-        };
-      }
-      return sec;
-    });
-
-    // Update pin prefixes on non-MCU sections
-    const finalSections = updateAllSectionPins(updatedSections, oldMcuName, newMcuName, allSchemas);
-    configState.setConfigFile(cfName, { ...cf, sections: finalSections });
-    void configState.revalidateFile(cfName);
-
-    // Also update pins in any other config files referenced by child nodes
+    // Update pins in any other config files referenced by child nodes
     const childConfigFiles = new Set<string>();
     for (const child of nodes) {
       if (child.parentId !== nodeId) continue;
@@ -418,16 +396,42 @@ export default function SettingsPanel() {
         }
       }
     }
-    for (const otherCfName of childConfigFiles) {
-      const otherCf = configState.configFiles[otherCfName];
-      if (!otherCf) continue;
-      const updatedOther = updateAllSectionPins(otherCf.sections, oldMcuName, newMcuName, allSchemas);
-      configState.setConfigFile(otherCfName, { ...otherCf, sections: updatedOther });
-      void configState.revalidateFile(otherCfName);
+
+    // Rename MCU section + rewrite pin prefixes across affected files (pure)
+    const updatedFiles = applyMcuRenameToFiles(
+      configState.configFiles,
+      cfName,
+      [...childConfigFiles],
+      oldMcuName,
+      newMcuName,
+      allSchemas,
+    );
+    for (const filename of Object.keys(updatedFiles)) {
+      if (updatedFiles[filename] === configState.configFiles[filename]) continue;
+      configState.updateConfigFile(filename, updatedFiles[filename]);
+      void configState.revalidateFile(filename);
     }
 
     // Update node data
     updateNodeData(nodeId, { mcuName: newMcuName } as Partial<AppNode['data']>);
+
+    // The MCU section header changed ([mcu old] → [mcu new]); any child
+    // sub-component/feature node whose sectionHeader matches the old header
+    // must be repointed or clicking it resolves null and the sidebar blanks.
+    const oldMcuHeader = mcuHeaderFor(oldMcuName);
+    const newMcuHeader = mcuHeaderFor(newMcuName);
+    for (const child of nodes) {
+      if (child.parentId !== nodeId) continue;
+      const childData = child.data as Record<string, unknown>;
+      if (childData.sectionHeader === oldMcuHeader) {
+        updateNodeData(child.id, {
+          sectionHeader: newMcuHeader,
+          label: newMcuName
+            ? `${(useConfigStore.getState().schemas?.['mcu']?.display_name) || 'MCU'}: ${newMcuName}`
+            : (useConfigStore.getState().schemas?.['mcu']?.display_name) || 'MCU',
+        } as Partial<AppNode['data']>);
+      }
+    }
 
     // Sync group node children's params with updated config store data
     const freshConfigs = useConfigStore.getState().configFiles;
@@ -439,9 +443,15 @@ export default function SettingsPanel() {
       const updatedChildren = gChildren.map((gc) => {
         const gcFile = (gc.configFile as string) || cfName;
         const gcConfig = freshConfigs[gcFile];
-        const matchedSection = gcConfig?.sections.find((s: { full_header: string }) => s.full_header === gc.sectionHeader);
+        // A group child that was the MCU section keeps its own header too.
+        const gcHeader = gc.sectionHeader === oldMcuHeader ? newMcuHeader : gc.sectionHeader;
+        const matchedSection = gcConfig?.sections.find((s: { full_header: string }) => s.full_header === gcHeader);
         if (!matchedSection) return gc;
-        return { ...gc, params: matchedSection.params.filter((p: { is_commented_out?: boolean }) => !p.is_commented_out) };
+        return {
+          ...gc,
+          sectionHeader: gcHeader,
+          params: matchedSection.params.filter((p: { is_commented_out?: boolean }) => !p.is_commented_out),
+        };
       });
       updateNodeData(child.id, { children: updatedChildren } as Partial<AppNode['data']>);
     }
@@ -450,40 +460,24 @@ export default function SettingsPanel() {
   // Toggle primary MCU - handles pin prefix updates, MCU section renaming, and config file renaming
   const handleTogglePrimary = useCallback(() => {
     if (!selectedNodeId) return;
+    useGraphStore.getState().pushHistory();
     const currentIsPrimary = (hwData as Record<string, unknown>)?.isPrimary as boolean;
     const { renameConfigFile } = useConfigStore.getState();
 
-    // Helper to swap config files: old primary's printer.cfg → {mcuName}.cfg, new primary's file → printer.cfg
+    // Helper to swap config files via the pure plan: old primary's
+    // printer.cfg → {mcuName}.cfg, new primary's file → printer.cfg, and
+    // repoint every affected hardware + child node.
     const swapConfigFiles = (oldPrimaryNodeId: string | null, oldMcuName: string, newPrimaryNodeId: string, newConfigFile: string) => {
-      // Rename old primary's printer.cfg to {oldMcuName}.cfg
-      if (oldPrimaryNodeId && oldMcuName) {
-        const demotedFileName = `${oldMcuName.toLowerCase().replace(/\s+/g, '_')}.cfg`;
-        renameConfigFile('printer.cfg', demotedFileName);
-        updateNodeData(oldPrimaryNodeId, { configFile: demotedFileName } as Partial<AppNode['data']>);
-        // Update child nodes referencing printer.cfg
-        for (const child of nodes) {
-          if (child.parentId === oldPrimaryNodeId) {
-            const cd = child.data as Record<string, unknown>;
-            if (cd.configFile === 'printer.cfg') {
-              updateNodeData(child.id, { configFile: demotedFileName } as Partial<AppNode['data']>);
-            }
-          }
-        }
-      }
-      // Rename new primary's config file to printer.cfg
-      if (newConfigFile && newConfigFile !== 'printer.cfg') {
-        renameConfigFile(newConfigFile, 'printer.cfg');
-        updateNodeData(newPrimaryNodeId, { configFile: 'printer.cfg' } as Partial<AppNode['data']>);
-        // Update child nodes referencing the old file
-        for (const child of nodes) {
-          if (child.parentId === newPrimaryNodeId) {
-            const cd = child.data as Record<string, unknown>;
-            if (cd.configFile === newConfigFile) {
-              updateNodeData(child.id, { configFile: 'printer.cfg' } as Partial<AppNode['data']>);
-            }
-          }
-        }
-      }
+      const plan = planPrimarySwap({
+        oldPrimaryId: oldPrimaryNodeId,
+        oldMcuName,
+        newPrimaryId: newPrimaryNodeId,
+        newConfigFile,
+        nodes,
+      });
+      for (const r of plan.renames) renameConfigFile(r.from, r.to);
+      applyNodeUpdates(plan, (nodeId, data) => updateNodeData(nodeId, data as Partial<AppNode['data']>));
+      applyGroupChildRenames(plan, nodes, (nodeId, data) => updateNodeData(nodeId, data as Partial<AppNode['data']>));
     };
 
     if (!currentIsPrimary) {
@@ -521,16 +515,16 @@ export default function SettingsPanel() {
         swapConfigFiles(oldPrimary.id, oldMcuName, selectedNodeId, newConfigFile);
       } else if (newConfigFile && newConfigFile !== 'printer.cfg') {
         // No old primary — just rename new primary's file to printer.cfg
-        renameConfigFile(newConfigFile, 'printer.cfg');
-        updateNodeData(selectedNodeId, { configFile: 'printer.cfg' } as Partial<AppNode['data']>);
-        for (const child of nodes) {
-          if (child.parentId === selectedNodeId) {
-            const cd = child.data as Record<string, unknown>;
-            if (cd.configFile === newConfigFile) {
-              updateNodeData(child.id, { configFile: 'printer.cfg' } as Partial<AppNode['data']>);
-            }
-          }
-        }
+        const plan = planPrimarySwap({
+          oldPrimaryId: null,
+          oldMcuName: '',
+          newPrimaryId: selectedNodeId,
+          newConfigFile,
+          nodes,
+        });
+        for (const r of plan.renames) renameConfigFile(r.from, r.to);
+        applyNodeUpdates(plan, (nodeId, data) => updateNodeData(nodeId, data as Partial<AppNode['data']>));
+        applyGroupChildRenames(plan, nodes, (nodeId, data) => updateNodeData(nodeId, data as Partial<AppNode['data']>));
       }
 
       // Promote the new primary: strip MCU prefix, rename [mcu name] → [mcu]
@@ -560,71 +554,42 @@ export default function SettingsPanel() {
     // Handle file rename when demoting: printer.cfg → {mcuName}.cfg
     if (mcuNamePrompt.purpose === 'demote') {
       const { renameConfigFile } = useConfigStore.getState();
-      const demotedFileName = `${mcuName.toLowerCase().replace(/\s+/g, '_')}.cfg`;
-      const ndData = nd?.data as Record<string, unknown>;
-      const currentFile = (ndData?.configFile as string) || 'printer.cfg';
-
-      if (currentFile === 'printer.cfg') {
-        renameConfigFile('printer.cfg', demotedFileName);
-        updateNodeData(mcuNamePrompt.nodeId, { configFile: demotedFileName } as Partial<AppNode['data']>);
-        // Update child nodes
-        for (const child of nodes) {
-          if (child.parentId === mcuNamePrompt.nodeId) {
-            const cd = child.data as Record<string, unknown>;
-            if (cd.configFile === 'printer.cfg') {
-              updateNodeData(child.id, { configFile: demotedFileName } as Partial<AppNode['data']>);
-            }
-          }
-        }
-      }
 
       // Now rename the new primary's file to printer.cfg
       const newPrimary = nodes.find(
         (n) => n.type === 'hardware' && n.id !== mcuNamePrompt.nodeId &&
           !!(n.data as Record<string, unknown>).isPrimary,
       );
-      if (newPrimary) {
-        const newPData = newPrimary.data as Record<string, unknown>;
-        const newPFile = (newPData.configFile as string) || '';
-        if (newPFile && newPFile !== 'printer.cfg') {
-          renameConfigFile(newPFile, 'printer.cfg');
-          updateNodeData(newPrimary.id, { configFile: 'printer.cfg' } as Partial<AppNode['data']>);
-          for (const child of nodes) {
-            if (child.parentId === newPrimary.id) {
-              const cd = child.data as Record<string, unknown>;
-              if (cd.configFile === newPFile) {
-                updateNodeData(child.id, { configFile: 'printer.cfg' } as Partial<AppNode['data']>);
-              }
-            }
-          }
-        }
-      }
+
+      // Demote the old primary (printer.cfg → {name}.cfg) and promote the new
+      // primary ({file} → printer.cfg) in one pure plan. renameConfigFile
+      // no-ops when the source file doesn't exist, so the stale-state guard
+      // from the old inline code is unnecessary.
+      const plan = planPrimarySwap({
+        oldPrimaryId: mcuNamePrompt.nodeId,
+        oldMcuName: mcuName,
+        newPrimaryId: newPrimary?.id ?? '',
+        newConfigFile: newPrimary
+          ? ((newPrimary.data as Record<string, unknown>).configFile as string) || ''
+          : '',
+        nodes,
+      });
+      for (const r of plan.renames) renameConfigFile(r.from, r.to);
+      applyNodeUpdates(plan, (nodeId, data) => updateNodeData(nodeId, data as Partial<AppNode['data']>));
+      applyGroupChildRenames(plan, nodes, (nodeId, data) => updateNodeData(nodeId, data as Partial<AppNode['data']>));
     }
 
     setMcuNamePrompt(null);
   }, [mcuNamePrompt, applyMcuNameChange, nodes, updateNodeData]);
 
-  // Handle MCU name dialog cancel — revert the primary toggle
+  // Handle MCU name dialog cancel — revert the primary toggle losslessly.
+  // handleTogglePrimary pushed history before any mutation, so undo() restores
+  // isPrimary flags, mcuName, file names, and pin prefixes in one step.
   const handleMcuNameCancel = useCallback(() => {
     if (!mcuNamePrompt) return;
-    if (mcuNamePrompt.purpose === 'demote') {
-      // Revert: re-promote if it was a swap, or re-promote if simple demote
-      updateNodeData(mcuNamePrompt.nodeId, { isPrimary: true } as Partial<AppNode['data']>);
-      // If there was a newly promoted node, demote it back
-      const currentPrimary = nodes.find(
-        (n) => n.type === 'hardware' && n.id !== mcuNamePrompt.nodeId &&
-          !!(n.data as Record<string, unknown>).isPrimary,
-      );
-      if (currentPrimary) {
-        // Revert its MCU prefix strip
-        const itsOldMcuName = (currentPrimary.data as Record<string, unknown>).mcuName as string || '';
-        // If it was just promoted and had its name stripped, it's now '' — we can't easily revert
-        // For now, just toggle the flags back
-        updateNodeData(currentPrimary.id, { isPrimary: false } as Partial<AppNode['data']>);
-      }
-    }
+    useGraphStore.getState().undo();
     setMcuNamePrompt(null);
-  }, [mcuNamePrompt, nodes, updateNodeData]);
+  }, [mcuNamePrompt]);
 
   // Toggle MCU mode for SBC
   const handleToggleMcu = useCallback(() => {
@@ -657,6 +622,7 @@ export default function SettingsPanel() {
   }, [isSuppressable, selectedNode, selectedSection]);
   const handleToggleSuppress = useCallback(() => {
     if (!selectedNodeId || !isSuppressable) return;
+    useGraphStore.getState().pushHistory();
     const newSuppressed = !nodeIsSuppressed;
 
     if (selectedNode?.type === 'subComponent' || selectedNode?.type === 'feature') {
@@ -670,17 +636,11 @@ export default function SettingsPanel() {
         const cs = useConfigStore.getState();
         const cf = cs.configFiles[cfName];
         if (cf) {
-          cs.setConfigFile(cfName, {
+          cs.updateConfigFile(cfName, {
             ...cf,
             sections: cf.sections.map((s) => {
               if (s.full_header !== secHeader) return s;
-              return {
-                ...s,
-                is_commented_out: newSuppressed,
-                params: s.params.map((p) =>
-                  p.key === '_comment_' ? p : { ...p, is_commented_out: newSuppressed },
-                ),
-              };
+              return toggleSectionSuppressed(s, newSuppressed);
             }),
           });
           void cs.revalidateFile(cfName);
@@ -702,17 +662,11 @@ export default function SettingsPanel() {
           const cs = useConfigStore.getState();
           const cf = cs.configFiles[cfName];
           if (cf) {
-            cs.setConfigFile(cfName, {
+            cs.updateConfigFile(cfName, {
               ...cf,
               sections: cf.sections.map((s) => {
                 if (s.full_header !== secHeader) return s;
-                return {
-                  ...s,
-                  is_commented_out: newSuppressed,
-                  params: s.params.map((p) =>
-                    p.key === '_comment_' ? p : { ...p, is_commented_out: newSuppressed },
-                  ),
-                };
+                return toggleSectionSuppressed(s, newSuppressed);
               }),
             });
             void cs.revalidateFile(cfName);
@@ -725,9 +679,10 @@ export default function SettingsPanel() {
   // Apply section text edits back to config
   const handleApplySectionText = useCallback(async () => {
     if (!sectionHeader) return;
+    useGraphStore.getState().pushHistory();
     try {
       const filename = sectionConfigFile || Object.entries(configFiles).find(([_, cf]) =>
-        cf.sections.some((s) => s.full_header === sectionHeader && (nodeSectionLineNumber == null || nodeSectionLineNumber === 0 || s.line_number === nodeSectionLineNumber))
+        cf.sections.some((s) => s.full_header === sectionHeader && (effectiveSectionLineNumber == null || effectiveSectionLineNumber === 0 || s.line_number === effectiveSectionLineNumber))
       )?.[0] || activeFile;
       const currentConfig = configFiles[filename];
       if (!currentConfig) return;
@@ -738,7 +693,7 @@ export default function SettingsPanel() {
 
       const targetIndex = currentConfig.sections.findIndex((s) =>
         s.full_header === sectionHeader
-        && (nodeSectionLineNumber == null || nodeSectionLineNumber === 0 || s.line_number === nodeSectionLineNumber),
+        && (effectiveSectionLineNumber == null || effectiveSectionLineNumber === 0 || s.line_number === effectiveSectionLineNumber),
       );
       if (targetIndex === -1) return;
 
@@ -752,7 +707,8 @@ export default function SettingsPanel() {
         sections: currentConfig.sections.map((candidate, index) => index === targetIndex ? nextSection : candidate),
       };
 
-      setConfigFile(filename, nextConfig);
+      updateConfigFile(filename, nextConfig);
+      void revalidateFile(filename);
 
       if (selectedNodeId && selectedNode && selectedNode.type !== 'hardware' && selectedNode.type !== 'group') {
         const displayName = schemas[nextSection.section_type]?.display_name || nextSection.section_type;
@@ -794,14 +750,14 @@ export default function SettingsPanel() {
         }
       }
 
-      setSelectedSection(nextSection.full_header);
+      setSelectedSection(nextSection.full_header, filename ?? null, nextSection.line_number ?? null);
       setSectionEditText(sectionToText(nextSection));
       setSectionTextDirty(false);
       void revalidateFile(filename);
     } catch (err) {
       console.error('Parse error:', err);
     }
-  }, [sectionEditText, activeFile, sectionHeader, sectionConfigFile, configFiles, nodeSectionLineNumber, setConfigFile, selectedNodeId, selectedNode, selectedSection, schemas, updateNodeData, setSelectedSection, revalidateFile]);
+  }, [sectionEditText, activeFile, sectionHeader, sectionConfigFile, configFiles, effectiveSectionLineNumber, updateConfigFile, selectedNodeId, selectedNode, selectedSection, schemas, updateNodeData, setSelectedSection, revalidateFile]);
 
   const handleAcknowledgeWarning = useCallback(async () => {
     if (!section || !sectionConfigFile) return;
@@ -827,8 +783,17 @@ export default function SettingsPanel() {
     const edgeData = edge?.data as Record<string, unknown> | undefined;
     if (edge && edgeData?.edgeType === 'communication') {
       const commType = (edgeData.commType as string) || 'usb';
-      // Find the target hardware node's MCU section for editing
-      const targetNode = nodes.find((n) => n.id === edge.target);
+      // Find the target hardware node's MCU section for editing. Comm edges
+      // connect SBC ↔ hardware and can be drawn in either direction, so the
+      // MCU to edit is ALWAYS the non-SBC endpoint (the SBC's host_mcu isn't
+      // the one carrying serial/canbus config for the peripheral).
+      const srcNode = nodes.find((n) => n.id === edge.source);
+      const srcData = srcNode?.data as Record<string, unknown> | undefined;
+      const tgtNode = nodes.find((n) => n.id === edge.target);
+      const tgtData = tgtNode?.data as Record<string, unknown> | undefined;
+      const srcIsSbc = srcData?.hardwareType === 'sbc';
+      const tgtIsSbc = tgtData?.hardwareType === 'sbc';
+      const targetNode = srcIsSbc && !tgtIsSbc ? tgtNode : srcNode;
       const targetData = targetNode?.data as Record<string, unknown> | undefined;
       const targetConfigFile = targetData?.configFile as string | undefined;
       const targetMcuName = (targetData?.mcuName as string) ?? '';
@@ -858,25 +823,38 @@ export default function SettingsPanel() {
                   <button
                     key={type}
                     onClick={() => {
+                      useGraphStore.getState().pushHistory();
                       updateEdgeData(selectedEdgeId, { commType: type } as Partial<AppEdge['data']>);
-                      // Toggle MCU params: comment/uncomment based on selected comm type
+                      // Toggle MCU params: comment/uncomment based on selected comm type.
+                      // USB and UART share the serial field — the edge label and
+                      // detect field are the only visible difference between them.
+                      // Serial params are only touched when the selected type
+                      // actually differs (CAN ⇄ serial-family): switching to CAN
+                      // comments serials; switching back restores ONE serial only
+                      // if none is active — never uncomment a second serial, which
+                      // would silently swap which device is in use.
                       if (mcuSection && targetConfigFile) {
                         const wantSerial = type === 'usb' || type === 'uart';
                         const wantCanbus = type === 'canbus';
+                        const serialParams = mcuSection.params.filter((p) => SERIAL_PARAMS.includes(p.key) && p.key !== '_comment_');
+                        const activeSerialCount = serialParams.filter((p) => !p.is_commented_out).length;
                         for (const param of mcuSection.params) {
                           if (param.key === '_comment_') continue;
-                          if (SERIAL_PARAMS.includes(param.key)) {
-                            // Ensure serial/baud params exist and are uncommented for USB/UART
-                            if (wantSerial && param.is_commented_out) {
-                              toggleParamCommented(targetConfigFile, mcuSection.full_header, param.key);
-                            } else if (!wantSerial && !param.is_commented_out) {
-                              toggleParamCommented(targetConfigFile, mcuSection.full_header, param.key);
-                            }
-                          } else if (CANBUS_PARAMS.includes(param.key)) {
+                          if (CANBUS_PARAMS.includes(param.key)) {
                             // Ensure canbus params exist and are uncommented for CAN
                             if (wantCanbus && param.is_commented_out) {
                               toggleParamCommented(targetConfigFile, mcuSection.full_header, param.key);
                             } else if (!wantCanbus && !param.is_commented_out) {
+                              toggleParamCommented(targetConfigFile, mcuSection.full_header, param.key);
+                            }
+                          } else if (SERIAL_PARAMS.includes(param.key)) {
+                            // CAN: comment every serial/baud param.
+                            if (wantCanbus && !param.is_commented_out) {
+                              toggleParamCommented(targetConfigFile, mcuSection.full_header, param.key);
+                            } else if (wantSerial && activeSerialCount === 0 && param.is_commented_out) {
+                              // Back from CAN with no active serial: restore the
+                              // first commented one only. If a serial is already
+                              // active, leave everything untouched.
                               toggleParamCommented(targetConfigFile, mcuSection.full_header, param.key);
                             }
                           }
@@ -951,7 +929,103 @@ export default function SettingsPanel() {
         </div>
       );
     }
-    // Config edge selected — nothing meaningful to show
+    // Config (trace) edge selected — show the include relation + delete
+    const configEdge = edges.find((e) => e.id === selectedEdgeId);
+    const configEdgeData = configEdge?.data as Record<string, unknown> | undefined;
+    if (configEdge && configEdgeData?.edgeType === 'configuration') {
+      const srcNode = nodes.find((n) => n.id === configEdge.source);
+      const tgtNode = nodes.find((n) => n.id === configEdge.target);
+      const srcFile = (srcNode?.data as Record<string, unknown> | undefined)?.configFile as string | undefined;
+      const tgtFile = (tgtNode?.data as Record<string, unknown> | undefined)?.configFile as string | undefined;
+      // Include direction: the primary file includes the non-primary one
+      const srcIsPrimary = !!(srcNode?.data as Record<string, unknown> | undefined)?.isPrimary || srcFile === 'printer.cfg';
+      const tgtIsPrimary = !!(tgtNode?.data as Record<string, unknown> | undefined)?.isPrimary || tgtFile === 'printer.cfg';
+      const includingFile = srcIsPrimary && !tgtIsPrimary ? srcFile : tgtFile;
+      const includedFile = srcIsPrimary && !tgtIsPrimary ? tgtFile : srcFile;
+      return (
+        <>{mcuNameDialog}
+        <div className="w-96 border-l border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] flex flex-col overflow-hidden">
+          <div className="p-3 border-b border-[var(--color-bg-tertiary)]">
+            <h2 className="text-sm font-semibold text-[var(--color-text-primary)]">Configuration Link</h2>
+            <p className="text-xs text-[var(--color-text-secondary)] mt-0.5">
+              Trace connection between hardware nodes
+            </p>
+          </div>
+          <div className="flex-1 overflow-y-auto p-3 space-y-3">
+            <div className="rounded-lg border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] p-3 space-y-2">
+              <label className="block text-xs">
+                <span className="text-[var(--color-text-secondary)]">Source (included file):</span>
+                <select
+                  className="mt-1 w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-xs text-[var(--color-text-primary)]"
+                  value={configEdge.source}
+                  onChange={(e) => {
+                    const newTarget = e.target.value === configEdge.target ? configEdge.source : configEdge.target;
+                    useGraphStore.getState().repointConfigEdge(configEdge.id, e.target.value, newTarget);
+                  }}
+                >
+                  {nodes.filter((n) => n.type === 'hardware').map((n) => (
+                    <option key={n.id} value={n.id}>
+                      {(n.data as Record<string, unknown>).label as string ?? n.id}
+                    </option>
+                  ))}
+                </select>
+                <div className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">{srcFile || 'unknown file'}</div>
+              </label>
+              <label className="block text-xs">
+                <span className="text-[var(--color-text-secondary)]">Target (including file):</span>
+                <select
+                  className="mt-1 w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-xs text-[var(--color-text-primary)]"
+                  value={configEdge.target}
+                  onChange={(e) => {
+                    const newSource = e.target.value === configEdge.source ? configEdge.target : configEdge.source;
+                    useGraphStore.getState().repointConfigEdge(configEdge.id, newSource, e.target.value);
+                  }}
+                >
+                  {nodes.filter((n) => n.type === 'hardware').map((n) => (
+                    <option key={n.id} value={n.id}>
+                      {(n.data as Record<string, unknown>).label as string ?? n.id}
+                    </option>
+                  ))}
+                </select>
+                <div className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">{tgtFile || 'unknown file'}</div>
+              </label>
+              {includingFile && includedFile && includingFile !== includedFile && (
+                <div className="pt-2 border-t border-[var(--color-bg-tertiary)] text-xs">
+                  <span className="text-[var(--color-text-secondary)]">Include:</span>{' '}
+                  <span className="font-mono text-[var(--color-text-primary)]">{includedFile}</span>
+                  <span className="text-[var(--color-text-secondary)]"> added to </span>
+                  <span className="font-mono text-[var(--color-text-primary)]">{includingFile}</span>
+                </div>
+              )}
+            </div>
+            <button
+              onClick={() => {
+                // removeEdge pushes history itself; include removal is folded
+                // into the same undo step since it happens before the next push
+                useGraphStore.getState().removeEdge(configEdge.id);
+                // Comment out the include in the primary file (direction-agnostic)
+                if (srcFile && tgtFile && srcFile !== tgtFile) {
+                  const srcIsPrimary2 = !!(srcNode?.data as Record<string, unknown> | undefined)?.isPrimary || srcFile === 'printer.cfg';
+                  if (srcIsPrimary2) {
+                    useConfigStore.getState().removeInclude(srcFile, tgtFile);
+                  } else {
+                    useConfigStore.getState().removeInclude(tgtFile, srcFile);
+                  }
+                }
+                setSelectedEdge(null);
+              }}
+              className="w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg border border-red-500/30 text-red-400 hover:bg-red-500/10 transition-colors text-xs font-medium"
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                <path d="M3 6h10M6.5 6V4h3v2M5 6l.5 7h5L11 6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+              Delete link
+            </button>
+          </div>
+        </div>
+        </>
+      );
+    }
     return mcuNameDialog;
   }
 
@@ -968,7 +1042,7 @@ export default function SettingsPanel() {
         setAddingType={setAddingType}
         onAddSubComponent={handleAddSubComponent}
         onAddFeature={handleAddFeature}
-        onSelectSection={(header: string) => setSelectedSection(header)}
+        onSelectSection={(header: string, cf?: string | null, ln?: number | null) => setSelectedSection(header, cf ?? null, ln ?? null)}
         onSelectNode={(nodeId: string) => { setSelectedNode(nodeId); setSelectedSection(null); }}
         onOpenCommunication={() => {
           if (!selectedNodeId) return;
@@ -984,7 +1058,7 @@ export default function SettingsPanel() {
           }
           const mcuHeader = hwData?.mcuName ? `mcu ${hwData.mcuName}` : 'mcu';
           setSelectedEdge(null);
-          setSelectedSection(mcuHeader);
+          setSelectedSection(mcuHeader, hwData?.configFile ?? null, null);
         }}
         onTogglePrimary={handleTogglePrimary}
         onToggleMcu={handleToggleMcu}
@@ -996,7 +1070,7 @@ export default function SettingsPanel() {
           const configState = useConfigStore.getState();
           const configFileData = configState.configFiles[hwData.configFile];
           if (!configFileData) return;
-          configState.setConfigFile(hwData.configFile, {
+          configState.updateConfigFile(hwData.configFile, {
             ...configFileData,
             sections: applyBoardTypeMarkerToMcuSections(
               configFileData.sections,
@@ -1016,13 +1090,13 @@ export default function SettingsPanel() {
     // GroupNode selected — show its children for editing
     if (selectedNode?.type === 'group') {
       const groupData = selectedNode.data as Record<string, unknown>;
-      const children = (groupData.children as Array<{ label: string; sectionHeader: string; params?: Array<{ key: string; value: string }>; validationStatus?: ValidationStatus }>) || [];
+      const children = (groupData.children as Array<{ label: string; sectionHeader: string; configFile?: string; sectionLineNumber?: number; params?: Array<{ key: string; value: string }>; validationStatus?: ValidationStatus }>) || [];
       const groupLabel = groupData.label as string;
       const parentId = groupData.parentHardwareId as string | undefined;
       const parentNode = parentId ? nodes.find((n) => n.id === parentId) : null;
       return (
         <>{mcuNameDialog}
-        <div className="w-80 border-l border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] flex flex-col overflow-hidden">
+        <div className="w-96 border-l border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] flex flex-col overflow-hidden">
           {parentNode && (
             <button
               onClick={() => { setSelectedNode(parentId!); setSelectedSection(null); }}
@@ -1042,7 +1116,7 @@ export default function SettingsPanel() {
             {children.map((child, idx) => (
               <button
                 key={`${child.sectionHeader}__${idx}`}
-                onClick={() => setSelectedSection(child.sectionHeader)}
+                onClick={() => setSelectedSection(child.sectionHeader, child.configFile ?? null, child.sectionLineNumber ?? null)}
                 className="flex items-center justify-between w-full px-2 py-1.5 rounded-lg text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors group"
               >
                 <span className="flex items-center gap-2 min-w-0">
@@ -1062,7 +1136,7 @@ export default function SettingsPanel() {
     }
     return (
       <>{mcuNameDialog}
-      <div className="w-80 border-l border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] p-4">
+      <div className="w-96 border-l border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] p-4">
         <p className="text-sm text-[var(--color-text-secondary)]">
           Select a component to edit its settings.
         </p>
@@ -1657,7 +1731,7 @@ function ChildNodesList({
   title,
 }: {
   childNodes: AppNode[];
-  onSelectSection: (header: string) => void;
+  onSelectSection: (header: string, configFile?: string | null, lineNumber?: number | null) => void;
   onSelectNode: (nodeId: string) => void;
   title?: string;
 }) {
@@ -1696,7 +1770,7 @@ function ChildNodesList({
                   key={n.id}
                   onClick={() => {
                     if (n.type === 'group') { onSelectNode(n.id); return; }
-                    if (d.sectionHeader) onSelectSection(d.sectionHeader as string);
+                    if (d.sectionHeader) onSelectSection(d.sectionHeader as string, d.configFile as string | undefined, typeof d.sectionLineNumber === 'number' ? d.sectionLineNumber as number : null);
                   }}
                   className="flex items-center gap-2 w-full px-2 py-1.5 rounded-lg text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors"
                 >
@@ -1720,7 +1794,7 @@ function ChildNodesList({
                     onSelectNode(n.id);
                     return;
                   }
-                  if (d.sectionHeader) onSelectSection(d.sectionHeader as string);
+                  if (d.sectionHeader) onSelectSection(d.sectionHeader as string, d.configFile as string | undefined, typeof d.sectionLineNumber === 'number' ? d.sectionLineNumber as number : null);
                 }}
                 className="flex items-center gap-2 w-full px-2 py-1.5 rounded-lg text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors"
               >
@@ -1775,10 +1849,10 @@ function ChildNodesList({
                             <span className="text-[10px] text-[var(--color-text-secondary)] ml-auto">open</span>
                           </button>
                           <div className="ml-3 space-y-0.5">
-                            {(d.children as Array<{ label: string; sectionHeader: string; configFile?: string; validationStatus?: ValidationStatus }>).map((child, ci) => (
+                            {(d.children as Array<{ label: string; sectionHeader: string; configFile?: string; sectionLineNumber?: number; validationStatus?: ValidationStatus }>).map((child, ci) => (
                               <button
                                 key={`${n.id}_${child.configFile || 'cfg'}_${child.sectionHeader}_${ci}`}
-                                onClick={() => onSelectSection(child.sectionHeader)}
+                                onClick={() => onSelectSection(child.sectionHeader, child.configFile ?? null, child.sectionLineNumber ?? null)}
                                 className="flex items-center gap-2 w-full px-2 py-1 rounded text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors"
                               >
                                 <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: getValidationStatusColor(child.validationStatus || 'valid') }} />
@@ -1793,7 +1867,7 @@ function ChildNodesList({
                       <button
                         key={n.id}
                         onClick={() => {
-                          if (d.sectionHeader) onSelectSection(d.sectionHeader as string);
+                          if (d.sectionHeader) onSelectSection(d.sectionHeader as string, d.configFile as string | undefined, typeof d.sectionLineNumber === 'number' ? d.sectionLineNumber as number : null);
                         }}
                         className="flex items-center gap-2 w-full px-2 py-1 rounded text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors"
                       >

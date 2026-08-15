@@ -9,24 +9,7 @@ import {
 import { type NodeRect } from '../../utils/edgeRouting';
 import { useBendPath } from '../../utils/edgeBend';
 import EdgeBendHandles from './EdgeBendHandles';
-
-const COMM_COLORS: Record<string, string> = {
-  usb: 'var(--color-usb)',
-  canbus: 'var(--color-canbus)',
-  uart: 'var(--color-uart)',
-};
-
-const COMM_LABELS: Record<string, string> = {
-  usb: 'USB',
-  canbus: 'CAN',
-  uart: 'UART',
-};
-
-const COMM_DESCRIPTIONS: Record<string, string> = {
-  usb: 'Universal Serial Bus',
-  canbus: 'Controller Area Network',
-  uart: 'Universal Async Receiver/Transmitter',
-};
+import { COMM_COLORS, COMM_LABELS, COMM_DESCRIPTIONS } from '../../constants/graphColors';
 
 function rectForNode(n: Node): NodeRect {
   return {

@@ -4,6 +4,7 @@ import { useGraphStore } from '../stores/graphStore';
 import * as api from '../services/api';
 import { applyBoardTypeMarkerToMcuSections, buildBoardTypeMarker } from '../utils/boardTypeMarker';
 import { buildUniqueSectionDraft } from '../utils/sectionNaming';
+import { hasFeatureSectionType as hasFeatureSectionTypeInFiles } from '../utils/featureSections';
 import type { ConfigSection, CommunicationType, ExampleConfig, HardwareType } from '../types/config';
 import McuNameDialog from './dialogs/McuNameDialog';
 
@@ -90,6 +91,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
   const [templateSearch, setTemplateSearch] = useState('');
   const [templates, setTemplates] = useState<ExampleConfig[]>([]);
   const [templateLoading, setTemplateLoading] = useState(false);
+  const [templateError, setTemplateError] = useState<string | null>(null);
 
   // MCU name prompt state
   const [mcuNamePrompt, setMcuNamePrompt] = useState<{
@@ -107,9 +109,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
     const data = n.data as Record<string, unknown>;
     return data.hardwareType !== 'sbc' || !!data.isMcu;
   });
-  const hasFeatureSectionType = (sectionType: string) => sectionType !== 'gcode_macro' && Object.values(configFiles).some(
-    (configFile) => configFile.sections.some((section) => section.section_type === sectionType),
-  );
+  const hasFeatureSectionType = (sectionType: string) => hasFeatureSectionTypeInFiles(configFiles, sectionType);
 
   // Derive kinematics from the selected parent's config file (fall back to all files)
   const kinematics = (() => {
@@ -241,9 +241,9 @@ export default function AddMenu({ onClose }: AddMenuProps) {
       : `${effectiveLabel.toLowerCase().replace(/\s+/g, '_')}.cfg`;
 
     // Ensure the config file exists in configStore
-    const { setConfigFile } = useConfigStore.getState();
+    const { updateConfigFile } = useConfigStore.getState();
     if (!configFiles[configFile]) {
-      setConfigFile(configFile, {
+      updateConfigFile(configFile, {
         filename: configFile,
         sections: [],
         includes: [],
@@ -288,6 +288,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
     // If a template was selected, load it and populate sections/graph
     if (templateFilename) {
       setTemplateLoading(true);
+      setTemplateError(null);
       api.getExample(templateFilename).then((res) => {
         const config = res.config;
 
@@ -312,7 +313,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
         }
 
         // Set config file with the parsed sections
-        setConfigFile(configFile, {
+        updateConfigFile(configFile, {
           filename: configFile,
           sections: applyBoardTypeMarkerToMcuSections(config.sections, hwType, finalMcuName),
           includes: config.includes || [],
@@ -341,7 +342,13 @@ export default function AddMenu({ onClose }: AddMenuProps) {
       }).catch((err) => {
         console.error('Template load error:', err);
         setTemplateLoading(false);
-        onClose();
+        // Surface the failure instead of silently closing. The node/file
+        // created optimistically above is removed so a retry starts clean.
+        try {
+          useGraphStore.getState().removeNode(nodeId);
+          useConfigStore.getState().removeConfigFile(configFile);
+        } catch { /* best-effort cleanup */ }
+        setTemplateError(`Failed to load template "${templateFilename}": ${(err as Error)?.message || 'unknown error'}`);
       });
     } else {
       // Add communication edge from SBC to this hardware node (blank config)
@@ -502,6 +509,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
                     setHwPickerStep(null);
                     setTemplateSearch('');
                     setTemplates([]);
+                    setTemplateError(null);
                   }}
                   className="px-2.5 py-1.5 rounded-lg text-xs font-medium bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:border-[var(--color-accent)]"
                 >
@@ -533,6 +541,11 @@ export default function AddMenu({ onClose }: AddMenuProps) {
               </div>
 
               <div className="space-y-1 max-h-72 overflow-y-auto pr-1">
+                {templateError && (
+                  <div className="px-3 py-2.5 rounded-lg border border-red-500/30 bg-red-500/10 text-xs text-red-400 mb-2">
+                    {templateError}
+                  </div>
+                )}
                 {templateLoading && (
                   <div className="px-3 py-2 text-xs text-[var(--color-text-secondary)]">
                     Loading templates...

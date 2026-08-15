@@ -17,6 +17,13 @@ export interface ConfigSection {
   header_comments: string[];
   trailing_comments?: string[];
   is_commented_out?: boolean;
+  /**
+   * Frontend-only: per-param `is_commented_out` state captured when the
+   * section was suppressed, so unsuppressing restores individually-commented
+   * params instead of enabling everything. Ignored by the backend (Pydantic
+   * drops unknown fields) and never written to config text.
+   */
+  suppressedParams?: Record<string, boolean>;
 }
 
 export interface ConfigFile {

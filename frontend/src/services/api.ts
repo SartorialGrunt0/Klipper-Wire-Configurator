@@ -271,10 +271,11 @@ export async function loadProject(name: string): Promise<{
 
 export async function saveConfigsToLocal(
   files: Record<string, string>,
-): Promise<{ saved: string[]; file_count: number; errors?: string[] }> {
+  deleted: string[] = [],
+): Promise<{ saved: string[]; removed: string[]; file_count: number; errors?: string[] }> {
   return request('/configs/save', {
     method: 'POST',
-    body: JSON.stringify({ files }),
+    body: JSON.stringify({ files, deleted }),
   });
 }
 
@@ -366,10 +367,11 @@ export async function readNativeConfigFiles(
 export async function applyNativeConfig(
   files: Record<string, string>,
   configPath?: string,
-): Promise<{ status: string; files: string[]; config_path: string }> {
+  deleted: string[] = [],
+): Promise<{ status: string; files: string[]; removed: string[]; config_path: string }> {
   return request('/native/apply', {
     method: 'POST',
-    body: JSON.stringify({ files, config_path: configPath }),
+    body: JSON.stringify({ files, config_path: configPath, deleted }),
   });
 }
 

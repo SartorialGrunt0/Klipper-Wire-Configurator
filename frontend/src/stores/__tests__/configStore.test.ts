@@ -59,6 +59,8 @@ beforeEach(() => {
     validation: {},
     schemas: {},
     selectedSection: null,
+    selectedSectionFile: null,
+    selectedSectionLine: null,
     originalTexts: {},
     isDirty: false,
     textParseErrors: {},
@@ -130,6 +132,33 @@ describe('configStore file operations', () => {
     expect(useConfigStore.getState().configFiles['a.cfg']).toBeDefined();
   });
 
+  it('renameConfigFile remaps the selected section file so the sidebar keeps working', () => {
+    const store = useConfigStore.getState();
+    store.setConfigFile('printer.cfg', makeConfigFile());
+    store.setSelectedSection('mcu', 'printer.cfg', 3);
+
+    useConfigStore.getState().renameConfigFile('printer.cfg', 'mainboard.cfg');
+
+    const state = useConfigStore.getState();
+    // The section header + line survive; the file pointer follows the rename.
+    expect(state.selectedSection).toBe('mcu');
+    expect(state.selectedSectionFile).toBe('mainboard.cfg');
+    expect(state.selectedSectionLine).toBe(3);
+  });
+
+  it('renameConfigFile clears the selection when a DIFFERENT file is renamed', () => {
+    const store = useConfigStore.getState();
+    store.setConfigFile('printer.cfg', makeConfigFile());
+    store.setConfigFile('toolhead.cfg', makeConfigFile());
+    store.setSelectedSection('mcu toolhead', 'toolhead.cfg', 5);
+
+    useConfigStore.getState().renameConfigFile('printer.cfg', 'mainboard.cfg');
+
+    const state = useConfigStore.getState();
+    expect(state.selectedSection).toBe('mcu toolhead');
+    expect(state.selectedSectionFile).toBe('toolhead.cfg');
+  });
+
   it('copyConfigFile deep-copies sections and params', () => {
     const store = useConfigStore.getState();
     const section = makeSection({
@@ -158,12 +187,18 @@ describe('configStore file operations', () => {
     store.setConfigFile('a.cfg', makeConfigFile());
     store.markDirty();
     store.setTextParseError('a.cfg', 'stale boom');
+    store.setSelectedSection('extruder', 'a.cfg', 12);
     useConfigStore.getState().loadConfigs({ 'new.cfg': makeConfigFile() });
     const state = useConfigStore.getState();
     expect(Object.keys(state.configFiles)).toEqual(['new.cfg']);
     expect(state.activeFile).toBe('new.cfg');
     expect(state.isDirty).toBe(false);
     expect(state.textParseErrors).toEqual({});
+    // The stale section selection must not survive into the new project,
+    // or it resolves against the wrong file and the sidebar shows it.
+    expect(state.selectedSection).toBeNull();
+    expect(state.selectedSectionFile).toBeNull();
+    expect(state.selectedSectionLine).toBeNull();
   });
 
   it('clearAll resets everything', () => {
@@ -171,12 +206,16 @@ describe('configStore file operations', () => {
     store.setConfigFile('a.cfg', makeConfigFile());
     store.markDirty();
     store.setTextParseError('a.cfg', 'stale boom');
+    store.setSelectedSection('extruder', 'a.cfg', 12);
     useConfigStore.getState().clearAll();
     const state = useConfigStore.getState();
     expect(state.configFiles).toEqual({});
     expect(state.activeFile).toBe('printer.cfg');
     expect(state.isDirty).toBe(false);
     expect(state.textParseErrors).toEqual({});
+    expect(state.selectedSection).toBeNull();
+    expect(state.selectedSectionFile).toBeNull();
+    expect(state.selectedSectionLine).toBeNull();
   });
 });
 
@@ -317,6 +356,38 @@ describe('configStore dirty / text parse error tracking', () => {
     expect(useConfigStore.getState().textParseErrors['printer.cfg']).toBeUndefined();
   });
 
+  it('updateConfigFile sets the file, marks dirty, and preserves others', () => {
+    const store = useConfigStore.getState();
+    store.setConfigFile('a.cfg', makeConfigFile());
+    store.setConfigFile('b.cfg', makeConfigFile());
+
+    const updated = makeConfigFile();
+    updated.sections = [];
+    useConfigStore.getState().updateConfigFile('a.cfg', updated);
+
+    const state = useConfigStore.getState();
+    expect(state.configFiles['a.cfg'].sections).toEqual([]);
+    expect(state.configFiles['b.cfg']).toBeDefined();
+    expect(state.isDirty).toBe(true);
+  });
+
+  it('raw setConfigFile does NOT mark dirty (load path semantics)', () => {
+    const store = useConfigStore.getState();
+    store.setConfigFile('a.cfg', makeConfigFile());
+    expect(useConfigStore.getState().isDirty).toBe(false);
+  });
+
+  it('updateConfigFile schedules revalidation', async () => {
+    vi.useRealTimers();
+    const store = useConfigStore.getState();
+    store.setConfigFile('printer.cfg', makeConfigFile());
+    useConfigStore.getState().updateConfigFile('printer.cfg', makeConfigFile());
+    // Let the 500ms revalidation timer fire; the mocked validateConfig returns
+    // a clean result, so validation must be present after it runs.
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(useConfigStore.getState().validation['printer.cfg']).toBeDefined();
+  });
+
   it('markClean clears the dirty flag', () => {
     const store = useConfigStore.getState();
     store.setConfigFile('printer.cfg', makeConfigFile());
@@ -356,5 +427,22 @@ describe('configStore validation helpers', () => {
     });
     const errors = useConfigStore.getState().getSectionErrors('mcu');
     expect(errors).toEqual(['missing serial']);
+  });
+
+  it('setSelectedSection carries file + line for duplicate-header safety', () => {
+    const store = useConfigStore.getState();
+    store.setSelectedSection('gcode_macro LEVEL_BED', 'macros.cfg', 12);
+    expect(useConfigStore.getState().selectedSection).toBe('gcode_macro LEVEL_BED');
+    expect(useConfigStore.getState().selectedSectionFile).toBe('macros.cfg');
+    expect(useConfigStore.getState().selectedSectionLine).toBe(12);
+  });
+
+  it('setSelectedSection with null header clears carried context', () => {
+    const store = useConfigStore.getState();
+    store.setSelectedSection('gcode_macro LEVEL_BED', 'macros.cfg', 12);
+    store.setSelectedSection(null);
+    expect(useConfigStore.getState().selectedSection).toBeNull();
+    expect(useConfigStore.getState().selectedSectionFile).toBeNull();
+    expect(useConfigStore.getState().selectedSectionLine).toBeNull();
   });
 });

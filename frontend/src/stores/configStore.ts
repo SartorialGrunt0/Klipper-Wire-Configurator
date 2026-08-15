@@ -108,17 +108,23 @@ interface ConfigState {
   validation: Record<string, ValidationResult>;
   schemas: Record<string, SectionSchema>;
   selectedSection: string | null; // full_header of selected section
+  selectedSectionFile: string | null; // config file owning the selected section (duplicate-header safe)
+  selectedSectionLine: number | null; // line number of the selected section (duplicate-header safe)
   originalTexts: Record<string, string>; // original exported text at import time
   isDirty: boolean; // true when config has unsaved changes
   textParseErrors: Record<string, string>; // per-file parse failures in the text view (last-good model is held)
 
   /* ── Actions ──────────────────────────────────────── */
   setConfigFile: (filename: string, config: ConfigFile) => void;
+  /** Replace a file's config AND mark the project dirty + schedule revalidation.
+   *  Use this for user-driven mutations (graph edits, duplicate, panel saves).
+   *  Use setConfigFile for load paths, which manage dirty state explicitly. */
+  updateConfigFile: (filename: string, config: ConfigFile) => void;
   removeConfigFile: (filename: string) => void;
   setActiveFile: (filename: string) => void;
   setValidation: (filename: string, result: ValidationResult) => void;
   setSchemas: (schemas: Record<string, SectionSchema>) => void;
-  setSelectedSection: (header: string | null) => void;
+  setSelectedSection: (header: string | null, configFile?: string | null, lineNumber?: number | null) => void;
 
   /* Section operations */
   addSection: (filename: string, section: ConfigSection) => void;
@@ -156,6 +162,7 @@ interface ConfigState {
 
   /* Original text tracking */
   setOriginalText: (filename: string, text: string) => void;
+  removeOriginalTexts: (filenames: string[]) => void;
 
   /* File operations */
   renameConfigFile: (oldName: string, newName: string) => void;
@@ -182,6 +189,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   validation: {},
   schemas: {},
   selectedSection: null,
+  selectedSectionFile: null,
+  selectedSectionLine: null,
   originalTexts: {},
   isDirty: false,
   textParseErrors: {},
@@ -190,6 +199,14 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     set((s) => ({
       configFiles: { ...s.configFiles, [filename]: config },
     })),
+
+  updateConfigFile: (filename, config) => {
+    set((s) => ({
+      isDirty: true,
+      configFiles: { ...s.configFiles, [filename]: config },
+    }));
+    scheduleRevalidation(get, set);
+  },
 
   removeConfigFile: (filename) =>
     set((s) => {
@@ -211,7 +228,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         validation: nextValidation,
         textParseErrors: nextTextParseErrors,
         activeFile: s.activeFile === filename ? remainingFiles[0] || 'printer.cfg' : s.activeFile,
-        selectedSection: s.activeFile === filename ? null : s.selectedSection,
+        selectedSection: s.activeFile === filename || s.selectedSectionFile === filename ? null : s.selectedSection,
+        selectedSectionFile: s.selectedSectionFile === filename ? null : s.selectedSectionFile,
+        selectedSectionLine: s.selectedSectionFile === filename ? null : s.selectedSectionLine,
       };
     }),
 
@@ -230,7 +249,12 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       ),
     })),
 
-  setSelectedSection: (header) => set({ selectedSection: header }),
+  setSelectedSection: (header, configFile, lineNumber) =>
+    set({
+      selectedSection: header,
+      selectedSectionFile: configFile ?? null,
+      selectedSectionLine: lineNumber ?? null,
+    }),
 
   addSection: (filename, section) => {
     set((s) => {
@@ -289,7 +313,13 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     set((s) => {
       const cf = s.configFiles[filename];
       if (!cf) return s;
-      const removeIndex = cf.sections.findIndex((sec) => matchesSectionIdentity(sec, fullHeader, lineNumber));
+      // Prefer exact (header, line) identity; fall back to header-only when
+      // the line number is stale (node data captured before later edits) so a
+      // delete never silently no-ops and vanishes from the diff.
+      let removeIndex = cf.sections.findIndex((sec) => matchesSectionIdentity(sec, fullHeader, lineNumber));
+      if (removeIndex === -1 && lineNumber != null && lineNumber !== 0) {
+        removeIndex = cf.sections.findIndex((sec) => sec.full_header === fullHeader);
+      }
       if (removeIndex === -1) return s;
       const sections = [...cf.sections];
       sections.splice(removeIndex, 1);
@@ -412,6 +442,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       activeFile: 'printer.cfg',
       validation: {},
       selectedSection: null,
+      selectedSectionFile: null,
+      selectedSectionLine: null,
       originalTexts: {},
       isDirty: false,
       textParseErrors: {},
@@ -422,6 +454,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       configFiles: configs,
       activeFile: Object.keys(configs)[0] || 'printer.cfg',
       isDirty: false,
+      selectedSection: null,
+      selectedSectionFile: null,
+      selectedSectionLine: null,
       textParseErrors: {},
     }),
 
@@ -429,6 +464,14 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     set((s) => ({
       originalTexts: { ...s.originalTexts, [filename]: text },
     })),
+
+  removeOriginalTexts: (filenames) =>
+    set((s) => {
+      if (filenames.length === 0) return s;
+      const next = { ...s.originalTexts };
+      for (const fn of filenames) delete next[fn];
+      return { originalTexts: next };
+    }),
 
   renameConfigFile: (oldName, newName) =>
     set((s) => {
@@ -466,6 +509,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         validation: nextValidation,
         originalTexts: nextOriginals,
         textParseErrors: nextTextParseErrors,
+        selectedSection: s.selectedSection,
+        selectedSectionFile: s.selectedSectionFile === oldName ? newName : s.selectedSectionFile,
+        selectedSectionLine: s.selectedSectionLine,
       };
     }),
 

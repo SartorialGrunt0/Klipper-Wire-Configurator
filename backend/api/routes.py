@@ -505,17 +505,19 @@ async def save_configs(data: dict):
 
     Accepts a dict of filename → config text, persists each file to
     CONFIG_STORAGE_DIR. Used by non-native mode to persist changes
-    made after import.
+    made after import. Accepts an optional ``deleted`` list of
+    filenames to remove from storage (a file deleted from the model).
     """
     files: dict[str, str] = data.get("files", {})
-    if not files:
+    deleted: list[str] = data.get("deleted", []) or []
+    if not files and not deleted:
         raise HTTPException(status_code=400, detail="No files provided")
 
     saved = []
     errors = []
     for filename, text in files.items():
         # Validate filename (no path traversal)
-        if ".." in filename or filename.startswith("/") or filename.startswith("\\"):
+        if ".." in filename or filename.startswith("/") or filename.startswith("\\\\"):
             errors.append(f"Invalid filename: {filename}")
             continue
         try:
@@ -524,10 +526,23 @@ async def save_configs(data: dict):
         except OSError as e:
             errors.append(f"{filename}: {e}")
 
-    result: dict[str, object] = {"saved": saved, "file_count": len(saved)}
+    removed = []
+    for filename in deleted:
+        if ".." in filename or filename.startswith("/") or filename.startswith("\\\\"):
+            errors.append(f"Invalid filename: {filename}")
+            continue
+        target = CONFIG_STORAGE_DIR / filename
+        try:
+            if target.is_file():
+                target.unlink()
+                removed.append(filename)
+        except OSError as e:
+            errors.append(f"{filename}: {e}")
+
+    result: dict[str, object] = {"saved": saved, "removed": removed, "file_count": len(saved)}
     if errors:
         result["errors"] = errors
-        if not saved:
+        if not saved and not removed:
             raise HTTPException(status_code=500, detail="Failed to save files: " + "; ".join(errors))
     return result
 

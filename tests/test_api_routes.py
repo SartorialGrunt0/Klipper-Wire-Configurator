@@ -485,9 +485,42 @@ def test_save_configs(monkeypatch, tmp_path):
     })
 
     assert response.status_code == 200
-    assert response.json() == {'saved': ['printer.cfg', 'other.cfg'], 'file_count': 2}
+    assert response.json() == {'saved': ['printer.cfg', 'other.cfg'], 'removed': [], 'file_count': 2}
     assert (tmp_path / 'printer.cfg').exists()
     assert (tmp_path / 'other.cfg').exists()
+
+
+def test_save_configs_deletes_removed_files(monkeypatch, tmp_path):
+    monkeypatch.setattr(routes, 'CONFIG_STORAGE_DIR', tmp_path)
+    (tmp_path / 'printer.cfg').write_text(SIMPLE_CFG, encoding='utf-8')
+    (tmp_path / 'toolhead_board.cfg').write_text(OTHER_CFG, encoding='utf-8')
+
+    response = client.post('/api/configs/save', json={
+        'files': {
+            'printer.cfg': SIMPLE_CFG,
+        },
+        'deleted': ['toolhead_board.cfg'],
+    })
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body['saved'] == ['printer.cfg']
+    assert body['removed'] == ['toolhead_board.cfg']
+    assert (tmp_path / 'printer.cfg').exists()
+    assert not (tmp_path / 'toolhead_board.cfg').exists()
+
+
+def test_save_configs_deletes_only_files_that_exist(monkeypatch, tmp_path):
+    monkeypatch.setattr(routes, 'CONFIG_STORAGE_DIR', tmp_path)
+
+    response = client.post('/api/configs/save', json={
+        'files': {'printer.cfg': SIMPLE_CFG},
+        'deleted': ['ghost.cfg'],
+    })
+
+    assert response.status_code == 200
+    assert response.json()['removed'] == []
+    assert not (tmp_path / 'ghost.cfg').exists()
 
 
 def test_save_configs_rejects_path_traversal(monkeypatch, tmp_path):
@@ -503,6 +536,19 @@ def test_save_configs_rejects_path_traversal(monkeypatch, tmp_path):
     assert response.status_code == 200
     assert response.json()['saved'] == ['good.cfg']
     assert 'Invalid filename: ../../evil.cfg' in response.json()['errors']
+
+
+def test_save_configs_rejects_traversal_in_deleted(monkeypatch, tmp_path):
+    monkeypatch.setattr(routes, 'CONFIG_STORAGE_DIR', tmp_path)
+
+    response = client.post('/api/configs/save', json={
+        'files': {'printer.cfg': SIMPLE_CFG},
+        'deleted': ['../evil.cfg'],
+    })
+
+    assert response.status_code == 200
+    assert 'Invalid filename: ../evil.cfg' in response.json()['errors']
+    assert not (tmp_path.parent / 'evil.cfg').exists()
 
 
 def test_save_configs_no_files():

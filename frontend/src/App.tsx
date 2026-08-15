@@ -16,6 +16,14 @@ import '@xyflow/react/dist/style.css';
 import { useGraphStore } from './stores/graphStore';
 import { useConfigStore } from './stores/configStore';
 import { useNativeStore } from './stores/nativeStore';
+import {
+  CONTAINER_WIDTH,
+  CONTAINER_HEADER_HEIGHT,
+  CHILD_SLOT_HEIGHT,
+  CONTAINER_PADDING_BOTTOM,
+  COLLAPSED_HEIGHT,
+  COLLAPSED_WIDTH,
+} from './constants/graphLayout';
 import * as api from './services/api';
 import HardwareNode from './components/nodes/HardwareNode';
 import SubComponentNode from './components/nodes/SubComponentNode';
@@ -90,12 +98,12 @@ const edgeTypes: EdgeTypes = {
   configuration: ConfigurationEdge,
 };
 
-const HARDWARE_DRAG_PREVIEW_WIDTH = 400;
-const HARDWARE_DRAG_PREVIEW_HEADER_HEIGHT = 110;
-const HARDWARE_DRAG_PREVIEW_SLOT_HEIGHT = 40;
-const HARDWARE_DRAG_PREVIEW_PADDING_BOTTOM = 16;
-const HARDWARE_DRAG_PREVIEW_COLLAPSED_HEIGHT = 56;
-const HARDWARE_DRAG_PREVIEW_COLLAPSED_WIDTH = 200;
+const HARDWARE_DRAG_PREVIEW_WIDTH = CONTAINER_WIDTH;
+const HARDWARE_DRAG_PREVIEW_HEADER_HEIGHT = CONTAINER_HEADER_HEIGHT;
+const HARDWARE_DRAG_PREVIEW_SLOT_HEIGHT = CHILD_SLOT_HEIGHT;
+const HARDWARE_DRAG_PREVIEW_PADDING_BOTTOM = CONTAINER_PADDING_BOTTOM;
+const HARDWARE_DRAG_PREVIEW_COLLAPSED_HEIGHT = COLLAPSED_HEIGHT;
+const HARDWARE_DRAG_PREVIEW_COLLAPSED_WIDTH = COLLAPSED_WIDTH;
 
 function computeHardwareDragPreviewSize(nodes: Node[], hardwareId: string) {
   const children = nodes.filter((node) => node.parentId === hardwareId);
@@ -115,6 +123,53 @@ function computeHardwareDragPreviewSize(nodes: Node[], hardwareId: string) {
       160,
     ),
   };
+}
+
+/** Saved edge layout entry (id may differ from rebuilt edges — pair-match). */
+interface SavedEdgeLayout {
+  id: string;
+  source?: string;
+  target?: string;
+  data?: Record<string, unknown>;
+  sourceHandle?: string;
+  targetHandle?: string;
+}
+
+/**
+ * Overlay saved edge routing (custom bend points + connection sides) onto the
+ * freshly rebuilt graph. Matches by PAIR (source+target+edgeType), falling back
+ * to id: edge ids come from a module-level counter, so a line drawn at runtime
+ * (edge_7) gets a different id after the config rebuild than the one the save
+ * captured. The source/target/type triple is stable across rebuilds, and comm
+ * edges are matched direction-agnostically (the rebuild always emits SBC →
+ * hardware but the user may have drawn the opposite way).
+ */
+function applySavedEdgeLayout(saved: SavedEdgeLayout[] | undefined, graphStore: ReturnType<typeof useGraphStore.getState>) {
+  if (!saved || saved.length === 0) return;
+  const pairKey = (e: { source?: string; target?: string; data?: Record<string, unknown> }) => {
+    const t = (e.data as Record<string, unknown> | undefined)?.edgeType as string | undefined;
+    const [a, b] = [e.source ?? '', e.target ?? ''].sort();
+    return [a, b, t ?? ''].join('|');
+  };
+  const savedByPair = new Map(saved.map((e) => [pairKey(e), e]));
+  const savedById = new Map(saved.map((e) => [e.id, e]));
+  const currentEdges = useGraphStore.getState().edges;
+  const updatedEdges = currentEdges.map((edge) => {
+    const found = savedByPair.get(pairKey(edge)) ?? savedById.get(edge.id);
+    if (!found) return edge;
+    const next: Record<string, unknown> = { ...edge };
+    if (found.data) {
+      next.data = {
+        ...edge.data,
+        ...found.data,
+        customMiddlePoints: (found.data as Record<string, unknown>).customMiddlePoints,
+      } as unknown as import('./types/graph').AppEdge['data'];
+    }
+    if (found.sourceHandle) next.sourceHandle = found.sourceHandle;
+    if (found.targetHandle) next.targetHandle = found.targetHandle;
+    return next as import('./types/graph').AppEdge;
+  });
+  graphStore.setEdges(updatedEdges);
 }
 
 /** Sits inside <ReactFlow> and calls fitView whenever trigger increments. */
@@ -257,7 +312,7 @@ export default function App() {
               if (layoutResult.layout) {
                 const layout = layoutResult.layout as {
                   graphNodes?: Array<{ id: string; position: { x: number; y: number } }>;
-                  graphEdges?: Array<{ id: string; data?: Record<string, unknown> }>;
+                  graphEdges?: SavedEdgeLayout[];
                   macroDesigner?: MacroDesignerPersistedState;
                 };
                 if (layout.macroDesigner) {
@@ -278,6 +333,9 @@ export default function App() {
                   });
                   graphStore.setNodes(updatedNodes);
                 }
+                // Restore edge routing the same way as the browser-mode path
+                // (pair-matched, direction-agnostic — see applySavedEdgeLayout).
+                applySavedEdgeLayout(layout.graphEdges as SavedEdgeLayout[] | undefined, graphStore);
               }
             } catch { /* no saved layout — use auto-arranged positions */ }
 
@@ -350,6 +408,45 @@ export default function App() {
         const { buildProjectGraph } = await import('./utils/graphBuilder');
         buildProjectGraph(allConfigs, graphStore, schemas, allValidations);
 
+        // Browser mode: restore saved layout from localStorage (if any)
+        try {
+          const saved = localStorage.getItem('kwc.graphLayout');
+          if (saved) {
+            const layout = JSON.parse(saved) as {
+              graphNodes?: Array<{ id: string; position: { x: number; y: number } }>;
+              graphEdges?: Array<{
+                id: string;
+                data?: Record<string, unknown>;
+                sourceHandle?: string;
+                targetHandle?: string;
+              }>;
+              macroDesigner?: MacroDesignerPersistedState;
+            };
+            if (layout.macroDesigner) {
+              useMacroDesignerStore.getState().hydratePersistedState(layout.macroDesigner);
+            }
+            if (layout.graphNodes) {
+              const positionMap = new Map(
+                layout.graphNodes.map((n) => [n.id, n.position]),
+              );
+              const currentNodes = useGraphStore.getState().nodes;
+              const updatedNodes = currentNodes.map((node) => {
+                const savedPos = positionMap.get(node.id);
+                if (savedPos) {
+                  return { ...node, position: savedPos } as import('./types/graph').AppNode;
+                }
+                return node;
+              });
+              graphStore.setNodes(updatedNodes);
+            }
+            // Restore edge routing: custom bend points + which side of each
+            // node the line connects to. Without this, a refresh resets every
+            // trace to default top/bottom routing even though card positions
+            // survived.
+            applySavedEdgeLayout(layout.graphEdges, graphStore);
+          }
+        } catch { /* malformed/absent layout — keep auto-arranged positions */ }
+
         configStore.markClean();
       } catch {
         // No saved configs — that's fine, start empty
@@ -357,20 +454,39 @@ export default function App() {
     })();
   }, []);
 
-  // Auto-save layout (debounced) in native mode
+  // Auto-save layout (debounced). Native mode persists via the backend;
+  // browser mode falls back to localStorage so arrangements survive refresh.
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => {
+  const saveLayoutNow = useCallback((n: typeof nodes, e: typeof edges) => {
+    if (n.length === 0) return;
+    const macroDesigner = useMacroDesignerStore.getState().exportPersistedState();
     const isNative = useNativeStore.getState().isNative;
-    if (!isNative) return;
+    if (isNative) {
+      api.saveNativeLayout({
+        graphNodes: n,
+        graphEdges: e,
+        macroDesigner,
+      }).catch(() => { /* ignore save errors */ });
+    } else {
+      try {
+        localStorage.setItem('kwc.graphLayout', JSON.stringify({
+          graphNodes: n.map((node) => ({ id: node.id, position: node.position })),
+          graphEdges: e.map((edge) => ({
+            id: edge.id,
+            data: edge.data,
+            sourceHandle: edge.sourceHandle ?? undefined,
+            targetHandle: edge.targetHandle ?? undefined,
+          })),
+          macroDesigner,
+        }));
+      } catch { /* ignore quota / privacy-mode errors */ }
+    }
+  }, []);
 
+  useEffect(() => {
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(() => {
-      if (nodes.length === 0) return;
-      api.saveNativeLayout({
-        graphNodes: nodes,
-        graphEdges: edges,
-        macroDesigner: useMacroDesignerStore.getState().exportPersistedState(),
-      }).catch(() => { /* ignore save errors */ });
+      saveLayoutNow(nodes, edges);
     }, 3000);
 
     return () => {
@@ -383,7 +499,27 @@ export default function App() {
     macroDesignerNoGoZones,
     macroDesignerDockPosition,
     macroDesignerRotation,
+    saveLayoutNow,
   ]);
+
+  // Flush any pending layout save when the page is being unloaded (refresh,
+  // close, navigate away). The debounced save races a quick refresh — the
+  // last card move / trace bend never reaches disk, which is why positions
+  // and pathing only "stuck" when a config save happened to give the timer
+  // time to fire. The browser's synchronous path covers unload for
+  // localStorage; the backend POST is fire-and-forget but usually completes.
+  useEffect(() => {
+    const onUnload = () => {
+      const graph = useGraphStore.getState();
+      saveLayoutNow(graph.nodes, graph.edges);
+    };
+    window.addEventListener('pagehide', onUnload);
+    window.addEventListener('beforeunload', onUnload);
+    return () => {
+      window.removeEventListener('pagehide', onUnload);
+      window.removeEventListener('beforeunload', onUnload);
+    };
+  }, [saveLayoutNow]);
 
   useEffect(() => {
     const sectionStatuses = new Map<string, ValidationStatus>();
@@ -613,7 +749,11 @@ export default function App() {
       setSelectedEdge(null);
       const data = node.data as Record<string, unknown>;
       if (data?.sectionHeader) {
-        setSelectedSection(data.sectionHeader as string);
+        setSelectedSection(
+          data.sectionHeader as string,
+          data.configFile as string | undefined,
+          typeof data.sectionLineNumber === 'number' ? data.sectionLineNumber as number : null,
+        );
       } else {
         setSelectedSection(null);
       }
@@ -649,7 +789,11 @@ export default function App() {
       const data = draggedNode.data as Record<string, unknown>;
       setSelectedNode(draggedNode.id);
       setSelectedEdge(null);
-      setSelectedSection(typeof data.sectionHeader === 'string' ? data.sectionHeader : null);
+      setSelectedSection(
+        typeof data.sectionHeader === 'string' ? data.sectionHeader : null,
+        data.configFile as string | undefined,
+        typeof data.sectionLineNumber === 'number' ? data.sectionLineNumber as number : null,
+      );
 
       useGraphStore.setState((s) => ({
         nodes: s.nodes.map((node) => {
@@ -935,17 +1079,10 @@ export default function App() {
               onToggleAddMenu={() => setShowAddMenu(!showAddMenu)}
               onOpenMacroDesigner={() => setShowMacroDesigner(true)}
               onToggleTextView={() => {
-                if (showTextView) {
-                  // Text edits apply to the model live, so switching views is
-                  // always safe — nothing to apply, nothing to lose.
-                  setShowTextView(false);
-                } else {
-                  // Switching TO text view — close the settings panel
-                  setSelectedNode(null);
-                  setSelectedEdge(null);
-                  setSelectedSection(null);
-                  setShowTextView(true);
-                }
+                // Text edits apply to the model live, so switching views is
+                // always safe — nothing to apply, nothing to lose.
+                // Both views stay mounted; ReactFlow keeps viewport + selection.
+                setShowTextView(!showTextView);
               }}
             />
           </div>
@@ -954,11 +1091,10 @@ export default function App() {
 
       {/* Main content */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Graph or Text view */}
+        {/* Graph or Text view — both stay mounted so ReactFlow keeps its
+            viewport/zoom/selection across toggles; only visibility flips. */}
         <div className="flex-1 relative">
-          {showTextView ? (
-            <TextEditor />
-          ) : (
+          <div className={showTextView ? 'hidden' : 'h-full w-full'}>
             <ReactFlow
               nodes={nodes}
               edges={edges}
@@ -1028,7 +1164,10 @@ export default function App() {
                 </button>
               </Panel>
             </ReactFlow>
-          )}
+          </div>
+          <div className={showTextView ? 'h-full w-full' : 'hidden'}>
+            <TextEditor isActive={showTextView} />
+          </div>
 
           {/* Add Menu Overlay */}
           {showAddMenu && (
