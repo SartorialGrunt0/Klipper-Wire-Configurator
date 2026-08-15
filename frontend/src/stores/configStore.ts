@@ -301,7 +301,13 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     set((s) => {
       const cf = s.configFiles[filename];
       if (!cf) return s;
-      const removeIndex = cf.sections.findIndex((sec) => matchesSectionIdentity(sec, fullHeader, lineNumber));
+      // Prefer exact (header, line) identity; fall back to header-only when
+      // the line number is stale (node data captured before later edits) so a
+      // delete never silently no-ops and vanishes from the diff.
+      let removeIndex = cf.sections.findIndex((sec) => matchesSectionIdentity(sec, fullHeader, lineNumber));
+      if (removeIndex === -1 && lineNumber != null && lineNumber !== 0) {
+        removeIndex = cf.sections.findIndex((sec) => sec.full_header === fullHeader);
+      }
       if (removeIndex === -1) return s;
       const sections = [...cf.sections];
       sections.splice(removeIndex, 1);

@@ -20,6 +20,29 @@ function makeHwNode(id: string, overrides: Record<string, unknown> = {}): AppNod
   } as AppNode;
 }
 
+function makeChildNode(id: string, parentId: string, sectionHeader: string, configFile = 'printer.cfg'): AppNode {
+  return {
+    id,
+    type: 'subComponent',
+    position: { x: 0, y: 0 },
+    parentId,
+    data: {
+      label: sectionHeader,
+      sectionType: sectionHeader.split(' ')[0],
+      sectionHeader,
+      sectionLineNumber: 1,
+      componentGroup: 'other',
+      section: {
+        section_type: sectionHeader.split(' ')[0], section_name: '', full_header: sectionHeader,
+        line_number: 1, params: [], header_comments: [], trailing_comments: [], is_commented_out: false,
+      },
+      parentHardwareId: parentId,
+      configFile,
+      hasErrors: false,
+    },
+  } as AppNode;
+}
+
 function makeEdge(id: string, source: string, target: string): AppEdge {
   return {
     id,
@@ -418,3 +441,91 @@ describe('graphStore auto-arrange', () => {
     expect(useGraphStore.getState().nodes).toHaveLength(0);
   });
 });
+
+  it('removes the board sections but keeps the file when a virtual SBC references it', () => {
+    useConfigStore.getState().setConfigFile('printer.cfg', {
+      filename: 'printer.cfg',
+      sections: [
+        { section_type: 'mcu', section_name: '', full_header: 'mcu', line_number: 1, params: [], header_comments: [], trailing_comments: [], is_commented_out: false },
+        { section_type: 'printer', section_name: '', full_header: 'printer', line_number: 2, params: [], header_comments: [], trailing_comments: [], is_commented_out: false },
+        { section_type: 'stepper_x', section_name: '', full_header: 'stepper_x', line_number: 3, params: [], header_comments: [], trailing_comments: [], is_commented_out: false },
+        { section_type: 'heater_bed', section_name: '', full_header: 'heater_bed', line_number: 4, params: [], header_comments: [], trailing_comments: [], is_commented_out: false },
+      ],
+      includes: [],
+      header_comments: [],
+      raw_text: '',
+    });
+    // Mainboard + virtual SBC both reference printer.cfg
+    useGraphStore.getState().addNode(makeHwNode('mainboard', { configFile: 'printer.cfg', mcuName: '' }));
+    useGraphStore.getState().addNode(makeHwNode('sbc', { configFile: 'printer.cfg', mcuName: 'host_mcu', hardwareType: 'sbc' }));
+    // Child nodes (what graphBuilder creates for each section) — correct line numbers
+    useGraphStore.getState().addNode(makeChildNode('c-mcu', 'mainboard', 'mcu', 'printer.cfg'));
+    useGraphStore.getState().addNode(makeChildNode('c-printer', 'mainboard', 'printer', 'printer.cfg'));
+    useGraphStore.getState().addNode(makeChildNode('c-stepper', 'mainboard', 'stepper_x', 'printer.cfg'));
+    useGraphStore.getState().addNode(makeChildNode('c-heater', 'mainboard', 'heater_bed', 'printer.cfg'));
+    // Fix their line numbers to match the config
+    const cfg = useConfigStore.getState().configFiles['printer.cfg'];
+    const byHeader = new Map(cfg.sections.map((s) => [s.full_header, s.line_number]));
+    for (const n of useGraphStore.getState().nodes) {
+      if (n.type === 'subComponent') {
+        const hdr = (n.data as Record<string, unknown>).sectionHeader as string;
+        useGraphStore.getState().updateNodeData(n.id, { sectionLineNumber: byHeader.get(hdr) });
+      }
+    }
+
+    useGraphStore.getState().removeNode('mainboard');
+
+    const after = useConfigStore.getState().configFiles['printer.cfg'];
+    // File survives (SBC references it) but all mainboard sections are gone
+    expect(after).toBeDefined();
+    expect(after.sections.map((s) => s.full_header)).toEqual([]);
+  });
+
+  it('removes sections even when child line numbers are STALE (config edited since graph build)', () => {
+    useConfigStore.getState().setConfigFile('printer.cfg', {
+      filename: 'printer.cfg',
+      sections: [
+        { section_type: 'mcu', section_name: '', full_header: 'mcu', line_number: 1, params: [], header_comments: [], trailing_comments: [], is_commented_out: false },
+        { section_type: 'printer', section_name: '', full_header: 'printer', line_number: 2, params: [], header_comments: [], trailing_comments: [], is_commented_out: false },
+        { section_type: 'stepper_x', section_name: '', full_header: 'stepper_x', line_number: 3, params: [], header_comments: [], trailing_comments: [], is_commented_out: false },
+      ],
+      includes: [],
+      header_comments: [],
+      raw_text: '',
+    });
+    useGraphStore.getState().addNode(makeHwNode('mainboard', { configFile: 'printer.cfg' }));
+    useGraphStore.getState().addNode(makeHwNode('sbc', { configFile: 'printer.cfg', mcuName: 'host_mcu', hardwareType: 'sbc' }));
+    // Children carry STALE line numbers (1) — config has them at 1,2,3
+    useGraphStore.getState().addNode(makeChildNode('c-mcu', 'mainboard', 'mcu'));
+    useGraphStore.getState().addNode(makeChildNode('c-printer', 'mainboard', 'printer'));
+    useGraphStore.getState().addNode(makeChildNode('c-stepper', 'mainboard', 'stepper_x'));
+
+    useGraphStore.getState().removeNode('mainboard');
+
+    const after = useConfigStore.getState().configFiles['printer.cfg'];
+    expect(after).toBeDefined();
+    // Even with stale line numbers, all three sections must be removed — a
+    // silent no-op here is what makes deletes vanish from the diff.
+    expect(after.sections.map((s) => s.full_header)).toEqual([]);
+  });
+
+  it('delete leaves NO sections when hardware has no children (all sections are children)', () => {
+    useConfigStore.getState().setConfigFile('printer.cfg', {
+      filename: 'printer.cfg',
+      sections: [
+        { section_type: 'mcu', section_name: '', full_header: 'mcu', line_number: 1, params: [], header_comments: [], trailing_comments: [], is_commented_out: false },
+      ],
+      includes: [],
+      header_comments: [],
+      raw_text: '',
+    });
+    useGraphStore.getState().addNode(makeHwNode('mainboard', { configFile: 'printer.cfg' }));
+    useGraphStore.getState().addNode(makeHwNode('sbc', { configFile: 'printer.cfg', mcuName: 'host_mcu', hardwareType: 'sbc' }));
+    useGraphStore.getState().addNode(makeChildNode('c-mcu', 'mainboard', 'mcu'));
+
+    useGraphStore.getState().removeNode('mainboard');
+
+    const cf = useConfigStore.getState().configFiles['printer.cfg'];
+    expect(cf).toBeDefined();
+    expect(cf.sections).toHaveLength(0);
+  });
