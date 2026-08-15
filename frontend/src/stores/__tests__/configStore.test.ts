@@ -61,8 +61,7 @@ beforeEach(() => {
     selectedSection: null,
     originalTexts: {},
     isDirty: false,
-    textEditorDirty: false,
-    textDrafts: {},
+    textParseErrors: {},
   });
 });
 
@@ -84,12 +83,14 @@ describe('configStore file operations', () => {
     store.setConfigFile('b.cfg', makeConfigFile());
     store.setActiveFile('a.cfg');
     store.setValidation('a.cfg', validResult);
+    store.setTextParseError('a.cfg', 'boom');
 
     useConfigStore.getState().removeConfigFile('a.cfg');
 
     const state = useConfigStore.getState();
     expect(state.configFiles['a.cfg']).toBeUndefined();
     expect(state.validation['a.cfg']).toBeUndefined();
+    expect(state.textParseErrors['a.cfg']).toBeUndefined();
     expect(state.activeFile).toBe('b.cfg');
     expect(state.isDirty).toBe(true);
   });
@@ -108,6 +109,7 @@ describe('configStore file operations', () => {
     b.includes = ['a.cfg'];
     store.setConfigFile('a.cfg', a);
     store.setConfigFile('b.cfg', b);
+    store.setTextParseError('a.cfg', 'boom');
 
     useConfigStore.getState().renameConfigFile('a.cfg', 'renamed.cfg');
 
@@ -115,6 +117,8 @@ describe('configStore file operations', () => {
     expect(state.configFiles['a.cfg']).toBeUndefined();
     expect(state.configFiles['renamed.cfg'].filename).toBe('renamed.cfg');
     expect(state.configFiles['b.cfg'].includes).toEqual(['renamed.cfg']);
+    expect(state.textParseErrors['a.cfg']).toBeUndefined();
+    expect(state.textParseErrors['renamed.cfg']).toBe('boom');
   });
 
   it('renameConfigFile refuses to overwrite an existing target', () => {
@@ -153,22 +157,26 @@ describe('configStore file operations', () => {
     const store = useConfigStore.getState();
     store.setConfigFile('a.cfg', makeConfigFile());
     store.markDirty();
+    store.setTextParseError('a.cfg', 'stale boom');
     useConfigStore.getState().loadConfigs({ 'new.cfg': makeConfigFile() });
     const state = useConfigStore.getState();
     expect(Object.keys(state.configFiles)).toEqual(['new.cfg']);
     expect(state.activeFile).toBe('new.cfg');
     expect(state.isDirty).toBe(false);
+    expect(state.textParseErrors).toEqual({});
   });
 
   it('clearAll resets everything', () => {
     const store = useConfigStore.getState();
     store.setConfigFile('a.cfg', makeConfigFile());
     store.markDirty();
+    store.setTextParseError('a.cfg', 'stale boom');
     useConfigStore.getState().clearAll();
     const state = useConfigStore.getState();
     expect(state.configFiles).toEqual({});
     expect(state.activeFile).toBe('printer.cfg');
     expect(state.isDirty).toBe(false);
+    expect(state.textParseErrors).toEqual({});
   });
 });
 
@@ -298,38 +306,24 @@ describe('configStore includes', () => {
   });
 });
 
-describe('configStore dirty / draft tracking', () => {
-  it('setTextDraft marks the editor dirty; clearTextDraft clears it', () => {
+describe('configStore dirty / text parse error tracking', () => {
+  it('setTextParseError records per-file errors; null clears them', () => {
     const store = useConfigStore.getState();
     store.setConfigFile('printer.cfg', makeConfigFile());
-    useConfigStore.getState().setTextDraft('printer.cfg', 'new text');
-    expect(useConfigStore.getState().textEditorDirty).toBe(true);
-    expect(useConfigStore.getState().textDrafts['printer.cfg']).toBe('new text');
+    useConfigStore.getState().setTextParseError('printer.cfg', 'boom');
+    expect(useConfigStore.getState().textParseErrors['printer.cfg']).toBe('boom');
 
-    useConfigStore.getState().clearTextDraft('printer.cfg');
-    expect(useConfigStore.getState().textEditorDirty).toBe(false);
-    expect(useConfigStore.getState().textDrafts['printer.cfg']).toBeUndefined();
+    useConfigStore.getState().setTextParseError('printer.cfg', null);
+    expect(useConfigStore.getState().textParseErrors['printer.cfg']).toBeUndefined();
   });
 
-  it('setTextDraft with identical text is a no-op', () => {
+  it('markClean clears the dirty flag', () => {
     const store = useConfigStore.getState();
     store.setConfigFile('printer.cfg', makeConfigFile());
-    useConfigStore.getState().setTextDraft('printer.cfg', 'same');
-    const before = useConfigStore.getState().textDrafts;
-    useConfigStore.getState().setTextDraft('printer.cfg', 'same');
-    expect(useConfigStore.getState().textDrafts).toBe(before);
-  });
-
-  it('markClean clears dirty flags and drafts', () => {
-    const store = useConfigStore.getState();
-    store.setConfigFile('printer.cfg', makeConfigFile());
-    store.setTextDraft('printer.cfg', 'draft');
     store.markDirty();
     useConfigStore.getState().markClean();
     const state = useConfigStore.getState();
     expect(state.isDirty).toBe(false);
-    expect(state.textEditorDirty).toBe(false);
-    expect(state.textDrafts).toEqual({});
   });
 });
 

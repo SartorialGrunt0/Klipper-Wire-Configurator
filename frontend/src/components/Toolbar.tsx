@@ -115,9 +115,8 @@ export default function Toolbar({
   const isNative = useNativeStore((s) => s.isNative);
   const hasConfig = Object.keys(useConfigStore((s) => s.configFiles)).length > 0;
   const isConfigDirty = useConfigStore((s) => s.isDirty);
-  const isTextDirty = useConfigStore((s) => s.textEditorDirty);
   const validation = useConfigStore((s) => s.validation);
-  const hasPendingChanges = isConfigDirty || isTextDirty;
+  const hasPendingChanges = isConfigDirty;
   const settingsButtonRef = useRef<HTMLButtonElement | null>(null);
   const settingsMenuRef = useRef<HTMLDivElement | null>(null);
 

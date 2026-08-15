@@ -117,11 +117,8 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     activeFile,
     validation,
     schemas,
-    textEditorDirty,
-    textDrafts,
     setConfigFile,
     setValidation,
-    clearTextDraft,
     markDirty,
   } = useConfigStore();
 
@@ -251,7 +248,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     }
     void updateAssistantDraftApplicableMessages(messages);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, messages, activeFile, configFiles, textDrafts]);
+  }, [open, messages, activeFile, configFiles]);
 
   // ── Settings Save ───────────────────────────────────────────────
   const handleSaveSettings = useCallback(() => {
@@ -310,23 +307,19 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   const getConfigText = useCallback(
     async (filename: string): Promise<string | null> => {
       if (!filename) return null;
-      const draftText = textDrafts[filename];
-      if (typeof draftText === 'string') return draftText;
       const config = configFiles[filename];
       if (!config) return null;
       return api.exportConfig(config);
     },
-    [configFiles, textDrafts],
+    [configFiles],
   );
 
   const getConfigContextLabel = useCallback(
     (filename: string): string =>
       filename === activeFile
-        ? (typeof textDrafts[activeFile] === 'string' && textEditorDirty
-          ? 'Active Klipper config draft with unapplied text-view changes'
-          : 'Active Klipper config draft')
+        ? 'Active Klipper config draft'
         : 'Loaded Klipper config file',
-    [activeFile, textDrafts, textEditorDirty],
+    [activeFile],
   );
 
   // ── Submit Message ──────────────────────────────────────────────

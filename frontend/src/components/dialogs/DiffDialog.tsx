@@ -15,7 +15,7 @@ async function exportConfigText(cf: ConfigFile): Promise<string> {
 export default function DiffDialog({ onClose }: DiffDialogProps) {
   // Snapshot store state once on mount — avoids re-running export on every Zustand update.
   const storeSnapshot = useRef(useConfigStore.getState());
-  const { configFiles, originalTexts, textDrafts, textEditorDirty } = storeSnapshot.current;
+  const { configFiles, originalTexts } = storeSnapshot.current;
   const filenames = Object.keys(configFiles);
 
   const [activeFile, setActiveFile] = useState(filenames[0] || '');
@@ -32,11 +32,7 @@ export default function DiffDialog({ onClose }: DiffDialogProps) {
         for (const filename of filenames) {
           const cf = configFiles[filename];
           if (!cf) continue;
-          if (textEditorDirty && filename in textDrafts) {
-            texts[filename] = textDrafts[filename];
-          } else {
-            texts[filename] = await exportConfigText(cf);
-          }
+          texts[filename] = await exportConfigText(cf);
           if (cancelled) return;
         }
         setCurrentTexts(texts);

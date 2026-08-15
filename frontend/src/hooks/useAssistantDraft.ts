@@ -116,10 +116,8 @@ export function useAssistantDraft() {
     configFiles,
     activeFile,
     validation,
-    textDrafts,
     setConfigFile,
     setValidation,
-    clearTextDraft,
     markDirty,
   } = useConfigStore();
   const loadedConfigFilenames = Object.keys(configFiles);
@@ -137,13 +135,11 @@ export function useAssistantDraft() {
   const getConfigText = useCallback(
     async (filename: string): Promise<string> => {
       if (!filename) return '';
-      const draftText = textDrafts[filename];
-      if (typeof draftText === 'string') return draftText;
       const config = configFiles[filename];
       if (!config) return '';
       return api.exportConfig(config);
     },
-    [configFiles, textDrafts],
+    [configFiles],
   );
 
   const flattenAssistantDraftChanges = useCallback(
@@ -381,24 +377,9 @@ export function useAssistantDraft() {
   // ── Validation ────────────────────────────────────────────────────
 
   const buildProjectConfigsForValidation = useCallback(async (): Promise<Record<string, ConfigFile>> => {
-    const currentProjectConfigs: Record<string, ConfigFile> = { ...configFiles };
-    const draftEntries = Object.entries(textDrafts);
-
-    if (draftEntries.length === 0) return currentProjectConfigs;
-
-    const draftResults = await Promise.all(
-      draftEntries.map(async ([filename, draftText]) => {
-        const result = await api.parseConfigText(draftText, filename);
-        return [filename, draftText, result] as const;
-      }),
-    );
-
-    draftResults.forEach(([filename, draftText, draftResult]) => {
-      currentProjectConfigs[filename] = { ...draftResult.config, raw_text: draftText };
-    });
-
-    return currentProjectConfigs;
-  }, [configFiles, textDrafts]);
+    // Text edits apply to the model live, so the store is always current.
+    return { ...configFiles };
+  }, [configFiles]);
 
   const runAssistantDraftValidation = useCallback(
     async (
@@ -644,14 +625,13 @@ export function useAssistantDraft() {
         setConfigFile(filename, updatedConfigs[filename]);
         setValidation(filename, updatedValidation[filename]);
       });
-      touchedFiles.forEach((filename) => clearTextDraft(filename));
       markDirty();
 
       setAssistantDraftPreview(null);
     } catch (err: unknown) {
       throw err; // Let caller handle the error
     }
-  }, [assistantDraftPreview, configFiles, validation, setConfigFile, setValidation, clearTextDraft, markDirty]);
+  }, [assistantDraftPreview, configFiles, validation, setConfigFile, setValidation, markDirty]);
 
   // ── Applicable Messages (for showing/hiding "Apply and Review Changes" buttons) ──
 

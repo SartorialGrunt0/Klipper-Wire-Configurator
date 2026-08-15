@@ -47,8 +47,7 @@ beforeEach(() => {
     selectedSection: null,
     originalTexts: {},
     isDirty: false,
-    textEditorDirty: false,
-    textDrafts: {},
+    textParseErrors: {},
   });
 });
 
