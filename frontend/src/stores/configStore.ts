@@ -200,12 +200,16 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const nextValidation = { ...s.validation };
       delete nextValidation[filename];
 
+      const nextTextParseErrors = { ...s.textParseErrors };
+      delete nextTextParseErrors[filename];
+
       const remainingFiles = Object.keys(nextConfigFiles);
 
       return {
         isDirty: true,
         configFiles: nextConfigFiles,
         validation: nextValidation,
+        textParseErrors: nextTextParseErrors,
         activeFile: s.activeFile === filename ? remainingFiles[0] || 'printer.cfg' : s.activeFile,
         selectedSection: s.activeFile === filename ? null : s.selectedSection,
       };
@@ -410,6 +414,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       selectedSection: null,
       originalTexts: {},
       isDirty: false,
+      textParseErrors: {},
     }),
 
   loadConfigs: (configs) =>
@@ -417,6 +422,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       configFiles: configs,
       activeFile: Object.keys(configs)[0] || 'printer.cfg',
       isDirty: false,
+      textParseErrors: {},
     }),
 
   setOriginalText: (filename, text) =>
@@ -442,6 +448,11 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         nextOriginals[newName] = nextOriginals[oldName];
         delete nextOriginals[oldName];
       }
+      const nextTextParseErrors = { ...s.textParseErrors };
+      if (nextTextParseErrors[oldName]) {
+        nextTextParseErrors[newName] = nextTextParseErrors[oldName];
+        delete nextTextParseErrors[oldName];
+      }
       // Update include directives in other files that reference the old name
       for (const [fn, cf] of Object.entries(next)) {
         if (cf.includes.includes(oldName)) {
@@ -454,6 +465,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         activeFile: s.activeFile === oldName ? newName : s.activeFile,
         validation: nextValidation,
         originalTexts: nextOriginals,
+        textParseErrors: nextTextParseErrors,
       };
     }),
 

@@ -83,12 +83,14 @@ describe('configStore file operations', () => {
     store.setConfigFile('b.cfg', makeConfigFile());
     store.setActiveFile('a.cfg');
     store.setValidation('a.cfg', validResult);
+    store.setTextParseError('a.cfg', 'boom');
 
     useConfigStore.getState().removeConfigFile('a.cfg');
 
     const state = useConfigStore.getState();
     expect(state.configFiles['a.cfg']).toBeUndefined();
     expect(state.validation['a.cfg']).toBeUndefined();
+    expect(state.textParseErrors['a.cfg']).toBeUndefined();
     expect(state.activeFile).toBe('b.cfg');
     expect(state.isDirty).toBe(true);
   });
@@ -107,6 +109,7 @@ describe('configStore file operations', () => {
     b.includes = ['a.cfg'];
     store.setConfigFile('a.cfg', a);
     store.setConfigFile('b.cfg', b);
+    store.setTextParseError('a.cfg', 'boom');
 
     useConfigStore.getState().renameConfigFile('a.cfg', 'renamed.cfg');
 
@@ -114,6 +117,8 @@ describe('configStore file operations', () => {
     expect(state.configFiles['a.cfg']).toBeUndefined();
     expect(state.configFiles['renamed.cfg'].filename).toBe('renamed.cfg');
     expect(state.configFiles['b.cfg'].includes).toEqual(['renamed.cfg']);
+    expect(state.textParseErrors['a.cfg']).toBeUndefined();
+    expect(state.textParseErrors['renamed.cfg']).toBe('boom');
   });
 
   it('renameConfigFile refuses to overwrite an existing target', () => {
@@ -152,22 +157,26 @@ describe('configStore file operations', () => {
     const store = useConfigStore.getState();
     store.setConfigFile('a.cfg', makeConfigFile());
     store.markDirty();
+    store.setTextParseError('a.cfg', 'stale boom');
     useConfigStore.getState().loadConfigs({ 'new.cfg': makeConfigFile() });
     const state = useConfigStore.getState();
     expect(Object.keys(state.configFiles)).toEqual(['new.cfg']);
     expect(state.activeFile).toBe('new.cfg');
     expect(state.isDirty).toBe(false);
+    expect(state.textParseErrors).toEqual({});
   });
 
   it('clearAll resets everything', () => {
     const store = useConfigStore.getState();
     store.setConfigFile('a.cfg', makeConfigFile());
     store.markDirty();
+    store.setTextParseError('a.cfg', 'stale boom');
     useConfigStore.getState().clearAll();
     const state = useConfigStore.getState();
     expect(state.configFiles).toEqual({});
     expect(state.activeFile).toBe('printer.cfg');
     expect(state.isDirty).toBe(false);
+    expect(state.textParseErrors).toEqual({});
   });
 });
 

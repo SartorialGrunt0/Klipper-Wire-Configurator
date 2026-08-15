@@ -85,6 +85,9 @@ function TextEditor() {
   // apply — the export effect must not echo it back into the textarea
   // (that would fight the user's typing and reset the cursor).
   const applyingRef = useRef(false);
+  // True while the textarea was (re)populated from the model's export — the
+  // live-sync parse of that text is an echo, not a user edit.
+  const exportingRef = useRef(false);
 
   // When config changes from OUTSIDE the text editor (undo/redo, import,
   // graph edits, file switch), re-export the model text into the textarea.
@@ -98,6 +101,7 @@ function TextEditor() {
       return;
     }
     const requestId = ++exportTextRef.current;
+    exportingRef.current = true;
     exportConfigText(config).then(({ text, usedFallback }) => {
       if (requestId === exportTextRef.current) {
         setEditText(text);
@@ -166,13 +170,28 @@ function TextEditor() {
           const { raw_text: _rawText, ...rest } = cf;
           return JSON.stringify(rest);
         };
+        const normalizeNewlines = (s: string) => s.replace(/\r\n?/g, '\n');
         // No-op echo (identical parse — e.g. native textarea undo returning to
-        // an already-applied state, or re-parse of unchanged text) → skip the
-        // store write, history push, and graph sync so we don't churn the undo
-        // stack or re-render the whole app.
-        if (currentConfig && comparable(currentConfig) === comparable(result.config)) {
+        // an already-applied state, or re-parse of text we just exported from
+        // the model) → skip the store write, history push, and graph sync so we
+        // don't churn the undo stack or re-render the whole app.
+        //
+        // A formatting-only edit (whitespace, blank lines) parses to the same
+        // structure — without distinguishing "exported text" from "user-typed
+        // text" it would be dropped here and silently vanish on save. The
+        // exportingRef marks text that came from the model; anything else with
+        // the same structure is a real user edit and is applied (raw_text
+        // updates so the edit survives). In offline fallback mode the
+        // re-serialized export normalizes formatting, so the echo is detected
+        // by structure alone (the banner already warns edits may normalize).
+        const structureSame = currentConfig && comparable(currentConfig) === comparable(result.config);
+        const textSame = currentConfig
+          && normalizeNewlines(currentConfig.raw_text ?? '') === normalizeNewlines(result.config.raw_text ?? '');
+        if (structureSame && (exportingRef.current || fallbackExportUsed || textSame)) {
+          exportingRef.current = false;
           return;
         }
+        exportingRef.current = false;
 
         applyingRef.current = true;
         useGraphStore.getState().pushHistory();
@@ -356,6 +375,7 @@ function TextEditor() {
   }, [activeFile, setActiveFile]);
 
   const handleTextChange = (newText: string) => {
+    exportingRef.current = false;
     setEditText(newText);
   };
 
