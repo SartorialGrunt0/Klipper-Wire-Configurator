@@ -813,8 +813,17 @@ export default function SettingsPanel() {
     const edgeData = edge?.data as Record<string, unknown> | undefined;
     if (edge && edgeData?.edgeType === 'communication') {
       const commType = (edgeData.commType as string) || 'usb';
-      // Find the target hardware node's MCU section for editing
-      const targetNode = nodes.find((n) => n.id === edge.target);
+      // Find the target hardware node's MCU section for editing. Comm edges
+      // connect SBC ↔ hardware and can be drawn in either direction, so the
+      // MCU to edit is ALWAYS the non-SBC endpoint (the SBC's host_mcu isn't
+      // the one carrying serial/canbus config for the peripheral).
+      const srcNode = nodes.find((n) => n.id === edge.source);
+      const srcData = srcNode?.data as Record<string, unknown> | undefined;
+      const tgtNode = nodes.find((n) => n.id === edge.target);
+      const tgtData = tgtNode?.data as Record<string, unknown> | undefined;
+      const srcIsSbc = srcData?.hardwareType === 'sbc';
+      const tgtIsSbc = tgtData?.hardwareType === 'sbc';
+      const targetNode = srcIsSbc && !tgtIsSbc ? tgtNode : srcNode;
       const targetData = targetNode?.data as Record<string, unknown> | undefined;
       const targetConfigFile = targetData?.configFile as string | undefined;
       const targetMcuName = (targetData?.mcuName as string) ?? '';
@@ -887,24 +896,6 @@ export default function SettingsPanel() {
                             addParam(targetConfigFile, mcuSection.full_header, {
                               key: 'canbus_interface', value: 'can0', is_commented_out: false, comment: '',
                             });
-                          }
-                        }
-                        // USB and UART share the serial field — the comm type is
-                        // inferred from the serial VALUE format, so switching the
-                        // label without rewriting the value leaves the config
-                        // disagreeing (and the next rebuild snaps back). Rewrite
-                        // the value to the selected transport's canonical format;
-                        // the user fine-tunes the exact path below (native mode
-                        // offers detected-device dropdowns).
-                        const serialParam = mcuSection.params.find((p) => p.key === 'serial');
-                        if (serialParam) {
-                          const val = serialParam.value;
-                          const isUsbPath = val.includes('/dev/serial/by-id/usb-') || val.includes('/tmp/klipper_host_mcu');
-                          const isTtyPath = /\/dev\/tty(S|AMA|ACM|USB)/.test(val);
-                          if (type === 'uart' && isUsbPath) {
-                            updateSectionParam(targetConfigFile, mcuSection.full_header, 'serial', '/dev/ttyACM0');
-                          } else if (type === 'usb' && isTtyPath) {
-                            updateSectionParam(targetConfigFile, mcuSection.full_header, 'serial', '/dev/serial/by-id/usb-klipper');
                           }
                         }
                       }

@@ -1106,7 +1106,7 @@ export default function App() {
             </ReactFlow>
           </div>
           <div className={showTextView ? 'h-full w-full' : 'hidden'}>
-            <TextEditor />
+            <TextEditor isActive={showTextView} />
           </div>
 
           {/* Add Menu Overlay */}

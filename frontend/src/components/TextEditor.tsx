@@ -37,7 +37,7 @@ interface ConfigSectionEntry {
   isCommented: boolean;
 }
 
-function TextEditor() {
+function TextEditor({ isActive = true }: { isActive?: boolean }) {
   const {
     configFiles,
     activeFile,
@@ -92,7 +92,12 @@ function TextEditor() {
 
   // When config changes from OUTSIDE the text editor (undo/redo, import,
   // graph edits, file switch), re-export the model text into the textarea.
+  // Only run while the text view is actually visible: the editor stays mounted
+  // (CSS-hidden) in graph view so viewport state survives toggling, but its
+  // effects must not fire there — a panel edit would otherwise be re-exported,
+  // re-parsed and synced back into the graph (commType snap-back, undo churn).
   useEffect(() => {
+    if (!isActive) return;
     if (applyingRef.current) {
       applyingRef.current = false;
       return;
@@ -109,7 +114,7 @@ function TextEditor() {
         markFallbackExport(activeFile, usedFallback);
       }
     });
-  }, [activeFile, config, exportConfigText, markFallbackExport]);
+  }, [isActive, activeFile, config, exportConfigText, markFallbackExport]);
 
   const [showSearch, setShowSearch] = useState(false);
   const [showFileSidebar, setShowFileSidebar] = useState(true);
@@ -156,6 +161,7 @@ function TextEditor() {
   // A request-id guard drops stale responses (older text resolving after
   // newer edits or a file switch).
   useEffect(() => {
+    if (!isActive) return;
     if (liveValidateTimerRef.current) clearTimeout(liveValidateTimerRef.current);
     const requestId = ++liveValidateRequestRef.current;
     liveValidateTimerRef.current = setTimeout(async () => {
@@ -214,7 +220,7 @@ function TextEditor() {
       if (liveValidateTimerRef.current) clearTimeout(liveValidateTimerRef.current);
       liveValidateRequestRef.current++;
     };
-  }, [activeFile, editText, markDirty, setConfigFile, setTextParseError, setValidation]);
+  }, [isActive, activeFile, editText, markDirty, setConfigFile, setTextParseError, setValidation]);
 
   // Collect inline issues from live validation of the current text
   const inlineIssues = useMemo((): TextIssue[] => {
