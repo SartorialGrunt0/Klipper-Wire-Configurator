@@ -34,7 +34,8 @@ function GroupNode({ data, selected, id }: NodeProps) {
   const isFeature = nodeData.isFeature;
   const children: GroupChildItem[] = nodeData.children || [];
   const isEmbedded = !!nodeData.parentHardwareId;
-  const isOrphan = !isEmbedded;
+  const isStandalone = !!(nodeData as Record<string, unknown>).isStandalone;
+  const isOrphan = !isEmbedded && !isStandalone;
   const validationStatus = (nodeData.validationStatus || 'valid') as ValidationStatus;
   const effectiveValidationStatus = isOrphan ? 'error' : validationStatus;
   const hasErrors = nodeData.hasErrors || isOrphan;

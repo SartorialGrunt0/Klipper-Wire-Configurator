@@ -1013,6 +1013,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
           configFile: resolvedFile,
           hasErrors: false,
           validationStatus: 'valid',
+          isStandalone: true,
         },
       };
       set((s) => ({ nodes: [...s.nodes, node as AppNode] }));
@@ -1103,6 +1104,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
           configFile: resolvedFile,
           hasErrors: false,
           validationStatus: 'valid',
+          isStandalone: true,
         },
       };
       set((s) => ({ nodes: [...s.nodes, node as AppNode] }));

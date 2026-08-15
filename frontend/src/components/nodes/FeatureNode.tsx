@@ -33,7 +33,8 @@ function FeatureNode({ data, selected, id }: NodeProps) {
   const color = FEATURE_COLORS[nodeData.sectionType] || FEATURE_COLORS.default;
   const isSuppressed = !!(nodeData as Record<string, unknown>).isSuppressed;
   const isEmbedded = !!(nodeData.parentId);
-  const isOrphan = !isEmbedded;
+  const isStandalone = !!(nodeData as Record<string, unknown>).isStandalone;
+  const isOrphan = !isEmbedded && !isStandalone;
   const validationStatus = (nodeData.validationStatus || 'valid') as ValidationStatus;
   const effectiveValidationStatus = isOrphan ? 'error' : validationStatus;
   const hasErrors = nodeData.hasErrors || isOrphan;

@@ -511,6 +511,22 @@ describe('graphStore auto-arrange', () => {
     useGraphStore.getState().autoArrange();
     expect(useGraphStore.getState().nodes).toHaveLength(0);
   });
+
+  it('standalone sub-component is flagged isStandalone, not orphan', () => {
+    useGraphStore.getState().addSubComponentNode(null as unknown as string, 'fan', 'Fan', 'fan', 'printer.cfg');
+    const node = useGraphStore.getState().nodes[0];
+    expect(node.type).toBe('subComponent');
+    expect((node.data as Record<string, unknown>).isStandalone).toBe(true);
+    expect((node.data as Record<string, unknown>).parentHardwareId).toBeNull();
+  });
+
+  it('standalone feature is flagged isStandalone, not orphan', () => {
+    useGraphStore.getState().addFeatureNode(null as unknown as string, 'gcode_macro', 'Macro', 'gcode_macro X', 'printer.cfg');
+    const node = useGraphStore.getState().nodes[0];
+    expect(node.type).toBe('feature');
+    expect((node.data as Record<string, unknown>).isStandalone).toBe(true);
+    expect((node.data as Record<string, unknown>).parentId).toBeNull();
+  });
 });
 
   it('removes the board sections but keeps the file when a virtual SBC references it', () => {

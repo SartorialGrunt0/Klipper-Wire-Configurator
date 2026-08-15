@@ -29,7 +29,8 @@ function SubComponentNode({ data, selected, id }: NodeProps) {
   const color = GROUP_COLORS[nodeData.componentGroup] || GROUP_COLORS.other;
   const isSuppressed = !!(nodeData as Record<string, unknown>).isSuppressed;
   const isEmbedded = !!nodeData.parentHardwareId;
-  const isOrphan = !isEmbedded;
+  const isStandalone = !!(nodeData as Record<string, unknown>).isStandalone;
+  const isOrphan = !isEmbedded && !isStandalone;
   const validationStatus = (nodeData.validationStatus || 'valid') as ValidationStatus;
   const effectiveValidationStatus = isOrphan ? 'error' : validationStatus;
   const hasErrors = nodeData.hasErrors || isOrphan;
