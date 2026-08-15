@@ -350,6 +350,35 @@ export default function App() {
         const { buildProjectGraph } = await import('./utils/graphBuilder');
         buildProjectGraph(allConfigs, graphStore, schemas, allValidations);
 
+        // Browser mode: restore saved layout from localStorage (if any)
+        try {
+          const saved = localStorage.getItem('kwc.graphLayout');
+          if (saved) {
+            const layout = JSON.parse(saved) as {
+              graphNodes?: Array<{ id: string; position: { x: number; y: number } }>;
+              graphEdges?: Array<{ id: string; data?: Record<string, unknown> }>;
+              macroDesigner?: MacroDesignerPersistedState;
+            };
+            if (layout.macroDesigner) {
+              useMacroDesignerStore.getState().hydratePersistedState(layout.macroDesigner);
+            }
+            if (layout.graphNodes) {
+              const positionMap = new Map(
+                layout.graphNodes.map((n) => [n.id, n.position]),
+              );
+              const currentNodes = useGraphStore.getState().nodes;
+              const updatedNodes = currentNodes.map((node) => {
+                const savedPos = positionMap.get(node.id);
+                if (savedPos) {
+                  return { ...node, position: savedPos } as import('./types/graph').AppNode;
+                }
+                return node;
+              });
+              graphStore.setNodes(updatedNodes);
+            }
+          }
+        } catch { /* malformed/absent layout — keep auto-arranged positions */ }
+
         configStore.markClean();
       } catch {
         // No saved configs — that's fine, start empty
@@ -357,20 +386,31 @@ export default function App() {
     })();
   }, []);
 
-  // Auto-save layout (debounced) in native mode
+  // Auto-save layout (debounced). Native mode persists via the backend;
+  // browser mode falls back to localStorage so arrangements survive refresh.
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     const isNative = useNativeStore.getState().isNative;
-    if (!isNative) return;
 
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(() => {
       if (nodes.length === 0) return;
-      api.saveNativeLayout({
-        graphNodes: nodes,
-        graphEdges: edges,
-        macroDesigner: useMacroDesignerStore.getState().exportPersistedState(),
-      }).catch(() => { /* ignore save errors */ });
+      const macroDesigner = useMacroDesignerStore.getState().exportPersistedState();
+      if (isNative) {
+        api.saveNativeLayout({
+          graphNodes: nodes,
+          graphEdges: edges,
+          macroDesigner,
+        }).catch(() => { /* ignore save errors */ });
+      } else {
+        try {
+          localStorage.setItem('kwc.graphLayout', JSON.stringify({
+            graphNodes: nodes.map((n) => ({ id: n.id, position: n.position })),
+            graphEdges: edges.map((e) => ({ id: e.id, data: e.data })),
+            macroDesigner,
+          }));
+        } catch { /* ignore quota / privacy-mode errors */ }
+      }
     }, 3000);
 
     return () => {
