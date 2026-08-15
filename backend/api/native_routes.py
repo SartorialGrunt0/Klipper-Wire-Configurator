@@ -218,6 +218,7 @@ async def read_config_files(data: dict):
 class ApplyRequest(BaseModel):
     config_path: str | None = None
     files: dict[str, str]  # filename → config text
+    deleted: list[str] = []  # filenames to remove from the config dir
 
 
 @router.post("/apply")
@@ -246,10 +247,24 @@ async def apply_config(data: ApplyRequest):
         except OSError as e:
             errors.append(f"{filename}: {e}")
 
-    if errors and not written:
+    removed = []
+    for filename in data.deleted:
+        if '..' in filename or filename.startswith('/'):
+            raise HTTPException(status_code=400, detail=f"Invalid filename: {filename}")
+        target = base / filename
+        try:
+            if target.is_file():
+                target.unlink()
+                removed.append(filename)
+        except PermissionError:
+            errors.append(f"Permission denied: {filename}")
+        except OSError as e:
+            errors.append(f"{filename}: {e}")
+
+    if errors and not written and not removed:
         raise HTTPException(status_code=500, detail="Failed to write files: " + "; ".join(errors))
 
-    result = {"status": "applied", "files": written, "config_path": config_path}
+    result = {"status": "applied", "files": written, "removed": removed, "config_path": config_path}
     if errors:
         result["warnings"] = errors
     return result

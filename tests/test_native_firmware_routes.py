@@ -12,6 +12,41 @@ from main import app  # noqa: E402
 client = TestClient(app)
 
 
+def test_native_apply_deletes_removed_files(monkeypatch, tmp_path):
+    """Deleting a file in the model must remove it from the Pi config dir."""
+    monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
+    monkeypatch.setattr(native_routes, 'load_settings', lambda: {})
+    monkeypatch.setattr(native_routes, 'get_default_config_path', lambda: str(tmp_path))
+    (tmp_path / 'printer.cfg').write_text('[printer]\nkinematics: cartesian\n', encoding='utf-8')
+    (tmp_path / 'toolhead_board.cfg').write_text('[mcu toolhead]\nserial: /dev/serial/by-id/x\n', encoding='utf-8')
+
+    response = client.post('/api/native/apply', json={
+        'files': {'printer.cfg': '[printer]\nkinematics: cartesian\n'},
+        'deleted': ['toolhead_board.cfg'],
+    })
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body['files'] == ['printer.cfg']
+    assert body['removed'] == ['toolhead_board.cfg']
+    assert (tmp_path / 'printer.cfg').exists()
+    assert not (tmp_path / 'toolhead_board.cfg').exists()
+
+
+def test_native_apply_rejects_traversal_in_deleted(monkeypatch, tmp_path):
+    monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
+    monkeypatch.setattr(native_routes, 'load_settings', lambda: {})
+    monkeypatch.setattr(native_routes, 'get_default_config_path', lambda: str(tmp_path))
+
+    response = client.post('/api/native/apply', json={
+        'files': {'printer.cfg': '[printer]\nkinematics: cartesian\n'},
+        'deleted': ['../evil.cfg'],
+    })
+
+    assert response.status_code == 400
+    assert not (tmp_path.parent / 'evil.cfg').exists()
+
+
 def test_klipper_firmware_state_returns_service_payload(monkeypatch):
     payload = {
         'available': True,

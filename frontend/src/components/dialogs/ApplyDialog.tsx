@@ -181,7 +181,11 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
   const isDirty = useConfigStore((s) => s.isDirty);
   const validation = useConfigStore((s) => s.validation);
   const saveButtonClass = getSaveButtonClass(isDirty, validation);
-  const filenames = Object.keys(configFiles);
+  // A file deleted since import is gone from configFiles but its original text
+  // survives in originalTexts — union both so deletions show up in the diff
+  // and are actually removed from disk on save.
+  const filenames = Array.from(new Set([...Object.keys(configFiles), ...Object.keys(originalTexts)]));
+  const deletedFilenames = filenames.filter((fn) => !(fn in configFiles) && fn in originalTexts);
 
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set(filenames));
   const [status, setStatus] = useState<'idle' | 'exporting' | 'applying' | 'success' | 'error'>('idle');
@@ -319,22 +323,26 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
         exportedFiles[fn] = text;
       }
 
+      // Files selected that exist in the model are written; files selected
+      // that were deleted from the model are removed from storage.
+      const deleted = files.filter((fn) => !(fn in configFiles));
+
       if (isLocalMode) {
         // Non-native mode: save to local config storage
         setStatus('applying');
-        setMessage(`Saving ${Object.keys(exportedFiles).length} files locally...`);
-        const result = await api.saveConfigsToLocal(exportedFiles);
+        setMessage(`Saving ${Object.keys(exportedFiles).length} file${Object.keys(exportedFiles).length !== 1 ? 's' : ''} locally...`);
+        const result = await api.saveConfigsToLocal(exportedFiles, deleted);
         setAppliedFiles(result.saved);
         setStatus('success');
-        setMessage(`Successfully saved ${result.saved.length} file${result.saved.length !== 1 ? 's' : ''} locally`);
+        setMessage(`Successfully saved ${result.saved.length} file${result.saved.length !== 1 ? 's' : ''} locally${result.removed.length ? `, removed ${result.removed.length} file${result.removed.length !== 1 ? 's' : ''}` : ''}`);
       } else {
         // Native mode: save to Pi config path
         setStatus('applying');
         setMessage(`Writing ${Object.keys(exportedFiles).length} files to ${configPath}...`);
-        const result = await api.applyNativeConfig(exportedFiles, configPath);
+        const result = await api.applyNativeConfig(exportedFiles, configPath, deleted);
         setAppliedFiles(result.files);
         setStatus('success');
-        setMessage(`Successfully saved ${result.files.length} file${result.files.length !== 1 ? 's' : ''} to ${result.config_path}`);
+        setMessage(`Successfully saved ${result.files.length} file${result.files.length !== 1 ? 's' : ''} to ${result.config_path}${result.removed.length ? `, removed ${result.removed.length} file${result.removed.length !== 1 ? 's' : ''}` : ''}`);
       }
 
       // Update originalTexts to match what was saved, so diff resets
@@ -342,6 +350,9 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
       for (const [fn, text] of Object.entries(exportedFiles)) {
         configStore.setOriginalText(fn, text);
       }
+      // Deleted files no longer have an original — drop them so the diff
+      // doesn't keep showing them as deleted forever.
+      configStore.removeOriginalTexts(deleted);
       configStore.markClean();
     } catch (err) {
       setStatus('error');
@@ -528,31 +539,37 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
                 </span>
               </div>
               <div className="space-y-1">
-                {filenames.map((fn) => (
-                  <label
-                    key={fn}
-                    className={`group flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer ${
-                      appliedFiles.includes(fn) ? 'bg-green-500/10' : 'hover:bg-[var(--color-bg-primary)]'
-                    }`}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={selectedFiles.has(fn)}
-                      onChange={() => toggleFile(fn)}
-                      disabled={status === 'applying' || status === 'success'}
-                      className="rounded"
-                    />
-                    <div className="kwc-marquee-shell flex-1 min-w-0">
-                      <div className="kwc-marquee-track">
-                        <span className="kwc-marquee-text text-xs font-mono text-[var(--color-text-primary)]">{fn}</span>
-                        <span aria-hidden="true" className="kwc-marquee-text text-xs font-mono text-[var(--color-text-primary)]">{fn}</span>
+                {filenames.map((fn) => {
+                  const isDeleted = fn in originalTexts && !(fn in configFiles);
+                  return (
+                    <label
+                      key={fn}
+                      className={`group flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer ${
+                        appliedFiles.includes(fn) ? 'bg-green-500/10' : 'hover:bg-[var(--color-bg-primary)]'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedFiles.has(fn)}
+                        onChange={() => toggleFile(fn)}
+                        disabled={status === 'applying' || status === 'success'}
+                        className="rounded"
+                      />
+                      <div className="kwc-marquee-shell flex-1 min-w-0">
+                        <div className="kwc-marquee-track">
+                          <span className="kwc-marquee-text text-xs font-mono text-[var(--color-text-primary)]">{fn}</span>
+                          <span aria-hidden="true" className="kwc-marquee-text text-xs font-mono text-[var(--color-text-primary)]">{fn}</span>
+                        </div>
                       </div>
-                    </div>
-                    {appliedFiles.includes(fn) && (
-                      <span className="w-11 shrink-0 text-right text-xs text-green-400">Saved</span>
-                    )}
-                  </label>
-                ))}
+                      {isDeleted && (
+                        <span className="shrink-0 text-[10px] font-semibold text-[var(--color-error)]">deleted</span>
+                      )}
+                      {appliedFiles.includes(fn) && (
+                        <span className="w-11 shrink-0 text-right text-xs text-green-400">Saved</span>
+                      )}
+                    </label>
+                  );
+                })}
               </div>
             </div>
           </div>
@@ -569,11 +586,14 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
                     const original = originalTexts[fn];
                     const current = currentTexts[fn];
                     const hasOriginal = fn in originalTexts;
+                    const isDeleted = hasOriginal && !(fn in configFiles);
 
                     let diffLines: DiffLine[] = [];
                     let hasChanges = false;
-                    if (hasOriginal && current !== undefined) {
-                      const patch = createTwoFilesPatch(fn, fn, original, current, 'saved', 'current', { context: 3 });
+                    if (hasOriginal && (current !== undefined || isDeleted)) {
+                      // Deleted files have no current text — diff against empty
+                      // so every original line shows as removed.
+                      const patch = createTwoFilesPatch(fn, fn, original, current ?? '', 'saved', isDeleted ? 'deleted' : 'current', { context: 3 });
                       diffLines = parsePatch(patch);
                       hasChanges = diffLines.some((l) => l.type === 'added' || l.type === 'removed');
                     }
@@ -582,15 +602,23 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
                       <div key={fn}>
                         <div className="flex items-center gap-2 mb-1">
                           <span className="text-xs font-semibold text-[var(--color-text-primary)]">{fn}</span>
+                          {isDeleted && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-error)]/20 text-[var(--color-error)]">deleted</span>
+                          )}
                           {!hasOriginal && (
                             <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-warning)]/20 text-[var(--color-warning)]">new file</span>
                           )}
-                          {hasOriginal && !hasChanges && (
+                          {hasOriginal && !isDeleted && !hasChanges && (
                             <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">unchanged</span>
                           )}
-                          {hasOriginal && hasChanges && (
+                          {hasOriginal && !isDeleted && hasChanges && (
                             <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-accent)]/20 text-[var(--color-accent)]">
                               {diffLines.filter((l) => l.type === 'added' || l.type === 'removed').length} lines changed
+                            </span>
+                          )}
+                          {isDeleted && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-error)]/20 text-[var(--color-error)]">
+                              {diffLines.filter((l) => l.type === 'removed').length} lines removed
                             </span>
                           )}
                         </div>

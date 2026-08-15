@@ -160,6 +160,7 @@ interface ConfigState {
 
   /* Original text tracking */
   setOriginalText: (filename: string, text: string) => void;
+  removeOriginalTexts: (filenames: string[]) => void;
 
   /* File operations */
   renameConfigFile: (oldName: string, newName: string) => void;
@@ -447,6 +448,14 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     set((s) => ({
       originalTexts: { ...s.originalTexts, [filename]: text },
     })),
+
+  removeOriginalTexts: (filenames) =>
+    set((s) => {
+      if (filenames.length === 0) return s;
+      const next = { ...s.originalTexts };
+      for (const fn of filenames) delete next[fn];
+      return { originalTexts: next };
+    }),
 
   renameConfigFile: (oldName, newName) =>
     set((s) => {
