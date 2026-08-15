@@ -938,7 +938,77 @@ export default function SettingsPanel() {
         </div>
       );
     }
-    // Config edge selected — nothing meaningful to show
+    // Config (trace) edge selected — show the include relation + delete
+    const configEdge = edges.find((e) => e.id === selectedEdgeId);
+    const configEdgeData = configEdge?.data as Record<string, unknown> | undefined;
+    if (configEdge && configEdgeData?.edgeType === 'configuration') {
+      const srcNode = nodes.find((n) => n.id === configEdge.source);
+      const tgtNode = nodes.find((n) => n.id === configEdge.target);
+      const srcFile = (srcNode?.data as Record<string, unknown> | undefined)?.configFile as string | undefined;
+      const tgtFile = (tgtNode?.data as Record<string, unknown> | undefined)?.configFile as string | undefined;
+      // Include direction: the primary file includes the non-primary one
+      const srcIsPrimary = !!(srcNode?.data as Record<string, unknown> | undefined)?.isPrimary || srcFile === 'printer.cfg';
+      const tgtIsPrimary = !!(tgtNode?.data as Record<string, unknown> | undefined)?.isPrimary || tgtFile === 'printer.cfg';
+      const includingFile = srcIsPrimary && !tgtIsPrimary ? srcFile : tgtFile;
+      const includedFile = srcIsPrimary && !tgtIsPrimary ? tgtFile : srcFile;
+      return (
+        <>{mcuNameDialog}
+        <div className="w-96 border-l border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] flex flex-col overflow-hidden">
+          <div className="p-3 border-b border-[var(--color-bg-tertiary)]">
+            <h2 className="text-sm font-semibold text-[var(--color-text-primary)]">Configuration Link</h2>
+            <p className="text-xs text-[var(--color-text-secondary)] mt-0.5">
+              Trace connection between hardware nodes
+            </p>
+          </div>
+          <div className="flex-1 overflow-y-auto p-3 space-y-3">
+            <div className="rounded-lg border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] p-3 space-y-2">
+              <div className="text-xs">
+                <span className="text-[var(--color-text-secondary)]">Source:</span>{' '}
+                <span className="font-mono text-[var(--color-text-primary)]">{srcNode?.data?.label as string ?? configEdge.source}</span>
+                <div className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">{srcFile || 'unknown file'}</div>
+              </div>
+              <div className="text-xs">
+                <span className="text-[var(--color-text-secondary)]">Target:</span>{' '}
+                <span className="font-mono text-[var(--color-text-primary)]">{tgtNode?.data?.label as string ?? configEdge.target}</span>
+                <div className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">{tgtFile || 'unknown file'}</div>
+              </div>
+              {includingFile && includedFile && includingFile !== includedFile && (
+                <div className="pt-2 border-t border-[var(--color-bg-tertiary)] text-xs">
+                  <span className="text-[var(--color-text-secondary)]">Include:</span>{' '}
+                  <span className="font-mono text-[var(--color-text-primary)]">{includedFile}</span>
+                  <span className="text-[var(--color-text-secondary)]"> added to </span>
+                  <span className="font-mono text-[var(--color-text-primary)]">{includingFile}</span>
+                </div>
+              )}
+            </div>
+            <button
+              onClick={() => {
+                // removeEdge pushes history itself; include removal is folded
+                // into the same undo step since it happens before the next push
+                useGraphStore.getState().removeEdge(configEdge.id);
+                // Comment out the include in the primary file (direction-agnostic)
+                if (srcFile && tgtFile && srcFile !== tgtFile) {
+                  const srcIsPrimary2 = !!(srcNode?.data as Record<string, unknown> | undefined)?.isPrimary || srcFile === 'printer.cfg';
+                  if (srcIsPrimary2) {
+                    useConfigStore.getState().removeInclude(srcFile, tgtFile);
+                  } else {
+                    useConfigStore.getState().removeInclude(tgtFile, srcFile);
+                  }
+                }
+                setSelectedEdge(null);
+              }}
+              className="w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg border border-red-500/30 text-red-400 hover:bg-red-500/10 transition-colors text-xs font-medium"
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                <path d="M3 6h10M6.5 6V4h3v2M5 6l.5 7h5L11 6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+              Delete link
+            </button>
+          </div>
+        </div>
+        </>
+      );
+    }
     return mcuNameDialog;
   }
 
