@@ -449,33 +449,36 @@ export default function App() {
   // Auto-save layout (debounced). Native mode persists via the backend;
   // browser mode falls back to localStorage so arrangements survive refresh.
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => {
+  const saveLayoutNow = useCallback((n: typeof nodes, e: typeof edges) => {
+    if (n.length === 0) return;
+    const macroDesigner = useMacroDesignerStore.getState().exportPersistedState();
     const isNative = useNativeStore.getState().isNative;
+    if (isNative) {
+      api.saveNativeLayout({
+        graphNodes: n,
+        graphEdges: e,
+        macroDesigner,
+      }).catch(() => { /* ignore save errors */ });
+    } else {
+      try {
+        localStorage.setItem('kwc.graphLayout', JSON.stringify({
+          graphNodes: n.map((node) => ({ id: node.id, position: node.position })),
+          graphEdges: e.map((edge) => ({
+            id: edge.id,
+            data: edge.data,
+            sourceHandle: edge.sourceHandle ?? undefined,
+            targetHandle: edge.targetHandle ?? undefined,
+          })),
+          macroDesigner,
+        }));
+      } catch { /* ignore quota / privacy-mode errors */ }
+    }
+  }, []);
 
+  useEffect(() => {
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(() => {
-      if (nodes.length === 0) return;
-      const macroDesigner = useMacroDesignerStore.getState().exportPersistedState();
-      if (isNative) {
-        api.saveNativeLayout({
-          graphNodes: nodes,
-          graphEdges: edges,
-          macroDesigner,
-        }).catch(() => { /* ignore save errors */ });
-      } else {
-        try {
-          localStorage.setItem('kwc.graphLayout', JSON.stringify({
-            graphNodes: nodes.map((n) => ({ id: n.id, position: n.position })),
-            graphEdges: edges.map((e) => ({
-              id: e.id,
-              data: e.data,
-              sourceHandle: e.sourceHandle ?? undefined,
-              targetHandle: e.targetHandle ?? undefined,
-            })),
-            macroDesigner,
-          }));
-        } catch { /* ignore quota / privacy-mode errors */ }
-      }
+      saveLayoutNow(nodes, edges);
     }, 3000);
 
     return () => {
@@ -488,7 +491,27 @@ export default function App() {
     macroDesignerNoGoZones,
     macroDesignerDockPosition,
     macroDesignerRotation,
+    saveLayoutNow,
   ]);
+
+  // Flush any pending layout save when the page is being unloaded (refresh,
+  // close, navigate away). The debounced save races a quick refresh — the
+  // last card move / trace bend never reaches disk, which is why positions
+  // and pathing only "stuck" when a config save happened to give the timer
+  // time to fire. The browser's synchronous path covers unload for
+  // localStorage; the backend POST is fire-and-forget but usually completes.
+  useEffect(() => {
+    const onUnload = () => {
+      const graph = useGraphStore.getState();
+      saveLayoutNow(graph.nodes, graph.edges);
+    };
+    window.addEventListener('pagehide', onUnload);
+    window.addEventListener('beforeunload', onUnload);
+    return () => {
+      window.removeEventListener('pagehide', onUnload);
+      window.removeEventListener('beforeunload', onUnload);
+    };
+  }, [saveLayoutNow]);
 
   useEffect(() => {
     const sectionStatuses = new Map<string, ValidationStatus>();
