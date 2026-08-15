@@ -11,7 +11,7 @@ import {
 import type { AppNode, AppEdge, GroupNodeData } from '../types/graph';
 import type { HardwareType, CommunicationType, ConfigFile, ConfigSection } from '../types/config';
 import { useConfigStore } from './configStore';
-import { updateSectionPins } from '../utils/pinUtils';
+import { updateSectionPins, updateAllSectionPins } from '../utils/pinUtils';
 import { buildUniqueSectionDraft } from '../utils/sectionNaming';
 
 const STEPPER_SECTION_RE = /^stepper_[a-z]+(\d+)?$/;
@@ -706,11 +706,14 @@ export const useGraphStore = create<GraphState>((set, get) => ({
           fileCounter++;
         }
 
-        // Copy sections from source config, renaming MCU section
+        // Copy sections from source config, renaming MCU section. Drop
+        // [include] (a clone shouldn't re-include the source's children) and
+        // [printer] (unique to the primary board — duplicating it into a
+        // non-primary file is invalid).
         const srcCf = configStore.configFiles[srcConfigFile];
         if (srcCf) {
           const newSections = srcCf.sections
-            .filter((s) => s.section_type !== 'include')
+            .filter((s) => s.section_type !== 'include' && s.section_type !== 'printer')
             .map((s) => {
               if (s.section_type === 'mcu') {
                 return {
@@ -726,10 +729,15 @@ export const useGraphStore = create<GraphState>((set, get) => ({
               };
             });
 
+          // Rewrite pin prefixes (step_pin: mainboard:PA0 → mainboard_2:PA0)
+          // so the clone references the NEW mcu, not a stale pointer to the
+          // source board. Mirrors reparentNode's MCU-context change.
+          const finalSections = updateAllSectionPins(newSections, srcMcuName, newMcuName, configStore.schemas);
+
           // Create the new config file
           configStore.updateConfigFile(newConfigFile, {
             filename: newConfigFile,
-            sections: newSections,
+            sections: finalSections,
             includes: [],
             header_comments: [...srcCf.header_comments],
           });

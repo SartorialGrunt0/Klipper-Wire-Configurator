@@ -124,6 +124,62 @@ describe('graphStore node operations', () => {
     useGraphStore.getState().duplicateNode('missing');
     expect(useGraphStore.getState().nodes).toHaveLength(0);
   });
+
+  it('duplicateNode hardware rewrites pin prefixes and drops printer/include sections', () => {
+    // Source board: mcu mainboard + stepper_x with a prefixed pin + printer + include
+    useConfigStore.getState().setConfigFile('mainboard.cfg', {
+      filename: 'mainboard.cfg',
+      sections: [
+        {
+          section_type: 'mcu', section_name: 'mainboard', full_header: 'mcu mainboard',
+          line_number: 1, params: [{ key: 'serial', value: '/dev/ttyACM0', is_commented_out: false, comment: '', separator: ':' }],
+          header_comments: [], trailing_comments: [], is_commented_out: false,
+        },
+        {
+          section_type: 'stepper_x', section_name: '', full_header: 'stepper_x',
+          line_number: 2, params: [{ key: 'step_pin', value: 'mainboard:PA0', is_commented_out: false, comment: '', separator: ':' }],
+          header_comments: [], trailing_comments: [], is_commented_out: false,
+        },
+        {
+          section_type: 'printer', section_name: '', full_header: 'printer',
+          line_number: 3, params: [], header_comments: [], trailing_comments: [], is_commented_out: false,
+        },
+        {
+          section_type: 'include', section_name: '', full_header: 'include macros.cfg',
+          line_number: 4, params: [], header_comments: [], trailing_comments: [], is_commented_out: false,
+        },
+      ],
+      includes: ['macros.cfg'],
+      header_comments: [],
+      raw_text: '',
+    });
+    useGraphStore.getState().addNode(makeHwNode('hw1', { mcuName: 'mainboard', configFile: 'mainboard.cfg' }));
+
+    useGraphStore.getState().duplicateNode('hw1');
+
+    const state = useGraphStore.getState();
+    const dup = state.nodes.find((n) => n.id !== 'hw1')!;
+    const dupData = dup.data as Record<string, unknown>;
+    const newFile = dupData.configFile as string;
+    const newMcu = dupData.mcuName as string;
+
+    // New MCU name is unique and the clone's file exists
+    expect(newMcu).toBe('mainboard_2');
+    const newCf = useConfigStore.getState().configFiles[newFile];
+    expect(newCf).toBeDefined();
+
+    const mcuSec = newCf.sections.find((s) => s.section_type === 'mcu');
+    expect(mcuSec?.full_header).toBe('mcu mainboard_2');
+
+    // Pin prefix rewritten to the NEW mcu name — no stale mainboard: refs
+    const stepper = newCf.sections.find((s) => s.full_header === 'stepper_x');
+    expect(stepper?.params[0].value).toBe('mainboard_2:PA0');
+
+    // [printer] must NOT be duplicated into the clone file
+    expect(newCf.sections.some((s) => s.section_type === 'printer')).toBe(false);
+    // [include] sections are deliberately dropped
+    expect(newCf.sections.some((s) => s.section_type === 'include')).toBe(false);
+  });
 });
 
 describe('graphStore edge operations', () => {
