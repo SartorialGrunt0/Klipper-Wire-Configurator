@@ -1079,7 +1079,7 @@ export default function SettingsPanel() {
       const parentNode = parentId ? nodes.find((n) => n.id === parentId) : null;
       return (
         <>{mcuNameDialog}
-        <div className="w-80 border-l border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] flex flex-col overflow-hidden">
+        <div className="w-96 border-l border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] flex flex-col overflow-hidden">
           {parentNode && (
             <button
               onClick={() => { setSelectedNode(parentId!); setSelectedSection(null); }}
@@ -1119,7 +1119,7 @@ export default function SettingsPanel() {
     }
     return (
       <>{mcuNameDialog}
-      <div className="w-80 border-l border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] p-4">
+      <div className="w-96 border-l border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] p-4">
         <p className="text-sm text-[var(--color-text-secondary)]">
           Select a component to edit its settings.
         </p>
