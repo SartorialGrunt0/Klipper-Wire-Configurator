@@ -336,6 +336,36 @@ describe('graphStore bulk + clear', () => {
     expect(restored.nodes).toHaveLength(1);
     expect(useConfigStore.getState().configFiles['printer.cfg'].sections).toHaveLength(1);
   });
+
+  it('Delete-key cascade (edges then nodes) restores edges on a single undo', () => {
+    // ReactFlow's deleteElements fires edge removes BEFORE node removes in the
+    // same synchronous batch. Both must collapse into ONE history entry so a
+    // single Ctrl+Z restores the node AND its connection lines.
+    // Drain any pre-existing history FIRST (adds don't push history, but
+    // earlier tests' removals do — undoing those would wipe our fixtures).
+    while (useGraphStore.getState().canUndo) useGraphStore.getState().undo();
+
+    useGraphStore.getState().addNode(makeHwNode('hw1', { configFile: 'a.cfg' }));
+    useGraphStore.getState().addNode(makeHwNode('hw2', { configFile: 'b.cfg' }));
+    useGraphStore.getState().addEdge(makeEdge('e1', 'hw1', 'hw2'));
+    useGraphStore.getState().addEdge(makeEdge('e2', 'hw1', 'hw1'));
+
+    // Simulate deleteElements order: edge remove changes first, then node removes
+    useGraphStore.getState().onEdgesChange([{ type: 'remove', id: 'e1' }, { type: 'remove', id: 'e2' }]);
+    useGraphStore.getState().onNodesChange([{ type: 'remove', id: 'hw1' }]);
+
+    const state = useGraphStore.getState();
+    expect(state.nodes.map((n) => n.id)).toEqual(['hw2']);
+    expect(state.edges).toHaveLength(0);
+    expect(state.canUndo).toBe(true);
+
+    // ONE undo must restore hw1 AND both edges (the edge push captured the
+    // full pre-delete state; the node push was deduped)
+    state.undo();
+    const restored = useGraphStore.getState();
+    expect(restored.nodes.map((n) => n.id).sort()).toEqual(['hw1', 'hw2']);
+    expect(restored.edges.map((e) => e.id).sort()).toEqual(['e1', 'e2']);
+  });
 });
 
 describe('graphStore undo/redo', () => {

@@ -1,4 +1,5 @@
-import { memo, useCallback, useState } from 'react';
+import { memo, useCallback, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useGraphStore } from '../../stores/graphStore';
 
 interface NodeActionsProps {
@@ -12,12 +13,18 @@ interface NodeActionsProps {
  * them silently is a footgun (Pattern 9e), so they confirm inline. Single-
  * section tiles delete directly. HardwareNode passes onDeleteRequested and
  * renders its own richer dialog (config file deletion).
+ *
+ * The confirm popover is portaled to document.body: child cards render at
+ * z-index 200–300 inside ReactFlow's stacking context, so an in-tree popover
+ * would appear behind them.
  */
 const MULTI_SECTION_TYPES = new Set(['group', 'customGroup']);
+const CONFIRM_Z_INDEX = 1000;
 
 function NodeActions({ nodeId, color, onDeleteRequested }: NodeActionsProps) {
   const { removeNode, duplicateNode, nodes } = useGraphStore();
   const [showConfirm, setShowConfirm] = useState(false);
+  const deleteButtonRef = useRef<HTMLButtonElement | null>(null);
 
   const nodeType = nodes.find((n) => n.id === nodeId)?.type;
 
@@ -45,8 +52,14 @@ function NodeActions({ nodeId, color, onDeleteRequested }: NodeActionsProps) {
     removeNode(nodeId);
   }, [nodeId, removeNode]);
 
+  // Position the portaled popover under the delete button's bottom-right corner
+  const rect = deleteButtonRef.current?.getBoundingClientRect();
+  const confirmStyle = rect
+    ? { top: rect.bottom + 6, left: Math.max(8, rect.right - 220), width: 220, zIndex: CONFIRM_Z_INDEX }
+    : { top: -9999, left: -9999, width: 220, zIndex: CONFIRM_Z_INDEX };
+
   return (
-    <div className="flex items-center gap-0.5 ml-auto shrink-0 relative">
+    <div className="flex items-center gap-0.5 ml-auto shrink-0">
       <button
         onClick={handleCopy}
         title="Duplicate"
@@ -59,6 +72,7 @@ function NodeActions({ nodeId, color, onDeleteRequested }: NodeActionsProps) {
         </svg>
       </button>
       <button
+        ref={deleteButtonRef}
         onClick={handleDelete}
         title="Delete"
         className="flex items-center justify-center w-5 h-5 rounded hover:bg-red-500/20 transition-colors text-red-400"
@@ -68,9 +82,10 @@ function NodeActions({ nodeId, color, onDeleteRequested }: NodeActionsProps) {
         </svg>
       </button>
 
-      {showConfirm && (
+      {showConfirm && createPortal(
         <div
-          className="absolute right-0 top-full mt-1 z-50 w-52 rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] p-3 shadow-2xl"
+          className="fixed rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] p-3 shadow-2xl"
+          style={confirmStyle}
           onClick={(event) => event.stopPropagation()}
         >
           <p className="text-[11px] leading-5 text-[var(--color-text-primary)]">
@@ -90,7 +105,8 @@ function NodeActions({ nodeId, color, onDeleteRequested }: NodeActionsProps) {
               Delete
             </button>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

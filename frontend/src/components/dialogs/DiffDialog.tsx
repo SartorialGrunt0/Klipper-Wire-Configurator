@@ -16,7 +16,9 @@ export default function DiffDialog({ onClose }: DiffDialogProps) {
   // Snapshot store state once on mount — avoids re-running export on every Zustand update.
   const storeSnapshot = useRef(useConfigStore.getState());
   const { configFiles, originalTexts } = storeSnapshot.current;
-  const filenames = Object.keys(configFiles);
+  // A file deleted since import is gone from configFiles but its original text
+  // survives in originalTexts — include it so deletions show up in the diff.
+  const filenames = Array.from(new Set([...Object.keys(configFiles), ...Object.keys(originalTexts)]));
 
   const [activeFile, setActiveFile] = useState(filenames[0] || '');
   const [currentTexts, setCurrentTexts] = useState<Record<string, string>>({});
@@ -78,15 +80,22 @@ export default function DiffDialog({ onClose }: DiffDialogProps) {
             {filenames.map((fn) => {
               const hasCurrent = fn in currentTexts;
               const hasOrig = fn in originalTexts;
-              let badge: 'changed' | 'unchanged' | 'new' | 'loading' = 'loading';
+              const isDeleted = hasOrig && !hasCurrent;
+              let badge: 'changed' | 'unchanged' | 'new' | 'deleted' | 'loading' = 'loading';
               let changeCount = 0;
-              if (!loading && hasCurrent) {
-                if (!hasOrig) {
-                  badge = 'new';
-                } else {
-                  const p = createConfigPatch(fn, originalTexts[fn] || '', currentTexts[fn] || '', '', '', 0);
+              if (!loading) {
+                if (isDeleted) {
+                  badge = 'deleted';
+                  const p = createConfigPatch(fn, originalTexts[fn] || '', '', '', '', 0);
                   changeCount = countChangedLines(p);
-                  badge = changeCount > 0 ? 'changed' : 'unchanged';
+                } else if (hasCurrent) {
+                  if (!hasOrig) {
+                    badge = 'new';
+                  } else {
+                    const p = createConfigPatch(fn, originalTexts[fn] || '', currentTexts[fn] || '', '', '', 0);
+                    changeCount = countChangedLines(p);
+                    badge = changeCount > 0 ? 'changed' : 'unchanged';
+                  }
                 }
               }
               return (
@@ -107,6 +116,11 @@ export default function DiffDialog({ onClose }: DiffDialogProps) {
                     {badge === 'changed' && (
                       <span className="text-[10px] font-semibold text-[var(--color-accent)]">
                         {changeCount}
+                      </span>
+                    )}
+                    {badge === 'deleted' && (
+                      <span className="text-[10px] font-semibold text-[var(--color-error)]">
+                        deleted
                       </span>
                     )}
                     {badge === 'unchanged' && (

@@ -446,6 +446,11 @@ function cleanupRemovedNodeConfig(
   }
 }
 
+/** Module-level flag: deleteElements fires edge removes before node removes in
+ *  the same batch. Set while that batch is in flight so onNodesChange skips its
+ *  duplicate history push (the edge push already captured the full state). */
+let edgeRemoveBatchPending = false;
+
 export const useGraphStore = create<GraphState>((set, get) => ({
   nodes: [],
   edges: [],
@@ -460,9 +465,19 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     // as removeNode so the section is deleted from the config model (not just
     // the graph) and the action is undoable — otherwise the section
     // resurrects on the next syncGraphWithConfig and Ctrl+Z does nothing.
+    //
+    // deleteElements fires edge removes BEFORE node removes (same batch), and
+    // onEdgesChange already pushed a full history snapshot that includes the
+    // edges. Pushing again here would snapshot the POST-edge-removal state,
+    // so Ctrl+Z would restore the node but not its connection lines. Skip the
+    // duplicate push when an edge-remove batch is pending; trash-can deletes
+    // (removeNode) are unaffected (single push).
     const removes = changes.filter((c) => c.type === 'remove');
     if (removes.length > 0) {
-      get().pushHistory();
+      if (!edgeRemoveBatchPending) {
+        get().pushHistory();
+      }
+      edgeRemoveBatchPending = false;
       const configStore = useConfigStore.getState();
       const nodesSnapshot = get().nodes;
       for (const change of removes) {
@@ -480,6 +495,13 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     // Clean up includes for removed configuration edges between hardware nodes
     const removes = changes.filter((c) => c.type === 'remove');
     if (removes.length > 0) {
+      // Mark this batch so onNodesChange (fired later by deleteElements) knows
+      // the history push already captured the full pre-delete state. Cleared
+      // on a microtask: deleteElements fires edge+node triggers synchronously,
+      // so the flag is only visible to that same batch — a standalone edge
+      // delete (no node changes follow) must not leak the flag forward.
+      edgeRemoveBatchPending = true;
+      queueMicrotask(() => { edgeRemoveBatchPending = false; });
       get().pushHistory();
       const { nodes, edges } = get();
       removes.forEach((c) => {
