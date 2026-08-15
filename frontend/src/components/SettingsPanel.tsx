@@ -8,6 +8,7 @@ import { applyBoardTypeMarkerToMcuSections } from '../utils/boardTypeMarker';
 import { updateAllSectionPins } from '../utils/pinUtils';
 import { buildUniqueSectionDraft } from '../utils/sectionNaming';
 import { getValidationStatusColor } from '../utils/validationStatus';
+import { resolveSection } from '../utils/sectionResolver';
 import { acknowledgeWarning } from '../services/api';
 import WarningBadge from './nodes/WarningBadge';
 import McuNameDialog from './dialogs/McuNameDialog';
@@ -92,6 +93,8 @@ function isAllowedSharedPin(users: PinUse[]): boolean {
 export default function SettingsPanel() {
   const {
     selectedSection,
+    selectedSectionFile,
+    selectedSectionLine,
     setSelectedSection,
     configFiles,
     activeFile,
@@ -138,6 +141,11 @@ export default function SettingsPanel() {
     return typeof data?.sectionLineNumber === 'number' ? data.sectionLineNumber as number : null;
   }, [selectedNode]);
 
+  // Prefer the line carried with the section selection (sidebar rows carry
+  // the exact (file, line) of the section they open); fall back to the
+  // selected node's line for direct node clicks.
+  const effectiveSectionLineNumber = selectedSectionLine ?? nodeSectionLineNumber;
+
   // Resolve the config file this node belongs to
   const nodeConfigFile = useMemo(() => {
     if (!selectedNode) return null;
@@ -157,21 +165,8 @@ export default function SettingsPanel() {
 
   const resolvedSectionInfo = useMemo(() => {
     if (!sectionHeader) return null;
-    // If we know the config file, look there first
-    if (nodeConfigFile) {
-      const cf = configFiles[nodeConfigFile];
-      if (cf) {
-        const found = cf.sections.find((s) => s.full_header === sectionHeader && (nodeSectionLineNumber == null || nodeSectionLineNumber === 0 || s.line_number === nodeSectionLineNumber));
-        if (found) return { section: found, filename: nodeConfigFile };
-      }
-    }
-    // Fallback: search across all config files
-    for (const [filename, cf] of Object.entries(configFiles)) {
-      const found = cf.sections.find((s) => s.full_header === sectionHeader && (nodeSectionLineNumber == null || nodeSectionLineNumber === 0 || s.line_number === nodeSectionLineNumber));
-      if (found) return { section: found, filename };
-    }
-    return null;
-  }, [sectionHeader, nodeConfigFile, configFiles, nodeSectionLineNumber]);
+    return resolveSection(configFiles, sectionHeader, selectedSectionFile, selectedSectionLine);
+  }, [sectionHeader, selectedSectionFile, selectedSectionLine, configFiles]);
 
   const section = resolvedSectionInfo?.section || null;
   const sectionConfigFile = resolvedSectionInfo?.filename || null;
@@ -266,9 +261,9 @@ export default function SettingsPanel() {
   const handleParamChange = useCallback(
     (key: string, value: string) => {
       if (!sectionHeader) return;
-      updateSectionParam(resolveFilename(), sectionHeader, key, value, nodeSectionLineNumber ?? undefined);
+      updateSectionParam(resolveFilename(), sectionHeader, key, value, effectiveSectionLineNumber ?? undefined);
     },
-    [sectionHeader, resolveFilename, updateSectionParam, nodeSectionLineNumber],
+    [sectionHeader, resolveFilename, updateSectionParam, effectiveSectionLineNumber],
   );
 
   const handleParamCommit = useCallback(() => {
@@ -284,17 +279,17 @@ export default function SettingsPanel() {
         value: paramSchema.default || '',
         comment: '',
         is_commented_out: false,
-      }, nodeSectionLineNumber ?? undefined);
+      }, effectiveSectionLineNumber ?? undefined);
     },
-    [sectionHeader, resolveFilename, addParam, nodeSectionLineNumber],
+    [sectionHeader, resolveFilename, addParam, effectiveSectionLineNumber],
   );
 
   const handleRemoveParam = useCallback(
     (key: string) => {
       if (!sectionHeader) return;
-      removeParam(resolveFilename(), sectionHeader, key, nodeSectionLineNumber ?? undefined);
+      removeParam(resolveFilename(), sectionHeader, key, effectiveSectionLineNumber ?? undefined);
     },
-    [sectionHeader, resolveFilename, removeParam, nodeSectionLineNumber],
+    [sectionHeader, resolveFilename, removeParam, effectiveSectionLineNumber],
   );
 
   // For hardware nodes: show overview with add buttons
@@ -727,7 +722,7 @@ export default function SettingsPanel() {
     if (!sectionHeader) return;
     try {
       const filename = sectionConfigFile || Object.entries(configFiles).find(([_, cf]) =>
-        cf.sections.some((s) => s.full_header === sectionHeader && (nodeSectionLineNumber == null || nodeSectionLineNumber === 0 || s.line_number === nodeSectionLineNumber))
+        cf.sections.some((s) => s.full_header === sectionHeader && (effectiveSectionLineNumber == null || effectiveSectionLineNumber === 0 || s.line_number === effectiveSectionLineNumber))
       )?.[0] || activeFile;
       const currentConfig = configFiles[filename];
       if (!currentConfig) return;
@@ -738,7 +733,7 @@ export default function SettingsPanel() {
 
       const targetIndex = currentConfig.sections.findIndex((s) =>
         s.full_header === sectionHeader
-        && (nodeSectionLineNumber == null || nodeSectionLineNumber === 0 || s.line_number === nodeSectionLineNumber),
+        && (effectiveSectionLineNumber == null || effectiveSectionLineNumber === 0 || s.line_number === effectiveSectionLineNumber),
       );
       if (targetIndex === -1) return;
 
@@ -795,14 +790,14 @@ export default function SettingsPanel() {
         }
       }
 
-      setSelectedSection(nextSection.full_header);
+      setSelectedSection(nextSection.full_header, filename ?? null, nextSection.line_number ?? null);
       setSectionEditText(sectionToText(nextSection));
       setSectionTextDirty(false);
       void revalidateFile(filename);
     } catch (err) {
       console.error('Parse error:', err);
     }
-  }, [sectionEditText, activeFile, sectionHeader, sectionConfigFile, configFiles, nodeSectionLineNumber, updateConfigFile, selectedNodeId, selectedNode, selectedSection, schemas, updateNodeData, setSelectedSection, revalidateFile]);
+  }, [sectionEditText, activeFile, sectionHeader, sectionConfigFile, configFiles, effectiveSectionLineNumber, updateConfigFile, selectedNodeId, selectedNode, selectedSection, schemas, updateNodeData, setSelectedSection, revalidateFile]);
 
   const handleAcknowledgeWarning = useCallback(async () => {
     if (!section || !sectionConfigFile) return;
@@ -969,7 +964,7 @@ export default function SettingsPanel() {
         setAddingType={setAddingType}
         onAddSubComponent={handleAddSubComponent}
         onAddFeature={handleAddFeature}
-        onSelectSection={(header: string) => setSelectedSection(header)}
+        onSelectSection={(header: string, cf?: string | null, ln?: number | null) => setSelectedSection(header, cf ?? null, ln ?? null)}
         onSelectNode={(nodeId: string) => { setSelectedNode(nodeId); setSelectedSection(null); }}
         onOpenCommunication={() => {
           if (!selectedNodeId) return;
@@ -985,7 +980,7 @@ export default function SettingsPanel() {
           }
           const mcuHeader = hwData?.mcuName ? `mcu ${hwData.mcuName}` : 'mcu';
           setSelectedEdge(null);
-          setSelectedSection(mcuHeader);
+          setSelectedSection(mcuHeader, hwData?.configFile ?? null, null);
         }}
         onTogglePrimary={handleTogglePrimary}
         onToggleMcu={handleToggleMcu}
@@ -1017,7 +1012,7 @@ export default function SettingsPanel() {
     // GroupNode selected — show its children for editing
     if (selectedNode?.type === 'group') {
       const groupData = selectedNode.data as Record<string, unknown>;
-      const children = (groupData.children as Array<{ label: string; sectionHeader: string; params?: Array<{ key: string; value: string }>; validationStatus?: ValidationStatus }>) || [];
+      const children = (groupData.children as Array<{ label: string; sectionHeader: string; configFile?: string; sectionLineNumber?: number; params?: Array<{ key: string; value: string }>; validationStatus?: ValidationStatus }>) || [];
       const groupLabel = groupData.label as string;
       const parentId = groupData.parentHardwareId as string | undefined;
       const parentNode = parentId ? nodes.find((n) => n.id === parentId) : null;
@@ -1043,7 +1038,7 @@ export default function SettingsPanel() {
             {children.map((child, idx) => (
               <button
                 key={`${child.sectionHeader}__${idx}`}
-                onClick={() => setSelectedSection(child.sectionHeader)}
+                onClick={() => setSelectedSection(child.sectionHeader, child.configFile ?? null, child.sectionLineNumber ?? null)}
                 className="flex items-center justify-between w-full px-2 py-1.5 rounded-lg text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors group"
               >
                 <span className="flex items-center gap-2 min-w-0">
@@ -1658,7 +1653,7 @@ function ChildNodesList({
   title,
 }: {
   childNodes: AppNode[];
-  onSelectSection: (header: string) => void;
+  onSelectSection: (header: string, configFile?: string | null, lineNumber?: number | null) => void;
   onSelectNode: (nodeId: string) => void;
   title?: string;
 }) {
@@ -1697,7 +1692,7 @@ function ChildNodesList({
                   key={n.id}
                   onClick={() => {
                     if (n.type === 'group') { onSelectNode(n.id); return; }
-                    if (d.sectionHeader) onSelectSection(d.sectionHeader as string);
+                    if (d.sectionHeader) onSelectSection(d.sectionHeader as string, d.configFile as string | undefined, typeof d.sectionLineNumber === 'number' ? d.sectionLineNumber as number : null);
                   }}
                   className="flex items-center gap-2 w-full px-2 py-1.5 rounded-lg text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors"
                 >
@@ -1721,7 +1716,7 @@ function ChildNodesList({
                     onSelectNode(n.id);
                     return;
                   }
-                  if (d.sectionHeader) onSelectSection(d.sectionHeader as string);
+                  if (d.sectionHeader) onSelectSection(d.sectionHeader as string, d.configFile as string | undefined, typeof d.sectionLineNumber === 'number' ? d.sectionLineNumber as number : null);
                 }}
                 className="flex items-center gap-2 w-full px-2 py-1.5 rounded-lg text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors"
               >
@@ -1776,10 +1771,10 @@ function ChildNodesList({
                             <span className="text-[10px] text-[var(--color-text-secondary)] ml-auto">open</span>
                           </button>
                           <div className="ml-3 space-y-0.5">
-                            {(d.children as Array<{ label: string; sectionHeader: string; configFile?: string; validationStatus?: ValidationStatus }>).map((child, ci) => (
+                            {(d.children as Array<{ label: string; sectionHeader: string; configFile?: string; sectionLineNumber?: number; validationStatus?: ValidationStatus }>).map((child, ci) => (
                               <button
                                 key={`${n.id}_${child.configFile || 'cfg'}_${child.sectionHeader}_${ci}`}
-                                onClick={() => onSelectSection(child.sectionHeader)}
+                                onClick={() => onSelectSection(child.sectionHeader, child.configFile ?? null, child.sectionLineNumber ?? null)}
                                 className="flex items-center gap-2 w-full px-2 py-1 rounded text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors"
                               >
                                 <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: getValidationStatusColor(child.validationStatus || 'valid') }} />
@@ -1794,7 +1789,7 @@ function ChildNodesList({
                       <button
                         key={n.id}
                         onClick={() => {
-                          if (d.sectionHeader) onSelectSection(d.sectionHeader as string);
+                          if (d.sectionHeader) onSelectSection(d.sectionHeader as string, d.configFile as string | undefined, typeof d.sectionLineNumber === 'number' ? d.sectionLineNumber as number : null);
                         }}
                         className="flex items-center gap-2 w-full px-2 py-1 rounded text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors"
                       >

@@ -108,6 +108,8 @@ interface ConfigState {
   validation: Record<string, ValidationResult>;
   schemas: Record<string, SectionSchema>;
   selectedSection: string | null; // full_header of selected section
+  selectedSectionFile: string | null; // config file owning the selected section (duplicate-header safe)
+  selectedSectionLine: number | null; // line number of the selected section (duplicate-header safe)
   originalTexts: Record<string, string>; // original exported text at import time
   isDirty: boolean; // true when config has unsaved changes
   textParseErrors: Record<string, string>; // per-file parse failures in the text view (last-good model is held)
@@ -122,7 +124,7 @@ interface ConfigState {
   setActiveFile: (filename: string) => void;
   setValidation: (filename: string, result: ValidationResult) => void;
   setSchemas: (schemas: Record<string, SectionSchema>) => void;
-  setSelectedSection: (header: string | null) => void;
+  setSelectedSection: (header: string | null, configFile?: string | null, lineNumber?: number | null) => void;
 
   /* Section operations */
   addSection: (filename: string, section: ConfigSection) => void;
@@ -187,6 +189,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   validation: {},
   schemas: {},
   selectedSection: null,
+  selectedSectionFile: null,
+  selectedSectionLine: null,
   originalTexts: {},
   isDirty: false,
   textParseErrors: {},
@@ -224,7 +228,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         validation: nextValidation,
         textParseErrors: nextTextParseErrors,
         activeFile: s.activeFile === filename ? remainingFiles[0] || 'printer.cfg' : s.activeFile,
-        selectedSection: s.activeFile === filename ? null : s.selectedSection,
+        selectedSection: s.activeFile === filename || s.selectedSectionFile === filename ? null : s.selectedSection,
+        selectedSectionFile: s.selectedSectionFile === filename ? null : s.selectedSectionFile,
+        selectedSectionLine: s.selectedSectionFile === filename ? null : s.selectedSectionLine,
       };
     }),
 
@@ -243,7 +249,12 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       ),
     })),
 
-  setSelectedSection: (header) => set({ selectedSection: header }),
+  setSelectedSection: (header, configFile, lineNumber) =>
+    set({
+      selectedSection: header,
+      selectedSectionFile: configFile ?? null,
+      selectedSectionLine: lineNumber ?? null,
+    }),
 
   addSection: (filename, section) => {
     set((s) => {

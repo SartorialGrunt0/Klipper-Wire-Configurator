@@ -613,7 +613,11 @@ export default function App() {
       setSelectedEdge(null);
       const data = node.data as Record<string, unknown>;
       if (data?.sectionHeader) {
-        setSelectedSection(data.sectionHeader as string);
+        setSelectedSection(
+          data.sectionHeader as string,
+          data.configFile as string | undefined,
+          typeof data.sectionLineNumber === 'number' ? data.sectionLineNumber as number : null,
+        );
       } else {
         setSelectedSection(null);
       }
@@ -649,7 +653,11 @@ export default function App() {
       const data = draggedNode.data as Record<string, unknown>;
       setSelectedNode(draggedNode.id);
       setSelectedEdge(null);
-      setSelectedSection(typeof data.sectionHeader === 'string' ? data.sectionHeader : null);
+      setSelectedSection(
+        typeof data.sectionHeader === 'string' ? data.sectionHeader : null,
+        data.configFile as string | undefined,
+        typeof data.sectionLineNumber === 'number' ? data.sectionLineNumber as number : null,
+      );
 
       useGraphStore.setState((s) => ({
         nodes: s.nodes.map((node) => {

@@ -59,6 +59,8 @@ beforeEach(() => {
     validation: {},
     schemas: {},
     selectedSection: null,
+    selectedSectionFile: null,
+    selectedSectionLine: null,
     originalTexts: {},
     isDirty: false,
     textParseErrors: {},
@@ -388,5 +390,22 @@ describe('configStore validation helpers', () => {
     });
     const errors = useConfigStore.getState().getSectionErrors('mcu');
     expect(errors).toEqual(['missing serial']);
+  });
+
+  it('setSelectedSection carries file + line for duplicate-header safety', () => {
+    const store = useConfigStore.getState();
+    store.setSelectedSection('gcode_macro LEVEL_BED', 'macros.cfg', 12);
+    expect(useConfigStore.getState().selectedSection).toBe('gcode_macro LEVEL_BED');
+    expect(useConfigStore.getState().selectedSectionFile).toBe('macros.cfg');
+    expect(useConfigStore.getState().selectedSectionLine).toBe(12);
+  });
+
+  it('setSelectedSection with null header clears carried context', () => {
+    const store = useConfigStore.getState();
+    store.setSelectedSection('gcode_macro LEVEL_BED', 'macros.cfg', 12);
+    store.setSelectedSection(null);
+    expect(useConfigStore.getState().selectedSection).toBeNull();
+    expect(useConfigStore.getState().selectedSectionFile).toBeNull();
+    expect(useConfigStore.getState().selectedSectionLine).toBeNull();
   });
 });

@@ -45,7 +45,7 @@ function GroupNode({ data, selected, id }: NodeProps) {
   const handleChildClick = useCallback((e: React.MouseEvent, child: GroupChildItem) => {
     e.stopPropagation();
     setSelectedNode(id);
-    setSelectedSection(child.sectionHeader);
+    setSelectedSection(child.sectionHeader, child.configFile ?? null, child.sectionLineNumber ?? null);
   }, [id, setSelectedNode, setSelectedSection]);
 
   const handleRemoveChild = useCallback((e: React.MouseEvent, idx: number) => {
