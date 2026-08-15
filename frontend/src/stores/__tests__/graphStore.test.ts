@@ -675,8 +675,11 @@ describe('graphStore configuration edge redraw/delete', () => {
     const redrawnEdgeId = useGraphStore.getState().edges[0].id;
     expect(redrawnEdgeId).not.toBe(originalEdgeId);
     const redrawn = useGraphStore.getState().edges[0];
-    expect(redrawn?.source).toBe('mainboard');
-    expect(redrawn?.target).toBe('toolhead');
+    // Direction is normalized: the edge always points FROM the included
+    // (non-primary) node TO the including (primary) node, regardless of
+    // draw direction — so the redrawn edge still reads toolhead → mainboard.
+    expect(redrawn?.source).toBe('toolhead');
+    expect(redrawn?.target).toBe('mainboard');
 
     // Now delete the line — include must be commented out in printer.cfg
     // (the file that owns the include), regardless of edge direction.
@@ -687,6 +690,66 @@ describe('graphStore configuration edge redraw/delete', () => {
     expect(useConfigStore.getState().isDirty).toBe(true);
   });
 
+  it('repointConfigEdge swaps the include to the new pair', () => {
+    // printer.cfg (primary mainboard) + toolhead_board.cfg, plus a second
+    // non-primary file so re-pointing changes the included file.
+    useConfigStore.getState().setConfigFile('printer.cfg', {
+      filename: 'printer.cfg',
+      sections: [
+        { section_type: 'include', section_name: 'toolhead_board.cfg', full_header: 'include toolhead_board.cfg', line_number: 1, params: [], header_comments: [], trailing_comments: [], is_commented_out: false },
+        { section_type: 'mcu', section_name: '', full_header: 'mcu', line_number: 2, params: [], header_comments: [], trailing_comments: [], is_commented_out: false },
+      ],
+      includes: ['toolhead_board.cfg'],
+      header_comments: [],
+      raw_text: '[include toolhead_board.cfg]\n[mcu]\n',
+    });
+    useConfigStore.getState().setConfigFile('toolhead_board.cfg', {
+      filename: 'toolhead_board.cfg',
+      sections: [
+        { section_type: 'mcu', section_name: 'toolhead', full_header: 'mcu toolhead', line_number: 1, params: [], header_comments: [], trailing_comments: [], is_commented_out: false },
+      ],
+      includes: [],
+      header_comments: [],
+      raw_text: '[mcu toolhead]\n',
+    });
+    useConfigStore.getState().setConfigFile('expander.cfg', {
+      filename: 'expander.cfg',
+      sections: [
+        { section_type: 'mcu', section_name: 'expander', full_header: 'mcu expander', line_number: 1, params: [], header_comments: [], trailing_comments: [], is_commented_out: false },
+      ],
+      includes: [],
+      header_comments: [],
+      raw_text: '[mcu expander]\n',
+    });
+    useConfigStore.getState().markClean();
+    useGraphStore.getState().addNode(makeHwNode('mainboard', { configFile: 'printer.cfg', isPrimary: true }));
+    useGraphStore.getState().addNode(makeHwNode('toolhead', { configFile: 'toolhead_board.cfg' }));
+    useGraphStore.getState().addNode(makeHwNode('expander', { configFile: 'expander.cfg' }));
+    const edgeId = useGraphStore.getState().addConfigurationEdge('toolhead', 'mainboard', 'toolhead');
+
+    // Re-point the edge: toolhead → expander (neither primary, so target
+    // includes source: expander.cfg gains [include toolhead_board.cfg] and
+    // printer.cfg's include is commented out).
+    useGraphStore.getState().repointConfigEdge(edgeId, 'toolhead', 'expander');
+
+    const edge = useGraphStore.getState().edges.find((e) => e.id === edgeId);
+    expect(edge?.source).toBe('toolhead');
+    expect(edge?.target).toBe('expander');
+
+    const printerCfg = useConfigStore.getState().configFiles['printer.cfg'];
+    expect(printerCfg.includes).toEqual([]);
+    expect(printerCfg.sections[0].is_commented_out).toBe(true);
+
+    const expanderCfg = useConfigStore.getState().configFiles['expander.cfg'];
+    expect(expanderCfg.includes).toEqual(['toolhead_board.cfg']);
+    expect(useConfigStore.getState().isDirty).toBe(true);
+
+    // Undo restores the original edge + include state
+    useGraphStore.getState().undo();
+    expect(useGraphStore.getState().edges.find((e) => e.id === edgeId)?.target).toBe('mainboard');
+    expect(useConfigStore.getState().configFiles['printer.cfg'].includes).toEqual(['toolhead_board.cfg']);
+  });
+
   it('deleting an edge drawn toolhead → mainboard still comments out the include', () => {
     const edgeId = setupToolheadMainboard();
 
@@ -694,5 +757,47 @@ describe('graphStore configuration edge redraw/delete', () => {
     const cf = useConfigStore.getState().configFiles['printer.cfg'];
     expect(cf.includes).toEqual([]);
     expect(cf.sections[0].is_commented_out).toBe(true);
+  });
+
+  it('syncGraphWithConfig does not create a phantom config edge to the SBC when printer.cfg hosts both MCUs', () => {
+    // printer.cfg contains [mcu] for the primary mainboard AND [mcu host_mcu]
+    // for the SBC — graphBuilder inserts the SBC node first, so the old
+    // configFile-first lookup attached include edges to the SBC.
+    const makeCfg = (filename: string, includes: string[]) => ({
+      filename,
+      sections: [
+        { section_type: 'include', section_name: 'toolhead_board.cfg', full_header: 'include toolhead_board.cfg', line_number: 1, params: [], header_comments: [], trailing_comments: [], is_commented_out: false },
+        { section_type: 'mcu', section_name: 'mainboard', full_header: 'mcu mainboard', line_number: 2, params: [], header_comments: [], trailing_comments: [], is_commented_out: false },
+        { section_type: 'mcu', section_name: 'host_mcu', full_header: 'mcu host_mcu', line_number: 3, params: [], header_comments: [], trailing_comments: [], is_commented_out: false },
+      ],
+      includes,
+      header_comments: [],
+      raw_text: '',
+    });
+    useConfigStore.getState().setConfigFile('printer.cfg', makeCfg('printer.cfg', ['toolhead_board.cfg']));
+    useConfigStore.getState().setConfigFile('toolhead_board.cfg', makeCfg('toolhead_board.cfg', []));
+    useGraphStore.setState({
+      nodes: [
+        // SBC first — this used to win the `find(configFile)` lookup
+        makeHwNode('sbc', { hardwareType: 'sbc', configFile: 'printer.cfg', mcuName: 'host_mcu', isPrimary: false }),
+        makeHwNode('mainboard', { hardwareType: 'mainboard', configFile: 'printer.cfg', mcuName: 'mainboard', isPrimary: true }),
+        makeHwNode('toolhead', { hardwareType: 'toolhead', configFile: 'toolhead_board.cfg', mcuName: 'ebbtool', isPrimary: false }),
+      ],
+      edges: [],
+    });
+
+    useGraphStore.getState().syncGraphWithConfig('printer.cfg');
+
+    const edges = useGraphStore.getState().edges;
+    const configEdges = edges.filter((e) => (e.data as Record<string, unknown>)?.edgeType === 'configuration');
+    // Exactly one config edge, between the toolhead and the PRIMARY mainboard —
+    // never attached to the SBC node.
+    expect(configEdges).toHaveLength(1);
+    expect(configEdges[0].source).toBe('toolhead');
+    expect(configEdges[0].target).toBe('mainboard');
+
+    // Running sync again (e.g. after a text edit) must not duplicate it
+    useGraphStore.getState().syncGraphWithConfig('printer.cfg');
+    expect(useGraphStore.getState().edges.filter((e) => (e.data as Record<string, unknown>)?.edgeType === 'configuration')).toHaveLength(1);
   });
 });

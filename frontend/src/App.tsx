@@ -356,7 +356,12 @@ export default function App() {
           if (saved) {
             const layout = JSON.parse(saved) as {
               graphNodes?: Array<{ id: string; position: { x: number; y: number } }>;
-              graphEdges?: Array<{ id: string; data?: Record<string, unknown> }>;
+              graphEdges?: Array<{
+                id: string;
+                data?: Record<string, unknown>;
+                sourceHandle?: string;
+                targetHandle?: string;
+              }>;
               macroDesigner?: MacroDesignerPersistedState;
             };
             if (layout.macroDesigner) {
@@ -375,6 +380,32 @@ export default function App() {
                 return node;
               });
               graphStore.setNodes(updatedNodes);
+            }
+            // Restore edge routing: custom bend points + which side of each
+            // node the line connects to. Without this, a refresh resets every
+            // trace to default top/bottom routing even though card positions
+            // survived.
+            if (layout.graphEdges) {
+              const savedEdges = new Map(
+                layout.graphEdges.map((e) => [e.id, e]),
+              );
+              const currentEdges = useGraphStore.getState().edges;
+              const updatedEdges = currentEdges.map((edge) => {
+                const saved = savedEdges.get(edge.id);
+                if (!saved) return edge;
+                const next: Record<string, unknown> = { ...edge };
+                if (saved.data) {
+                  next.data = {
+                    ...edge.data,
+                    ...saved.data,
+                    customMiddlePoints: (saved.data as Record<string, unknown>).customMiddlePoints,
+                  } as unknown as import('./types/graph').AppEdge['data'];
+                }
+                if (saved.sourceHandle) next.sourceHandle = saved.sourceHandle;
+                if (saved.targetHandle) next.targetHandle = saved.targetHandle;
+                return next as import('./types/graph').AppEdge;
+              });
+              graphStore.setEdges(updatedEdges);
             }
           }
         } catch { /* malformed/absent layout — keep auto-arranged positions */ }
@@ -406,7 +437,12 @@ export default function App() {
         try {
           localStorage.setItem('kwc.graphLayout', JSON.stringify({
             graphNodes: nodes.map((n) => ({ id: n.id, position: n.position })),
-            graphEdges: edges.map((e) => ({ id: e.id, data: e.data })),
+            graphEdges: edges.map((e) => ({
+              id: e.id,
+              data: e.data,
+              sourceHandle: e.sourceHandle ?? undefined,
+              targetHandle: e.targetHandle ?? undefined,
+            })),
             macroDesigner,
           }));
         } catch { /* ignore quota / privacy-mode errors */ }

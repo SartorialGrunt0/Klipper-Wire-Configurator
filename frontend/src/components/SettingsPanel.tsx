@@ -962,16 +962,42 @@ export default function SettingsPanel() {
           </div>
           <div className="flex-1 overflow-y-auto p-3 space-y-3">
             <div className="rounded-lg border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] p-3 space-y-2">
-              <div className="text-xs">
-                <span className="text-[var(--color-text-secondary)]">Source:</span>{' '}
-                <span className="font-mono text-[var(--color-text-primary)]">{srcNode?.data?.label as string ?? configEdge.source}</span>
+              <label className="block text-xs">
+                <span className="text-[var(--color-text-secondary)]">Source (included file):</span>
+                <select
+                  className="mt-1 w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-xs text-[var(--color-text-primary)]"
+                  value={configEdge.source}
+                  onChange={(e) => {
+                    const newTarget = e.target.value === configEdge.target ? configEdge.source : configEdge.target;
+                    useGraphStore.getState().repointConfigEdge(configEdge.id, e.target.value, newTarget);
+                  }}
+                >
+                  {nodes.filter((n) => n.type === 'hardware').map((n) => (
+                    <option key={n.id} value={n.id}>
+                      {(n.data as Record<string, unknown>).label as string ?? n.id}
+                    </option>
+                  ))}
+                </select>
                 <div className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">{srcFile || 'unknown file'}</div>
-              </div>
-              <div className="text-xs">
-                <span className="text-[var(--color-text-secondary)]">Target:</span>{' '}
-                <span className="font-mono text-[var(--color-text-primary)]">{tgtNode?.data?.label as string ?? configEdge.target}</span>
+              </label>
+              <label className="block text-xs">
+                <span className="text-[var(--color-text-secondary)]">Target (including file):</span>
+                <select
+                  className="mt-1 w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-xs text-[var(--color-text-primary)]"
+                  value={configEdge.target}
+                  onChange={(e) => {
+                    const newSource = e.target.value === configEdge.source ? configEdge.target : configEdge.source;
+                    useGraphStore.getState().repointConfigEdge(configEdge.id, newSource, e.target.value);
+                  }}
+                >
+                  {nodes.filter((n) => n.type === 'hardware').map((n) => (
+                    <option key={n.id} value={n.id}>
+                      {(n.data as Record<string, unknown>).label as string ?? n.id}
+                    </option>
+                  ))}
+                </select>
                 <div className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">{tgtFile || 'unknown file'}</div>
-              </div>
+              </label>
               {includingFile && includedFile && includingFile !== includedFile && (
                 <div className="pt-2 border-t border-[var(--color-bg-tertiary)] text-xs">
                   <span className="text-[var(--color-text-secondary)]">Include:</span>{' '}

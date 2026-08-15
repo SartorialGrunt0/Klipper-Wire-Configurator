@@ -254,6 +254,7 @@ interface GraphState {
   addEdge: (edge: AppEdge) => void;
   removeEdge: (id: string) => void;
   updateEdgeData: (id: string, data: Partial<AppEdge['data']>) => void;
+  repointConfigEdge: (id: string, newSourceId: string, newTargetId: string) => void;
   selectedEdgeId: string | null;
   setSelectedEdge: (id: string | null) => void;
 
@@ -590,10 +591,19 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         const srcIsPrimary = Boolean(srcData.isPrimary) || srcConfigFile === 'printer.cfg';
         const tgtIsPrimary = Boolean(tgtData.isPrimary) || tgtConfigFile === 'printer.cfg';
         const color = getHardwareColor(srcHwType);
+        // Normalize direction: the edge always points FROM the included
+        // (non-primary) node TO the including (primary) node, mirroring
+        // graphBuilder's convention. Draw direction is arbitrary; showing it
+        // verbatim would label the primary as "source" half the time.
+        // When the primary was drawn as source, swap so the non-primary
+        // (included) node becomes the source.
+        const swapDirection = srcIsPrimary && !tgtIsPrimary;
+        const normalizedSource = swapDirection ? connection.target : connection.source;
+        const normalizedTarget = swapDirection ? connection.source : connection.target;
         const newEdge: AppEdge = {
           id,
-          source: connection.source,
-          target: connection.target,
+          source: normalizedSource,
+          target: normalizedTarget,
           sourceHandle: connection.sourceHandle ?? undefined,
           targetHandle: connection.targetHandle ?? undefined,
           data: { edgeType: 'configuration', sourceHardwareType: srcHwType as HardwareType, color },
@@ -956,6 +966,55 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         e.id === id ? { ...e, data: { ...e.data, ...data } } : e,
       ) as AppEdge[],
     })),
+
+  repointConfigEdge: (id, newSourceId, newTargetId) => {
+    const { edges, nodes } = get();
+    const edge = edges.find((e) => e.id === id);
+    if (!edge) return;
+    const configStore = useConfigStore.getState();
+
+    // Snapshot BEFORE any mutation so one undo restores edge + includes.
+    get().pushHistory();
+
+    // Resolve the file include that the OLD edge represents, then comment it out
+    const oldSrc = nodes.find((n) => n.id === edge.source);
+    const oldTgt = nodes.find((n) => n.id === edge.target);
+    const oldSrcFile = (oldSrc?.data as Record<string, unknown> | undefined)?.configFile as string | undefined;
+    const oldTgtFile = (oldTgt?.data as Record<string, unknown> | undefined)?.configFile as string | undefined;
+    if (oldSrcFile && oldTgtFile && oldSrcFile !== oldTgtFile) {
+      const oldSrcPrimary = Boolean((oldSrc?.data as Record<string, unknown> | undefined)?.isPrimary) || oldSrcFile === 'printer.cfg';
+      if (oldSrcPrimary) {
+        configStore.removeInclude(oldSrcFile, oldTgtFile);
+      } else {
+        configStore.removeInclude(oldTgtFile, oldSrcFile);
+      }
+    }
+
+    // Update the edge to point at the new pair (normalized: included → primary)
+    const newSrc = nodes.find((n) => n.id === newSourceId);
+    const newTgt = nodes.find((n) => n.id === newTargetId);
+    const newSrcFile = (newSrc?.data as Record<string, unknown> | undefined)?.configFile as string | undefined;
+    const newTgtFile = (newTgt?.data as Record<string, unknown> | undefined)?.configFile as string | undefined;
+    const newSrcPrimary = Boolean((newSrc?.data as Record<string, unknown> | undefined)?.isPrimary) || newSrcFile === 'printer.cfg';
+    const newTgtPrimary = Boolean((newTgt?.data as Record<string, unknown> | undefined)?.isPrimary) || newTgtFile === 'printer.cfg';
+    const normalizedSource = newTgtPrimary && !newSrcPrimary ? newTargetId : newSourceId;
+    const normalizedTarget = newTgtPrimary && !newSrcPrimary ? newSourceId : newTargetId;
+
+    set((s) => ({
+      edges: s.edges.map((e) =>
+        e.id === id ? { ...e, source: normalizedSource, target: normalizedTarget } : e,
+      ) as AppEdge[],
+    }));
+
+    // Add the include for the new pair (primary includes non-primary)
+    if (newSrcFile && newTgtFile && newSrcFile !== newTgtFile) {
+      if (newSrcPrimary && !newTgtPrimary) {
+        configStore.addInclude(newSrcFile, newTgtFile);
+      } else {
+        configStore.addInclude(newTgtFile, newSrcFile);
+      }
+    }
+  },
 
   addHardwareNode: (hwType, label, configFile, position, mcuName) => {
     const id = nextNodeId();
@@ -2015,17 +2074,31 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     }
 
     // 4. Sync include directives → configuration edges
-    // Find the hardware node for this config file
-    const thisHwNode = get().nodes.find((n) => {
+    // Find the hardware node for this config file. printer.cfg can host BOTH the
+    // primary mainboard [mcu] and the SBC host_mcu — when multiple hardware
+    // nodes share the file, the include edge must attach to the PRIMARY node
+    // (isPrimary), not whichever node happens to appear first (graphBuilder
+    // inserts the SBC first, which caused phantom edges to the SBC).
+    const matchingHwNodes = get().nodes.filter((n) => {
       if (n.type !== 'hardware') return false;
       const nodeFile = (n.data as Record<string, unknown>).configFile as string || '';
       const nodeBasename = nodeFile.replace(/^.*[\\/]/, '');
       const filenameBasename = filename.replace(/^.*[\\/]/, '');
       return nodeFile === filename || nodeBasename === filenameBasename;
     });
+    const thisHwNode = matchingHwNodes.find(
+      (n) => Boolean((n.data as Record<string, unknown>).isPrimary),
+    ) ?? matchingHwNodes[0];
 
     if (thisHwNode) {
       const includes = cf.includes || [];
+
+      // Helper: is this edge a config edge connecting the same two hardware nodes
+      // (either direction)? Mirrors onConnect's pair normalization — direction
+      // never matters, the include always lives in the primary file.
+      const isPairEdge = (e: AppEdge, aId: string, bId: string) =>
+        (e.data as Record<string, unknown>)?.edgeType === 'configuration' &&
+        ((e.source === aId && e.target === bId) || (e.source === bId && e.target === aId));
 
       // Remove configuration edges no longer backed by an include directive
       const existingIncomingEdges = get().edges.filter(
@@ -2047,7 +2120,13 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         }
       }
 
-      // Add configuration edges for newly-added include directives
+      // Add configuration edges for newly-added include directives.
+      // The include belongs to THIS hardware node's file, but the edge that
+      // represents it must connect the two hardware nodes of the involved
+      // files — resolved by filename, never by assuming thisHwNode is the
+      // primary. When the include lives in printer.cfg (owned by the SBC
+      // node), the edge must still land on the PRIMARY node so a redraw
+      // doesn't spawn a duplicate phantom edge to the SBC.
       for (const inc of includes) {
         const incBasename = inc.replace(/^.*[\\/]/, '');
         const includedHwNode = get().nodes.find((n) => {
@@ -2057,15 +2136,20 @@ export const useGraphStore = create<GraphState>((set, get) => ({
           return nodeBasename === incBasename || nodeFile === inc;
         });
         if (!includedHwNode || includedHwNode.id === thisHwNode.id) continue;
-        const edgeExists = get().edges.some(
-          (e) =>
-            (e.data as Record<string, unknown>)?.edgeType === 'configuration' &&
-            e.source === includedHwNode.id &&
-            e.target === thisHwNode.id,
-        );
+        // Resolve the include target: the primary (printer.cfg) node if one of
+        // the pair is primary, otherwise thisHwNode (the file declaring it).
+        const includedData = includedHwNode.data as Record<string, unknown>;
+        const thisData = thisHwNode.data as Record<string, unknown>;
+        const includedFile = includedData.configFile as string || '';
+        const thisFile = thisData.configFile as string || '';
+        const includedIsPrimary = Boolean(includedData.isPrimary) || includedFile === 'printer.cfg';
+        const thisIsPrimary = Boolean(thisData.isPrimary) || thisFile === 'printer.cfg';
+        const edgeSource = thisIsPrimary && !includedIsPrimary ? includedHwNode.id : thisHwNode.id;
+        const edgeTarget = thisIsPrimary && !includedIsPrimary ? thisHwNode.id : includedHwNode.id;
+        const edgeExists = get().edges.some((e) => isPairEdge(e, edgeSource, edgeTarget));
         if (!edgeExists) {
           const hwType = (includedHwNode.data as Record<string, unknown>).hardwareType as HardwareType;
-          get().addConfigurationEdge(includedHwNode.id, thisHwNode.id, hwType);
+          get().addConfigurationEdge(edgeSource, edgeTarget, hwType);
         }
       }
 

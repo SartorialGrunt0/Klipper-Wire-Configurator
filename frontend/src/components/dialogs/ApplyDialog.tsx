@@ -590,10 +590,12 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
 
                     let diffLines: DiffLine[] = [];
                     let hasChanges = false;
-                    if (hasOriginal && (current !== undefined || isDeleted)) {
+                    if (current !== undefined || isDeleted) {
                       // Deleted files have no current text — diff against empty
-                      // so every original line shows as removed.
-                      const patch = createTwoFilesPatch(fn, fn, original, current ?? '', 'saved', isDeleted ? 'deleted' : 'current', { context: 3 });
+                      // so every original line shows as removed. New files have
+                      // no original — diff against empty so every line shows as
+                      // added (moved sub-components/features stay visible).
+                      const patch = createTwoFilesPatch(fn, fn, original ?? '', current ?? '', 'saved', isDeleted ? 'deleted' : 'current', { context: 3 });
                       diffLines = parsePatch(patch);
                       hasChanges = diffLines.some((l) => l.type === 'added' || l.type === 'removed');
                     }
@@ -623,7 +625,7 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
                           )}
                         </div>
 
-                        {hasOriginal && hasChanges && (
+                        {hasChanges && (
                           <div className="rounded-lg border border-[var(--color-bg-tertiary)] overflow-hidden">
                             <pre className="text-xs leading-5 font-mono overflow-x-auto">
                               {diffLines.map((line, i) => (

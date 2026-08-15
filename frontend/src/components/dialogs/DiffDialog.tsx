@@ -51,9 +51,11 @@ export default function DiffDialog({ onClose }: DiffDialogProps) {
 
   const original = originalTexts[activeFile] || '';
   const current = currentTexts[activeFile] || '';
-  const hasOriginal = activeFile in originalTexts;
 
-  const patch = hasOriginal && !loading
+  // Diff against the original text when available; for brand-new files the
+  // original is empty so every line renders as an addition — otherwise a
+  // moved sub-component/feature inside a new file would be invisible in the diff.
+  const patch = !loading
     ? createConfigPatch(activeFile, original, current, 'imported', 'current', 3)
     : '';
   const diffLines = parsePatch(patch);
@@ -145,10 +147,6 @@ export default function DiffDialog({ onClose }: DiffDialogProps) {
               <div className="p-3 rounded-lg bg-[var(--color-error)]/10 text-xs text-[var(--color-error)]">
                 {error}
               </div>
-            ) : !hasOriginal ? (
-              <p className="text-xs text-[var(--color-text-secondary)] text-center py-8">
-                No original version available — this file was added after import.
-              </p>
             ) : !hasChanges ? (
               <p className="text-xs text-[var(--color-text-secondary)] text-center py-8">
                 No changes — identical to the imported version.
