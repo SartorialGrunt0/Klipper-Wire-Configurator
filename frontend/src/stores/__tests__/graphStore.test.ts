@@ -177,6 +177,61 @@ describe('graphStore bulk + clear', () => {
     useGraphStore.getState().onNodesChange([{ type: 'remove', id: 'a' }]);
     expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['b']);
   });
+
+  it('onNodesChange remove deletes the config section and pushes undo history', () => {
+    // Set up a sub-component node backed by a config section
+    useConfigStore.getState().setConfigFile('printer.cfg', {
+      filename: 'printer.cfg',
+      sections: [{
+        section_type: 'stepper_x',
+        section_name: '',
+        full_header: 'stepper_x',
+        line_number: 3,
+        params: [],
+        header_comments: [],
+        trailing_comments: [],
+        is_commented_out: false,
+      }],
+      includes: [],
+      header_comments: [],
+      raw_text: '',
+    });
+    useGraphStore.getState().addNode({
+      id: 'sc1',
+      type: 'subComponent',
+      position: { x: 0, y: 0 },
+      parentId: 'hw1',
+      data: {
+        label: 'stepper_x',
+        sectionType: 'stepper_x',
+        sectionHeader: 'stepper_x',
+        sectionLineNumber: 3,
+        componentGroup: 'stepper',
+        section: {
+          section_type: 'stepper_x', section_name: '', full_header: 'stepper_x',
+          line_number: 3, params: [], header_comments: [], trailing_comments: [], is_commented_out: false,
+        },
+        parentHardwareId: 'hw1',
+        configFile: 'printer.cfg',
+        hasErrors: false,
+      },
+    } as AppNode);
+
+    // Pressing Delete dispatches a remove change through onNodesChange
+    useGraphStore.getState().onNodesChange([{ type: 'remove', id: 'sc1' }]);
+
+    const state = useGraphStore.getState();
+    expect(state.nodes).toHaveLength(0);
+    // Config section must be gone too — no orphan resurrection on next sync
+    expect(useConfigStore.getState().configFiles['printer.cfg'].sections).toHaveLength(0);
+    expect(state.canUndo).toBe(true);
+
+    // Undo restores both the node and the section
+    state.undo();
+    const restored = useGraphStore.getState();
+    expect(restored.nodes).toHaveLength(1);
+    expect(useConfigStore.getState().configFiles['printer.cfg'].sections).toHaveLength(1);
+  });
 });
 
 describe('graphStore undo/redo', () => {

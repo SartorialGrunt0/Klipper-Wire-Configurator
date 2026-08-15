@@ -400,6 +400,37 @@ function sortNodesParentsFirst(nodes: AppNode[]): AppNode[] {
   return result;
 }
 
+/**
+ * Remove the config-model sections (or config file for hardware) backing a
+ * node. Shared by removeNode and onNodesChange so the Delete key and the ✕
+ * button can't drift apart. Does NOT touch the graph store — callers decide
+ * when to pushHistory and how to apply the node removal.
+ */
+function cleanupRemovedNodeConfig(node: AppNode, configStore: ReturnType<typeof useConfigStore.getState>): void {
+  const d = node.data as Record<string, unknown>;
+  const configFile = d.configFile as string | undefined;
+  if (!configFile) return;
+
+  if (node.type === 'subComponent' || node.type === 'feature') {
+    const sectionHeader = d.sectionHeader as string | undefined;
+    if (sectionHeader) {
+      configStore.removeSection(configFile, sectionHeader, d.sectionLineNumber as number | undefined);
+    }
+  } else if (node.type === 'group') {
+    const children = d.children as Array<{ sectionHeader: string; sectionLineNumber?: number; configFile?: string }> | undefined;
+    if (children) {
+      for (const child of children) {
+        const childFile = child.configFile || configFile;
+        if (child.sectionHeader) {
+          configStore.removeSection(childFile, child.sectionHeader, child.sectionLineNumber);
+        }
+      }
+    }
+  } else if (node.type === 'hardware') {
+    configStore.removeConfigFile(configFile);
+  }
+}
+
 export const useGraphStore = create<GraphState>((set, get) => ({
   nodes: [],
   edges: [],
@@ -408,10 +439,26 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   selectedEdgeId: null,
   fitViewTrigger: 0,
 
-  onNodesChange: (changes) =>
+  onNodesChange: (changes) => {
+    // ReactFlow dispatches Delete-key node removals through onNodesChange as
+    // { type: 'remove' } changes. Route them through the same config cleanup
+    // as removeNode so the section is deleted from the config model (not just
+    // the graph) and the action is undoable — otherwise the section
+    // resurrects on the next syncGraphWithConfig and Ctrl+Z does nothing.
+    const removes = changes.filter((c) => c.type === 'remove');
+    if (removes.length > 0) {
+      get().pushHistory();
+      const configStore = useConfigStore.getState();
+      for (const change of removes) {
+        const id = (change as { id: string }).id;
+        const node = get().nodes.find((n) => n.id === id);
+        if (node) cleanupRemovedNodeConfig(node, configStore);
+      }
+    }
     set((s) => ({
       nodes: sortNodesParentsFirst(applyNodeChanges(changes, s.nodes) as AppNode[]),
-    })),
+    }));
+  },
 
   onEdgesChange: (changes) => {
     // Clean up includes for removed configuration edges between hardware nodes
@@ -557,35 +604,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     // Remove corresponding config sections for each removed node
     const configStore = useConfigStore.getState();
     for (const rn of removedNodes) {
-      const d = rn.data as Record<string, unknown>;
-      const configFile = d.configFile as string | undefined;
-      if (!configFile) continue;
-
-      if (rn.type === 'subComponent' || rn.type === 'feature') {
-        const sectionHeader = d.sectionHeader as string | undefined;
-        if (sectionHeader) {
-          configStore.removeSection(configFile, sectionHeader, d.sectionLineNumber as number | undefined);
-        }
-      } else if (rn.type === 'group') {
-        const children = d.children as Array<{ sectionHeader: string; sectionLineNumber?: number; configFile?: string }> | undefined;
-        if (children) {
-          for (const child of children) {
-            const childFile = child.configFile || configFile;
-            if (child.sectionHeader) {
-              configStore.removeSection(childFile, child.sectionHeader, child.sectionLineNumber);
-            }
-          }
-        }
-      }
-    }
-
-    // If removing a hardware node, delete its entire config file
-    if (node?.type === 'hardware') {
-      const d = node.data as Record<string, unknown>;
-      const configFile = d.configFile as string | undefined;
-      if (configFile) {
-        configStore.removeConfigFile(configFile);
-      }
+      cleanupRemovedNodeConfig(rn, configStore);
     }
 
     set((s) => {
