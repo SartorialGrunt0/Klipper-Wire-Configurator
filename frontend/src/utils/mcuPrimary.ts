@@ -77,14 +77,23 @@ export interface NodeFileUpdate {
   configFile: string;
 }
 
+/** Repoint every child inside a group node whose configFile === from → to. */
+export interface GroupChildRename {
+  nodeId: string;
+  from: string;
+  to: string;
+}
+
 export interface PrimarySwapPlan {
   renames: FileRename[];
   nodeUpdates: NodeFileUpdate[];
+  groupChildRenames: GroupChildRename[];
 }
 
-interface PlanNode {
+export interface PlanNode {
   id: string;
   parentId?: string | null;
+  type?: string;
   data?: unknown;
 }
 
@@ -92,8 +101,10 @@ interface PlanNode {
  * Compute the file renames + node configFile updates needed to make a new
  * primary MCU: the old primary's printer.cfg → {oldMcuName}.cfg, the new
  * primary's file → printer.cfg, and every affected node (hardware + its
- * children) repointed. Pure — returns a plan for the caller to apply via
- * store actions.
+ * children) repointed. Group nodes also carry a children array whose entries
+ * each record their own configFile — those are repointed via
+ * groupChildRenames so sidebar section resolution never hits a stale
+ * filename. Pure — returns a plan for the caller to apply via store actions.
  */
 export function planPrimarySwap(opts: {
   oldPrimaryId: string | null;
@@ -103,35 +114,43 @@ export function planPrimarySwap(opts: {
   nodes: PlanNode[];
 }): PrimarySwapPlan {
   const renames: FileRename[] = [];
-  const nodeUpdates: NodeFileUpdate[] = [];
 
   const fileOf = (n: PlanNode): string | undefined =>
     (n.data as { configFile?: string } | undefined)?.configFile;
 
   // Old primary: printer.cfg → {oldMcuName}.cfg
   if (opts.oldPrimaryId && opts.oldMcuName) {
-    const demotedFileName = demotedConfigFilename(opts.oldMcuName);
-    renames.push({ from: 'printer.cfg', to: demotedFileName });
-    nodeUpdates.push({ nodeId: opts.oldPrimaryId, configFile: demotedFileName });
-    for (const child of opts.nodes) {
-      if (child.parentId === opts.oldPrimaryId && fileOf(child) === 'printer.cfg') {
-        nodeUpdates.push({ nodeId: child.id, configFile: demotedFileName });
-      }
-    }
+    renames.push({ from: 'printer.cfg', to: demotedConfigFilename(opts.oldMcuName) });
   }
 
   // New primary: {newConfigFile} → printer.cfg
   if (opts.newConfigFile && opts.newConfigFile !== 'printer.cfg') {
     renames.push({ from: opts.newConfigFile, to: 'printer.cfg' });
-    nodeUpdates.push({ nodeId: opts.newPrimaryId, configFile: 'printer.cfg' });
-    for (const child of opts.nodes) {
-      if (child.parentId === opts.newPrimaryId && fileOf(child) === opts.newConfigFile) {
-        nodeUpdates.push({ nodeId: child.id, configFile: 'printer.cfg' });
+  }
+
+  // Repoint every node whose configFile matches a renamed file (top-level
+  // hardware + sub-component/feature/group nodes). Group nodes also carry a
+  // children array whose entries each record their own configFile — those are
+  // repointed via groupChildRenames so sidebar section resolution never hits
+  // a stale filename.
+  const nodeUpdates: NodeFileUpdate[] = [];
+  const groupChildRenames: GroupChildRename[] = [];
+  for (const r of renames) {
+    for (const n of opts.nodes) {
+      if (fileOf(n) === r.from) {
+        nodeUpdates.push({ nodeId: n.id, configFile: r.to });
+      }
+      if (n.type === 'group') {
+        const children = (n.data as { children?: Array<{ configFile?: string }> } | undefined)?.children;
+        if (!Array.isArray(children)) continue;
+        if (children.some((c) => c.configFile === r.from)) {
+          groupChildRenames.push({ nodeId: n.id, from: r.from, to: r.to });
+        }
       }
     }
   }
 
-  return { renames, nodeUpdates };
+  return { renames, nodeUpdates, groupChildRenames };
 }
 
 /** Apply a plan's file renames via a renameConfigFile-style callback. */
@@ -140,4 +159,36 @@ export function applyRenames(
   renameConfigFile: (from: string, to: string) => void,
 ): void {
   for (const r of plan.renames) renameConfigFile(r.from, r.to);
+}
+
+/**
+ * Apply a plan's node configFile updates via an updateNodeData-style
+ * callback (top-level hardware + sub-component/feature/group nodes).
+ */
+export function applyNodeUpdates(
+  plan: PrimarySwapPlan,
+  updateNodeData: (nodeId: string, data: { configFile: string }) => void,
+): void {
+  for (const u of plan.nodeUpdates) updateNodeData(u.nodeId, { configFile: u.configFile });
+}
+
+/**
+ * Apply a plan's group-child repoints: for each group node listed, rewrite
+ * every child entry whose configFile matches the renamed source file.
+ */
+export function applyGroupChildRenames(
+  plan: PrimarySwapPlan,
+  nodes: PlanNode[],
+  updateNodeData: (nodeId: string, data: { children: unknown }) => void,
+): void {
+  for (const g of plan.groupChildRenames) {
+    const groupNode = nodes.find((n) => n.id === g.nodeId);
+    if (!groupNode) continue;
+    const children = (groupNode.data as { children?: Array<{ configFile?: string; [k: string]: unknown }> } | undefined)?.children;
+    if (!Array.isArray(children)) continue;
+    const updated = children.map((c) =>
+      c.configFile === g.from ? { ...c, configFile: g.to } : c,
+    );
+    updateNodeData(g.nodeId, { children: updated });
+  }
 }

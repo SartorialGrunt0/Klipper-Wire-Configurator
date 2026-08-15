@@ -10,7 +10,7 @@ import { getValidationStatusColor } from '../utils/validationStatus';
 import { resolveSection } from '../utils/sectionResolver';
 import { hasFeatureSectionType as hasFeatureSectionTypeInFiles } from '../utils/featureSections';
 import { toggleSectionSuppressed } from '../utils/sectionSuppress';
-import { applyMcuRenameToFiles, planPrimarySwap } from '../utils/mcuPrimary';
+import { applyMcuRenameToFiles, planPrimarySwap, applyNodeUpdates, applyGroupChildRenames, mcuHeaderFor } from '../utils/mcuPrimary';
 import { acknowledgeWarning } from '../services/api';
 import WarningBadge from './nodes/WarningBadge';
 import McuNameDialog from './dialogs/McuNameDialog';
@@ -415,6 +415,24 @@ export default function SettingsPanel() {
     // Update node data
     updateNodeData(nodeId, { mcuName: newMcuName } as Partial<AppNode['data']>);
 
+    // The MCU section header changed ([mcu old] → [mcu new]); any child
+    // sub-component/feature node whose sectionHeader matches the old header
+    // must be repointed or clicking it resolves null and the sidebar blanks.
+    const oldMcuHeader = mcuHeaderFor(oldMcuName);
+    const newMcuHeader = mcuHeaderFor(newMcuName);
+    for (const child of nodes) {
+      if (child.parentId !== nodeId) continue;
+      const childData = child.data as Record<string, unknown>;
+      if (childData.sectionHeader === oldMcuHeader) {
+        updateNodeData(child.id, {
+          sectionHeader: newMcuHeader,
+          label: newMcuName
+            ? `${(useConfigStore.getState().schemas?.['mcu']?.display_name) || 'MCU'}: ${newMcuName}`
+            : (useConfigStore.getState().schemas?.['mcu']?.display_name) || 'MCU',
+        } as Partial<AppNode['data']>);
+      }
+    }
+
     // Sync group node children's params with updated config store data
     const freshConfigs = useConfigStore.getState().configFiles;
     for (const child of nodes) {
@@ -425,9 +443,15 @@ export default function SettingsPanel() {
       const updatedChildren = gChildren.map((gc) => {
         const gcFile = (gc.configFile as string) || cfName;
         const gcConfig = freshConfigs[gcFile];
-        const matchedSection = gcConfig?.sections.find((s: { full_header: string }) => s.full_header === gc.sectionHeader);
+        // A group child that was the MCU section keeps its own header too.
+        const gcHeader = gc.sectionHeader === oldMcuHeader ? newMcuHeader : gc.sectionHeader;
+        const matchedSection = gcConfig?.sections.find((s: { full_header: string }) => s.full_header === gcHeader);
         if (!matchedSection) return gc;
-        return { ...gc, params: matchedSection.params.filter((p: { is_commented_out?: boolean }) => !p.is_commented_out) };
+        return {
+          ...gc,
+          sectionHeader: gcHeader,
+          params: matchedSection.params.filter((p: { is_commented_out?: boolean }) => !p.is_commented_out),
+        };
       });
       updateNodeData(child.id, { children: updatedChildren } as Partial<AppNode['data']>);
     }
@@ -452,9 +476,8 @@ export default function SettingsPanel() {
         nodes,
       });
       for (const r of plan.renames) renameConfigFile(r.from, r.to);
-      for (const u of plan.nodeUpdates) {
-        updateNodeData(u.nodeId, { configFile: u.configFile } as Partial<AppNode['data']>);
-      }
+      applyNodeUpdates(plan, (nodeId, data) => updateNodeData(nodeId, data as Partial<AppNode['data']>));
+      applyGroupChildRenames(plan, nodes, (nodeId, data) => updateNodeData(nodeId, data as Partial<AppNode['data']>));
     };
 
     if (!currentIsPrimary) {
@@ -500,9 +523,8 @@ export default function SettingsPanel() {
           nodes,
         });
         for (const r of plan.renames) renameConfigFile(r.from, r.to);
-        for (const u of plan.nodeUpdates) {
-          updateNodeData(u.nodeId, { configFile: u.configFile } as Partial<AppNode['data']>);
-        }
+        applyNodeUpdates(plan, (nodeId, data) => updateNodeData(nodeId, data as Partial<AppNode['data']>));
+        applyGroupChildRenames(plan, nodes, (nodeId, data) => updateNodeData(nodeId, data as Partial<AppNode['data']>));
       }
 
       // Promote the new primary: strip MCU prefix, rename [mcu name] → [mcu]
@@ -553,9 +575,8 @@ export default function SettingsPanel() {
         nodes,
       });
       for (const r of plan.renames) renameConfigFile(r.from, r.to);
-      for (const u of plan.nodeUpdates) {
-        updateNodeData(u.nodeId, { configFile: u.configFile } as Partial<AppNode['data']>);
-      }
+      applyNodeUpdates(plan, (nodeId, data) => updateNodeData(nodeId, data as Partial<AppNode['data']>));
+      applyGroupChildRenames(plan, nodes, (nodeId, data) => updateNodeData(nodeId, data as Partial<AppNode['data']>));
     }
 
     setMcuNamePrompt(null);

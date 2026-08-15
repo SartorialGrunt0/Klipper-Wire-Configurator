@@ -5,6 +5,7 @@ import {
   renameMcuSections,
   applyMcuRenameToFiles,
   planPrimarySwap,
+  type PlanNode,
 } from '../mcuPrimary';
 import type { ConfigFile } from '../../types/config';
 
@@ -160,5 +161,55 @@ describe('planPrimarySwap', () => {
     });
     expect(plan.renames).toEqual([]);
     expect(plan.nodeUpdates).toEqual([]);
+  });
+
+  it('repoints group children whose configFile matches a renamed file', () => {
+    // Group nodes carry their own configFile AND a children array where each
+    // child also records its configFile. Both must be repointed when the file
+    // is renamed, or clicking a group child resolves against a stale filename
+    // and the sidebar shows nothing.
+    const groupNode = {
+      id: 'group1',
+      type: 'group',
+      parentId: 'mainboard',
+      data: {
+        configFile: 'printer.cfg',
+        children: [
+          { sectionHeader: 'bed_mesh', configFile: 'printer.cfg' },
+          { sectionHeader: 'z_tilt', configFile: 'printer.cfg' },
+        ],
+      },
+    };
+    const plan = planPrimarySwap({
+      oldPrimaryId: 'mainboard',
+      oldMcuName: 'mainboard',
+      newPrimaryId: 'toolhead',
+      newConfigFile: 'toolhead_board.cfg',
+      nodes: [...nodes, groupNode as unknown as PlanNode],
+    });
+    expect(plan.renames).toContainEqual({ from: 'printer.cfg', to: 'mainboard.cfg' });
+    // The group node itself gets repointed…
+    expect(plan.nodeUpdates).toContainEqual({ nodeId: 'group1', configFile: 'mainboard.cfg' });
+    // …AND each child inside it.
+    expect(plan.groupChildRenames).toContainEqual({ nodeId: 'group1', from: 'printer.cfg', to: 'mainboard.cfg' });
+  });
+
+  it('repoints ANY node referencing a renamed file, including standalone nodes', () => {
+    // A standalone (parentless) sub-component may reference printer.cfg even
+    // though it is not a child of the old primary — it must still be repointed.
+    const standalone = {
+      id: 'standalone1',
+      type: 'subComponent',
+      parentId: null,
+      data: { configFile: 'printer.cfg', sectionHeader: 'probe' },
+    };
+    const plan = planPrimarySwap({
+      oldPrimaryId: 'mainboard',
+      oldMcuName: 'mainboard',
+      newPrimaryId: 'toolhead',
+      newConfigFile: 'toolhead_board.cfg',
+      nodes: [...nodes, standalone as unknown as PlanNode],
+    });
+    expect(plan.nodeUpdates).toContainEqual({ nodeId: 'standalone1', configFile: 'mainboard.cfg' });
   });
 });

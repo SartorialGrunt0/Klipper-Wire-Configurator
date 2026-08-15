@@ -132,6 +132,33 @@ describe('configStore file operations', () => {
     expect(useConfigStore.getState().configFiles['a.cfg']).toBeDefined();
   });
 
+  it('renameConfigFile remaps the selected section file so the sidebar keeps working', () => {
+    const store = useConfigStore.getState();
+    store.setConfigFile('printer.cfg', makeConfigFile());
+    store.setSelectedSection('mcu', 'printer.cfg', 3);
+
+    useConfigStore.getState().renameConfigFile('printer.cfg', 'mainboard.cfg');
+
+    const state = useConfigStore.getState();
+    // The section header + line survive; the file pointer follows the rename.
+    expect(state.selectedSection).toBe('mcu');
+    expect(state.selectedSectionFile).toBe('mainboard.cfg');
+    expect(state.selectedSectionLine).toBe(3);
+  });
+
+  it('renameConfigFile clears the selection when a DIFFERENT file is renamed', () => {
+    const store = useConfigStore.getState();
+    store.setConfigFile('printer.cfg', makeConfigFile());
+    store.setConfigFile('toolhead.cfg', makeConfigFile());
+    store.setSelectedSection('mcu toolhead', 'toolhead.cfg', 5);
+
+    useConfigStore.getState().renameConfigFile('printer.cfg', 'mainboard.cfg');
+
+    const state = useConfigStore.getState();
+    expect(state.selectedSection).toBe('mcu toolhead');
+    expect(state.selectedSectionFile).toBe('toolhead.cfg');
+  });
+
   it('copyConfigFile deep-copies sections and params', () => {
     const store = useConfigStore.getState();
     const section = makeSection({

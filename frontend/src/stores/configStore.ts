@@ -504,6 +504,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         validation: nextValidation,
         originalTexts: nextOriginals,
         textParseErrors: nextTextParseErrors,
+        selectedSection: s.selectedSection,
+        selectedSectionFile: s.selectedSectionFile === oldName ? newName : s.selectedSectionFile,
+        selectedSectionLine: s.selectedSectionLine,
       };
     }),
 
