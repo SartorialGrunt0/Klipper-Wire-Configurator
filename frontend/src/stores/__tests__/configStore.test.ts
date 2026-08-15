@@ -317,6 +317,38 @@ describe('configStore dirty / text parse error tracking', () => {
     expect(useConfigStore.getState().textParseErrors['printer.cfg']).toBeUndefined();
   });
 
+  it('updateConfigFile sets the file, marks dirty, and preserves others', () => {
+    const store = useConfigStore.getState();
+    store.setConfigFile('a.cfg', makeConfigFile());
+    store.setConfigFile('b.cfg', makeConfigFile());
+
+    const updated = makeConfigFile();
+    updated.sections = [];
+    useConfigStore.getState().updateConfigFile('a.cfg', updated);
+
+    const state = useConfigStore.getState();
+    expect(state.configFiles['a.cfg'].sections).toEqual([]);
+    expect(state.configFiles['b.cfg']).toBeDefined();
+    expect(state.isDirty).toBe(true);
+  });
+
+  it('raw setConfigFile does NOT mark dirty (load path semantics)', () => {
+    const store = useConfigStore.getState();
+    store.setConfigFile('a.cfg', makeConfigFile());
+    expect(useConfigStore.getState().isDirty).toBe(false);
+  });
+
+  it('updateConfigFile schedules revalidation', async () => {
+    vi.useRealTimers();
+    const store = useConfigStore.getState();
+    store.setConfigFile('printer.cfg', makeConfigFile());
+    useConfigStore.getState().updateConfigFile('printer.cfg', makeConfigFile());
+    // Let the 500ms revalidation timer fire; the mocked validateConfig returns
+    // a clean result, so validation must be present after it runs.
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(useConfigStore.getState().validation['printer.cfg']).toBeDefined();
+  });
+
   it('markClean clears the dirty flag', () => {
     const store = useConfigStore.getState();
     store.setConfigFile('printer.cfg', makeConfigFile());

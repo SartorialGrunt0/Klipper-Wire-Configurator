@@ -114,6 +114,10 @@ interface ConfigState {
 
   /* ── Actions ──────────────────────────────────────── */
   setConfigFile: (filename: string, config: ConfigFile) => void;
+  /** Replace a file's config AND mark the project dirty + schedule revalidation.
+   *  Use this for user-driven mutations (graph edits, duplicate, panel saves).
+   *  Use setConfigFile for load paths, which manage dirty state explicitly. */
+  updateConfigFile: (filename: string, config: ConfigFile) => void;
   removeConfigFile: (filename: string) => void;
   setActiveFile: (filename: string) => void;
   setValidation: (filename: string, result: ValidationResult) => void;
@@ -190,6 +194,14 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     set((s) => ({
       configFiles: { ...s.configFiles, [filename]: config },
     })),
+
+  updateConfigFile: (filename, config) => {
+    set((s) => ({
+      isDirty: true,
+      configFiles: { ...s.configFiles, [filename]: config },
+    }));
+    scheduleRevalidation(get, set);
+  },
 
   removeConfigFile: (filename) =>
     set((s) => {
