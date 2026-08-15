@@ -5,12 +5,12 @@ import { useNativeStore } from '../stores/nativeStore';
 import type { ParamSchema, ConfigParam, ConfigSection, HardwareType, SectionSchema } from '../types/config';
 import type { HardwareNodeData, SubComponentNodeData, FeatureNodeData, GroupChildItem, AppNode, AppEdge, ValidationStatus } from '../types/graph';
 import { applyBoardTypeMarkerToMcuSections } from '../utils/boardTypeMarker';
-import { updateAllSectionPins } from '../utils/pinUtils';
 import { buildUniqueSectionDraft } from '../utils/sectionNaming';
 import { getValidationStatusColor } from '../utils/validationStatus';
 import { resolveSection } from '../utils/sectionResolver';
 import { hasFeatureSectionType as hasFeatureSectionTypeInFiles } from '../utils/featureSections';
 import { toggleSectionSuppressed } from '../utils/sectionSuppress';
+import { applyMcuRenameToFiles, planPrimarySwap } from '../utils/mcuPrimary';
 import { acknowledgeWarning } from '../services/api';
 import WarningBadge from './nodes/WarningBadge';
 import McuNameDialog from './dialogs/McuNameDialog';
@@ -383,26 +383,7 @@ export default function SettingsPanel() {
     if (!cf) return;
     const allSchemas = configState.schemas;
 
-    // Rename MCU section header: [mcu oldName] → [mcu newName] (or [mcu] ↔ [mcu name])
-    const oldMcuHeader = oldMcuName ? `mcu ${oldMcuName}` : 'mcu';
-    const newMcuHeader = newMcuName ? `mcu ${newMcuName}` : 'mcu';
-    const updatedSections = cf.sections.map((sec) => {
-      if (sec.full_header === oldMcuHeader) {
-        return {
-          ...sec,
-          section_name: newMcuName,
-          full_header: newMcuHeader,
-        };
-      }
-      return sec;
-    });
-
-    // Update pin prefixes on non-MCU sections
-    const finalSections = updateAllSectionPins(updatedSections, oldMcuName, newMcuName, allSchemas);
-    configState.updateConfigFile(cfName, { ...cf, sections: finalSections });
-    void configState.revalidateFile(cfName);
-
-    // Also update pins in any other config files referenced by child nodes
+    // Update pins in any other config files referenced by child nodes
     const childConfigFiles = new Set<string>();
     for (const child of nodes) {
       if (child.parentId !== nodeId) continue;
@@ -415,12 +396,20 @@ export default function SettingsPanel() {
         }
       }
     }
-    for (const otherCfName of childConfigFiles) {
-      const otherCf = configState.configFiles[otherCfName];
-      if (!otherCf) continue;
-      const updatedOther = updateAllSectionPins(otherCf.sections, oldMcuName, newMcuName, allSchemas);
-      configState.updateConfigFile(otherCfName, { ...otherCf, sections: updatedOther });
-      void configState.revalidateFile(otherCfName);
+
+    // Rename MCU section + rewrite pin prefixes across affected files (pure)
+    const updatedFiles = applyMcuRenameToFiles(
+      configState.configFiles,
+      cfName,
+      [...childConfigFiles],
+      oldMcuName,
+      newMcuName,
+      allSchemas,
+    );
+    for (const filename of Object.keys(updatedFiles)) {
+      if (updatedFiles[filename] === configState.configFiles[filename]) continue;
+      configState.updateConfigFile(filename, updatedFiles[filename]);
+      void configState.revalidateFile(filename);
     }
 
     // Update node data
@@ -451,36 +440,20 @@ export default function SettingsPanel() {
     const currentIsPrimary = (hwData as Record<string, unknown>)?.isPrimary as boolean;
     const { renameConfigFile } = useConfigStore.getState();
 
-    // Helper to swap config files: old primary's printer.cfg → {mcuName}.cfg, new primary's file → printer.cfg
+    // Helper to swap config files via the pure plan: old primary's
+    // printer.cfg → {mcuName}.cfg, new primary's file → printer.cfg, and
+    // repoint every affected hardware + child node.
     const swapConfigFiles = (oldPrimaryNodeId: string | null, oldMcuName: string, newPrimaryNodeId: string, newConfigFile: string) => {
-      // Rename old primary's printer.cfg to {oldMcuName}.cfg
-      if (oldPrimaryNodeId && oldMcuName) {
-        const demotedFileName = `${oldMcuName.toLowerCase().replace(/\s+/g, '_')}.cfg`;
-        renameConfigFile('printer.cfg', demotedFileName);
-        updateNodeData(oldPrimaryNodeId, { configFile: demotedFileName } as Partial<AppNode['data']>);
-        // Update child nodes referencing printer.cfg
-        for (const child of nodes) {
-          if (child.parentId === oldPrimaryNodeId) {
-            const cd = child.data as Record<string, unknown>;
-            if (cd.configFile === 'printer.cfg') {
-              updateNodeData(child.id, { configFile: demotedFileName } as Partial<AppNode['data']>);
-            }
-          }
-        }
-      }
-      // Rename new primary's config file to printer.cfg
-      if (newConfigFile && newConfigFile !== 'printer.cfg') {
-        renameConfigFile(newConfigFile, 'printer.cfg');
-        updateNodeData(newPrimaryNodeId, { configFile: 'printer.cfg' } as Partial<AppNode['data']>);
-        // Update child nodes referencing the old file
-        for (const child of nodes) {
-          if (child.parentId === newPrimaryNodeId) {
-            const cd = child.data as Record<string, unknown>;
-            if (cd.configFile === newConfigFile) {
-              updateNodeData(child.id, { configFile: 'printer.cfg' } as Partial<AppNode['data']>);
-            }
-          }
-        }
+      const plan = planPrimarySwap({
+        oldPrimaryId: oldPrimaryNodeId,
+        oldMcuName,
+        newPrimaryId: newPrimaryNodeId,
+        newConfigFile,
+        nodes,
+      });
+      for (const r of plan.renames) renameConfigFile(r.from, r.to);
+      for (const u of plan.nodeUpdates) {
+        updateNodeData(u.nodeId, { configFile: u.configFile } as Partial<AppNode['data']>);
       }
     };
 
@@ -519,15 +492,16 @@ export default function SettingsPanel() {
         swapConfigFiles(oldPrimary.id, oldMcuName, selectedNodeId, newConfigFile);
       } else if (newConfigFile && newConfigFile !== 'printer.cfg') {
         // No old primary — just rename new primary's file to printer.cfg
-        renameConfigFile(newConfigFile, 'printer.cfg');
-        updateNodeData(selectedNodeId, { configFile: 'printer.cfg' } as Partial<AppNode['data']>);
-        for (const child of nodes) {
-          if (child.parentId === selectedNodeId) {
-            const cd = child.data as Record<string, unknown>;
-            if (cd.configFile === newConfigFile) {
-              updateNodeData(child.id, { configFile: 'printer.cfg' } as Partial<AppNode['data']>);
-            }
-          }
+        const plan = planPrimarySwap({
+          oldPrimaryId: null,
+          oldMcuName: '',
+          newPrimaryId: selectedNodeId,
+          newConfigFile,
+          nodes,
+        });
+        for (const r of plan.renames) renameConfigFile(r.from, r.to);
+        for (const u of plan.nodeUpdates) {
+          updateNodeData(u.nodeId, { configFile: u.configFile } as Partial<AppNode['data']>);
         }
       }
 
@@ -558,44 +532,29 @@ export default function SettingsPanel() {
     // Handle file rename when demoting: printer.cfg → {mcuName}.cfg
     if (mcuNamePrompt.purpose === 'demote') {
       const { renameConfigFile } = useConfigStore.getState();
-      const demotedFileName = `${mcuName.toLowerCase().replace(/\s+/g, '_')}.cfg`;
-      const ndData = nd?.data as Record<string, unknown>;
-      const currentFile = (ndData?.configFile as string) || 'printer.cfg';
-
-      if (currentFile === 'printer.cfg') {
-        renameConfigFile('printer.cfg', demotedFileName);
-        updateNodeData(mcuNamePrompt.nodeId, { configFile: demotedFileName } as Partial<AppNode['data']>);
-        // Update child nodes
-        for (const child of nodes) {
-          if (child.parentId === mcuNamePrompt.nodeId) {
-            const cd = child.data as Record<string, unknown>;
-            if (cd.configFile === 'printer.cfg') {
-              updateNodeData(child.id, { configFile: demotedFileName } as Partial<AppNode['data']>);
-            }
-          }
-        }
-      }
 
       // Now rename the new primary's file to printer.cfg
       const newPrimary = nodes.find(
         (n) => n.type === 'hardware' && n.id !== mcuNamePrompt.nodeId &&
           !!(n.data as Record<string, unknown>).isPrimary,
       );
-      if (newPrimary) {
-        const newPData = newPrimary.data as Record<string, unknown>;
-        const newPFile = (newPData.configFile as string) || '';
-        if (newPFile && newPFile !== 'printer.cfg') {
-          renameConfigFile(newPFile, 'printer.cfg');
-          updateNodeData(newPrimary.id, { configFile: 'printer.cfg' } as Partial<AppNode['data']>);
-          for (const child of nodes) {
-            if (child.parentId === newPrimary.id) {
-              const cd = child.data as Record<string, unknown>;
-              if (cd.configFile === newPFile) {
-                updateNodeData(child.id, { configFile: 'printer.cfg' } as Partial<AppNode['data']>);
-              }
-            }
-          }
-        }
+
+      // Demote the old primary (printer.cfg → {name}.cfg) and promote the new
+      // primary ({file} → printer.cfg) in one pure plan. renameConfigFile
+      // no-ops when the source file doesn't exist, so the stale-state guard
+      // from the old inline code is unnecessary.
+      const plan = planPrimarySwap({
+        oldPrimaryId: mcuNamePrompt.nodeId,
+        oldMcuName: mcuName,
+        newPrimaryId: newPrimary?.id ?? '',
+        newConfigFile: newPrimary
+          ? ((newPrimary.data as Record<string, unknown>).configFile as string) || ''
+          : '',
+        nodes,
+      });
+      for (const r of plan.renames) renameConfigFile(r.from, r.to);
+      for (const u of plan.nodeUpdates) {
+        updateNodeData(u.nodeId, { configFile: u.configFile } as Partial<AppNode['data']>);
       }
     }
 
