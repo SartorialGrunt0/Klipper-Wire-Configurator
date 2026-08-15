@@ -117,6 +117,53 @@ function computeHardwareDragPreviewSize(nodes: Node[], hardwareId: string) {
   };
 }
 
+/** Saved edge layout entry (id may differ from rebuilt edges — pair-match). */
+interface SavedEdgeLayout {
+  id: string;
+  source?: string;
+  target?: string;
+  data?: Record<string, unknown>;
+  sourceHandle?: string;
+  targetHandle?: string;
+}
+
+/**
+ * Overlay saved edge routing (custom bend points + connection sides) onto the
+ * freshly rebuilt graph. Matches by PAIR (source+target+edgeType), falling back
+ * to id: edge ids come from a module-level counter, so a line drawn at runtime
+ * (edge_7) gets a different id after the config rebuild than the one the save
+ * captured. The source/target/type triple is stable across rebuilds, and comm
+ * edges are matched direction-agnostically (the rebuild always emits SBC →
+ * hardware but the user may have drawn the opposite way).
+ */
+function applySavedEdgeLayout(saved: SavedEdgeLayout[] | undefined, graphStore: ReturnType<typeof useGraphStore.getState>) {
+  if (!saved || saved.length === 0) return;
+  const pairKey = (e: { source?: string; target?: string; data?: Record<string, unknown> }) => {
+    const t = (e.data as Record<string, unknown> | undefined)?.edgeType as string | undefined;
+    const [a, b] = [e.source ?? '', e.target ?? ''].sort();
+    return [a, b, t ?? ''].join('|');
+  };
+  const savedByPair = new Map(saved.map((e) => [pairKey(e), e]));
+  const savedById = new Map(saved.map((e) => [e.id, e]));
+  const currentEdges = useGraphStore.getState().edges;
+  const updatedEdges = currentEdges.map((edge) => {
+    const found = savedByPair.get(pairKey(edge)) ?? savedById.get(edge.id);
+    if (!found) return edge;
+    const next: Record<string, unknown> = { ...edge };
+    if (found.data) {
+      next.data = {
+        ...edge.data,
+        ...found.data,
+        customMiddlePoints: (found.data as Record<string, unknown>).customMiddlePoints,
+      } as unknown as import('./types/graph').AppEdge['data'];
+    }
+    if (found.sourceHandle) next.sourceHandle = found.sourceHandle;
+    if (found.targetHandle) next.targetHandle = found.targetHandle;
+    return next as import('./types/graph').AppEdge;
+  });
+  graphStore.setEdges(updatedEdges);
+}
+
 /** Sits inside <ReactFlow> and calls fitView whenever trigger increments. */
 function AutoFitController({ trigger }: { trigger: number }) {
   const { fitView } = useReactFlow();
@@ -257,7 +304,7 @@ export default function App() {
               if (layoutResult.layout) {
                 const layout = layoutResult.layout as {
                   graphNodes?: Array<{ id: string; position: { x: number; y: number } }>;
-                  graphEdges?: Array<{ id: string; data?: Record<string, unknown> }>;
+                  graphEdges?: SavedEdgeLayout[];
                   macroDesigner?: MacroDesignerPersistedState;
                 };
                 if (layout.macroDesigner) {
@@ -278,6 +325,9 @@ export default function App() {
                   });
                   graphStore.setNodes(updatedNodes);
                 }
+                // Restore edge routing the same way as the browser-mode path
+                // (pair-matched, direction-agnostic — see applySavedEdgeLayout).
+                applySavedEdgeLayout(layout.graphEdges as SavedEdgeLayout[] | undefined, graphStore);
               }
             } catch { /* no saved layout — use auto-arranged positions */ }
 
@@ -385,28 +435,7 @@ export default function App() {
             // node the line connects to. Without this, a refresh resets every
             // trace to default top/bottom routing even though card positions
             // survived.
-            if (layout.graphEdges) {
-              const savedEdges = new Map(
-                layout.graphEdges.map((e) => [e.id, e]),
-              );
-              const currentEdges = useGraphStore.getState().edges;
-              const updatedEdges = currentEdges.map((edge) => {
-                const saved = savedEdges.get(edge.id);
-                if (!saved) return edge;
-                const next: Record<string, unknown> = { ...edge };
-                if (saved.data) {
-                  next.data = {
-                    ...edge.data,
-                    ...saved.data,
-                    customMiddlePoints: (saved.data as Record<string, unknown>).customMiddlePoints,
-                  } as unknown as import('./types/graph').AppEdge['data'];
-                }
-                if (saved.sourceHandle) next.sourceHandle = saved.sourceHandle;
-                if (saved.targetHandle) next.targetHandle = saved.targetHandle;
-                return next as import('./types/graph').AppEdge;
-              });
-              graphStore.setEdges(updatedEdges);
-            }
+            applySavedEdgeLayout(layout.graphEdges, graphStore);
           }
         } catch { /* malformed/absent layout — keep auto-arranged positions */ }
 
