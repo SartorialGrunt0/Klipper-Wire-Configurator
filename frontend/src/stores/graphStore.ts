@@ -405,8 +405,16 @@ function sortNodesParentsFirst(nodes: AppNode[]): AppNode[] {
  * node. Shared by removeNode and onNodesChange so the Delete key and the ✕
  * button can't drift apart. Does NOT touch the graph store — callers decide
  * when to pushHistory and how to apply the node removal.
+ *
+ * For hardware nodes the config FILE is only deleted when no other hardware
+ * node still references it — two boards can share one multi-MCU file, and
+ * deleting one board must not delete the other's sections.
  */
-function cleanupRemovedNodeConfig(node: AppNode, configStore: ReturnType<typeof useConfigStore.getState>): void {
+function cleanupRemovedNodeConfig(
+  node: AppNode,
+  configStore: ReturnType<typeof useConfigStore.getState>,
+  allNodes: AppNode[],
+): void {
   const d = node.data as Record<string, unknown>;
   const configFile = d.configFile as string | undefined;
   if (!configFile) return;
@@ -427,7 +435,14 @@ function cleanupRemovedNodeConfig(node: AppNode, configStore: ReturnType<typeof 
       }
     }
   } else if (node.type === 'hardware') {
-    configStore.removeConfigFile(configFile);
+    // Only delete the config file if no OTHER hardware node references it
+    const stillReferenced = allNodes.some(
+      (n) => n.id !== node.id && n.type === 'hardware'
+        && (n.data as Record<string, unknown>).configFile === configFile,
+    );
+    if (!stillReferenced) {
+      configStore.removeConfigFile(configFile);
+    }
   }
 }
 
@@ -449,10 +464,11 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     if (removes.length > 0) {
       get().pushHistory();
       const configStore = useConfigStore.getState();
+      const nodesSnapshot = get().nodes;
       for (const change of removes) {
         const id = (change as { id: string }).id;
-        const node = get().nodes.find((n) => n.id === id);
-        if (node) cleanupRemovedNodeConfig(node, configStore);
+        const node = nodesSnapshot.find((n) => n.id === id);
+        if (node) cleanupRemovedNodeConfig(node, configStore, nodesSnapshot);
       }
     }
     set((s) => ({
@@ -603,8 +619,9 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 
     // Remove corresponding config sections for each removed node
     const configStore = useConfigStore.getState();
+    const allNodes = state.nodes;
     for (const rn of removedNodes) {
-      cleanupRemovedNodeConfig(rn, configStore);
+      cleanupRemovedNodeConfig(rn, configStore, allNodes);
     }
 
     set((s) => {

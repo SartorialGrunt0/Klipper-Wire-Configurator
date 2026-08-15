@@ -102,6 +102,54 @@ describe('graphStore node operations', () => {
     expect(useGraphStore.getState().nodes).toHaveLength(0);
   });
 
+  it('removeNode hardware preserves a config file shared with another board', () => {
+    // Two boards reference the same multi-MCU file (e.g. printer.cfg with two [mcu] sections)
+    useConfigStore.getState().setConfigFile('printer.cfg', {
+      filename: 'printer.cfg',
+      sections: [
+        {
+          section_type: 'mcu', section_name: 'mainboard', full_header: 'mcu mainboard',
+          line_number: 1, params: [], header_comments: [], trailing_comments: [], is_commented_out: false,
+        },
+        {
+          section_type: 'mcu', section_name: 'ebbtool', full_header: 'mcu ebbtool',
+          line_number: 2, params: [], header_comments: [], trailing_comments: [], is_commented_out: false,
+        },
+      ],
+      includes: [],
+      header_comments: [],
+      raw_text: '',
+    });
+    useGraphStore.getState().addNode(makeHwNode('hw1', { configFile: 'printer.cfg', mcuName: 'mainboard' }));
+    useGraphStore.getState().addNode(makeHwNode('hw2', { configFile: 'printer.cfg', mcuName: 'ebbtool' }));
+
+    // Delete only the first board
+    useGraphStore.getState().removeNode('hw1');
+
+    // The file must survive (hw2 still references it) with hw2's section intact
+    const cf = useConfigStore.getState().configFiles['printer.cfg'];
+    expect(cf).toBeDefined();
+    expect(cf.sections.some((s) => s.full_header === 'mcu ebbtool')).toBe(true);
+  });
+
+  it('removeNode hardware deletes the file when no other board references it', () => {
+    useConfigStore.getState().setConfigFile('solo.cfg', {
+      filename: 'solo.cfg',
+      sections: [{
+        section_type: 'mcu', section_name: 'solo', full_header: 'mcu solo',
+        line_number: 1, params: [], header_comments: [], trailing_comments: [], is_commented_out: false,
+      }],
+      includes: [],
+      header_comments: [],
+      raw_text: '',
+    });
+    useGraphStore.getState().addNode(makeHwNode('hw1', { configFile: 'solo.cfg', mcuName: 'solo' }));
+
+    useGraphStore.getState().removeNode('hw1');
+
+    expect(useConfigStore.getState().configFiles['solo.cfg']).toBeUndefined();
+  });
+
   it('setSelectedNode updates selection', () => {
     useGraphStore.getState().addNode(makeHwNode('n1'));
     useGraphStore.getState().setSelectedNode('n1');
