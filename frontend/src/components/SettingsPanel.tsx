@@ -855,24 +855,36 @@ export default function SettingsPanel() {
                     onClick={() => {
                       useGraphStore.getState().pushHistory();
                       updateEdgeData(selectedEdgeId, { commType: type } as Partial<AppEdge['data']>);
-                      // Toggle MCU params: comment/uncomment based on selected comm type
+                      // Toggle MCU params: comment/uncomment based on selected comm type.
+                      // USB and UART share the serial field — the edge label and
+                      // detect field are the only visible difference between them.
+                      // Serial params are only touched when the selected type
+                      // actually differs (CAN ⇄ serial-family): switching to CAN
+                      // comments serials; switching back restores ONE serial only
+                      // if none is active — never uncomment a second serial, which
+                      // would silently swap which device is in use.
                       if (mcuSection && targetConfigFile) {
                         const wantSerial = type === 'usb' || type === 'uart';
                         const wantCanbus = type === 'canbus';
+                        const serialParams = mcuSection.params.filter((p) => SERIAL_PARAMS.includes(p.key) && p.key !== '_comment_');
+                        const activeSerialCount = serialParams.filter((p) => !p.is_commented_out).length;
                         for (const param of mcuSection.params) {
                           if (param.key === '_comment_') continue;
-                          if (SERIAL_PARAMS.includes(param.key)) {
-                            // Ensure serial/baud params exist and are uncommented for USB/UART
-                            if (wantSerial && param.is_commented_out) {
-                              toggleParamCommented(targetConfigFile, mcuSection.full_header, param.key);
-                            } else if (!wantSerial && !param.is_commented_out) {
-                              toggleParamCommented(targetConfigFile, mcuSection.full_header, param.key);
-                            }
-                          } else if (CANBUS_PARAMS.includes(param.key)) {
+                          if (CANBUS_PARAMS.includes(param.key)) {
                             // Ensure canbus params exist and are uncommented for CAN
                             if (wantCanbus && param.is_commented_out) {
                               toggleParamCommented(targetConfigFile, mcuSection.full_header, param.key);
                             } else if (!wantCanbus && !param.is_commented_out) {
+                              toggleParamCommented(targetConfigFile, mcuSection.full_header, param.key);
+                            }
+                          } else if (SERIAL_PARAMS.includes(param.key)) {
+                            // CAN: comment every serial/baud param.
+                            if (wantCanbus && !param.is_commented_out) {
+                              toggleParamCommented(targetConfigFile, mcuSection.full_header, param.key);
+                            } else if (wantSerial && activeSerialCount === 0 && param.is_commented_out) {
+                              // Back from CAN with no active serial: restore the
+                              // first commented one only. If a serial is already
+                              // active, leave everything untouched.
                               toggleParamCommented(targetConfigFile, mcuSection.full_header, param.key);
                             }
                           }
