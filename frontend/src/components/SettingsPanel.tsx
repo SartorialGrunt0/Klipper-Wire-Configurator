@@ -889,6 +889,24 @@ export default function SettingsPanel() {
                             });
                           }
                         }
+                        // USB and UART share the serial field — the comm type is
+                        // inferred from the serial VALUE format, so switching the
+                        // label without rewriting the value leaves the config
+                        // disagreeing (and the next rebuild snaps back). Rewrite
+                        // the value to the selected transport's canonical format;
+                        // the user fine-tunes the exact path below (native mode
+                        // offers detected-device dropdowns).
+                        const serialParam = mcuSection.params.find((p) => p.key === 'serial');
+                        if (serialParam) {
+                          const val = serialParam.value;
+                          const isUsbPath = val.includes('/dev/serial/by-id/usb-') || val.includes('/tmp/klipper_host_mcu');
+                          const isTtyPath = /\/dev\/tty(S|AMA|ACM|USB)/.test(val);
+                          if (type === 'uart' && isUsbPath) {
+                            updateSectionParam(targetConfigFile, mcuSection.full_header, 'serial', '/dev/ttyACM0');
+                          } else if (type === 'usb' && isTtyPath) {
+                            updateSectionParam(targetConfigFile, mcuSection.full_header, 'serial', '/dev/serial/by-id/usb-klipper');
+                          }
+                        }
                       }
                     }}
                     className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-all ${
