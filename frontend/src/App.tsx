@@ -943,17 +943,10 @@ export default function App() {
               onToggleAddMenu={() => setShowAddMenu(!showAddMenu)}
               onOpenMacroDesigner={() => setShowMacroDesigner(true)}
               onToggleTextView={() => {
-                if (showTextView) {
-                  // Text edits apply to the model live, so switching views is
-                  // always safe — nothing to apply, nothing to lose.
-                  setShowTextView(false);
-                } else {
-                  // Switching TO text view — close the settings panel
-                  setSelectedNode(null);
-                  setSelectedEdge(null);
-                  setSelectedSection(null);
-                  setShowTextView(true);
-                }
+                // Text edits apply to the model live, so switching views is
+                // always safe — nothing to apply, nothing to lose.
+                // Both views stay mounted; ReactFlow keeps viewport + selection.
+                setShowTextView(!showTextView);
               }}
             />
           </div>
@@ -962,11 +955,10 @@ export default function App() {
 
       {/* Main content */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Graph or Text view */}
+        {/* Graph or Text view — both stay mounted so ReactFlow keeps its
+            viewport/zoom/selection across toggles; only visibility flips. */}
         <div className="flex-1 relative">
-          {showTextView ? (
-            <TextEditor />
-          ) : (
+          <div className={showTextView ? 'hidden' : 'h-full w-full'}>
             <ReactFlow
               nodes={nodes}
               edges={edges}
@@ -1036,7 +1028,10 @@ export default function App() {
                 </button>
               </Panel>
             </ReactFlow>
-          )}
+          </div>
+          <div className={showTextView ? 'h-full w-full' : 'hidden'}>
+            <TextEditor />
+          </div>
 
           {/* Add Menu Overlay */}
           {showAddMenu && (
