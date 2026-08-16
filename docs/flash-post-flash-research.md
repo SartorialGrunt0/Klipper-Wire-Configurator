@@ -102,6 +102,14 @@ Voron's own DFU flashing flow for the Klipper Expander (STM32F042) documents the
 ### 6. RP2040 (PIS/Hotkey)
 `make flash` uses the USB bootrom via `picoboot` (`2e8a:0003`), or manual BOOTSEL + copy `klipper.uf2`. The MCU resets into the app automatically — no `:leave` equivalent, no power-cycle requirement.
 
+### 6b. Serial flashtool path — VALIDATED 2026-08-16 on live hardware (Klipper Expander, STM32F042)
+Full loop tested with the board reflashed to Katapult then Klipper:
+1. **Katapult install requires a full chip erase first.** `dfu-util -s 0x08000000:mass-erase:force -D katapult.bin` (Katapult README: "Prior to flashing Katapult it is recommended to do a full chip erase. Doing so allows Katapult to detect that no application is present and enter the bootloader."). Flashing Katapult over a stale Klipper image leaves Katapult unable to decide boot mode — the board sits off the USB bus entirely (no enumeration attempt at all). With a clean erase it enumerates as `1d50:6177` → `/dev/serial/by-id/usb-katapult_stm32f042x6_<chipid>-if00`.
+2. **App/bootloader offset must match.** Katapult built with 8KiB bootloader (`STM32_FLASH_START_2000`) → application start `0x8002000`. The Klipper build must use the same 8KiB offset (`CONFIG_FLASH_APPLICATION_ADDRESS=0x8002000`) or flashtool writes to a mismatched address. Katapult reports `Application Start: 0x8002000` during flash.
+3. **flashtool.py serial flow works as a single `-f` command** — no `-r`/`-q` needed for serial; the tool handles bootloader entry itself over the wire. Command: `python3 ~/katapult/scripts/flashtool.py -d /dev/serial/by-id/usb-katapult_* -f out/klipper.bin` → `Programming Complete` with SHA verification. The board then re-enumerates as `1d50:614e` (`usb-Klipper_*`).
+4. **Dependency:** flashtool.py needs `pyserial`. On a stock Debian/Pi host that's `python3-serial` (root install) or a venv — a bare `python3` run fails with `FlashError: The pyserial python package was not found`. KWC's backend must run flashtool with a python that has pyserial, or surface this error clearly.
+5. CAN path (`-i can0 -r -q -f -q` multi-step) still requires a CAN adapter/board — not validated on this host.
+
 ### 7. flashtool `-q` query is single-node-only (affects KWC's device scan)
 Katapult README: "A query should only be performed when a single can node is on the network. Attempting to query multiple nodes may result in transmission errors that can force a node into a 'bus off' state. When a node enters 'bus off' it becomes unresponsive. The node must be reset to recover."
 
