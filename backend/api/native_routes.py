@@ -353,6 +353,7 @@ class FlashProfileSaveRequest(BaseModel):
     flash_device: str | None = None
     flash_method: str | None = None
     assignments: list[FirmwareAssignment] = []
+    overwrite: bool = False
 
 
 def _validated_target(target: str) -> str:
@@ -505,6 +506,7 @@ async def save_flash_profile_api(target: str, data: FlashProfileSaveRequest):
                 "flash_method": data.flash_method,
                 "assignments": [{"symbol": item.symbol, "value": item.value} for item in data.assignments],
             },
+            overwrite=data.overwrite,
         )
     except FileExistsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

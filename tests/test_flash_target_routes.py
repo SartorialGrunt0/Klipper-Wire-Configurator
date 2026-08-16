@@ -267,10 +267,11 @@ def test_list_flash_profiles_route_returns_profiles(monkeypatch):
 def test_save_flash_profile_route_forwards_payload(monkeypatch):
     captured = {}
 
-    def fake_save(target, name, data):
+    def fake_save(target, name, data, overwrite=False):
         captured['target'] = target
         captured['name'] = name
         captured['data'] = data
+        captured['overwrite'] = overwrite
         return {'target': target, 'name': name, **data}
 
     monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
@@ -297,7 +298,34 @@ def test_save_flash_profile_route_forwards_payload(monkeypatch):
             'flash_method': 'flashtool',
             'assignments': [{'symbol': 'MACH_AVR', 'value': 'y'}],
         },
+        'overwrite': False,
     }
+
+
+def test_save_flash_profile_route_forwards_overwrite_flag(monkeypatch):
+    captured = {}
+
+    def fake_save(target, name, data, overwrite=False):
+        captured['overwrite'] = overwrite
+        return {'target': target, 'name': name, **data}
+
+    monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
+    monkeypatch.setattr(native_routes, 'save_flash_profile', fake_save)
+
+    response = client.post(
+        '/api/native/flash/klipper/profiles',
+        json={
+            'name': 'AVR Profile',
+            'checkout_path': '/home/pi/klipper',
+            'flash_device': '/dev/serial/by-id/usb-avr',
+            'flash_method': 'flashtool',
+            'assignments': [],
+            'overwrite': True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured == {'overwrite': True}
 
 
 def test_delete_flash_profile_route_deletes_named_profile(monkeypatch):

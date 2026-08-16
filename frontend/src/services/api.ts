@@ -9,6 +9,17 @@ import type {
 
 const BASE_URL = (import.meta.env.VITE_API_URL as string | undefined) || '/api';
 
+/** HTTP error with the response status attached, so callers can branch on it (e.g. 409). */
+export class ApiError extends Error {
+  status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE_URL}${url}`, {
     headers: { 'Content-Type': 'application/json' },
@@ -16,7 +27,7 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   });
   const text = await res.text();
   if (!res.ok) {
-    throw new Error(`API error ${res.status}: ${text}`);
+    throw new ApiError(res.status, `API error ${res.status}: ${text}`);
   }
 
   const contentType = res.headers.get('content-type') || '';
@@ -692,6 +703,7 @@ export async function saveNativeFlashProfile(
     flashDevice?: string;
     flashMethod?: string;
     assignments: NativeFlashProfileAssignment[];
+    overwrite?: boolean;
   },
 ): Promise<NativeFlashProfile> {
   return request(`/native/flash/${encodeURIComponent(target)}/profiles`, {
@@ -702,6 +714,7 @@ export async function saveNativeFlashProfile(
       flash_device: profile.flashDevice,
       flash_method: profile.flashMethod,
       assignments: profile.assignments,
+      overwrite: profile.overwrite ?? false,
     }),
   });
 }

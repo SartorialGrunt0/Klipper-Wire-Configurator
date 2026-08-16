@@ -471,13 +471,19 @@ def list_flash_profiles(target: str) -> list[dict[str, Any]]:
     return profiles
 
 
-def save_flash_profile(target: str, name: str, data: dict[str, Any]) -> dict[str, Any]:
+def save_flash_profile(target: str, name: str, data: dict[str, Any], overwrite: bool = False) -> dict[str, Any]:
     normalized_target = _validated_flash_profile_target(target)
     payload = _flash_profile_payload(normalized_target, name, data)
     profile_path = _flash_profile_file(normalized_target, payload["name"])
-    if profile_path.exists():
+    if profile_path.exists() and not overwrite:
         raise FileExistsError(f"Flash profile already exists: {payload['name']}")
-    profile_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    if overwrite and profile_path.exists():
+        # Atomic replace: write to a temp file in the same directory, then rename.
+        temp_path = profile_path.with_name(f"{profile_path.name}.tmp")
+        temp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        temp_path.replace(profile_path)
+    else:
+        profile_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return load_flash_profile(normalized_target, payload["name"])
 
 

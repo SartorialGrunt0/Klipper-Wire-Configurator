@@ -1151,19 +1151,38 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
 
     const target = profileDialog.target;
     const panel = panels[target];
+    const profilePayload = {
+      name,
+      checkoutPath: panel.checkoutPath.trim() || undefined,
+      flashDevice: panel.flashDevice.trim() || undefined,
+      flashMethod: panel.flashMethod || panel.flashState?.default_flash_method || undefined,
+      assignments: buildPanelAssignments(panel.assignmentValues, panel.knownFields, panel.stickyAssignments),
+    };
     setProfileDialog((current) => current ? { ...current, saving: true, error: '' } : current);
 
     try {
-      await api.saveNativeFlashProfile(target, {
-        name,
-        checkoutPath: panel.checkoutPath.trim() || undefined,
-        flashDevice: panel.flashDevice.trim() || undefined,
-        flashMethod: panel.flashMethod || panel.flashState?.default_flash_method || undefined,
-        assignments: buildPanelAssignments(panel.assignmentValues, panel.knownFields, panel.stickyAssignments),
-      });
+      await api.saveNativeFlashProfile(target, profilePayload);
       setPanelMessage(target, `Saved flash profile "${name}" on the host.`, 'success');
       setProfileDialog(null);
     } catch (error) {
+      if (
+        error instanceof api.ApiError
+        && error.status === 409
+        && window.confirm(`A flash profile named "${name}" already exists. Replace it?`)
+      ) {
+        try {
+          await api.saveNativeFlashProfile(target, { ...profilePayload, overwrite: true });
+          setPanelMessage(target, `Replaced flash profile "${name}" on the host.`, 'success');
+          setProfileDialog(null);
+        } catch (retryError) {
+          setProfileDialog((current) => current ? {
+            ...current,
+            saving: false,
+            error: retryError instanceof Error ? retryError.message : 'Failed to replace the flash profile.',
+          } : current);
+        }
+        return;
+      }
       setProfileDialog((current) => current ? {
         ...current,
         saving: false,

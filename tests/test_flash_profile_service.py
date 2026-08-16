@@ -63,6 +63,37 @@ def test_save_flash_profile_rejects_duplicate_names(monkeypatch, tmp_path):
         assert 'already exists' in str(exc)
 
 
+def test_save_flash_profile_replaces_existing_with_overwrite(monkeypatch, tmp_path):
+    monkeypatch.setattr(native_services, '_LAYOUT_DIR', tmp_path)
+
+    native_services.save_flash_profile('katapult', 'CAN Toolhead', {
+        'checkout_path': '/home/pi/katapult',
+        'flash_device': 'aabbccddeeff',
+        'flash_method': 'flashtool',
+        'assignments': [],
+    })
+
+    replaced = native_services.save_flash_profile(
+        'katapult',
+        'CAN Toolhead',
+        {
+            'checkout_path': '/home/pi/katapult',
+            'flash_device': 'ffeeddccbbaa',
+            'flash_method': 'flashtool',
+            'assignments': [],
+        },
+        overwrite=True,
+    )
+
+    assert replaced['flash_device'] == 'ffeeddccbbaa'
+    loaded = native_services.load_flash_profile('katapult', 'CAN Toolhead')
+    assert loaded['flash_device'] == 'ffeeddccbbaa'
+    # Only the final profile file should exist — no leftover temp files.
+    assert sorted(path.name for path in (tmp_path / 'flash_profiles' / 'katapult').iterdir()) == [
+        'CAN%20Toolhead.json',
+    ]
+
+
 def test_delete_flash_profile_removes_profile(monkeypatch, tmp_path):
     monkeypatch.setattr(native_services, '_LAYOUT_DIR', tmp_path)
     native_services.save_flash_profile('klipper', 'Temporary', {
