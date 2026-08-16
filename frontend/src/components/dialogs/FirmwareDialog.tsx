@@ -849,6 +849,10 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
           : result.error || `${result.display_name} flash failed.`,
         messageTone: result.success ? 'success' : 'error',
       }));
+      if (result.success && !panelsRef.current[target].devicesScanning) {
+        // USB enumeration changed after a flash — refresh the candidate list.
+        void scanDevices(target, true);
+      }
     } catch (error) {
       updatePanel(target, (current) => ({
         ...current,
