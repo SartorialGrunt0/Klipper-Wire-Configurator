@@ -9,6 +9,17 @@ import type {
 
 const BASE_URL = (import.meta.env.VITE_API_URL as string | undefined) || '/api';
 
+/** HTTP error with the response status attached, so callers can branch on it (e.g. 409). */
+export class ApiError extends Error {
+  status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE_URL}${url}`, {
     headers: { 'Content-Type': 'application/json' },
@@ -16,7 +27,7 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   });
   const text = await res.text();
   if (!res.ok) {
-    throw new Error(`API error ${res.status}: ${text}`);
+    throw new ApiError(res.status, `API error ${res.status}: ${text}`);
   }
 
   const contentType = res.headers.get('content-type') || '';
@@ -554,9 +565,29 @@ export type NativeFirmwareBuildResult = NativeFlashCommandResult;
 export async function getNativeFlashState(
   target: FlashTargetKey,
   checkoutPath?: string,
+  helpLimit = 400,
 ): Promise<NativeFlashState> {
-  const q = checkoutPath ? `?checkout_path=${encodeURIComponent(checkoutPath)}` : '';
+  const params = new URLSearchParams();
+  if (checkoutPath) {
+    params.set('checkout_path', checkoutPath);
+  }
+  if (helpLimit > 0) {
+    params.set('help_limit', String(helpLimit));
+  }
+  const q = params.toString() ? `?${params.toString()}` : '';
   return request(`/native/flash/${encodeURIComponent(target)}${q}`);
+}
+
+export async function getNativeFlashFieldHelp(
+  target: FlashTargetKey,
+  fieldId: string,
+  checkoutPath?: string,
+): Promise<{ field_id: string; help: string }> {
+  const params = new URLSearchParams({ field_id: fieldId });
+  if (checkoutPath) {
+    params.set('checkout_path', checkoutPath);
+  }
+  return request(`/native/flash/${encodeURIComponent(target)}/field-help?${params.toString()}`);
 }
 
 export interface NativeFlashDeviceScanResult {
@@ -586,10 +617,11 @@ export async function previewNativeFlashConfig(
   target: FlashTargetKey,
   assignments: Array<{ symbol: string; value: string }>,
   checkoutPath?: string,
+  helpLimit = 400,
 ): Promise<NativeFlashState> {
   return request(`/native/flash/${encodeURIComponent(target)}/preview`, {
     method: 'POST',
-    body: JSON.stringify({ assignments, checkout_path: checkoutPath }),
+    body: JSON.stringify({ assignments, checkout_path: checkoutPath, help_limit: helpLimit }),
   });
 }
 
@@ -597,32 +629,69 @@ export async function updateNativeFlashConfig(
   target: FlashTargetKey,
   assignments: Array<{ symbol: string; value: string }>,
   checkoutPath?: string,
+  helpLimit = 400,
 ): Promise<NativeFlashState> {
   return request(`/native/flash/${encodeURIComponent(target)}/config`, {
     method: 'PUT',
-    body: JSON.stringify({ assignments, checkout_path: checkoutPath }),
+    body: JSON.stringify({ assignments, checkout_path: checkoutPath, help_limit: helpLimit }),
   });
 }
 
-export async function buildNativeFlashTarget(
+/** A build/flash request that started a background job. */
+export interface NativeFlashJobStarted {
+  job_id: string;
+  running: true;
+  target: FlashTargetKey;
+  kind: 'build' | 'flash';
+}
+
+/** A build/flash request that failed validation before any job started. */
+export type NativeFlashJobStartResult = NativeFlashJobStarted | NativeFlashCommandResult;
+
+export interface NativeFlashJobStatus {
+  job_id: string;
+  running: boolean;
+  target: FlashTargetKey;
+  kind: 'build' | 'flash';
+  log_tail: string[];
+  result: NativeFlashCommandResult | null;
+}
+
+export async function startNativeFlashBuild(
   target: FlashTargetKey,
   checkoutPath?: string,
-): Promise<NativeFlashCommandResult> {
+): Promise<NativeFlashJobStartResult> {
   return request(`/native/flash/${encodeURIComponent(target)}/build`, {
     method: 'POST',
     body: JSON.stringify({ checkout_path: checkoutPath }),
   });
 }
 
-export async function flashNativeFlashTarget(
+export async function startNativeFlashFlash(
   target: FlashTargetKey,
   checkoutPath?: string,
   flashDevice?: string,
   flashMethod?: string,
-): Promise<NativeFlashCommandResult> {
+): Promise<NativeFlashJobStartResult> {
   return request(`/native/flash/${encodeURIComponent(target)}/flash`, {
     method: 'POST',
     body: JSON.stringify({ checkout_path: checkoutPath, flash_device: flashDevice, flash_method: flashMethod }),
+  });
+}
+
+export async function getNativeFlashJobStatus(
+  target: FlashTargetKey,
+  jobId: string,
+): Promise<NativeFlashJobStatus> {
+  return request(`/native/flash/${encodeURIComponent(target)}/jobs/${encodeURIComponent(jobId)}`);
+}
+
+export async function cancelNativeFlashJob(
+  target: FlashTargetKey,
+  jobId: string,
+): Promise<{ job_id: string; cancelled: boolean }> {
+  return request(`/native/flash/${encodeURIComponent(target)}/jobs/${encodeURIComponent(jobId)}/cancel`, {
+    method: 'POST',
   });
 }
 
@@ -670,6 +739,7 @@ export async function saveNativeFlashProfile(
     flashDevice?: string;
     flashMethod?: string;
     assignments: NativeFlashProfileAssignment[];
+    overwrite?: boolean;
   },
 ): Promise<NativeFlashProfile> {
   return request(`/native/flash/${encodeURIComponent(target)}/profiles`, {
@@ -680,6 +750,7 @@ export async function saveNativeFlashProfile(
       flash_device: profile.flashDevice,
       flash_method: profile.flashMethod,
       assignments: profile.assignments,
+      overwrite: profile.overwrite ?? false,
     }),
   });
 }
@@ -699,10 +770,6 @@ export async function updateNativeFirmwareConfig(
   klipperPath?: string,
 ): Promise<NativeFirmwareState> {
   return updateNativeFlashConfig('klipper', assignments, klipperPath);
-}
-
-export async function buildNativeFirmware(klipperPath?: string): Promise<NativeFirmwareBuildResult> {
-  return buildNativeFlashTarget('klipper', klipperPath);
 }
 
 export async function downloadNativeFirmwareArtifact(

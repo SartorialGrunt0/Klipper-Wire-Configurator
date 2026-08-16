@@ -471,13 +471,19 @@ def list_flash_profiles(target: str) -> list[dict[str, Any]]:
     return profiles
 
 
-def save_flash_profile(target: str, name: str, data: dict[str, Any]) -> dict[str, Any]:
+def save_flash_profile(target: str, name: str, data: dict[str, Any], overwrite: bool = False) -> dict[str, Any]:
     normalized_target = _validated_flash_profile_target(target)
     payload = _flash_profile_payload(normalized_target, name, data)
     profile_path = _flash_profile_file(normalized_target, payload["name"])
-    if profile_path.exists():
+    if profile_path.exists() and not overwrite:
         raise FileExistsError(f"Flash profile already exists: {payload['name']}")
-    profile_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    if overwrite and profile_path.exists():
+        # Atomic replace: write to a temp file in the same directory, then rename.
+        temp_path = profile_path.with_name(f"{profile_path.name}.tmp")
+        temp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        temp_path.replace(profile_path)
+    else:
+        profile_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return load_flash_profile(normalized_target, payload["name"])
 
 
@@ -570,6 +576,74 @@ def firmware_restart_klipper() -> dict:
         "method": "gcode/firmware_restart",
         "socket_path": response["socket_path"],
     }
+
+
+# ── Klipper service control (systemctl) ────────────────────────
+
+_KLIPPER_SERVICE_NAME = os.environ.get("KWC_KLIPPER_SERVICE", "klipper")
+
+
+def _klipper_service_command(action: str) -> list[str]:
+    """Build a systemctl command for the Klipper service."""
+    if os.geteuid() == 0:
+        return ["systemctl", action, _KLIPPER_SERVICE_NAME]
+    # `sudo -n` fails fast instead of hanging on a password prompt; the flash
+    # job surfaces the error if the user lacks passwordless sudo.
+    return ["sudo", "-n", "systemctl", action, _KLIPPER_SERVICE_NAME]
+
+
+def klipper_service_state() -> str:
+    """Return 'active', 'inactive', 'failed', or '' (no such service)."""
+    try:
+        completed = subprocess.run(
+            ["systemctl", "is-active", _KLIPPER_SERVICE_NAME],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return ""
+    state = (completed.stdout or completed.stderr or "").strip()
+    return state if state in {"active", "inactive", "failed"} else ""
+
+
+def klipper_service_can_control() -> bool:
+    """True when the backend can stop/start the Klipper service itself.
+
+    Root can always control it; a non-root backend needs passwordless sudo
+    (`sudo -n true`), otherwise the orchestrated stop/start would fail mid-job
+    with ``sudo: a password is required``.
+    """
+    if os.geteuid() == 0:
+        return True
+    try:
+        completed = subprocess.run(
+            ["sudo", "-n", "true"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0
+
+
+def klipper_service_stop_command() -> list[str] | None:
+    """Return the stop command when the service is active, else None.
+
+    Returns None on hosts without a running Klipper service so flash jobs
+    there (e.g. the dev Pi) skip orchestration entirely.
+    """
+    if klipper_service_state() != "active":
+        return None
+    return _klipper_service_command("stop")
+
+
+def klipper_service_start_command() -> list[str] | None:
+    """Return the start command; callers only invoke it after a stop ran."""
+    return _klipper_service_command("start")
 
 
 def _klippy_log_candidates() -> list[Path]:

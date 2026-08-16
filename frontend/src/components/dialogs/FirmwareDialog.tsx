@@ -13,6 +13,30 @@ import type {
   NativeFlashProfileSummary,
   NativeFlashState,
 } from '../../services/api';
+import {
+  CAN_UUID_PATTERN,
+  USB_ID_PATTERN,
+  applyFieldValue,
+  buildAssignments,
+  buildPanelAssignments,
+  cloneField,
+  cloneFields,
+  fieldAssignments,
+  fieldRecord,
+  flashMethodRecord,
+  flashOutcomeLabel,
+  formatBytes,
+  formatModified,
+  groupedFields,
+  inferFlashMethodForDevice,
+  isBusyStatus,
+  mergeDeviceCandidates,
+  normalizeProfileAssignments,
+  PreviewEpoch,
+  resolveFlashDevice,
+  resolveFlashMethod,
+  resolveMethodDefaultDevice,
+} from '../../utils/flashPanel';
 
 interface FirmwareDialogProps {
   onClose: () => void;
@@ -39,6 +63,14 @@ interface FlashProfileDialogState {
   deletingName: string | null;
 }
 
+interface FlashConfirmState {
+  target: FlashTargetKey;
+  device: string;
+  method: string;
+  methodLabel: string;
+  methodDescription: string;
+}
+
 type DialogStatus = 'idle' | 'loading' | 'previewing' | 'saving' | 'building' | 'flashing';
 type MessageTone = 'info' | 'success' | 'error';
 
@@ -57,32 +89,13 @@ interface FlashPanelState {
   assignmentValues: Record<string, string>;
   isDirty: boolean;
   commandResult: NativeFlashCommandResult | null;
+  activeJobId: string | null;
+  liveLog: string | null;
   scannedDeviceCandidates: NativeFlashDeviceCandidate[];
   devicesScanning: boolean;
 }
 
 const TARGETS: FlashTargetKey[] = ['klipper', 'katapult'];
-const CHECKOUT_PATHS_STORAGE_KEY = 'klipper-wire-firmware-checkout-paths';
-
-function loadPersistedCheckoutPaths(): Record<FlashTargetKey, string> {
-  try {
-    const raw = localStorage.getItem(CHECKOUT_PATHS_STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as Partial<Record<FlashTargetKey, string>>;
-      return {
-        klipper: typeof parsed.klipper === 'string' ? parsed.klipper : '',
-        katapult: typeof parsed.katapult === 'string' ? parsed.katapult : '',
-      };
-    }
-  } catch { /* ignore */ }
-  return { klipper: '', katapult: '' };
-}
-
-function savePersistedCheckoutPaths(paths: Record<FlashTargetKey, string>): void {
-  try {
-    localStorage.setItem(CHECKOUT_PATHS_STORAGE_KEY, JSON.stringify(paths));
-  } catch { /* ignore */ }
-}
 
 const FLASH_WORKFLOW_HELP = 'Changes update the visible menuconfig fields immediately. Use the settings gear to override the Klipper and Katapult checkout paths and refresh detected flash devices. Save writes the active .config file and then lets you store the current flash setup under a unique host-side profile name. Load opens the active config or any saved host-side flash profile for the current target. Flash auto-matches the selected device to a supported method when possible, while still letting you override the method manually.';
 const ARTIFACTS_HELP = 'Generated files stay on the SBC under the active out directory. You can download them directly here or delete stale artifacts you no longer need.';
@@ -91,190 +104,11 @@ const HELP_POPOVER_WIDTH = 288;
 const HELP_POPOVER_MARGIN = 12;
 const HELP_POPOVER_OFFSET = 8;
 const PREVIEW_DEBOUNCE_MS = 180;
-const USB_ID_PATTERN = /^[0-9a-fA-F]{4}:[0-9a-fA-F]{4}$/;
-const CAN_UUID_PATTERN = /^(?:[A-Za-z0-9_-]+:)?[0-9a-fA-F]{12}$/;
+const JOB_POLL_MS = 1500;
 
 interface HelpPopoverPosition {
   top: number;
   left: number;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function isFlashTargetKey(value: unknown): value is FlashTargetKey {
-  return value === 'klipper' || value === 'katapult';
-}
-
-function normalizeProfileAssignments(assignments: NativeFlashProfileAssignment[]): NativeFlashProfileAssignment[] {
-  const normalized: NativeFlashProfileAssignment[] = [];
-  for (const assignment of assignments) {
-    const symbol = assignment.symbol.trim();
-    if (!symbol) {
-      continue;
-    }
-    normalized.push({
-      symbol,
-      value: assignment.value,
-    });
-  }
-  return normalized;
-}
-
-function buildPanelAssignments(
-  assignmentValues: Record<string, string>,
-  knownFields: Record<string, NativeFlashField>,
-  stickyAssignments: NativeFlashProfileAssignment[],
-): Array<{ symbol: string; value: string }> {
-  const merged = new Map<string, string>();
-  for (const assignment of normalizeProfileAssignments(stickyAssignments)) {
-    merged.set(assignment.symbol, assignment.value);
-  }
-  for (const assignment of buildAssignments(assignmentValues, knownFields)) {
-    merged.set(assignment.symbol, assignment.value);
-  }
-  return Array.from(merged.entries()).map(([symbol, value]) => ({ symbol, value }));
-}
-
-function flashMethodRecord(
-  state: NativeFlashState | null,
-  methodValue: string,
-): NativeFlashMethodCandidate | null {
-  if (!state || !methodValue) {
-    return null;
-  }
-  return state.flash_method_candidates.find((candidate) => candidate.value === methodValue) || null;
-}
-
-function resolveMethodDefaultDevice(state: NativeFlashState | null, methodValue: string): string {
-  return flashMethodRecord(state, methodValue)?.default_device || state?.default_flash_device || '';
-}
-
-function inferFlashMethodForDevice(value: string, state: NativeFlashState | null): string {
-  const trimmedValue = value.trim();
-  if (!state || !trimmedValue) {
-    return '';
-  }
-
-  const exactCandidate = state.flash_device_candidates.find((candidate) => candidate.value === trimmedValue);
-  if (exactCandidate?.preferred_flash_method && flashMethodRecord(state, exactCandidate.preferred_flash_method)) {
-    return exactCandidate.preferred_flash_method;
-  }
-
-  const supportedMethods = new Set(state.flash_method_candidates.map((candidate) => candidate.value));
-  if (CAN_UUID_PATTERN.test(trimmedValue) && supportedMethods.has('flashtool')) {
-    return 'flashtool';
-  }
-  if (trimmedValue.startsWith('/dev/')) {
-    if (supportedMethods.has('flashtool')) {
-      return 'flashtool';
-    }
-    if (supportedMethods.has('make_flash')) {
-      return 'make_flash';
-    }
-  }
-  if (trimmedValue === 'first' && supportedMethods.has('make_flash')) {
-    return 'make_flash';
-  }
-  if (USB_ID_PATTERN.test(trimmedValue)) {
-    if (supportedMethods.has('dfu_util')) {
-      return 'dfu_util';
-    }
-    if (supportedMethods.has('make_flash')) {
-      return 'make_flash';
-    }
-  }
-  return '';
-}
-
-function resolveFlashMethod(previous: FlashPanelState, nextState: NativeFlashState, resetToDefault: boolean): string {
-  const currentDefault = previous.flashState?.default_flash_method || '';
-  const nextDefault = nextState.default_flash_method || '';
-  if (resetToDefault) {
-    if (previous.flashMethod && previous.flashMethod !== currentDefault) {
-      return previous.flashMethod;
-    }
-    return nextDefault;
-  }
-  if (!previous.flashMethod || previous.flashMethod === currentDefault) {
-    return nextDefault;
-  }
-  return previous.flashMethod;
-}
-
-function cloneField(field: NativeFlashField): NativeFlashField {
-  return {
-    ...field,
-    menu_path: [...field.menu_path],
-    assignable: [...field.assignable],
-    options: field.options?.map((option) => ({ ...option })),
-  };
-}
-
-function cloneFields(fields: NativeFlashField[]): NativeFlashField[] {
-  return fields.map(cloneField);
-}
-
-function fieldRecord(fields: NativeFlashField[]): Record<string, NativeFlashField> {
-  const result: Record<string, NativeFlashField> = {};
-  for (const field of fields) {
-    result[field.id] = cloneField(field);
-  }
-  return result;
-}
-
-function fieldAssignments(fields: NativeFlashField[]): Record<string, string> {
-  const result: Record<string, string> = {};
-  for (const field of fields) {
-    result[field.id] = field.value;
-  }
-  return result;
-}
-
-function buildAssignments(
-  assignmentValues: Record<string, string>,
-  knownFields: Record<string, NativeFlashField>,
-): Array<{ symbol: string; value: string }> {
-  const assignments: Array<{ symbol: string; value: string }> = [];
-  for (const [fieldId, value] of Object.entries(assignmentValues)) {
-    const field = knownFields[fieldId];
-    if (!field) {
-      continue;
-    }
-    if (field.kind === 'choice') {
-      if (value) {
-        assignments.push({ symbol: value, value: 'y' });
-      }
-      continue;
-    }
-    if (field.symbol) {
-      assignments.push({ symbol: field.symbol, value });
-    }
-  }
-  return assignments;
-}
-
-function applyFieldValue(fields: NativeFlashField[], fieldId: string, value: string): NativeFlashField[] {
-  return fields.map((field) => {
-    if (field.id !== fieldId) {
-      return field;
-    }
-    if (field.kind === 'choice') {
-      return {
-        ...field,
-        value,
-        options: field.options?.map((option) => ({
-          ...option,
-          selected: option.symbol === value,
-        })),
-      };
-    }
-    return {
-      ...field,
-      value,
-    };
-  });
 }
 
 function createEmptyPanelState(target: FlashTargetKey, checkoutPath = ''): FlashPanelState {
@@ -294,50 +128,11 @@ function createEmptyPanelState(target: FlashTargetKey, checkoutPath = ''): Flash
     assignmentValues: {},
     isDirty: false,
     commandResult: null,
+    activeJobId: null,
+    liveLog: null,
     scannedDeviceCandidates: [],
     devicesScanning: false,
   };
-}
-
-function formatBytes(size: number): string {
-  if (size < 1024) return `${size} B`;
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
-  return `${(size / (1024 * 1024)).toFixed(2)} MB`;
-}
-
-function formatModified(timestamp: number): string {
-  return new Date(timestamp * 1000).toLocaleString();
-}
-
-/** Merge static (config-driven) candidates with dynamically scanned ones, deduplicating by value. */
-function mergeDeviceCandidates(
-  staticCandidates: NativeFlashDeviceCandidate[],
-  scannedCandidates: NativeFlashDeviceCandidate[],
-): NativeFlashDeviceCandidate[] {
-  const seen = new Set(staticCandidates.map((c) => c.value));
-  const extras = scannedCandidates.filter((c) => !seen.has(c.value));
-  return [...staticCandidates, ...extras];
-}
-
-function resolveFlashDevice(
-  previous: FlashPanelState,
-  nextState: NativeFlashState,
-  nextMethod: string,
-  resetToDefault: boolean,
-): string {
-  const currentMethod = previous.flashMethod || previous.flashState?.default_flash_method || '';
-  const currentDefault = resolveMethodDefaultDevice(previous.flashState, currentMethod);
-  const nextDefault = resolveMethodDefaultDevice(nextState, nextMethod);
-  if (resetToDefault) {
-    if (previous.flashDevice && previous.flashDevice !== currentDefault) {
-      return previous.flashDevice;
-    }
-    return nextDefault;
-  }
-  if (!previous.flashDevice || previous.flashDevice === currentDefault) {
-    return nextDefault;
-  }
-  return previous.flashDevice;
 }
 
 function createLoadedPanel(
@@ -408,20 +203,6 @@ function mergePreviewPanel(previous: FlashPanelState, result: NativeFlashState):
   };
 }
 
-function groupedFields(fields: NativeFlashField[]): Map<string, NativeFlashField[]> {
-  const groups = new Map<string, NativeFlashField[]>();
-  for (const field of fields) {
-    const name = field.menu_path.length > 0 ? field.menu_path.join(' / ') : 'General';
-    const existing = groups.get(name);
-    if (existing) {
-      existing.push(field);
-    } else {
-      groups.set(name, [field]);
-    }
-  }
-  return groups;
-}
-
 function useAnimatedDots(active: boolean): string {
   const [tick, setTick] = useState(0);
 
@@ -439,11 +220,47 @@ function useAnimatedDots(active: boolean): string {
   return '.'.repeat(Math.max(1, tick));
 }
 
-function HelpPopover({ text }: { text: string }) {
+/** Per-session cache of lazy-loaded full field help, keyed by `${target}:${fieldId}`. */
+const fieldHelpCache = new Map<string, string>();
+
+function HelpPopover({
+  text,
+  lazyFetch,
+}: {
+  text: string;
+  lazyFetch?: () => Promise<string>;
+}) {
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState<HelpPopoverPosition | null>(null);
+  const [fullText, setFullText] = useState<string | null>(null);
+  const [loadingHelp, setLoadingHelp] = useState(false);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const popoverRef = useRef<HTMLDivElement | null>(null);
+
+  // When the payload help was truncated ("…"), fetch the full text lazily the
+  // first time the popover opens. Falls back to the truncated text on error.
+  useEffect(() => {
+    if (!open || !lazyFetch || !text.endsWith('…') || fullText !== null || loadingHelp) {
+      return undefined;
+    }
+    let cancelled = false;
+    setLoadingHelp(true);
+    lazyFetch()
+      .then((fetched) => {
+        if (!cancelled) {
+          setFullText(fetched || text);
+        }
+      })
+      .catch(() => { /* keep the truncated text */ })
+      .finally(() => {
+        if (!cancelled) {
+          setLoadingHelp(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, lazyFetch, text, fullText, loadingHelp]);
 
   function updatePosition() {
     const trigger = triggerRef.current;
@@ -477,7 +294,7 @@ function HelpPopover({ text }: { text: string }) {
       return;
     }
     updatePosition();
-  }, [open]);
+  }, [open, fullText, loadingHelp]);
 
   useEffect(() => {
     if (!open) {
@@ -543,7 +360,9 @@ function HelpPopover({ text }: { text: string }) {
             zIndex: 80,
           }}
         >
-          <p className="text-xs leading-5 whitespace-pre-wrap text-[var(--color-text-secondary)]">{text}</p>
+          <p className="text-xs leading-5 whitespace-pre-wrap text-[var(--color-text-secondary)]">
+            {loadingHelp && fullText === null ? 'Loading help…' : (fullText ?? text)}
+          </p>
         </div>,
         document.body,
       )}
@@ -650,20 +469,23 @@ function FlashDeviceField({
 
 export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
   const [activeTarget, setActiveTarget] = useState<FlashTargetKey>('klipper');
-  const [panels, setPanels] = useState<Record<FlashTargetKey, FlashPanelState>>(() => {
-    const persistedPaths = loadPersistedCheckoutPaths();
-    return {
-      klipper: createEmptyPanelState('klipper', persistedPaths.klipper),
-      katapult: createEmptyPanelState('katapult', persistedPaths.katapult),
-    };
-  });
+  const [panels, setPanels] = useState<Record<FlashTargetKey, FlashPanelState>>(() => ({
+    klipper: createEmptyPanelState('klipper'),
+    katapult: createEmptyPanelState('katapult'),
+  }));
   const [profileDialog, setProfileDialog] = useState<FlashProfileDialogState | null>(null);
+  const [flashConfirm, setFlashConfirm] = useState<FlashConfirmState | null>(null);
   const [showTargetSettings, setShowTargetSettings] = useState(false);
   const panelsRef = useRef(panels);
+  const logContainerRef = useRef<HTMLDivElement | null>(null);
   const previewTimeoutsRef = useRef<Partial<Record<FlashTargetKey, number>>>({});
   const previewRequestIdsRef = useRef<Record<FlashTargetKey, number>>({
     klipper: 0,
     katapult: 0,
+  });
+  const previewEpochsRef = useRef<Record<FlashTargetKey, PreviewEpoch>>({
+    klipper: new PreviewEpoch(),
+    katapult: new PreviewEpoch(),
   });
 
   const buildDots = useAnimatedDots(panels[activeTarget].status === 'building');
@@ -672,6 +494,14 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
   useEffect(() => {
     panelsRef.current = panels;
   }, [panels]);
+
+  // Keep the Command Log pinned to the newest output while a job streams.
+  useEffect(() => {
+    const container = logContainerRef.current;
+    if (container) {
+      container.scrollTop = container.scrollHeight;
+    }
+  }, [panels[activeTarget]?.liveLog]);
 
   function updatePanel(target: FlashTargetKey, updater: (panel: FlashPanelState) => FlashPanelState) {
     setPanels((previous) => ({
@@ -696,11 +526,11 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
   }
 
   async function applyCheckoutSettings() {
+    TARGETS.forEach((target) => beginTargetMutation(target));
     const requestedPaths: Record<FlashTargetKey, string> = {
       klipper: panels.klipper.checkoutPath.trim(),
       katapult: panels.katapult.checkoutPath.trim(),
     };
-    savePersistedCheckoutPaths(requestedPaths);
     setShowTargetSettings(false);
     await Promise.all(TARGETS.map((target) => loadState(target, requestedPaths[target] || undefined)));
     // Kick off a fresh device scan now that checkout paths may have changed.
@@ -771,6 +601,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
   ) {
     const requestId = previewRequestIdsRef.current[target] + 1;
     previewRequestIdsRef.current[target] = requestId;
+    const capturedEpoch = previewEpochsRef.current[target].current;
     updatePanel(target, (panel) => ({
       ...panel,
       status: 'previewing',
@@ -782,12 +613,18 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
         buildPanelAssignments(assignmentValues, knownFields, stickyAssignments),
         checkoutPath.trim() || undefined,
       );
-      if (previewRequestIdsRef.current[target] !== requestId) {
+      if (
+        previewRequestIdsRef.current[target] !== requestId ||
+        previewEpochsRef.current[target].isStale(capturedEpoch)
+      ) {
         return;
       }
       updatePanel(target, (panel) => mergePreviewPanel(panel, result));
     } catch (error) {
-      if (previewRequestIdsRef.current[target] !== requestId) {
+      if (
+        previewRequestIdsRef.current[target] !== requestId ||
+        previewEpochsRef.current[target].isStale(capturedEpoch)
+      ) {
         return;
       }
       updatePanel(target, (panel) => ({
@@ -807,6 +644,35 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
     }
   }
 
+  /** Invalidate in-flight previews for a target before a mutation starts. */
+  function beginTargetMutation(target: FlashTargetKey) {
+    clearScheduledPreview(target);
+    previewEpochsRef.current[target].beginMutation();
+  }
+
+  /** Poll a build/flash job until it finishes, streaming live output. */
+  async function pollFlashJob(
+    target: FlashTargetKey,
+    jobId: string,
+    onComplete: (result: api.NativeFlashCommandResult) => void,
+  ): Promise<void> {
+    for (;;) {
+      const status = await api.getNativeFlashJobStatus(target, jobId);
+      updatePanel(target, (current) => ({
+        ...current,
+        liveLog: status.log_tail.join('\n'),
+      }));
+      if (status.running) {
+        await new Promise((resolve) => window.setTimeout(resolve, JOB_POLL_MS));
+        continue;
+      }
+      if (status.result) {
+        onComplete(status.result);
+      }
+      return;
+    }
+  }
+
   function schedulePreview(
     target: FlashTargetKey,
     assignmentValues: Record<string, string>,
@@ -822,7 +688,29 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
     }, delay);
   }
 
+  async function fetchFieldHelp(target: FlashTargetKey, fieldId: string): Promise<string> {
+    const cacheKey = `${target}:${fieldId}`;
+    const cached = fieldHelpCache.get(cacheKey);
+    if (cached !== undefined) {
+      return cached;
+    }
+    try {
+      const result = await api.getNativeFlashFieldHelp(
+        target,
+        fieldId,
+        panels[target]?.checkoutPath.trim() || undefined,
+      );
+      if (result.help) {
+        fieldHelpCache.set(cacheKey, result.help);
+      }
+      return result.help;
+    } catch {
+      return '';
+    }
+  }
+
   async function persistConfig(target: FlashTargetKey, showSuccessMessage: boolean): Promise<boolean> {
+    beginTargetMutation(target);
     const panel = panels[target];
     if (!panel.flashState?.available) {
       updatePanel(target, (current) => ({
@@ -879,6 +767,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
   }
 
   async function handleBuild(target: FlashTargetKey) {
+    beginTargetMutation(target);
     const panel = panels[target];
     if (!panel.flashState?.available) {
       updatePanel(target, (current) => ({
@@ -899,37 +788,58 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
     updatePanel(target, (current) => ({
       ...current,
       status: 'building',
+      activeJobId: null,
+      liveLog: null,
       message: `Running make olddefconfig and make in ${current.flashState?.display_name || 'the active checkout'}...`,
       messageTone: 'info',
     }));
 
     try {
-      const result = await api.buildNativeFlashTarget(target, panel.checkoutPath.trim() || undefined);
-      updatePanel(target, (current) => ({
-        ...current,
-        status: 'idle',
-        checkoutPath: result.checkout_path || current.checkoutPath,
-        commandResult: result,
-        flashState: current.flashState
-          ? {
-              ...current.flashState,
-              checkout_path: result.checkout_path || current.flashState.checkout_path,
-              out_path: result.out_path || current.flashState.out_path,
-              artifacts: result.artifacts,
-              primary_artifact: result.primary_artifact,
-            }
-          : current.flashState,
-        message: result.success
-          ? result.primary_artifact
-            ? `Built ${result.primary_artifact.name} in ${result.out_path}`
-            : `Build completed in ${result.out_path}`
-          : result.error || `${result.display_name} build failed.`,
-        messageTone: result.success ? 'success' : 'error',
-      }));
+      const started = await api.startNativeFlashBuild(target, panel.checkoutPath.trim() || undefined);
+      if (!('job_id' in started)) {
+        // Validation failed before any job started — the response is the
+        // standard command-result failure.
+        updatePanel(target, (current) => ({
+          ...current,
+          status: 'idle',
+          commandResult: started,
+          message: started.error || `${started.display_name} build failed.`,
+          messageTone: 'error',
+        }));
+        return;
+      }
+      updatePanel(target, (current) => ({ ...current, activeJobId: started.job_id }));
+      await pollFlashJob(target, started.job_id, (result) => {
+        updatePanel(target, (current) => ({
+          ...current,
+          status: 'idle',
+          activeJobId: null,
+          liveLog: null,
+          checkoutPath: result.checkout_path || current.checkoutPath,
+          commandResult: result,
+          flashState: current.flashState
+            ? {
+                ...current.flashState,
+                checkout_path: result.checkout_path || current.flashState.checkout_path,
+                out_path: result.out_path || current.flashState.out_path,
+                artifacts: result.artifacts,
+                primary_artifact: result.primary_artifact,
+              }
+            : current.flashState,
+          message: result.success
+            ? result.primary_artifact
+              ? `Built ${result.primary_artifact.name} in ${result.out_path}`
+              : `Build completed in ${result.out_path}`
+            : result.error || `${result.display_name} build failed.`,
+          messageTone: result.success ? 'success' : 'error',
+        }));
+      });
     } catch (error) {
       updatePanel(target, (current) => ({
         ...current,
         status: 'idle',
+        activeJobId: null,
+        liveLog: null,
         message: error instanceof Error ? error.message : 'Failed to build the selected target.',
         messageTone: 'error',
       }));
@@ -965,6 +875,35 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
       return;
     }
 
+    const resolvedDevice = panel.flashDevice.trim() || selectedMethodState.default_device || 'the auto-detected device';
+    setFlashConfirm({
+      target,
+      device: resolvedDevice,
+      method: selectedMethod,
+      methodLabel: selectedMethodState.label,
+      methodDescription: selectedMethodState.description,
+    });
+  }
+
+  async function confirmFlash() {
+    if (!flashConfirm) {
+      return;
+    }
+    const target = flashConfirm.target;
+    const { method } = flashConfirm;
+    setFlashConfirm(null);
+    beginTargetMutation(target);
+    const panel = panels[target];
+    const selectedMethod = method;
+    const selectedMethodState = flashMethodRecord(panel.flashState, selectedMethod);
+    if (!selectedMethodState) {
+      updatePanel(target, (current) => ({
+        ...current,
+        message: 'Select a supported flash method before flashing.',
+        messageTone: 'error',
+      }));
+      return;
+    }
     if (panel.isDirty) {
       const saved = await persistConfig(target, false);
       if (!saved) {
@@ -975,42 +914,88 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
     updatePanel(target, (current) => ({
       ...current,
       status: 'flashing',
+      activeJobId: null,
+      liveLog: null,
       message: `Running ${selectedMethodState.label} in ${current.flashState?.display_name || 'the active checkout'}...`,
       messageTone: 'info',
     }));
 
     try {
-      const result = await api.flashNativeFlashTarget(
+      const started = await api.startNativeFlashFlash(
         target,
         panel.checkoutPath.trim() || undefined,
         panel.flashDevice.trim() || undefined,
         selectedMethod,
       );
-      updatePanel(target, (current) => ({
-        ...current,
-        status: 'idle',
-        checkoutPath: result.checkout_path || current.checkoutPath,
-        flashMethod: result.flash_method || current.flashMethod,
-        commandResult: result,
-        flashState: current.flashState
-          ? {
-              ...current.flashState,
-              checkout_path: result.checkout_path || current.flashState.checkout_path,
-              out_path: result.out_path || current.flashState.out_path,
-              artifacts: result.artifacts,
-              primary_artifact: result.primary_artifact,
-            }
-          : current.flashState,
-        message: result.success
-          ? `${flashMethodRecord(current.flashState, result.flash_method || selectedMethod)?.label || 'Flash'} completed${result.flash_device ? ` using ${result.flash_device}` : ''}.`
-          : result.error || `${result.display_name} flash failed.`,
-        messageTone: result.success ? 'success' : 'error',
-      }));
+      if (!('job_id' in started)) {
+        // Validation failed before any job started — the response is the
+        // standard command-result failure.
+        updatePanel(target, (current) => ({
+          ...current,
+          status: 'idle',
+          commandResult: started,
+          message: started.error || `${started.display_name} flash failed.`,
+          messageTone: 'error',
+        }));
+        return;
+      }
+      updatePanel(target, (current) => ({ ...current, activeJobId: started.job_id }));
+      await pollFlashJob(target, started.job_id, (result) => {
+        updatePanel(target, (current) => ({
+          ...current,
+          status: 'idle',
+          activeJobId: null,
+          liveLog: null,
+          checkoutPath: result.checkout_path || current.checkoutPath,
+          flashMethod: result.flash_method || current.flashMethod,
+          commandResult: result,
+          flashState: current.flashState
+            ? {
+                ...current.flashState,
+                checkout_path: result.checkout_path || current.flashState.checkout_path,
+                out_path: result.out_path || current.flashState.out_path,
+                artifacts: result.artifacts,
+                primary_artifact: result.primary_artifact,
+              }
+            : current.flashState,
+          message: result.success
+            ? `${flashMethodRecord(current.flashState, result.flash_method || selectedMethod)?.label || 'Flash'} completed${result.flash_device ? ` using ${result.flash_device}` : ''}.`
+            : result.error || `${result.display_name} flash failed.`,
+          messageTone: result.success ? 'success' : 'error',
+        }));
+        if (result.success && !panelsRef.current[target].devicesScanning) {
+          // USB enumeration changed after a flash — refresh the candidate list.
+          void scanDevices(target, true);
+        }
+      });
     } catch (error) {
       updatePanel(target, (current) => ({
         ...current,
         status: 'idle',
+        activeJobId: null,
+        liveLog: null,
         message: error instanceof Error ? error.message : 'Failed to flash the selected target.',
+        messageTone: 'error',
+      }));
+    }
+  }
+
+  async function handleCancelJob(target: FlashTargetKey) {
+    const panel = panels[target];
+    if (!panel.activeJobId) {
+      return;
+    }
+    try {
+      await api.cancelNativeFlashJob(target, panel.activeJobId);
+      updatePanel(target, (current) => ({
+        ...current,
+        message: current.status === 'building' ? 'Cancelling build...' : 'Cancelling flash...',
+        messageTone: 'info',
+      }));
+    } catch (error) {
+      updatePanel(target, (current) => ({
+        ...current,
+        message: error instanceof Error ? error.message : 'Failed to cancel the running job.',
         messageTone: 'error',
       }));
     }
@@ -1308,19 +1293,38 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
 
     const target = profileDialog.target;
     const panel = panels[target];
+    const profilePayload = {
+      name,
+      checkoutPath: panel.checkoutPath.trim() || undefined,
+      flashDevice: panel.flashDevice.trim() || undefined,
+      flashMethod: panel.flashMethod || panel.flashState?.default_flash_method || undefined,
+      assignments: buildPanelAssignments(panel.assignmentValues, panel.knownFields, panel.stickyAssignments),
+    };
     setProfileDialog((current) => current ? { ...current, saving: true, error: '' } : current);
 
     try {
-      await api.saveNativeFlashProfile(target, {
-        name,
-        checkoutPath: panel.checkoutPath.trim() || undefined,
-        flashDevice: panel.flashDevice.trim() || undefined,
-        flashMethod: panel.flashMethod || panel.flashState?.default_flash_method || undefined,
-        assignments: buildPanelAssignments(panel.assignmentValues, panel.knownFields, panel.stickyAssignments),
-      });
+      await api.saveNativeFlashProfile(target, profilePayload);
       setPanelMessage(target, `Saved flash profile "${name}" on the host.`, 'success');
       setProfileDialog(null);
     } catch (error) {
+      if (
+        error instanceof api.ApiError
+        && error.status === 409
+        && window.confirm(`A flash profile named "${name}" already exists. Replace it?`)
+      ) {
+        try {
+          await api.saveNativeFlashProfile(target, { ...profilePayload, overwrite: true });
+          setPanelMessage(target, `Replaced flash profile "${name}" on the host.`, 'success');
+          setProfileDialog(null);
+        } catch (retryError) {
+          setProfileDialog((current) => current ? {
+            ...current,
+            saving: false,
+            error: retryError instanceof Error ? retryError.message : 'Failed to replace the flash profile.',
+          } : current);
+        }
+        return;
+      }
       setProfileDialog((current) => current ? {
         ...current,
         saving: false,
@@ -1405,9 +1409,19 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
   const artifacts = panel.commandResult?.artifacts || panel.flashState?.artifacts || [];
   const primaryArtifact = panel.commandResult?.primary_artifact || panel.flashState?.primary_artifact || null;
   const anyPanelBusy = TARGETS.some((target) => panels[target].status !== 'idle');
-  const actionBusy = panel.status !== 'idle';
-  const buildLabel = panel.status === 'building' ? `Build${buildDots}` : 'Build';
-  const flashLabel = panel.status === 'flashing' ? `Flash${flashDots}` : 'Flash';
+  // Preview is a read-only refresh: it must not gate Save/Load/Method/Device.
+  const actionBusy = isBusyStatus(panel.status);
+  const previewPending = panel.status === 'previewing';
+  const buildJobActive = panel.status === 'building' && panel.activeJobId !== null;
+  const flashJobActive = panel.status === 'flashing' && panel.activeJobId !== null;
+  const buildLabel = buildJobActive ? `Cancel${buildDots}` : (panel.status === 'building' ? `Build${buildDots}` : 'Build');
+  const flashLabel = flashJobActive ? `Cancel${flashDots}` : (panel.status === 'flashing' ? `Flash${flashDots}` : 'Flash');
+  const flashStatusLabel = flashOutcomeLabel(panel.status, panel.commandResult);
+  const flashStatusTone =
+    flashStatusLabel === 'failed' ? 'text-red-400'
+    : flashStatusLabel === 'succeeded' ? 'text-emerald-400'
+    : flashStatusLabel === 'idle' ? 'text-[var(--color-text-secondary)]'
+    : 'text-[var(--color-accent)]';
   const saveLabel = panel.status === 'saving' ? 'Saving...' : 'Save';
   const flashMethodCandidates = panel.flashState?.flash_method_candidates || [];
   const selectedFlashMethod = panel.flashMethod || panel.flashState?.default_flash_method || '';
@@ -1664,6 +1678,12 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
             </div>
 
             <div className="ml-auto flex shrink-0 flex-wrap items-center gap-2">
+              <span
+                className={`shrink-0 rounded-full border border-[var(--color-bg-tertiary)] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] ${flashStatusTone}`}
+                title="Current build/flash state"
+              >
+                {flashStatusLabel}
+              </span>
             <button
                 onClick={() => void openLoadDialog(activeTarget)}
                 disabled={actionBusy}
@@ -1679,16 +1699,24 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                 {saveLabel}
               </button>
               <button
-                onClick={() => void handleBuild(activeTarget)}
-                disabled={actionBusy || !panel.flashState?.available}
-                className="inline-flex min-w-[5.75rem] justify-center rounded-md bg-amber-500 px-4 py-2 text-xs font-semibold text-black transition-colors hover:bg-amber-400 disabled:opacity-50"
+                onClick={() => void (buildJobActive ? handleCancelJob(activeTarget) : handleBuild(activeTarget))}
+                disabled={(!buildJobActive && actionBusy) || !panel.flashState?.available}
+                className={`inline-flex min-w-[5.75rem] justify-center rounded-md px-4 py-2 text-xs font-semibold text-black transition-colors disabled:opacity-50 ${
+                  buildJobActive
+                    ? 'bg-red-500 hover:bg-red-400'
+                    : 'bg-amber-500 hover:bg-amber-400'
+                }`}
               >
                 {buildLabel}
               </button>
               <button
-                onClick={() => void handleFlash(activeTarget)}
-                disabled={flashButtonDisabled}
-                className="inline-flex min-w-[5.75rem] justify-center rounded-md bg-emerald-500 px-4 py-2 text-xs font-semibold text-black transition-colors hover:bg-emerald-400 disabled:bg-[var(--color-bg-tertiary)] disabled:text-[var(--color-text-secondary)] disabled:hover:bg-[var(--color-bg-tertiary)]"
+                onClick={() => void (flashJobActive ? handleCancelJob(activeTarget) : handleFlash(activeTarget))}
+                disabled={flashJobActive ? false : flashButtonDisabled}
+                className={`inline-flex min-w-[5.75rem] justify-center rounded-md px-4 py-2 text-xs font-semibold text-black transition-colors ${
+                  flashJobActive
+                    ? 'bg-red-500 hover:bg-red-400'
+                    : 'bg-emerald-500 hover:bg-emerald-400 disabled:bg-[var(--color-bg-tertiary)] disabled:text-[var(--color-text-secondary)] disabled:hover:bg-[var(--color-bg-tertiary)]'
+                }`}
               >
                 {flashLabel}
               </button>
@@ -1721,6 +1749,13 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                 </div>
               )}
 
+              {previewPending && (
+                <p className="flex items-center gap-1.5 text-[11px] text-[var(--color-text-secondary)]">
+                  <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--color-accent)]" />
+                  Updating preview…
+                </p>
+              )}
+
               {Array.from(fieldGroups.entries()).map(([groupName, groupFields]) => (
                 <section key={groupName} className="overflow-hidden rounded-xl border border-[var(--color-bg-tertiary)]">
                   <div className="border-b border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)]/70 px-4 py-3">
@@ -1733,7 +1768,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-2">
                               <p className="text-sm font-medium text-[var(--color-text-primary)]">{field.prompt}</p>
-                              <HelpPopover text={field.help} />
+                              <HelpPopover text={field.help} lazyFetch={() => fetchFieldHelp(activeTarget, field.id)} />
                             </div>
                             {field.symbol && (
                               <p className="mt-1 text-[10px] font-mono text-[var(--color-text-secondary)]">{field.symbol}</p>
@@ -1880,9 +1915,9 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                     <HelpPopover text={COMMAND_LOG_HELP} />
                   </div>
                 </div>
-                <div className="flex-1 overflow-auto bg-black/30 p-4">
+                <div ref={logContainerRef} className="flex-1 overflow-auto bg-black/30 p-4">
                   <pre className="whitespace-pre-wrap break-words text-[11px] leading-5 text-[var(--color-text-primary)]">
-                    {panel.commandResult?.log || 'No build or flash command has been run in this session yet.'}
+                    {(panel.liveLog ?? panel.commandResult?.log) || 'No build or flash command has been run in this session yet.'}
                   </pre>
                 </div>
               </section>
@@ -2082,6 +2117,68 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                   {profileDialog.saving ? 'Saving...' : 'Save Named Profile'}
                 </button>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+      {flashConfirm && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60" onClick={() => setFlashConfirm(null)}>
+          <div
+            className="w-[440px] max-w-[92vw] overflow-hidden rounded-2xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-start justify-between border-b border-[var(--color-bg-tertiary)] px-5 py-4">
+              <div>
+                <h3 className="text-base font-semibold text-[var(--color-text-primary)]">
+                  Flash {flashConfirm.target === 'klipper' ? 'Klipper' : 'Katapult'}?
+                </h3>
+                <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
+                  Confirm the target device and flash method before proceeding.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setFlashConfirm(null)}
+                className="rounded p-1 text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)]"
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                  <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                </svg>
+              </button>
+            </div>
+
+            <div className="space-y-3 p-5">
+              <div className="rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)]/50 p-3">
+                <p className="text-[11px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">Device</p>
+                <p className="mt-1 break-all font-mono text-sm text-[var(--color-text-primary)]">{flashConfirm.device}</p>
+              </div>
+              <div className="rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)]/50 p-3">
+                <p className="text-[11px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">Method</p>
+                <p className="mt-1 text-sm font-medium text-[var(--color-text-primary)]">{flashConfirm.methodLabel}</p>
+                <p className="mt-1 text-xs text-[var(--color-text-secondary)]">{flashConfirm.methodDescription}</p>
+              </div>
+              <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3">
+                <p className="text-xs text-amber-400">
+                  Klipper will be stopped during the flash and restarted afterward (when the service is running).
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 border-t border-[var(--color-bg-tertiary)] px-5 py-3">
+              <button
+                type="button"
+                onClick={() => setFlashConfirm(null)}
+                className="rounded-md bg-[var(--color-bg-tertiary)] px-4 py-2 text-xs font-medium text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-primary)]"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmFlash()}
+                className="inline-flex min-w-[5.75rem] justify-center rounded-md bg-emerald-500 px-4 py-2 text-xs font-semibold text-black transition-colors hover:bg-emerald-400"
+              >
+                Flash
+              </button>
             </div>
           </div>
         </div>

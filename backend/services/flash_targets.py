@@ -10,12 +10,22 @@ import re
 import shlex
 import subprocess
 import tempfile
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from services.native_services import load_settings, save_settings, list_uart_devices, list_usb_serial_devices
+from services.flash_log import logger
+from services.native_services import (
+    klipper_service_can_control,
+    klipper_service_start_command,
+    klipper_service_stop_command,
+    load_settings,
+    save_settings,
+    list_uart_devices,
+    list_usb_serial_devices,
+)
 
 _SUPPORTED_TARGETS = {"klipper", "katapult"}
 
@@ -83,6 +93,22 @@ _TRISTATE_VALUE_NAMES = {
 _FLASH_METHOD_MAKE_FLASH = "make_flash"
 _FLASH_METHOD_DFU_UTIL = "dfu_util"
 _FLASH_METHOD_FLASHTOOL = "flashtool"
+
+
+def _flash_method_needs_klipper_stop(method: str, flash_device: str) -> bool:
+    """True when the flash method needs Klipper stopped first.
+
+    Klippy holds the USB-ACM serial port and CAN node that flashtool (serial
+    or CAN) and `make flash` with a serial by-id device talk to, so those
+    paths require the service to be stopped. Direct dfu-util and `make flash`
+    with a USB VID:PID (DFU mode or RP2040 bootrom) use a separate USB
+    interface and do not need it.
+    """
+    if method == _FLASH_METHOD_FLASHTOOL:
+        return True
+    if method == _FLASH_METHOD_MAKE_FLASH:
+        return not _is_usb_id(flash_device)
+    return False
 
 _DFU_UTIL_USB_ID_RE = re.compile(r"\[([0-9a-fA-F]{4}:[0-9a-fA-F]{4})\]")
 _DFU_UTIL_NAME_RE = re.compile(r'name="([^"]+)"')
@@ -180,16 +206,19 @@ def resolve_flash_target_checkout(target: str, requested_path: str | None = None
     for candidate in candidates:
         if _is_flash_target_checkout(normalized_target, candidate):
             _persist_checkout_path(normalized_target, candidate)
+            logger.info("resolved %s checkout: %s", normalized_target, candidate)
             return candidate, None
 
     display_name = _target_display_name(normalized_target)
     if requested_path:
+        logger.warning("requested %s checkout not found at %s", normalized_target, requested_path)
         return None, (
             f"{display_name} checkout not found at {requested_path}. "
             "Expected Makefile, src/Kconfig, and lib/kconfiglib/kconfiglib.py."
         )
 
     attempted = ", ".join(str(path) for path in candidates) or "no candidate paths"
+    logger.warning("%s checkout not found; attempted: %s", normalized_target, attempted)
     return None, (
         f"{display_name} is not installed on this SBC or its checkout could not be auto-detected. "
         f"Checked: {attempted}."
@@ -219,14 +248,56 @@ def _temporary_env(name: str, value: str):
             os.environ[name] = previous
 
 
+# Parsed Kconfig trees are expensive (Kconfig(...) walks the whole source
+# tree). Cache the parsed tree per (target, checkout, src/Kconfig mtime), but
+# NEVER the loaded config state: every request reloads .config fresh so cached
+# trees cannot leak mutations from a previous request's assignment preview.
+_KCONFIG_TREE_CACHE: dict[tuple[str, str, float], tuple[Any, Any, Path]] = {}
+_KCONFIG_TREE_LOCK = threading.Lock()
+_KCONFIG_TREE_CACHE_MAX = 8
+
+
+def _kconfig_src_mtime(checkout_path: Path) -> float:
+    try:
+        return (checkout_path / "src" / "Kconfig").stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _invalidate_kconfig_tree_cache(target: str, checkout_path: Path) -> None:
+    """Drop cached trees for a checkout (called after .config writes)."""
+    prefix = (target, str(checkout_path))
+    with _KCONFIG_TREE_LOCK:
+        for key in [key for key in _KCONFIG_TREE_CACHE if key[:2] == prefix]:
+            del _KCONFIG_TREE_CACHE[key]
+
+
 def _load_target_kconfig_state(target: str, checkout_path: Path):
     normalized_target = _require_supported_target(target)
-    kconfiglib = _load_kconfiglib_module(str(checkout_path / "lib" / "kconfiglib" / "kconfiglib.py"))
-    config_path = checkout_path / ".config"
+    cache_key = (normalized_target, str(checkout_path), _kconfig_src_mtime(checkout_path))
+
+    with _KCONFIG_TREE_LOCK:
+        cached = _KCONFIG_TREE_CACHE.get(cache_key)
+        if cached is not None:
+            kconfiglib, kconf, config_path = cached
+        else:
+            kconfiglib = _load_kconfiglib_module(str(checkout_path / "lib" / "kconfiglib" / "kconfiglib.py"))
+            config_path = checkout_path / ".config"
+            with _temporary_env("srctree", str(checkout_path)):
+                kconf = kconfiglib.Kconfig(str(checkout_path / "src" / "Kconfig"))
+            if len(_KCONFIG_TREE_CACHE) >= _KCONFIG_TREE_CACHE_MAX:
+                _KCONFIG_TREE_CACHE.clear()
+            _KCONFIG_TREE_CACHE[cache_key] = (kconfiglib, kconf, config_path)
+
+    # Always reload config state fresh: the cached tree is shared and a prior
+    # request may have mutated it via assignment previews. This also picks up
+    # .config edits made outside the app. When no .config exists, reset the
+    # tree to defaults so nothing leaks across requests.
     with _temporary_env("srctree", str(checkout_path)):
-        kconf = kconfiglib.Kconfig(str(checkout_path / "src" / "Kconfig"))
         if config_path.is_file():
             kconf.load_config(str(config_path))
+        else:
+            kconf.unset_values()
     return kconfiglib, kconf, config_path
 
 
@@ -277,7 +348,13 @@ def _serialize_assignable(symbol) -> list[str]:
     return values
 
 
-def _serialize_symbol_field(kconfiglib, node) -> dict[str, Any] | None:
+def _truncate_help(help_text: str, limit: int) -> str:
+    if limit <= 0 or len(help_text) <= limit:
+        return help_text
+    return help_text[:limit].rstrip() + "…"
+
+
+def _serialize_symbol_field(kconfiglib, node, help_limit: int = 0) -> dict[str, Any] | None:
     symbol = node.item
     if not isinstance(symbol, kconfiglib.Symbol):
         return None
@@ -295,13 +372,13 @@ def _serialize_symbol_field(kconfiglib, node) -> dict[str, Any] | None:
         "symbol": symbol.name,
         "prompt": prompt,
         "value": symbol.str_value,
-        "help": node.help or "",
+        "help": _truncate_help(node.help or "", help_limit),
         "menu_path": _menu_path(kconfiglib, node),
         "assignable": _serialize_assignable(symbol),
     }
 
 
-def _serialize_choice_field(kconfiglib, node) -> dict[str, Any] | None:
+def _serialize_choice_field(kconfiglib, node, help_limit: int = 0) -> dict[str, Any] | None:
     choice = node.item
     if not isinstance(choice, kconfiglib.Choice):
         return None
@@ -333,22 +410,22 @@ def _serialize_choice_field(kconfiglib, node) -> dict[str, Any] | None:
         "symbol": None,
         "prompt": prompt,
         "value": selected,
-        "help": node.help or "",
+        "help": _truncate_help(node.help or "", help_limit),
         "menu_path": _menu_path(kconfiglib, node),
         "assignable": [option["symbol"] for option in options],
         "options": options,
     }
 
 
-def _serialize_kconfig_fields(kconfiglib, kconf) -> list[dict[str, Any]]:
+def _serialize_kconfig_fields(kconfiglib, kconf, help_limit: int = 0) -> list[dict[str, Any]]:
     fields: list[dict[str, Any]] = []
     for node in kconf.node_iter():
         item = node.item
         field: dict[str, Any] | None = None
         if isinstance(item, kconfiglib.Choice):
-            field = _serialize_choice_field(kconfiglib, node)
+            field = _serialize_choice_field(kconfiglib, node, help_limit)
         elif isinstance(item, kconfiglib.Symbol):
-            field = _serialize_symbol_field(kconfiglib, node)
+            field = _serialize_symbol_field(kconfiglib, node, help_limit)
         if field is not None:
             fields.append(field)
     return fields
@@ -1028,8 +1105,10 @@ def get_flash_target_state(
     target: str,
     checkout_path: str | None = None,
     assignments: list[tuple[str, str]] | None = None,
+    help_limit: int = 0,
 ) -> dict[str, Any]:
     normalized_target = _require_supported_target(target)
+    _start = time.monotonic()
     resolved_path, error = resolve_flash_target_checkout(normalized_target, checkout_path)
     if resolved_path is None:
         return _empty_flash_target_state(normalized_target, checkout_path, error)
@@ -1061,7 +1140,7 @@ def get_flash_target_state(
         "config_path": str(config_path),
         "out_path": str(resolved_path / "out"),
         "config_exists": config_path.is_file(),
-        "fields": _serialize_kconfig_fields(kconfiglib, kconf),
+        "fields": _serialize_kconfig_fields(kconfiglib, kconf, help_limit),
         "artifacts": artifacts,
         "primary_artifact": pick_primary_flash_target_artifact(normalized_target, artifacts),
         "flash_supported": bool(flash_method_candidates),
@@ -1076,6 +1155,14 @@ def get_flash_target_state(
     }
     if issues:
         state["error"] = "; ".join(issues)
+    logger.debug(
+        "state %s: %d fields, %d artifacts, flash_supported=%s (%.0f ms)",
+        normalized_target,
+        len(state["fields"]),
+        len(state["artifacts"]),
+        state["flash_supported"],
+        (time.monotonic() - _start) * 1000,
+    )
     return state
 
 
@@ -1083,14 +1170,16 @@ def preview_flash_target_config(
     target: str,
     assignments: list[tuple[str, str]],
     checkout_path: str | None = None,
+    help_limit: int = 0,
 ) -> dict[str, Any]:
-    return get_flash_target_state(target, checkout_path, assignments)
+    return get_flash_target_state(target, checkout_path, assignments, help_limit)
 
 
 def save_flash_target_config(
     target: str,
     assignments: list[tuple[str, str]],
     checkout_path: str | None = None,
+    help_limit: int = 0,
 ) -> dict[str, Any]:
     normalized_target = _require_supported_target(target)
     resolved_path, error = resolve_flash_target_checkout(normalized_target, checkout_path)
@@ -1100,10 +1189,56 @@ def save_flash_target_config(
     kconfiglib, kconf, config_path = _load_target_kconfig_state(normalized_target, resolved_path)
     issues = _apply_assignments_to_kconfig(kconfiglib, kconf, assignments)
     kconf.write_config(str(config_path))
-    state = get_flash_target_state(normalized_target, str(resolved_path))
+    logger.info("saved %s .config to %s (%d assignments)", normalized_target, config_path, len(assignments))
+    state = get_flash_target_state(normalized_target, str(resolved_path), help_limit=help_limit)
+    # The tree itself is unchanged by a .config write (fresh loads pick up the
+    # new file), but drop the cached entry anyway so the next request re-parses
+    # from the on-disk state without any doubt.
+    _invalidate_kconfig_tree_cache(normalized_target, resolved_path)
     if issues:
         state["error"] = "; ".join(issues)
     return state
+
+
+def _find_kconfig_node(kconf, field_id: str):
+    """Locate the menu node for a serialized field id (symbol or choice:id)."""
+    if field_id.startswith("choice:"):
+        parts = field_id.split(":", 2)
+        if len(parts) != 3:
+            return None
+        _prefix, filename, linenr_text = parts
+        try:
+            linenr = int(linenr_text)
+        except ValueError:
+            return None
+        for node in kconf.node_iter():
+            if node.filename == filename and node.linenr == linenr:
+                return node
+        return None
+    symbol = kconf.syms.get(field_id)
+    if symbol is None:
+        return None
+    for node in symbol.nodes:
+        if node.prompt is not None:
+            return node
+    return symbol.nodes[0] if symbol.nodes else None
+
+
+def get_flash_field_help(target: str, field_id: str, checkout_path: str | None = None) -> dict[str, Any]:
+    """Return the FULL (uncapped) help text for one menuconfig field.
+
+    The parsed tree is cached, so this is a cheap in-memory lookup. Used by the
+    frontend to lazy-load help that was truncated by ``help_limit``.
+    """
+    normalized_target = _require_supported_target(target)
+    resolved_path, error = resolve_flash_target_checkout(normalized_target, checkout_path)
+    if resolved_path is None:
+        return {"field_id": field_id, "help": ""}
+    _kconfiglib, kconf, _config_path = _load_target_kconfig_state(normalized_target, resolved_path)
+    node = _find_kconfig_node(kconf, field_id)
+    if node is None:
+        return {"field_id": field_id, "help": ""}
+    return {"field_id": field_id, "help": node.help or ""}
 
 
 def scan_flash_target_devices(
@@ -1127,6 +1262,7 @@ def scan_flash_target_devices(
     if not force_refresh:
         cached = _DEVICE_SCAN_CACHE.get(cache_key)
         if cached is not None and now - cached["timestamp"] < _DEVICE_SCAN_CACHE_TTL:
+            logger.debug("scan %s: served %d cached candidates", normalized_target, len(cached["candidates"]))
             return {
                 "target": normalized_target,
                 "candidates": cached["candidates"],
@@ -1141,8 +1277,11 @@ def scan_flash_target_devices(
     candidates: list[dict[str, str]] = []
     seen_values: set[str] = set()
 
-    # RP2040 USB bootloader devices (lsusb, fast)
-    if normalized_target in {"klipper", "katapult"} and "MACH_RPXXXX" in machine_symbols:
+    # RP2040 USB bootloader devices (lsusb, fast). Listed for both targets
+    # regardless of the checkout's current .config MCU: the dropdown shows what
+    # is physically connected and flashable, and the user may reconfigure the
+    # checkout for the discovered board (e.g. Katapult on an RP2040 EBB).
+    if normalized_target in {"klipper", "katapult"}:
         for candidate in _rp2040_usb_flash_device_candidates():
             _append_flash_device_candidate(
                 candidates, seen_values,
@@ -1151,15 +1290,15 @@ def scan_flash_target_devices(
                 interface=candidate.get("interface"),
             )
 
-    # STM32 DFU devices (dfu-util -l or lsusb, fast)
-    if "MACH_STM32" in machine_symbols:
-        for candidate in _dfu_flash_device_candidates():
-            _append_flash_device_candidate(
-                candidates, seen_values,
-                candidate["value"], candidate["label"],
-                transport=candidate.get("transport") or "usb_id",
-                interface=candidate.get("interface"),
-            )
+    # STM32 DFU devices (dfu-util -l or lsusb, fast). Same reasoning: both
+    # targets can flash a board sitting in its STM32 ROM bootloader.
+    for candidate in _dfu_flash_device_candidates():
+        _append_flash_device_candidate(
+            candidates, seen_values,
+            candidate["value"], candidate["label"],
+            transport=candidate.get("transport") or "usb_id",
+            interface=candidate.get("interface"),
+        )
 
     # Katapult CAN bus UUIDs (flashtool.py -q, potentially slow)
     if katapult_script_path is not None:
@@ -1183,6 +1322,12 @@ def scan_flash_target_devices(
             )
 
     _DEVICE_SCAN_CACHE[cache_key] = {"candidates": candidates, "timestamp": now}
+    logger.info(
+        "scan %s: %d candidates (fresh, %.0f ms)",
+        normalized_target,
+        len(candidates),
+        (time.monotonic() - now) * 1000,
+    )
     return {"target": normalized_target, "candidates": candidates, "error": None, "cached": False}
 
 
@@ -1238,7 +1383,99 @@ def _build_artifact_path(target: str, checkout_path: Path) -> Path | None:
     return artifact_path if artifact_path.is_file() else None
 
 
-def _resolve_dfu_util_flash_command(checkout_path: Path, flash_device: str) -> tuple[list[str] | None, str | None, str]:
+# Direct dfu-util fallback, used when `make -n flash` output cannot be parsed
+# into a dfu-util command. On a real Klipper checkout that is the common case:
+# `make -n flash` prints a flash_usb.py invocation (or an avrdude line when no
+# .config exists yet), never a literal dfu-util token — so this fallback is
+# effectively the primary direct-dfu-util path.
+#
+# The address MUST come from the parsed kconf (CONFIG_FLASH_APPLICATION_ADDRESS)
+# and carry the DfuSe `:leave` modifier, otherwise the STM32 ROM bootloader
+# re-enters DFU mode after the flash and the board appears dead. Klipper's own
+# flash_usb.py pattern: dfu-util -d ,<VID:PID> -R -a 0 -s <addr>:leave -D out/klipper.bin
+_DEFAULT_FLASH_APPLICATION_ADDRESS = "0x08000000"
+_DFU_UTIL_SUCCESS_MARKER = "downloaded successfully"
+
+
+def _dfu_util_app_address(checkout_path: Path) -> str:
+    """Read CONFIG_FLASH_APPLICATION_ADDRESS from the checkout's .config."""
+    try:
+        for raw_line in (checkout_path / ".config").read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if line.startswith("CONFIG_FLASH_APPLICATION_ADDRESS="):
+                value = line.split("=", 1)[1].strip()
+                if value:
+                    return value
+    except OSError:
+        pass
+    return _DEFAULT_FLASH_APPLICATION_ADDRESS
+
+
+def _is_dfu_util_success(command: list[str], output: str) -> bool:
+    """True when a dfu-util flash succeeded despite a non-zero exit code.
+
+    The Voron Klipper_Expander guide documents dfu-util exiting non-zero
+    *after* a successful download: the MCU immediately runs the uploaded code
+    and stops enumerating as a DFU device, which dfu-util reports as an error.
+    Detect success from the log instead of the exit code.
+    """
+    if not command or os.path.basename(command[0]) != "dfu-util":
+        return False
+    return _DFU_UTIL_SUCCESS_MARKER in output.lower()
+
+
+def _try_dfu_util_fallback(
+    checkout_path: Path,
+    flash_device: str,
+    artifact_path: Path | None,
+    make_log: str,
+) -> tuple[list[str] | None, str | None, str]:
+    if artifact_path is None or not artifact_path.is_file():
+        return None, "No flashable .bin artifact was found. Build the target before flashing with dfu-util.", make_log
+    try:
+        completed = subprocess.run(
+            ["dfu-util", "-l"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except FileNotFoundError:
+        return None, "dfu-util is not available on this SBC.", make_log
+    except subprocess.TimeoutExpired:
+        return None, "Timed out while listing dfu-util devices.", make_log
+
+    device_listing = "\n".join(chunk for chunk in (completed.stdout, completed.stderr) if chunk)
+    if flash_device.lower() not in device_listing.lower():
+        logger.warning(
+            "dfu-util fallback skipped: %s not present in `dfu-util -l` output",
+            flash_device,
+        )
+        return None, f"dfu-util does not list {flash_device}. Enter DFU/bootloader mode and try again.", make_log
+
+    fallback_log = make_log + ("\n\n" if make_log else "") + _command_log(["dfu-util", "-l"], completed)
+    app_addr = _dfu_util_app_address(checkout_path)
+    command = [
+        "dfu-util",
+        "-d",
+        f",{flash_device}",
+        "-R",
+        "-a",
+        "0",
+        "-s",
+        f"{app_addr}:leave",
+        "-D",
+        str(artifact_path),
+    ]
+    logger.info("using direct dfu-util fallback for %s: %s", flash_device, " ".join(command))
+    return command, None, fallback_log
+
+
+def _resolve_dfu_util_flash_command(
+    checkout_path: Path,
+    flash_device: str,
+    artifact_path: Path | None = None,
+) -> tuple[list[str] | None, str | None, str]:
     preview_command = ["make", "-n", "flash", "NOSUDO=1", f"FLASH_DEVICE={flash_device}"]
     try:
         completed = subprocess.run(
@@ -1256,7 +1493,7 @@ def _resolve_dfu_util_flash_command(checkout_path: Path, flash_device: str) -> t
 
     log = _command_log(preview_command, completed)
     if completed.returncode != 0:
-        return None, f"Unable to resolve a dfu-util flash command (exit code {completed.returncode}).", log
+        return _try_dfu_util_fallback(checkout_path, flash_device, artifact_path, log)
 
     output = "\n".join(chunk for chunk in (completed.stdout, completed.stderr) if chunk)
     for raw_line in output.splitlines():
@@ -1271,9 +1508,11 @@ def _resolve_dfu_util_flash_command(checkout_path: Path, flash_device: str) -> t
         except ValueError:
             continue
         if tokens and tokens[0] == "dfu-util":
+            logger.info("resolved dfu-util command for %s: %s", flash_device, " ".join(tokens))
             return tokens, None, log
 
-    return None, "The current target does not resolve to a dfu-util flash command.", log
+    logger.warning("dfu-util flash command could not be resolved for %s via `make -n flash`", flash_device)
+    return _try_dfu_util_fallback(checkout_path, flash_device, artifact_path, log)
 
 
 def _run_direct_flash_commands(
@@ -1309,6 +1548,13 @@ def _run_commands(target: str, checkout_path: Path, commands: list[list[str]], t
             )
             logs.append(_command_log(command, completed))
             if completed.returncode != 0:
+                if _is_dfu_util_success(command, completed.stdout + "\n" + completed.stderr):
+                    logger.info(
+                        "dfu-util reported success for %s despite exit code %s",
+                        " ".join(command),
+                        completed.returncode,
+                    )
+                    continue
                 return _command_result(
                     normalized_target,
                     False,
@@ -1342,22 +1588,31 @@ def _run_commands(target: str, checkout_path: Path, commands: list[list[str]], t
     )
 
 
-def build_flash_target(target: str, checkout_path: str | None = None) -> dict[str, Any]:
-    normalized_target = _require_supported_target(target)
-    resolved_path, error = resolve_flash_target_checkout(normalized_target, checkout_path)
-    if resolved_path is None:
-        return _command_result(normalized_target, False, error, "", checkout_path or ".")
+def finalize_flash_job_result(
+    raw_result: dict,
+    target: str,
+    kind: str,
+    checkout_path: str,
+    flash_device: str = "",
+    flash_method: str = "",
+) -> dict[str, Any]:
+    """Enrich a raw job outcome into the standard command-result shape.
 
-    result = _run_commands(
+    Used by the streaming job status route once a job finishes, and by the
+    synchronous build/flash helpers. ``kind`` is 'build' or 'flash'; build
+    results are additionally checked for a produced artifact.
+    """
+    normalized_target = _require_supported_target(target)
+    result = _command_result(
         normalized_target,
-        resolved_path,
-        [
-            ["make", "olddefconfig"],
-            ["make", f"-j{max(1, os.cpu_count() or 1)}"],
-        ],
-        timeout=900,
+        bool(raw_result.get("success", False)),
+        raw_result.get("error"),
+        raw_result.get("log", ""),
+        checkout_path,
+        flash_device,
+        flash_method,
     )
-    if result["success"] and result["primary_artifact"] is None:
+    if kind == "build" and result["success"] and result["primary_artifact"] is None:
         result["success"] = False
         result["error"] = (
             f"{_target_display_name(normalized_target)} build completed but no artifact was found in the out directory."
@@ -1365,20 +1620,71 @@ def build_flash_target(target: str, checkout_path: str | None = None) -> dict[st
     return result
 
 
-def flash_flash_target(
+def plan_build_flash_job(target: str, checkout_path: str | None = None) -> dict[str, Any]:
+    """Resolve a build request into either an immediate result or job commands."""
+    normalized_target = _require_supported_target(target)
+    resolved_path, error = resolve_flash_target_checkout(normalized_target, checkout_path)
+    if resolved_path is None:
+        return {
+            "immediate": True,
+            "result": _command_result(normalized_target, False, error, "", checkout_path or "."),
+            "commands": None,
+            "checkout_path": None,
+            "flash_device": "",
+            "flash_method": "",
+        }
+    return {
+        "immediate": False,
+        "result": None,
+        "commands": [
+            ["make", "olddefconfig"],
+            ["make", f"-j{max(1, os.cpu_count() or 1)}"],
+        ],
+        "checkout_path": str(resolved_path),
+        "flash_device": "",
+        "flash_method": "",
+    }
+
+
+def plan_flash_flash_job(
     target: str,
     checkout_path: str | None = None,
     flash_device: str | None = None,
     flash_method: str | None = None,
 ) -> dict[str, Any]:
+    """Resolve a flash request into either an immediate result or job commands.
+
+    Every validation failure returns ``immediate: True`` with the same
+    command-result dict the synchronous path produced; the happy path returns
+    the exact command sequence the job runner should execute.
+    """
     normalized_target = _require_supported_target(target)
     resolved_path, error = resolve_flash_target_checkout(normalized_target, checkout_path)
     if resolved_path is None:
-        return _command_result(normalized_target, False, error, "", checkout_path or ".", flash_device, flash_method)
+        return {
+            "immediate": True,
+            "result": _command_result(
+                normalized_target, False, error, "", checkout_path or ".", flash_device, flash_method
+            ),
+            "commands": None,
+            "checkout_path": None,
+            "flash_device": flash_device or "",
+            "flash_method": flash_method or "",
+        }
+
+    def immediate(result: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "immediate": True,
+            "result": result,
+            "commands": None,
+            "checkout_path": str(resolved_path),
+            "flash_device": flash_device or "",
+            "flash_method": flash_method or "",
+        }
 
     state = get_flash_target_state(normalized_target, str(resolved_path))
     if not state["flash_supported"]:
-        return _command_result(
+        return immediate(_command_result(
             normalized_target,
             False,
             state["flash_reason"] or "Flashing is not supported for this target.",
@@ -1386,7 +1692,7 @@ def flash_flash_target(
             resolved_path,
             flash_device,
             flash_method,
-        )
+        ))
 
     method_candidates_list = state.get("flash_method_candidates", [])
     method_candidates = {
@@ -1402,7 +1708,7 @@ def flash_flash_target(
     ) or state.get("default_flash_method", "")
     method_state = method_candidates.get(resolved_method)
     if method_state is None:
-        return _command_result(
+        return immediate(_command_result(
             normalized_target,
             False,
             "A supported flash method must be selected for the current target.",
@@ -1410,11 +1716,11 @@ def flash_flash_target(
             resolved_path,
             flash_device,
             flash_method,
-        )
+        ))
 
     resolved_device = (flash_device or "").strip() or method_state.get("default_device", "") or state.get("default_flash_device", "")
     if method_state["device_required"] and not resolved_device:
-        return _command_result(
+        return immediate(_command_result(
             normalized_target,
             False,
             "A flash device is required for the current target.",
@@ -1422,11 +1728,13 @@ def flash_flash_target(
             resolved_path,
             flash_device,
             resolved_method,
-        )
+        ))
+
+    make_jobs = f"-j{max(1, os.cpu_count() or 1)}"
 
     if resolved_method == _FLASH_METHOD_DFU_UTIL:
         if not _is_usb_id(resolved_device):
-            return _command_result(
+            return immediate(_command_result(
                 normalized_target,
                 False,
                 "dfu-util requires a USB VID:PID flash device such as 0483:df11.",
@@ -1434,10 +1742,14 @@ def flash_flash_target(
                 resolved_path,
                 resolved_device,
                 resolved_method,
-            )
-        flash_command, resolve_error, resolve_log = _resolve_dfu_util_flash_command(resolved_path, resolved_device)
+            ))
+        flash_command, resolve_error, resolve_log = _resolve_dfu_util_flash_command(
+            resolved_path,
+            resolved_device,
+            _build_artifact_path(normalized_target, resolved_path),
+        )
         if flash_command is None:
-            return _command_result(
+            return immediate(_command_result(
                 normalized_target,
                 False,
                 resolve_error,
@@ -1445,12 +1757,16 @@ def flash_flash_target(
                 resolved_path,
                 resolved_device,
                 resolved_method,
-            )
-        result = _run_direct_flash_commands(normalized_target, resolved_path, flash_command)
+            ))
+        commands = [
+            ["make", "olddefconfig"],
+            ["make", make_jobs],
+            flash_command,
+        ]
     elif resolved_method == _FLASH_METHOD_FLASHTOOL:
         katapult_script_path = _katapult_flashtool_path(normalized_target, resolved_path)
         if katapult_script_path is None:
-            return _command_result(
+            return immediate(_command_result(
                 normalized_target,
                 False,
                 "Katapult is not installed on this SBC, so flashtool.py is unavailable.",
@@ -1458,10 +1774,10 @@ def flash_flash_target(
                 resolved_path,
                 resolved_device,
                 resolved_method,
-            )
+            ))
         artifact_path = _build_artifact_path(normalized_target, resolved_path)
         if artifact_path is None:
-            return _command_result(
+            return immediate(_command_result(
                 normalized_target,
                 False,
                 "No flashable build artifact was found. Build the target before flashing with flashtool.py.",
@@ -1469,7 +1785,7 @@ def flash_flash_target(
                 resolved_path,
                 resolved_device,
                 resolved_method,
-            )
+            ))
         can_device = _parse_can_flash_device(resolved_device)
         if can_device is not None:
             interface, uuid = can_device
@@ -1484,7 +1800,7 @@ def flash_flash_target(
                 uuid,
             ]
         elif _is_usb_id(resolved_device):
-            return _command_result(
+            return immediate(_command_result(
                 normalized_target,
                 False,
                 "flashtool.py requires a serial device path or a CAN UUID, not a USB VID:PID.",
@@ -1492,7 +1808,7 @@ def flash_flash_target(
                 resolved_path,
                 resolved_device,
                 resolved_method,
-            )
+            ))
         else:
             flash_command = [
                 "python3",
@@ -1502,24 +1818,157 @@ def flash_flash_target(
                 "-f",
                 str(artifact_path),
             ]
-        result = _run_direct_flash_commands(normalized_target, resolved_path, flash_command)
+        commands = [
+            ["make", "olddefconfig"],
+            ["make", make_jobs],
+            flash_command,
+        ]
     else:
         flash_command = ["make", "flash", "NOSUDO=1"]
         if resolved_device:
             flash_command.append(f"FLASH_DEVICE={resolved_device}")
+        commands = [
+            ["make", "olddefconfig"],
+            flash_command,
+        ]
 
-        result = _run_commands(
-            normalized_target,
-            resolved_path,
-            [
-                ["make", "olddefconfig"],
-                flash_command,
-            ],
-            timeout=900,
-        )
+    # Stop Klipper before flashing and restart it afterwards — but only for
+    # methods that actually need it. Research matrix (docs/flash-post-flash-research.md):
+    # - flashtool serial/CAN and make flash with a serial by-id device: klippy
+    #   holds the port the flash tool talks to -> stop REQUIRED.
+    # - direct dfu-util (device already in DFU mode) and make flash with a USB
+    #   VID:PID (DFU or RP2040 bootrom): separate USB interface -> no stop.
+    # When the service is active but the backend can't control it (no
+    # passwordless sudo), fail fast with a clear message instead of letting the
+    # job die on `sudo: a password is required`.
+    cleanup_commands: list[list[str]] = []
+    if _flash_method_needs_klipper_stop(resolved_method, resolved_device):
+        klipper_stop = klipper_service_stop_command()
+        if klipper_stop is not None and not klipper_service_can_control():
+            return immediate(_command_result(
+                normalized_target,
+                False,
+                "Klipper is running and this host has no passwordless sudo, so the flash "
+                "cannot stop it automatically. Stop Klipper manually "
+                "(`sudo systemctl stop klipper`), run the flash, then start it again.",
+                "",
+                resolved_path,
+                resolved_device,
+                resolved_method,
+            ))
+        if klipper_stop is not None:
+            commands.insert(0, klipper_stop)
+            klipper_start = klipper_service_start_command()
+            if klipper_start is not None:
+                cleanup_commands.append(klipper_start)
 
-    result["flash_device"] = resolved_device
-    result["flash_method"] = resolved_method
+    return {
+        "immediate": False,
+        "result": None,
+        "commands": commands,
+        "cleanup_commands": cleanup_commands,
+        "checkout_path": str(resolved_path),
+        "flash_device": resolved_device,
+        "flash_method": resolved_method,
+    }
+
+
+def build_flash_target(target: str, checkout_path: str | None = None) -> dict[str, Any]:
+    normalized_target = _require_supported_target(target)
+    planned = plan_build_flash_job(normalized_target, checkout_path)
+    if planned["immediate"]:
+        return planned["result"]
+
+    _start = time.monotonic()
+    logger.info("build %s starting at %s", normalized_target, planned["checkout_path"])
+    result = _run_commands(
+        normalized_target,
+        Path(planned["checkout_path"]),
+        planned["commands"],
+        timeout=900,
+    )
+    result = finalize_flash_job_result(
+        result,
+        normalized_target,
+        "build",
+        planned["checkout_path"],
+    )
+    logger.info(
+        "build %s finished: success=%s artifact=%s (%.0f s)",
+        normalized_target,
+        result["success"],
+        (result.get("primary_artifact") or {}).get("name"),
+        time.monotonic() - _start,
+    )
+    return result
+
+
+def flash_flash_target(
+    target: str,
+    checkout_path: str | None = None,
+    flash_device: str | None = None,
+    flash_method: str | None = None,
+) -> dict[str, Any]:
+    normalized_target = _require_supported_target(target)
+    planned = plan_flash_flash_job(normalized_target, checkout_path, flash_device, flash_method)
+    if planned["immediate"]:
+        return planned["result"]
+
+    _start = time.monotonic()
+    logger.info(
+        "flash %s requested: method=%s device=%s",
+        normalized_target,
+        flash_method or "(auto)",
+        flash_device or "(default)",
+    )
+    result = _run_commands(
+        normalized_target,
+        Path(planned["checkout_path"]),
+        planned["commands"],
+        timeout=900,
+    )
+    # Mirror the job runner's semantics: cleanup (e.g. `systemctl start
+    # klipper`) always runs after the main sequence — even on failure — so
+    # services the flash stopped are guaranteed to come back.
+    for command in planned.get("cleanup_commands") or []:
+        try:
+            cleanup = subprocess.run(
+                command,
+                cwd=planned["checkout_path"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+        if cleanup.returncode != 0:
+            result = _command_result(
+                normalized_target,
+                False,
+                f"Flash completed but cleanup failed: {' '.join(command)} exited with code {cleanup.returncode}.",
+                result.get("log", ""),
+                planned["checkout_path"],
+                planned["flash_device"],
+                planned["flash_method"],
+            )
+            break
+    result = finalize_flash_job_result(
+        result,
+        normalized_target,
+        "flash",
+        planned["checkout_path"],
+        planned["flash_device"],
+        planned["flash_method"],
+    )
+    logger.info(
+        "flash %s finished: method=%s device=%s success=%s (%.0f s)",
+        normalized_target,
+        planned["flash_method"],
+        planned["flash_device"],
+        result["success"],
+        time.monotonic() - _start,
+    )
     return result
 
 
