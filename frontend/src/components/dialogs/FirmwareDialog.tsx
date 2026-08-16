@@ -13,6 +13,27 @@ import type {
   NativeFlashProfileSummary,
   NativeFlashState,
 } from '../../services/api';
+import {
+  CAN_UUID_PATTERN,
+  USB_ID_PATTERN,
+  applyFieldValue,
+  buildAssignments,
+  buildPanelAssignments,
+  cloneField,
+  cloneFields,
+  fieldAssignments,
+  fieldRecord,
+  flashMethodRecord,
+  formatBytes,
+  formatModified,
+  groupedFields,
+  inferFlashMethodForDevice,
+  mergeDeviceCandidates,
+  normalizeProfileAssignments,
+  resolveFlashDevice,
+  resolveFlashMethod,
+  resolveMethodDefaultDevice,
+} from '../../utils/flashPanel';
 
 interface FirmwareDialogProps {
   onClose: () => void;
@@ -91,190 +112,10 @@ const HELP_POPOVER_WIDTH = 288;
 const HELP_POPOVER_MARGIN = 12;
 const HELP_POPOVER_OFFSET = 8;
 const PREVIEW_DEBOUNCE_MS = 180;
-const USB_ID_PATTERN = /^[0-9a-fA-F]{4}:[0-9a-fA-F]{4}$/;
-const CAN_UUID_PATTERN = /^(?:[A-Za-z0-9_-]+:)?[0-9a-fA-F]{12}$/;
 
 interface HelpPopoverPosition {
   top: number;
   left: number;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function isFlashTargetKey(value: unknown): value is FlashTargetKey {
-  return value === 'klipper' || value === 'katapult';
-}
-
-function normalizeProfileAssignments(assignments: NativeFlashProfileAssignment[]): NativeFlashProfileAssignment[] {
-  const normalized: NativeFlashProfileAssignment[] = [];
-  for (const assignment of assignments) {
-    const symbol = assignment.symbol.trim();
-    if (!symbol) {
-      continue;
-    }
-    normalized.push({
-      symbol,
-      value: assignment.value,
-    });
-  }
-  return normalized;
-}
-
-function buildPanelAssignments(
-  assignmentValues: Record<string, string>,
-  knownFields: Record<string, NativeFlashField>,
-  stickyAssignments: NativeFlashProfileAssignment[],
-): Array<{ symbol: string; value: string }> {
-  const merged = new Map<string, string>();
-  for (const assignment of normalizeProfileAssignments(stickyAssignments)) {
-    merged.set(assignment.symbol, assignment.value);
-  }
-  for (const assignment of buildAssignments(assignmentValues, knownFields)) {
-    merged.set(assignment.symbol, assignment.value);
-  }
-  return Array.from(merged.entries()).map(([symbol, value]) => ({ symbol, value }));
-}
-
-function flashMethodRecord(
-  state: NativeFlashState | null,
-  methodValue: string,
-): NativeFlashMethodCandidate | null {
-  if (!state || !methodValue) {
-    return null;
-  }
-  return state.flash_method_candidates.find((candidate) => candidate.value === methodValue) || null;
-}
-
-function resolveMethodDefaultDevice(state: NativeFlashState | null, methodValue: string): string {
-  return flashMethodRecord(state, methodValue)?.default_device || state?.default_flash_device || '';
-}
-
-function inferFlashMethodForDevice(value: string, state: NativeFlashState | null): string {
-  const trimmedValue = value.trim();
-  if (!state || !trimmedValue) {
-    return '';
-  }
-
-  const exactCandidate = state.flash_device_candidates.find((candidate) => candidate.value === trimmedValue);
-  if (exactCandidate?.preferred_flash_method && flashMethodRecord(state, exactCandidate.preferred_flash_method)) {
-    return exactCandidate.preferred_flash_method;
-  }
-
-  const supportedMethods = new Set(state.flash_method_candidates.map((candidate) => candidate.value));
-  if (CAN_UUID_PATTERN.test(trimmedValue) && supportedMethods.has('flashtool')) {
-    return 'flashtool';
-  }
-  if (trimmedValue.startsWith('/dev/')) {
-    if (supportedMethods.has('flashtool')) {
-      return 'flashtool';
-    }
-    if (supportedMethods.has('make_flash')) {
-      return 'make_flash';
-    }
-  }
-  if (trimmedValue === 'first' && supportedMethods.has('make_flash')) {
-    return 'make_flash';
-  }
-  if (USB_ID_PATTERN.test(trimmedValue)) {
-    if (supportedMethods.has('dfu_util')) {
-      return 'dfu_util';
-    }
-    if (supportedMethods.has('make_flash')) {
-      return 'make_flash';
-    }
-  }
-  return '';
-}
-
-function resolveFlashMethod(previous: FlashPanelState, nextState: NativeFlashState, resetToDefault: boolean): string {
-  const currentDefault = previous.flashState?.default_flash_method || '';
-  const nextDefault = nextState.default_flash_method || '';
-  if (resetToDefault) {
-    if (previous.flashMethod && previous.flashMethod !== currentDefault) {
-      return previous.flashMethod;
-    }
-    return nextDefault;
-  }
-  if (!previous.flashMethod || previous.flashMethod === currentDefault) {
-    return nextDefault;
-  }
-  return previous.flashMethod;
-}
-
-function cloneField(field: NativeFlashField): NativeFlashField {
-  return {
-    ...field,
-    menu_path: [...field.menu_path],
-    assignable: [...field.assignable],
-    options: field.options?.map((option) => ({ ...option })),
-  };
-}
-
-function cloneFields(fields: NativeFlashField[]): NativeFlashField[] {
-  return fields.map(cloneField);
-}
-
-function fieldRecord(fields: NativeFlashField[]): Record<string, NativeFlashField> {
-  const result: Record<string, NativeFlashField> = {};
-  for (const field of fields) {
-    result[field.id] = cloneField(field);
-  }
-  return result;
-}
-
-function fieldAssignments(fields: NativeFlashField[]): Record<string, string> {
-  const result: Record<string, string> = {};
-  for (const field of fields) {
-    result[field.id] = field.value;
-  }
-  return result;
-}
-
-function buildAssignments(
-  assignmentValues: Record<string, string>,
-  knownFields: Record<string, NativeFlashField>,
-): Array<{ symbol: string; value: string }> {
-  const assignments: Array<{ symbol: string; value: string }> = [];
-  for (const [fieldId, value] of Object.entries(assignmentValues)) {
-    const field = knownFields[fieldId];
-    if (!field) {
-      continue;
-    }
-    if (field.kind === 'choice') {
-      if (value) {
-        assignments.push({ symbol: value, value: 'y' });
-      }
-      continue;
-    }
-    if (field.symbol) {
-      assignments.push({ symbol: field.symbol, value });
-    }
-  }
-  return assignments;
-}
-
-function applyFieldValue(fields: NativeFlashField[], fieldId: string, value: string): NativeFlashField[] {
-  return fields.map((field) => {
-    if (field.id !== fieldId) {
-      return field;
-    }
-    if (field.kind === 'choice') {
-      return {
-        ...field,
-        value,
-        options: field.options?.map((option) => ({
-          ...option,
-          selected: option.symbol === value,
-        })),
-      };
-    }
-    return {
-      ...field,
-      value,
-    };
-  });
 }
 
 function createEmptyPanelState(target: FlashTargetKey, checkoutPath = ''): FlashPanelState {
@@ -297,47 +138,6 @@ function createEmptyPanelState(target: FlashTargetKey, checkoutPath = ''): Flash
     scannedDeviceCandidates: [],
     devicesScanning: false,
   };
-}
-
-function formatBytes(size: number): string {
-  if (size < 1024) return `${size} B`;
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
-  return `${(size / (1024 * 1024)).toFixed(2)} MB`;
-}
-
-function formatModified(timestamp: number): string {
-  return new Date(timestamp * 1000).toLocaleString();
-}
-
-/** Merge static (config-driven) candidates with dynamically scanned ones, deduplicating by value. */
-function mergeDeviceCandidates(
-  staticCandidates: NativeFlashDeviceCandidate[],
-  scannedCandidates: NativeFlashDeviceCandidate[],
-): NativeFlashDeviceCandidate[] {
-  const seen = new Set(staticCandidates.map((c) => c.value));
-  const extras = scannedCandidates.filter((c) => !seen.has(c.value));
-  return [...staticCandidates, ...extras];
-}
-
-function resolveFlashDevice(
-  previous: FlashPanelState,
-  nextState: NativeFlashState,
-  nextMethod: string,
-  resetToDefault: boolean,
-): string {
-  const currentMethod = previous.flashMethod || previous.flashState?.default_flash_method || '';
-  const currentDefault = resolveMethodDefaultDevice(previous.flashState, currentMethod);
-  const nextDefault = resolveMethodDefaultDevice(nextState, nextMethod);
-  if (resetToDefault) {
-    if (previous.flashDevice && previous.flashDevice !== currentDefault) {
-      return previous.flashDevice;
-    }
-    return nextDefault;
-  }
-  if (!previous.flashDevice || previous.flashDevice === currentDefault) {
-    return nextDefault;
-  }
-  return previous.flashDevice;
 }
 
 function createLoadedPanel(
@@ -406,20 +206,6 @@ function mergePreviewPanel(previous: FlashPanelState, result: NativeFlashState):
     message: result.error || previous.message,
     messageTone: result.error ? 'error' : previous.messageTone,
   };
-}
-
-function groupedFields(fields: NativeFlashField[]): Map<string, NativeFlashField[]> {
-  const groups = new Map<string, NativeFlashField[]>();
-  for (const field of fields) {
-    const name = field.menu_path.length > 0 ? field.menu_path.join(' / ') : 'General';
-    const existing = groups.get(name);
-    if (existing) {
-      existing.push(field);
-    } else {
-      groups.set(name, [field]);
-    }
-  }
-  return groups;
 }
 
 function useAnimatedDots(active: boolean): string {
