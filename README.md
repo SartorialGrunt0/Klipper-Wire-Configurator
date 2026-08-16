@@ -109,7 +109,9 @@ After install, proceed to http://{your_ip_here}:8099
 
 ### Moonraker update_manager
 
-If you want Moonraker to manage updates in Mainsail or Fluidd, add the following section to `moonraker.conf`:
+The installer automatically registers KWC with Moonraker's update manager when it finds a `moonraker.conf` (kiauh layout: `~/printer_data/config/moonraker.conf`): it writes a dedicated `klipper-wire-configurator-update.cfg` include file (same pattern as obico's) and adds `[include klipper-wire-configurator-update.cfg]` to the config. Updates then appear in Mainsail/Fluidd's update manager. Uninstall removes the include file and line.
+
+To manage it manually instead, add the following section to `moonraker.conf`:
 
 ```ini
 [update_manager klipper-wire-configurator]

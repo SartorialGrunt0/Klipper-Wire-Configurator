@@ -84,6 +84,69 @@ resolve_mainsail_theme_dir() {
     return 1
 }
 
+# Locate the Moonraker config directory (kiauh layout). Used for the
+# update_manager include file and Mainsail's .theme folder.
+resolve_moonraker_config_dir() {
+    if [ -d "$HOME/printer_data/config" ]; then
+        echo "$HOME/printer_data/config"
+        return 0
+    fi
+    if [ -d "$HOME/klipper_config" ]; then
+        echo "$HOME/klipper_config"
+        return 0
+    fi
+    return 1
+}
+
+# Add KWC to Moonraker's update manager so updates show up in Mainsail /
+# Fluidd. Writes a dedicated include file (same pattern as obico's
+# moonraker-obico-update.cfg) and adds a single [include] line to
+# moonraker.conf — the user's other sections are left untouched.
+install_moonraker_updater() {
+    local config_dir moonraker_conf include_file
+    config_dir="$(resolve_moonraker_config_dir)" || return 0
+    moonraker_conf="$config_dir/moonraker.conf"
+    [ -f "$moonraker_conf" ] || return 0
+    include_file="$config_dir/klipper-wire-configurator-update.cfg"
+
+    # If the user manages KWC directly in moonraker.conf, don't duplicate.
+    if grep -q '^\[update_manager klipper-wire-configurator\]' "$moonraker_conf"; then
+        return 0
+    fi
+
+    {
+        echo "[update_manager klipper-wire-configurator]"
+        echo "type: git_repo"
+        echo "channel: dev"
+        echo "path: $INSTALL_DIR"
+        echo "origin: $REPO_URL"
+        echo "primary_branch: main"
+        echo "virtualenv: $INSTALL_DIR/venv"
+        echo "requirements: backend/requirements.txt"
+        echo "managed_services: klipper-wire-configurator"
+        echo "info_tags:"
+        printf '\tdesc=Klipper Wire Configurator\n'
+    } > "$include_file"
+
+    if ! grep -q '^\[include klipper-wire-configurator-update\.cfg\]' "$moonraker_conf"; then
+        printf '\n[include klipper-wire-configurator-update.cfg]\n' >> "$moonraker_conf"
+    fi
+}
+
+# Remove the KWC update_manager include (file + include line) from the
+# Moonraker config directory.
+remove_moonraker_updater() {
+    local config_dir moonraker_conf include_file
+    config_dir="$(resolve_moonraker_config_dir)" || return 0
+    moonraker_conf="$config_dir/moonraker.conf"
+    include_file="$config_dir/klipper-wire-configurator-update.cfg"
+
+    rm -f "$include_file"
+    if [ -f "$moonraker_conf" ]; then
+        sed -i '/^\[include klipper-wire-configurator-update\.cfg\]$/d' "$moonraker_conf"
+    fi
+}
+
 # Merge (or remove) the KWC entry in Mainsail's navi.json. Keeps any other
 # custom navigation entries the user already has.
 edit_mainsail_navi() {
@@ -211,6 +274,9 @@ if [ "${1:-}" = "--uninstall" ]; then
         info "Removing KWC entry from Mainsail sidebar..."
         edit_mainsail_navi remove
     fi
+
+    # Remove the Moonraker update_manager include (file + include line).
+    remove_moonraker_updater
 
     ok "Klipper Wire Configurator has been uninstalled."
     echo ""
@@ -529,6 +595,15 @@ if mainsail_installed; then
     else
         warn "Mainsail detected but no Klipper config directory found; skipping sidebar link."
     fi
+fi
+
+# --- Moonraker update_manager entry ---
+# Register KWC with Moonraker's update manager so updates are visible in
+# Mainsail/Fluidd. Skips when there is no moonraker.conf (standalone SBC).
+if resolve_moonraker_config_dir > /dev/null && [ -f "$(resolve_moonraker_config_dir)/moonraker.conf" ]; then
+    info "Adding KWC to Moonraker update_manager..."
+    install_moonraker_updater
+    ok "Moonraker update_manager configured."
 fi
 
 # --- Done! ---
