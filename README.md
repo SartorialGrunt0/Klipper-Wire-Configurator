@@ -125,6 +125,10 @@ info_tags:
 	desc=Klipper Wire Configurator
 ```
 
+### Mainsail sidebar link
+
+If Mainsail is detected on the machine (its `~/mainsail` install or an `[update_manager mainsail]` entry in `moonraker.conf`), the installer adds a **KWC** entry to Mainsail's custom navigation — it writes `navi.json` into the `.theme` folder inside the Klipper config directory (`~/printer_data/config/.theme` on kiauh installs). The link opens `http://<this-host>:8099` in a new tab, positioned below Machine. Fluidd and OctoPrint have no custom-navigation support, so nothing is written for them. Re-running the installer (or `--uninstall`) adds/removes only the KWC entry, leaving any other custom navigation entries untouched.
+
 ### Uninstall
 
 If you installed into `~/Klipper-Wire-Configurator`:

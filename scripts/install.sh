@@ -45,6 +45,88 @@ is_system_service_active() {
     sudo systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null
 }
 
+# Detect Mainsail so we can drop a sidebar link to KWC in its theme folder.
+# Fluidd and OctoPrint have no custom-navigation equivalent, so navi.json is
+# only written when Mainsail is actually present.
+mainsail_installed() {
+    if [ -d "$HOME/mainsail" ]; then
+        return 0
+    fi
+    local moonraker_conf
+    for moonraker_conf in "$HOME/printer_data/config/moonraker.conf" "$HOME/klipper_config/moonraker.conf"; do
+        if [ -f "$moonraker_conf" ] && grep -q '^\[update_manager mainsail\]' "$moonraker_conf"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Locate Mainsail's .theme folder (inside the Klipper/Moonraker config dir).
+# Prefers an existing .theme folder; falls back to creating one in the
+# detected config directory.
+resolve_mainsail_theme_dir() {
+    if [ -d "$HOME/printer_data/config/.theme" ]; then
+        echo "$HOME/printer_data/config/.theme"
+        return 0
+    fi
+    if [ -d "$HOME/klipper_config/.theme" ]; then
+        echo "$HOME/klipper_config/.theme"
+        return 0
+    fi
+    if [ -d "$HOME/printer_data/config" ]; then
+        echo "$HOME/printer_data/config/.theme"
+        return 0
+    fi
+    if [ -d "$HOME/klipper_config" ]; then
+        echo "$HOME/klipper_config/.theme"
+        return 0
+    fi
+    return 1
+}
+
+# Merge (or remove) the KWC entry in Mainsail's navi.json. Keeps any other
+# custom navigation entries the user already has.
+edit_mainsail_navi() {
+    local action="$1"  # add | remove
+    local theme_dir navi_path kwc_url
+    theme_dir="$(resolve_mainsail_theme_dir)" || return 0
+    mkdir -p "$theme_dir"
+    navi_path="$theme_dir/navi.json"
+    kwc_url="http://${IP_ADDR:-localhost}:${KWC_PORT}"
+    python3 - "$action" "$navi_path" "$kwc_url" <<'PYEOF'
+import json
+import sys
+
+action, path, url = sys.argv[1], sys.argv[2], sys.argv[3]
+
+try:
+    with open(path, encoding="utf-8") as fh:
+        entries = json.load(fh)
+    if not isinstance(entries, list):
+        entries = []
+except (OSError, ValueError):
+    entries = []
+
+entries = [
+    e for e in entries
+    if not (isinstance(e, dict) and e.get("title") == "KWC")
+]
+
+if action == "add":
+    entries.append({
+        "title": "KWC",
+        "href": url,
+        "target": "_blank",
+        "position": 95,
+        "icon": "M21.71 20.29L20.29 21.71A1 1 0 0 1 18.88 21.71L7 9.85A3.81 3.81 0 0 1 6 10A4 4 0 0 1 2.22 4.7L4.76 7.24L5.29 6.71L6.71 5.29L7.24 4.76L4.7 2.22A4 4 0 0 1 10 6A3.81 3.81 0 0 1 9.85 7L21.71 18.88A1 1 0 0 1 21.71 20.29M2.29 18.88A1 1 0 0 0 2.29 20.29L3.71 21.71A1 1 0 0 0 5.12 21.71L10.59 16.25L7.76 13.42M20 2L16 4V6L13.83 8.17L15.83 10.17L18 8H20L22 4Z",
+    })
+
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(entries, fh, indent=2)
+    fh.write("\n")
+PYEOF
+}
+
 on_error() {
     local line_no="$1"
     local exit_code="$2"
@@ -121,6 +203,13 @@ if [ "${1:-}" = "--uninstall" ]; then
     if [ -d "$INSTALL_DIR" ]; then
         info "Removing installation directory: $INSTALL_DIR"
         rm -rf "$INSTALL_DIR"
+    fi
+
+    # Remove the KWC entry from Mainsail's navi.json (keeps any other custom
+    # navigation entries the user added). Best-effort — no config dir, no problem.
+    if mainsail_installed; then
+        info "Removing KWC entry from Mainsail sidebar..."
+        edit_mainsail_navi remove
     fi
 
     ok "Klipper Wire Configurator has been uninstalled."
@@ -425,6 +514,21 @@ fi
 IP_ADDR="$(hostname -I 2>/dev/null | awk '{print $1}')"
 if [ -z "$IP_ADDR" ]; then
     IP_ADDR="<your-pi-ip>"
+fi
+
+# --- Mainsail sidebar link (navi.json) ---
+# Mainsail supports custom sidebar entries via navi.json in its .theme folder
+# (inside the Klipper config dir). Fluidd and OctoPrint have no equivalent, so
+# this only runs when Mainsail is detected. The link targets _blank so the
+# Mainsail tab is preserved.
+if mainsail_installed; then
+    if resolve_mainsail_theme_dir > /dev/null; then
+        info "Mainsail detected - adding KWC link to its sidebar (navi.json)..."
+        edit_mainsail_navi add
+        ok "Mainsail sidebar link configured."
+    else
+        warn "Mainsail detected but no Klipper config directory found; skipping sidebar link."
+    fi
 fi
 
 # --- Done! ---
