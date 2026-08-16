@@ -942,6 +942,27 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
     }
   }
 
+  async function handleCancelJob(target: FlashTargetKey) {
+    const panel = panels[target];
+    if (!panel.activeJobId) {
+      return;
+    }
+    try {
+      await api.cancelNativeFlashJob(target, panel.activeJobId);
+      updatePanel(target, (current) => ({
+        ...current,
+        message: current.status === 'building' ? 'Cancelling build...' : 'Cancelling flash...',
+        messageTone: 'info',
+      }));
+    } catch (error) {
+      updatePanel(target, (current) => ({
+        ...current,
+        message: error instanceof Error ? error.message : 'Failed to cancel the running job.',
+        messageTone: 'error',
+      }));
+    }
+  }
+
   async function handleDownload(target: FlashTargetKey, artifact: NativeFlashArtifact) {
     const panel = panels[target];
     try {
@@ -1353,8 +1374,10 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
   // Preview is a read-only refresh: it must not gate Save/Load/Method/Device.
   const actionBusy = isBusyStatus(panel.status);
   const previewPending = panel.status === 'previewing';
-  const buildLabel = panel.status === 'building' ? `Build${buildDots}` : 'Build';
-  const flashLabel = panel.status === 'flashing' ? `Flash${flashDots}` : 'Flash';
+  const buildJobActive = panel.status === 'building' && panel.activeJobId !== null;
+  const flashJobActive = panel.status === 'flashing' && panel.activeJobId !== null;
+  const buildLabel = buildJobActive ? `Cancel${buildDots}` : (panel.status === 'building' ? `Build${buildDots}` : 'Build');
+  const flashLabel = flashJobActive ? `Cancel${flashDots}` : (panel.status === 'flashing' ? `Flash${flashDots}` : 'Flash');
   const saveLabel = panel.status === 'saving' ? 'Saving...' : 'Save';
   const flashMethodCandidates = panel.flashState?.flash_method_candidates || [];
   const selectedFlashMethod = panel.flashMethod || panel.flashState?.default_flash_method || '';
@@ -1626,16 +1649,24 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                 {saveLabel}
               </button>
               <button
-                onClick={() => void handleBuild(activeTarget)}
-                disabled={actionBusy || !panel.flashState?.available}
-                className="inline-flex min-w-[5.75rem] justify-center rounded-md bg-amber-500 px-4 py-2 text-xs font-semibold text-black transition-colors hover:bg-amber-400 disabled:opacity-50"
+                onClick={() => void (buildJobActive ? handleCancelJob(activeTarget) : handleBuild(activeTarget))}
+                disabled={(!buildJobActive && actionBusy) || !panel.flashState?.available}
+                className={`inline-flex min-w-[5.75rem] justify-center rounded-md px-4 py-2 text-xs font-semibold text-black transition-colors disabled:opacity-50 ${
+                  buildJobActive
+                    ? 'bg-red-500 hover:bg-red-400'
+                    : 'bg-amber-500 hover:bg-amber-400'
+                }`}
               >
                 {buildLabel}
               </button>
               <button
-                onClick={() => void handleFlash(activeTarget)}
-                disabled={flashButtonDisabled}
-                className="inline-flex min-w-[5.75rem] justify-center rounded-md bg-emerald-500 px-4 py-2 text-xs font-semibold text-black transition-colors hover:bg-emerald-400 disabled:bg-[var(--color-bg-tertiary)] disabled:text-[var(--color-text-secondary)] disabled:hover:bg-[var(--color-bg-tertiary)]"
+                onClick={() => void (flashJobActive ? handleCancelJob(activeTarget) : handleFlash(activeTarget))}
+                disabled={flashJobActive ? false : flashButtonDisabled}
+                className={`inline-flex min-w-[5.75rem] justify-center rounded-md px-4 py-2 text-xs font-semibold text-black transition-colors ${
+                  flashJobActive
+                    ? 'bg-red-500 hover:bg-red-400'
+                    : 'bg-emerald-500 hover:bg-emerald-400 disabled:bg-[var(--color-bg-tertiary)] disabled:text-[var(--color-text-secondary)] disabled:hover:bg-[var(--color-bg-tertiary)]'
+                }`}
               >
                 {flashLabel}
               </button>
