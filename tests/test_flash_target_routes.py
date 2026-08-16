@@ -15,6 +15,51 @@ from main import app  # noqa: E402
 client = TestClient(app)
 
 
+class _FakeJobRunner:
+    """Minimal double for FlashJobRunner used by the route tests."""
+
+    def __init__(self):
+        self.started: list[dict] = []
+        self.statuses: dict[str, dict] = {}
+        self.cancelled_ids: list[str] = []
+
+    def start(self, target, kind, commands, checkout_path, flash_device="", flash_method=""):
+        self.started.append({
+            'target': target,
+            'kind': kind,
+            'commands': commands,
+            'checkout_path': checkout_path,
+            'flash_device': flash_device,
+            'flash_method': flash_method,
+        })
+        job_id = f'job-{len(self.started)}'
+        self.statuses[job_id] = {
+            'job_id': job_id,
+            'target': target,
+            'kind': kind,
+            'checkout_path': checkout_path,
+            'flash_device': flash_device,
+            'flash_method': flash_method,
+            'running': True,
+            'returncode': None,
+            'log_tail': [],
+            'raw_result': None,
+        }
+        return job_id
+
+    def status(self, job_id):
+        if job_id not in self.statuses:
+            raise KeyError(job_id)
+        return self.statuses[job_id]
+
+    def cancel(self, job_id):
+        if job_id not in self.statuses or not self.statuses[job_id]['running']:
+            return False
+        self.statuses[job_id]['running'] = False
+        self.cancelled_ids.append(job_id)
+        return True
+
+
 def test_blocking_subprocess_routes_are_sync():
     """Blocking subprocess/socket/file routes must run in the threadpool,
     not on the FastAPI event loop (a frozen loop stalls AI chat, config
@@ -47,8 +92,9 @@ def test_blocking_subprocess_routes_are_sync():
 
 
 def test_build_route_does_not_block_concurrent_status(monkeypatch):
-    """A slow build must not stall a concurrent request: the build sleeps in
-    the threadpool while /status completes on the event loop.
+    """A slow build request must not stall a concurrent /status call: the
+    build route runs in the threadpool while /status completes on the event
+    loop.
 
     Uses a real uvicorn server + httpx (TestClient serializes requests at the
     transport level and cannot exercise concurrency).
@@ -58,24 +104,32 @@ def test_build_route_does_not_block_concurrent_status(monkeypatch):
     import httpx
     import uvicorn
 
-    def slow_build(target, checkout_path=None):
-        time.sleep(1.5)
+    class SlowRunner:
+        """Fake FlashJobRunner whose start() blocks like the old sync build."""
+
+        def start(self, target, kind, commands, checkout_path, flash_device="", flash_method=""):
+            time.sleep(1.5)
+            return 'job-slow'
+
+        def status(self, job_id):
+            raise KeyError(job_id)
+
+        def cancel(self, job_id):
+            return False
+
+    def fake_plan(target, checkout_path=None):
         return {
-            'target': target,
-            'display_name': 'Klipper',
-            'success': True,
-            'error': None,
-            'log': '$ make',
-            'checkout_path': '/home/pi/klipper',
-            'out_path': '/home/pi/klipper/out',
-            'artifacts': [],
-            'primary_artifact': None,
+            'immediate': False,
+            'result': None,
+            'commands': [['make', 'olddefconfig'], ['make', '-j4']],
+            'checkout_path': checkout_path or '/home/pi/klipper',
             'flash_device': '',
             'flash_method': '',
         }
 
     monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
-    monkeypatch.setattr(native_routes, 'build_flash_target', slow_build)
+    monkeypatch.setattr(native_routes, 'plan_build_flash_job', fake_plan)
+    monkeypatch.setattr(native_routes, 'flash_job_runner', SlowRunner())
 
     with socket_mod.socket() as sock:
         sock.bind(('127.0.0.1', 0))
@@ -187,29 +241,22 @@ def test_flash_field_help_route_forwards_field_id(monkeypatch):
     }
 
 
-def test_flash_target_route_forwards_device(monkeypatch):
-    captured = {}
+def test_flash_target_route_starts_job_and_forwards_device(monkeypatch):
+    runner = _FakeJobRunner()
 
-    def fake_flash(target, checkout_path=None, flash_device=None, flash_method=None):
-        captured['target'] = target
-        captured['checkout_path'] = checkout_path
-        captured['flash_device'] = flash_device
-        captured['flash_method'] = flash_method
+    def fake_plan(target, checkout_path=None, flash_device=None, flash_method=None):
         return {
-            'target': target,
-            'success': True,
-            'error': None,
-            'log': '$ make flash',
+            'immediate': False,
+            'result': None,
+            'commands': [['make', 'olddefconfig'], ['make', 'flash', 'NOSUDO=1']],
             'checkout_path': checkout_path,
-            'out_path': f'{checkout_path}/out',
-            'artifacts': [],
-            'primary_artifact': None,
-            'flash_device': flash_device,
-            'flash_method': flash_method,
+            'flash_device': flash_device or '',
+            'flash_method': flash_method or '',
         }
 
     monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
-    monkeypatch.setattr(native_routes, 'flash_flash_target', fake_flash)
+    monkeypatch.setattr(native_routes, 'plan_flash_flash_job', fake_plan)
+    monkeypatch.setattr(native_routes, 'flash_job_runner', runner)
 
     response = client.post(
         '/api/native/flash/katapult/flash',
@@ -221,13 +268,126 @@ def test_flash_target_route_forwards_device(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert response.json()['success'] is True
-    assert captured == {
+    body = response.json()
+    assert body == {'job_id': 'job-1', 'running': True, 'target': 'katapult', 'kind': 'flash'}
+    assert runner.started == [{
         'target': 'katapult',
+        'kind': 'flash',
+        'commands': [['make', 'olddefconfig'], ['make', 'flash', 'NOSUDO=1']],
         'checkout_path': '/home/pi/katapult',
         'flash_device': '0483:df11',
         'flash_method': 'dfu_util',
-    }
+    }]
+
+
+def test_flash_target_route_returns_immediate_failure_without_job(monkeypatch):
+    def fake_plan(target, checkout_path=None, flash_device=None, flash_method=None):
+        return {
+            'immediate': True,
+            'result': {
+                'target': target,
+                'display_name': 'Klipper',
+                'success': False,
+                'error': 'dfu-util requires a USB VID:PID flash device such as 0483:df11.',
+                'log': '',
+                'checkout_path': checkout_path,
+                'out_path': f'{checkout_path}/out',
+                'artifacts': [],
+                'primary_artifact': None,
+                'flash_device': flash_device,
+                'flash_method': flash_method,
+            },
+            'commands': None,
+            'checkout_path': None,
+            'flash_device': flash_device or '',
+            'flash_method': flash_method or '',
+        }
+
+    runner = _FakeJobRunner()
+    monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
+    monkeypatch.setattr(native_routes, 'plan_flash_flash_job', fake_plan)
+    monkeypatch.setattr(native_routes, 'flash_job_runner', runner)
+
+    response = client.post(
+        '/api/native/flash/klipper/flash',
+        json={'checkout_path': '/home/pi/klipper', 'flash_device': 'not-a-usb-id', 'flash_method': 'dfu_util'},
+    )
+
+    assert response.status_code == 200
+    assert response.json()['success'] is False
+    assert runner.started == []
+
+
+def test_flash_job_status_route_returns_tail_and_final_result(monkeypatch):
+    runner = _FakeJobRunner()
+    job_id = runner.start('klipper', 'build', [['make']], '/home/pi/klipper')
+    runner.statuses[job_id].update({
+        'running': False,
+        'returncode': 0,
+        'log_tail': ['$ make', 'output line'],
+        'raw_result': {'success': True, 'error': None, 'log': '$ make\noutput line', 'returncode': 0},
+    })
+
+    monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
+    monkeypatch.setattr(native_routes, 'flash_job_runner', runner)
+
+    response = client.get(f'/api/native/flash/klipper/jobs/{job_id}')
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body['running'] is False
+    assert body['kind'] == 'build'
+    assert body['log_tail'] == ['$ make', 'output line']
+    # A build that produced no artifact is finalized as a failure, matching
+    # the synchronous build path's artifact check.
+    assert body['result']['success'] is False
+    assert 'no artifact' in body['result']['error']
+    assert body['result']['log'] == '$ make\noutput line'
+    assert body['result']['target'] == 'klipper'
+
+
+def test_flash_job_status_route_returns_live_tail_while_running(monkeypatch):
+    runner = _FakeJobRunner()
+    job_id = runner.start('klipper', 'build', [['make']], '/home/pi/klipper')
+    runner.statuses[job_id]['log_tail'] = ['$ make', 'compiling...']
+
+    monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
+    monkeypatch.setattr(native_routes, 'flash_job_runner', runner)
+
+    response = client.get(f'/api/native/flash/klipper/jobs/{job_id}')
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body['running'] is True
+    assert body['log_tail'] == ['$ make', 'compiling...']
+    assert body['result'] is None
+
+
+def test_flash_job_status_route_404_for_unknown_job(monkeypatch):
+    runner = _FakeJobRunner()
+    monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
+    monkeypatch.setattr(native_routes, 'flash_job_runner', runner)
+
+    response = client.get('/api/native/flash/klipper/jobs/nope')
+
+    assert response.status_code == 404
+
+
+def test_flash_job_cancel_route(monkeypatch):
+    runner = _FakeJobRunner()
+    job_id = runner.start('klipper', 'build', [['make']], '/home/pi/klipper')
+
+    monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
+    monkeypatch.setattr(native_routes, 'flash_job_runner', runner)
+
+    response = client.post(f'/api/native/flash/klipper/jobs/{job_id}/cancel')
+    assert response.status_code == 200
+    assert response.json() == {'job_id': job_id, 'cancelled': True}
+    assert runner.cancelled_ids == [job_id]
+
+    # Already cancelled/stopped → 409
+    again = client.post(f'/api/native/flash/klipper/jobs/{job_id}/cancel')
+    assert again.status_code == 409
 
 
 def test_list_flash_profiles_route_returns_profiles(monkeypatch):

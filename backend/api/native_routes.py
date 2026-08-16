@@ -40,17 +40,21 @@ from services.klipper_firmware import (
     preview_klipper_menuconfig,
     save_klipper_menuconfig,
 )
+from services.flash_jobs import FlashJobRunner
 from services.flash_targets import (
-    build_flash_target,
     delete_flash_target_artifact,
-    flash_flash_target,
+    finalize_flash_job_result,
     get_flash_field_help,
     get_flash_target_artifact_path,
     get_flash_target_state,
+    plan_build_flash_job,
+    plan_flash_flash_job,
     preview_flash_target_config,
     save_flash_target_config,
     scan_flash_target_devices,
 )
+
+flash_job_runner = FlashJobRunner()
 
 router = APIRouter()
 
@@ -421,18 +425,84 @@ def save_flash_target(target: str, data: FlashTargetConfigUpdate):
 
 @router.post("/flash/{target}/build")
 def build_flash_target_api(target: str, data: FlashTargetCommandRequest):
-    """Run `make olddefconfig` and `make` for a local flash target checkout."""
+    """Start a `make olddefconfig` + `make` job for a local flash target checkout."""
     if not is_native_platform():
         raise HTTPException(status_code=501, detail="Only available on Pi")
-    return build_flash_target(_validated_target(target), data.checkout_path)
+    normalized = _validated_target(target)
+    planned = plan_build_flash_job(normalized, data.checkout_path)
+    if planned["immediate"]:
+        return planned["result"]
+    job_id = flash_job_runner.start(
+        normalized,
+        "build",
+        planned["commands"],
+        planned["checkout_path"],
+    )
+    return {"job_id": job_id, "running": True, "target": normalized, "kind": "build"}
 
 
 @router.post("/flash/{target}/flash")
 def flash_target_api(target: str, data: FlashTargetCommandRequest):
-    """Run the selected flash method for a local flash target checkout."""
+    """Start the selected flash-method job for a local flash target checkout."""
     if not is_native_platform():
         raise HTTPException(status_code=501, detail="Only available on Pi")
-    return flash_flash_target(_validated_target(target), data.checkout_path, data.flash_device, data.flash_method)
+    normalized = _validated_target(target)
+    planned = plan_flash_flash_job(
+        normalized,
+        data.checkout_path,
+        data.flash_device,
+        data.flash_method,
+    )
+    if planned["immediate"]:
+        return planned["result"]
+    job_id = flash_job_runner.start(
+        normalized,
+        "flash",
+        planned["commands"],
+        planned["checkout_path"],
+        planned["flash_device"],
+        planned["flash_method"],
+    )
+    return {"job_id": job_id, "running": True, "target": normalized, "kind": "flash"}
+
+
+@router.get("/flash/{target}/jobs/{job_id}")
+def flash_job_status_api(target: str, job_id: str):
+    """Return live output for a build/flash job; the final result when done."""
+    if not is_native_platform():
+        raise HTTPException(status_code=501, detail="Only available on Pi")
+    try:
+        status = flash_job_runner.status(job_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Flash job not found") from None
+    result = None
+    if not status["running"] and status["raw_result"] is not None:
+        result = finalize_flash_job_result(
+            status["raw_result"],
+            status["target"],
+            status["kind"],
+            status["checkout_path"],
+            status["flash_device"],
+            status["flash_method"],
+        )
+    return {
+        "job_id": job_id,
+        "running": status["running"],
+        "target": status["target"],
+        "kind": status["kind"],
+        "log_tail": status["log_tail"],
+        "result": result,
+    }
+
+
+@router.post("/flash/{target}/jobs/{job_id}/cancel")
+def flash_job_cancel_api(target: str, job_id: str):
+    """Cancel a running build/flash job."""
+    if not is_native_platform():
+        raise HTTPException(status_code=501, detail="Only available on Pi")
+    if not flash_job_runner.cancel(job_id):
+        raise HTTPException(status_code=409, detail="Flash job is not running.")
+    return {"job_id": job_id, "cancelled": True}
 
 
 @router.get("/flash/{target}/artifacts/{filename}")

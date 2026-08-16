@@ -1507,28 +1507,280 @@ def _run_commands(target: str, checkout_path: Path, commands: list[list[str]], t
     )
 
 
-def build_flash_target(target: str, checkout_path: str | None = None) -> dict[str, Any]:
-    normalized_target = _require_supported_target(target)
-    resolved_path, error = resolve_flash_target_checkout(normalized_target, checkout_path)
-    if resolved_path is None:
-        return _command_result(normalized_target, False, error, "", checkout_path or ".")
+def finalize_flash_job_result(
+    raw_result: dict,
+    target: str,
+    kind: str,
+    checkout_path: str,
+    flash_device: str = "",
+    flash_method: str = "",
+) -> dict[str, Any]:
+    """Enrich a raw job outcome into the standard command-result shape.
 
-    _start = time.monotonic()
-    logger.info("build %s starting at %s", normalized_target, resolved_path)
-    result = _run_commands(
+    Used by the streaming job status route once a job finishes, and by the
+    synchronous build/flash helpers. ``kind`` is 'build' or 'flash'; build
+    results are additionally checked for a produced artifact.
+    """
+    normalized_target = _require_supported_target(target)
+    result = _command_result(
         normalized_target,
-        resolved_path,
-        [
-            ["make", "olddefconfig"],
-            ["make", f"-j{max(1, os.cpu_count() or 1)}"],
-        ],
-        timeout=900,
+        bool(raw_result.get("success", False)),
+        raw_result.get("error"),
+        raw_result.get("log", ""),
+        checkout_path,
+        flash_device,
+        flash_method,
     )
-    if result["success"] and result["primary_artifact"] is None:
+    if kind == "build" and result["success"] and result["primary_artifact"] is None:
         result["success"] = False
         result["error"] = (
             f"{_target_display_name(normalized_target)} build completed but no artifact was found in the out directory."
         )
+    return result
+
+
+def plan_build_flash_job(target: str, checkout_path: str | None = None) -> dict[str, Any]:
+    """Resolve a build request into either an immediate result or job commands."""
+    normalized_target = _require_supported_target(target)
+    resolved_path, error = resolve_flash_target_checkout(normalized_target, checkout_path)
+    if resolved_path is None:
+        return {
+            "immediate": True,
+            "result": _command_result(normalized_target, False, error, "", checkout_path or "."),
+            "commands": None,
+            "checkout_path": None,
+            "flash_device": "",
+            "flash_method": "",
+        }
+    return {
+        "immediate": False,
+        "result": None,
+        "commands": [
+            ["make", "olddefconfig"],
+            ["make", f"-j{max(1, os.cpu_count() or 1)}"],
+        ],
+        "checkout_path": str(resolved_path),
+        "flash_device": "",
+        "flash_method": "",
+    }
+
+
+def plan_flash_flash_job(
+    target: str,
+    checkout_path: str | None = None,
+    flash_device: str | None = None,
+    flash_method: str | None = None,
+) -> dict[str, Any]:
+    """Resolve a flash request into either an immediate result or job commands.
+
+    Every validation failure returns ``immediate: True`` with the same
+    command-result dict the synchronous path produced; the happy path returns
+    the exact command sequence the job runner should execute.
+    """
+    normalized_target = _require_supported_target(target)
+    resolved_path, error = resolve_flash_target_checkout(normalized_target, checkout_path)
+    if resolved_path is None:
+        return {
+            "immediate": True,
+            "result": _command_result(
+                normalized_target, False, error, "", checkout_path or ".", flash_device, flash_method
+            ),
+            "commands": None,
+            "checkout_path": None,
+            "flash_device": flash_device or "",
+            "flash_method": flash_method or "",
+        }
+
+    def immediate(result: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "immediate": True,
+            "result": result,
+            "commands": None,
+            "checkout_path": str(resolved_path),
+            "flash_device": flash_device or "",
+            "flash_method": flash_method or "",
+        }
+
+    state = get_flash_target_state(normalized_target, str(resolved_path))
+    if not state["flash_supported"]:
+        return immediate(_command_result(
+            normalized_target,
+            False,
+            state["flash_reason"] or "Flashing is not supported for this target.",
+            "",
+            resolved_path,
+            flash_device,
+            flash_method,
+        ))
+
+    method_candidates_list = state.get("flash_method_candidates", [])
+    method_candidates = {
+        candidate["value"]: candidate
+        for candidate in method_candidates_list
+    }
+    initial_device = (flash_device or "").strip() or state.get("default_flash_device", "")
+    requested_method = (flash_method or "").strip()
+    resolved_method = requested_method or _preferred_flash_method_for_device(
+        initial_device,
+        method_candidates_list,
+        state.get("flash_device_candidates", []),
+    ) or state.get("default_flash_method", "")
+    method_state = method_candidates.get(resolved_method)
+    if method_state is None:
+        return immediate(_command_result(
+            normalized_target,
+            False,
+            "A supported flash method must be selected for the current target.",
+            "",
+            resolved_path,
+            flash_device,
+            flash_method,
+        ))
+
+    resolved_device = (flash_device or "").strip() or method_state.get("default_device", "") or state.get("default_flash_device", "")
+    if method_state["device_required"] and not resolved_device:
+        return immediate(_command_result(
+            normalized_target,
+            False,
+            "A flash device is required for the current target.",
+            "",
+            resolved_path,
+            flash_device,
+            resolved_method,
+        ))
+
+    make_jobs = f"-j{max(1, os.cpu_count() or 1)}"
+
+    if resolved_method == _FLASH_METHOD_DFU_UTIL:
+        if not _is_usb_id(resolved_device):
+            return immediate(_command_result(
+                normalized_target,
+                False,
+                "dfu-util requires a USB VID:PID flash device such as 0483:df11.",
+                "",
+                resolved_path,
+                resolved_device,
+                resolved_method,
+            ))
+        flash_command, resolve_error, resolve_log = _resolve_dfu_util_flash_command(
+            resolved_path,
+            resolved_device,
+            _build_artifact_path(normalized_target, resolved_path),
+        )
+        if flash_command is None:
+            return immediate(_command_result(
+                normalized_target,
+                False,
+                resolve_error,
+                resolve_log,
+                resolved_path,
+                resolved_device,
+                resolved_method,
+            ))
+        commands = [
+            ["make", "olddefconfig"],
+            ["make", make_jobs],
+            flash_command,
+        ]
+    elif resolved_method == _FLASH_METHOD_FLASHTOOL:
+        katapult_script_path = _katapult_flashtool_path(normalized_target, resolved_path)
+        if katapult_script_path is None:
+            return immediate(_command_result(
+                normalized_target,
+                False,
+                "Katapult is not installed on this SBC, so flashtool.py is unavailable.",
+                "",
+                resolved_path,
+                resolved_device,
+                resolved_method,
+            ))
+        artifact_path = _build_artifact_path(normalized_target, resolved_path)
+        if artifact_path is None:
+            return immediate(_command_result(
+                normalized_target,
+                False,
+                "No flashable build artifact was found. Build the target before flashing with flashtool.py.",
+                "",
+                resolved_path,
+                resolved_device,
+                resolved_method,
+            ))
+        can_device = _parse_can_flash_device(resolved_device)
+        if can_device is not None:
+            interface, uuid = can_device
+            flash_command = [
+                "python3",
+                str(katapult_script_path),
+                "-i",
+                interface,
+                "-f",
+                str(artifact_path),
+                "-u",
+                uuid,
+            ]
+        elif _is_usb_id(resolved_device):
+            return immediate(_command_result(
+                normalized_target,
+                False,
+                "flashtool.py requires a serial device path or a CAN UUID, not a USB VID:PID.",
+                "",
+                resolved_path,
+                resolved_device,
+                resolved_method,
+            ))
+        else:
+            flash_command = [
+                "python3",
+                str(katapult_script_path),
+                "-d",
+                resolved_device,
+                "-f",
+                str(artifact_path),
+            ]
+        commands = [
+            ["make", "olddefconfig"],
+            ["make", make_jobs],
+            flash_command,
+        ]
+    else:
+        flash_command = ["make", "flash", "NOSUDO=1"]
+        if resolved_device:
+            flash_command.append(f"FLASH_DEVICE={resolved_device}")
+        commands = [
+            ["make", "olddefconfig"],
+            flash_command,
+        ]
+
+    return {
+        "immediate": False,
+        "result": None,
+        "commands": commands,
+        "checkout_path": str(resolved_path),
+        "flash_device": resolved_device,
+        "flash_method": resolved_method,
+    }
+
+
+def build_flash_target(target: str, checkout_path: str | None = None) -> dict[str, Any]:
+    normalized_target = _require_supported_target(target)
+    planned = plan_build_flash_job(normalized_target, checkout_path)
+    if planned["immediate"]:
+        return planned["result"]
+
+    _start = time.monotonic()
+    logger.info("build %s starting at %s", normalized_target, planned["checkout_path"])
+    result = _run_commands(
+        normalized_target,
+        Path(planned["checkout_path"]),
+        planned["commands"],
+        timeout=900,
+    )
+    result = finalize_flash_job_result(
+        result,
+        normalized_target,
+        "build",
+        planned["checkout_path"],
+    )
     logger.info(
         "build %s finished: success=%s artifact=%s (%.0f s)",
         normalized_target,
@@ -1546,9 +1798,9 @@ def flash_flash_target(
     flash_method: str | None = None,
 ) -> dict[str, Any]:
     normalized_target = _require_supported_target(target)
-    resolved_path, error = resolve_flash_target_checkout(normalized_target, checkout_path)
-    if resolved_path is None:
-        return _command_result(normalized_target, False, error, "", checkout_path or ".", flash_device, flash_method)
+    planned = plan_flash_flash_job(normalized_target, checkout_path, flash_device, flash_method)
+    if planned["immediate"]:
+        return planned["result"]
 
     _start = time.monotonic()
     logger.info(
@@ -1557,159 +1809,25 @@ def flash_flash_target(
         flash_method or "(auto)",
         flash_device or "(default)",
     )
-    state = get_flash_target_state(normalized_target, str(resolved_path))
-    if not state["flash_supported"]:
-        return _command_result(
-            normalized_target,
-            False,
-            state["flash_reason"] or "Flashing is not supported for this target.",
-            "",
-            resolved_path,
-            flash_device,
-            flash_method,
-        )
-
-    method_candidates_list = state.get("flash_method_candidates", [])
-    method_candidates = {
-        candidate["value"]: candidate
-        for candidate in method_candidates_list
-    }
-    initial_device = (flash_device or "").strip() or state.get("default_flash_device", "")
-    requested_method = (flash_method or "").strip()
-    resolved_method = requested_method or _preferred_flash_method_for_device(
-        initial_device,
-        method_candidates_list,
-        state.get("flash_device_candidates", []),
-    ) or state.get("default_flash_method", "")
-    method_state = method_candidates.get(resolved_method)
-    if method_state is None:
-        return _command_result(
-            normalized_target,
-            False,
-            "A supported flash method must be selected for the current target.",
-            "",
-            resolved_path,
-            flash_device,
-            flash_method,
-        )
-
-    resolved_device = (flash_device or "").strip() or method_state.get("default_device", "") or state.get("default_flash_device", "")
-    if method_state["device_required"] and not resolved_device:
-        return _command_result(
-            normalized_target,
-            False,
-            "A flash device is required for the current target.",
-            "",
-            resolved_path,
-            flash_device,
-            resolved_method,
-        )
-
-    if resolved_method == _FLASH_METHOD_DFU_UTIL:
-        if not _is_usb_id(resolved_device):
-            return _command_result(
-                normalized_target,
-                False,
-                "dfu-util requires a USB VID:PID flash device such as 0483:df11.",
-                "",
-                resolved_path,
-                resolved_device,
-                resolved_method,
-            )
-        flash_command, resolve_error, resolve_log = _resolve_dfu_util_flash_command(
-            resolved_path,
-            resolved_device,
-            _build_artifact_path(normalized_target, resolved_path),
-        )
-        if flash_command is None:
-            return _command_result(
-                normalized_target,
-                False,
-                resolve_error,
-                resolve_log,
-                resolved_path,
-                resolved_device,
-                resolved_method,
-            )
-        result = _run_direct_flash_commands(normalized_target, resolved_path, flash_command)
-    elif resolved_method == _FLASH_METHOD_FLASHTOOL:
-        katapult_script_path = _katapult_flashtool_path(normalized_target, resolved_path)
-        if katapult_script_path is None:
-            return _command_result(
-                normalized_target,
-                False,
-                "Katapult is not installed on this SBC, so flashtool.py is unavailable.",
-                "",
-                resolved_path,
-                resolved_device,
-                resolved_method,
-            )
-        artifact_path = _build_artifact_path(normalized_target, resolved_path)
-        if artifact_path is None:
-            return _command_result(
-                normalized_target,
-                False,
-                "No flashable build artifact was found. Build the target before flashing with flashtool.py.",
-                "",
-                resolved_path,
-                resolved_device,
-                resolved_method,
-            )
-        can_device = _parse_can_flash_device(resolved_device)
-        if can_device is not None:
-            interface, uuid = can_device
-            flash_command = [
-                "python3",
-                str(katapult_script_path),
-                "-i",
-                interface,
-                "-f",
-                str(artifact_path),
-                "-u",
-                uuid,
-            ]
-        elif _is_usb_id(resolved_device):
-            return _command_result(
-                normalized_target,
-                False,
-                "flashtool.py requires a serial device path or a CAN UUID, not a USB VID:PID.",
-                "",
-                resolved_path,
-                resolved_device,
-                resolved_method,
-            )
-        else:
-            flash_command = [
-                "python3",
-                str(katapult_script_path),
-                "-d",
-                resolved_device,
-                "-f",
-                str(artifact_path),
-            ]
-        result = _run_direct_flash_commands(normalized_target, resolved_path, flash_command)
-    else:
-        flash_command = ["make", "flash", "NOSUDO=1"]
-        if resolved_device:
-            flash_command.append(f"FLASH_DEVICE={resolved_device}")
-
-        result = _run_commands(
-            normalized_target,
-            resolved_path,
-            [
-                ["make", "olddefconfig"],
-                flash_command,
-            ],
-            timeout=900,
-        )
-
-    result["flash_device"] = resolved_device
-    result["flash_method"] = resolved_method
+    result = _run_commands(
+        normalized_target,
+        Path(planned["checkout_path"]),
+        planned["commands"],
+        timeout=900,
+    )
+    result = finalize_flash_job_result(
+        result,
+        normalized_target,
+        "flash",
+        planned["checkout_path"],
+        planned["flash_device"],
+        planned["flash_method"],
+    )
     logger.info(
         "flash %s finished: method=%s device=%s success=%s (%.0f s)",
         normalized_target,
-        resolved_method,
-        resolved_device,
+        planned["flash_method"],
+        planned["flash_device"],
         result["success"],
         time.monotonic() - _start,
     )

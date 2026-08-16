@@ -80,6 +80,8 @@ interface FlashPanelState {
   assignmentValues: Record<string, string>;
   isDirty: boolean;
   commandResult: NativeFlashCommandResult | null;
+  activeJobId: string | null;
+  liveLog: string | null;
   scannedDeviceCandidates: NativeFlashDeviceCandidate[];
   devicesScanning: boolean;
 }
@@ -93,6 +95,7 @@ const HELP_POPOVER_WIDTH = 288;
 const HELP_POPOVER_MARGIN = 12;
 const HELP_POPOVER_OFFSET = 8;
 const PREVIEW_DEBOUNCE_MS = 180;
+const JOB_POLL_MS = 1500;
 
 interface HelpPopoverPosition {
   top: number;
@@ -116,6 +119,8 @@ function createEmptyPanelState(target: FlashTargetKey, checkoutPath = ''): Flash
     assignmentValues: {},
     isDirty: false,
     commandResult: null,
+    activeJobId: null,
+    liveLog: null,
     scannedDeviceCandidates: [],
     devicesScanning: false,
   };
@@ -462,6 +467,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
   const [profileDialog, setProfileDialog] = useState<FlashProfileDialogState | null>(null);
   const [showTargetSettings, setShowTargetSettings] = useState(false);
   const panelsRef = useRef(panels);
+  const logContainerRef = useRef<HTMLDivElement | null>(null);
   const previewTimeoutsRef = useRef<Partial<Record<FlashTargetKey, number>>>({});
   const previewRequestIdsRef = useRef<Record<FlashTargetKey, number>>({
     klipper: 0,
@@ -478,6 +484,14 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
   useEffect(() => {
     panelsRef.current = panels;
   }, [panels]);
+
+  // Keep the Command Log pinned to the newest output while a job streams.
+  useEffect(() => {
+    const container = logContainerRef.current;
+    if (container) {
+      container.scrollTop = container.scrollHeight;
+    }
+  }, [panels[activeTarget]?.liveLog]);
 
   function updatePanel(target: FlashTargetKey, updater: (panel: FlashPanelState) => FlashPanelState) {
     setPanels((previous) => ({
@@ -626,6 +640,29 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
     previewEpochsRef.current[target].beginMutation();
   }
 
+  /** Poll a build/flash job until it finishes, streaming live output. */
+  async function pollFlashJob(
+    target: FlashTargetKey,
+    jobId: string,
+    onComplete: (result: api.NativeFlashCommandResult) => void,
+  ): Promise<void> {
+    for (;;) {
+      const status = await api.getNativeFlashJobStatus(target, jobId);
+      updatePanel(target, (current) => ({
+        ...current,
+        liveLog: status.log_tail.join('\n'),
+      }));
+      if (status.running) {
+        await new Promise((resolve) => window.setTimeout(resolve, JOB_POLL_MS));
+        continue;
+      }
+      if (status.result) {
+        onComplete(status.result);
+      }
+      return;
+    }
+  }
+
   function schedulePreview(
     target: FlashTargetKey,
     assignmentValues: Record<string, string>,
@@ -741,37 +778,58 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
     updatePanel(target, (current) => ({
       ...current,
       status: 'building',
+      activeJobId: null,
+      liveLog: null,
       message: `Running make olddefconfig and make in ${current.flashState?.display_name || 'the active checkout'}...`,
       messageTone: 'info',
     }));
 
     try {
-      const result = await api.buildNativeFlashTarget(target, panel.checkoutPath.trim() || undefined);
-      updatePanel(target, (current) => ({
-        ...current,
-        status: 'idle',
-        checkoutPath: result.checkout_path || current.checkoutPath,
-        commandResult: result,
-        flashState: current.flashState
-          ? {
-              ...current.flashState,
-              checkout_path: result.checkout_path || current.flashState.checkout_path,
-              out_path: result.out_path || current.flashState.out_path,
-              artifacts: result.artifacts,
-              primary_artifact: result.primary_artifact,
-            }
-          : current.flashState,
-        message: result.success
-          ? result.primary_artifact
-            ? `Built ${result.primary_artifact.name} in ${result.out_path}`
-            : `Build completed in ${result.out_path}`
-          : result.error || `${result.display_name} build failed.`,
-        messageTone: result.success ? 'success' : 'error',
-      }));
+      const started = await api.startNativeFlashBuild(target, panel.checkoutPath.trim() || undefined);
+      if (!('job_id' in started)) {
+        // Validation failed before any job started — the response is the
+        // standard command-result failure.
+        updatePanel(target, (current) => ({
+          ...current,
+          status: 'idle',
+          commandResult: started,
+          message: started.error || `${started.display_name} build failed.`,
+          messageTone: 'error',
+        }));
+        return;
+      }
+      updatePanel(target, (current) => ({ ...current, activeJobId: started.job_id }));
+      await pollFlashJob(target, started.job_id, (result) => {
+        updatePanel(target, (current) => ({
+          ...current,
+          status: 'idle',
+          activeJobId: null,
+          liveLog: null,
+          checkoutPath: result.checkout_path || current.checkoutPath,
+          commandResult: result,
+          flashState: current.flashState
+            ? {
+                ...current.flashState,
+                checkout_path: result.checkout_path || current.flashState.checkout_path,
+                out_path: result.out_path || current.flashState.out_path,
+                artifacts: result.artifacts,
+                primary_artifact: result.primary_artifact,
+              }
+            : current.flashState,
+          message: result.success
+            ? result.primary_artifact
+              ? `Built ${result.primary_artifact.name} in ${result.out_path}`
+              : `Build completed in ${result.out_path}`
+            : result.error || `${result.display_name} build failed.`,
+          messageTone: result.success ? 'success' : 'error',
+        }));
+      });
     } catch (error) {
       updatePanel(target, (current) => ({
         ...current,
         status: 'idle',
+        activeJobId: null,
+        liveLog: null,
         message: error instanceof Error ? error.message : 'Failed to build the selected target.',
         messageTone: 'error',
       }));
@@ -818,45 +876,66 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
     updatePanel(target, (current) => ({
       ...current,
       status: 'flashing',
+      activeJobId: null,
+      liveLog: null,
       message: `Running ${selectedMethodState.label} in ${current.flashState?.display_name || 'the active checkout'}...`,
       messageTone: 'info',
     }));
 
     try {
-      const result = await api.flashNativeFlashTarget(
+      const started = await api.startNativeFlashFlash(
         target,
         panel.checkoutPath.trim() || undefined,
         panel.flashDevice.trim() || undefined,
         selectedMethod,
       );
-      updatePanel(target, (current) => ({
-        ...current,
-        status: 'idle',
-        checkoutPath: result.checkout_path || current.checkoutPath,
-        flashMethod: result.flash_method || current.flashMethod,
-        commandResult: result,
-        flashState: current.flashState
-          ? {
-              ...current.flashState,
-              checkout_path: result.checkout_path || current.flashState.checkout_path,
-              out_path: result.out_path || current.flashState.out_path,
-              artifacts: result.artifacts,
-              primary_artifact: result.primary_artifact,
-            }
-          : current.flashState,
-        message: result.success
-          ? `${flashMethodRecord(current.flashState, result.flash_method || selectedMethod)?.label || 'Flash'} completed${result.flash_device ? ` using ${result.flash_device}` : ''}.`
-          : result.error || `${result.display_name} flash failed.`,
-        messageTone: result.success ? 'success' : 'error',
-      }));
-      if (result.success && !panelsRef.current[target].devicesScanning) {
-        // USB enumeration changed after a flash — refresh the candidate list.
-        void scanDevices(target, true);
+      if (!('job_id' in started)) {
+        // Validation failed before any job started — the response is the
+        // standard command-result failure.
+        updatePanel(target, (current) => ({
+          ...current,
+          status: 'idle',
+          commandResult: started,
+          message: started.error || `${started.display_name} flash failed.`,
+          messageTone: 'error',
+        }));
+        return;
       }
+      updatePanel(target, (current) => ({ ...current, activeJobId: started.job_id }));
+      await pollFlashJob(target, started.job_id, (result) => {
+        updatePanel(target, (current) => ({
+          ...current,
+          status: 'idle',
+          activeJobId: null,
+          liveLog: null,
+          checkoutPath: result.checkout_path || current.checkoutPath,
+          flashMethod: result.flash_method || current.flashMethod,
+          commandResult: result,
+          flashState: current.flashState
+            ? {
+                ...current.flashState,
+                checkout_path: result.checkout_path || current.flashState.checkout_path,
+                out_path: result.out_path || current.flashState.out_path,
+                artifacts: result.artifacts,
+                primary_artifact: result.primary_artifact,
+              }
+            : current.flashState,
+          message: result.success
+            ? `${flashMethodRecord(current.flashState, result.flash_method || selectedMethod)?.label || 'Flash'} completed${result.flash_device ? ` using ${result.flash_device}` : ''}.`
+            : result.error || `${result.display_name} flash failed.`,
+          messageTone: result.success ? 'success' : 'error',
+        }));
+        if (result.success && !panelsRef.current[target].devicesScanning) {
+          // USB enumeration changed after a flash — refresh the candidate list.
+          void scanDevices(target, true);
+        }
+      });
     } catch (error) {
       updatePanel(target, (current) => ({
         ...current,
         status: 'idle',
+        activeJobId: null,
+        liveLog: null,
         message: error instanceof Error ? error.message : 'Failed to flash the selected target.',
         messageTone: 'error',
       }));
@@ -1755,9 +1834,9 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                     <HelpPopover text={COMMAND_LOG_HELP} />
                   </div>
                 </div>
-                <div className="flex-1 overflow-auto bg-black/30 p-4">
+                <div ref={logContainerRef} className="flex-1 overflow-auto bg-black/30 p-4">
                   <pre className="whitespace-pre-wrap break-words text-[11px] leading-5 text-[var(--color-text-primary)]">
-                    {panel.commandResult?.log || 'No build or flash command has been run in this session yet.'}
+                    {(panel.liveLog ?? panel.commandResult?.log) || 'No build or flash command has been run in this session yet.'}
                   </pre>
                 </div>
               </section>

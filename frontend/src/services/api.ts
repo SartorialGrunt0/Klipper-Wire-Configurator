@@ -637,25 +637,61 @@ export async function updateNativeFlashConfig(
   });
 }
 
-export async function buildNativeFlashTarget(
+/** A build/flash request that started a background job. */
+export interface NativeFlashJobStarted {
+  job_id: string;
+  running: true;
+  target: FlashTargetKey;
+  kind: 'build' | 'flash';
+}
+
+/** A build/flash request that failed validation before any job started. */
+export type NativeFlashJobStartResult = NativeFlashJobStarted | NativeFlashCommandResult;
+
+export interface NativeFlashJobStatus {
+  job_id: string;
+  running: boolean;
+  target: FlashTargetKey;
+  kind: 'build' | 'flash';
+  log_tail: string[];
+  result: NativeFlashCommandResult | null;
+}
+
+export async function startNativeFlashBuild(
   target: FlashTargetKey,
   checkoutPath?: string,
-): Promise<NativeFlashCommandResult> {
+): Promise<NativeFlashJobStartResult> {
   return request(`/native/flash/${encodeURIComponent(target)}/build`, {
     method: 'POST',
     body: JSON.stringify({ checkout_path: checkoutPath }),
   });
 }
 
-export async function flashNativeFlashTarget(
+export async function startNativeFlashFlash(
   target: FlashTargetKey,
   checkoutPath?: string,
   flashDevice?: string,
   flashMethod?: string,
-): Promise<NativeFlashCommandResult> {
+): Promise<NativeFlashJobStartResult> {
   return request(`/native/flash/${encodeURIComponent(target)}/flash`, {
     method: 'POST',
     body: JSON.stringify({ checkout_path: checkoutPath, flash_device: flashDevice, flash_method: flashMethod }),
+  });
+}
+
+export async function getNativeFlashJobStatus(
+  target: FlashTargetKey,
+  jobId: string,
+): Promise<NativeFlashJobStatus> {
+  return request(`/native/flash/${encodeURIComponent(target)}/jobs/${encodeURIComponent(jobId)}`);
+}
+
+export async function cancelNativeFlashJob(
+  target: FlashTargetKey,
+  jobId: string,
+): Promise<{ job_id: string; cancelled: boolean }> {
+  return request(`/native/flash/${encodeURIComponent(target)}/jobs/${encodeURIComponent(jobId)}/cancel`, {
+    method: 'POST',
   });
 }
 
@@ -734,10 +770,6 @@ export async function updateNativeFirmwareConfig(
   klipperPath?: string,
 ): Promise<NativeFirmwareState> {
   return updateNativeFlashConfig('klipper', assignments, klipperPath);
-}
-
-export async function buildNativeFirmware(klipperPath?: string): Promise<NativeFirmwareBuildResult> {
-  return buildNativeFlashTarget('klipper', klipperPath);
 }
 
 export async function downloadNativeFirmwareArtifact(
