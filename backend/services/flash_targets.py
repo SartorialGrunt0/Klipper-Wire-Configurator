@@ -1358,7 +1358,7 @@ def _build_artifact_path(target: str, checkout_path: Path) -> Path | None:
 
 # Direct dfu-util fallback flags, used when `make -n flash` output cannot be
 # parsed into a dfu-util command. Exact flag set to be confirmed against the
-# Spider (STM32F407) during Phase 7 research — tune this constant if the
+# Spider (STM32F446) during Phase 7 research — tune this constant if the
 # direct command needs adjusting.
 _DFU_UTIL_FALLBACK_FLAGS = ["-a", "0", "-R", "-D"]
 
