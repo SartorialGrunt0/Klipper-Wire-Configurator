@@ -1356,7 +1356,52 @@ def _build_artifact_path(target: str, checkout_path: Path) -> Path | None:
     return artifact_path if artifact_path.is_file() else None
 
 
-def _resolve_dfu_util_flash_command(checkout_path: Path, flash_device: str) -> tuple[list[str] | None, str | None, str]:
+# Direct dfu-util fallback flags, used when `make -n flash` output cannot be
+# parsed into a dfu-util command. Exact flag set to be confirmed against the
+# Spider (STM32F407) during Phase 7 research — tune this constant if the
+# direct command needs adjusting.
+_DFU_UTIL_FALLBACK_FLAGS = ["-a", "0", "-R", "-D"]
+
+
+def _try_dfu_util_fallback(
+    flash_device: str,
+    artifact_path: Path | None,
+    make_log: str,
+) -> tuple[list[str] | None, str | None, str]:
+    if artifact_path is None or not artifact_path.is_file():
+        return None, "No flashable .bin artifact was found. Build the target before flashing with dfu-util.", make_log
+    try:
+        completed = subprocess.run(
+            ["dfu-util", "-l"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except FileNotFoundError:
+        return None, "dfu-util is not available on this SBC.", make_log
+    except subprocess.TimeoutExpired:
+        return None, "Timed out while listing dfu-util devices.", make_log
+
+    device_listing = "\n".join(chunk for chunk in (completed.stdout, completed.stderr) if chunk)
+    if flash_device.lower() not in device_listing.lower():
+        logger.warning(
+            "dfu-util fallback skipped: %s not present in `dfu-util -l` output",
+            flash_device,
+        )
+        return None, f"dfu-util does not list {flash_device}. Enter DFU/bootloader mode and try again.", make_log
+
+    fallback_log = make_log + ("\n\n" if make_log else "") + _command_log(["dfu-util", "-l"], completed)
+    command = ["dfu-util", *_DFU_UTIL_FALLBACK_FLAGS, str(artifact_path)]
+    logger.info("using direct dfu-util fallback for %s: %s", flash_device, " ".join(command))
+    return command, None, fallback_log
+
+
+def _resolve_dfu_util_flash_command(
+    checkout_path: Path,
+    flash_device: str,
+    artifact_path: Path | None = None,
+) -> tuple[list[str] | None, str | None, str]:
     preview_command = ["make", "-n", "flash", "NOSUDO=1", f"FLASH_DEVICE={flash_device}"]
     try:
         completed = subprocess.run(
@@ -1374,7 +1419,7 @@ def _resolve_dfu_util_flash_command(checkout_path: Path, flash_device: str) -> t
 
     log = _command_log(preview_command, completed)
     if completed.returncode != 0:
-        return None, f"Unable to resolve a dfu-util flash command (exit code {completed.returncode}).", log
+        return _try_dfu_util_fallback(flash_device, artifact_path, log)
 
     output = "\n".join(chunk for chunk in (completed.stdout, completed.stderr) if chunk)
     for raw_line in output.splitlines():
@@ -1393,7 +1438,7 @@ def _resolve_dfu_util_flash_command(checkout_path: Path, flash_device: str) -> t
             return tokens, None, log
 
     logger.warning("dfu-util flash command could not be resolved for %s via `make -n flash`", flash_device)
-    return None, "The current target does not resolve to a dfu-util flash command.", log
+    return _try_dfu_util_fallback(flash_device, artifact_path, log)
 
 
 def _run_direct_flash_commands(
@@ -1571,7 +1616,11 @@ def flash_flash_target(
                 resolved_device,
                 resolved_method,
             )
-        flash_command, resolve_error, resolve_log = _resolve_dfu_util_flash_command(resolved_path, resolved_device)
+        flash_command, resolve_error, resolve_log = _resolve_dfu_util_flash_command(
+            resolved_path,
+            resolved_device,
+            _build_artifact_path(normalized_target, resolved_path),
+        )
         if flash_command is None:
             return _command_result(
                 normalized_target,

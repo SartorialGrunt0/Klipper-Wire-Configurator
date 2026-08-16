@@ -7,6 +7,7 @@ from services.flash_targets import (  # noqa: E402
     _FLASH_METHOD_DFU_UTIL,
     _FLASH_METHOD_FLASHTOOL,
     _FLASH_METHOD_MAKE_FLASH,
+    _resolve_dfu_util_flash_command,
     _truncate_help,
     delete_flash_target_artifact,
     get_flash_field_help,
@@ -597,3 +598,112 @@ def test_get_flash_field_help_returns_empty_for_unknown(monkeypatch, tmp_path):
         'field_id': 'choice:bad',
         'help': '',
     }
+
+
+class _FakeCompleted:
+    def __init__(self, returncode: int = 0, stdout: str = '', stderr: str = ''):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _write_bin_artifact(root: Path) -> Path:
+    artifact = root / 'out' / 'klipper.bin'
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b'\x00' * 16)
+    return artifact
+
+
+def test_dfu_util_fallback_used_when_make_fails_but_device_listed(monkeypatch, tmp_path):
+    artifact = _write_bin_artifact(tmp_path)
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if command[0] == 'make':
+            return _FakeCompleted(returncode=1, stderr='make: *** No rule to make target')
+        return _FakeCompleted(
+            stdout='Found DFU: [0483:df11] ver=2200, devnum=13, cfg=1, alt=0, name="STM32 BOOTLOADER"'
+        )
+
+    monkeypatch.setattr('services.flash_targets.subprocess.run', fake_run)
+
+    command, error, log = _resolve_dfu_util_flash_command(tmp_path, '0483:df11', artifact)
+
+    assert command == ['dfu-util', '-a', '0', '-R', '-D', str(artifact)]
+    assert error is None
+    assert ['dfu-util', '-l'] in calls
+
+
+def test_dfu_util_fallback_used_when_make_parses_no_token(monkeypatch, tmp_path):
+    artifact = _write_bin_artifact(tmp_path)
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if command[0] == 'make':
+            return _FakeCompleted(returncode=0, stdout='make: Nothing to be done for `flash`.')
+        return _FakeCompleted(stdout='Found DFU: [0483:df11] ver=2200')
+
+    monkeypatch.setattr('services.flash_targets.subprocess.run', fake_run)
+
+    command, error, log = _resolve_dfu_util_flash_command(tmp_path, '0483:df11', artifact)
+
+    assert command == ['dfu-util', '-a', '0', '-R', '-D', str(artifact)]
+    assert error is None
+
+
+def test_dfu_util_fallback_rejects_when_device_not_listed(monkeypatch, tmp_path):
+    artifact = _write_bin_artifact(tmp_path)
+
+    def fake_run(command, **kwargs):
+        if command[0] == 'make':
+            return _FakeCompleted(returncode=1)
+        return _FakeCompleted(stdout='No DFU capable USB device available')
+
+    monkeypatch.setattr('services.flash_targets.subprocess.run', fake_run)
+
+    command, error, log = _resolve_dfu_util_flash_command(tmp_path, '0483:df11', artifact)
+
+    assert command is None
+    assert error is not None
+    assert '0483:df11' in error
+
+
+def test_dfu_util_fallback_rejects_when_no_artifact(monkeypatch, tmp_path):
+    missing_artifact = tmp_path / 'out' / 'missing.bin'
+    dfu_util_called = []
+
+    def fake_run(command, **kwargs):
+        if command[0] == 'make':
+            return _FakeCompleted(returncode=1)
+        dfu_util_called.append(command)
+        return _FakeCompleted(stdout='Found DFU: [0483:df11]')
+
+    monkeypatch.setattr('services.flash_targets.subprocess.run', fake_run)
+
+    command, error, log = _resolve_dfu_util_flash_command(tmp_path, '0483:df11', missing_artifact)
+
+    assert command is None
+    assert error is not None
+    # Without an artifact the fallback must not even list devices.
+    assert dfu_util_called == []
+
+
+def test_dfu_util_make_resolution_still_preferred(monkeypatch, tmp_path):
+    artifact = _write_bin_artifact(tmp_path)
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if command[0] == 'make':
+            return _FakeCompleted(stdout=f'dfu-util -a 0 -R -D {artifact}')
+        return _FakeCompleted(stdout='Found DFU: [0483:df11]')
+
+    monkeypatch.setattr('services.flash_targets.subprocess.run', fake_run)
+
+    command, error, log = _resolve_dfu_util_flash_command(tmp_path, '0483:df11', artifact)
+
+    assert command == ['dfu-util', '-a', '0', '-R', '-D', str(artifact)]
+    assert error is None
+    assert ['dfu-util', '-l'] not in calls
