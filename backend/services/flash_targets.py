@@ -18,6 +18,7 @@ from typing import Any
 
 from services.flash_log import logger
 from services.native_services import (
+    klipper_service_can_control,
     klipper_service_start_command,
     klipper_service_stop_command,
     load_settings,
@@ -92,6 +93,22 @@ _TRISTATE_VALUE_NAMES = {
 _FLASH_METHOD_MAKE_FLASH = "make_flash"
 _FLASH_METHOD_DFU_UTIL = "dfu_util"
 _FLASH_METHOD_FLASHTOOL = "flashtool"
+
+
+def _flash_method_needs_klipper_stop(method: str, flash_device: str) -> bool:
+    """True when the flash method needs Klipper stopped first.
+
+    Klippy holds the USB-ACM serial port and CAN node that flashtool (serial
+    or CAN) and `make flash` with a serial by-id device talk to, so those
+    paths require the service to be stopped. Direct dfu-util and `make flash`
+    with a USB VID:PID (DFU mode or RP2040 bootrom) use a separate USB
+    interface and do not need it.
+    """
+    if method == _FLASH_METHOD_FLASHTOOL:
+        return True
+    if method == _FLASH_METHOD_MAKE_FLASH:
+        return not _is_usb_id(flash_device)
+    return False
 
 _DFU_UTIL_USB_ID_RE = re.compile(r"\[([0-9a-fA-F]{4}:[0-9a-fA-F]{4})\]")
 _DFU_UTIL_NAME_RE = re.compile(r'name="([^"]+)"')
@@ -1260,8 +1277,11 @@ def scan_flash_target_devices(
     candidates: list[dict[str, str]] = []
     seen_values: set[str] = set()
 
-    # RP2040 USB bootloader devices (lsusb, fast)
-    if normalized_target in {"klipper", "katapult"} and "MACH_RPXXXX" in machine_symbols:
+    # RP2040 USB bootloader devices (lsusb, fast). Listed for both targets
+    # regardless of the checkout's current .config MCU: the dropdown shows what
+    # is physically connected and flashable, and the user may reconfigure the
+    # checkout for the discovered board (e.g. Katapult on an RP2040 EBB).
+    if normalized_target in {"klipper", "katapult"}:
         for candidate in _rp2040_usb_flash_device_candidates():
             _append_flash_device_candidate(
                 candidates, seen_values,
@@ -1270,15 +1290,15 @@ def scan_flash_target_devices(
                 interface=candidate.get("interface"),
             )
 
-    # STM32 DFU devices (dfu-util -l or lsusb, fast)
-    if "MACH_STM32" in machine_symbols:
-        for candidate in _dfu_flash_device_candidates():
-            _append_flash_device_candidate(
-                candidates, seen_values,
-                candidate["value"], candidate["label"],
-                transport=candidate.get("transport") or "usb_id",
-                interface=candidate.get("interface"),
-            )
+    # STM32 DFU devices (dfu-util -l or lsusb, fast). Same reasoning: both
+    # targets can flash a board sitting in its STM32 ROM bootloader.
+    for candidate in _dfu_flash_device_candidates():
+        _append_flash_device_candidate(
+            candidates, seen_values,
+            candidate["value"], candidate["label"],
+            transport=candidate.get("transport") or "usb_id",
+            interface=candidate.get("interface"),
+        )
 
     # Katapult CAN bus UUIDs (flashtool.py -q, potentially slow)
     if katapult_script_path is not None:
@@ -1812,18 +1832,35 @@ def plan_flash_flash_job(
             flash_command,
         ]
 
-    # Stop Klipper before flashing (it holds the USB-ACM serial / CAN node the
-    # flash tools talk to) and restart it afterwards. systemctl stop is only
-    # issued when the service is actually active, so hosts without a running
-    # Klipper (e.g. the dev Pi) skip orchestration entirely; the restart is a
-    # cleanup command, guaranteed to run even when the flash fails or cancels.
-    klipper_stop = klipper_service_stop_command()
+    # Stop Klipper before flashing and restart it afterwards — but only for
+    # methods that actually need it. Research matrix (docs/flash-post-flash-research.md):
+    # - flashtool serial/CAN and make flash with a serial by-id device: klippy
+    #   holds the port the flash tool talks to -> stop REQUIRED.
+    # - direct dfu-util (device already in DFU mode) and make flash with a USB
+    #   VID:PID (DFU or RP2040 bootrom): separate USB interface -> no stop.
+    # When the service is active but the backend can't control it (no
+    # passwordless sudo), fail fast with a clear message instead of letting the
+    # job die on `sudo: a password is required`.
     cleanup_commands: list[list[str]] = []
-    if klipper_stop is not None:
-        commands.insert(0, klipper_stop)
-        klipper_start = klipper_service_start_command()
-        if klipper_start is not None:
-            cleanup_commands.append(klipper_start)
+    if _flash_method_needs_klipper_stop(resolved_method, resolved_device):
+        klipper_stop = klipper_service_stop_command()
+        if klipper_stop is not None and not klipper_service_can_control():
+            return immediate(_command_result(
+                normalized_target,
+                False,
+                "Klipper is running and this host has no passwordless sudo, so the flash "
+                "cannot stop it automatically. Stop Klipper manually "
+                "(`sudo systemctl stop klipper`), run the flash, then start it again.",
+                "",
+                resolved_path,
+                resolved_device,
+                resolved_method,
+            ))
+        if klipper_stop is not None:
+            commands.insert(0, klipper_stop)
+            klipper_start = klipper_service_start_command()
+            if klipper_start is not None:
+                cleanup_commands.append(klipper_start)
 
     return {
         "immediate": False,

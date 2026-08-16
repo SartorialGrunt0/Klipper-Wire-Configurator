@@ -123,6 +123,7 @@ def test_get_flash_target_state_keeps_dynamic_serial_candidates_in_scan_results(
         lambda: [{'path': '/dev/ttyS0', 'description': 'ttyS0', 'by_id': ''}],
     )
     monkeypatch.setattr('services.flash_targets._dfu_flash_device_candidates', lambda: [])
+    monkeypatch.setattr('services.flash_targets._rp2040_usb_flash_device_candidates', lambda: [])
 
     state = get_flash_target_state('klipper', str(tmp_path))
     scan_result = scan_flash_target_devices('klipper', str(tmp_path))
@@ -165,6 +166,7 @@ def test_get_flash_target_state_keeps_dynamic_dfu_candidates_in_scan_results(mon
         'services.flash_targets._dfu_flash_device_candidates',
         lambda: [{'value': '0483:df11', 'label': 'DFU device: 0483:df11 (STM32 DFU mode)'}],
     )
+    monkeypatch.setattr('services.flash_targets._rp2040_usb_flash_device_candidates', lambda: [])
     monkeypatch.setattr('services.flash_targets.list_usb_serial_devices', lambda: [])
     monkeypatch.setattr('services.flash_targets.list_uart_devices', lambda: [])
 
@@ -236,6 +238,7 @@ def test_get_flash_target_state_keeps_dynamic_can_candidates_in_scan_results(mon
     )
     monkeypatch.setattr('services.flash_targets._serialize_kconfig_fields', lambda kconfiglib, kconf, help_limit=0: [])
     monkeypatch.setattr('services.flash_targets._dfu_flash_device_candidates', lambda: [])
+    monkeypatch.setattr('services.flash_targets._rp2040_usb_flash_device_candidates', lambda: [])
     monkeypatch.setattr('services.flash_targets.list_usb_serial_devices', lambda: [])
     monkeypatch.setattr('services.flash_targets.list_uart_devices', lambda: [])
     monkeypatch.setattr(
@@ -327,6 +330,7 @@ def test_flash_target_uses_flashtool_for_can_uuid(monkeypatch, tmp_path):
         }
 
     monkeypatch.setattr('services.flash_targets._run_commands', fake_run)
+    monkeypatch.setattr('services.flash_targets.klipper_service_stop_command', lambda: None)
 
     result = flash_flash_target('klipper', str(tmp_path), 'aabbccddeeff', _FLASH_METHOD_FLASHTOOL)
 
@@ -407,6 +411,7 @@ def test_flash_target_auto_selects_method_from_serial_device(monkeypatch, tmp_pa
         }
 
     monkeypatch.setattr('services.flash_targets._run_commands', fake_run)
+    monkeypatch.setattr('services.flash_targets.klipper_service_stop_command', lambda: None)
 
     result = flash_flash_target('klipper', str(tmp_path), '/dev/serial/by-id/usb-test')
 
@@ -770,12 +775,108 @@ def test_plan_flash_flash_job_wraps_commands_with_klipper_service(monkeypatch, t
     })
     monkeypatch.setattr(flash_targets, 'klipper_service_stop_command', lambda: ['sudo', '-n', 'systemctl', 'stop', 'klipper'])
     monkeypatch.setattr(flash_targets, 'klipper_service_start_command', lambda: ['sudo', '-n', 'systemctl', 'start', 'klipper'])
+    monkeypatch.setattr(flash_targets, 'klipper_service_can_control', lambda: True)
 
     planned = plan_flash_flash_job('klipper', str(checkout))
 
     assert planned['immediate'] is False
     assert planned['commands'][0] == ['sudo', '-n', 'systemctl', 'stop', 'klipper']
     assert planned['cleanup_commands'] == [['sudo', '-n', 'systemctl', 'start', 'klipper']]
+
+
+def test_plan_flash_flash_job_skips_klipper_stop_for_dfu_util(monkeypatch, tmp_path):
+    checkout = tmp_path / 'klipper'
+    checkout.mkdir()
+    (checkout / '.config').write_text('CONFIG_MACH_STM32=y\n', encoding='utf-8')
+
+    monkeypatch.setattr(flash_targets, 'resolve_flash_target_checkout', lambda target, path: (checkout, None))
+    monkeypatch.setattr(flash_targets, 'get_flash_target_state', lambda target, path: {
+        'flash_supported': True,
+        'flash_reason': None,
+        'flash_method_candidates': [{
+            'value': _FLASH_METHOD_DFU_UTIL,
+            'label': 'dfu-util',
+            'supported': True,
+            'device_required': True,
+            'default_device': '0483:df11',
+        }],
+        'flash_device_candidates': [{'value': '0483:df11', 'label': 'STM32 DFU device: 0483:df11'}],
+        'default_flash_method': _FLASH_METHOD_DFU_UTIL,
+        'default_flash_device': '0483:df11',
+    })
+    monkeypatch.setattr(flash_targets, '_resolve_dfu_util_flash_command', lambda *args: (
+        ['dfu-util', '-d', ',0483:df11', '-D', 'x.bin'], None, '',
+    ))
+    monkeypatch.setattr(flash_targets, 'klipper_service_stop_command', lambda: ['sudo', '-n', 'systemctl', 'stop', 'klipper'])
+    monkeypatch.setattr(flash_targets, 'klipper_service_can_control', lambda: True)
+
+    planned = plan_flash_flash_job('klipper', str(checkout))
+
+    assert planned['immediate'] is False
+    # dfu-util talks to a separate USB interface; klipper must NOT be stopped.
+    assert all(command[0] != 'sudo' for command in planned['commands'])
+    assert planned['cleanup_commands'] == []
+
+
+def test_plan_flash_flash_job_skips_klipper_stop_for_usb_id_make_flash(monkeypatch, tmp_path):
+    checkout = tmp_path / 'klipper'
+    checkout.mkdir()
+    (checkout / '.config').write_text('CONFIG_MACH_RPXXXX=y\n', encoding='utf-8')
+
+    monkeypatch.setattr(flash_targets, 'resolve_flash_target_checkout', lambda target, path: (checkout, None))
+    monkeypatch.setattr(flash_targets, 'get_flash_target_state', lambda target, path: {
+        'flash_supported': True,
+        'flash_reason': None,
+        'flash_method_candidates': [{
+            'value': _FLASH_METHOD_MAKE_FLASH,
+            'label': 'make flash',
+            'supported': True,
+            'device_required': True,
+            'default_device': '2e8a:0003',
+        }],
+        'flash_device_candidates': [{'value': '2e8a:0003', 'label': 'RP2040 bootloader: 2e8a:0003'}],
+        'default_flash_method': _FLASH_METHOD_MAKE_FLASH,
+        'default_flash_device': '2e8a:0003',
+    })
+    monkeypatch.setattr(flash_targets, 'klipper_service_stop_command', lambda: ['sudo', '-n', 'systemctl', 'stop', 'klipper'])
+    monkeypatch.setattr(flash_targets, 'klipper_service_can_control', lambda: True)
+
+    planned = plan_flash_flash_job('klipper', str(checkout))
+
+    assert planned['immediate'] is False
+    # RP2040 bootrom is a separate USB interface; no klipper stop needed.
+    assert all(command[0] != 'sudo' for command in planned['commands'])
+    assert planned['cleanup_commands'] == []
+
+
+def test_plan_flash_flash_job_fails_fast_when_klipper_active_but_no_sudo(monkeypatch, tmp_path):
+    checkout = tmp_path / 'klipper'
+    checkout.mkdir()
+    (checkout / '.config').write_text('CONFIG_MACH_STM32=y\n', encoding='utf-8')
+
+    monkeypatch.setattr(flash_targets, 'resolve_flash_target_checkout', lambda target, path: (checkout, None))
+    monkeypatch.setattr(flash_targets, 'get_flash_target_state', lambda target, path: {
+        'flash_supported': True,
+        'flash_reason': None,
+        'flash_method_candidates': [{
+            'value': _FLASH_METHOD_MAKE_FLASH,
+            'label': 'make flash',
+            'supported': True,
+            'device_required': True,
+            'default_device': '/dev/serial/by-id/usb-Klipper_stm32f042x6-if00',
+        }],
+        'flash_device_candidates': [],
+        'default_flash_method': _FLASH_METHOD_MAKE_FLASH,
+        'default_flash_device': '/dev/serial/by-id/usb-Klipper_stm32f042x6-if00',
+    })
+    monkeypatch.setattr(flash_targets, 'klipper_service_stop_command', lambda: ['sudo', '-n', 'systemctl', 'stop', 'klipper'])
+    monkeypatch.setattr(flash_targets, 'klipper_service_can_control', lambda: False)
+
+    planned = plan_flash_flash_job('klipper', str(checkout))
+
+    assert planned['immediate'] is True
+    assert planned['result']['success'] is False
+    assert 'passwordless sudo' in planned['result']['error']
 
 
 def test_plan_flash_flash_job_skips_klipper_service_when_inactive(monkeypatch, tmp_path):

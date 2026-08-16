@@ -54,6 +54,29 @@ def test_klipper_service_start_command_shape(monkeypatch):
     assert command[-2:] == ['start', 'klipper']
 
 
+def test_klipper_service_can_control_as_root(monkeypatch):
+    monkeypatch.setattr(native_services.os, 'geteuid', lambda: 0)
+    assert native_services.klipper_service_can_control() is True
+
+
+def test_klipper_service_can_control_with_passwordless_sudo(monkeypatch):
+    monkeypatch.setattr(native_services.os, 'geteuid', lambda: 1000)
+    monkeypatch.setattr(
+        native_services.subprocess, 'run',
+        lambda *args, **kwargs: type('_C', (), {'returncode': 0})(),
+    )
+    assert native_services.klipper_service_can_control() is True
+
+
+def test_klipper_service_can_control_without_sudo(monkeypatch):
+    monkeypatch.setattr(native_services.os, 'geteuid', lambda: 1000)
+    monkeypatch.setattr(
+        native_services.subprocess, 'run',
+        lambda *args, **kwargs: type('_C', (), {'returncode': 1})(),
+    )
+    assert native_services.klipper_service_can_control() is False
+
+
 def test_klipper_service_state_unknown_service(monkeypatch):
     class _Completed:
         stdout = ''

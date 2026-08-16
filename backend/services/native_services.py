@@ -608,6 +608,28 @@ def klipper_service_state() -> str:
     return state if state in {"active", "inactive", "failed"} else ""
 
 
+def klipper_service_can_control() -> bool:
+    """True when the backend can stop/start the Klipper service itself.
+
+    Root can always control it; a non-root backend needs passwordless sudo
+    (`sudo -n true`), otherwise the orchestrated stop/start would fail mid-job
+    with ``sudo: a password is required``.
+    """
+    if os.geteuid() == 0:
+        return True
+    try:
+        completed = subprocess.run(
+            ["sudo", "-n", "true"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0
+
+
 def klipper_service_stop_command() -> list[str] | None:
     """Return the stop command when the service is active, else None.
 
