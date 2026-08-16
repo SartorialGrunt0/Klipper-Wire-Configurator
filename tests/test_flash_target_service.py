@@ -905,3 +905,64 @@ def test_plan_flash_flash_job_skips_klipper_service_when_inactive(monkeypatch, t
     assert planned['immediate'] is False
     assert planned['commands'][0][0] == 'make'
     assert planned['cleanup_commands'] == []
+
+
+def test_flash_flash_target_runs_cleanup_after_main_commands(monkeypatch, tmp_path):
+    """The synchronous flash path must run cleanup (klipper start) even on
+    success, mirroring the job runner — otherwise the legacy /firmware/flash
+    route stops Klipper and never restarts it."""
+    checkout = tmp_path / 'klipper'
+    checkout.mkdir()
+    (checkout / '.config').write_text('CONFIG_MACH_STM32=y\n', encoding='utf-8')
+    (checkout / 'Makefile').write_text('all:\n\t@true\nflash:\n\t@true\n', encoding='utf-8')
+    (checkout / 'src').mkdir()
+
+    ran_cleanup: list[list[str]] = []
+
+    def fake_run(target, checkout_path, commands, timeout):
+        return {
+            'success': True,
+            'error': None,
+            'log': '$ make flash',
+            'returncode': 0,
+        }
+
+    def fake_subprocess_run(command, **kwargs):
+        ran_cleanup.append(command)
+        return type('Completed', (), {'returncode': 0, 'stdout': '', 'stderr': ''})()
+
+    monkeypatch.setattr(
+        'services.flash_targets.resolve_flash_target_checkout',
+        lambda target, checkout_path=None: (checkout, None),
+    )
+    monkeypatch.setattr(
+        'services.flash_targets.get_flash_target_state',
+        lambda target, checkout_path=None: {
+            'flash_supported': True,
+            'flash_reason': None,
+            'default_flash_device': '',
+            'default_flash_method': _FLASH_METHOD_MAKE_FLASH,
+            'flash_device_candidates': [],
+            'flash_method_candidates': [{
+                'value': _FLASH_METHOD_MAKE_FLASH,
+                'label': 'make flash',
+                'supported': True,
+                'device_required': True,
+                'default_device': '/dev/serial/by-id/usb-test',
+            }],
+        },
+    )
+    monkeypatch.setattr('services.flash_targets._run_commands', fake_run)
+    monkeypatch.setattr(
+        'services.flash_targets.klipper_service_stop_command',
+        lambda: ['sudo', '-n', 'systemctl', 'stop', 'klipper'],
+    )
+    monkeypatch.setattr('services.flash_targets.klipper_service_start_command',
+                        lambda: ['sudo', '-n', 'systemctl', 'start', 'klipper'])
+    monkeypatch.setattr('services.flash_targets.klipper_service_can_control', lambda: True)
+    monkeypatch.setattr('services.flash_targets.subprocess.run', fake_subprocess_run)
+
+    result = flash_flash_target('klipper', str(checkout), '/dev/serial/by-id/usb-test', _FLASH_METHOD_MAKE_FLASH)
+
+    assert result['success'] is True
+    assert ran_cleanup == [['sudo', '-n', 'systemctl', 'start', 'klipper']]

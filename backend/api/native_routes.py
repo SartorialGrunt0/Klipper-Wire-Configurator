@@ -432,12 +432,15 @@ def build_flash_target_api(target: str, data: FlashTargetCommandRequest):
     planned = plan_build_flash_job(normalized, data.checkout_path)
     if planned["immediate"]:
         return planned["result"]
-    job_id = flash_job_runner.start(
-        normalized,
-        "build",
-        planned["commands"],
-        planned["checkout_path"],
-    )
+    try:
+        job_id = flash_job_runner.start(
+            normalized,
+            "build",
+            planned["commands"],
+            planned["checkout_path"],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"job_id": job_id, "running": True, "target": normalized, "kind": "build"}
 
 
@@ -455,15 +458,18 @@ def flash_target_api(target: str, data: FlashTargetCommandRequest):
     )
     if planned["immediate"]:
         return planned["result"]
-    job_id = flash_job_runner.start(
-        normalized,
-        "flash",
-        planned["commands"],
-        planned["checkout_path"],
-        planned["flash_device"],
-        planned["flash_method"],
-        planned.get("cleanup_commands"),
-    )
+    try:
+        job_id = flash_job_runner.start(
+            normalized,
+            "flash",
+            planned["commands"],
+            planned["checkout_path"],
+            planned["flash_device"],
+            planned["flash_method"],
+            planned.get("cleanup_commands"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"job_id": job_id, "running": True, "target": normalized, "kind": "flash"}
 
 

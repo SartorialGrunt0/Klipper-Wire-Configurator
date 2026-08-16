@@ -1927,6 +1927,32 @@ def flash_flash_target(
         planned["commands"],
         timeout=900,
     )
+    # Mirror the job runner's semantics: cleanup (e.g. `systemctl start
+    # klipper`) always runs after the main sequence — even on failure — so
+    # services the flash stopped are guaranteed to come back.
+    for command in planned.get("cleanup_commands") or []:
+        try:
+            cleanup = subprocess.run(
+                command,
+                cwd=planned["checkout_path"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+        if cleanup.returncode != 0:
+            result = _command_result(
+                normalized_target,
+                False,
+                f"Flash completed but cleanup failed: {' '.join(command)} exited with code {cleanup.returncode}.",
+                result.get("log", ""),
+                planned["checkout_path"],
+                planned["flash_device"],
+                planned["flash_method"],
+            )
+            break
     result = finalize_flash_job_result(
         result,
         normalized_target,
