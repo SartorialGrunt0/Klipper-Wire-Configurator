@@ -28,6 +28,7 @@ import {
   formatModified,
   groupedFields,
   inferFlashMethodForDevice,
+  isBusyStatus,
   mergeDeviceCandidates,
   normalizeProfileAssignments,
   resolveFlashDevice,
@@ -1191,7 +1192,9 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
   const artifacts = panel.commandResult?.artifacts || panel.flashState?.artifacts || [];
   const primaryArtifact = panel.commandResult?.primary_artifact || panel.flashState?.primary_artifact || null;
   const anyPanelBusy = TARGETS.some((target) => panels[target].status !== 'idle');
-  const actionBusy = panel.status !== 'idle';
+  // Preview is a read-only refresh: it must not gate Save/Load/Method/Device.
+  const actionBusy = isBusyStatus(panel.status);
+  const previewPending = panel.status === 'previewing';
   const buildLabel = panel.status === 'building' ? `Build${buildDots}` : 'Build';
   const flashLabel = panel.status === 'flashing' ? `Flash${flashDots}` : 'Flash';
   const saveLabel = panel.status === 'saving' ? 'Saving...' : 'Save';
@@ -1505,6 +1508,13 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                 <div className="rounded-xl border border-[var(--color-bg-tertiary)] p-4 text-sm text-[var(--color-text-secondary)]">
                   No visible menuconfig options are available for the current selection.
                 </div>
+              )}
+
+              {previewPending && (
+                <p className="flex items-center gap-1.5 text-[11px] text-[var(--color-text-secondary)]">
+                  <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--color-accent)]" />
+                  Updating preview…
+                </p>
               )}
 
               {Array.from(fieldGroups.entries()).map(([groupName, groupFields]) => (

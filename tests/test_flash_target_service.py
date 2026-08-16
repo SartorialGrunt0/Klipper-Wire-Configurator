@@ -7,11 +7,13 @@ from services.flash_targets import (  # noqa: E402
     _FLASH_METHOD_DFU_UTIL,
     _FLASH_METHOD_FLASHTOOL,
     _FLASH_METHOD_MAKE_FLASH,
+    _truncate_help,
     delete_flash_target_artifact,
     get_flash_target_state,
     flash_flash_target,
     list_flash_target_artifacts,
     pick_primary_flash_target_artifact,
+    save_flash_target_config,
     scan_flash_target_devices,
 )
 
@@ -24,6 +26,43 @@ class _FakeSymbol:
 class _FakeKconf:
     def __init__(self, **symbols):
         self.syms = {name: _FakeSymbol(value) for name, value in symbols.items()}
+        self.loads: list[str] = []
+
+    def load_config(self, filename):
+        """Mirror kconfiglib's replace semantics: reset, then apply the file."""
+        self.loads.append(str(filename))
+        for sym in self.syms.values():
+            sym.str_value = "n"
+        try:
+            text = Path(filename).read_text(encoding="utf-8")
+        except OSError:
+            return
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("CONFIG_") and "=" in line:
+                name, value = line[len("CONFIG_"):].split("=", 1)
+                self.syms.setdefault(name, _FakeSymbol("n")).str_value = value
+
+    def unset_values(self):
+        for sym in self.syms.values():
+            sym.str_value = "n"
+
+    def write_config(self, filename):
+        lines = [f"CONFIG_{name}={sym.str_value}" for name, sym in sorted(self.syms.items())]
+        Path(filename).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+class _CountingKconfigLib:
+    """Stand-in for the vendored kconfiglib module; counts tree parses."""
+
+    def __init__(self):
+        self.kconfig_calls = 0
+        self.last_kconf: _FakeKconf | None = None
+
+    def Kconfig(self, filename):
+        self.kconfig_calls += 1
+        self.last_kconf = _FakeKconf()
+        return self.last_kconf
 
 
 def test_list_flash_target_artifacts_prefers_katapult_primary_names(tmp_path):
@@ -51,7 +90,7 @@ def test_get_flash_target_state_keeps_dynamic_serial_candidates_in_scan_results(
         'services.flash_targets._load_target_kconfig_state',
         lambda target, checkout_path: (object(), _FakeKconf(MACH_AVR='y'), config_path),
     )
-    monkeypatch.setattr('services.flash_targets._serialize_kconfig_fields', lambda kconfiglib, kconf: [])
+    monkeypatch.setattr('services.flash_targets._serialize_kconfig_fields', lambda kconfiglib, kconf, help_limit=0: [])
     monkeypatch.setattr(
         'services.flash_targets.list_usb_serial_devices',
         lambda: [{
@@ -102,7 +141,7 @@ def test_get_flash_target_state_keeps_dynamic_dfu_candidates_in_scan_results(mon
         'services.flash_targets._load_target_kconfig_state',
         lambda target, checkout_path: (object(), _FakeKconf(MACH_STM32='y'), tmp_path / '.config'),
     )
-    monkeypatch.setattr('services.flash_targets._serialize_kconfig_fields', lambda kconfiglib, kconf: [])
+    monkeypatch.setattr('services.flash_targets._serialize_kconfig_fields', lambda kconfiglib, kconf, help_limit=0: [])
     monkeypatch.setattr(
         'services.flash_targets._dfu_flash_device_candidates',
         lambda: [{'value': '0483:df11', 'label': 'DFU device: 0483:df11 (STM32 DFU mode)'}],
@@ -144,7 +183,7 @@ def test_get_flash_target_state_surfaces_rp2040_candidates_for_katapult(monkeypa
         'services.flash_targets._load_target_kconfig_state',
         lambda target, checkout_path: (object(), _FakeKconf(MACH_RPXXXX='y'), tmp_path / '.config'),
     )
-    monkeypatch.setattr('services.flash_targets._serialize_kconfig_fields', lambda kconfiglib, kconf: [])
+    monkeypatch.setattr('services.flash_targets._serialize_kconfig_fields', lambda kconfiglib, kconf, help_limit=0: [])
     monkeypatch.setattr('services.flash_targets._dfu_flash_device_candidates', lambda: [])
     monkeypatch.setattr('services.flash_targets.list_usb_serial_devices', lambda: [])
     monkeypatch.setattr('services.flash_targets.list_uart_devices', lambda: [])
@@ -176,7 +215,7 @@ def test_get_flash_target_state_keeps_dynamic_can_candidates_in_scan_results(mon
         'services.flash_targets._load_target_kconfig_state',
         lambda target, checkout_path: (object(), _FakeKconf(MACH_STM32='y'), tmp_path / '.config'),
     )
-    monkeypatch.setattr('services.flash_targets._serialize_kconfig_fields', lambda kconfiglib, kconf: [])
+    monkeypatch.setattr('services.flash_targets._serialize_kconfig_fields', lambda kconfiglib, kconf, help_limit=0: [])
     monkeypatch.setattr('services.flash_targets._dfu_flash_device_candidates', lambda: [])
     monkeypatch.setattr('services.flash_targets.list_usb_serial_devices', lambda: [])
     monkeypatch.setattr('services.flash_targets.list_uart_devices', lambda: [])
@@ -381,3 +420,104 @@ def test_delete_flash_target_artifact_removes_file(monkeypatch, tmp_path):
     assert artifact.exists() is False
     assert result['status'] == 'deleted'
     assert [item['name'] for item in result['artifacts']] == ['klipper.uf2']
+
+
+def _fake_checkout(tmp_path, config_text: str | None = None) -> Path:
+    """Create a minimal checkout with src/Kconfig so the tree cache keying works."""
+    src_kconfig = tmp_path / 'src' / 'Kconfig'
+    src_kconfig.parent.mkdir()
+    src_kconfig.write_text('mainmenu "Test"\n', encoding='utf-8')
+    (tmp_path / 'lib' / 'kconfiglib').mkdir(parents=True)
+    (tmp_path / 'lib' / 'kconfiglib' / 'kconfiglib.py').write_text('', encoding='utf-8')
+    if config_text is not None:
+        (tmp_path / '.config').write_text(config_text, encoding='utf-8')
+    return tmp_path
+
+
+def _monkeypatch_state_deps(monkeypatch, checkout: Path, config_text: str | None):
+    monkeypatch.setattr(
+        'services.flash_targets.resolve_flash_target_checkout',
+        lambda target, checkout_path=None: (checkout, None),
+    )
+    monkeypatch.setattr('services.flash_targets._serialize_kconfig_fields', lambda kconfiglib, kconf, help_limit=0: [])
+    monkeypatch.setattr('services.flash_targets.list_usb_serial_devices', lambda: [])
+    monkeypatch.setattr('services.flash_targets.list_uart_devices', lambda: [])
+    monkeypatch.setattr('services.flash_targets._dfu_flash_device_candidates', lambda: [])
+    monkeypatch.setattr('services.flash_targets._katapult_can_flash_device_candidates', lambda script, interface='can0': [])
+
+
+def test_get_flash_target_state_reuses_cached_kconfig_tree(monkeypatch, tmp_path):
+    checkout = _fake_checkout(tmp_path, config_text='CONFIG_MACH_AVR=y\n')
+    fake_lib = _CountingKconfigLib()
+    monkeypatch.setattr('services.flash_targets._load_kconfiglib_module', lambda module_path: fake_lib)
+    _monkeypatch_state_deps(monkeypatch, checkout, None)
+
+    state1 = get_flash_target_state('klipper', str(checkout))
+    assert state1['available'] is True
+
+    # The .config changed on disk between requests; the cached tree must pick
+    # it up (fresh load_config per request) without re-parsing the Kconfig.
+    (checkout / '.config').write_text('CONFIG_MACH_STM32=y\n', encoding='utf-8')
+    state2 = get_flash_target_state('klipper', str(checkout))
+    assert state2['available'] is True
+
+    assert fake_lib.kconfig_calls == 1, 'Kconfig tree should be parsed once for two requests'
+    kconf = fake_lib.last_kconf
+    assert kconf is not None
+    assert kconf.syms['MACH_STM32'].str_value == 'y'
+    assert kconf.syms['MACH_AVR'].str_value == 'n', 'stale symbol from the first request leaked'
+    assert len(kconf.loads) == 2, 'config must be reloaded fresh on every request'
+
+
+def test_save_flash_target_config_invalidates_kconfig_cache(monkeypatch, tmp_path):
+    checkout = _fake_checkout(tmp_path, config_text='CONFIG_MACH_AVR=y\n')
+    fake_lib = _CountingKconfigLib()
+    monkeypatch.setattr('services.flash_targets._load_kconfiglib_module', lambda module_path: fake_lib)
+    _monkeypatch_state_deps(monkeypatch, checkout, None)
+
+    get_flash_target_state('klipper', str(checkout))
+    get_flash_target_state('klipper', str(checkout))
+    assert fake_lib.kconfig_calls == 1
+
+    result = save_flash_target_config('klipper', [], str(checkout))
+    assert result['available'] is True
+    # The save's own state read reuses the cache; the invalidation forces the
+    # NEXT request to re-parse.
+    get_flash_target_state('klipper', str(checkout))
+    assert fake_lib.kconfig_calls == 2, 'cache entry should be invalidated after a save'
+
+
+def test_get_flash_target_state_passes_help_limit_to_serializer(monkeypatch, tmp_path):
+    config_path = tmp_path / '.config'
+    config_path.write_text('CONFIG_MACH_AVR=y\n', encoding='utf-8')
+    monkeypatch.setattr(
+        'services.flash_targets.resolve_flash_target_checkout',
+        lambda target, checkout_path=None: (tmp_path, None),
+    )
+    monkeypatch.setattr(
+        'services.flash_targets._load_target_kconfig_state',
+        lambda target, checkout_path: (object(), _FakeKconf(MACH_AVR='y'), config_path),
+    )
+    captured = {}
+
+    def fake_serialize(kconfiglib, kconf, help_limit=0):
+        captured['help_limit'] = help_limit
+        return []
+
+    monkeypatch.setattr('services.flash_targets._serialize_kconfig_fields', fake_serialize)
+    monkeypatch.setattr('services.flash_targets.list_usb_serial_devices', lambda: [])
+    monkeypatch.setattr('services.flash_targets.list_uart_devices', lambda: [])
+    monkeypatch.setattr('services.flash_targets._dfu_flash_device_candidates', lambda: [])
+
+    get_flash_target_state('klipper', str(tmp_path), help_limit=400)
+    assert captured['help_limit'] == 400
+
+    get_flash_target_state('klipper', str(tmp_path))
+    assert captured['help_limit'] == 0, 'default keeps the full-help contract'
+
+
+def test_truncate_help_caps_long_text():
+    assert _truncate_help('short', 400) == 'short'
+    assert _truncate_help('', 400) == ''
+    assert _truncate_help('x' * 500, 400) == 'x' * 400 + '…'
+    assert _truncate_help('x' * 400, 400) == 'x' * 400

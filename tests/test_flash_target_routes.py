@@ -133,10 +133,11 @@ def test_build_route_does_not_block_concurrent_status(monkeypatch):
 def test_preview_flash_target_route_forwards_assignments(monkeypatch):
     captured = {}
 
-    def fake_preview(target, assignments, checkout_path=None):
+    def fake_preview(target, assignments, checkout_path=None, help_limit=0):
         captured['target'] = target
         captured['assignments'] = assignments
         captured['checkout_path'] = checkout_path
+        captured['help_limit'] = help_limit
         return {'target': target, 'available': True, 'fields': []}
 
     monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
@@ -156,6 +157,7 @@ def test_preview_flash_target_route_forwards_assignments(monkeypatch):
         'target': 'klipper',
         'assignments': [('LOW_LEVEL_OPTIONS', 'y')],
         'checkout_path': '/home/pi/klipper',
+        'help_limit': 0,
     }
 
 

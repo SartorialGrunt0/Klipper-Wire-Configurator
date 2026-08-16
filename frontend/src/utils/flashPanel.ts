@@ -255,3 +255,12 @@ export function groupedFields(fields: NativeFlashField[]): Map<string, NativeFla
   }
   return groups;
 }
+
+/**
+ * True only for statuses that mutate real state or run long commands. Preview
+ * (a read-only refresh) is deliberately NOT busy, so Save/Load/Method/Device
+ * stay live while a preview is in flight.
+ */
+export function isBusyStatus(status: string): boolean {
+  return status === 'saving' || status === 'building' || status === 'flashing';
+}

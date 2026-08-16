@@ -10,6 +10,7 @@ import re
 import shlex
 import subprocess
 import tempfile
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -223,14 +224,56 @@ def _temporary_env(name: str, value: str):
             os.environ[name] = previous
 
 
+# Parsed Kconfig trees are expensive (Kconfig(...) walks the whole source
+# tree). Cache the parsed tree per (target, checkout, src/Kconfig mtime), but
+# NEVER the loaded config state: every request reloads .config fresh so cached
+# trees cannot leak mutations from a previous request's assignment preview.
+_KCONFIG_TREE_CACHE: dict[tuple[str, str, float], tuple[Any, Any, Path]] = {}
+_KCONFIG_TREE_LOCK = threading.Lock()
+_KCONFIG_TREE_CACHE_MAX = 8
+
+
+def _kconfig_src_mtime(checkout_path: Path) -> float:
+    try:
+        return (checkout_path / "src" / "Kconfig").stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _invalidate_kconfig_tree_cache(target: str, checkout_path: Path) -> None:
+    """Drop cached trees for a checkout (called after .config writes)."""
+    prefix = (target, str(checkout_path))
+    with _KCONFIG_TREE_LOCK:
+        for key in [key for key in _KCONFIG_TREE_CACHE if key[:2] == prefix]:
+            del _KCONFIG_TREE_CACHE[key]
+
+
 def _load_target_kconfig_state(target: str, checkout_path: Path):
     normalized_target = _require_supported_target(target)
-    kconfiglib = _load_kconfiglib_module(str(checkout_path / "lib" / "kconfiglib" / "kconfiglib.py"))
-    config_path = checkout_path / ".config"
+    cache_key = (normalized_target, str(checkout_path), _kconfig_src_mtime(checkout_path))
+
+    with _KCONFIG_TREE_LOCK:
+        cached = _KCONFIG_TREE_CACHE.get(cache_key)
+        if cached is not None:
+            kconfiglib, kconf, config_path = cached
+        else:
+            kconfiglib = _load_kconfiglib_module(str(checkout_path / "lib" / "kconfiglib" / "kconfiglib.py"))
+            config_path = checkout_path / ".config"
+            with _temporary_env("srctree", str(checkout_path)):
+                kconf = kconfiglib.Kconfig(str(checkout_path / "src" / "Kconfig"))
+            if len(_KCONFIG_TREE_CACHE) >= _KCONFIG_TREE_CACHE_MAX:
+                _KCONFIG_TREE_CACHE.clear()
+            _KCONFIG_TREE_CACHE[cache_key] = (kconfiglib, kconf, config_path)
+
+    # Always reload config state fresh: the cached tree is shared and a prior
+    # request may have mutated it via assignment previews. This also picks up
+    # .config edits made outside the app. When no .config exists, reset the
+    # tree to defaults so nothing leaks across requests.
     with _temporary_env("srctree", str(checkout_path)):
-        kconf = kconfiglib.Kconfig(str(checkout_path / "src" / "Kconfig"))
         if config_path.is_file():
             kconf.load_config(str(config_path))
+        else:
+            kconf.unset_values()
     return kconfiglib, kconf, config_path
 
 
@@ -281,7 +324,13 @@ def _serialize_assignable(symbol) -> list[str]:
     return values
 
 
-def _serialize_symbol_field(kconfiglib, node) -> dict[str, Any] | None:
+def _truncate_help(help_text: str, limit: int) -> str:
+    if limit <= 0 or len(help_text) <= limit:
+        return help_text
+    return help_text[:limit].rstrip() + "…"
+
+
+def _serialize_symbol_field(kconfiglib, node, help_limit: int = 0) -> dict[str, Any] | None:
     symbol = node.item
     if not isinstance(symbol, kconfiglib.Symbol):
         return None
@@ -299,13 +348,13 @@ def _serialize_symbol_field(kconfiglib, node) -> dict[str, Any] | None:
         "symbol": symbol.name,
         "prompt": prompt,
         "value": symbol.str_value,
-        "help": node.help or "",
+        "help": _truncate_help(node.help or "", help_limit),
         "menu_path": _menu_path(kconfiglib, node),
         "assignable": _serialize_assignable(symbol),
     }
 
 
-def _serialize_choice_field(kconfiglib, node) -> dict[str, Any] | None:
+def _serialize_choice_field(kconfiglib, node, help_limit: int = 0) -> dict[str, Any] | None:
     choice = node.item
     if not isinstance(choice, kconfiglib.Choice):
         return None
@@ -337,22 +386,22 @@ def _serialize_choice_field(kconfiglib, node) -> dict[str, Any] | None:
         "symbol": None,
         "prompt": prompt,
         "value": selected,
-        "help": node.help or "",
+        "help": _truncate_help(node.help or "", help_limit),
         "menu_path": _menu_path(kconfiglib, node),
         "assignable": [option["symbol"] for option in options],
         "options": options,
     }
 
 
-def _serialize_kconfig_fields(kconfiglib, kconf) -> list[dict[str, Any]]:
+def _serialize_kconfig_fields(kconfiglib, kconf, help_limit: int = 0) -> list[dict[str, Any]]:
     fields: list[dict[str, Any]] = []
     for node in kconf.node_iter():
         item = node.item
         field: dict[str, Any] | None = None
         if isinstance(item, kconfiglib.Choice):
-            field = _serialize_choice_field(kconfiglib, node)
+            field = _serialize_choice_field(kconfiglib, node, help_limit)
         elif isinstance(item, kconfiglib.Symbol):
-            field = _serialize_symbol_field(kconfiglib, node)
+            field = _serialize_symbol_field(kconfiglib, node, help_limit)
         if field is not None:
             fields.append(field)
     return fields
@@ -1032,6 +1081,7 @@ def get_flash_target_state(
     target: str,
     checkout_path: str | None = None,
     assignments: list[tuple[str, str]] | None = None,
+    help_limit: int = 0,
 ) -> dict[str, Any]:
     normalized_target = _require_supported_target(target)
     _start = time.monotonic()
@@ -1066,7 +1116,7 @@ def get_flash_target_state(
         "config_path": str(config_path),
         "out_path": str(resolved_path / "out"),
         "config_exists": config_path.is_file(),
-        "fields": _serialize_kconfig_fields(kconfiglib, kconf),
+        "fields": _serialize_kconfig_fields(kconfiglib, kconf, help_limit),
         "artifacts": artifacts,
         "primary_artifact": pick_primary_flash_target_artifact(normalized_target, artifacts),
         "flash_supported": bool(flash_method_candidates),
@@ -1096,14 +1146,16 @@ def preview_flash_target_config(
     target: str,
     assignments: list[tuple[str, str]],
     checkout_path: str | None = None,
+    help_limit: int = 0,
 ) -> dict[str, Any]:
-    return get_flash_target_state(target, checkout_path, assignments)
+    return get_flash_target_state(target, checkout_path, assignments, help_limit)
 
 
 def save_flash_target_config(
     target: str,
     assignments: list[tuple[str, str]],
     checkout_path: str | None = None,
+    help_limit: int = 0,
 ) -> dict[str, Any]:
     normalized_target = _require_supported_target(target)
     resolved_path, error = resolve_flash_target_checkout(normalized_target, checkout_path)
@@ -1114,7 +1166,11 @@ def save_flash_target_config(
     issues = _apply_assignments_to_kconfig(kconfiglib, kconf, assignments)
     kconf.write_config(str(config_path))
     logger.info("saved %s .config to %s (%d assignments)", normalized_target, config_path, len(assignments))
-    state = get_flash_target_state(normalized_target, str(resolved_path))
+    state = get_flash_target_state(normalized_target, str(resolved_path), help_limit=help_limit)
+    # The tree itself is unchanged by a .config write (fresh loads pick up the
+    # new file), but drop the cached entry anyway so the next request re-parses
+    # from the on-disk state without any doubt.
+    _invalidate_kconfig_tree_cache(normalized_target, resolved_path)
     if issues:
         state["error"] = "; ".join(issues)
     return state

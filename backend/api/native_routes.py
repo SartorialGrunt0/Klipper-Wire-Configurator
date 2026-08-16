@@ -337,6 +337,7 @@ class FirmwareBuildRequest(BaseModel):
 class FlashTargetConfigUpdate(BaseModel):
     checkout_path: str | None = None
     assignments: list[FirmwareAssignment] = []
+    help_limit: int = 0
 
 
 class FlashTargetCommandRequest(BaseModel):
@@ -361,11 +362,11 @@ def _validated_target(target: str) -> str:
 
 
 @router.get("/flash/{target}")
-def flash_target_state(target: str, checkout_path: str | None = None):
+def flash_target_state(target: str, checkout_path: str | None = None, help_limit: int = 0):
     """Return menuconfig fields and artifacts for a local flash target checkout."""
     if not is_native_platform():
         raise HTTPException(status_code=501, detail="Only available on Pi")
-    return get_flash_target_state(_validated_target(target), checkout_path)
+    return get_flash_target_state(_validated_target(target), checkout_path, help_limit=help_limit)
 
 
 @router.get("/flash/{target}/scan-devices")
@@ -392,7 +393,7 @@ def preview_flash_target(target: str, data: FlashTargetConfigUpdate):
     if not is_native_platform():
         raise HTTPException(status_code=501, detail="Only available on Pi")
     assignments = [(item.symbol, item.value) for item in data.assignments]
-    return preview_flash_target_config(_validated_target(target), assignments, data.checkout_path)
+    return preview_flash_target_config(_validated_target(target), assignments, data.checkout_path, help_limit=data.help_limit)
 
 
 @router.put("/flash/{target}/config")
@@ -401,7 +402,7 @@ def save_flash_target(target: str, data: FlashTargetConfigUpdate):
     if not is_native_platform():
         raise HTTPException(status_code=501, detail="Only available on Pi")
     assignments = [(item.symbol, item.value) for item in data.assignments]
-    return save_flash_target_config(_validated_target(target), assignments, data.checkout_path)
+    return save_flash_target_config(_validated_target(target), assignments, data.checkout_path, help_limit=data.help_limit)
 
 
 @router.post("/flash/{target}/build")

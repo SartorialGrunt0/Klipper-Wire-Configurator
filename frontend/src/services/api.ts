@@ -554,8 +554,16 @@ export type NativeFirmwareBuildResult = NativeFlashCommandResult;
 export async function getNativeFlashState(
   target: FlashTargetKey,
   checkoutPath?: string,
+  helpLimit = 400,
 ): Promise<NativeFlashState> {
-  const q = checkoutPath ? `?checkout_path=${encodeURIComponent(checkoutPath)}` : '';
+  const params = new URLSearchParams();
+  if (checkoutPath) {
+    params.set('checkout_path', checkoutPath);
+  }
+  if (helpLimit > 0) {
+    params.set('help_limit', String(helpLimit));
+  }
+  const q = params.toString() ? `?${params.toString()}` : '';
   return request(`/native/flash/${encodeURIComponent(target)}${q}`);
 }
 
@@ -586,10 +594,11 @@ export async function previewNativeFlashConfig(
   target: FlashTargetKey,
   assignments: Array<{ symbol: string; value: string }>,
   checkoutPath?: string,
+  helpLimit = 400,
 ): Promise<NativeFlashState> {
   return request(`/native/flash/${encodeURIComponent(target)}/preview`, {
     method: 'POST',
-    body: JSON.stringify({ assignments, checkout_path: checkoutPath }),
+    body: JSON.stringify({ assignments, checkout_path: checkoutPath, help_limit: helpLimit }),
   });
 }
 
@@ -597,10 +606,11 @@ export async function updateNativeFlashConfig(
   target: FlashTargetKey,
   assignments: Array<{ symbol: string; value: string }>,
   checkoutPath?: string,
+  helpLimit = 400,
 ): Promise<NativeFlashState> {
   return request(`/native/flash/${encodeURIComponent(target)}/config`, {
     method: 'PUT',
-    body: JSON.stringify({ assignments, checkout_path: checkoutPath }),
+    body: JSON.stringify({ assignments, checkout_path: checkoutPath, help_limit: helpLimit }),
   });
 }
 

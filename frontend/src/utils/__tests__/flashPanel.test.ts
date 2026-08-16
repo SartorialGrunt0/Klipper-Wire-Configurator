@@ -8,6 +8,7 @@ import {
   flashMethodRecord,
   formatBytes,
   inferFlashMethodForDevice,
+  isBusyStatus,
   mergeDeviceCandidates,
   normalizeProfileAssignments,
   resolveFlashDevice,
@@ -301,5 +302,19 @@ describe('pattern constants', () => {
     expect(CAN_UUID_PATTERN.test('aabbccddeeff')).toBe(true);
     expect(CAN_UUID_PATTERN.test('can0:aabbccddeeff')).toBe(true);
     expect(CAN_UUID_PATTERN.test('aabbccddee')).toBe(false);
+  });
+});
+
+describe('isBusyStatus', () => {
+  it('treats mutating statuses as busy', () => {
+    expect(isBusyStatus('saving')).toBe(true);
+    expect(isBusyStatus('building')).toBe(true);
+    expect(isBusyStatus('flashing')).toBe(true);
+  });
+
+  it('does not gate the panel on a preview or idle/loading', () => {
+    expect(isBusyStatus('previewing')).toBe(false);
+    expect(isBusyStatus('idle')).toBe(false);
+    expect(isBusyStatus('loading')).toBe(false);
   });
 });
