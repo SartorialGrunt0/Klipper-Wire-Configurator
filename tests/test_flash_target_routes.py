@@ -161,6 +161,32 @@ def test_preview_flash_target_route_forwards_assignments(monkeypatch):
     }
 
 
+def test_flash_field_help_route_forwards_field_id(monkeypatch):
+    captured = {}
+
+    def fake_help(target, field_id, checkout_path=None):
+        captured['target'] = target
+        captured['field_id'] = field_id
+        captured['checkout_path'] = checkout_path
+        return {'field_id': field_id, 'help': 'full help text'}
+
+    monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
+    monkeypatch.setattr(native_routes, 'get_flash_field_help', fake_help)
+
+    response = client.get(
+        '/api/native/flash/klipper/field-help',
+        params={'field_id': 'MACH_AVR', 'checkout_path': '/home/pi/klipper'},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {'field_id': 'MACH_AVR', 'help': 'full help text'}
+    assert captured == {
+        'target': 'klipper',
+        'field_id': 'MACH_AVR',
+        'checkout_path': '/home/pi/klipper',
+    }
+
+
 def test_flash_target_route_forwards_device(monkeypatch):
     captured = {}
 

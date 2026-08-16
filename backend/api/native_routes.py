@@ -44,6 +44,7 @@ from services.flash_targets import (
     build_flash_target,
     delete_flash_target_artifact,
     flash_flash_target,
+    get_flash_field_help,
     get_flash_target_artifact_path,
     get_flash_target_state,
     preview_flash_target_config,
@@ -367,6 +368,18 @@ def flash_target_state(target: str, checkout_path: str | None = None, help_limit
     if not is_native_platform():
         raise HTTPException(status_code=501, detail="Only available on Pi")
     return get_flash_target_state(_validated_target(target), checkout_path, help_limit=help_limit)
+
+
+@router.get("/flash/{target}/field-help")
+def flash_field_help(target: str, field_id: str, checkout_path: str | None = None):
+    """Return the full help text for one menuconfig field (symbol or choice id).
+
+    The frontend lazy-loads this when a field's help was truncated by
+    ``help_limit`` on the main state payloads.
+    """
+    if not is_native_platform():
+        raise HTTPException(status_code=501, detail="Only available on Pi")
+    return get_flash_field_help(_validated_target(target), field_id, checkout_path)
 
 
 @router.get("/flash/{target}/scan-devices")

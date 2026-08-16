@@ -226,11 +226,47 @@ function useAnimatedDots(active: boolean): string {
   return '.'.repeat(Math.max(1, tick));
 }
 
-function HelpPopover({ text }: { text: string }) {
+/** Per-session cache of lazy-loaded full field help, keyed by `${target}:${fieldId}`. */
+const fieldHelpCache = new Map<string, string>();
+
+function HelpPopover({
+  text,
+  lazyFetch,
+}: {
+  text: string;
+  lazyFetch?: () => Promise<string>;
+}) {
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState<HelpPopoverPosition | null>(null);
+  const [fullText, setFullText] = useState<string | null>(null);
+  const [loadingHelp, setLoadingHelp] = useState(false);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const popoverRef = useRef<HTMLDivElement | null>(null);
+
+  // When the payload help was truncated ("…"), fetch the full text lazily the
+  // first time the popover opens. Falls back to the truncated text on error.
+  useEffect(() => {
+    if (!open || !lazyFetch || !text.endsWith('…') || fullText !== null || loadingHelp) {
+      return undefined;
+    }
+    let cancelled = false;
+    setLoadingHelp(true);
+    lazyFetch()
+      .then((fetched) => {
+        if (!cancelled) {
+          setFullText(fetched || text);
+        }
+      })
+      .catch(() => { /* keep the truncated text */ })
+      .finally(() => {
+        if (!cancelled) {
+          setLoadingHelp(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, lazyFetch, text, fullText, loadingHelp]);
 
   function updatePosition() {
     const trigger = triggerRef.current;
@@ -264,7 +300,7 @@ function HelpPopover({ text }: { text: string }) {
       return;
     }
     updatePosition();
-  }, [open]);
+  }, [open, fullText, loadingHelp]);
 
   useEffect(() => {
     if (!open) {
@@ -330,7 +366,9 @@ function HelpPopover({ text }: { text: string }) {
             zIndex: 80,
           }}
         >
-          <p className="text-xs leading-5 whitespace-pre-wrap text-[var(--color-text-secondary)]">{text}</p>
+          <p className="text-xs leading-5 whitespace-pre-wrap text-[var(--color-text-secondary)]">
+            {loadingHelp && fullText === null ? 'Loading help…' : (fullText ?? text)}
+          </p>
         </div>,
         document.body,
       )}
@@ -607,6 +645,27 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
       delete previewTimeoutsRef.current[target];
       void previewConfig(target, assignmentValues, knownFields, stickyAssignments, checkoutPath);
     }, delay);
+  }
+
+  async function fetchFieldHelp(target: FlashTargetKey, fieldId: string): Promise<string> {
+    const cacheKey = `${target}:${fieldId}`;
+    const cached = fieldHelpCache.get(cacheKey);
+    if (cached !== undefined) {
+      return cached;
+    }
+    try {
+      const result = await api.getNativeFlashFieldHelp(
+        target,
+        fieldId,
+        panels[target]?.checkoutPath.trim() || undefined,
+      );
+      if (result.help) {
+        fieldHelpCache.set(cacheKey, result.help);
+      }
+      return result.help;
+    } catch {
+      return '';
+    }
   }
 
   async function persistConfig(target: FlashTargetKey, showSuccessMessage: boolean): Promise<boolean> {
@@ -1529,7 +1588,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-2">
                               <p className="text-sm font-medium text-[var(--color-text-primary)]">{field.prompt}</p>
-                              <HelpPopover text={field.help} />
+                              <HelpPopover text={field.help} lazyFetch={() => fetchFieldHelp(activeTarget, field.id)} />
                             </div>
                             {field.symbol && (
                               <p className="mt-1 text-[10px] font-mono text-[var(--color-text-secondary)]">{field.symbol}</p>

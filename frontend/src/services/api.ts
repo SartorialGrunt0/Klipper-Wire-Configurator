@@ -567,6 +567,18 @@ export async function getNativeFlashState(
   return request(`/native/flash/${encodeURIComponent(target)}${q}`);
 }
 
+export async function getNativeFlashFieldHelp(
+  target: FlashTargetKey,
+  fieldId: string,
+  checkoutPath?: string,
+): Promise<{ field_id: string; help: string }> {
+  const params = new URLSearchParams({ field_id: fieldId });
+  if (checkoutPath) {
+    params.set('checkout_path', checkoutPath);
+  }
+  return request(`/native/flash/${encodeURIComponent(target)}/field-help?${params.toString()}`);
+}
+
 export interface NativeFlashDeviceScanResult {
   target: FlashTargetKey;
   candidates: NativeFlashDeviceCandidate[];

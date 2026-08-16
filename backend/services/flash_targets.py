@@ -1176,6 +1176,47 @@ def save_flash_target_config(
     return state
 
 
+def _find_kconfig_node(kconf, field_id: str):
+    """Locate the menu node for a serialized field id (symbol or choice:id)."""
+    if field_id.startswith("choice:"):
+        parts = field_id.split(":", 2)
+        if len(parts) != 3:
+            return None
+        _prefix, filename, linenr_text = parts
+        try:
+            linenr = int(linenr_text)
+        except ValueError:
+            return None
+        for node in kconf.node_iter():
+            if node.filename == filename and node.linenr == linenr:
+                return node
+        return None
+    symbol = kconf.syms.get(field_id)
+    if symbol is None:
+        return None
+    for node in symbol.nodes:
+        if node.prompt is not None:
+            return node
+    return symbol.nodes[0] if symbol.nodes else None
+
+
+def get_flash_field_help(target: str, field_id: str, checkout_path: str | None = None) -> dict[str, Any]:
+    """Return the FULL (uncapped) help text for one menuconfig field.
+
+    The parsed tree is cached, so this is a cheap in-memory lookup. Used by the
+    frontend to lazy-load help that was truncated by ``help_limit``.
+    """
+    normalized_target = _require_supported_target(target)
+    resolved_path, error = resolve_flash_target_checkout(normalized_target, checkout_path)
+    if resolved_path is None:
+        return {"field_id": field_id, "help": ""}
+    _kconfiglib, kconf, _config_path = _load_target_kconfig_state(normalized_target, resolved_path)
+    node = _find_kconfig_node(kconf, field_id)
+    if node is None:
+        return {"field_id": field_id, "help": ""}
+    return {"field_id": field_id, "help": node.help or ""}
+
+
 def scan_flash_target_devices(
     target: str,
     checkout_path: str | None = None,

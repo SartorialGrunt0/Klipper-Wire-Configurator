@@ -9,6 +9,7 @@ from services.flash_targets import (  # noqa: E402
     _FLASH_METHOD_MAKE_FLASH,
     _truncate_help,
     delete_flash_target_artifact,
+    get_flash_field_help,
     get_flash_target_state,
     flash_flash_target,
     list_flash_target_artifacts,
@@ -21,12 +22,25 @@ from services.flash_targets import (  # noqa: E402
 class _FakeSymbol:
     def __init__(self, value: str):
         self.str_value = value
+        self.nodes: list[_FakeMenuNode] = []
+
+
+class _FakeMenuNode:
+    def __init__(self, help_text: str = "", prompt=("Prompt", None), filename: str = "Kconfig", linenr: int = 1):
+        self.help = help_text
+        self.prompt = prompt
+        self.filename = filename
+        self.linenr = linenr
 
 
 class _FakeKconf:
-    def __init__(self, **symbols):
+    def __init__(self, nodes: list[_FakeMenuNode] | None = None, **symbols):
         self.syms = {name: _FakeSymbol(value) for name, value in symbols.items()}
+        self._nodes = list(nodes or [])
         self.loads: list[str] = []
+
+    def node_iter(self):
+        return iter(self._nodes)
 
     def load_config(self, filename):
         """Mirror kconfiglib's replace semantics: reset, then apply the file."""
@@ -521,3 +535,65 @@ def test_truncate_help_caps_long_text():
     assert _truncate_help('', 400) == ''
     assert _truncate_help('x' * 500, 400) == 'x' * 400 + '…'
     assert _truncate_help('x' * 400, 400) == 'x' * 400
+
+
+def test_get_flash_field_help_returns_full_text_for_symbol(monkeypatch, tmp_path):
+    full_help = 'FULL HELP ' + 'x' * 500
+    node = _FakeMenuNode(help_text=full_help, filename='Kconfig', linenr=42)
+    kconf = _FakeKconf(MACH_AVR='y')
+    kconf.syms['MACH_AVR'].nodes = [node]
+
+    monkeypatch.setattr(
+        'services.flash_targets.resolve_flash_target_checkout',
+        lambda target, checkout_path=None: (tmp_path, None),
+    )
+    monkeypatch.setattr(
+        'services.flash_targets._load_target_kconfig_state',
+        lambda target, checkout_path: (object(), kconf, tmp_path / '.config'),
+    )
+
+    result = get_flash_field_help('klipper', 'MACH_AVR', str(tmp_path))
+
+    assert result == {'field_id': 'MACH_AVR', 'help': full_help}
+    assert len(result['help']) > 400, 'full help must not be truncated'
+
+
+def test_get_flash_field_help_resolves_choice_ids(monkeypatch, tmp_path):
+    full_help = 'Choice help text'
+    node = _FakeMenuNode(help_text=full_help, filename='Kconfig', linenr=42)
+    kconf = _FakeKconf(nodes=[node])
+
+    monkeypatch.setattr(
+        'services.flash_targets.resolve_flash_target_checkout',
+        lambda target, checkout_path=None: (tmp_path, None),
+    )
+    monkeypatch.setattr(
+        'services.flash_targets._load_target_kconfig_state',
+        lambda target, checkout_path: (object(), kconf, tmp_path / '.config'),
+    )
+
+    result = get_flash_field_help('klipper', 'choice:Kconfig:42', str(tmp_path))
+
+    assert result == {'field_id': 'choice:Kconfig:42', 'help': full_help}
+
+
+def test_get_flash_field_help_returns_empty_for_unknown(monkeypatch, tmp_path):
+    kconf = _FakeKconf(MACH_AVR='y')
+
+    monkeypatch.setattr(
+        'services.flash_targets.resolve_flash_target_checkout',
+        lambda target, checkout_path=None: (tmp_path, None),
+    )
+    monkeypatch.setattr(
+        'services.flash_targets._load_target_kconfig_state',
+        lambda target, checkout_path: (object(), kconf, tmp_path / '.config'),
+    )
+
+    assert get_flash_field_help('klipper', 'NO_SUCH_SYMBOL', str(tmp_path)) == {
+        'field_id': 'NO_SUCH_SYMBOL',
+        'help': '',
+    }
+    assert get_flash_field_help('klipper', 'choice:bad', str(tmp_path)) == {
+        'field_id': 'choice:bad',
+        'help': '',
+    }
