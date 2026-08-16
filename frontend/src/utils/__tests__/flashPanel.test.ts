@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   CAN_UUID_PATTERN,
   USB_ID_PATTERN,
+  PreviewEpoch,
   buildAssignments,
   buildPanelAssignments,
   fieldRecord,
@@ -316,5 +317,46 @@ describe('isBusyStatus', () => {
     expect(isBusyStatus('previewing')).toBe(false);
     expect(isBusyStatus('idle')).toBe(false);
     expect(isBusyStatus('loading')).toBe(false);
+  });
+});
+
+describe('PreviewEpoch', () => {
+  it('accepts previews captured before any mutation', () => {
+    const epoch = new PreviewEpoch();
+    const captured = epoch.current;
+    expect(epoch.isStale(captured)).toBe(false);
+  });
+
+  it('drops previews captured before a mutation', () => {
+    const epoch = new PreviewEpoch();
+    const captured = epoch.current;
+    epoch.beginMutation();
+    expect(epoch.isStale(captured)).toBe(true);
+  });
+
+  it('accepts previews captured after the latest mutation', () => {
+    const epoch = new PreviewEpoch();
+    epoch.beginMutation();
+    const captured = epoch.current;
+    expect(epoch.isStale(captured)).toBe(false);
+  });
+
+  it('bumps the epoch on every mutation', () => {
+    const epoch = new PreviewEpoch();
+    const first = epoch.beginMutation();
+    const second = epoch.beginMutation();
+    expect(second).toBeGreaterThan(first);
+    expect(epoch.isStale(first)).toBe(true);
+    expect(epoch.isStale(second)).toBe(false);
+  });
+
+  it('invalidates progressively older captures', () => {
+    const epoch = new PreviewEpoch();
+    const captured = epoch.current;
+    epoch.beginMutation();
+    const capturedAfterFirst = epoch.current;
+    epoch.beginMutation();
+    expect(epoch.isStale(captured)).toBe(true);
+    expect(epoch.isStale(capturedAfterFirst)).toBe(true);
   });
 });

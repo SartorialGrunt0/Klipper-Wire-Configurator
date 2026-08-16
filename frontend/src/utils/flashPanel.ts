@@ -264,3 +264,30 @@ export function groupedFields(fields: NativeFlashField[]): Map<string, NativeFla
 export function isBusyStatus(status: string): boolean {
   return status === 'saving' || status === 'building' || status === 'flashing';
 }
+
+/**
+ * Orders preview responses against mutations (save/build/flash/checkout
+ * changes). A preview captures the current epoch when it starts; if any
+ * mutation lands before the response arrives, the epoch is bumped and the
+ * preview result must be dropped — otherwise a slow preview could land after
+ * Save/Build and re-mark the panel dirty with pre-mutation fields.
+ */
+export class PreviewEpoch {
+  private epoch = 0;
+
+  /** Call at the start of any mutation. Returns the new epoch. */
+  beginMutation(): number {
+    this.epoch += 1;
+    return this.epoch;
+  }
+
+  /** Capture the current epoch when starting a read-only preview. */
+  get current(): number {
+    return this.epoch;
+  }
+
+  /** True when a capture predates the latest mutation (result is stale). */
+  isStale(captured: number): boolean {
+    return captured < this.epoch;
+  }
+}

@@ -31,6 +31,7 @@ import {
   isBusyStatus,
   mergeDeviceCandidates,
   normalizeProfileAssignments,
+  PreviewEpoch,
   resolveFlashDevice,
   resolveFlashMethod,
   resolveMethodDefaultDevice,
@@ -490,6 +491,10 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
     klipper: 0,
     katapult: 0,
   });
+  const previewEpochsRef = useRef<Record<FlashTargetKey, PreviewEpoch>>({
+    klipper: new PreviewEpoch(),
+    katapult: new PreviewEpoch(),
+  });
 
   const buildDots = useAnimatedDots(panels[activeTarget].status === 'building');
   const flashDots = useAnimatedDots(panels[activeTarget].status === 'flashing');
@@ -521,6 +526,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
   }
 
   async function applyCheckoutSettings() {
+    TARGETS.forEach((target) => beginTargetMutation(target));
     const requestedPaths: Record<FlashTargetKey, string> = {
       klipper: panels.klipper.checkoutPath.trim(),
       katapult: panels.katapult.checkoutPath.trim(),
@@ -596,6 +602,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
   ) {
     const requestId = previewRequestIdsRef.current[target] + 1;
     previewRequestIdsRef.current[target] = requestId;
+    const capturedEpoch = previewEpochsRef.current[target].current;
     updatePanel(target, (panel) => ({
       ...panel,
       status: 'previewing',
@@ -607,12 +614,18 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
         buildPanelAssignments(assignmentValues, knownFields, stickyAssignments),
         checkoutPath.trim() || undefined,
       );
-      if (previewRequestIdsRef.current[target] !== requestId) {
+      if (
+        previewRequestIdsRef.current[target] !== requestId ||
+        previewEpochsRef.current[target].isStale(capturedEpoch)
+      ) {
         return;
       }
       updatePanel(target, (panel) => mergePreviewPanel(panel, result));
     } catch (error) {
-      if (previewRequestIdsRef.current[target] !== requestId) {
+      if (
+        previewRequestIdsRef.current[target] !== requestId ||
+        previewEpochsRef.current[target].isStale(capturedEpoch)
+      ) {
         return;
       }
       updatePanel(target, (panel) => ({
@@ -630,6 +643,12 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
       window.clearTimeout(timeoutId);
       delete previewTimeoutsRef.current[target];
     }
+  }
+
+  /** Invalidate in-flight previews for a target before a mutation starts. */
+  function beginTargetMutation(target: FlashTargetKey) {
+    clearScheduledPreview(target);
+    previewEpochsRef.current[target].beginMutation();
   }
 
   function schedulePreview(
@@ -669,6 +688,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
   }
 
   async function persistConfig(target: FlashTargetKey, showSuccessMessage: boolean): Promise<boolean> {
+    beginTargetMutation(target);
     const panel = panels[target];
     if (!panel.flashState?.available) {
       updatePanel(target, (current) => ({
@@ -725,6 +745,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
   }
 
   async function handleBuild(target: FlashTargetKey) {
+    beginTargetMutation(target);
     const panel = panels[target];
     if (!panel.flashState?.available) {
       updatePanel(target, (current) => ({
@@ -783,6 +804,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
   }
 
   async function handleFlash(target: FlashTargetKey) {
+    beginTargetMutation(target);
     const panel = panels[target];
     const selectedMethod = panel.flashMethod || panel.flashState?.default_flash_method || '';
     const selectedMethodState = flashMethodRecord(panel.flashState, selectedMethod);
