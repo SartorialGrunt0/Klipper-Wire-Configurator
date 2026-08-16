@@ -217,3 +217,36 @@ def test_cleanup_failure_does_not_flip_main_result(tmp_path):
     status = runner.status(job_id)
     assert status['raw_result']['success'] is True
     assert 'Cleanup command exited with code 9' in status['raw_result']['log']
+
+
+def _fake_dfu_util_script(tmp_path: Path, marker: str, exit_code: int) -> list[str]:
+    """Write an executable 'dfu-util' shim that prints marker and exits."""
+    script = tmp_path / 'bin' / 'dfu-util'
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text(f"#!/bin/sh\necho '{marker}'\nexit {exit_code}\n", encoding='utf-8')
+    script.chmod(0o755)
+    return [str(script)]
+
+
+def test_dfu_util_nonzero_exit_with_success_marker_counts_as_success(tmp_path):
+    runner = FlashJobRunner(log_dir=tmp_path / 'logs')
+    command = _fake_dfu_util_script(tmp_path, 'File downloaded successfully', 74)
+
+    job_id = runner.start('klipper', 'flash', [command], str(tmp_path))
+
+    assert _wait_until(lambda: not runner.status(job_id)['running'])
+    status = runner.status(job_id)
+    assert status['raw_result']['success'] is True
+    assert 'downloaded successfully' in status['raw_result']['log']
+
+
+def test_dfu_util_nonzero_exit_without_success_marker_still_fails(tmp_path):
+    runner = FlashJobRunner(log_dir=tmp_path / 'logs')
+    command = _fake_dfu_util_script(tmp_path, 'dfu-util: error: something broke', 74)
+
+    job_id = runner.start('klipper', 'flash', [command], str(tmp_path))
+
+    assert _wait_until(lambda: not runner.status(job_id)['running'])
+    status = runner.status(job_id)
+    assert status['raw_result']['success'] is False
+    assert 'failed with exit code 74' in status['raw_result']['error']

@@ -21,6 +21,8 @@ import uuid
 from collections import deque
 from pathlib import Path
 
+from services.flash_targets import _is_dfu_util_success
+
 logger = logging.getLogger(__name__)
 
 _TAIL_LIMIT = 200
@@ -197,11 +199,13 @@ class FlashJobRunner:
                 timer = threading.Timer(self._command_timeout, self._timeout_process, args=(job, process))
                 timer.daemon = True
                 timer.start()
+                command_output: list[str] = []
                 try:
                     if process.stdout is not None:
                         for raw_line in process.stdout:
                             if self._is_cancelled(job):
                                 break
+                            command_output.append(raw_line)
                             self._append(job, raw_line.rstrip("\n"))
                 finally:
                     timer.cancel()
@@ -221,8 +225,15 @@ class FlashJobRunner:
                     success, error = False, f"{' '.join(command)} timed out."
                     break
                 if returncode != 0:
-                    success, error = False, f"{' '.join(command)} failed with exit code {returncode}."
-                    break
+                    # dfu-util can exit non-zero *after* a successful download:
+                    # the MCU immediately runs the uploaded code and stops
+                    # enumerating as a DFU device, which dfu-util reports as an
+                    # error. Detect success from the log, not the exit code.
+                    if _is_dfu_util_success(command, "".join(command_output)):
+                        logger.info("dfu-util reported success for %s despite exit code %s", " ".join(command), returncode)
+                    else:
+                        success, error = False, f"{' '.join(command)} failed with exit code {returncode}."
+                        break
             else:
                 success = True
         except Exception as exc:  # pragma: no cover - safety net for runaway jobs

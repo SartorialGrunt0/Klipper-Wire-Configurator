@@ -1363,14 +1363,49 @@ def _build_artifact_path(target: str, checkout_path: Path) -> Path | None:
     return artifact_path if artifact_path.is_file() else None
 
 
-# Direct dfu-util fallback flags, used when `make -n flash` output cannot be
-# parsed into a dfu-util command. Exact flag set to be confirmed against the
-# Spider (STM32F446) during Phase 7 research — tune this constant if the
-# direct command needs adjusting.
-_DFU_UTIL_FALLBACK_FLAGS = ["-a", "0", "-R", "-D"]
+# Direct dfu-util fallback, used when `make -n flash` output cannot be parsed
+# into a dfu-util command. On a real Klipper checkout that is the common case:
+# `make -n flash` prints a flash_usb.py invocation (or an avrdude line when no
+# .config exists yet), never a literal dfu-util token — so this fallback is
+# effectively the primary direct-dfu-util path.
+#
+# The address MUST come from the parsed kconf (CONFIG_FLASH_APPLICATION_ADDRESS)
+# and carry the DfuSe `:leave` modifier, otherwise the STM32 ROM bootloader
+# re-enters DFU mode after the flash and the board appears dead. Klipper's own
+# flash_usb.py pattern: dfu-util -d ,<VID:PID> -R -a 0 -s <addr>:leave -D out/klipper.bin
+_DEFAULT_FLASH_APPLICATION_ADDRESS = "0x08000000"
+_DFU_UTIL_SUCCESS_MARKER = "downloaded successfully"
+
+
+def _dfu_util_app_address(checkout_path: Path) -> str:
+    """Read CONFIG_FLASH_APPLICATION_ADDRESS from the checkout's .config."""
+    try:
+        for raw_line in (checkout_path / ".config").read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if line.startswith("CONFIG_FLASH_APPLICATION_ADDRESS="):
+                value = line.split("=", 1)[1].strip()
+                if value:
+                    return value
+    except OSError:
+        pass
+    return _DEFAULT_FLASH_APPLICATION_ADDRESS
+
+
+def _is_dfu_util_success(command: list[str], output: str) -> bool:
+    """True when a dfu-util flash succeeded despite a non-zero exit code.
+
+    The Voron Klipper_Expander guide documents dfu-util exiting non-zero
+    *after* a successful download: the MCU immediately runs the uploaded code
+    and stops enumerating as a DFU device, which dfu-util reports as an error.
+    Detect success from the log instead of the exit code.
+    """
+    if not command or os.path.basename(command[0]) != "dfu-util":
+        return False
+    return _DFU_UTIL_SUCCESS_MARKER in output.lower()
 
 
 def _try_dfu_util_fallback(
+    checkout_path: Path,
     flash_device: str,
     artifact_path: Path | None,
     make_log: str,
@@ -1399,7 +1434,19 @@ def _try_dfu_util_fallback(
         return None, f"dfu-util does not list {flash_device}. Enter DFU/bootloader mode and try again.", make_log
 
     fallback_log = make_log + ("\n\n" if make_log else "") + _command_log(["dfu-util", "-l"], completed)
-    command = ["dfu-util", *_DFU_UTIL_FALLBACK_FLAGS, str(artifact_path)]
+    app_addr = _dfu_util_app_address(checkout_path)
+    command = [
+        "dfu-util",
+        "-d",
+        f",{flash_device}",
+        "-R",
+        "-a",
+        "0",
+        "-s",
+        f"{app_addr}:leave",
+        "-D",
+        str(artifact_path),
+    ]
     logger.info("using direct dfu-util fallback for %s: %s", flash_device, " ".join(command))
     return command, None, fallback_log
 
@@ -1426,7 +1473,7 @@ def _resolve_dfu_util_flash_command(
 
     log = _command_log(preview_command, completed)
     if completed.returncode != 0:
-        return _try_dfu_util_fallback(flash_device, artifact_path, log)
+        return _try_dfu_util_fallback(checkout_path, flash_device, artifact_path, log)
 
     output = "\n".join(chunk for chunk in (completed.stdout, completed.stderr) if chunk)
     for raw_line in output.splitlines():
@@ -1445,7 +1492,7 @@ def _resolve_dfu_util_flash_command(
             return tokens, None, log
 
     logger.warning("dfu-util flash command could not be resolved for %s via `make -n flash`", flash_device)
-    return _try_dfu_util_fallback(flash_device, artifact_path, log)
+    return _try_dfu_util_fallback(checkout_path, flash_device, artifact_path, log)
 
 
 def _run_direct_flash_commands(
@@ -1481,6 +1528,13 @@ def _run_commands(target: str, checkout_path: Path, commands: list[list[str]], t
             )
             logs.append(_command_log(command, completed))
             if completed.returncode != 0:
+                if _is_dfu_util_success(command, completed.stdout + "\n" + completed.stderr):
+                    logger.info(
+                        "dfu-util reported success for %s despite exit code %s",
+                        " ".join(command),
+                        completed.returncode,
+                    )
+                    continue
                 return _command_result(
                     normalized_target,
                     False,

@@ -7,6 +7,7 @@ from services.flash_targets import (  # noqa: E402
     _FLASH_METHOD_DFU_UTIL,
     _FLASH_METHOD_FLASHTOOL,
     _FLASH_METHOD_MAKE_FLASH,
+    _is_dfu_util_success,
     _resolve_dfu_util_flash_command,
     _truncate_help,
     delete_flash_target_artifact,
@@ -633,7 +634,9 @@ def test_dfu_util_fallback_used_when_make_fails_but_device_listed(monkeypatch, t
 
     command, error, log = _resolve_dfu_util_flash_command(tmp_path, '0483:df11', artifact)
 
-    assert command == ['dfu-util', '-a', '0', '-R', '-D', str(artifact)]
+    assert command == [
+        'dfu-util', '-d', ',0483:df11', '-R', '-a', '0', '-s', '0x08000000:leave', '-D', str(artifact),
+    ]
     assert error is None
     assert ['dfu-util', '-l'] in calls
 
@@ -652,7 +655,31 @@ def test_dfu_util_fallback_used_when_make_parses_no_token(monkeypatch, tmp_path)
 
     command, error, log = _resolve_dfu_util_flash_command(tmp_path, '0483:df11', artifact)
 
-    assert command == ['dfu-util', '-a', '0', '-R', '-D', str(artifact)]
+    assert command == [
+        'dfu-util', '-d', ',0483:df11', '-R', '-a', '0', '-s', '0x08000000:leave', '-D', str(artifact),
+    ]
+    assert error is None
+
+
+def test_dfu_util_fallback_uses_kconf_application_address(monkeypatch, tmp_path):
+    artifact = _write_bin_artifact(tmp_path)
+    (tmp_path / '.config').write_text(
+        'CONFIG_MACH_STM32=y\nCONFIG_FLASH_APPLICATION_ADDRESS=0x08004000\n',
+        encoding='utf-8',
+    )
+
+    def fake_run(command, **kwargs):
+        if command[0] == 'make':
+            return _FakeCompleted(returncode=1)
+        return _FakeCompleted(stdout='Found DFU: [0483:df11] ver=2200')
+
+    monkeypatch.setattr('services.flash_targets.subprocess.run', fake_run)
+
+    command, error, log = _resolve_dfu_util_flash_command(tmp_path, '0483:df11', artifact)
+
+    assert command == [
+        'dfu-util', '-d', ',0483:df11', '-R', '-a', '0', '-s', '0x08004000:leave', '-D', str(artifact),
+    ]
     assert error is None
 
 
@@ -710,6 +737,16 @@ def test_dfu_util_make_resolution_still_preferred(monkeypatch, tmp_path):
     assert command == ['dfu-util', '-a', '0', '-R', '-D', str(artifact)]
     assert error is None
     assert ['dfu-util', '-l'] not in calls
+
+
+def test_is_dfu_util_success_detects_downloaded_marker():
+    assert _is_dfu_util_success(
+        ['dfu-util', '-d', ',0483:df11', '-D', 'x.bin'],
+        'Download done.\nFile downloaded successfully\n',
+    ) is True
+    assert _is_dfu_util_success(['dfu-util', '-l'], 'Found DFU: [0483:df11]') is False
+    assert _is_dfu_util_success(['make', 'flash'], 'File downloaded successfully') is False
+    assert _is_dfu_util_success(['dfu-util', '-D', 'x.bin'], 'download failed') is False
 
 
 def test_plan_flash_flash_job_wraps_commands_with_klipper_service(monkeypatch, tmp_path):
