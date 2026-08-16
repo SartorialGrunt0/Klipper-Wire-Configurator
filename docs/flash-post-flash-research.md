@@ -35,13 +35,12 @@ Toolhead (EBBCan) — exactly as documented:
 6. Verify: `flashtool.py -i can0 -q` → same UUID, "Application: Klipper".
 7. `sudo service klipper start`, then `FIRMWARE_RESTART` and confirm no errors.
 
-Mainboard (Spider when it runs Katapult as a USB-CAN bridge) — same shape but the bootloader entry + flash go over USB serial:
+Mainboard (Spider when it runs Katapult as a USB-CAN bridge) — the README's `-r` section documents the exact pattern: bridge-mode devices **cannot be auto-detected** by flashtool (only plain USB and CANBus devices can), so bootloader entry must be requested manually with `-r`, then the upload goes through a different tool:
 1. Build `klipper.bin` ("USB to CAN bus bridge", correct pins, 1Mbit).
 2. `sudo service klipper stop`.
 3. Force bootloader: `flashtool.py -i can0 -r -u <uuid>` (or double-press RESET on the mainboard).
-4. Verify: `ls /dev/serial/by-id` shows `usb-katapult-...`.
-5. Flash: `python3 ~/katapult/scripts/flashtool.py -f ~/klipper/out/klipper.bin -d /dev/serial/by-id/usb-katapult_<id>`.
-6. Verify mainboard still enumerates as a CAN adapter (`lsusb` + `ip a` shows can0), then `sudo service klipper start`.
+4. Upload via `dfu-util` (if the board is DFU-capable) or `flashtool.py -d /dev/serial/by-id/usb-katapult_<id>` (Katapult-USB).
+5. Verify mainboard still enumerates as a CAN adapter (`lsusb` + `ip a` shows can0), then `sudo service klipper start`.
 
 Implementation implication: KWC's flashtool CAN/serial job currently runs a single command sequence. The canonical flow needs (a) klipper service stop before step 3, (b) an explicit `-r` bootloader-entry command that returns "Flash success" but is not the flash, (c) a `-q` verify between entry and flash, and (d) klipper service start + `FIRMWARE_RESTART` after. Whether the `-r` + verify steps belong inside the automated job or as pre-flight guidance is a Phase 7 design decision.
 
@@ -83,6 +82,14 @@ Klipper's `Bootloader_Entry.md` warns that on some boards (e.g., Octopus Pro v1)
 ### 6. RP2040 (PIS/Hotkey)
 `make flash` uses the USB bootrom via `picoboot` (`2e8a:0003`), or manual BOOTSEL + copy `klipper.uf2`. The MCU resets into the app automatically — no `:leave` equivalent, no power-cycle requirement.
 
+### 7. flashtool `-q` query is single-node-only (affects KWC's device scan)
+Katapult README: "A query should only be performed when a single can node is on the network. Attempting to query multiple nodes may result in transmission errors that can force a node into a 'bus off' state. When a node enters 'bus off' it becomes unresponsive. The node must be reset to recover."
+
+KWC's CAN UUID scan (`flashtool.py -q` / canbus_query) runs while potentially multiple unassigned nodes are present (e.g., EBBCan in Katapult mode + Spider in Katapult mode simultaneously). Note that klippy only grabs `Application: Klipper` UUIDs — so any node sitting in Katapult mode (blinking status LED) is *unassigned* and answers queries, making the multi-node BUS-OFF scenario real. The scan should either (a) document this and rely on klippy-grabbed nodes being quiet, (b) skip the query when the user is mid-flash, or (c) tolerate a BUS-OFF recovery. [IMPLEMENTATION NOTE]
+
+### 8. Katapult deployer / brick risk (KWC has a Katapult target)
+The README's deployer section warns: "Overwriting your existing bootloader with an incorrectly configured build will brick your device and require a programmer to recover." A stock bootloader backup is strongly recommended before deployment. For KWC's Katapult target, flashing a *new* Katapult build over an existing Katapult should prefer the deployer path (flash `deployer.bin` through the existing bootloader) over a raw write, and the UI should warn about the brick risk. [IMPLEMENTATION NOTE]
+
 ## Open questions for Clifford
 
 1. How do you actually flash the Spider today — SD card (Fysetc bootloader), DFU via BOOT0+RESET, or Katapult? Decides which method paths are primary for Trident validation.
@@ -100,7 +107,7 @@ Klipper's `Bootloader_Entry.md` warns that on some boards (e.g., Octopus Pro v1)
 - Klipper `docs/CANBUS.md` — UUID derivation from chip identifier; `canbus_query.py` only reports uninitialized devices
 - Klipper `docs/FAQ.md` — stable `/dev/serial/by-id/...` names; `FIRMWARE_RESTART` usage
 - dfu-util man page — `-R` (USB reset signalling), `-e` (detach), `-s ADDRESS[:LENGTH][:MODIFIERS]` with `:leave`
-- Katapult README (Arksine/katapult) — flashtool auto bootloader entry for USB/CAN; UART + USB-to-CAN-bridge cannot be auto-entered
+- Katapult README (Arksine/katapult) — upload flow requires `klipper` service stopped; flashtool auto bootloader entry for plain USB/CAN devices; USB-to-CAN-bridge + UART devices cannot be auto-detected (need `-r` first, then `dfu-util`/`flashtool.py -d` upload); `-q` is single-node-only (multi-node query risks BUS-OFF); deployer brick warning; `-r` prints "Flash success" but exits without uploading
 - katapult issue #114 (EBB42) + Esoterical CANBus guide — stop Klipper to release CAN bus device before flashing
 - **Esoterical CANBus guide** (canbus.esoterical.online) — canonical update flows: `toolhead_klipper_updating.html`, `mainboard_klipper_updating.html`, `katapult_updating.html`, `troubleshooting/no_uuid.html`. Confirms: klipper stop is a required step for CAN flashes; `flashtool.py -r` is the bootloader-entry command (prints "Flash success" but flashes nothing); double-press RESET is the manual fallback; UUID grab/query semantics; BUS-OFF recovery; `usb-katapult-*` vs Klipper-mode serial paths
 - Fysetc Spider wiki + FYSETC-SPIDER repo `bootloader/README.md` — SD-card bootloader, BOOT0/RESET switch wiring
