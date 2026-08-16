@@ -63,6 +63,14 @@ interface FlashProfileDialogState {
   deletingName: string | null;
 }
 
+interface FlashConfirmState {
+  target: FlashTargetKey;
+  device: string;
+  method: string;
+  methodLabel: string;
+  methodDescription: string;
+}
+
 type DialogStatus = 'idle' | 'loading' | 'previewing' | 'saving' | 'building' | 'flashing';
 type MessageTone = 'info' | 'success' | 'error';
 
@@ -466,6 +474,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
     katapult: createEmptyPanelState('katapult'),
   }));
   const [profileDialog, setProfileDialog] = useState<FlashProfileDialogState | null>(null);
+  const [flashConfirm, setFlashConfirm] = useState<FlashConfirmState | null>(null);
   const [showTargetSettings, setShowTargetSettings] = useState(false);
   const panelsRef = useRef(panels);
   const logContainerRef = useRef<HTMLDivElement | null>(null);
@@ -838,7 +847,6 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
   }
 
   async function handleFlash(target: FlashTargetKey) {
-    beginTargetMutation(target);
     const panel = panels[target];
     const selectedMethod = panel.flashMethod || panel.flashState?.default_flash_method || '';
     const selectedMethodState = flashMethodRecord(panel.flashState, selectedMethod);
@@ -868,17 +876,34 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
     }
 
     const resolvedDevice = panel.flashDevice.trim() || selectedMethodState.default_device || 'the auto-detected device';
-    const confirmed = window.confirm(
-      `You are about to flash ${resolvedDevice} using ${selectedMethodState.label}.\n\n`
-      + 'The following will occur:\n'
-      + '- Klipper will be stopped during the flash and restarted afterward (when the service is running).\n'
-      + `- ${selectedMethodState.description}\n\n`
-      + 'Do you want to proceed?',
-    );
-    if (!confirmed) {
+    setFlashConfirm({
+      target,
+      device: resolvedDevice,
+      method: selectedMethod,
+      methodLabel: selectedMethodState.label,
+      methodDescription: selectedMethodState.description,
+    });
+  }
+
+  async function confirmFlash() {
+    if (!flashConfirm) {
       return;
     }
-
+    const target = flashConfirm.target;
+    const { method } = flashConfirm;
+    setFlashConfirm(null);
+    beginTargetMutation(target);
+    const panel = panels[target];
+    const selectedMethod = method;
+    const selectedMethodState = flashMethodRecord(panel.flashState, selectedMethod);
+    if (!selectedMethodState) {
+      updatePanel(target, (current) => ({
+        ...current,
+        message: 'Select a supported flash method before flashing.',
+        messageTone: 'error',
+      }));
+      return;
+    }
     if (panel.isDirty) {
       const saved = await persistConfig(target, false);
       if (!saved) {
@@ -2092,6 +2117,68 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                   {profileDialog.saving ? 'Saving...' : 'Save Named Profile'}
                 </button>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+      {flashConfirm && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60" onClick={() => setFlashConfirm(null)}>
+          <div
+            className="w-[440px] max-w-[92vw] overflow-hidden rounded-2xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-start justify-between border-b border-[var(--color-bg-tertiary)] px-5 py-4">
+              <div>
+                <h3 className="text-base font-semibold text-[var(--color-text-primary)]">
+                  Flash {flashConfirm.target === 'klipper' ? 'Klipper' : 'Katapult'}?
+                </h3>
+                <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
+                  Confirm the target device and flash method before proceeding.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setFlashConfirm(null)}
+                className="rounded p-1 text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)]"
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                  <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                </svg>
+              </button>
+            </div>
+
+            <div className="space-y-3 p-5">
+              <div className="rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)]/50 p-3">
+                <p className="text-[11px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">Device</p>
+                <p className="mt-1 break-all font-mono text-sm text-[var(--color-text-primary)]">{flashConfirm.device}</p>
+              </div>
+              <div className="rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)]/50 p-3">
+                <p className="text-[11px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">Method</p>
+                <p className="mt-1 text-sm font-medium text-[var(--color-text-primary)]">{flashConfirm.methodLabel}</p>
+                <p className="mt-1 text-xs text-[var(--color-text-secondary)]">{flashConfirm.methodDescription}</p>
+              </div>
+              <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3">
+                <p className="text-xs text-amber-400">
+                  Klipper will be stopped during the flash and restarted afterward (when the service is running).
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 border-t border-[var(--color-bg-tertiary)] px-5 py-3">
+              <button
+                type="button"
+                onClick={() => setFlashConfirm(null)}
+                className="rounded-md bg-[var(--color-bg-tertiary)] px-4 py-2 text-xs font-medium text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-primary)]"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmFlash()}
+                className="inline-flex min-w-[5.75rem] justify-center rounded-md bg-emerald-500 px-4 py-2 text-xs font-semibold text-black transition-colors hover:bg-emerald-400"
+              >
+                Flash
+              </button>
             </div>
           </div>
         </div>
