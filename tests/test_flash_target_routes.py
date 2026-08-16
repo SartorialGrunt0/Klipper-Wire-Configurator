@@ -4,11 +4,130 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'backend'))
 
+import asyncio  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+
 import api.native_routes as native_routes  # noqa: E402
 from main import app  # noqa: E402
 
 
 client = TestClient(app)
+
+
+def test_blocking_subprocess_routes_are_sync():
+    """Blocking subprocess/socket/file routes must run in the threadpool,
+    not on the FastAPI event loop (a frozen loop stalls AI chat, config
+    saves, and every other request while a build/flash/scan is running).
+    """
+    blocking_routes = [
+        native_routes.list_devices,
+        native_routes.get_canbus_uuids,
+        native_routes.read_config_files,
+        native_routes.apply_config,
+        native_routes.klipper_firmware_restart,
+        native_routes.klipper_status,
+        native_routes.klipper_log_excerpt,
+        native_routes.scan_flash_target_devices_api,
+        native_routes.build_flash_target_api,
+        native_routes.flash_target_api,
+        native_routes.flash_target_state,
+        native_routes.preview_flash_target,
+        native_routes.save_flash_target,
+        native_routes.download_flash_target_artifact,
+        native_routes.delete_saved_flash_target_artifact,
+        native_routes.klipper_firmware_state,
+        native_routes.update_klipper_firmware_config,
+        native_routes.preview_klipper_firmware_config,
+        native_routes.build_klipper_firmware_api,
+        native_routes.flash_klipper_firmware_api,
+    ]
+    for route in blocking_routes:
+        assert asyncio.iscoroutinefunction(route) is False, f"{route.__name__} is still async"
+
+
+def test_build_route_does_not_block_concurrent_status(monkeypatch):
+    """A slow build must not stall a concurrent request: the build sleeps in
+    the threadpool while /status completes on the event loop.
+
+    Uses a real uvicorn server + httpx (TestClient serializes requests at the
+    transport level and cannot exercise concurrency).
+    """
+    import socket as socket_mod
+
+    import httpx
+    import uvicorn
+
+    def slow_build(target, checkout_path=None):
+        time.sleep(1.5)
+        return {
+            'target': target,
+            'display_name': 'Klipper',
+            'success': True,
+            'error': None,
+            'log': '$ make',
+            'checkout_path': '/home/pi/klipper',
+            'out_path': '/home/pi/klipper/out',
+            'artifacts': [],
+            'primary_artifact': None,
+            'flash_device': '',
+            'flash_method': '',
+        }
+
+    monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
+    monkeypatch.setattr(native_routes, 'build_flash_target', slow_build)
+
+    with socket_mod.socket() as sock:
+        sock.bind(('127.0.0.1', 0))
+        port = sock.getsockname()[1]
+
+    server = uvicorn.Server(uvicorn.Config(app, host='127.0.0.1', port=port, log_level='warning'))
+    server_thread = threading.Thread(target=server.run, daemon=True)
+    server_thread.start()
+
+    base_url = f'http://127.0.0.1:{port}'
+    deadline = time.monotonic() + 10
+    try:
+        with httpx.Client(base_url=base_url) as probe:
+            while True:
+                try:
+                    if probe.get('/api/native/status').status_code in (200, 501):
+                        break
+                except Exception:
+                    pass
+                if time.monotonic() > deadline:
+                    raise RuntimeError('test server did not become ready')
+                time.sleep(0.05)
+
+            results = {}
+
+            def run_build():
+                results['build'] = probe.post(
+                    '/api/native/flash/klipper/build',
+                    json={'checkout_path': '/home/pi/klipper'},
+                )
+
+            def run_status():
+                time.sleep(0.2)  # let the build start first
+                start = time.monotonic()
+                results['status'] = probe.get('/api/native/status')
+                results['status_elapsed'] = time.monotonic() - start
+
+            build_thread = threading.Thread(target=run_build)
+            status_thread = threading.Thread(target=run_status)
+            build_thread.start()
+            status_thread.start()
+            build_thread.join(timeout=10)
+            status_thread.join(timeout=10)
+
+            assert results['build'].status_code == 200
+            assert results['status'].status_code == 200
+            assert results['status_elapsed'] < 1.0, (
+                f"/status took {results['status_elapsed']:.2f}s while a build was running — event loop is blocked"
+            )
+    finally:
+        server.should_exit = True
+        server_thread.join(timeout=5)
 
 
 def test_preview_flash_target_route_forwards_assignments(monkeypatch):

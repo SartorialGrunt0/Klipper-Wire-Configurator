@@ -71,7 +71,7 @@ async def native_status():
 
 
 @router.get("/devices")
-async def list_devices():
+def list_devices():
     """List available serial, CAN, and UART devices."""
     if not is_native_platform():
         raise HTTPException(status_code=501, detail="Device detection is only available on the Raspberry Pi")
@@ -79,7 +79,7 @@ async def list_devices():
 
 
 @router.get("/canbus-uuids")
-async def get_canbus_uuids(interface: str = "can0"):
+def get_canbus_uuids(interface: str = "can0"):
     """Query CAN bus UUIDs on a given interface."""
     if not is_native_platform():
         raise HTTPException(status_code=501, detail="CAN bus query is only available on the Raspberry Pi")
@@ -126,7 +126,7 @@ async def get_config_files(path: str | None = None):
 
 
 @router.post("/config-files/read")
-async def read_config_files(data: dict):
+def read_config_files(data: dict):
     """Read and parse one or more config files from the Pi."""
     if not is_native_platform():
         raise HTTPException(status_code=501, detail="Only available on Pi")
@@ -222,7 +222,7 @@ class ApplyRequest(BaseModel):
 
 
 @router.post("/apply")
-async def apply_config(data: ApplyRequest):
+def apply_config(data: ApplyRequest):
     """Write config files back to the Pi filesystem."""
     if not is_native_platform():
         raise HTTPException(status_code=501, detail="Only available on Pi")
@@ -274,7 +274,7 @@ async def apply_config(data: ApplyRequest):
 
 
 @router.post("/klipper/firmware-restart")
-async def klipper_firmware_restart():
+def klipper_firmware_restart():
     """Send FIRMWARE_RESTART to Klipper via its Unix socket API."""
     if not is_native_platform():
         raise HTTPException(status_code=501, detail="Only available on Pi")
@@ -287,7 +287,7 @@ async def klipper_firmware_restart():
 
 
 @router.get("/klipper/status")
-async def klipper_status():
+def klipper_status():
     """Get current Klipper state and recent log errors when not ready."""
     if not is_native_platform():
         raise HTTPException(status_code=501, detail="Only available on Pi")
@@ -306,7 +306,7 @@ class KlippyLogExcerptRequest(BaseModel):
 
 
 @router.post("/klipper/log-excerpt")
-async def klipper_log_excerpt(data: KlippyLogExcerptRequest):
+def klipper_log_excerpt(data: KlippyLogExcerptRequest):
     """Get a targeted klippy.log excerpt for a restart failure analysis request."""
     if not is_native_platform():
         raise HTTPException(status_code=501, detail="Only available on Pi")
@@ -361,7 +361,7 @@ def _validated_target(target: str) -> str:
 
 
 @router.get("/flash/{target}")
-async def flash_target_state(target: str, checkout_path: str | None = None):
+def flash_target_state(target: str, checkout_path: str | None = None):
     """Return menuconfig fields and artifacts for a local flash target checkout."""
     if not is_native_platform():
         raise HTTPException(status_code=501, detail="Only available on Pi")
@@ -369,7 +369,7 @@ async def flash_target_state(target: str, checkout_path: str | None = None):
 
 
 @router.get("/flash/{target}/scan-devices")
-async def scan_flash_target_devices_api(
+def scan_flash_target_devices_api(
     target: str,
     checkout_path: str | None = None,
     force_refresh: bool = False,
@@ -387,7 +387,7 @@ async def scan_flash_target_devices_api(
 
 
 @router.post("/flash/{target}/preview")
-async def preview_flash_target(target: str, data: FlashTargetConfigUpdate):
+def preview_flash_target(target: str, data: FlashTargetConfigUpdate):
     """Preview menuconfig changes without persisting the target's .config file."""
     if not is_native_platform():
         raise HTTPException(status_code=501, detail="Only available on Pi")
@@ -396,7 +396,7 @@ async def preview_flash_target(target: str, data: FlashTargetConfigUpdate):
 
 
 @router.put("/flash/{target}/config")
-async def save_flash_target(target: str, data: FlashTargetConfigUpdate):
+def save_flash_target(target: str, data: FlashTargetConfigUpdate):
     """Persist menuconfig selections to the target's active .config file."""
     if not is_native_platform():
         raise HTTPException(status_code=501, detail="Only available on Pi")
@@ -405,7 +405,7 @@ async def save_flash_target(target: str, data: FlashTargetConfigUpdate):
 
 
 @router.post("/flash/{target}/build")
-async def build_flash_target_api(target: str, data: FlashTargetCommandRequest):
+def build_flash_target_api(target: str, data: FlashTargetCommandRequest):
     """Run `make olddefconfig` and `make` for a local flash target checkout."""
     if not is_native_platform():
         raise HTTPException(status_code=501, detail="Only available on Pi")
@@ -413,7 +413,7 @@ async def build_flash_target_api(target: str, data: FlashTargetCommandRequest):
 
 
 @router.post("/flash/{target}/flash")
-async def flash_target_api(target: str, data: FlashTargetCommandRequest):
+def flash_target_api(target: str, data: FlashTargetCommandRequest):
     """Run the selected flash method for a local flash target checkout."""
     if not is_native_platform():
         raise HTTPException(status_code=501, detail="Only available on Pi")
@@ -421,7 +421,7 @@ async def flash_target_api(target: str, data: FlashTargetCommandRequest):
 
 
 @router.get("/flash/{target}/artifacts/{filename}")
-async def download_flash_target_artifact(target: str, filename: str, checkout_path: str | None = None):
+def download_flash_target_artifact(target: str, filename: str, checkout_path: str | None = None):
     """Download a generated build artifact from a target's out directory."""
     if not is_native_platform():
         raise HTTPException(status_code=501, detail="Only available on Pi")
@@ -440,7 +440,7 @@ async def download_flash_target_artifact(target: str, filename: str, checkout_pa
 
 
 @router.delete("/flash/{target}/artifacts/{filename}")
-async def delete_saved_flash_target_artifact(target: str, filename: str, checkout_path: str | None = None):
+def delete_saved_flash_target_artifact(target: str, filename: str, checkout_path: str | None = None):
     """Delete a generated build artifact from a target's out directory."""
     if not is_native_platform():
         raise HTTPException(status_code=501, detail="Only available on Pi")
@@ -513,7 +513,7 @@ async def delete_saved_flash_profile_api(target: str, name: str):
 
 
 @router.get("/firmware")
-async def klipper_firmware_state(klipper_path: str | None = None):
+def klipper_firmware_state(klipper_path: str | None = None):
     """Return Klipper menuconfig options and current firmware artifacts."""
     if not is_native_platform():
         raise HTTPException(status_code=501, detail="Only available on Pi")
@@ -521,7 +521,7 @@ async def klipper_firmware_state(klipper_path: str | None = None):
 
 
 @router.put("/firmware")
-async def update_klipper_firmware_config(data: FirmwareConfigUpdate):
+def update_klipper_firmware_config(data: FirmwareConfigUpdate):
     """Persist menuconfig selections to Klipper's active .config file."""
     if not is_native_platform():
         raise HTTPException(status_code=501, detail="Only available on Pi")
@@ -530,7 +530,7 @@ async def update_klipper_firmware_config(data: FirmwareConfigUpdate):
 
 
 @router.post("/firmware/preview")
-async def preview_klipper_firmware_config(data: FirmwareConfigUpdate):
+def preview_klipper_firmware_config(data: FirmwareConfigUpdate):
     """Preview Klipper menuconfig changes without writing `.config`."""
     if not is_native_platform():
         raise HTTPException(status_code=501, detail="Only available on Pi")
@@ -539,7 +539,7 @@ async def preview_klipper_firmware_config(data: FirmwareConfigUpdate):
 
 
 @router.post("/firmware/build")
-async def build_klipper_firmware_api(data: FirmwareBuildRequest):
+def build_klipper_firmware_api(data: FirmwareBuildRequest):
     """Run Klipper's firmware build using the active local checkout."""
     if not is_native_platform():
         raise HTTPException(status_code=501, detail="Only available on Pi")
@@ -547,7 +547,7 @@ async def build_klipper_firmware_api(data: FirmwareBuildRequest):
 
 
 @router.post("/firmware/flash")
-async def flash_klipper_firmware_api(data: FlashTargetCommandRequest):
+def flash_klipper_firmware_api(data: FlashTargetCommandRequest):
     """Run the selected flash method in the active Klipper checkout."""
     if not is_native_platform():
         raise HTTPException(status_code=501, detail="Only available on Pi")
