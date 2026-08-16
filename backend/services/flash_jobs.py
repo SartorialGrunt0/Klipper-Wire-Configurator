@@ -41,11 +41,13 @@ class FlashJob:
         log_path: Path,
         flash_device: str = "",
         flash_method: str = "",
+        cleanup_commands: list[list[str]] | None = None,
     ) -> None:
         self.job_id = job_id
         self.target = target
         self.kind = kind
         self.commands = commands
+        self.cleanup_commands = cleanup_commands or []
         self.checkout_path = checkout_path
         self.log_path = log_path
         self.flash_device = flash_device
@@ -80,6 +82,7 @@ class FlashJobRunner:
         checkout_path: str,
         flash_device: str = "",
         flash_method: str = "",
+        cleanup_commands: list[list[str]] | None = None,
     ) -> str:
         """Start a job and return its id. Raises ValueError if the target is busy."""
         normalized = str(target).strip().lower()
@@ -108,6 +111,7 @@ class FlashJobRunner:
                 log_path=log_path,
                 flash_device=flash_device,
                 flash_method=flash_method,
+                cleanup_commands=cleanup_commands,
             )
             self._jobs[job_id] = job
             self._active_by_target[normalized] = job_id
@@ -158,11 +162,12 @@ class FlashJobRunner:
     # ── internals ────────────────────────────────────────────────
 
     def _run(self, job: FlashJob) -> None:
+        success, error = False, None
         try:
             for command in job.commands:
                 if self._is_cancelled(job):
-                    self._finish(job, False, "Cancelled.")
-                    return
+                    success, error = False, "Cancelled."
+                    break
                 self._append(job, f"$ {' '.join(command)}")
                 try:
                     process = subprocess.Popen(
@@ -175,8 +180,8 @@ class FlashJobRunner:
                         start_new_session=True,
                     )
                 except FileNotFoundError:
-                    self._finish(job, False, f"Command not found: {command[0]}")
-                    return
+                    success, error = False, f"Command not found: {command[0]}"
+                    break
                 with job.lock:
                     job.process = process
                     already_cancelled = job.cancelled
@@ -186,8 +191,8 @@ class FlashJobRunner:
                     # block forever waiting for output that never comes.
                     self._terminate(process)
                     process.wait()
-                    self._finish(job, False, "Cancelled.")
-                    return
+                    success, error = False, "Cancelled."
+                    break
 
                 timer = threading.Timer(self._command_timeout, self._timeout_process, args=(job, process))
                 timer.daemon = True
@@ -210,18 +215,52 @@ class FlashJobRunner:
                     cancelled = job.cancelled
 
                 if cancelled:
-                    self._finish(job, False, "Cancelled.")
-                    return
+                    success, error = False, "Cancelled."
+                    break
                 if timed_out:
-                    self._finish(job, False, f"{' '.join(command)} timed out.")
-                    return
+                    success, error = False, f"{' '.join(command)} timed out."
+                    break
                 if returncode != 0:
-                    self._finish(job, False, f"{' '.join(command)} failed with exit code {returncode}.")
-                    return
-            self._finish(job, True, None)
+                    success, error = False, f"{' '.join(command)} failed with exit code {returncode}."
+                    break
+            else:
+                success = True
         except Exception as exc:  # pragma: no cover - safety net for runaway jobs
             logger.exception("flash job %s crashed", job.job_id)
-            self._finish(job, False, f"Job crashed: {exc}")
+            success, error = False, f"Job crashed: {exc}"
+
+        # Cleanup commands (e.g. `systemctl start klipper`) always run after
+        # the main sequence, even on failure/cancel/timeout, so services the
+        # job stopped are guaranteed to come back.
+        self._run_cleanup(job)
+        self._finish(job, success, error)
+
+    def _run_cleanup(self, job: FlashJob) -> None:
+        if not job.cleanup_commands:
+            return
+        for command in job.cleanup_commands:
+            self._append(job, f"$ {' '.join(command)}")
+            try:
+                completed = subprocess.run(
+                    command,
+                    cwd=job.checkout_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    check=False,
+                )
+            except FileNotFoundError:
+                self._append(job, f"Cleanup command not found: {command[0]}")
+                continue
+            except subprocess.TimeoutExpired:
+                self._append(job, f"Cleanup command timed out: {' '.join(command)}")
+                continue
+            output = "\n".join(chunk for chunk in (completed.stdout, completed.stderr) if chunk)
+            if output:
+                for raw_line in output.splitlines():
+                    self._append(job, raw_line)
+            if completed.returncode != 0:
+                self._append(job, f"Cleanup command exited with code {completed.returncode}")
 
     def _is_cancelled(self, job: FlashJob) -> bool:
         with job.lock:

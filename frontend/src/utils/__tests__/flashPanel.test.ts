@@ -7,6 +7,7 @@ import {
   buildPanelAssignments,
   fieldRecord,
   flashMethodRecord,
+  flashOutcomeLabel,
   formatBytes,
   inferFlashMethodForDevice,
   isBusyStatus,
@@ -358,5 +359,22 @@ describe('PreviewEpoch', () => {
     epoch.beginMutation();
     expect(epoch.isStale(captured)).toBe(true);
     expect(epoch.isStale(capturedAfterFirst)).toBe(true);
+  });
+});
+
+describe('flashOutcomeLabel', () => {
+  it('maps running statuses to building/flashing regardless of result', () => {
+    expect(flashOutcomeLabel('building', null)).toBe('building');
+    expect(flashOutcomeLabel('flashing', { success: true })).toBe('flashing');
+  });
+
+  it('maps a final command result to succeeded/failed', () => {
+    expect(flashOutcomeLabel('idle', { success: true })).toBe('succeeded');
+    expect(flashOutcomeLabel('idle', { success: false })).toBe('failed');
+  });
+
+  it('defaults to idle with no result', () => {
+    expect(flashOutcomeLabel('idle', null)).toBe('idle');
+    expect(flashOutcomeLabel('previewing', null)).toBe('idle');
   });
 });

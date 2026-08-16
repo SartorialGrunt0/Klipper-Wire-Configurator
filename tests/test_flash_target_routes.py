@@ -23,7 +23,7 @@ class _FakeJobRunner:
         self.statuses: dict[str, dict] = {}
         self.cancelled_ids: list[str] = []
 
-    def start(self, target, kind, commands, checkout_path, flash_device="", flash_method=""):
+    def start(self, target, kind, commands, checkout_path, flash_device="", flash_method="", cleanup_commands=None):
         self.started.append({
             'target': target,
             'kind': kind,
@@ -31,6 +31,7 @@ class _FakeJobRunner:
             'checkout_path': checkout_path,
             'flash_device': flash_device,
             'flash_method': flash_method,
+            'cleanup_commands': cleanup_commands,
         })
         job_id = f'job-{len(self.started)}'
         self.statuses[job_id] = {
@@ -277,6 +278,7 @@ def test_flash_target_route_starts_job_and_forwards_device(monkeypatch):
         'checkout_path': '/home/pi/katapult',
         'flash_device': '0483:df11',
         'flash_method': 'dfu_util',
+        'cleanup_commands': None,
     }]
 
 

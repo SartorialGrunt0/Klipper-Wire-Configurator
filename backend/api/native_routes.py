@@ -462,6 +462,7 @@ def flash_target_api(target: str, data: FlashTargetCommandRequest):
         planned["checkout_path"],
         planned["flash_device"],
         planned["flash_method"],
+        planned.get("cleanup_commands"),
     )
     return {"job_id": job_id, "running": True, "target": normalized, "kind": "flash"}
 

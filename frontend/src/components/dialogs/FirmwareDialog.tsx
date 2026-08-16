@@ -24,6 +24,7 @@ import {
   fieldAssignments,
   fieldRecord,
   flashMethodRecord,
+  flashOutcomeLabel,
   formatBytes,
   formatModified,
   groupedFields,
@@ -866,6 +867,18 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
       return;
     }
 
+    const resolvedDevice = panel.flashDevice.trim() || selectedMethodState.default_device || 'the auto-detected device';
+    const confirmed = window.confirm(
+      `You are about to flash ${resolvedDevice} using ${selectedMethodState.label}.\n\n`
+      + 'The following will occur:\n'
+      + '- Klipper will be stopped during the flash and restarted afterward (when the service is running).\n'
+      + `- ${selectedMethodState.description}\n\n`
+      + 'Do you want to proceed?',
+    );
+    if (!confirmed) {
+      return;
+    }
+
     if (panel.isDirty) {
       const saved = await persistConfig(target, false);
       if (!saved) {
@@ -1378,6 +1391,12 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
   const flashJobActive = panel.status === 'flashing' && panel.activeJobId !== null;
   const buildLabel = buildJobActive ? `Cancel${buildDots}` : (panel.status === 'building' ? `Build${buildDots}` : 'Build');
   const flashLabel = flashJobActive ? `Cancel${flashDots}` : (panel.status === 'flashing' ? `Flash${flashDots}` : 'Flash');
+  const flashStatusLabel = flashOutcomeLabel(panel.status, panel.commandResult);
+  const flashStatusTone =
+    flashStatusLabel === 'failed' ? 'text-red-400'
+    : flashStatusLabel === 'succeeded' ? 'text-emerald-400'
+    : flashStatusLabel === 'idle' ? 'text-[var(--color-text-secondary)]'
+    : 'text-[var(--color-accent)]';
   const saveLabel = panel.status === 'saving' ? 'Saving...' : 'Save';
   const flashMethodCandidates = panel.flashState?.flash_method_candidates || [];
   const selectedFlashMethod = panel.flashMethod || panel.flashState?.default_flash_method || '';
@@ -1634,6 +1653,12 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
             </div>
 
             <div className="ml-auto flex shrink-0 flex-wrap items-center gap-2">
+              <span
+                className={`shrink-0 rounded-full border border-[var(--color-bg-tertiary)] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] ${flashStatusTone}`}
+                title="Current build/flash state"
+              >
+                {flashStatusLabel}
+              </span>
             <button
                 onClick={() => void openLoadDialog(activeTarget)}
                 disabled={actionBusy}

@@ -17,7 +17,14 @@ from pathlib import Path
 from typing import Any
 
 from services.flash_log import logger
-from services.native_services import load_settings, save_settings, list_uart_devices, list_usb_serial_devices
+from services.native_services import (
+    klipper_service_start_command,
+    klipper_service_stop_command,
+    load_settings,
+    save_settings,
+    list_uart_devices,
+    list_usb_serial_devices,
+)
 
 _SUPPORTED_TARGETS = {"klipper", "katapult"}
 
@@ -1751,10 +1758,24 @@ def plan_flash_flash_job(
             flash_command,
         ]
 
+    # Stop Klipper before flashing (it holds the USB-ACM serial / CAN node the
+    # flash tools talk to) and restart it afterwards. systemctl stop is only
+    # issued when the service is actually active, so hosts without a running
+    # Klipper (e.g. the dev Pi) skip orchestration entirely; the restart is a
+    # cleanup command, guaranteed to run even when the flash fails or cancels.
+    klipper_stop = klipper_service_stop_command()
+    cleanup_commands: list[list[str]] = []
+    if klipper_stop is not None:
+        commands.insert(0, klipper_stop)
+        klipper_start = klipper_service_start_command()
+        if klipper_start is not None:
+            cleanup_commands.append(klipper_start)
+
     return {
         "immediate": False,
         "result": None,
         "commands": commands,
+        "cleanup_commands": cleanup_commands,
         "checkout_path": str(resolved_path),
         "flash_device": resolved_device,
         "flash_method": resolved_method,

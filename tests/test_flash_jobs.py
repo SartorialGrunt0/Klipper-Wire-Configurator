@@ -143,3 +143,77 @@ def test_sequential_commands_run_in_order(tmp_path):
     tail = status['log_tail']
     assert tail.index('first') < tail.index('second')
     assert status['raw_result']['success'] is True
+
+
+def test_cleanup_commands_run_after_success(tmp_path):
+    runner = FlashJobRunner(log_dir=tmp_path / 'logs')
+
+    job_id = runner.start(
+        'klipper',
+        'flash',
+        [_py(['print("main")'])],
+        str(tmp_path),
+        cleanup_commands=[_py(['print("cleanup")'])],
+    )
+
+    assert _wait_until(lambda: not runner.status(job_id)['running'])
+    status = runner.status(job_id)
+    tail = status['log_tail']
+    assert tail.index('main') < tail.index('cleanup')
+    assert status['raw_result']['success'] is True
+    assert 'cleanup' in status['raw_result']['log']
+
+
+def test_cleanup_commands_run_after_failure(tmp_path):
+    runner = FlashJobRunner(log_dir=tmp_path / 'logs')
+
+    job_id = runner.start(
+        'klipper',
+        'flash',
+        [_py(['import sys; print("boom"); sys.exit(3)'])],
+        str(tmp_path),
+        cleanup_commands=[_py(['print("cleanup")'])],
+    )
+
+    assert _wait_until(lambda: not runner.status(job_id)['running'])
+    status = runner.status(job_id)
+    assert status['raw_result']['success'] is False
+    assert 'cleanup' in status['raw_result']['log']
+
+
+def test_cleanup_commands_run_after_cancel(tmp_path):
+    runner = FlashJobRunner(log_dir=tmp_path / 'logs')
+
+    job_id = runner.start(
+        'klipper',
+        'flash',
+        [_py([_SLEEP_SCRIPT.format(seconds=5)])],
+        str(tmp_path),
+        cleanup_commands=[_py(['print("cleanup")'])],
+    )
+
+    assert _wait_until(lambda: runner.status(job_id)['running'])
+    runner.cancel(job_id)
+
+    assert _wait_until(lambda: not runner.status(job_id)['running'])
+    status = runner.status(job_id)
+    assert status['raw_result']['success'] is False
+    assert 'Cancelled.' in status['raw_result']['error']
+    assert 'cleanup' in status['raw_result']['log']
+
+
+def test_cleanup_failure_does_not_flip_main_result(tmp_path):
+    runner = FlashJobRunner(log_dir=tmp_path / 'logs')
+
+    job_id = runner.start(
+        'klipper',
+        'flash',
+        [_py(['print("main")'])],
+        str(tmp_path),
+        cleanup_commands=[_py(['import sys; sys.exit(9)'])],
+    )
+
+    assert _wait_until(lambda: not runner.status(job_id)['running'])
+    status = runner.status(job_id)
+    assert status['raw_result']['success'] is True
+    assert 'Cleanup command exited with code 9' in status['raw_result']['log']

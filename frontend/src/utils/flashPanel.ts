@@ -265,6 +265,23 @@ export function isBusyStatus(status: string): boolean {
   return status === 'saving' || status === 'building' || status === 'flashing';
 }
 
+/** Terminal flash/build outcome label derived from the last command result. */
+export function flashOutcomeLabel(
+  status: string,
+  commandResult: { success: boolean } | null,
+): 'idle' | 'building' | 'flashing' | 'failed' | 'succeeded' {
+  if (status === 'building') {
+    return 'building';
+  }
+  if (status === 'flashing') {
+    return 'flashing';
+  }
+  if (commandResult !== null) {
+    return commandResult.success ? 'succeeded' : 'failed';
+  }
+  return 'idle';
+}
+
 /**
  * Orders preview responses against mutations (save/build/flash/checkout
  * changes). A preview captures the current epoch when it starts; if any

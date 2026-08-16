@@ -15,9 +15,12 @@ from services.flash_targets import (  # noqa: E402
     flash_flash_target,
     list_flash_target_artifacts,
     pick_primary_flash_target_artifact,
+    plan_flash_flash_job,
     save_flash_target_config,
     scan_flash_target_devices,
 )
+
+import services.flash_targets as flash_targets  # noqa: E402
 
 
 class _FakeSymbol:
@@ -707,3 +710,60 @@ def test_dfu_util_make_resolution_still_preferred(monkeypatch, tmp_path):
     assert command == ['dfu-util', '-a', '0', '-R', '-D', str(artifact)]
     assert error is None
     assert ['dfu-util', '-l'] not in calls
+
+
+def test_plan_flash_flash_job_wraps_commands_with_klipper_service(monkeypatch, tmp_path):
+    checkout = tmp_path / 'klipper'
+    checkout.mkdir()
+    (checkout / '.config').write_text('CONFIG_MACH_STM32=y\n', encoding='utf-8')
+
+    monkeypatch.setattr(flash_targets, 'resolve_flash_target_checkout', lambda target, path: (checkout, None))
+    monkeypatch.setattr(flash_targets, 'get_flash_target_state', lambda target, path: {
+        'flash_supported': True,
+        'flash_reason': None,
+        'flash_method_candidates': [{
+            'value': _FLASH_METHOD_MAKE_FLASH,
+            'label': 'make flash',
+            'supported': True,
+            'device_required': False,
+        }],
+        'flash_device_candidates': [],
+        'default_flash_method': _FLASH_METHOD_MAKE_FLASH,
+        'default_flash_device': '',
+    })
+    monkeypatch.setattr(flash_targets, 'klipper_service_stop_command', lambda: ['sudo', '-n', 'systemctl', 'stop', 'klipper'])
+    monkeypatch.setattr(flash_targets, 'klipper_service_start_command', lambda: ['sudo', '-n', 'systemctl', 'start', 'klipper'])
+
+    planned = plan_flash_flash_job('klipper', str(checkout))
+
+    assert planned['immediate'] is False
+    assert planned['commands'][0] == ['sudo', '-n', 'systemctl', 'stop', 'klipper']
+    assert planned['cleanup_commands'] == [['sudo', '-n', 'systemctl', 'start', 'klipper']]
+
+
+def test_plan_flash_flash_job_skips_klipper_service_when_inactive(monkeypatch, tmp_path):
+    checkout = tmp_path / 'klipper'
+    checkout.mkdir()
+    (checkout / '.config').write_text('CONFIG_MACH_STM32=y\n', encoding='utf-8')
+
+    monkeypatch.setattr(flash_targets, 'resolve_flash_target_checkout', lambda target, path: (checkout, None))
+    monkeypatch.setattr(flash_targets, 'get_flash_target_state', lambda target, path: {
+        'flash_supported': True,
+        'flash_reason': None,
+        'flash_method_candidates': [{
+            'value': _FLASH_METHOD_MAKE_FLASH,
+            'label': 'make flash',
+            'supported': True,
+            'device_required': False,
+        }],
+        'flash_device_candidates': [],
+        'default_flash_method': _FLASH_METHOD_MAKE_FLASH,
+        'default_flash_device': '',
+    })
+    monkeypatch.setattr(flash_targets, 'klipper_service_stop_command', lambda: None)
+
+    planned = plan_flash_flash_job('klipper', str(checkout))
+
+    assert planned['immediate'] is False
+    assert planned['commands'][0][0] == 'make'
+    assert planned['cleanup_commands'] == []
