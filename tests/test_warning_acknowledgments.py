@@ -553,6 +553,44 @@ def test_unknown_section_warning_can_be_acknowledged():
             del os.environ['KWC_LAYOUT_DIR']
 
 
+def test_unknown_section_warning_with_multiline_param_can_be_acknowledged():
+    """Regression: a section with a multi-line (indented continuation) param
+    value, e.g. moonraker's `[update_manager moonraker-obico]`, could never be
+    acknowledged because canonicalize re-indented continuation lines and the
+    stored snippet never matched the live canonical form.
+    """
+    with tempfile.TemporaryDirectory() as temp_dir:
+        os.environ['KWC_LAYOUT_DIR'] = temp_dir
+        try:
+            config = parse_config(
+                '[update_manager moonraker-obico]\n'
+                'type: git_repo\n'
+                'path: /home/clifgall/moonraker-obico\n'
+                'origin: https://github.com/TheSpaghettiDetective/moonraker-obico.git\n'
+                'env: /home/clifgall/moonraker-obico/../moonraker-obico-env/bin/python\n'
+                'requirements: requirements.txt\n'
+                'install_script: install.sh\n'
+                'managed_services:\n'
+                '  moonraker-obico\n',
+                'moonraker.conf',
+            )
+
+            before = validate_config(config)
+            assert before.has_warnings
+            assert any(
+                error.severity == 'warning'
+                and "Unknown section type 'update_manager moonraker-obico'" in error.message
+                for error in before.errors
+            )
+
+            acknowledge_warning_for_section(config.sections[0])
+
+            after = validate_config(config)
+            assert not after.has_warnings
+        finally:
+            del os.environ['KWC_LAYOUT_DIR']
+
+
 def test_duplicate_exact_stepper_section_across_active_files_is_warning():
     results = _validate_project({
         'printer.cfg': (
