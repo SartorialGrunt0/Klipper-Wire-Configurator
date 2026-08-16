@@ -76,13 +76,22 @@ Extra note: on a real Klipper checkout `make -n flash` prints a `flash_usb.py` i
 Klipper's `Bootloader_Entry.md` warns that on some boards (e.g., Octopus Pro v1) entering DFU mode "can cause undesired actions (such as powering the heater while in DFU mode). It is recommended to disconnect heaters." Voron's Octopus doc is blunter: "Do not leave HE0 or HE1 connected during initial flashing. There have been reports of Octopus boards turning on all heaters and fans as soon as you power up the board." Surface this warning for any STM32 DFU flash; the Octopus case is the concrete documented example. [VERIFY Spider-specific behavior on the Trident]
 
 ### 5. Spider-specific facts (Voron docs + Fysetc wiki)
-- **MCU is STM32F446** (not F407 — earlier notes were wrong). Voron docs: Processor = STM32F446, Bootloader offset = **32KiB for boards after 2021/06/23 (all V2.2), 64KiB for older**, Clock = 12 MHz crystal, Comm = USB on PA11/PA12. The bootloader offset directly sets `CONFIG_FLASH_APPLICATION_ADDRESS` → the `:leave` address for dfu-util must match (0x08008000 for 32KiB, 0x08010000 for 64KiB). [VERIFY]
+- **There are multiple Spider board versions — the MCU/flash details vary.** Known versions: Spider V2.2, V2.3, V3.0 (and the original Spider); Fysetc's product pages list the V3.0 as STM32F446. The Voron docs' settings (STM32F446, 32KiB/64KiB bootloader offset, 12 MHz crystal, USB PA11/PA12) are a reference for a *specific* Spider revision — KWC must not hardcode one MCU/bootloader-offset assumption for "Spider". The user's actual menuconfig (the parsed kconf) is the ground truth for `CONFIG_FLASH_APPLICATION_ADDRESS` and `CONFIG_MCU` — the `:leave` address must come from there, not from a board-name lookup. [VERIFY which Spider revision Clifford has]
 - Voron recommends USB (USB-A to USB-C between Spider and Pi); UART is possible but needs Fysetc config changes.
 - **DFU entry (new install):** power off Spider → install jumper **BT0 to 3.3V** → connect USB → power on → `lsusb` to find DFU VID:PID → `make flash FLASH_DEVICE=<id>` → power off → **remove the BT0 jumper** → power on. The jumper removal step matters: leaving BT0 high keeps the MCU in the ROM bootloader (matches the `:leave` finding — the app can't boot while BOOT0/BT0 is asserted).
 - **SD-card install (Fysetc's documented primary method):** rename `klipper.bin` → `firmware.bin` (must be renamed!), FAT32 (NOT exFAT), power down, insert card, power on. Post-flash confirmation: `ls /dev/serial/by-id` shows `usb-Klipper_stm32f446xx_...`.
 - **Update flow (already running Klipper):** `sudo service klipper stop` → `make flash FLASH_DEVICE=<by-id serial>` → `sudo service klipper start` — no BT0 jumper needed (DTR trick), but klipper must be stopped.
 - Klipper will not auto-update MCU firmware when the Pi-side Klipper updates — the docs explicitly call out that updates are manual. KWC's "flash" button is that manual step.
 - Fysetc ships an SD-card bootloader (32k/64k variants); BOOT0/RESET pins exist and *can* be wired to the Pi's GPIO "through the switch (disconnected by default)". Whether Clifford's Spider DFU entry is automatable is an open question (below).
+
+### 5b. DFU-mode flashing pattern (Voron Klipper_Expander guide — generic STM32 reference)
+Voron's own DFU flashing flow for the Klipper Expander (STM32F042) documents the reusable pattern:
+1. Install the boot jumper and reset the board → DFU mode.
+2. `lsusb` → confirm "STM32 in DFU mode"; `dfu-util --list` → note `[xxxx:yyyy]`.
+3. `make menuconfig` (do not configure `USB ids`).
+4. `make clean` then `make flash FLASH_DEVICE=xxxx:yyyy`.
+5. **dfu-util may print an error after a successful flash** — "caused by the controller immediately running the uploaded code and no longer appearing as a DFU device. This is not an issue, as long as the board reports a Klipper serial name." This is directly relevant to KWC's flash-result handling: a non-zero dfu-util exit after a successful download is expected behavior, not a failure — detect it by re-checking the serial/by-id for the Klipper device rather than trusting dfu-util's exit code.
+6. Remove the boot jumper, press reset, confirm `/dev/serial/by-id/usb-Klipper_...`, and put that serial in `[mcu ...]`.
 
 ### 6. RP2040 (PIS/Hotkey)
 `make flash` uses the USB bootrom via `picoboot` (`2e8a:0003`), or manual BOOTSEL + copy `klipper.uf2`. The MCU resets into the app automatically — no `:leave` equivalent, no power-cycle requirement.
@@ -97,11 +106,12 @@ The README's deployer section warns: "Overwriting your existing bootloader with 
 
 ## Open questions for Clifford
 
-1. How do you actually flash the Spider today — SD card (Fysetc bootloader), DFU via BOOT0+RESET, or Katapult? Decides which method paths are primary for Trident validation.
-2. Is the Spider's BOOT0/RESET switch wired to the Pi's GPIO? If yes, DFU entry could be automated.
-3. Does the EBBCan toolhead run Katapult, and is the `canbus_uuid` constant across your reflashes?
-4. OK to surface the "disconnect heaters before DFU" warning for the Spider?
-5. Apply the dfu-util `:leave` flag correction now (one line + test) or bundle with the Phase 7 feature decision?
+1. Which Spider revision is on the Trident (V2.2 / V2.3 / V3.0 / original)? Determines the MCU (likely STM32F446 for V2.2+/V3.0) and bootloader offset — but the parsed kconf is the real ground truth for the `:leave` address either way.
+2. How do you actually flash the Spider today — SD card (Fysetc bootloader), DFU via BT0/BOOT0 jumper, or Katapult? Decides which method paths are primary for Trident validation.
+3. Is the Spider's BOOT0/RESET switch wired to the Pi's GPIO? If yes, DFU entry could be automated.
+4. Does the EBBCan toolhead run Katapult, and is the `canbus_uuid` constant across your reflashes?
+5. OK to surface the "disconnect heaters before DFU" warning for the Spider?
+6. Apply the dfu-util `:leave` flag correction now (one line + test) or bundle with the Phase 7 feature decision?
 
 ## Sources
 
@@ -115,8 +125,9 @@ The README's deployer section warns: "Overwriting your existing bootloader with 
 - Katapult README (Arksine/katapult) — upload flow requires `klipper` service stopped; flashtool auto bootloader entry for plain USB/CAN devices; USB-to-CAN-bridge + UART devices cannot be auto-detected (need `-r` first, then `dfu-util`/`flashtool.py -d` upload); `-q` is single-node-only (multi-node query risks BUS-OFF); deployer brick warning; `-r` prints "Flash success" but exits without uploading
 - katapult issue #114 (EBB42) + Esoterical CANBus guide — stop Klipper to release CAN bus device before flashing
 - **Esoterical CANBus guide** (canbus.esoterical.online) — canonical update flows: `toolhead_klipper_updating.html`, `mainboard_klipper_updating.html`, `katapult_updating.html`, `troubleshooting/no_uuid.html`. Confirms: klipper stop is a required step for CAN flashes; `flashtool.py -r` is the bootloader-entry command (prints "Flash success" but flashes nothing); double-press RESET is the manual fallback; UUID grab/query semantics; BUS-OFF recovery; `usb-katapult-*` vs Klipper-mode serial paths
-- Fysetc Spider wiki + FYSETC-SPIDER repo `bootloader/README.md` — SD-card bootloader, BOOT0/RESET switch wiring
+- Fysetc Spider wiki + FYSETC-SPIDER repo `bootloader/README.md` — SD-card bootloader, BOOT0/RESET switch wiring; multiple Spider revisions (V2.2/V2.3/V3.0), so MCU/offset must come from the parsed kconf, not a board-name lookup
 - **Voron Design build docs** (docs.vorondesign.com/build/software/) — `spider_klipper.html`, `skrPico_klipper.html`, `octopus_klipper.html`: per-board menuconfig settings (Spider = STM32F446, 32KiB/64KiB bootloader offset, 12 MHz, USB PA11/PA12); DFU new-install = BT0 jumper + power cycle + jumper removal; SD-card = rename to `firmware.bin` + FAT32; update flow = `sudo service klipper stop` → `make flash FLASH_DEVICE=<serial by-id>` → `sudo service klipper start` (all three boards); Octopus heater warning; post-flash confirm via `ls /dev/serial/by-id` showing `usb-Klipper_stm32f446xx_...` / `usb-Klipper_rp2040_...`
+- **Voron Klipper_Expander guide** (VoronHardware `Klipper_Expander/Documentation/Setup_and_Flashing_Guide.md`) — generic STM32 DFU pattern: boot jumper + reset → DFU; `lsusb`/`dfu-util --list`; `make flash FLASH_DEVICE=xxxx:yyyy`; **dfu-util error after successful flash is expected** (MCU runs the code and leaves DFU) — verify via serial/by-id, not exit code; remove jumper + reset; copy `usb-Klipper_...` serial into `[mcu ...]`
 - Klipper discourse 13151 — "no UUID after flashing klipper" root causes
 
 ## Verification checklist (real Trident — Clifford must accept the risk first)
@@ -124,7 +135,7 @@ The README's deployer section warns: "Overwriting your existing bootloader with 
 Per method: record pre-flash identity → flash → confirm MCU state → recommended post-step → `query_klipper_status` green.
 
 - [ ] `make flash` DFU path: `dfu-util` command shown by `make -n flash`; confirm `:leave` present with the correct app address (0x08008000 for 32KiB bootloader); confirm app boots after flash (no manual power cycle)
-- [ ] Direct dfu-util with corrected flags: exit DFU, app boots, `FIRMWARE_RESTART` reconnects
+- [ ] Direct dfu-util with corrected flags: exit DFU, app boots, `FIRMWARE_RESTART` reconnects; a dfu-util non-zero exit right after "File downloaded successfully" is expected (Klipper_Expander guide) — confirm via serial/by-id instead
 - [ ] Spider DFU entry: BT0 jumper + power cycle; jumper removal required for app boot
 - [ ] flashtool CAN: klipper stopped first; `-r` bootloader entry + `-q` verify; UUID unchanged across flash; `service klipper start` + `FIRMWARE_RESTART` suffices
 - [ ] flashtool serial: by-id path switches to `usb-katapult-*` during flash and returns after; klipper stopped first
