@@ -85,27 +85,6 @@ interface FlashPanelState {
 }
 
 const TARGETS: FlashTargetKey[] = ['klipper', 'katapult'];
-const CHECKOUT_PATHS_STORAGE_KEY = 'klipper-wire-firmware-checkout-paths';
-
-function loadPersistedCheckoutPaths(): Record<FlashTargetKey, string> {
-  try {
-    const raw = localStorage.getItem(CHECKOUT_PATHS_STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as Partial<Record<FlashTargetKey, string>>;
-      return {
-        klipper: typeof parsed.klipper === 'string' ? parsed.klipper : '',
-        katapult: typeof parsed.katapult === 'string' ? parsed.katapult : '',
-      };
-    }
-  } catch { /* ignore */ }
-  return { klipper: '', katapult: '' };
-}
-
-function savePersistedCheckoutPaths(paths: Record<FlashTargetKey, string>): void {
-  try {
-    localStorage.setItem(CHECKOUT_PATHS_STORAGE_KEY, JSON.stringify(paths));
-  } catch { /* ignore */ }
-}
 
 const FLASH_WORKFLOW_HELP = 'Changes update the visible menuconfig fields immediately. Use the settings gear to override the Klipper and Katapult checkout paths and refresh detected flash devices. Save writes the active .config file and then lets you store the current flash setup under a unique host-side profile name. Load opens the active config or any saved host-side flash profile for the current target. Flash auto-matches the selected device to a supported method when possible, while still letting you override the method manually.';
 const ARTIFACTS_HELP = 'Generated files stay on the SBC under the active out directory. You can download them directly here or delete stale artifacts you no longer need.';
@@ -476,13 +455,10 @@ function FlashDeviceField({
 
 export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
   const [activeTarget, setActiveTarget] = useState<FlashTargetKey>('klipper');
-  const [panels, setPanels] = useState<Record<FlashTargetKey, FlashPanelState>>(() => {
-    const persistedPaths = loadPersistedCheckoutPaths();
-    return {
-      klipper: createEmptyPanelState('klipper', persistedPaths.klipper),
-      katapult: createEmptyPanelState('katapult', persistedPaths.katapult),
-    };
-  });
+  const [panels, setPanels] = useState<Record<FlashTargetKey, FlashPanelState>>(() => ({
+    klipper: createEmptyPanelState('klipper'),
+    katapult: createEmptyPanelState('katapult'),
+  }));
   const [profileDialog, setProfileDialog] = useState<FlashProfileDialogState | null>(null);
   const [showTargetSettings, setShowTargetSettings] = useState(false);
   const panelsRef = useRef(panels);
@@ -531,7 +507,6 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
       klipper: panels.klipper.checkoutPath.trim(),
       katapult: panels.katapult.checkoutPath.trim(),
     };
-    savePersistedCheckoutPaths(requestedPaths);
     setShowTargetSettings(false);
     await Promise.all(TARGETS.map((target) => loadState(target, requestedPaths[target] || undefined)));
     // Kick off a fresh device scan now that checkout paths may have changed.
