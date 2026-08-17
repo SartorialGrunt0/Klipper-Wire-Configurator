@@ -162,7 +162,6 @@ install_moonraker_updater() {
     write_file_elevated "$include_file" "$content" || return 0
 
     if ! grep -q '^\[include klipper-wire-configurator-update\.cfg\]' "$moonraker_conf"; then
-        append_line_elevated "$moonraker_conf" "" || true
         append_line_elevated "$moonraker_conf" "[include klipper-wire-configurator-update.cfg]" || true
     fi
     return 0
@@ -176,7 +175,11 @@ remove_moonraker_updater() {
     moonraker_conf="$config_dir/moonraker.conf"
     include_file="$config_dir/klipper-wire-configurator-update.cfg"
 
-    rm -f "$include_file" 2>/dev/null || true
+    if [ -e "$include_file" ]; then
+        if ! rm -f "$include_file" 2>/dev/null; then
+            sudo rm -f "$include_file" 2>/dev/null || true
+        fi
+    fi
     if [ -f "$moonraker_conf" ]; then
         if ! sed -i '/^\[include klipper-wire-configurator-update\.cfg\]$/d' "$moonraker_conf" 2>/dev/null; then
             sudo sed -i '/^\[include klipper-wire-configurator-update\.cfg\]$/d' "$moonraker_conf" 2>/dev/null || true
@@ -192,15 +195,22 @@ edit_mainsail_navi() {
     local action="$1"  # add | remove
     local theme_dir navi_path kwc_url py_script
     theme_dir="$(resolve_mainsail_theme_dir)" || return 0
-    if ! mkdir -p "$theme_dir" 2>/dev/null; then
-        sudo mkdir -p "$theme_dir" 2>/dev/null || return 0
-    fi
     navi_path="$theme_dir/navi.json"
     kwc_url="http://${IP_ADDR:-localhost}:${KWC_PORT}"
+
+    # Nothing to clean if the navi file was never written.
+    if [ "$action" = "remove" ] && [ ! -f "$navi_path" ]; then
+        return 0
+    fi
+    # Only create the theme dir when adding — remove must not leave one behind.
+    if [ "$action" = "add" ] && ! mkdir -p "$theme_dir" 2>/dev/null; then
+        sudo mkdir -p "$theme_dir" 2>/dev/null || return 0
+    fi
 
     py_script="$(mktemp)"
     cat > "$py_script" <<'PYEOF'
 import json
+import os
 import sys
 
 action, path, url = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -217,6 +227,21 @@ entries = [
     e for e in entries
     if not (isinstance(e, dict) and e.get("title") == "KWC")
 ]
+
+if action == "remove":
+    # Delete the file when the KWC entry was the only custom entry; keep it
+    # (minus KWC) when the user has other custom navigation entries.
+    if entries:
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(entries, fh, indent=2)
+            fh.write("\n")
+    else:
+        try:
+            os.remove(path)
+        except OSError:
+            # Signal failure so the caller retries under sudo.
+            sys.exit(1)
+    sys.exit(0)
 
 if action == "add":
     # KWC favicon mark (frontend/public/favicon.svg) converted to a single
