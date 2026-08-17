@@ -136,13 +136,26 @@ append_line_elevated() {
     return 1
 }
 
+# Best-effort: restart Moonraker so update_manager picks up config changes.
+# Only restarts when the unit exists and is active; never aborts the install.
+restart_moonraker() {
+    if systemctl list-unit-files moonraker.service > /dev/null 2>&1 && \
+       systemctl is-active --quiet moonraker; then
+        if sudo systemctl restart moonraker 2>/dev/null; then
+            info "Moonraker restarted to pick up update_manager changes."
+        else
+            warn "Could not restart moonraker automatically — restart it manually (systemctl restart moonraker) for update_manager changes to take effect."
+        fi
+    fi
+}
+
 # Add KWC to Moonraker's update manager so updates show up in Mainsail /
 # Fluidd. Writes a dedicated include file (same pattern as obico's
 # moonraker-obico-update.cfg) and adds a single [include] line to
 # moonraker.conf — the user's other sections are left untouched. Best-effort:
 # failures warn and return 0 so the install never aborts over this.
 install_moonraker_updater() {
-    local config_dir moonraker_conf include_file content
+    local config_dir moonraker_conf include_file content changed=0
     config_dir="$(resolve_moonraker_config_dir)" || return 0
     moonraker_conf="$config_dir/moonraker.conf"
     [ -f "$moonraker_conf" ] || return 0
@@ -166,10 +179,18 @@ install_moonraker_updater() {
         echo "info_tags:"
         printf '\tdesc=Klipper Wire Configurator\n'
     )"
-    write_file_elevated "$include_file" "$content" || return 0
+    # Idempotent: only rewrite + restart when the include file differs.
+    if [ ! -f "$include_file" ] || ! cmp -s "$include_file" <(printf '%s' "$content") 2>/dev/null; then
+        write_file_elevated "$include_file" "$content" || return 0
+        changed=1
+    fi
 
     if ! grep -q '^\[include klipper-wire-configurator-update\.cfg\]' "$moonraker_conf"; then
         append_line_elevated "$moonraker_conf" "[include klipper-wire-configurator-update.cfg]" || true
+        changed=1
+    fi
+    if [ "$changed" -eq 1 ]; then
+        restart_moonraker
     fi
     return 0
 }
@@ -177,7 +198,7 @@ install_moonraker_updater() {
 # Remove the KWC update_manager include (file + include line) from the
 # Moonraker config directory. Best-effort.
 remove_moonraker_updater() {
-    local config_dir moonraker_conf include_file
+    local config_dir moonraker_conf include_file changed=0
     config_dir="$(resolve_moonraker_config_dir)" || return 0
     moonraker_conf="$config_dir/moonraker.conf"
     include_file="$config_dir/klipper-wire-configurator-update.cfg"
@@ -186,11 +207,22 @@ remove_moonraker_updater() {
         if ! rm -f "$include_file" 2>/dev/null; then
             sudo rm -f "$include_file" 2>/dev/null || true
         fi
+        changed=1
     fi
     if [ -f "$moonraker_conf" ]; then
+        local had_line=0
+        if grep -q '^\[include klipper-wire-configurator-update\.cfg\]' "$moonraker_conf"; then
+            had_line=1
+        fi
         if ! sed -i '/^\[include klipper-wire-configurator-update\.cfg\]$/d' "$moonraker_conf" 2>/dev/null; then
             sudo sed -i '/^\[include klipper-wire-configurator-update\.cfg\]$/d' "$moonraker_conf" 2>/dev/null || true
         fi
+        if [ "$had_line" -eq 1 ]; then
+            changed=1
+        fi
+    fi
+    if [ "$changed" -eq 1 ]; then
+        restart_moonraker
     fi
     return 0
 }
@@ -276,12 +308,15 @@ if action == "add":
     # KWC favicon mark (frontend/public/favicon.svg) converted to a single
     # filled SVG path: the 4-spoke asterisk + tip dots, background square
     # dropped (nav icons render monochrome with the sidebar text color).
+    # Coordinates shifted (-2,-4) from the favicon so the whole mark sits
+    # inside the 24x24 viewBox with margin — the original touched the right
+    # edge and overflowed the bottom, clipping the tip dots.
     entries.append({
         "title": "KWC",
         "href": url,
         "target": "_blank",
         "position": 95,
-        "icon": "M8 17L24 17A1 1 0 0 1 24 15L8 15A1 1 0 0 1 8 17ZM15 8L15 24A1 1 0 0 1 17 24L17 8A1 1 0 0 1 15 8ZM9.293 10.707L21.293 22.707A1 1 0 0 1 22.707 21.293L10.707 9.293A1 1 0 0 1 9.293 10.707ZM21.293 9.293L9.293 21.293A1 1 0 0 1 10.707 22.707L22.707 10.707A1 1 0 0 1 21.293 9.293ZM6 16a2 2 0 1 0 4 0a2 2 0 1 0 -4 0ZM22 16a2 2 0 1 0 4 0a2 2 0 1 0 -4 0ZM14 8a2 2 0 1 0 4 0a2 2 0 1 0 -4 0ZM14 24a2 2 0 1 0 4 0a2 2 0 1 0 -4 0Z",
+        "icon": "M6 13L22 13A1 1 0 0 1 22 11L6 11A1 1 0 0 1 6 13ZM13 4L13 20A1 1 0 0 1 15 20L15 4A1 1 0 0 1 13 4ZM7.293 6.707L19.293 18.707A1 1 0 0 1 20.707 17.293L8.707 5.293A1 1 0 0 1 7.293 6.707ZM19.293 5.293L7.293 17.293A1 1 0 0 1 8.707 18.707L20.707 6.707A1 1 0 0 1 19.293 5.293ZM4 12a2 2 0 1 0 4 0a2 2 0 1 0 -4 0ZM20 12a2 2 0 1 0 4 0a2 2 0 1 0 -4 0ZM12 4a2 2 0 1 0 4 0a2 2 0 1 0 -4 0ZM12 20a2 2 0 1 0 4 0a2 2 0 1 0 -4 0Z",
     })
 
 with open(path, "w", encoding="utf-8") as fh:
