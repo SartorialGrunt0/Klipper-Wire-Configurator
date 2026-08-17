@@ -7,6 +7,13 @@
 # Or if you've already cloned the repo:
 #   bash scripts/install.sh
 #
+# IMPORTANT: run WITHOUT sudo. The installer escalates internally wherever
+# elevated access is needed (apt, systemd, and writes into the Moonraker
+# config dir). Running `sudo bash scripts/install.sh` resets $HOME to /root,
+# so the Moonraker config directory is not found and the update_manager /
+# Mainsail sidebar setup is silently skipped (and the app installs into
+# /root instead of your user's home).
+#
 # Uninstall:
 #   bash scripts/install.sh --uninstall
 
