@@ -98,12 +98,44 @@ resolve_moonraker_config_dir() {
     return 1
 }
 
+# Write a file, escalating to sudo when the current user lacks write access
+# (the Moonraker config dir is sometimes root-owned). Ownership is returned
+# to the invoking user so moonraker/Mainsail can keep managing the file.
+write_file_elevated() {
+    local target="$1" content="$2"
+    if printf '%s' "$content" > "$target" 2>/dev/null; then
+        return 0
+    fi
+    warn "No write access to $target, retrying with sudo..."
+    if printf '%s' "$content" | sudo tee "$target" > /dev/null 2>&1; then
+        sudo chown "$USER" "$target" 2>/dev/null || true
+        return 0
+    fi
+    warn "Could not write $target (permission denied). Skipping."
+    return 1
+}
+
+# Append a line to a file, escalating to sudo when needed.
+append_line_elevated() {
+    local target="$1" line="$2"
+    if printf '%s\n' "$line" >> "$target" 2>/dev/null; then
+        return 0
+    fi
+    warn "No write access to $target, retrying with sudo..."
+    if printf '%s\n' "$line" | sudo tee -a "$target" > /dev/null 2>&1; then
+        return 0
+    fi
+    warn "Could not append to $target (permission denied). Skipping."
+    return 1
+}
+
 # Add KWC to Moonraker's update manager so updates show up in Mainsail /
 # Fluidd. Writes a dedicated include file (same pattern as obico's
 # moonraker-obico-update.cfg) and adds a single [include] line to
-# moonraker.conf — the user's other sections are left untouched.
+# moonraker.conf — the user's other sections are left untouched. Best-effort:
+# failures warn and return 0 so the install never aborts over this.
 install_moonraker_updater() {
-    local config_dir moonraker_conf include_file
+    local config_dir moonraker_conf include_file content
     config_dir="$(resolve_moonraker_config_dir)" || return 0
     moonraker_conf="$config_dir/moonraker.conf"
     [ -f "$moonraker_conf" ] || return 0
@@ -114,7 +146,7 @@ install_moonraker_updater() {
         return 0
     fi
 
-    {
+    content="$(
         echo "[update_manager klipper-wire-configurator]"
         echo "type: git_repo"
         echo "channel: dev"
@@ -126,37 +158,48 @@ install_moonraker_updater() {
         echo "managed_services: klipper-wire-configurator"
         echo "info_tags:"
         printf '\tdesc=Klipper Wire Configurator\n'
-    } > "$include_file"
+    )"
+    write_file_elevated "$include_file" "$content" || return 0
 
     if ! grep -q '^\[include klipper-wire-configurator-update\.cfg\]' "$moonraker_conf"; then
-        printf '\n[include klipper-wire-configurator-update.cfg]\n' >> "$moonraker_conf"
+        append_line_elevated "$moonraker_conf" "" || true
+        append_line_elevated "$moonraker_conf" "[include klipper-wire-configurator-update.cfg]" || true
     fi
+    return 0
 }
 
 # Remove the KWC update_manager include (file + include line) from the
-# Moonraker config directory.
+# Moonraker config directory. Best-effort.
 remove_moonraker_updater() {
     local config_dir moonraker_conf include_file
     config_dir="$(resolve_moonraker_config_dir)" || return 0
     moonraker_conf="$config_dir/moonraker.conf"
     include_file="$config_dir/klipper-wire-configurator-update.cfg"
 
-    rm -f "$include_file"
+    rm -f "$include_file" 2>/dev/null || true
     if [ -f "$moonraker_conf" ]; then
-        sed -i '/^\[include klipper-wire-configurator-update\.cfg\]$/d' "$moonraker_conf"
+        if ! sed -i '/^\[include klipper-wire-configurator-update\.cfg\]$/d' "$moonraker_conf" 2>/dev/null; then
+            sudo sed -i '/^\[include klipper-wire-configurator-update\.cfg\]$/d' "$moonraker_conf" 2>/dev/null || true
+        fi
     fi
+    return 0
 }
 
 # Merge (or remove) the KWC entry in Mainsail's navi.json. Keeps any other
-# custom navigation entries the user already has.
+# custom navigation entries the user already has. Best-effort: failures warn
+# and return 0 so the install never aborts over this.
 edit_mainsail_navi() {
     local action="$1"  # add | remove
-    local theme_dir navi_path kwc_url
+    local theme_dir navi_path kwc_url py_script
     theme_dir="$(resolve_mainsail_theme_dir)" || return 0
-    mkdir -p "$theme_dir"
+    if ! mkdir -p "$theme_dir" 2>/dev/null; then
+        sudo mkdir -p "$theme_dir" 2>/dev/null || return 0
+    fi
     navi_path="$theme_dir/navi.json"
     kwc_url="http://${IP_ADDR:-localhost}:${KWC_PORT}"
-    python3 - "$action" "$navi_path" "$kwc_url" <<'PYEOF'
+
+    py_script="$(mktemp)"
+    cat > "$py_script" <<'PYEOF'
 import json
 import sys
 
@@ -191,6 +234,17 @@ with open(path, "w", encoding="utf-8") as fh:
     json.dump(entries, fh, indent=2)
     fh.write("\n")
 PYEOF
+
+    if ! python3 "$py_script" "$action" "$navi_path" "$kwc_url" 2>/dev/null; then
+        warn "No write access to $navi_path, retrying with sudo..."
+        if sudo python3 "$py_script" "$action" "$navi_path" "$kwc_url" 2>/dev/null; then
+            sudo chown "$USER" "$navi_path" 2>/dev/null || true
+        else
+            warn "Could not update $navi_path (permission denied). Skipping."
+        fi
+    fi
+    rm -f "$py_script"
+    return 0
 }
 
 on_error() {
