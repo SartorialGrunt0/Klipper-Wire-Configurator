@@ -211,17 +211,39 @@ edit_mainsail_navi() {
     cat > "$py_script" <<'PYEOF'
 import json
 import os
+import shutil
 import sys
 
 action, path, url = sys.argv[1], sys.argv[2], sys.argv[3]
 
+# Load existing entries. A pre-existing navi.json must never be destroyed:
+# when the current content is not a parseable list (corrupt JSON or a
+# non-array shape), back it up before we replace it (add) or leave it alone
+# (remove).
+existing_raw = None
+entries = []
+parseable = True
 try:
     with open(path, encoding="utf-8") as fh:
-        entries = json.load(fh)
-    if not isinstance(entries, list):
-        entries = []
+        existing_raw = fh.read()
+    parsed = json.loads(existing_raw)
+    if not isinstance(parsed, list):
+        parseable = False
+    else:
+        entries = parsed
 except (OSError, ValueError):
-    entries = []
+    parseable = False
+
+if not parseable:
+    # Don't touch a corrupt/unexpected file on remove.
+    if action == "remove":
+        sys.exit(0)
+    # Preserve the original before replacing it on add.
+    if existing_raw is not None:
+        try:
+            shutil.copy2(path, path + ".bak")
+        except OSError:
+            pass
 
 entries = [
     e for e in entries
