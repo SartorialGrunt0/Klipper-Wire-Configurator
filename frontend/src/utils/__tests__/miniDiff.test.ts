@@ -468,6 +468,55 @@ algorithm: bicubic
     expect(result.applied).toBe(true);
     expect(result.text).toBe(`[gcode_macro X]\ngcode:\n    G28\n    M117 done\n\n`);
   });
+
+  it('matches a gcode body line ignoring the base line trailing # comment', () => {
+    // Regression: gcode lines frequently carry trailing comments that the
+    // model omits when copying a line into the mini-diff. Without this the
+    // removal failed, the block fell back to the RAW text and the literal
+    // '- SET_LED ...' line leaked into the merged config as gcode.
+    const base = `[gcode_macro Chamber_LEDs]\ngcode:\n    SET_LED LED="Chamber_LEDs" RED=0.0 GREEN=0.0 BLUE=0.0 SYNC=0 TRANSMIT=1 # turn off\n    M104 S0\n`;
+    const result = applyMiniDiffBlock(
+      '[gcode_macro Chamber_LEDs]\n- SET_LED LED="Chamber_LEDs" RED=0.0 GREEN=0.0 BLUE=0.0 SYNC=0 TRANSMIT=1\n+ _LED LED="Chamber_LEDs" RED=0.0 GREEN=0.0 BLUE=0.0 SYNC=0 TRANSMIT=1',
+      base,
+    );
+    expect(result.applied).toBe(true);
+    expect(result.text).toContain('    _LED LED="Chamber_LEDs"');
+    // The removed line's trailing comment is dropped with the replaced line.
+    expect(result.text).not.toContain('SET_LED LED="Chamber_LEDs"');
+    // Unchanged lines survive.
+    expect(result.text).toContain('    M104 S0');
+  });
+
+  it('does not use comment-tolerant matching on plain (non-gcode) sections', () => {
+    const base = `[printer]\nmax_accel: 15500 #Ellis Tuned\n`;
+    const result = applyMiniDiffBlock(
+      '[printer]\n-max_accel: 15500\n+max_accel: 18000',
+      base,
+    );
+    expect(result.applied).toBe(false);
+  });
+
+  it('fails the WHOLE block when one section cannot be applied (atomicity)', () => {
+    // Regression: partial application silently DROPPED the failed section from
+    // the output while claiming applied=true — the failed section's edit never
+    // appeared in the review. A block must either apply fully or fall back.
+    const base = `[gcode_macro A]\ngcode:\n    G28\n\n[gcode_macro B]\ngcode:\n    M104 S0\n`;
+    const result = applyMiniDiffBlock(
+      '[gcode_macro A]\n-    G28\n+    G28 X0\n\n[gcode_macro B]\n-    M999\n+    M104 S0',
+      base,
+    );
+    expect(result.applied).toBe(false);
+    expect(result.text).toContain('-    G28');
+  });
+
+  it('fails the whole block when a section in the block is not in the base file', () => {
+    const base = `[gcode_macro A]\ngcode:\n    G28\n`;
+    const result = applyMiniDiffBlock(
+      '[gcode_macro A]\n-    G28\n+    G28 X0\n\n[gcode_macro NEW_MACRO]\n-    M104\n+    M104 S0',
+      base,
+    );
+    expect(result.applied).toBe(false);
+  });
 });
 
 describe('fenceUnfencedMiniDiffs', () => {

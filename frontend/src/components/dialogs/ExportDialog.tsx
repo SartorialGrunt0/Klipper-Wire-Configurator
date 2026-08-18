@@ -267,12 +267,12 @@ export default function ExportDialog({ onClose }: ExportDialogProps) {
                                   key={i}
                                   className={
                                     line.type === 'added'
-                                      ? 'bg-green-500/15 text-green-400 px-3'
+                                      ? 'w-max min-w-full bg-green-500/15 text-green-400 px-3'
                                       : line.type === 'removed'
-                                        ? 'bg-red-500/15 text-red-400 px-3'
+                                        ? 'w-max min-w-full bg-red-500/15 text-red-400 px-3'
                                         : line.type === 'header'
-                                          ? 'bg-blue-500/10 text-blue-400 px-3 py-0.5'
-                                          : 'text-[var(--color-text-secondary)] px-3'
+                                          ? 'w-max min-w-full bg-blue-500/10 text-blue-400 px-3 py-0.5'
+                                          : 'w-max min-w-full text-[var(--color-text-secondary)] px-3'
                                   }
                                 >
                                   <span className="select-none opacity-40 mr-2">

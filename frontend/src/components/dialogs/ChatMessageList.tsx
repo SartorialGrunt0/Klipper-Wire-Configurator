@@ -95,10 +95,10 @@ function MarkdownCode({ children, className, inline }: CodeProps) {
                 key={index}
                 className={
                   kind === 'removal'
-                    ? 'bg-red-500/15 px-3 text-red-400'
+                    ? 'w-max min-w-full bg-red-500/15 px-3 text-red-400'
                     : kind === 'addition'
-                      ? 'bg-green-500/15 px-3 text-green-400'
-                      : 'px-3 text-[var(--color-text-primary)]'
+                      ? 'w-max min-w-full bg-green-500/15 px-3 text-green-400'
+                      : 'w-max min-w-full px-3 text-[var(--color-text-primary)]'
                 }
               >
                 <span className="mr-2 select-none opacity-40">
@@ -351,6 +351,12 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                     td: ({ children }: TableDataCellProps) => (
                       <td className="border border-[var(--color-bg-tertiary)] px-2 py-1 align-top">{children}</td>
                     ),
+                    // MarkdownCode renders its own <pre> inside a styled wrapper
+                    // div. Drop react-markdown's default <pre> wrapper so the
+                    // code block is not nested inside invalid HTML
+                    // (<pre><div>…<pre>), which lets long lines push outside
+                    // the bubble instead of scrolling.
+                    pre: ({ children }: ComponentPropsWithoutRef<'pre'>) => <>{children}</>,
                     code: MarkdownCode,
                   }}
                 >

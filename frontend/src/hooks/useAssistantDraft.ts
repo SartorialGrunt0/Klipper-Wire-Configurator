@@ -210,19 +210,30 @@ export function useAssistantDraft() {
         // existing section, materialize the full section from the current file
         // text BEFORE parsing. Unchanged lines (including Jinja tags in macros)
         // are preserved verbatim from the base file, so the model can never
-        // drop them. If the edit cannot be applied (e.g. the section is not in
-        // the base file), fall back to the raw block so the normal parse and
-        // validation feedback handles it.
+        // drop them. If the edit cannot be applied, fall back to the model's
+        // block as a FULL section write (markers stripped) — never to the raw
+        // text with markers, which would leak literal '-'/'+' lines into the
+        // parsed config (visible as broken gcode in the merged draft).
         let draftConfigText = configText;
         const blockIsMiniDiff = isMiniDiffBlock(draftConfigText);
+        let miniDiffApplyFailed = false;
         if (blockIsMiniDiff) {
           const baseFileText = await getConfigText(assistantParseFilename);
           if (baseFileText) {
             const applied = applyMiniDiffBlock(draftConfigText, baseFileText);
             if (applied.applied) {
               draftConfigText = applied.text;
+            } else {
+              miniDiffApplyFailed = true;
             }
           }
+        }
+        if (miniDiffApplyFailed) {
+          console.warn('[AIDraft] Mini-diff could not be applied against the base file — treating it as a full section write (markers stripped). Review the diff before accepting.');
+          draftConfigText = draftConfigText
+            .split(/\r?\n/)
+            .map((line) => line.replace(/^(\s*)[-+][ \t]?/, '$1'))
+            .join('\n');
         }
 
         // Phase 4 deterministic auto-repair: when the model rewrote a macro
@@ -250,7 +261,7 @@ export function useAssistantDraft() {
           throw new Error('Unable to determine which config file should receive the assistant changes.');
         }
 
-        if (!blockIsMiniDiff) {
+        if (!blockIsMiniDiff || miniDiffApplyFailed) {
           for (const section of assistantResult.config.sections) {
             fullRewriteSections.push({ filename: targetFile, fullHeader: section.full_header });
           }

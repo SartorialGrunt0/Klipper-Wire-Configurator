@@ -139,6 +139,10 @@ NAMED_SECTION_TYPES = {
     "adxl345", "lis2dw", "lis3dh", "bmi160", "mpu9250", "icm20948",
     "angle", "probe_eddy_current",
     "axis_twist_compensation", "smart_effector",
+    # Moonraker update_manager entries: `[update_manager <name>]` sections
+    # live in moonraker.conf (not Klipper), but they are a legitimate named
+    # section type and must not be flagged as unknown by the validator.
+    "update_manager",
 }
 
 
