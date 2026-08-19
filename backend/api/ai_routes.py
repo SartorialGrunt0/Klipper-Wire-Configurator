@@ -105,6 +105,17 @@ FUNC_CALL_CLEANUP_RE = re.compile(
     r"(?:^|\n)\s*(?:call[\s:]?\s*)?(?:tool_call[\s:]*)?\w+\s*\([^)]*\)\s*(?=\n|$)",
     re.DOTALL,
 )
+# Bracket-wrapped Python-style calls: [tool_name(arg1="val1", arg2=val2)].
+# Emitted as plain text by models that know the OpenAI-style [tool(args)]
+# rendering but not the configured protocol (observed 2026-08 on local
+# models: [read_user_config(filename=Hotkey.cfg)] leaked into chat because
+# FUNC_CALL_RE is line-anchored and the '[' defeats it). Extraction and
+# cleanup are gated on KNOWN tool names so config headers ([probe]) and
+# prose with parens are never treated as calls.
+BRACKET_CALL_RE = re.compile(
+    r"\[\s*(\w+)\s*\(\s*(.+?)\s*\)\s*\]",
+    re.DOTALL,
+)
 # DeepSeek DSML (Data Structure Markup Language) native tool-call markup.
 # DeepSeek V3.2/V4 models emit tool calls as:
 #   <||DSML||tool_calls>
@@ -1126,6 +1137,21 @@ def _extract_tool_calls(text: str) -> list[dict]:
                 arguments[key] = value
         calls.append({"name": name, "arguments": arguments})
 
+    # Format 7: bracket-wrapped calls [name(k=v, ...)] (see BRACKET_CALL_RE).
+    # Gated on known tool names — config headers ([probe]) and prose with
+    # parens must never extract as calls.
+    known_tool_names = {t["name"] for t in _mcp_server._list_tools()}
+    for bracket_match in BRACKET_CALL_RE.finditer(text):
+        content = bracket_match.group(0).strip()
+        if not content or content in seen_contents:
+            continue
+        name = bracket_match.group(1).strip()
+        if name not in known_tool_names:
+            continue
+        seen_contents.add(content)
+        arguments = _parse_kwargs(bracket_match.group(2).strip())
+        calls.append({"name": name, "arguments": arguments})
+
     if calls:
         names = [c["name"] for c in calls]
         logger.debug("Extracted %d tool call(s): %s", len(calls), names)
@@ -1146,6 +1172,20 @@ def _parse_kwargs(args_text: str) -> dict:
         arg_value = arg_match.group(2).strip().strip('"').strip("'")
         arguments[arg_name] = arg_value
     return arguments
+
+
+def _strip_bracket_tool_calls(text: str) -> str:
+    """Strip bracket-wrapped tool calls whose name is a REAL tool.
+
+    Name-gated mirror of BRACKET_CALL_RE: only known tool names are removed,
+    so config section headers ([probe], [include printer.cfg]) and prose with
+    parens survive the cleanup chain.
+    """
+    known_tool_names = {t["name"] for t in _mcp_server._list_tools()}
+    return BRACKET_CALL_RE.sub(
+        lambda m: "" if m.group(1).strip() in known_tool_names else m.group(0),
+        text,
+    )
 
 
 # llama.cpp/Gemma text-protocol templates wrap tool calls in decoration
@@ -1988,6 +2028,7 @@ async def chat_proxy(req: ChatRequest):
                         clean_content = ALT_TOOL_CALL_CONTENT_RE.sub("", clean_content).strip()
                         clean_content = CALL_SYNTAX_CLEANUP_RE.sub("", clean_content).strip()
                         clean_content = FUNC_CALL_CLEANUP_RE.sub("", clean_content).strip()
+                        clean_content = _strip_bracket_tool_calls(clean_content).strip()
                         clean_content = DSML_CLEANUP_RE.sub("", clean_content).strip()
                         clean_content = XML_TOOL_CALLS_CLEANUP_RE.sub("", clean_content).strip()
                         if clean_content:
@@ -2022,6 +2063,7 @@ async def chat_proxy(req: ChatRequest):
             final_content = ALT_TOOL_CALL_CONTENT_RE.sub("", final_content).strip()
             final_content = CALL_SYNTAX_CLEANUP_RE.sub("", final_content).strip()
             final_content = FUNC_CALL_CLEANUP_RE.sub("", final_content).strip()
+            final_content = _strip_bracket_tool_calls(final_content).strip()
             final_content = DSML_CLEANUP_RE.sub("", final_content).strip()
             # If the cleanup left nothing but the original was a tool call,
             # don't restore the raw tool call text — return empty instead.
@@ -2095,6 +2137,7 @@ async def chat_proxy(req: ChatRequest):
                     clean_assistant = ALT_TOOL_CALL_CONTENT_RE.sub("", clean_assistant).strip()
                     clean_assistant = CALL_SYNTAX_CLEANUP_RE.sub("", clean_assistant).strip()
                     clean_assistant = FUNC_CALL_CLEANUP_RE.sub("", clean_assistant).strip()
+                    clean_assistant = _strip_bracket_tool_calls(clean_assistant).strip()
                     clean_assistant = DSML_CLEANUP_RE.sub("", clean_assistant).strip()
                     clean_assistant = XML_TOOL_CALLS_CLEANUP_RE.sub("", clean_assistant).strip()
                     if clean_assistant:
@@ -2117,6 +2160,7 @@ async def chat_proxy(req: ChatRequest):
                 final_content = ALT_TOOL_CALL_CONTENT_RE.sub("", final_content).strip()
                 final_content = CALL_SYNTAX_CLEANUP_RE.sub("", final_content).strip()
                 final_content = FUNC_CALL_CLEANUP_RE.sub("", final_content).strip()
+                final_content = _strip_bracket_tool_calls(final_content).strip()
                 final_content = DSML_CLEANUP_RE.sub("", final_content).strip()
                 final_content = XML_TOOL_CALLS_CLEANUP_RE.sub("", final_content).strip()
 
