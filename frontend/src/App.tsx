@@ -39,6 +39,7 @@ import AddMenu from './components/AddMenu';
 import MacroDesignerDialog from './components/dialogs/MacroDesignerDialog';
 
 import type { AppEdge, AppNode, ValidationStatus } from './types/graph';
+import type { ConfigFile, ValidationResult } from './types/config';
 import type { MacroDesignerPersistedState } from './types/macroDesigner';
 import { combineValidationStatuses } from './utils/validationStatus';
 import { isBackupConfigFilename } from './utils/backupFiles';
@@ -170,6 +171,105 @@ function applySavedEdgeLayout(saved: SavedEdgeLayout[] | undefined, graphStore: 
     return next as import('./types/graph').AppEdge;
   });
   graphStore.setEdges(updatedEdges);
+}
+
+/**
+ * Browser-mode fallback: restore the last saved config session from backend
+ * storage (project/load-saved) and the saved graph layout from localStorage.
+ * Only called when native mode is NOT active — native mode reads the real
+ * config from the Pi disk via the native startup path instead.
+ */
+async function restoreSavedConfigsFromBackend(): Promise<void> {
+  const configStore = useConfigStore.getState();
+  // Belt-and-suspenders: if another loader (e.g. native) already populated
+  // configs, don't clobber them.
+  if (Object.keys(configStore.configFiles).length > 0) {
+    return;
+  }
+
+  try {
+    const result = await api.loadSavedConfigs();
+    if (!result.files || Object.keys(result.files).length === 0) return;
+
+    let schemas = configStore.schemas;
+    if (Object.keys(schemas).length === 0) {
+      try {
+        const schemaResult = await api.getSchema();
+        configStore.setSchemas(schemaResult.schemas);
+        schemas = schemaResult.schemas;
+      } catch { /* proceed without */ }
+    }
+
+    // Use loadConfigs to replace all configs at once (avoids duplicates)
+    const allConfigs: Record<string, ConfigFile> = {};
+    const allValidations: Record<string, ValidationResult> = {};
+
+    for (const [filename, fileResult] of Object.entries(result.files)) {
+      allConfigs[filename] = fileResult.config;
+      allValidations[filename] = fileResult.validation;
+    }
+
+    configStore.loadConfigs(allConfigs);
+
+    for (const [filename, validation] of Object.entries(allValidations)) {
+      configStore.setValidation(filename, validation);
+    }
+
+    for (const [filename, config] of Object.entries(allConfigs)) {
+      if (config.raw_text) {
+        configStore.setOriginalText(filename, config.raw_text);
+      }
+    }
+
+    // Clear graph first, then rebuild to avoid duplicate nodes
+    const graphStore = useGraphStore.getState();
+    graphStore.clearGraph();
+    const { buildProjectGraph } = await import('./utils/graphBuilder');
+    buildProjectGraph(allConfigs, graphStore, schemas, allValidations);
+
+    // Browser mode: restore saved layout from localStorage (if any)
+    try {
+      const saved = localStorage.getItem('kwc.graphLayout');
+      if (saved) {
+        const layout = JSON.parse(saved) as {
+          graphNodes?: Array<{ id: string; position: { x: number; y: number } }>;
+          graphEdges?: Array<{
+            id: string;
+            data?: Record<string, unknown>;
+            sourceHandle?: string;
+            targetHandle?: string;
+          }>;
+          macroDesigner?: MacroDesignerPersistedState;
+        };
+        if (layout.macroDesigner) {
+          useMacroDesignerStore.getState().hydratePersistedState(layout.macroDesigner);
+        }
+        if (layout.graphNodes) {
+          const positionMap = new Map(
+            layout.graphNodes.map((n) => [n.id, n.position]),
+          );
+          const currentNodes = useGraphStore.getState().nodes;
+          const updatedNodes = currentNodes.map((node) => {
+            const savedPos = positionMap.get(node.id);
+            if (savedPos) {
+              return { ...node, position: savedPos } as AppNode;
+            }
+            return node;
+          });
+          graphStore.setNodes(updatedNodes);
+        }
+        // Restore edge routing: custom bend points + which side of each
+        // node the line connects to. Without this, a refresh resets every
+        // trace to default top/bottom routing even though card positions
+        // survived.
+        applySavedEdgeLayout(layout.graphEdges, graphStore);
+      }
+    } catch { /* malformed/absent layout — keep auto-arranged positions */ }
+
+    configStore.markClean();
+  } catch {
+    // No saved configs — that's fine, start empty
+  }
 }
 
 /** Sits inside <ReactFlow> and calls fitView whenever trigger increments. */
@@ -352,106 +452,30 @@ export default function App() {
     return unsub;
   }, []);
 
-  // Restore saved configs from disk on startup (non-native fallback).
-  // If native mode already loaded configs, this does nothing.
+  // Restore saved configs from backend storage on startup (non-native fallback).
+  // Waits for the native status check so the two loaders can't race: native
+  // mode loads from the Pi config dir (effect above); browser mode restores
+  // the last saved session. Previously this fired on mount regardless —
+  // wasting ~400ms of load-saved work on native startups and racing
+  // buildProjectGraph (additive), a duplicate-cards source.
   const savedConfigRestored = useRef(false);
   useEffect(() => {
     if (savedConfigRestored.current) return;
 
-    savedConfigRestored.current = true;  // Mark immediately to prevent double-load
-
-    const configStore = useConfigStore.getState();
-    const existingFiles = Object.keys(configStore.configFiles);
-    if (existingFiles.length > 0) {
-      // Native mode already loaded configs — skip restore
-      return;
-    }
-
-    (async () => {
-      try {
-        const result = await api.loadSavedConfigs();
-        if (!result.files || Object.keys(result.files).length === 0) return;
-
-        let schemas = configStore.schemas;
-        if (Object.keys(schemas).length === 0) {
-          try {
-            const schemaResult = await api.getSchema();
-            configStore.setSchemas(schemaResult.schemas);
-            schemas = schemaResult.schemas;
-          } catch { /* proceed without */ }
-        }
-
-        // Use loadConfigs to replace all configs at once (avoids duplicates)
-        const allConfigs: Record<string, import('./types/config').ConfigFile> = {};
-        const allValidations: Record<string, import('./types/config').ValidationResult> = {};
-
-        for (const [filename, fileResult] of Object.entries(result.files)) {
-          allConfigs[filename] = fileResult.config;
-          allValidations[filename] = fileResult.validation;
-        }
-
-        configStore.loadConfigs(allConfigs);
-
-        for (const [filename, validation] of Object.entries(allValidations)) {
-          configStore.setValidation(filename, validation);
-        }
-
-        for (const [filename, config] of Object.entries(allConfigs)) {
-          if (config.raw_text) {
-            configStore.setOriginalText(filename, config.raw_text);
-          }
-        }
-
-        // Clear graph first, then rebuild to avoid duplicate nodes
-        const graphStore = useGraphStore.getState();
-        graphStore.clearGraph();
-        const { buildProjectGraph } = await import('./utils/graphBuilder');
-        buildProjectGraph(allConfigs, graphStore, schemas, allValidations);
-
-        // Browser mode: restore saved layout from localStorage (if any)
-        try {
-          const saved = localStorage.getItem('kwc.graphLayout');
-          if (saved) {
-            const layout = JSON.parse(saved) as {
-              graphNodes?: Array<{ id: string; position: { x: number; y: number } }>;
-              graphEdges?: Array<{
-                id: string;
-                data?: Record<string, unknown>;
-                sourceHandle?: string;
-                targetHandle?: string;
-              }>;
-              macroDesigner?: MacroDesignerPersistedState;
-            };
-            if (layout.macroDesigner) {
-              useMacroDesignerStore.getState().hydratePersistedState(layout.macroDesigner);
-            }
-            if (layout.graphNodes) {
-              const positionMap = new Map(
-                layout.graphNodes.map((n) => [n.id, n.position]),
-              );
-              const currentNodes = useGraphStore.getState().nodes;
-              const updatedNodes = currentNodes.map((node) => {
-                const savedPos = positionMap.get(node.id);
-                if (savedPos) {
-                  return { ...node, position: savedPos } as import('./types/graph').AppNode;
-                }
-                return node;
-              });
-              graphStore.setNodes(updatedNodes);
-            }
-            // Restore edge routing: custom bend points + which side of each
-            // node the line connects to. Without this, a refresh resets every
-            // trace to default top/bottom routing even though card positions
-            // survived.
-            applySavedEdgeLayout(layout.graphEdges, graphStore);
-          }
-        } catch { /* malformed/absent layout — keep auto-arranged positions */ }
-
-        configStore.markClean();
-      } catch {
-        // No saved configs — that's fine, start empty
+    let unsub: () => void = () => {};
+    const maybeRestore = () => {
+      if (savedConfigRestored.current) return;
+      const state = useNativeStore.getState();
+      if (state.isNative === null) return; // status check still in flight
+      savedConfigRestored.current = true;
+      unsub();
+      if (!state.isNative) {
+        void restoreSavedConfigsFromBackend();
       }
-    })();
+    };
+    unsub = useNativeStore.subscribe(maybeRestore);
+    maybeRestore();
+    return unsub;
   }, []);
 
   // Auto-save layout (debounced). Native mode persists via the backend;
