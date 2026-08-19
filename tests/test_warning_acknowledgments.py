@@ -553,11 +553,15 @@ def test_unknown_section_warning_can_be_acknowledged():
             del os.environ['KWC_LAYOUT_DIR']
 
 
-def test_unknown_section_warning_with_multiline_param_can_be_acknowledged():
-    """Regression: a section with a multi-line (indented continuation) param
-    value, e.g. moonraker's `[update_manager moonraker-obico]`, could never be
-    acknowledged because canonicalize re-indented continuation lines and the
-    stored snippet never matched the live canonical form.
+def test_update_manager_section_is_recognized():
+    """[update_manager <name>] is a known Moonraker section type — it must NOT
+    produce an unknown-section warning.
+
+    This test originally asserted the warning for `[update_manager
+    moonraker-obico]` (a multiline-param ack regression: the stored snippet
+    never matched the canonical form). Once update_manager is registered as a
+    known named section the warning is gone by construction, so the ack path
+    is moot — assert recognition directly.
     """
     with tempfile.TemporaryDirectory() as temp_dir:
         os.environ['KWC_LAYOUT_DIR'] = temp_dir
@@ -576,13 +580,15 @@ def test_unknown_section_warning_with_multiline_param_can_be_acknowledged():
             )
 
             before = validate_config(config)
-            assert before.has_warnings
-            assert any(
+            assert not any(
                 error.severity == 'warning'
-                and "Unknown section type 'update_manager moonraker-obico'" in error.message
+                and 'Unknown section type' in error.message
                 for error in before.errors
             )
+            assert not before.has_warnings
 
+            # The acknowledgment path remains a safe no-op for recognized
+            # sections (no snippet to store, no warning to clear).
             acknowledge_warning_for_section(config.sections[0])
 
             after = validate_config(config)
