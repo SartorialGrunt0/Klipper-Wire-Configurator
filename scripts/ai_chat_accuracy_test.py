@@ -952,6 +952,26 @@ def build_trident_questions() -> list[TestQuestion]:
             ),
         ),
         TestQuestion(
+            qid="TRIDENT-16",
+            title="Real file: idle_timeout all LEDs (no file attached)",
+            text=("Can you edit my idle_timeout in my printer.cfg so it times "
+                  "out after 5 minutes and has gcode to turn off all of my LEDs?"),
+            # Harder variant of TRIDENT-15: NOTHING is attached — the model
+            # must discover printer.cfg's idle_timeout AND all three LED
+            # sections (SB_LEDs in EBB.cfg, Chamber_LEDs in printer.cfg,
+            # hotkey_leds in Hotkey.cfg) purely via tools.
+            context_files=(),
+            expected_tools=("read_user_config", "list_user_configs"),
+            require_tool=True,
+            criteria=(
+                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
+                ("regex", r"timeout\s*:\s*300\b"),
+                ("contains", "SB_LEDs"),
+                ("contains", "Chamber_LEDs"),
+                ("contains", "hotkey_leds"),
+            ),
+        ),
+        TestQuestion(
             qid="MINIDIFF-01",
             title="Mini-diff: level_bed adaptive (endif invariant)",
             text=("Modify my level_bed macro in printer.cfg to call "
