@@ -750,6 +750,12 @@ def test_chat_proxy_local_openai_compatible_allows_missing_key(monkeypatch):
         'mcpToolNames': [],
         'toolCalls': [],
         'repromptCount': 0,
+        'usage': {
+            'completionTokens': 0,
+            'reasoningTokens': 0,
+            'events': [],
+            'truncated': False,
+        },
     }
     # The local URL is POSTed verbatim and no Authorization header is added
     # when no key was provided.
@@ -854,7 +860,77 @@ def test_chat_proxy_returns_plain_content(monkeypatch):
         'mcpToolNames': [],
         'toolCalls': [],
         'repromptCount': 0,
+        'usage': {
+            'completionTokens': 0,
+            'reasoningTokens': 0,
+            'events': [],
+            'truncated': False,
+        },
     }
+
+
+def test_extract_usage_info_captures_tokens_and_reasoning():
+    info = ai_routes._extract_usage_info({
+        'choices': [{'message': {'content': 'x'}, 'finish_reason': 'stop'}],
+        'usage': {
+            'completion_tokens': 1234,
+            'completion_tokens_details': {'reasoning_tokens': 700},
+        },
+    })
+    assert info == {
+        'completionTokens': 1234,
+        'reasoningTokens': 700,
+        'finishReason': 'stop',
+    }
+
+
+def test_extract_usage_info_none_without_usage():
+    assert ai_routes._extract_usage_info({'choices': [{'message': {'content': 'x'}}]}) is None
+    assert ai_routes._extract_usage_info({}) is None
+
+
+def test_chat_proxy_reports_usage_and_truncation(monkeypatch):
+    # A provider response that burned the whole max_tokens budget
+    # (finish_reason=length) must surface in /ai/chat as truncated so the
+    # harness can distinguish budget exhaustion from a wrong answer.
+    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
+    monkeypatch.setattr(ai_routes, '_auto_search_context', lambda query: None)
+
+    def fake_post(url, headers, payload):
+        return DummyResponse(
+            {
+                'choices': [{
+                    'message': {'content': 'The answer got cut off mid-sent'},
+                    'finish_reason': 'length',
+                }],
+                'usage': {
+                    'completion_tokens': 4096,
+                    'completion_tokens_details': {'reasoning_tokens': 2500},
+                },
+            },
+            url=url,
+        )
+
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda *args, **kwargs: FakeAsyncClient(post_handler=fake_post))
+
+    response = client.post(
+        '/ai/chat',
+        json={
+            'messages': [{'role': 'user', 'content': 'Explain everything about Klipper.'}],
+            'apiKey': 'openai-token',
+            'model': 'gpt-4o',
+            'apiUrl': 'https://api.openai.com/v1/chat/completions',
+            'apiProvider': 'chatgpt',
+        },
+    )
+
+    assert response.status_code == 200
+    usage = response.json()['usage']
+    assert usage['completionTokens'] == 4096
+    assert usage['reasoningTokens'] == 2500
+    assert usage['truncated'] is True
+    assert usage['events'][0]['finishReason'] == 'length'
+    assert usage['events'][0]['context'] == 'initial'
 
 
 def test_chat_proxy_auto_search_fallback_injects_docs(monkeypatch):

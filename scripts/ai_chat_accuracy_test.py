@@ -1481,6 +1481,7 @@ class QuestionResult:
     error: str = ""
     checks: list[tuple[str, str, bool]] = field(default_factory=list)
     duration_s: float = 0.0
+    usage: dict | None = None
 
 
 # ── HTTP helpers (stdlib only) ─────────────────────────────────────────
@@ -1651,9 +1652,20 @@ def run_one_question(
         result.tool_names = list(response.get("mcpToolNames", []) or [])
         result.tool_turns = int(response.get("mcpToolTurns", 0) or 0)
         result.tool_calls = list(response.get("toolCalls", []) or [])
+        result.usage = response.get("usage")
 
         log.write(f"Response mcpToolTurns={result.tool_turns} "
                   f"mcpToolNames={result.tool_names}")
+        if result.usage:
+            log.write(
+                "Usage: completion_tokens=%s reasoning_tokens=%s truncated=%s "
+                "events=%s" % (
+                    result.usage.get("completionTokens"),
+                    result.usage.get("reasoningTokens"),
+                    result.usage.get("truncated"),
+                    json.dumps(result.usage.get("events", []))[:500],
+                )
+            )
         log.write(f"Raw response keys: {sorted(response.keys())}")
         log.write(f"Answer ({len(result.response)} chars):")
         log.write(result.response)
@@ -1999,11 +2011,24 @@ def main() -> int:
                   f"{len(wrong_tool)} correct-but-wrong-tool")
     log.write(f"Answer accuracy: {len([r for r in results if r.answer_ok])}/{len(results)}")
     log.write(f"Tool-usage accuracy: {len([r for r in results if r.tool_ok])}/{len(results)}")
+    truncated_results = [r for r in results if (r.usage or {}).get("truncated")]
     log.write("")
-    log.write(f"{'QID':<5} {'STATUS':<15} {'ANSWER':<7} {'TOOL':<7} {'TURNS':<6} TOOLS USED")
+    log.write(f"{'QID':<5} {'STATUS':<15} {'ANSWER':<7} {'TOOL':<7} {'TURNS':<6} {'TOKENS':<8} TOOLS USED")
     for r in results:
+        usage = r.usage or {}
+        tokens = usage.get("completionTokens")
+        tok_s = str(tokens) if tokens is not None else "-"
+        if usage.get("truncated"):
+            tok_s += "*"  # * = hit max_tokens (finish_reason=length), possibly truncated
         log.write(f"{r.qid:<5} {r.status:<15} {str(r.answer_ok):<7} {str(r.tool_ok):<7} "
-                  f"{r.tool_turns:<6} {','.join(r.tool_names) or '-'}")
+                  f"{r.tool_turns:<6} {tok_s:<8} {','.join(r.tool_names) or '-'}")
+    if truncated_results:
+        log.write("")
+        log.write(f"Truncated (hit max_tokens budget, finish_reason=length): {len(truncated_results)}")
+        for r in truncated_results:
+            usage = r.usage or {}
+            log.write(f"  {r.qid} {r.title} (tokens={usage.get('completionTokens')} "
+                      f"reasoning={usage.get('reasoningTokens')})")
     if no_tool or wrong_tool:
         log.write("")
         log.write("Conditional passes (correct answer, tool requirement missed):")
@@ -2077,11 +2102,20 @@ def main() -> int:
           + (f", {len(conditional)} conditional" if conditional else "") + ")")
     print(f"Answer accuracy: {len([r for r in results if r.answer_ok])}/{len(results)}")
     print(f"Tool-usage accuracy: {len([r for r in results if r.tool_ok])}/{len(results)}")
+    if truncated_results:
+        print(f"Truncated (hit max_tokens): {len(truncated_results)} "
+              f"-> {', '.join(r.qid for r in truncated_results)}")
     marks = {"PASS": "PASS", "PASS_NO_TOOL": "PASS*", "PASS_WRONG_TOOL": "PASS+",
              "ERROR": "ERR "}
     for r in results:
         mark = marks.get(r.status, "FAIL")
-        print(f"  {r.qid} {mark}  tools=[{','.join(r.tool_names) or '-'}]  {r.title}")
+        usage = r.usage or {}
+        tok = usage.get("completionTokens")
+        tok_s = f" tok={tok}" if tok is not None else ""
+        if usage.get("truncated"):
+            tok_s += " TRUNC"
+        print(f"  {r.qid} {mark}  tools=[{','.join(r.tool_names) or '-'}]"
+              f"{tok_s}  {r.title}")
     if conditional:
         print("  * = correct answer, required tool not called "
               "| + = correct answer, wrong tool called")

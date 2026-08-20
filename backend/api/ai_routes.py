@@ -1686,6 +1686,37 @@ def _extract_provider_content(provider: str, data: dict) -> str:
     return data.get("choices", [{}])[0].get("message", {}).get("content", "")
 
 
+def _extract_usage_info(data: dict) -> dict | None:
+    """Extract token usage + finish_reason from a provider response.
+
+    Used to surface per-turn budget consumption in /ai/chat responses so the
+    accuracy harness can tell a truncated answer (finish_reason=length) from
+    a genuinely wrong one. Thinking models report reasoning tokens under
+    usage.completion_tokens_details.reasoning_tokens — those count against the
+    same max_tokens budget as visible content.
+    """
+    if not isinstance(data, dict):
+        return None
+    usage = data.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    choice = (data.get("choices") or [{}])[0]
+    completion_tokens = usage.get("completion_tokens")
+    if not isinstance(completion_tokens, int):
+        return None
+    details = usage.get("completion_tokens_details")
+    reasoning_tokens = None
+    if isinstance(details, dict):
+        rt = details.get("reasoning_tokens")
+        if isinstance(rt, int):
+            reasoning_tokens = rt
+    return {
+        "completionTokens": completion_tokens,
+        "reasoningTokens": reasoning_tokens,
+        "finishReason": choice.get("finish_reason") or "",
+    }
+
+
 def _build_api_base_url(api_url: str) -> str:
     parsed = urlparse(api_url)
     if not parsed.scheme or not parsed.netloc:
@@ -1848,6 +1879,11 @@ async def chat_proxy(req: ChatRequest):
                 logger_context="initial",
                 stop_event=stop_event,
             )
+            usage_events: list[dict] = []
+            initial_usage = _extract_usage_info(current_data)
+            if initial_usage:
+                initial_usage["context"] = "initial"
+                usage_events.append(initial_usage)
 
             tool_turns = 0
             current_messages = list(messages)
@@ -1905,6 +1941,10 @@ async def chat_proxy(req: ChatRequest):
                             logger_context="config-fallback",
                             stop_event=stop_event,
                         )
+                        cfg_usage = _extract_usage_info(current_data)
+                        if cfg_usage:
+                            cfg_usage["context"] = "config-fallback"
+                            usage_events.append(cfg_usage)
 
             # ── Auto-search fallback ──
             # If the model didn't call any tools on the first pass, do a backend
@@ -1951,6 +1991,10 @@ async def chat_proxy(req: ChatRequest):
                             logger_context="auto-search",
                             stop_event=stop_event,
                         )
+                        search_usage = _extract_usage_info(current_data)
+                        if search_usage:
+                            search_usage["context"] = "auto-search"
+                            usage_events.append(search_usage)
 
             while tool_turns < MAX_MCP_TOOL_TURNS:
                 if stop_event is not None and stop_event.is_set():
@@ -2047,6 +2091,10 @@ async def chat_proxy(req: ChatRequest):
                     logger_context=f"tool-turn-{tool_turns}",
                     stop_event=stop_event,
                 )
+                turn_usage = _extract_usage_info(current_data)
+                if turn_usage:
+                    turn_usage["context"] = f"tool-turn-{tool_turns}"
+                    usage_events.append(turn_usage)
 
             # Clean up any remaining tool call blocks in the final content.
             # Check whether the content contained tool call blocks BEFORE cleanup
@@ -2115,6 +2163,10 @@ async def chat_proxy(req: ChatRequest):
                     logger_context=f"empty-reprompt-{empty_reprompts}",
                     stop_event=stop_event,
                 )
+                retry_usage = _extract_usage_info(current_data)
+                if retry_usage:
+                    retry_usage["context"] = f"empty-reprompt-{empty_reprompts}"
+                    usage_events.append(retry_usage)
 
                 # Some models (DeepSeek "flash", Qwen, ...) ignore the
                 # no-tools instruction and emit tool calls as plain text —
@@ -2196,6 +2248,18 @@ async def chat_proxy(req: ChatRequest):
                 "mcpToolNames": mcp_tool_names,
                 "toolCalls": executed_tool_calls,
                 "repromptCount": empty_reprompts,
+                "usage": {
+                    "completionTokens": sum(
+                        (e.get("completionTokens") or 0) for e in usage_events
+                    ),
+                    "reasoningTokens": sum(
+                        (e.get("reasoningTokens") or 0) for e in usage_events
+                    ),
+                    "events": usage_events,
+                    "truncated": any(
+                        (e.get("finishReason") or "") == "length" for e in usage_events
+                    ),
+                },
             }
         except ChatStoppedError:
             logger.info("Chat stopped by user | requestId=%s", req.requestId)
