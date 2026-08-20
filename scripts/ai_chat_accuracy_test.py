@@ -932,6 +932,26 @@ def build_trident_questions() -> list[TestQuestion]:
             ),
         ),
         TestQuestion(
+            qid="TRIDENT-15",
+            title="Real file: idle_timeout turns off all LEDs",
+            text=("Can you edit my idle_timeout in my printer.cfg so it times "
+                  "out after 5 minutes and has gcode to turn off all of my LEDs?"),
+            # Only printer.cfg is attached — Chamber_LEDs is visible there, but
+            # SB_LEDs (EBB.cfg) and hotkey_leds (Hotkey.cfg) must be discovered
+            # via read_user_config (the backend user_configs mirror has all
+            # three files).
+            context_files=printer_cfg,
+            expected_tools=("read_user_config",),
+            require_tool=True,
+            criteria=(
+                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
+                ("regex", r"timeout\s*:\s*300\b"),
+                ("contains", "SB_LEDs"),
+                ("contains", "Chamber_LEDs"),
+                ("contains", "hotkey_leds"),
+            ),
+        ),
+        TestQuestion(
             qid="MINIDIFF-01",
             title="Mini-diff: level_bed adaptive (endif invariant)",
             text=("Modify my level_bed macro in printer.cfg to call "
@@ -2012,6 +2032,12 @@ def main() -> int:
     log.write(f"Answer accuracy: {len([r for r in results if r.answer_ok])}/{len(results)}")
     log.write(f"Tool-usage accuracy: {len([r for r in results if r.tool_ok])}/{len(results)}")
     truncated_results = [r for r in results if (r.usage or {}).get("truncated")]
+    token_values: list[int] = []
+    for r in results:
+        tok = (r.usage or {}).get("completionTokens")
+        if isinstance(tok, int):
+            token_values.append(tok)
+    avg_tokens = (sum(token_values) / len(token_values)) if token_values else None
     log.write("")
     log.write(f"{'QID':<5} {'STATUS':<15} {'ANSWER':<7} {'TOOL':<7} {'TURNS':<6} {'TOKENS':<8} TOOLS USED")
     for r in results:
@@ -2029,6 +2055,9 @@ def main() -> int:
             usage = r.usage or {}
             log.write(f"  {r.qid} {r.title} (tokens={usage.get('completionTokens')} "
                       f"reasoning={usage.get('reasoningTokens')})")
+    if avg_tokens is not None:
+        log.write(f"Average completion tokens per question: {avg_tokens:.0f} "
+                  f"(over {len(token_values)} questions reporting usage)")
     if no_tool or wrong_tool:
         log.write("")
         log.write("Conditional passes (correct answer, tool requirement missed):")
@@ -2105,6 +2134,8 @@ def main() -> int:
     if truncated_results:
         print(f"Truncated (hit max_tokens): {len(truncated_results)} "
               f"-> {', '.join(r.qid for r in truncated_results)}")
+    if avg_tokens is not None:
+        print(f"Average tokens per question: {avg_tokens:.0f} (over {len(token_values)} questions)")
     marks = {"PASS": "PASS", "PASS_NO_TOOL": "PASS*", "PASS_WRONG_TOOL": "PASS+",
              "ERROR": "ERR "}
     for r in results:
