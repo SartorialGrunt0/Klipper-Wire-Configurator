@@ -30,6 +30,8 @@ export interface ChatSettingsPanelProps {
   setEditMaxTokens: (v: string) => void;
   editTemperature: string;
   setEditTemperature: (v: string) => void;
+  editToolProtocol: 'auto' | 'native' | 'text';
+  setEditToolProtocol: (v: 'auto' | 'native' | 'text') => void;
   resolvedEditApiUrl: string;
   onSaveSettings: () => void;
   onClose?: () => void;
@@ -54,6 +56,8 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
   setEditMaxTokens,
   editTemperature,
   setEditTemperature,
+  editToolProtocol,
+  setEditToolProtocol,
   resolvedEditApiUrl,
   onSaveSettings,
   onClose,
@@ -239,6 +243,28 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
     </div>
   );
 
+  // Only meaningful for openai-compatible endpoints (the backend's scheme
+  // split http→text / https→native is the 'auto' default).
+  const toolFormatField = editApiProvider === 'openai-compatible' ? (
+    <div>
+      <label className="block text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-1.5">
+        Tool Format
+      </label>
+      <select
+        className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
+        value={editToolProtocol}
+        onChange={(e) => setEditToolProtocol(e.target.value as 'auto' | 'native' | 'text')}
+      >
+        <option value="auto">Auto</option>
+        <option value="native">Native</option>
+        <option value="text">Text</option>
+      </select>
+      <p className="text-[10px] text-[var(--color-text-secondary)] mt-1">
+        Auto: http → text ```tool, https → native. Force either if the model misformats calls.
+      </p>
+    </div>
+  ) : null;
+
   const maxTokensField = (
     <div>
       <label className="block text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-1.5">
@@ -295,6 +321,7 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
       {modelField}
       {apiUrlField}
       {apiKeyField}
+      {toolFormatField}
       {maxTokensAndTemperatureRow}
     </div>
   );
@@ -410,6 +437,7 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
               placeholder="sk-..."
             />
           </div>
+          {toolFormatField}
           <div className="flex gap-2">
             <div className="flex-1">
               <label className="block text-[10px] text-[var(--color-text-secondary)] mb-1">Max Tokens</label>

@@ -35,6 +35,12 @@ export interface AiSettings {
   maxTokens: number;
   /** Sampling temperature for AI responses (0-2; 0.7 default). */
   temperature: number;
+  /**
+   * Tool-calling protocol for openai-compatible providers:
+   * 'auto' (default) keeps the scheme split — plain http → text ```tool,
+   * https → native function calling; 'native'/'text' force either.
+   */
+  toolProtocol: 'auto' | 'native' | 'text';
 }
 
 interface PersistedAiState {
@@ -179,6 +185,7 @@ const DEFAULT_SETTINGS: AiSettings = {
   port: '11434',
   maxTokens: 4096,
   temperature: 0.7,
+  toolProtocol: 'auto',
 };
 
 export const useAiStore = create<AiState>()((set, get) => {

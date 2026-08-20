@@ -98,6 +98,8 @@ interface ChatRequestBase {
   maxTokens?: number;
   /** Sampling temperature for the provider (0-2). Omit for provider default. */
   temperature?: number;
+  /** Tool-calling protocol override: 'auto' (scheme split), 'native', 'text'. */
+  toolProtocol?: 'auto' | 'native' | 'text';
   /** Loaded user-config content for the backend config-grounding fallback. */
   contextFiles?: Record<string, { content: string; label: string }>;
   /** Full-rewrite guard state — sent to the backend to select prompt wording. */
