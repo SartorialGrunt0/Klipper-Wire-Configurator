@@ -43,6 +43,13 @@ import type { ConfigFile, ValidationResult } from './types/config';
 import type { MacroDesignerPersistedState } from './types/macroDesigner';
 import { combineValidationStatuses } from './utils/validationStatus';
 import { isBackupConfigFilename } from './utils/backupFiles';
+import {
+  LAYOUT_STORAGE_KEY,
+  buildLayoutPayload,
+  applySavedNodePositions,
+  applySavedEdgeLayout,
+  loadSavedLayout,
+} from './utils/layoutPersistence';
 import { useMacroDesignerStore } from './stores/macroDesignerStore';
 
 function getSectionValidationKey(configFile: string | undefined, sectionHeader: string): string {
@@ -126,53 +133,6 @@ function computeHardwareDragPreviewSize(nodes: Node[], hardwareId: string) {
   };
 }
 
-/** Saved edge layout entry (id may differ from rebuilt edges — pair-match). */
-interface SavedEdgeLayout {
-  id: string;
-  source?: string;
-  target?: string;
-  data?: Record<string, unknown>;
-  sourceHandle?: string;
-  targetHandle?: string;
-}
-
-/**
- * Overlay saved edge routing (custom bend points + connection sides) onto the
- * freshly rebuilt graph. Matches by PAIR (source+target+edgeType), falling back
- * to id: edge ids come from a module-level counter, so a line drawn at runtime
- * (edge_7) gets a different id after the config rebuild than the one the save
- * captured. The source/target/type triple is stable across rebuilds, and comm
- * edges are matched direction-agnostically (the rebuild always emits SBC →
- * hardware but the user may have drawn the opposite way).
- */
-function applySavedEdgeLayout(saved: SavedEdgeLayout[] | undefined, graphStore: ReturnType<typeof useGraphStore.getState>) {
-  if (!saved || saved.length === 0) return;
-  const pairKey = (e: { source?: string; target?: string; data?: Record<string, unknown> }) => {
-    const t = (e.data as Record<string, unknown> | undefined)?.edgeType as string | undefined;
-    const [a, b] = [e.source ?? '', e.target ?? ''].sort();
-    return [a, b, t ?? ''].join('|');
-  };
-  const savedByPair = new Map(saved.map((e) => [pairKey(e), e]));
-  const savedById = new Map(saved.map((e) => [e.id, e]));
-  const currentEdges = useGraphStore.getState().edges;
-  const updatedEdges = currentEdges.map((edge) => {
-    const found = savedByPair.get(pairKey(edge)) ?? savedById.get(edge.id);
-    if (!found) return edge;
-    const next: Record<string, unknown> = { ...edge };
-    if (found.data) {
-      next.data = {
-        ...edge.data,
-        ...found.data,
-        customMiddlePoints: (found.data as Record<string, unknown>).customMiddlePoints,
-      } as unknown as import('./types/graph').AppEdge['data'];
-    }
-    if (found.sourceHandle) next.sourceHandle = found.sourceHandle;
-    if (found.targetHandle) next.targetHandle = found.targetHandle;
-    return next as import('./types/graph').AppEdge;
-  });
-  graphStore.setEdges(updatedEdges);
-}
-
 /**
  * Browser-mode fallback: restore the last saved config session from backend
  * storage (project/load-saved) and the saved graph layout from localStorage.
@@ -227,44 +187,22 @@ async function restoreSavedConfigsFromBackend(): Promise<void> {
     const { buildProjectGraph } = await import('./utils/graphBuilder');
     buildProjectGraph(allConfigs, graphStore, schemas, allValidations);
 
-    // Browser mode: restore saved layout from localStorage (if any)
-    try {
-      const saved = localStorage.getItem('kwc.graphLayout');
-      if (saved) {
-        const layout = JSON.parse(saved) as {
-          graphNodes?: Array<{ id: string; position: { x: number; y: number } }>;
-          graphEdges?: Array<{
-            id: string;
-            data?: Record<string, unknown>;
-            sourceHandle?: string;
-            targetHandle?: string;
-          }>;
-          macroDesigner?: MacroDesignerPersistedState;
-        };
-        if (layout.macroDesigner) {
-          useMacroDesignerStore.getState().hydratePersistedState(layout.macroDesigner);
-        }
-        if (layout.graphNodes) {
-          const positionMap = new Map(
-            layout.graphNodes.map((n) => [n.id, n.position]),
-          );
-          const currentNodes = useGraphStore.getState().nodes;
-          const updatedNodes = currentNodes.map((node) => {
-            const savedPos = positionMap.get(node.id);
-            if (savedPos) {
-              return { ...node, position: savedPos } as AppNode;
-            }
-            return node;
-          });
-          graphStore.setNodes(updatedNodes);
-        }
-        // Restore edge routing: custom bend points + which side of each
-        // node the line connects to. Without this, a refresh resets every
-        // trace to default top/bottom routing even though card positions
-        // survived.
-        applySavedEdgeLayout(layout.graphEdges, graphStore);
+    // Browser mode: restore saved layout from localStorage (if any).
+    // Position/edge restore is keyed by content identity (logicalKey) with
+    // exact-id fallback — see utils/layoutPersistence.
+    const layout = await loadSavedLayout(false);
+    if (layout) {
+      if (layout.macroDesigner) {
+        useMacroDesignerStore.getState().hydratePersistedState(layout.macroDesigner as MacroDesignerPersistedState);
       }
-    } catch { /* malformed/absent layout — keep auto-arranged positions */ }
+      const gs = useGraphStore.getState();
+      gs.setNodes(applySavedNodePositions(gs.nodes, layout.graphNodes));
+      // Restore edge routing: custom bend points + which side of each
+      // node the line connects to. Without this, a refresh resets every
+      // trace to default top/bottom routing even though card positions
+      // survived.
+      gs.setEdges(applySavedEdgeLayout(gs.edges, layout.graphEdges, gs.nodes, layout.graphNodes));
+    }
 
     configStore.markClean();
   } catch {
@@ -407,37 +345,17 @@ export default function App() {
             buildProjectGraph(allConfigs, graphStore, schemas, allValidations);
 
             // Now try to restore graph positions from saved layout
-            try {
-              const layoutResult = await api.loadNativeLayout();
-              if (layoutResult.layout) {
-                const layout = layoutResult.layout as {
-                  graphNodes?: Array<{ id: string; position: { x: number; y: number } }>;
-                  graphEdges?: SavedEdgeLayout[];
-                  macroDesigner?: MacroDesignerPersistedState;
-                };
-                if (layout.macroDesigner) {
-                  useMacroDesignerStore.getState().hydratePersistedState(layout.macroDesigner);
-                }
-                // Overlay saved positions onto the newly built graph nodes
-                if (layout.graphNodes) {
-                  const positionMap = new Map(
-                    layout.graphNodes.map((n) => [n.id, n.position]),
-                  );
-                  const currentNodes = useGraphStore.getState().nodes;
-                  const updatedNodes = currentNodes.map((node) => {
-                    const savedPos = positionMap.get(node.id);
-                    if (savedPos) {
-                      return { ...node, position: savedPos } as import('./types/graph').AppNode;
-                    }
-                    return node;
-                  });
-                  graphStore.setNodes(updatedNodes);
-                }
-                // Restore edge routing the same way as the browser-mode path
-                // (pair-matched, direction-agnostic — see applySavedEdgeLayout).
-                applySavedEdgeLayout(layout.graphEdges as SavedEdgeLayout[] | undefined, graphStore);
+            // (content-keyed with exact-id fallback — see utils/layoutPersistence)
+            const layout = await loadSavedLayout(true);
+            if (layout) {
+              if (layout.macroDesigner) {
+                useMacroDesignerStore.getState().hydratePersistedState(layout.macroDesigner as MacroDesignerPersistedState);
               }
-            } catch { /* no saved layout — use auto-arranged positions */ }
+              const gs = useGraphStore.getState();
+              gs.setNodes(applySavedNodePositions(gs.nodes, layout.graphNodes));
+              // Restore edge routing the same way as the browser-mode path.
+              gs.setEdges(applySavedEdgeLayout(gs.edges, layout.graphEdges, gs.nodes, layout.graphNodes));
+            }
 
             configStore.markClean();
           } catch {
@@ -480,29 +398,19 @@ export default function App() {
 
   // Auto-save layout (debounced). Native mode persists via the backend;
   // browser mode falls back to localStorage so arrangements survive refresh.
+  // Both modes store the SAME canonical payload (id + position + logicalKey
+  // per node, endpoint-bearing edges) so restore can key on content identity.
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveLayoutNow = useCallback((n: typeof nodes, e: typeof edges) => {
     if (n.length === 0) return;
     const macroDesigner = useMacroDesignerStore.getState().exportPersistedState();
+    const layout = buildLayoutPayload(n, e, macroDesigner);
     const isNative = useNativeStore.getState().isNative;
     if (isNative) {
-      api.saveNativeLayout({
-        graphNodes: n,
-        graphEdges: e,
-        macroDesigner,
-      }).catch(() => { /* ignore save errors */ });
+      api.saveNativeLayout(layout).catch(() => { /* ignore save errors */ });
     } else {
       try {
-        localStorage.setItem('kwc.graphLayout', JSON.stringify({
-          graphNodes: n.map((node) => ({ id: node.id, position: node.position })),
-          graphEdges: e.map((edge) => ({
-            id: edge.id,
-            data: edge.data,
-            sourceHandle: edge.sourceHandle ?? undefined,
-            targetHandle: edge.targetHandle ?? undefined,
-          })),
-          macroDesigner,
-        }));
+        localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(layout));
       } catch { /* ignore quota / privacy-mode errors */ }
     }
   }, []);

@@ -131,7 +131,7 @@ function matchesSectionRef(section: { full_header: string; line_number: number }
   return section.line_number === ref.sectionLineNumber;
 }
 
-function sectionIdentity(sectionHeader: string, sectionLineNumber?: number): string {
+export function sectionIdentity(sectionHeader: string, sectionLineNumber?: number): string {
   return `${sectionHeader}#${sectionLineNumber ?? 0}`;
 }
 

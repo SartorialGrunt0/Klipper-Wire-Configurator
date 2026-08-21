@@ -15,6 +15,8 @@ import { useAiStore, AiProvider, providerRequiresApiKey, type ChatMessage } from
 import { useChatHistoryStore } from '../../stores/chatHistoryStore';
 import { useConfigStore } from '../../stores/configStore';
 import { useGraphStore } from '../../stores/graphStore';
+import { useNativeStore } from '../../stores/nativeStore';
+import { restoreLayoutAfterRebuild } from '../../utils/layoutPersistence';
 import { usePrinterMemoryStore, DEFAULT_PRINTER_MEMORY, type PrinterMemory } from '../../stores/printerMemoryStore';
 import * as api from '../../services/api';
 import {
@@ -772,6 +774,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       const latestConfigFiles = useConfigStore.getState().configFiles;
       const latestValidation = useConfigStore.getState().validation;
       buildProjectGraph(latestConfigFiles, graphStore, schemas, latestValidation);
+      // The rebuild renumbers node ids — re-apply the saved layout so
+      // accepting an AI edit doesn't auto-arrange over the user's current
+      // arrangement (and the autosave can't persist that reset).
+      await restoreLayoutAfterRebuild(graphStore, useNativeStore.getState().isNative);
       setError(null);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to accept assistant changes.');
