@@ -1,13 +1,12 @@
 # Klipper Wire Configurator
 
-Klipper Wire Configurator is a web-based tool for inspecting, creating, and editing Klipper `printer.cfg` files with an intuitive graphical interface. It simplifies configuration management by providing visual tools to view connections, add components from the official reference, validate settings in real-time, and apply changes directly to your printer. The software runs locally on your SBC and is completely free and open-source under the GPL3 license.
+Klipper Wire Configurator (KWC) is a web-based tool for inspecting, creating, and editing Klipper configuration files with an intuitive graphical interface. It simplifies configuration management by providing visual tools to view links between files, see communication paths, add components and features from the official reference, validate settings in real-time against the klipper runtime, and apply changes directly to your printer configuration files. The software runs locally on your SBC and is completely free and open-source under the GPL3 license.
 
 Special thanks to the Klipper, Mainsail, Moonraker, Fluidd, and other teams whose work was heavily referenced for this project.
 
 ## Table of contents
 
 - [Features](#features)
-- [AI Chat](docs/AI_CHAT.md)
 - [Installing](#installing/uninstalling)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
@@ -16,9 +15,9 @@ Special thanks to the Klipper, Mainsail, Moonraker, Fluidd, and other teams whos
 
 ### Visual Tools
 
-- View your printer's hardware as interactive cards and wires—MCUs, steppers, heaters, probes, and more.
-- Add any Klipper component directly from the official Config Reference documentation.
-- Import example configurations organized by board type (Mainboard, Toolhead, Probe, Expander) with fuzzy search.
+- View your printer's hardware as interactive cards and connection wires.
+- Add any Klipper component or feature directly from the official Config Reference documentation.
+- Import example configurations organized by board type (Mainboard, Toolhead, Probe, Expander).
 - Delete, modify, or reposition components using drag-and-drop interactions.
 - Auto-detect and manage USB, UART, and CAN communications with ID detection.
 
@@ -26,12 +25,12 @@ Special thanks to the Klipper, Mainsail, Moonraker, Fluidd, and other teams whos
 
 - See validation warnings and errors in real-time as you edit to catch mistakes before they cause runtime failures.
 - Review a side-by-side diff of your changes before exporting or applying them to your printer.
-- Save and apply configuration updates directly, then manually restart Klipper when ready.
+- Save and apply configuration updates directly.
 - Edit files in Text View with multi-file fuzzy search, per-line error highlighting, and traditional config management.
 
 ### Advanced Features
 
-- Create, manage, and simulate macros that reflects your printer configuration.
+- Create, manage, and simulate macros that reflect your printer configuration.
 - Add an AI assistant that references official Klipper documentation, Config Reference excerpts, and your current config with explicit review and approval before applying ([read about it](docs/AI_CHAT.md)).
 - Build, download, and flash Katapult and Klipper firmware directly from the UI.
 
@@ -75,18 +74,14 @@ Special thanks to the Klipper, Mainsail, Moonraker, Fluidd, and other teams whos
 <img src="images/AI_Chat.png" width="100%">
 <div style="height: 45%;"></div>
 
-## AI Chat
-
-The AI assistant answers Klipper questions and drafts config changes, macros, and printer-memory updates using the bundled Klipper documentation, example configs, and your loaded project files. Nothing the assistant produces touches your config until you review and approve it in the draft preview dialog.
-
-The full [AI Chat guide](docs/AI_CHAT.md) covers configuration, how a request flows from prompt to file edit, the draft-block file-edit protocol, printer memory, and the accuracy test results for the models we've benchmarked.
-
 ## Prerequisites
 
-- Raspberry Pi OS or another Debian-based distribution. Must be bookworm or newer.
+- Raspberry Pi OS or another linux distribution. Must be bookworm or newer. 
 - Python 3.10+
 - Git and internet access for the initial install.
 - Klipper
+- Moonraker
+- Mainsail/Fluidd
 - Katapult (optional)
 
 ## Installing/Uninstalling
@@ -104,10 +99,14 @@ bash scripts/install.sh
 
 Run **without sudo** — the installer escalates internally wherever needed (apt, systemd, and writes into the Moonraker config dir). `sudo bash scripts/install.sh` resets `$HOME` to `/root`, so the Moonraker config directory isn't found, the update_manager/Mainsail sidebar setup is silently skipped, and the app installs into `/root` instead of your user's home.
 
-Note: On 32-bit Raspberry Pi OS (`armv7` / `armhf`), the installer automatically uses the distro `nodejs` package. I haven't tried 64-bit, YMMV.
+Note: On 32-bit Raspberry Pi OS (`armv7` / `armhf`), the installer automatically uses the distro `nodejs` package.
 A successful install ends by checking the service health and printing the installer log path under `/tmp/klipper-wire-configurator-install-*.log`.
 
-After install, proceed to http://{your_ip_here}:8099
+### Mainsail sidebar link
+
+If you are using Mainsail the installer adds a **KWC** entry to Mainsail's custom navigation — it writes `navi.json` into the `.theme` folder inside the Klipper config directory (`~/printer_data/config/.theme` on kiauh installs). The link opens `http://<this-host>:8099` in a new tab, positioned below Machine. Re-running the installer (or `--uninstall`) adds/removes only the KWC entry, leaving any other custom navigation entries untouched.
+
+If using Fluidd or Octoprint, proceed to http://{your_ip_here}:8099 
 
 ### Moonraker update_manager
 
@@ -128,10 +127,6 @@ managed_services: klipper-wire-configurator
 info_tags:
 	desc=Klipper Wire Configurator
 ```
-
-### Mainsail sidebar link
-
-If Mainsail is detected on the machine (its `~/mainsail` install or an `[update_manager mainsail]` entry in `moonraker.conf`), the installer adds a **KWC** entry to Mainsail's custom navigation — it writes `navi.json` into the `.theme` folder inside the Klipper config directory (`~/printer_data/config/.theme` on kiauh installs). The link opens `http://<this-host>:8099` in a new tab, positioned below Machine. Fluidd and OctoPrint have no custom-navigation support, so nothing is written for them. Re-running the installer (or `--uninstall`) adds/removes only the KWC entry, leaving any other custom navigation entries untouched.
 
 ### Uninstall
 
