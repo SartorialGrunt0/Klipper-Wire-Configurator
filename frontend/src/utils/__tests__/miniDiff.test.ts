@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isMiniDiffBlock, applyMiniDiffBlock, classifyMiniDiffLine, fenceUnfencedMiniDiffs } from '../miniDiff';
+import { isMiniDiffBlock, applyMiniDiffBlock, classifyMiniDiffLine, fenceUnfencedMiniDiffs, stripMiniDiffMarkers } from '../miniDiff';
 
 const LEVEL_BED_SECTION = `[gcode_macro Level_Bed]
 #rename_existing: _BED_MESH_CALIBRATE
@@ -516,6 +516,39 @@ algorithm: bicubic
       base,
     );
     expect(result.applied).toBe(false);
+  });
+});
+
+describe('stripMiniDiffMarkers', () => {
+  it('strips markers from a mixed block, preserving gcode indentation', () => {
+    const block = '[gcode_macro Level_Bed]\n-    G28\n+    G28 X0\n+    M104 S0\n    M84';
+    expect(stripMiniDiffMarkers(block)).toBe(
+      '[gcode_macro Level_Bed]\n    G28\n    G28 X0\n    M104 S0\n    M84',
+    );
+  });
+
+  it('strips ALL separator spaces from param-shaped lines (no stray indent)', () => {
+    // Regression: the old fallback strip ate exactly one separator char, so a
+    // model emitting `-  max_accel: 15500` (marker, two spaces, column-0 param)
+    // left ` max_accel: 15500` — a leading space the parser folds into the
+    // PREVIOUS param's multi-line value, silently corrupting the config.
+    expect(stripMiniDiffMarkers('[printer]\n-  max_accel: 15500\n+  max_accel: 18000')).toBe(
+      '[printer]\nmax_accel: 15500\nmax_accel: 18000',
+    );
+  });
+
+  it('keeps one-separator stripping for non-param lines (jinja indent preserved)', () => {
+    // `{% set x = 1 %}` is not param-shaped — strip exactly one separator and
+    // keep the line's own indentation (multi-line jinja blocks).
+    expect(stripMiniDiffMarkers('[gcode_macro A]\ngcode:\n-    {% set x = 1 %}\n+    {% set x = 2 %}')).toBe(
+      '[gcode_macro A]\ngcode:\n    {% set x = 1 %}\n    {% set x = 2 %}',
+    );
+  });
+
+  it('leaves context (unmarked) lines untouched', () => {
+    expect(stripMiniDiffMarkers('# file: printer.cfg\n[bed_mesh]\n    algorithm: bicubic')).toBe(
+      '# file: printer.cfg\n[bed_mesh]\n    algorithm: bicubic',
+    );
   });
 });
 

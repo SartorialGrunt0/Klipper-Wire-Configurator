@@ -735,9 +735,16 @@ fi
 # Mainsail tab is preserved.
 if mainsail_installed; then
     if resolve_mainsail_theme_dir > /dev/null; then
-        info "Mainsail detected - adding KWC link to its sidebar (navi.json)..."
-        edit_mainsail_navi add
-        ok "Mainsail sidebar link configured."
+        if [ -z "$IP_ADDR" ] || [ "$IP_ADDR" = "<your-pi-ip>" ]; then
+            # Never write a link with a placeholder URL — a navi.json entry
+            # pointing at "<your-pi-ip>" would silently 404 with no signal.
+            warn "Could not detect the Pi's IP address; skipping the Mainsail sidebar link."
+            warn "Add it later manually: a KWC entry in the .theme folder of your Klipper config dir (see README 'Mainsail sidebar link')."
+        else
+            info "Mainsail detected - adding KWC link to its sidebar (navi.json)..."
+            edit_mainsail_navi add
+            ok "Mainsail sidebar link configured."
+        fi
     else
         warn "Mainsail detected but no Klipper config directory found; skipping sidebar link."
     fi

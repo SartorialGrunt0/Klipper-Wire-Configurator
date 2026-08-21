@@ -230,6 +230,36 @@ export function isMiniDiffBlock(configText: string): boolean {
   return hasHeader && hasMarker;
 }
 
+/**
+ * Strip the `-`/`+` mini-diff markers from a block, producing plain section
+ * text (used when the mini-diff cannot be applied against the base file and
+ * the block is treated as a FULL section write instead).
+ *
+ * Content handling follows the same convention as the apply path
+ * (MINI_DIFF_REMOVAL_RE): everything after the marker is the line's own
+ * content, indent included — that is how removals are matched against the
+ * base file. On top of that:
+ * - param-shaped lines (`key: value` / `key= value`, column 0 in Klipper
+ *   params) — trim to column 0. A model emitting `-  max_accel: 15500` must
+ *   NOT leave the leading space: an indented line is folded into the
+ *   PREVIOUS param's multi-line value by the parser, silently corrupting
+ *   the config.
+ * - all other lines (gcode bodies, jinja, comments) — kept verbatim, indent
+ *   included (harmless for gcode, keeps multi-line jinja indented blocks).
+ */
+export function stripMiniDiffMarkers(blockText: string): string {
+  return blockText
+    .split(/\r?\n/)
+    .map((line) => {
+      const marker = /^(\s*)[-+](.*)$/.exec(line);
+      if (!marker) return line;
+      const content = marker[2];
+      const trimmed = content.trimStart();
+      return PARAM_LINE_RE.test(trimmed) ? trimmed : content;
+    })
+    .join('\n');
+}
+
 /** Extract the operations for one section header from the block's lines. */
 function extractSectionOps(
   lines: string[],

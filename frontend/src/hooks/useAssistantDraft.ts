@@ -45,7 +45,7 @@ import {
 import type { AssistantDraftChange } from '../utils/assistantDraftMerge';
 import { mergeAssistantSectionsIntoConfig, preprocessDeleteMarkers } from '../utils/assistantDraftMerge';
 import { normalizeDiffText } from '../utils/configDiff';
-import { isMiniDiffBlock, applyMiniDiffBlock } from '../utils/miniDiff';
+import { isMiniDiffBlock, applyMiniDiffBlock, stripMiniDiffMarkers } from '../utils/miniDiff';
 import { repairUnclosedJinjaInConfigText } from '../utils/jinjaBlockRepair';
 import type { ReplyValidator } from '../utils/replyValidation';
 
@@ -232,10 +232,7 @@ export function useAssistantDraft() {
         }
         if (miniDiffApplyFailed) {
           console.warn('[AIDraft] Mini-diff could not be applied against the base file — treating it as a full section write (markers stripped). Review the diff before accepting.');
-          draftConfigText = draftConfigText
-            .split(/\r?\n/)
-            .map((line) => line.replace(/^(\s*)[-+][ \t]?/, '$1'))
-            .join('\n');
+          draftConfigText = stripMiniDiffMarkers(draftConfigText);
         }
 
         // Phase 4 deterministic auto-repair: when the model rewrote a macro
