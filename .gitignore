@@ -62,3 +62,7 @@ nul
 
 # Agent scratch (plans, working notes)
 .hermes/
+
+# Klipper docs checkouts used by the MCP docs server (local only)
+.mcp-klipper-docs/
+tmpmcp-klipper-docs/
