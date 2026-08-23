@@ -270,12 +270,15 @@ gcode:
     G90                     # Absolute positioning
     M140 S{params.BED_TEMP} # Heat bed
     M104 S{params.EXTRUDER_TEMP} # Heat hotend
+    M117 Heating...         # Show status on display
     G1 X10 Y10 Z10 F3000    # Park position
     # Wait for temps
     M190 S{params.BED_TEMP}
     M109 S{params.EXTRUDER_TEMP}
+    M117 Starting Bed Mesh...
     BED_MESH_CALIBRATE      # Bed mesh
     G1 X0 Y0 Z2 F3000       # Move to start
+    M117 Ready to print!
 ```
 
 **Parameters:**

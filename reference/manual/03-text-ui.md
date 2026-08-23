@@ -81,7 +81,8 @@ gcode:
 step_pin: PB0
 dir_pin: PB1
 enable_pin: !PB2
-rotation_distance: 40  # Add this line
+rotation_distance: 40  # Primary parameter for stepper movement
+microsteps: 16          # Number of microsteps per full step
 ```
 
 **Edit a value:**
