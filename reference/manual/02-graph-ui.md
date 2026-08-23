@@ -14,11 +14,12 @@ The graph organizes your printer's components into a hierarchical tree:
 
 | Node Type | Purpose |
 |-----------|---------|
-| **SBC** | Your Raspberry Pi (single-board computer) — the brain running Klipper |
-| **Mainboard** | The printer's main controller board (e.g., Fysetc Spider, MKS Robin) |
-| **Toolhead** | The moving carriage containing extruders, heaters, and motors |
-| **Expander** | Additional boards connected via UART or CAN bus |
-
+| **SBC** | Your Raspberry Pi or other single-board computer |
+| **Mainboard** | The printer's main controller board |
+| **Toolhead** | An accessory board mounted to the containing extruders, heaters, and fans |
+| **Expander** | Additional boards connected |
+| **Probes** | Probes that contain an MCU |
+| **Accelerometers** | Standalone Accelerometers that contain an MCU |
 ### Child Components
 
 Within each hardware node, you'll find:
