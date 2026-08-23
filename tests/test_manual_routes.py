@@ -19,7 +19,8 @@ def test_manual_section_list():
     data = resp.json()
     assert data["count"] == len(data["sections"])
     assert "01-getting-started" in data["sections"]
-    assert "10-appendix" in data["sections"]
+    # The manual ends with an appendix section (survives section renumbers)
+    assert data["sections"][-1].endswith("appendix")
     # Sections come back sorted and contain no non-section files
     assert data["sections"] == sorted(data["sections"])
     assert all(s[0].isdigit() for s in data["sections"])
@@ -88,12 +89,15 @@ def test_manual_section_html_popout():
 
 
 def test_manual_section_html_popout_pager_edges():
-    first = client.get("/api/manual/01-getting-started").text
-    assert 'href="/api/manual/01-getting-started"' not in first  # no prev
-    assert 'href="/api/manual/02-graph-ui"' in first  # next
-    last = client.get("/api/manual/10-appendix").text
-    assert 'href="/api/manual/10-appendix"' not in last  # no next
-    assert 'href="/api/manual/09-firmware-tooling"' in last  # prev
+    sections = client.get("/api/manual").json()["sections"]
+    assert len(sections) >= 3
+    first, last = sections[0], sections[-1]
+    first_html = client.get(f"/api/manual/{first}").text
+    assert f'href="/api/manual/{first}"' not in first_html  # no prev
+    assert f'href="/api/manual/{sections[1]}"' in first_html  # next
+    last_html = client.get(f"/api/manual/{last}").text
+    assert f'href="/api/manual/{last}"' not in last_html  # no next
+    assert f'href="/api/manual/{sections[-2]}"' in last_html  # prev
 
 
 def test_manual_markdown_fences_balanced():
