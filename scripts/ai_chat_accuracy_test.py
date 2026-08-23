@@ -43,6 +43,9 @@ in logs and are never written to output files.
 Other useful flags:
     --questions 1-5,8     run only a subset of questions
     --start N             start at question N (runs N..end); ignored when --questions is set
+    --question TEXT       run ONE ad-hoc question of your own instead of the bank
+                          (takes priority over --questions/--start); repeatable
+                          --check TEXT adds case-insensitive pass criteria
     --list-questions      print the question bank and exit (no API calls)
     --output-dir DIR      where to write the log (default reports/ai-chat-accuracy)
     --include-memory      also test printer-memory auto-fill (MEMORY-01..03); the backend's
@@ -1917,6 +1920,15 @@ def main() -> int:
     parser.add_argument("--start", default=0, type=int,
                         help="Start at question N (1-based), running N..end. "
                              "Ignored when --questions is set.")
+    parser.add_argument("--question", action="append", default=[], metavar="TEXT",
+                        help="Ad-hoc question to run INSTEAD of the bank (repeatable "
+                             "for several one-offs). Takes priority over --questions "
+                             "and --start. QID: AD-01, AD-02, ...")
+    parser.add_argument("--check", action="append", default=[], metavar="TEXT",
+                        help="Case-insensitive substring the answer must contain "
+                             "(repeatable). With one --question every --check "
+                             "applies to it; with several, check N pairs with "
+                             "question N.")
     parser.add_argument("--list-questions", action="store_true",
                         help="Print the question bank and exit")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR),
@@ -1941,8 +1953,43 @@ def main() -> int:
             print(f"{q.qid:<5} {tools:<45} {q.title}")
         return 0
 
+    # Ad-hoc one-off questions (--question) are appended to the bank so they
+    # flow through the exact same request/eval path as bank questions. When
+    # any are given they take priority over --questions and --start: only the
+    # ad-hoc questions run.
+    #
+    # --check criteria pairing:
+    #   * exactly one --question  -> every --check applies to it (the common
+    #     "one prompt, several required substrings" case);
+    #   * several --question      -> check[i] pairs with question[i]; a question
+    #     with no check has no criteria (always passes, manual review).
+    # Without any --check the question always passes and the full answer +
+    # tools land in the log for manual review.
+    adhoc: list[TestQuestion] = []
+    for i, text in enumerate(args.question, start=1):
+        if not text.strip():
+            parser.error("--question requires non-empty text")
+        if len(args.question) == 1:
+            checks = args.check
+        else:
+            checks = [args.check[i - 1]] if i - 1 < len(args.check) else []
+        criteria = tuple(("contains", c) for c in checks)
+        adhoc.append(TestQuestion(
+            qid=f"AD-{i:02d}",
+            title=text.strip().splitlines()[0][:60],
+            text=text.strip(),
+            require_tool=False,
+            criteria=criteria,
+        ))
+    if len(args.question) > 1 and len(args.check) > len(args.question):
+        parser.error(f"--check given without a matching --question "
+                     f"({len(args.check)} checks for {len(args.question)} questions)")
+    if adhoc:
+        questions += adhoc
+
     # Validate --start before any interactive prompts so bad values fail fast.
-    if args.start and not args.questions and (args.start < 1 or args.start > len(questions)):
+    if args.start and not args.questions and not args.question \
+            and (args.start < 1 or args.start > len(questions)):
         parser.error(f"--start must be between 1 and {len(questions)}")
 
     settings = resolve_settings(args)
@@ -1982,7 +2029,10 @@ def main() -> int:
         print(msg, file=sys.stderr)
         return 1
 
-    if args.questions:
+    if adhoc:
+        # Ad-hoc questions only — the bank is listed in the log but not run.
+        selected = list(range(len(questions) - len(adhoc), len(questions)))
+    elif args.questions:
         selected = parse_question_filter(args.questions, len(questions))
     elif args.start:
         selected = list(range(args.start - 1, len(questions)))
