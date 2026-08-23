@@ -16,34 +16,9 @@ KWC is a visual editor for Klipper `printer.cfg` files that combines:
 - **Macro Designer** — Visual G-code macro editor with motion simulation
 - **Flash Tool** — Build and flash Klipper/Katapult firmware (native mode only)
 
-KWC runs in your browser. You can use it in two modes:
-1. **Browser Mode:** Access via any web browser. Best for editing files on your PC.
-2. **Native Mode:** Installed directly on your Raspberry Pi. Best for direct hardware access and flashing.
-
 ---
 
 ## First Startup
-
-### Installation
-
-**Prerequisites:** Before running the installer, ensure your Raspberry Pi has:
-- **Internet Access** (to download dependencies)
-- **Sufficient Disk Space** (at least 500MB)
-
-If you haven't installed KWC yet:
-
-```bash
-# On your Raspberry Pi
-curl -sSL https://raw.githubusercontent.com/SartorialGrunt0/Klipper-Wire-Configurator/main/scripts/install.sh | bash
-```
-
-The installer will:
-- Install dependencies (Python 3.11+, Node.js, build tools)
-- Build the frontend
-- Create a systemd service on port 8099
-- Verify the service is running
-
-Access KWC at: `http://<your-pi-ip>:8099`
 
 ### Opening KWC
 
@@ -71,22 +46,9 @@ When you first load KWC in your browser:
 
 ## Importing Your First Config
 
-### From Your Computer
+If you already have Klipper installed, KWC uses the default file paths and will your configuration immediatley. If you are on a fresh build or your files didnt immeditaily load, see the following sections for opening and importing configurations.
 
-1. Click **Import** in the toolbar
-2. Select a `.cfg` file from your computer
-3. KWC will parse the file and display it in the graph workspace
-
-**What happens during import:**
-
-- The file is parsed into structured sections and parameters
-- Validation runs automatically — **Red badges** indicate critical errors that will prevent the printer from starting, while **Yellow badges** indicate non-critical warnings
-- Board detection attempts to identify your mainboard type
-- The graph workspace builds a visual representation
-
-> **Note:** Import is a **read-only** operation. Your original file is never modified. To save changes, you must explicitly use **Save** (native mode) or **Export** (browser mode).
-
-### From Your Pi (Native Mode Only)
+### From Your Pi
 
 When running KWC on your Raspberry Pi:
 
@@ -95,9 +57,17 @@ When running KWC on your Raspberry Pi:
 3. Select one or more `.cfg` files
 4. KWC loads them and builds a multi-file project
 
+### From Your Computer
+
+1. Click **Import** in the toolbar
+2. Select a `.cfg` file from your computer
+3. KWC will parse the file and display it in the graph workspace
+
+> **Note:** Import is a **read-only** operation. Your original file is not modified. To save changes, you must explicitly use **Save** (native mode) or **Export** (browser mode).
+
 **Multi-file projects:**
 
-- KWC attempts to identify the main config file
+- KWC attempts to identify the main config file (printer.cfg)
 - Include relationships (`[include *.cfg]`) are resolved
 - Cross-file validation checks for duplicates and missing dependencies
 
@@ -113,11 +83,10 @@ After importing, you'll see the **Graph View** by default.
 
 The graph organizes your config into a hardware tree:
 
-- **SBC Node** — Your Raspberry Pi (single-board computer)
-- **Mainboard Node** — Your printer's main controller board
-- **Toolhead Nodes** — Extruders, heaters, motors on the moving carriage
+- **SBC Node** — Your Raspberry Pi (or other single-board computer)
+- **Mainboard Node** — Your printer's primary main controller board
+- **Accessory Nodes** — Additional MCUs such as toolhead boards, expander boards, probes, etc.
 - **Config File Nodes** — Individual `.cfg` files in your project
-- **Feature Nodes** — Add-ons like probes, accelerometers, LEDs
 
 **Common actions:**
 
