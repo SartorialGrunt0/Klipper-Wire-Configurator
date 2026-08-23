@@ -12,6 +12,7 @@ import ApplyDialog from './dialogs/ApplyDialog';
 import RevertDialog from './dialogs/RevertDialog';
 import ChatDialog from './dialogs/ChatDialog';
 import FirmwareDialog from './dialogs/FirmwareDialog';
+import ManualDialog from './dialogs/ManualDialog';
 
 interface ToolbarProps {
   showTextView: boolean;
@@ -30,7 +31,8 @@ type ToolbarItemId =
   | 'aiChat'
   | 'flash'
   | 'component'
-  | 'macro';
+  | 'macro'
+  | 'manual';
 
 type ToolbarHiddenState = Record<ToolbarItemId, boolean>;
 
@@ -47,6 +49,7 @@ const defaultHiddenItems: ToolbarHiddenState = {
   flash: false,
   component: false,
   macro: false,
+  manual: false,
 };
 
 const toolbarVisibilityOptions: Array<{ id: ToolbarItemId; label: string }> = [
@@ -60,6 +63,7 @@ const toolbarVisibilityOptions: Array<{ id: ToolbarItemId; label: string }> = [
   { id: 'flash', label: 'Flash' },
   { id: 'component', label: 'Component' },
   { id: 'macro', label: 'Macro' },
+  { id: 'manual', label: 'Manual' },
 ];
 
 function loadHiddenItems(): ToolbarHiddenState {
@@ -85,6 +89,7 @@ function loadHiddenItems(): ToolbarHiddenState {
       flash: parsed.flash === true,
       component: parsed.component === true,
       macro: parsed.macro === true,
+      manual: parsed.manual === true,
     };
   } catch {
     return { ...defaultHiddenItems };
@@ -104,13 +109,14 @@ export default function Toolbar({
   const [showApply, setShowApply] = useState(false);
   const [showRevert, setShowRevert] = useState(false);
   const [showChat, setShowChat] = useState(false);
+  const [showFlash, setShowFlash] = useState(false);
   const [pendingAiRequest, setPendingAiRequest] = useState<PendingAiChatRequest | null>(null);
   const [hiddenItems, setHiddenItems] = useState<ToolbarHiddenState>(() => loadHiddenItems());
   const [showVisibilityMenu, setShowVisibilityMenu] = useState(false);
   const [visibilityMenuPosition, setVisibilityMenuPosition] = useState({ top: 0, left: 0 });
   const aiConfigured = useAiStore((s) => s.isConfigured());
   const chatStatus = useAiStore((s) => s.chatStatus);
-  const [showFlash, setShowFlash] = useState(false);
+  const [showManual, setShowManual] = useState(false);
   const hasOriginals = Object.keys(useConfigStore((s) => s.originalTexts)).length > 0;
   const isNative = useNativeStore((s) => s.isNative);
   const hasConfig = Object.keys(useConfigStore((s) => s.configFiles)).length > 0;
@@ -130,6 +136,7 @@ export default function Toolbar({
   const showFlashButton = isNative && !hiddenItems.flash;
   const showComponentButton = Boolean(onToggleAddMenu) && !hiddenItems.component;
   const showMacroButton = Boolean(onOpenMacroDesigner) && !hiddenItems.macro;
+  const showManualButton = !hiddenItems.manual;
 
   const showFileGroup = showImportButton || showOpenFromPiButton;
   const showProjectGroup =
@@ -384,9 +391,22 @@ export default function Toolbar({
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] transition-colors"
         >
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-            <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+            <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
           Macro
+        </button>
+      )}
+
+      {/* Manual */}
+      {showManualButton && (
+        <button
+          onClick={() => setShowManual(true)}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] transition-colors"
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <path d="M3 4h10M3 8h7M3 12h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+          Manual
         </button>
       )}
 
@@ -514,7 +534,6 @@ export default function Toolbar({
           onAnalyzeWithAi={queueAiAnalyzeRequest}
         />
       )}
-      {showFlash && <FirmwareDialog onClose={() => setShowFlash(false)} />}
       {showRevert && <RevertDialog onClose={() => setShowRevert(false)} />}
       {/* ChatDialog stays mounted when closed so an in-flight request keeps
           running; `open` hides/shows the overlay. */}
@@ -527,6 +546,7 @@ export default function Toolbar({
         pendingRequest={pendingAiRequest}
         onPendingRequestHandled={() => setPendingAiRequest(null)}
       />
+      {showManual && <ManualDialog onClose={() => setShowManual(false)} />}
     </div>
   );
 }

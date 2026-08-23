@@ -232,6 +232,27 @@ export async function getConfigReference(): Promise<{ content: string }> {
   return request('/reference/config-reference');
 }
 
+/* ── Manual (User Guide) ─────────────────────────────── */
+
+export interface ManualSection {
+  content: string;
+  section: string;
+  title: string;
+}
+
+export interface ManualSectionsList {
+  sections: string[];
+  count: number;
+}
+
+export async function getManualSections(): Promise<ManualSectionsList> {
+  return request('/manual');
+}
+
+export async function getManualSection(section: string): Promise<ManualSection> {
+  return request(`/manual?section=${encodeURIComponent(section)}`);
+}
+
 export interface KlipperDocResponse {
   filename: string;
   content: string;
