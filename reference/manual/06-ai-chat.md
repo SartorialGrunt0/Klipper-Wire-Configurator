@@ -362,6 +362,3 @@ AI: [Uses read_klipper_doc → searches for "Eddy"]
 4. **Ask for revision** — "Please fix this"
 
 ---
-
-*Next: [Flash Tool](./07-flash-tool.md)*
-| Previous: [Macro Designer](./05-macro-designer.md)*

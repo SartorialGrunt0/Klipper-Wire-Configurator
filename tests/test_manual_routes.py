@@ -1,4 +1,5 @@
 """Tests for the embedded user manual endpoints (/api/manual)."""
+import os
 import sys
 from pathlib import Path
 
@@ -81,8 +82,30 @@ def test_manual_section_html_popout():
     assert "KWC User Manual" in html
     # Figures are served from the API route in the pop-out page
     assert "/api/manual/figures/" in html
-    # Cross-section nav links are absolute
-    assert 'href="/api/manual/01-getting-started"' in html or 'href="/api/manual/03-text-ui"' in html
+    # Pager nav: middle section has both links
+    assert 'href="/api/manual/01-getting-started"' in html
+    assert 'href="/api/manual/03-text-ui"' in html
+
+
+def test_manual_section_html_popout_pager_edges():
+    first = client.get("/api/manual/01-getting-started").text
+    assert 'href="/api/manual/01-getting-started"' not in first  # no prev
+    assert 'href="/api/manual/02-graph-ui"' in first  # next
+    last = client.get("/api/manual/10-appendix").text
+    assert 'href="/api/manual/10-appendix"' not in last  # no next
+    assert 'href="/api/manual/09-firmware-tooling"' in last  # prev
+
+
+def test_manual_markdown_fences_balanced():
+    # A stray ``` line opens a code fence that swallows everything after it,
+    # silently hiding headings, figures, and nav. Every section's fences must
+    # be balanced (even count) so no content is eaten.
+    for md in sorted(os.listdir(MANUAL_DIR)):
+        if not md.endswith(".md") or not md[0].isdigit():
+            continue
+        text = (MANUAL_DIR / md).read_text(encoding="utf-8")
+        fences = sum(1 for line in text.splitlines() if line.startswith("```"))
+        assert fences % 2 == 0, f"{md} has an odd number ({fences}) of code fences"
 
 
 def test_manual_section_html_missing():

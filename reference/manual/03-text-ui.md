@@ -314,6 +314,3 @@ The reference viewer includes:
 - **Export/Apply** — Required to persist changes
 
 ---
-
-*Next: [Save, Diff, Export](./04-save-diff-export.md)*
-| Previous: [Graph UI](./02-graph-ui.md)*

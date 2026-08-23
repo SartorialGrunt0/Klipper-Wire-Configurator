@@ -321,6 +321,3 @@ python3 ~/klipper/scripts/canboot_flash.py -i can0 firmware.bin
 ```
 
 ---
-
-*Next: [Appendix](./10-appendix.md)*
-| Previous: [Native Mode](./08-native-mode.md)*

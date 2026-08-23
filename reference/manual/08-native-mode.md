@@ -410,6 +410,3 @@ sudo rm -rf ~/printer_data/config/backup_*
 ```
 
 ---
-
-*Next: [Firmware Tooling](./09-firmware-tooling.md)*
-| Previous: [Flash Tool](./07-flash-tool.md)*

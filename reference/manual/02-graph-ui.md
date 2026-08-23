@@ -226,6 +226,3 @@ When you select a node, the **Settings Panel** appears with:
 - Cartesian (standard)
 
 ---
-
-*Next: [Text UI](./03-text-ui.md)*
-| Previous: [Getting Started](./01-getting-started.md)*

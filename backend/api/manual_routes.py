@@ -43,8 +43,42 @@ def _rewrite_assets(content: str) -> str:
     return content
 
 
-def _section_html(content: str, title: str) -> HTMLResponse:
+def _section_list():
+    """Sorted section slugs available in the manual."""
+    return sorted(
+        f[:-3]
+        for f in os.listdir(MANUAL_DIR)
+        if f.endswith('.md') and f[0].isdigit() and f != 'index.md'
+    )
+
+
+def _section_html(content: str, title: str, slug: str) -> HTMLResponse:
     body = md_lib.markdown(_rewrite_assets(content), extensions=['tables', 'fenced_code'])
+    # Previous/Next navigation for the standalone page
+    slugs = _section_list()
+    idx = slugs.index(slug) if slug in slugs else -1
+    prev_slug = slugs[idx - 1] if idx > 0 else None
+    next_slug = slugs[idx + 1] if 0 <= idx < len(slugs) - 1 else None
+
+    def _label(s: str) -> str:
+        return s.replace('-', ' ').title()
+
+    nav = ''
+    if prev_slug or next_slug:
+        nav = (
+            '<nav class="pager">'
+            + (
+                f'<a href="/api/manual/{prev_slug}">← {_label(prev_slug)}</a>'
+                if prev_slug
+                else '<span></span>'
+            )
+            + (
+                f'<a class="next" href="/api/manual/{next_slug}">{_label(next_slug)} →</a>'
+                if next_slug
+                else '<span></span>'
+            )
+            + '</nav>'
+        )
     return HTMLResponse(f"""<!doctype html>
 <html lang="en">
 <head>
@@ -72,9 +106,13 @@ def _section_html(content: str, title: str) -> HTMLResponse:
   figcaption {{ font-size: .85rem; color: #8b98ab; margin-top: .5rem; }}
   blockquote {{ border-left: 3px solid #263143; margin: 1rem 0; padding: .25rem 1rem; color: #8b98ab; }}
   a {{ color: #5aa2ff; }}
+  .pager {{ display: flex; justify-content: space-between; gap: 1rem; margin-top: 2.5rem; padding-top: 1rem; border-top: 1px solid #263143; }}
+  .pager a {{ text-decoration: none; font-size: .9em; }}
+  .pager a:hover {{ text-decoration: underline; }}
+  .pager .next {{ text-align: right; }}
 </style>
 </head>
-<body><main>{body}</main></body>
+<body><main>{body}</main>{nav}</body>
 </html>""")
 
 
@@ -140,4 +178,4 @@ async def get_manual_section_html(section: str):
     if not path.exists():
         raise HTTPException(404, f"Section '{section}' not found")
     content = path.read_text(encoding='utf-8')
-    return _section_html(content, safe_name.replace('-', ' ').title())
+    return _section_html(content, safe_name.replace('-', ' ').title(), safe_name)

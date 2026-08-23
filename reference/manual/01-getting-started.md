@@ -167,5 +167,3 @@ Now that you've imported a config, try these:
 > **Note:** `F1` and custom shortcuts are planned for a future release.
 
 ---
-
-*Next: [Graph UI](./02-graph-ui.md)*

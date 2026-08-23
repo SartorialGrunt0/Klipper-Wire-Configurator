@@ -310,6 +310,3 @@ curl -X POST http://localhost:7125/klippy/restart
 | Default name | `printer.cfg` or original filename |
 
 ---
-
-*Next: [Macro Designer](./05-macro-designer.md)*
-| Previous: [Text UI](./03-text-ui.md)*

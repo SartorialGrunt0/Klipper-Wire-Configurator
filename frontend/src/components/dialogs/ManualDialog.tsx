@@ -6,7 +6,7 @@
  * - TOC sidebar + markdown content (similar to ConfigReferenceDialog)
  * - "Pop-out" button opens current section in new browser tab
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import * as api from '../../services/api';
@@ -119,6 +119,22 @@ export default function ManualDialog({ onClose }: ManualDialogProps) {
       window.open(url, '_blank', 'noopener,noreferrer');
     }
   };
+
+  // Reset scroll to the top of the document whenever the section content changes
+  const contentRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    contentRef.current?.scrollTo({ top: 0, left: 0 });
+  }, [content]);
+
+  // Previous/Next sections for the footer navigation buttons
+  const sectionIdx = currentSection ? sections.indexOf(currentSection) : -1;
+  const prevSection = sectionIdx > 0 ? sections[sectionIdx - 1] : null;
+  const nextSection =
+    sectionIdx >= 0 && sectionIdx < sections.length - 1 ? sections[sectionIdx + 1] : null;
+
+  // Display name for a section slug (e.g. "02-graph-ui" → "02 Graph Ui")
+  const sectionDisplay = (name: string) =>
+    name.replace(/-/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase());
 
   // Extract headings from content for in-document TOC
   const headings = useMemo(() => extractHeadings(content), [content]);
@@ -234,7 +250,7 @@ export default function ManualDialog({ onClose }: ManualDialogProps) {
             </nav>
 
             {/* Markdown content */}
-            <div className="flex-1 overflow-auto p-4">
+            <div ref={contentRef} className="flex-1 overflow-auto p-4">
               <div className="mx-auto max-w-3xl text-xs leading-5 text-[var(--color-text-primary)]">
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm]}
@@ -307,6 +323,29 @@ export default function ManualDialog({ onClose }: ManualDialogProps) {
                 </ReactMarkdown>
               </div>
             </div>
+          </div>
+        )}
+
+        {/* Previous / Next navigation */}
+        {content && (
+          <div className="flex shrink-0 items-center justify-between border-t border-[var(--color-bg-tertiary)] px-4 py-2.5">
+            <button
+              onClick={() => prevSection && loadSection(prevSection)}
+              disabled={!prevSection}
+              className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-xs text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-[var(--color-text-primary)]"
+            >
+              ← {prevSection ? sectionDisplay(prevSection) : 'Previous'}
+            </button>
+            <span className="text-[10px] text-[var(--color-text-secondary)]">
+              {sectionIdx >= 0 ? `${sectionIdx + 1} of ${sections.length}` : ''}
+            </span>
+            <button
+              onClick={() => nextSection && loadSection(nextSection)}
+              disabled={!nextSection}
+              className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-xs text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-[var(--color-text-primary)]"
+            >
+              {nextSection ? sectionDisplay(nextSection) : 'Next'} →
+            </button>
           </div>
         )}
 

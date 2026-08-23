@@ -171,12 +171,13 @@ gcode:
 ```
 
 **Accessing parameters:**
+```gcode
+MY_MACRO TEMP=210
+```
 
 **Parameters vs. Variables:**
 - **Parameters (`params.NAME`):** Passed at the time of calling the macro (e.g., `MY_MACRO TEMP=210`). These are temporary and reset with each call.
 - **Variables (`variable_NAME`):** Defined within the macro block. These persist across multiple calls and can store state (e.g., a "parked" position).
-
-```
 
 ## Motion Simulation and Validation
 
@@ -357,6 +358,3 @@ gcode:
 3. **Name matches** — `MY_MACRO` vs `my_macro` (case-sensitive)
 
 ---
-
-*Next: [AI Chat](./06-ai-chat.md)*
-| Previous: [Save, Diff, Export](./04-save-diff-export.md)*

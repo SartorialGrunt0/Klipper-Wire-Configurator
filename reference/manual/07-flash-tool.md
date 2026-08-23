@@ -391,6 +391,3 @@ cp klipper.uf2 /media/pi/RPI-RP2/
 ```
 
 ---
-
-*Next: [Native Mode](./08-native-mode.md)*
-| Previous: [AI Chat](./06-ai-chat.md)*
