@@ -1,6 +1,6 @@
 # Getting Started
 
-Welcome to **Klipper Wire Configurator (KWC)** — your browser-based editor for Klipper printer configurations.
+Welcome to **Klipper Wire Configurator (KWC)** — your editor for Klipper printer configurations.
 
 This guide walks you through the first startup, importing your first config, and understanding the workspace layout.
 
@@ -14,7 +14,7 @@ KWC is a visual editor for Klipper `printer.cfg` files that combines:
 - **Text View** — Direct config file editing with live validation
 - **AI Assistant** — Context-aware help powered by Klipper documentation
 - **Macro Designer** — Visual G-code macro editor with motion simulation
-- **Flash Tool** — Build and flash Klipper/Katapult firmware (native mode only)
+- **Flash Tool** — Build and flash Klipper/Katapult firmware (on supported hardware)
 
 ---
 
@@ -22,7 +22,7 @@ KWC is a visual editor for Klipper `printer.cfg` files that combines:
 
 ### Opening KWC
 
-When you first load KWC in your browser:
+When you first load KWC:
 
 ![Figure 1: Toolbar layout](./figures/fig-0-toolbar-updated.png)
 
@@ -30,40 +30,45 @@ When you first load KWC in your browser:
 
 | Button | Purpose |
 |--------|---------|
-| **Import** | Load a config file from your computer |
-| **Open from Pi** | (Native mode only) Open configs from your Pi's config directory |
+| **Import** | Load config files or a folder from your computer |
+| **Open from Pi** | Open configs from your Pi's config directory |
 | **Export** | Save your current config to your computer |
-| **Save** | (Native mode) Write changes back to your Pi |
+| **Save** | Write changes back to the Pi's config directory |
 | **Revert** | Discard changes and reload the original |
 | **Diff** | Compare your changes against the original |
 | **AI Chat** | Get help from the AI assistant |
-| **Flash** | (Native mode) Build and flash firmware |
-| **Component** | Add hardware/components to the graph |
+| **Flash** | Build and flash firmware |
+| **Component (+)** | Add hardware/components to the graph |
 | **Macro** | Open the Macro Designer |
-| **Manual** | Open this user manual! |
+| **Manual** | Open this user manual |
+| **⚙ Customize top bar** | Show or hide toolbar items (remembers your choice) |
 
 ---
 
 ## Importing Your First Config
 
-If you already have Klipper installed, KWC uses the default file paths and will your configuration immediatley. If you are on a fresh build or your files didnt immeditaily load, see the following sections for opening and importing configurations.
+If you already have Klipper installed, KWC can load your configuration directly. If you are on a fresh build or your files did not immediately load, see the sections below.
 
 ### From Your Pi
 
 When running KWC on your Raspberry Pi:
 
 1. Click **Open from Pi** in the toolbar
-2. Browse the config directory (default: `~/printer_data/config`)
-3. Select one or more `.cfg` files
-4. KWC loads them and builds a multi-file project
+2. Enter the config directory (default: `~/printer_data/config`) and click **Refresh**
+3. Check the `.cfg` files to load (use **All**/**None** to select or clear quickly). Klipper's `SAVE_CONFIG` backup files are hidden from this list.
+4. Optionally untick **Clear existing config** if you want to keep what's already loaded
+5. Click **Open N Files** to load the project
 
 ### From Your Computer
 
 1. Click **Import** in the toolbar
-2. Select a `.cfg` file from your computer
-3. KWC will parse the file and display it in the graph workspace
+2. A dialog opens with a drag-and-drop zone and two buttons: **Select Files** and **Select Folder**
+3. Choose your `.cfg` file(s) or folder from your computer
+4. You will see a file selection list with checkboxes — you can deselect individual files
+5. If any selected files already exist in the project, you will be asked to confirm overwriting them
+6. Click **Import** to load
 
-> **Note:** Import is a **read-only** operation. Your original file is not modified. To save changes, you must explicitly use **Save** (native mode) or **Export** (browser mode).
+> **Note:** Import is a **read-only** operation. Your original file is not modified. Files are staged into the current project as unsaved changes — to persist them, use **Save** (writes to the Pi's config directory) or **Export** (download).
 
 **Multi-file projects:**
 
@@ -75,7 +80,7 @@ When running KWC on your Raspberry Pi:
 
 ## Understanding the Workspace
 
-After importing, you'll see the **Graph View** by default.
+After importing, you will see the **Graph View** by default.
 
 ### Graph View
 
@@ -92,7 +97,7 @@ The graph organizes your config into a hardware tree:
 
 - **Drag nodes** — Reparent components (e.g., move a stepper to a toolhead)
 - **Click a node** — Open the Settings Panel with parameters
-- **Right-click** — Context menu (rename, delete, duplicate)
+- **Node buttons** — Each node shows **Duplicate** and **Delete** buttons; deleting a hardware node asks for confirmation
 - **Scroll to zoom** — Adjust the graph scale
 
 ### Switching to Text View
@@ -105,8 +110,8 @@ The text editor includes:
 
 - **Live validation** — Errors highlight as you type
 - **Section TOC** — Jump to any section header
-- **Reference viewer** — Inline Klipper documentation
-- **Cross-file search** — Find sections across multiple files
+- **Configuration Reference** — A dialog that searches bundled Klipper documentation
+- **Search all files** — Find sections across multiple files
 
 You can switch between Graph and Text views at any time. Both views sync automatically — changes in one update the other.
 
@@ -114,7 +119,7 @@ You can switch between Graph and Text views at any time. Both views sync automat
 
 ## Next Steps
 
-Now that you've imported a config, try these:
+Now that you have imported a config, try these:
 
 1. **Explore the Graph** — Click nodes to see their parameters and how they connect
 2. **Verify Validation** — Ensure no red badges appear on your mainboard or toolhead nodes
@@ -123,16 +128,6 @@ Now that you've imported a config, try these:
 
 ---
 
-## Appendix: Keyboard Shortcuts
+## Keyboard Shortcuts
 
-| Shortcut | Action |
-|----------|--------|
-| `Ctrl+S` | Save (native mode) |
-| `Ctrl+Shift+S` | Export |
-| `F1` | Open User Manual |
-| `Ctrl+Shift+M` | Open Macro Designer |
-| `Ctrl+F` | Cross-file search (in Text View) |
-
-> **Note:** `F1` and custom shortcuts are planned for a future release.
-
----
+- **Undo / Redo** — `Ctrl+Z` / `Ctrl+Y` (Graph View)

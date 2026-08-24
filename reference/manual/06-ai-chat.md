@@ -12,40 +12,35 @@ The **AI Chat** feature provides context-aware assistance powered by large langu
 
 **Click "AI Chat"** in the toolbar, then click **Settings** (gear icon).
 
-**Choose your provider:**
+**Choose your provider** from the dropdown menu:
 
-| Provider | Type | Notes |
-|----------|------|-------|
-| **OpenAI** | Cloud | Requires API key, most capable |
-| **Google Gemini** | Cloud | Requires API key, good for code |
-| **Anthropic Claude** | Cloud | Requires API key, strong reasoning |
-| **GitHub Copilot** | Cloud | Requires API key, code-focused |
-| **OpenAI-Compatible** | Local/Cloud | Works with LM Studio, Ollama, local servers |
+- **ChatGPT (OpenAI)** — cloud, requires an API key
+- **Anthropic** — cloud, requires an API key
+- **GitHub** — cloud (Copilot), requires an API key
+- **Google** — cloud, requires an API key
+- **OpenAI-compatible** — any OpenAI-compatible server (local or hosted); host/port required
 
 ### Provider Configuration
 
 **For cloud providers:**
 1. **Select a provider** from the dropdown menu.
-2. **Enter your API key** (stored locally; never sent to KWC servers).
-3. **Select a model** (e.g., `gpt-4`, `gemini-pro`).
+2. **Enter your API key** (stored locally in the app's settings; never sent to KWC servers).
+3. **Select a model** — type a model name or pick one offered by the provider.
 4. **Click "Save"**.
 
-**For local/OpenAI-compatible providers:**
-1. **Select "OpenAI-Compatible"**
-2. **Enter host/port** (e.g., `localhost:1234`)
-3. **Leave API key blank** (or enter if required)
+**For the OpenAI-compatible provider:**
+1. **Select "OpenAI-compatible"**
+2. **Enter host/port** (e.g., `192.168.1.135:8080`)
+3. **Enter API key** if required (many local servers do not need one)
 4. **Click "Save"**
 
 **Model selection:**
-- Cloud providers: Auto-populated with available models
-- Local providers: Fetches models from your server's `/v1/models` endpoint
+- Local/compatible servers expose their models via the `/v1/models` endpoint, which the settings panel can list
 
-### Testing the Connection
-
-After saving:
-1. **Try a simple question:** "What is a Klipper macro?"
-2. **Check the status** — Green indicates success
-3. **Watch for errors** — Red indicates connection issues
+**Additional settings:**
+- **Max tokens** — Maximum response length (default: 4096)
+- **Temperature** — Creativity parameter, 0–2 (default: 0.7)
+- **Tool protocol** — How the model uses tools (auto, native, or text)
 
 ---
 
@@ -71,12 +66,12 @@ How do I tune my PID?
 
 **To provide config context:**
 
-1. **Click the paperclip icon** (or drag files into chat)
-2. **Select loaded files** (from your current project)
-3. **Or attach local files** from your computer
+1. **Click the Attach (paperclip) icon** in the input bar
+2. **Select loaded files** (from your current project) to include
+3. **Or attach local files** from your computer (`.cfg` / plain text)
 
 **What gets sent:**
-- Only **checked** files are included
+- Only **checked** files are included as context
 - **Targeted sections** (if you mention them)
 - **Section index** (if no specific section is named)
 
@@ -106,10 +101,12 @@ Create a new macro for homing all axes
 
 **Mini-diff format:**
 ```
-#[stepper_x]
+[stepper_x]
 -rotation_distance: 39.5
 +rotation_distance: 40
 ```
+
+The header (without `#` prefix) identifies the section. Lines prefixed with `-` are removed, lines prefixed with `+` are added. This is standard unified diff format.
 
 ---
 
@@ -121,34 +118,28 @@ After the AI proposes changes:
 
 ### Step 1: Review Changes
 
-**The preview shows:**
+**The preview shows the proposed diff:**
 - **Green lines** — What will be added
 - **Red lines** — What will be removed
 - **Gray lines** — Context (unchanged)
+- **Blue lines** — Hunk headers (`@@`)
 
-**Per-file tabs:**
-- If multiple files are affected, click tabs to review each
-- **New files** are shown with a "New" badge
+**Per-section selection:**
+- Each section of the proposal is an individual row with a checkbox
+- **New files** are shown as section rows with a "New file" badge
+- Use **Select all / Deselect all** to toggle the whole proposal
 
-### Step 2: Validate
-
-Before accepting:
-1. **Click "Validate"** — KWC checks for errors
-2. **Review any warnings** — Red badges block acceptance
-3. **Fix issues** if needed (AI can help)
-
-### Step 3: Accept or Reject
+### Step 2: Accept or Reject
 
 **Options:**
-- **Accept all** — Apply all proposed changes
-- **Accept per-file** — Click "Accept" on each file tab
-- **Reject** — Discard all changes
-- **Request revision** — Ask the AI to modify the proposal
+- **Accept Selected Sections** — Apply the checked sections (the button is disabled when nothing is selected)
+- **Close** — Discard the proposal
 
 **After accepting:**
-- Changes are staged in KWC
+- Accepted sections are applied to the editor immediately and staged for save
 - Use **Diff** to review before saving
 - Use **Save/Export** to persist
+- If the AI's proposal needs work, reply in chat to ask for a revision — it can propose a new draft
 
 ---
 
@@ -156,14 +147,14 @@ Before accepting:
 
 ### What is Printer Memory?
 
-Printer Memory is a structured JSON object that the AI can update to remember your printer's configuration:
+Printer Memory is a structured object that the AI can update to remember your printer's configuration:
 
 ```json
 {
   "bed_mesh_profile": "default",
   "pid_bed_temp": 60,
   "pid_hotend_temp": 200,
-  "homming_origin": "bed_mesh"
+  "homing_origin": "bed_mesh"
 }
 ```
 
@@ -205,12 +196,21 @@ The AI uses **MCP (Model Context Protocol)** — a standard for connecting AI to
 
 | Tool | Purpose |
 |------|---------|
-| `read_user_config` | Fetch specific sections from your config |
-| `read_klipper_doc` | Search Klipper documentation |
-| `search_examples` | Find example configurations |
-| `validate_macro` | Check G-code macro syntax and bounds |
+| `search_klipper_docs` | Search the bundled Klipper documentation |
+| `read_klipper_doc` | Read a specific Klipper doc |
+| `list_klipper_docs` | List available Klipper docs |
+| `list_config_reference_sections` | List sections in the config reference |
+| `get_config_reference_section` | Read one config-reference section |
+| `validate_klipper_config` | Validate a config (or section) |
+| `search_example_configs` | Find bundled example configs |
+| `read_example_config` | Read an example config file |
+| `search_user_configs` | Search the files in the current project |
+| `list_user_configs` | List the files in the current project |
+| `list_user_config_sections` | List sections in a project file |
+| `read_user_config` | Read sections from your config |
 | `calculate_rotation_distance` | Compute stepper rotation distance |
-| `list_sections` | List all sections in a file |
+| `generate_macro_template` | Generate a G-code macro template |
+| `validate_macro` | Check G-code macro syntax and bounds |
 
 ### Tool Use in Chat
 
@@ -218,12 +218,12 @@ When the AI needs information, it uses tools silently:
 
 ```
 User: How do I set up my Eddy probe?
-AI: [Uses read_klipper_doc → searches for "Eddy"]
+AI: [Uses search_klipper_docs → searches for "Eddy"]
     Based on the documentation...
 ```
 
 **You can see tool usage** in the chat footer:
-- ✅ `read_klipper_doc` — Tool executed successfully
+- ✅ `search_klipper_docs` — Tool executed successfully
 - ❌ `validate_macro` — Tool returned an error
 
 ---
@@ -232,28 +232,19 @@ AI: [Uses read_klipper_doc → searches for "Eddy"]
 
 ### Saving Conversations
 
-**Click the save icon** (floppy disk) to save a conversation:
-
-1. **Enter a name** (e.g., "PID Tuning Session")
-2. **Select what to save:**
-   - Messages only
-   - Messages + attached config files
-   - Messages + provider settings
-
-**Saved conversations** appear in the History dialog.
+Conversations are **saved automatically** — when you start a **New Chat** (or close the app), the current conversation is saved to history. You don't need to save manually.
 
 ### Loading Conversations
 
-**Open History** (clock icon):
-1. **Browse saved conversations**
-2. **Click to load**
-3. **Resume chat** with full context restored
+**Open History** (clock icon) in the AI Chat toolbar:
+1. **Browse saved conversations** — each entry shows the title and a message summary
+2. **Click a conversation** — loads it and resumes the chat with full context
 
 ### Deleting Conversations
 
-**Right-click a conversation** in History:
-- **Delete** — Remove permanently
-- **Export** — Save as JSON
+**In the History dialog:**
+- **Delete** — click the trash icon on a conversation; click again to confirm
+- **Delete all** — the "Delete all saved conversations" button clears the entire history
 
 ---
 
@@ -261,17 +252,16 @@ AI: [Uses read_klipper_doc → searches for "Eddy"]
 
 | Shortcut | Action |
 |----------|--------|
-| `Ctrl+Enter` | Send message |
-| `Esc` | Stop generation |
-| `Ctrl+L` | New chat |
-| `Ctrl+H` | Open history |
-| `Ctrl+,` | Open settings |
+| `Enter` | Send message |
+| `Shift+Enter` | New line in the composer |
+
+These are the only keyboard shortcuts in AI Chat.
 
 ---
 
 ## Troubleshooting
 
-### AI Doesn't Respond
+### AI Does Not Respond
 
 **Possible causes:**
 - **Network issue** — Check your connection
@@ -280,8 +270,8 @@ AI: [Uses read_klipper_doc → searches for "Eddy"]
 - **Model unavailable** — Switch to a different model
 
 **Solution:**
-1. **Check status icon** — Red indicates connection issues
-2. **Verify API key** — Settings → Test Connection
+1. **Check the error banner** — connection and provider errors are shown in the chat
+2. **Verify the API key / host** — AI Chat → Settings
 3. **Try a different model** — Some models have higher latency
 
 ### AI Suggests Invalid Changes
@@ -316,14 +306,13 @@ AI: [Uses read_klipper_doc → searches for "Eddy"]
 ### Slow Responses
 
 **Causes:**
-- Cloud API latency (common with GPT-4)
+- Cloud API latency
 - Local model is small/slow
 - Complex query requiring multiple tool calls
 
 **Mitigation:**
-- Use faster models (GPT-3.5 vs GPT-4)
 - Simplify your query (ask smaller questions)
-- For local models, try a larger model if RAM allows
+- For local models, try a larger model if resources allow
 
 ---
 
@@ -344,19 +333,19 @@ AI: [Uses read_klipper_doc → searches for "Eddy"]
 ### Context Management
 
 **Attach only what you need:**
-- ✅ "Here's my probe.cfg, how do I adjust the offset?"
+- ✅ "Here is my probe.cfg, how do I adjust the offset?"
 - ❌ Attach whole project for a single-section question
 
-**Pro Tip:** If the AI is hallucinating configuration values, try "unchecking" other files to force it to focus only on the specific file you are currently editing.
+**Pro Tip:** If the AI is hallucinating configuration values, try unchecking other files in "Include Files" to force it to focus only on the specific file you are editing.
 
 **Reference specific files:**
-- "In `printer.cfg`, what's wrong with my stepper_x?"
+- "In `printer.cfg`, what is wrong with my stepper_x?"
 - "Look at `macros.cfg` and explain the PAUSE macro"
 
 ### Iterative Refinement
 
 **When the AI gets it wrong:**
-1. **Don't accept** the draft
+1. **Do not accept** the draft
 2. **Point out the issue** — "You added G28 but I asked for G90"
 3. **Provide a corrected example** — "Like this: [paste correct code]"
 4. **Ask for revision** — "Please fix this"

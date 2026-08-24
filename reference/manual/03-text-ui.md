@@ -10,8 +10,6 @@ The **Text View** gives you direct access to the raw Klipper configuration files
 
 **Click the "Text View"** button in the toolbar (next to "Graph View").
 
-**Keyboard shortcut:** `Ctrl+T` (planned, not yet implemented).
-
 When activated:
 - The graph disappears
 - A text editor opens with your config file
@@ -25,42 +23,39 @@ When activated:
 
 The editor consists of three main areas:
 
+### Files Sidebar (Left)
+
+![Figure 3: File list sidebar](./figures/fig-3-toc.svg)
+
+- **File list** — Every `.cfg` file in the project as a row, with red/yellow dots for validation errors/warnings
+- **Add Configuration** (+ button) — Create a new file: **Blank config** (name it) or **From Reference** (search example configs)
+- **Collapse** — Hide the sidebar to give the editor more room
+
 ### Main Editor Pane (Center)
 
 - **Live text editing** — Type directly into the editor
-- **Syntax highlighting** — Sections, parameters, and values are color-coded
 - **Line numbers** — Shown on the left
 - **Validation markers** — Errors and warnings underlined
+- **Editor toolbar** — Search all files, Configuration Reference, and other editor actions
 
-### Table of Contents (Left Sidebar)
+### Sections Sidebar (Right)
 
-![Figure 3: Section TOC](./figures/fig-3-toc.svg)
-
-The TOC shows all sections in your config. It appears on the **left side** of the editor:
+The section table of contents shows all sections in the currently open file:
 
 - **Click a section** — Jump to that section in the editor
-- **Expandable** — Some sections show sub-parameters
-- **Active section** — Highlighted with a background color
-- **Validation status** — Sections with errors show a red dot
+- **Active section** — Highlighted as you scroll
+- **Validation status** — Sections with errors show a red dot, warnings a yellow dot
+- **Collapse** — Hide the sidebar to give the editor more room
 
-**Search the TOC:**
-- Type in the search box at the top
-- Filters sections in real-time
+### Configuration Reference (Dialog)
 
-### Reference Viewer (Right Sidebar)
+![Figure 4: Configuration Reference dialog](./figures/fig-4-reference.svg)
 
-![Figure 4: Reference viewer](./figures/fig-4-reference.svg)
+The reference viewer is a **modal dialog** opened from the editor toolbar's **Configuration Reference** button — it is not a sidebar. It searches the bundled Klipper documentation (no internet required):
 
-The Reference Viewer appears on the **right side** of the editor and shows Klipper documentation for the currently selected section:
-
-- **Automatic** — Updates when you click a section
-- **Manual** — Type a section name in the search box
-- **Navigation** — Click links to browse related documentation
-
-**To use:**
-1. Click a section in the editor or TOC
-2. Reference documentation appears on the right
-3. Click any link to navigate within the docs
+1. Open the dialog from the editor toolbar
+2. Search for a section or keyword (e.g., `bed_mesh`, `stepper_x`)
+3. Read the matching documentation and copy example parameters
 
 ---
 
@@ -90,15 +85,13 @@ microsteps: 16          # Number of microsteps per full step
 - Type the new value
 - Validation runs immediately
 
+### Live Sync
+
+Changes in Text View automatically sync to Graph View. The editor debounces input at 800ms, then parses your text and updates the graph model. If parsing fails, the editor **holds the last-good model**, shows a banner, and **Save/Apply are blocked until the parse error is fixed**. This means you can edit freely in Text View and always see a valid result in the graph.
+
 ### Keyboard Shortcuts
 
-| Shortcut | Action |
-|----------|--------|
-| `Ctrl+F` | Cross-file search |
-| `Ctrl+G` | Go to line |
-| `Ctrl+/` | Toggle comment |
-| `Ctrl+Space` | Parameter autocomplete (planned) |
-| `Tab` | Indent (or autocomplete) |
+There are no keyboard shortcuts in the editor itself. `Escape` closes the search panel, and `Enter` confirms dialogs.
 
 ### Validation Feedback
 
@@ -106,7 +99,6 @@ microsteps: 16          # Number of microsteps per full step
 
 **Errors** appear as red underlines:
 - **Hover** — See the error message
-- **Click** — Jump to the related setting in the TOC
 
 **Warnings** appear as yellow underlines:
 - **Hover** — See the warning message
@@ -120,16 +112,18 @@ microcontroller: wrong_value  # ← Red underline: "Invalid MCU name"
 
 **Live validation** runs as you type, updating markers instantly.
 
-### Cross-File Search
+### Search All Files
 
 ![Figure 6: Cross-file search results](./figures/fig-6-search.svg)
 
 **When working with multi-file projects:**
 
-1. **Click Search** (or `Ctrl+F`)
+1. **Click Search** in the editor toolbar — opens the "Search all files…" panel
 2. **Enter your search term** (section name, parameter, value)
-3. **Results show** all files containing matches
-4. **Click a result** — Jump to that line in that file
+3. **Results show** matches across all project files
+4. **Click a result** — Opens that file at the matching location
+
+Press `Escape` to close the search panel.
 
 **Example searches:**
 - `probe` — Find all probe-related sections
@@ -142,91 +136,49 @@ microcontroller: wrong_value  # ← Red underline: "Invalid MCU name"
 
 ### Adding a New File
 
-**From the editor toolbar:**
-
-1. **Click "Add File"** (+ icon)
+1. **Click the "Add Configuration"** (+) button in the Files sidebar header
 2. **Choose:**
-   - **Blank config** — Start with an empty file
-   - **From example** — Use a bundled template
+   - **Blank config** — start with an empty file (enter its name)
+   - **From Reference** — search the bundled example configs and start from one
 
-**Example usage:**
-- Create `bed_sensors.cfg` for bed temperature sensors
-- Create `macros.cfg` for custom G-code macros
-- Create `tuning.cfg` for PID tuning values
+### File Context Menu
 
-### Renaming a File
+**Right-click a file** in the left Files sidebar:
 
-1. **Right-click the file tab** (or filename in TOC)
-2. **Select "Rename"**
-3. **Enter new name** (e.g., `printer.cfg` → `main.cfg`)
-4. **Include statements update** automatically
-
-**Warning:** If other files within the project workspace reference this file via `[include]`, those statements are updated automatically to reflect the new path.
-
-### Copying a File
-
-1. **Right-click the file tab**
-2. **Select "Copy"**
-3. **Enter new filename**
-4. **New file appears** as a tab with identical content
-
-**Use case:**
-- Backup a working configuration
-- Create variations (e.g., `printer_left.cfg`, `printer_right.cfg`)
+- **Rename** — Opens a rename dialog; `[include]` references across the project update automatically. (Disabled for `printer.cfg`.)
+- **Duplicate** — Creates a copy of the file with a new name.
+- **Delete** — Removes the file after a confirmation dialog. (Disabled for `printer.cfg`.)
 
 ### Deleting a File
 
-1. **Right-click the file tab**
+1. **Right-click the file** in the Files sidebar
 2. **Select "Delete"**
-3. **Confirm** (if file has sections in use)
-
-**Safety:** KWC warns you if the file contains sections referenced by other files.
+3. **Confirm** in the dialog
 
 ---
 
 ## Switching Between Files
 
-![Figure 7: File tabs](./figures/fig-7-tabs.svg)
+![Figure 7: File list](./figures/fig-7-tabs.svg)
 
 **When your project has multiple files:**
 
-- **Tabs** — Each open file appears as a tab at the top
-- **Click a tab** — Switch to that file
-- **Close a tab** — Click the `×` on the tab
-- **Active file** — Highlighted with a different background
+- Files appear as **rows in the left Files sidebar** — not tabs
+- **Click a file** — Opens it in the editor
+- **Active file** — Highlighted; its error/warning dot is shown next to it
 
-**Keyboard navigation:**
-- `Ctrl+Tab` — Switch to next file
-- `Ctrl+Shift+Tab` — Switch to previous file
+There are no keyboard shortcuts for switching files.
 
 ---
 
-## Working with the Reference Viewer
+## Working with the Configuration Reference
 
-### Accessing Documentation
+The Configuration Reference is a dialog over the editor (see [Configuration Reference (Dialog)](#configuration-reference-dialog) above). The bundled docs include:
 
-**Method 1: Automatic**
-1. Click any section in the editor
-2. Reference viewer shows that section's documentation
-
-**Method 2: Manual search**
-1. Type in the reference search box
-2. Select from matching sections
-3. Documentation loads
-
-**Method 3: From TOC**
-1. Click a section in the TOC
-2. Both editor and reference viewer update
-
-### Navigating Documentation
-
-The reference viewer includes:
 - **Clickable headings** — Jump to subsections
 - **Cross-references** — Links to related sections
 - **Examples** — Sample configurations
 - **Parameter tables** — Lists all parameters with descriptions
-
-**Tip:** Click "Open in new tab" to view documentation side-by-side with the editor.
 
 ---
 
@@ -236,13 +188,13 @@ The reference viewer includes:
 
 ✅ **Use Text View when:**
 - You need precise control over formatting
-- You're copying sections from documentation
+- You are copying sections from documentation
 - You want to see the exact output
-- You're comfortable with Klipper syntax
+- You are comfortable with Klipper syntax
 - You need to edit many parameters quickly
 
 ❌ **Use Graph View when:**
-- You're learning Klipper structure
+- You are learning Klipper structure
 - You want visual confirmation of connections
 - You need to add hardware components
 - You prefer form-based editing
@@ -265,32 +217,21 @@ The reference viewer includes:
 
 ## Troubleshooting
 
-### Text Doesn't Update After Graph Edit
+### Text Does Not Update After Graph Edit
 
-**Problem:** You edited a node in Graph View but the text didn't change.
+**Problem:** You edited a node in Graph View but the text did not change.
 
 **Solution:**
-1. **Refresh the editor** — Click outside the editor pane
-2. **Check for errors** — Validation errors may block updates
-3. **Rebuild** — Use File → Rebuild (if available)
+1. **Check for errors** — Validation errors may block the update
+2. **Re-import** — If the file was modified externally, re-import it
 
-### Editor Seemingly Frozen
+### Editor Seems Unresponsive
 
 **Problem:** The editor stops responding to input.
 
 **Solution:**
 1. **Check validation** — Large configs may take time to process
-2. **Close other tabs** — Reduce memory usage
-3. **Restart the app** — As a last resort
-
-### Reference Viewer Not Loading
-
-**Problem:** The reference viewer shows "Loading..." or is blank.
-
-**Solution:**
-1. **Check your connection** — Online reference needs internet
-2. **Click a section** — Sometimes requires manual trigger
-3. **Use offline reference** — Falls back to bundled documentation
+2. **Restart the app** — As a last resort
 
 ---
 
@@ -312,6 +253,6 @@ The reference viewer includes:
 
 - **Not automatic** — KWC does not auto-save
 - **Staged changes** — Edits are held in memory
-- **Export/Apply** — Required to persist changes
+- **Save/Export** — Required to persist changes
 
 ---

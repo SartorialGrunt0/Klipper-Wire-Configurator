@@ -20,9 +20,10 @@ The graph organizes your printer's components into a hierarchical tree:
 | **Expander** | Additional boards connected |
 | **Probes** | Probes that contain an MCU |
 | **Accelerometers** | Standalone Accelerometers that contain an MCU |
+
 ### Child Components
 
-Within each hardware node, you'll find:
+Within each hardware node, you will find:
 
 - **Steppers** — X, Y, Z motors and extruder motors
 - **Drivers** — TMC2209, TMC2208, etc. (attached to steppers)
@@ -49,9 +50,9 @@ The lines (edges) connecting nodes represent the communication and power paths b
 ### Navigation
 
 - **Pan** — Click and drag the background to move the view.
-- **Zoom** — Use the scroll wheel or pinch gesture to zoom in/out.
-- **Fit to Screen** — Double-click the background or press `F` to automatically center and scale all nodes.
-- **Auto-Arrange** — Click the "Auto-Layout" button in the toolbar to automatically reorganize the graph for better readability.
+- **Zoom** — Use the scroll wheel to zoom in/out.
+- **Fit View** — Click the **Fit View** button (bottom-left of the canvas) to center and scale all nodes.
+- **Arrange** — Click the **Arrange** button (top-left of the canvas) to automatically reorganize the graph.
 
 ### Selecting Nodes
 
@@ -59,29 +60,49 @@ The lines (edges) connecting nodes represent the communication and power paths b
 
 **Click a node** to:
 - See its parameters in the Settings Panel (opens on the right)
-- View validation status (green/yellow/red badges)
-- Access context menu via right-click
-
-**Multi-select** by holding `Shift` while clicking multiple nodes.
+- View validation status (green/yellow/red badge)
+- Use the node's **Duplicate** and **Delete** buttons
 
 ### Adding Components
 
 ![Figure 4: Add menu](./figures/fig-4-add-menu.png)
 
-**Click the "+" button** in the toolbar or right-click a parent node to add a new component:
+**Click the Component (+) button** in the toolbar to add a new component. The add menu has three tabs:
 
-1. Choose a category (e.g., Steppers, Heaters).
-2. Select the specific component from the list.
-3. The component will be automatically attached to the selected parent node.
+**Major Components** — Hardware nodes:
+- SBC (automatically added on new project)
+- Mainboard
+- Toolhead
+- Expander
+- Probe
+- Accelerometer
+- Other
 
-**Common additions:**
+For mainboard, toolhead, expander, probe, and accelerometer, a **template picker** appears: choose **Blank {type}** for an empty section, or search and select an example config that fills the node with that example's sections.
 
-| Action | Steps |
-|--------|-------|
-| Add stepper motor | Right-click Toolhead → Steppers → X Stepper |
-| Add temperature sensor | Right-click Mainboard → Sensors → Thermistor |
-| Add probe | Right-click Toolhead → Sensors → Probe |
-| Add accelerometer | Right-click Toolhead → Sensors → ADXL345 |
+**Sub-Components** — Parts attached to the currently selected node (or standalone if nothing is selected):
+- Steppers (X, Y, Z)
+- Stepper Drivers (TMC2209, TMC2208, TMC2240, etc.)
+- Extruders
+- Heaters (hotend, bed)
+- Fans (part cooling, hotend, controller)
+- Temperature Sensors (thermistors)
+- Probes
+- LEDs
+- Displays
+- Servos
+- Output Pins
+- Filament Sensors
+- Accelerometers
+- MCU (extra sections on a board)
+
+**Features** — Klipper features that add config sections, with an optional "attach to component" picker:
+- Bed Leveling (`bed_mesh`, `z_tilt`, `quad_gantry_level`, …)
+- Homing (`safe_z_home`, …)
+- Resonance (`input_shaper`, `resonance_tester`)
+- G-Code Features (`virtual_sdcard`, `pause_resume`, `gcode_macro`, …)
+
+**MCU name prompt:** when you add a **non-primary** board (toolhead, expander, probe, accelerometer, or an extra MCU), KWC asks for an MCU name. This name is used in section headers (e.g., `[mcu EBBCan]`) and as a pin prefix (e.g., `EBBCan:gpio13`).
 
 ### Reparenting Components
 
@@ -93,23 +114,16 @@ To reorganize your hardware hierarchy, you can **drag and drop** components to c
 
 **Validation:** KWC automatically verifies that the new parent is compatible with the component type.
 
-### Grouping and Un grouping
+### Grouping
+
+There is no "group selected" menu — groups form automatically:
+
+- **Create a group:** drag a node onto a sibling of the same component group (e.g., drag a second fan onto the existing fan node). The two merge into a group node holding both.
+- **Ungroup:** drag a child out of the group. It leaves the group and becomes a standalone node.
 
 ![Figure 5: Grouped nodes](./figures/fig-5-groups.svg)
 
-**Create a group:**
-1. Select multiple nodes (hold `Shift` and click)
-2. Right-click → **Group Selected**
-3. Nodes are wrapped in a container for easier organization
-
-**Un group:**
-1. Right-click the group
-2. Select **Ungroup**
-
-**Why group?**
-- Logical organization (e.g., all Toolhead components together)
-- Easier to move multiple components at once
-- Cleaner graph for complex printers
+Grouping is for organization only (e.g., all toolhead components together); it does not change the configuration.
 
 ---
 
@@ -121,7 +135,7 @@ To reorganize your hardware hierarchy, you can **drag and drop** components to c
 
 When you select a node, the **Settings Panel** appears with:
 
-- **Section name** — The config section header (e.g., `[stepper_x]`)
+- **Section name** — The config section header (e.g., `[stepper_x]`); editable inline (renames the node)
 - **Parameters** — Editable fields with validation
 - **Validation errors** — Red highlights with explanations
 - **Reference link** — Quick access to Klipper documentation
@@ -132,7 +146,7 @@ When you select a node, the **Settings Panel** appears with:
 1. Click a field to edit (text box, dropdown, checkbox)
 2. Enter the new value
 3. Validation runs immediately
-4. Changes are staged (not saved until you export/apply)
+4. Changes are staged (not saved until you save)
 
 **Common parameter types:**
 
@@ -143,6 +157,10 @@ When you select a node, the **Settings Panel** appears with:
 | **Boolean** | `endstop_pin: endstop_z` | True/False toggles. |
 | **Dropdown** | `microsteps: 16` | Selection from a predefined list of valid options. |
 | **Pin** | `step_pin: PB0` | Specialized pin input with real-time hardware validation. |
+
+### Pin Conflict Detection
+
+If two sections claim the same pin (e.g., two steppers with `step_pin: PB0`), the conflict surfaces as a red validation error on the affected fields and as a badge on the affected node.
 
 ### Validation Feedback
 
@@ -163,11 +181,10 @@ When you select a node, the **Settings Panel** appears with:
 
 | Shortcut | Action |
 |----------|--------|
-| `F` | Fit all nodes to screen |
-| `Delete` | Remove selected node |
-| `Ctrl+D` | Duplicate selected node |
 | `Ctrl+Z` | Undo last change |
 | `Ctrl+Y` | Redo last change |
+
+(These are the only keyboard shortcuts in the Graph View. Deleting or duplicating a node uses the node's own buttons.)
 
 ---
 
@@ -176,21 +193,21 @@ When you select a node, the **Settings Panel** appears with:
 ### Building a Printer from Scratch
 
 1. **Start with SBC** — Automatically added on project creation
-2. **Add Mainboard** — Click "+" → Hardware → Mainboard
+2. **Add Mainboard** — Click Component (+) → Major Components → Mainboard
 3. **Connect to SBC** — Drag mainboard node under SBC (creates USB edge)
-4. **Add Toolhead** — Right-click Mainboard → Add Toolhead
+4. **Add Toolhead** — Component (+) → Major Components → Toolhead
 5. **Add components** — Steppers, heaters, sensors under Toolhead
 6. **Set parameters** — Click each node and configure values
 7. **Validate** — Ensure no red badges appear
 
 ### Modifying an Existing Config
 
-1. **Import the config** — File → Import
+1. **Import the config** — Click Import
 2. **Review graph** — Identify components that need changes
-3. **Add missing hardware** — Use Add menu
+3. **Add missing hardware** — Use Component (+) button
 4. **Edit parameters** — Click nodes and modify in Settings Panel
 5. **Reparent if needed** — Drag nodes to new parent
-6. **Validate** — Check for errors before exporting
+6. **Validate** — Check for pin conflicts and errors before saving
 
 ### Troubleshooting Validation Errors
 
@@ -214,7 +231,7 @@ When you select a node, the **Settings Panel** appears with:
 
 - Fysetc Spider (Fysetc)
 - MKS Robin (MKS)
-| BigTreeTech SKR (BTT)
+- BigTreeTech SKR (BTT)
 - Duet (Duet)
 - Custom/Other
 

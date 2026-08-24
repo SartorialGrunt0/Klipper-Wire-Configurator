@@ -10,13 +10,11 @@ The **Macro Designer** provides a visual interface for creating and editing G-co
 
 **Click "Macro"** in the toolbar to open the designer.
 
-**Alternative:** Right-click a `gcode_macro` section in Graph or Text View → **Edit in Designer**.
-
 When opened:
-- A dialog appears docked to the side (or floating)
+- A dialog appears (docked or floating, your choice is remembered)
 - Your existing macros are listed on the left
-- The editor opens on the right
-- Motion preview appears at the bottom
+- The editor opens for the selected macro
+- The machine canvas and simulation controls appear at the bottom
 
 ---
 
@@ -26,18 +24,13 @@ When opened:
 
 ### Macro List (Left)
 
-Shows all macros in your config:
-
-- **print_start** — Called before printing
-- **print_end** — Called after printing
-- **PAUSE** — Custom pause behavior
-- **RESUME** — Custom resume behavior
-- **custom_macros** — Your user-defined macros
+Shows all macros in your config, with a **Search macros** box at the top:
 
 **Actions:**
 - **Click** — Open the selected macro in the editor.
-- **Right-click** — Context menu to **Duplicate**, **Delete**, or **Rename** a macro.
-- **"+" button** — Create a new, empty macro.
+- **Right-click** — Context menu to **Copy**, **Rename**, or **Delete** a draft macro.
+- **"New" button** — Create a new, empty macro draft.
+- **"Load G-code"** — Load a G-code file for playback (simulation only, not added to the config).
 
 ### Editor (Center)
 
@@ -48,9 +41,10 @@ The macro editor with syntax highlighting:
 - **G-code body** — The actual G-code and Jinja
 
 **Features:**
-- **Auto-complete** — Press `Tab` to autocomplete commands as you type.
 - **Jinja validation** — Errors shown as you type.
 - **Line numbers** — Shown on the left.
+- **"Commands" button** — Opens a searchable list of supported G-code commands; click one to append it.
+- **Indent carry** — Pressing `Enter` keeps the current line's indentation.
 
 ### Motion Preview (Bottom)
 
@@ -89,19 +83,14 @@ gcode:
     M117 Bed level check complete
 ```
 
-### From Template
+### From a G-code File
 
-**Use bundled templates:**
-**Steps:**
-1. **Right-click** anywhere in the macro list.
-2. **Select "From Template"**.
-3. **Choose a template** (e.g., `PRINT_START`).
-*The editor will automatically open with the template content pre-populated.*
+You can also load an existing G-code file for **playback** (simulation only — it is not added to your config):
 
-**Templates include:**
-- Common parameters
-- Best practices
-- Comments explaining each section
+1. **Click "Load G-code"** in the macro list
+2. **Choose a G-code file**
+3. Select it in the list and use the simulation controls to step through it
+4. **Unload** removes the playback file
 
 ---
 
@@ -120,10 +109,8 @@ gcode:
 | `M117` | Display message on LCD |
 | `SAVE_CONFIG` | Save to printer.cfg |
 
-**Auto-complete:**
-- Start typing a command
-- Press `Tab` to autocomplete commands as you type.
-- **Ctrl+Space** opens the full command list (coming soon).
+**Inserting commands:**
+- Use the **"Commands" button** in the editor to open a searchable list of supported G-code commands and append one.
 
 ### Using Jinja2
 
@@ -188,14 +175,13 @@ MY_MACRO TEMP=210
 **No-go zones** are areas where the printer should not move (e.g., filament spool holder, tool changer).
 
 **Setting no-go zones:**
-1. **Click "No-Go Zones"** in the designer toolbar
-2. **Click and drag** on the bed preview to draw a zone
-3. **Adjust size/position** by dragging the zone edges
+1. **Click "Add no-go zone"** in the machine toolbar — a zone appears in the center of the bed
+2. **Move it** by dragging, or **resize** by dragging its edges/corners (a "Set exact position" dialog gives you precise X/Y/bounds)
+3. **Right-click a zone** for context-menu actions (copy, delete)
 
-**Zones are checked** during:
-- Macro simulation
-- Real-time validation
-- AI chat suggestions
+The machine toolbar also has **Add dock** (sets the toolhead park/dock position) and **Rotate 90°** (view rotation).
+
+**Zones are checked** during simulation.
 
 ### Move Validation
 
@@ -231,7 +217,14 @@ G90                 # Back to absolute
 
 ### Simulate Before Saving
 
-**Click "Simulate"** in the designer:
+The machine canvas has on-screen simulation controls (no shortcuts):
+
+- **Play/Pause** — Runs the simulation animation
+- **Step back / Step forward** — Move through the simulated steps one at a time
+- **Reset** — Return to the start of the simulation
+- **Reset (machine)** — Stop the simulation, clear seeded commands, reset the toolhead to centered/cold
+
+**Seed a command** — Type a G-code command (e.g., `G28`) in the seed box and **Send** to place the toolhead in a known state before simulating.
 
 1. **Macro runs step-by-step** in the preview
 2. **Toolhead path** is shown
@@ -313,11 +306,9 @@ gcode:
 
 | Shortcut | Action |
 |----------|--------|
-| `Ctrl+S` | Save macro |
-| `Ctrl+Enter` | Run simulation |
-| `Ctrl+/` | Toggle comment |
-| `Ctrl+D` | Duplicate macro |
-| `Ctrl+Shift+S` | Save as template |
+| `Delete` / `Backspace` | Delete the selected canvas item (no-go zone or dock) |
+
+These are the only keyboard shortcuts in the Macro Designer. Simulation uses the on-screen Play/Pause, Step, and Reset buttons; the editor has no shortcuts.
 
 ---
 

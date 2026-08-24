@@ -1,6 +1,6 @@
 # Save, Diff, and Export
 
-Once you've made changes to your configuration, you need to save, review, and export them. This section covers the complete workflow from editing to applying changes.
+Once you have made changes to your configuration, you need to save, review, and export them. This section covers the complete workflow from editing to applying changes.
 
 ---
 
@@ -12,124 +12,114 @@ The typical workflow is:
 
 1. **Edit** — Make changes in Graph or Text View
 2. **Diff** — Review changes before applying
-3. **Export/Save** — Write changes to disk (native) or download (browser)
+3. **Save/Export** — Write changes to disk or download to your computer
 
-> **Safety Net:** Changes are **staged** in memory. They do not affect your actual configuration files or your printer until you click **Save** (Native) or **Export** (Browser). This allows you to experiment freely without risk.
+> **Safety Net:** Changes are **staged** in memory. They do not affect your actual configuration files or your printer until you click **Save** (write to disk) or **Export** (download). This allows you to experiment freely without risk.
 
 ---
 
 ## The Diff Viewer
 
-![Figure 2: Diff viewer with side-by-side comparison](./figures/fig-4-2-diff-viewer.png)
+![Figure 2: Diff viewer with changes list](./figures/fig-4-2-diff-viewer.png)
 
-**Click the "Diff"** button in the toolbar to open the diff viewer.
+**Click the "Diff"** button in the toolbar to open the **"Changes Since Import"** dialog.
 
-### What You'll See
+### What You Will See
 
-The diff viewer shows two columns:
+**Left sidebar — File list:**
+Each file shows a badge indicating its status:
+- **New** — Added since the project was loaded
+- **Changed** — Modified, with a count of changed lines
+- **Deleted** — Removed from the project since it was loaded
+- **Unchanged** — No modifications (grey dot)
 
-| Column | Content |
-|--------|---------|
-| **Original** | The config as it was when imported |
-| **Current** | Your edited version with changes |
+When nothing has changed: "No changes — identical to the imported version."
 
-### Change Markers
-
-**Green lines:** Added content
-```diff
-+rotation_distance: 40
-```
-
-**Red lines:** Removed content
-```diff
--enable_pin: !PB2
-```
-
-**Gray lines:** Context (unchanged lines around changes)
-```
-[stepper_x]
-step_pin: PB0
-```
+**Right panel — Unified diff:**
+- `+` (green) — Added content
+- `-` (red) — Removed content
+- ` ` (grey) — Context lines (unchanged)
+- `@@` (blue) — Hunk header
 
 ### Diff Navigation
 
-![Figure 3: Diff navigation buttons](./figures/fig-3-navigation.svg)
+![Figure 3: Diff navigation](./figures/fig-3-navigation.svg)
 
-**Use the navigation buttons:**
-- **Previous change** — Jump to the previous edit
-- **Next change** — Jump to the next edit
-- **List all changes** — See a summary of all modifications
+**Click any file in the sidebar** to see its diff.
 
-**Click any line** — Jump directly to that section in the editor.
-
-**Pro-Tip:** Always review the Diff viewer before saving. It is the final confirmation of exactly what lines will be added or removed from your config files.
+**Pro-Tip:** Always review the diff before saving. It shows exactly what lines will be added or removed from your config files.
 
 ---
 
 ## Exporting Your Config
 
-### Export to Computer (Browser Mode)
+### Export to Computer
 
-When using KWC in a web browser, you'll **Export** your config to download it.
+**Click "Export"** in the toolbar. The **"Export Configuration"** dialog shows:
 
-![Figure 4: Export dialog](./figures/fig-4-export-dialog.svg)
+**File list with checkboxes:**
+- Select which files to include
+- Each file shows its error/warning count; entries with issues can be expanded to list them
 
-**Steps:**
-1. **Click "Export"** in the toolbar
-2. **Choose format:**
-   - **Single file** — All sections merged into one file
-   - **Multi-file** — Preserve the original file structure (Best for complex setups with multiple config files, e.g., `printer.cfg`, `macros.cfg`, `custom_config.cfg`).
-3. **Choose destination** — Your computer's Downloads folder
-4. **Click "Export"** — The file(s) download
+**Diff preview:**
+- When the project has originals (opened from the Pi or previously saved), changed lines for each selected file are shown
 
-**Result:** A `.cfg` file (or folder of files) ready to transfer to your printer.
+**Format selector:**
+- **Individual files (.cfg)** — download each file separately
+- **ZIP archive (.zip)** — a single archive containing all selected files
+
+**Download:**
+- Click **Export N file(s)** (or **Export ZIP (N file(s))**) to save to your computer
+- Exported files preserve comments, formatting, and structure
 
 ### What Gets Exported
 
-- **All config files** in your project
+- **All checked config files** in your project
 - **Comments preserved** — Your annotations remain
 - **Formatting preserved** — Indentation and spacing intact
 - **Validation state** — Exported regardless of errors (warnings are noted)
 
 ---
 
-## Saving to Your Pi (Native Mode)
+## Saving Changes
 
-When running KWC natively on a Raspberry Pi, you can **Save** directly to disk.
+When KWC has a config directory (after **Open from Pi** or a previous **Save**), you can write your changes back to disk.
 
 ![Figure 5: Save button states](./figures/fig-5-save-states.svg)
 
 ### The Save Button
 
-**Three states:**
+The button color reflects the whole project's validation state:
 
 | State | Color | Meaning |
 |-------|-------|---------|
-| **Ready** | Gray | No changes to save |
-| **Dirty** | Yellow | Changes staged, click to save |
-| **Error** | Red | Validation errors prevent saving |
+| **No changes** | Grey | Nothing to save |
+| **Valid changes** | Green | Changes staged and valid — click to save |
+| **Warnings** | Yellow | Changes staged with validation warnings |
+| **Errors** | Red | Validation errors block saving — fix them first |
 
 ### Saving Changes
 
-**Prerequisites:**
-- You're in **Native Mode** (running on the Pi)
-- You have **changes staged** (Save button is yellow)
-- **No blocking errors** (warnings are okay)
-
 **Steps:**
+
 1. **Click "Save"** in the toolbar
-2. **Review the summary** — Shows what files will be modified
-3. **Click "Confirm"** — Writes changes to disk
-4. **Klipper restart prompt** — Choose whether to restart Klipper immediately
+2. **The save dialog opens** showing:
+   - A list of files with checkboxes, each with a badge (**new file**, **deleted**, **unchanged**, or **N lines changed**)
+   - A unified diff per selected file
+   - The **Apply** button — its color mirrors the toolbar Save state
+3. **Click "Apply"** to write the selected files to the Pi's config directory
+
+**Prerequisites:**
+- You have **changes staged** (Save button is green or yellow)
+- **No blocking errors** — if Text View contains text that cannot be parsed, Apply is blocked until you fix it
 
 ### What "Save" Does
 
-- **Writes files** to `~/printer_data/config/` (or your configured path)
-- **Backs up originals** — Previous versions are preserved
-- **Updates include paths** — If you renamed files
-- **Triggers validation** — Final check before writing
+- **Writes files** to the configured config path (default: `~/printer_data/config/`)
+- **Updates include paths** — if you renamed files
+- **Triggers validation** — final check before writing
 
-**Warning:** If validation fails, KWC will prevent saving.
+**Warning:** If validation fails with errors, KWC will prevent saving.
 
 ---
 
@@ -137,67 +127,44 @@ When running KWC natively on a Raspberry Pi, you can **Save** directly to disk.
 
 ### Save and Restart Workflow
 
-When you save in Native Mode:
+After a successful save, the dialog shows a single **Firmware Restart** button:
 
 1. **Changes written to disk** — Files updated
-2. **Backup created** — Old version saved with timestamp
-3. **Klipper restart dialog appears** — Choose your action:
+2. **Click "Firmware Restart"** to send the restart to Klipper (it becomes "Restart Sent")
+3. KWC **polls Klipper status** and reports the result in the dialog:
+   - Recent Klipper errors are listed on failure, with the log path
+   - If Moonraker reports an **active print job**, the restart is disabled until it finishes
 
-**Options:**
-- **Restart now** — Klipper restarts immediately (may interrupt a print)
-- **Restart later** — You'll restart manually via SSH or Moonraker
-- **Don't restart** — Changes are written to disk, but Klipper will continue running the old configuration until you manually restart the service.
+If you don't restart, Klipper keeps running the old configuration until you restart it manually (Moonraker, or `sudo systemctl restart klipper`).
 
 ### Checking Klipper Status
 
-After saving:
+![Figure 6: Klipper status in the save dialog](./figures/fig-6-status.svg)
 
-![Figure 6: Klipper status indicator](./figures/fig-6-status.svg)
-
-**The status bar shows:**
-- **Connected** — Klipper is running and responsive
-- **Disconnected** — Klipper has crashed or not started
-- **Restarting** — Klipper is in the process of restarting
-- **Recent errors** — Click to see the last 10 error lines
-
-**Click the status** to see detailed information.
+There is no persistent status bar in the app. Klipper status is reported **inside the save dialog after a restart attempt** (Ready, starting, or error states via the Klipper API, with recent error lines and the log path on failure).
 
 ---
 
 ## Reverting Changes
 
-If you've made mistakes or want to try something risky, you can revert to the original state.
+If you have made mistakes or want to try something risky, you can revert to the original state.
 
-### Revert in Browser Mode
+### Revert
 
-![Figure 7: Revert dialog](./figures/fig-7-revert.svg)
-
-**Steps:**
 1. **Click "Revert"** in the toolbar
-2. **Choose files to revert:**
-   - **All files** — Discard all changes
-   - **Selected files** — Revert specific files only
-3. **Confirm** — Changes are discarded
+2. **Confirm** — Revert restores the **whole project**; there is no per-file selection
+3. KWC **re-reads the original files** from the config directory on the Pi (or re-parses the stored originals if there is no directory)
+4. **Changes are discarded** — the config returns to the original state
 
-**Result:** Config returns to the state when you imported it.
+The dialog offers a **"Clear Macro Designer drafts/layout"** checkbox, matching Open from Pi.
 
-### Revert in Native Mode
+**Manual restore (SAVE_CONFIG backups):**
+KWC does not create its own backup directories. Klipper's `SAVE_CONFIG` writes timestamped files like `printer-20260822_143000.cfg` into your config directory — that is where previous versions live. **Open from Pi** hides those files from its file list. To restore, copy one back:
 
-**Option 1: KWC Revert**
-1. Click "Revert" in the toolbar
-2. Select files to restore
-3. KWC re-reads the original files from disk
-
-**Option 2: Manual Restore**
-1. Navigate to your config directory via SSH
-2. Find backup files (timestamped)
-3. Copy the backup back to the original location
-
-**Example:**
 ```bash
 cd ~/printer_data/config  # Or your custom config directory
-ls -la *.bak
-cp printer.cfg.20260822_143000 printer.cfg
+ls -la printer-*.cfg      # Klipper SAVE_CONFIG backups
+cp printer-20260822_143000.cfg printer.cfg
 ```
 
 ---
@@ -217,7 +184,7 @@ For important configs, use Git or similar:
    ```
 4. **Push to remote** (GitHub, GitLab, etc.)
 
-**Safety Hierarchy:** KWC Backups (Instant Recovery) → Git (History & Collaboration) → Manual Downloads (Archival).
+**Safety Hierarchy:** Klipper SAVE_CONFIG backups (instant recovery) → Git (history & collaboration) → manual downloads (archival).
 
 ### KWC and Git
 
@@ -236,15 +203,13 @@ KWC doesn't include built-in Git integration, but:
 **Problem:** You made changes but the Save button is still gray.
 
 **Possible causes:**
-- You edited in Graph View but didn't apply changes
-- You're in browser mode (should use Export instead)
-- Your changes were automatically reverted
+- You edited in Graph View but changes did not apply
+- Changes were automatically reverted
 - Your config files are set to read-only on the filesystem
 
 **Solution:**
-1. Check that you clicked "Apply" or "Confirm" after editing
-2. Verify you're in Native Mode
-3. Check if changes appear in the Diff viewer
+1. Check that edits are reflected in the Diff viewer
+2. Check if changes appear in the Diff viewer
 
 ### "Save" Button Is Red (Validation Errors)
 
@@ -260,13 +225,14 @@ KWC doesn't include built-in Git integration, but:
 - Duplicate section names
 - Missing required parameters
 - Invalid pin assignments
+- Text that cannot be parsed in Text View
 
 ### Export Creates Empty File
 
 **Problem:** The exported file is empty or missing content.
 
 **Possible causes:**
-- You haven't loaded any config
+- You have not loaded any config
 - The export failed silently
 
 **Solution:**
@@ -276,7 +242,7 @@ KWC doesn't include built-in Git integration, but:
 
 ### Klipper Won't Restart After Save
 
-**Problem:** You saved changes but Klipper won't restart.
+**Problem:** You saved changes but Klipper will not restart.
 
 **Check:**
 1. **Klipper status** — Is it showing errors?
@@ -294,19 +260,19 @@ curl -X POST http://localhost:7125/klippy/restart
 
 ## Appendix: File Locations
 
-### Native Mode Paths
+### Config Paths
 
 | File Type | Location |
 |-----------|----------|
-| Active config | `~/printer_data/config/` |
-| Backups | `~/printer_data/config/backup_[timestamp]/` |
+| Active config | `~/printer_data/config/` (default) |
+| Klipper SAVE_CONFIG backups | `printer-YYYYMMDD_HHMMSS.cfg` in the config directory |
 | KWC state | `~/.config/klipper-wire-configurator/` |
 
-### Browser Mode Downloads
+### Computer Downloads
 
 | File Type | Location |
 |-----------|----------|
-| Exported files | Your browser's Downloads folder |
+| Exported files | Your computer's Downloads folder |
 | Default name | `printer.cfg` or original filename |
 
 ---
