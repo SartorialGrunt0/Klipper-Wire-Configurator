@@ -814,6 +814,8 @@ export interface AiChatRequest {
   maxTokens?: number;
   /** Sampling temperature for the provider (0-2). Omit for provider default. */
   temperature?: number;
+  /** Tool-calling protocol override: 'auto' (scheme split), 'native', 'text'. */
+  toolProtocol?: 'auto' | 'native' | 'text';
   /**
    * Loaded user-config content (filename -> {content, label}) for the
    * backend's config-grounding fallback. Held server-side only — it is NOT

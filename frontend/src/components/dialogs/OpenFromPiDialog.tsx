@@ -5,6 +5,7 @@ import { useMacroDesignerStore } from '../../stores/macroDesignerStore';
 import { useNativeStore } from '../../stores/nativeStore';
 import * as api from '../../services/api';
 import { buildProjectGraph } from '../../utils/graphBuilder';
+import { restoreLayoutAfterRebuild } from '../../utils/layoutPersistence';
 import { isBackupConfigFilename } from '../../utils/backupFiles';
 import type { ConfigFile, ValidationResult } from '../../types/config';
 
@@ -137,6 +138,11 @@ export default function OpenFromPiDialog({ onClose }: OpenFromPiDialogProps) {
       // Build graph
       const graphStore = useGraphStore.getState();
       buildProjectGraph(allConfigs, graphStore, schemas, allValidations);
+
+      // The rebuild renumbers node ids — re-apply the saved layout so an
+      // open doesn't auto-arrange over the user's arrangement, and the
+      // macro-state persist below saves the restored arrangement.
+      await restoreLayoutAfterRebuild(graphStore, isNative);
 
       if (clearMacroDesignerState) {
         await persistClearedMacroDesignerState();

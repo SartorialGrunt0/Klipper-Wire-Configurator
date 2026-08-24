@@ -7,6 +7,13 @@
 # Or if you've already cloned the repo:
 #   bash scripts/install.sh
 #
+# IMPORTANT: run WITHOUT sudo. The installer escalates internally wherever
+# elevated access is needed (apt, systemd, and writes into the Moonraker
+# config dir). Running `sudo bash scripts/install.sh` resets $HOME to /root,
+# so the Moonraker config directory is not found and the update_manager /
+# Mainsail sidebar setup is silently skipped (and the app installs into
+# /root instead of your user's home).
+#
 # Uninstall:
 #   bash scripts/install.sh --uninstall
 
@@ -43,6 +50,290 @@ is_legacy_user_service_active() {
 
 is_system_service_active() {
     sudo systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null
+}
+
+# Detect Mainsail so we can drop a sidebar link to KWC in its theme folder.
+# Fluidd and OctoPrint have no custom-navigation equivalent, so navi.json is
+# only written when Mainsail is actually present.
+mainsail_installed() {
+    if [ -d "$HOME/mainsail" ]; then
+        return 0
+    fi
+    local moonraker_conf
+    for moonraker_conf in "$HOME/printer_data/config/moonraker.conf" "$HOME/klipper_config/moonraker.conf"; do
+        if [ -f "$moonraker_conf" ] && grep -q '^\[update_manager mainsail\]' "$moonraker_conf"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Locate Mainsail's .theme folder (inside the Klipper/Moonraker config dir).
+# Prefers an existing .theme folder; falls back to creating one in the
+# detected config directory.
+resolve_mainsail_theme_dir() {
+    if [ -d "$HOME/printer_data/config/.theme" ]; then
+        echo "$HOME/printer_data/config/.theme"
+        return 0
+    fi
+    if [ -d "$HOME/klipper_config/.theme" ]; then
+        echo "$HOME/klipper_config/.theme"
+        return 0
+    fi
+    if [ -d "$HOME/printer_data/config" ]; then
+        echo "$HOME/printer_data/config/.theme"
+        return 0
+    fi
+    if [ -d "$HOME/klipper_config" ]; then
+        echo "$HOME/klipper_config/.theme"
+        return 0
+    fi
+    return 1
+}
+
+# Locate the Moonraker config directory (kiauh layout). Used for the
+# update_manager include file and Mainsail's .theme folder.
+resolve_moonraker_config_dir() {
+    if [ -d "$HOME/printer_data/config" ]; then
+        echo "$HOME/printer_data/config"
+        return 0
+    fi
+    if [ -d "$HOME/klipper_config" ]; then
+        echo "$HOME/klipper_config"
+        return 0
+    fi
+    return 1
+}
+
+# Write a file, escalating to sudo when the current user lacks write access
+# (the Moonraker config dir is sometimes root-owned). Ownership is returned
+# to the invoking user so moonraker/Mainsail can keep managing the file.
+write_file_elevated() {
+    local target="$1" content="$2"
+    if printf '%s' "$content" > "$target" 2>/dev/null; then
+        return 0
+    fi
+    warn "No write access to $target, retrying with sudo..."
+    if printf '%s' "$content" | sudo tee "$target" > /dev/null 2>&1; then
+        sudo chown "$USER" "$target" 2>/dev/null || true
+        return 0
+    fi
+    warn "Could not write $target (permission denied). Skipping."
+    return 1
+}
+
+# Append a line to a file, escalating to sudo when needed.
+append_line_elevated() {
+    local target="$1" line="$2"
+    if printf '%s\n' "$line" >> "$target" 2>/dev/null; then
+        return 0
+    fi
+    warn "No write access to $target, retrying with sudo..."
+    if printf '%s\n' "$line" | sudo tee -a "$target" > /dev/null 2>&1; then
+        return 0
+    fi
+    warn "Could not append to $target (permission denied). Skipping."
+    return 1
+}
+
+# Best-effort: restart Moonraker so update_manager picks up config changes.
+# Only restarts when the unit exists and is active; never aborts the install.
+restart_moonraker() {
+    if systemctl list-unit-files moonraker.service > /dev/null 2>&1 && \
+       systemctl is-active --quiet moonraker; then
+        if sudo systemctl restart moonraker 2>/dev/null; then
+            info "Moonraker restarted to pick up update_manager changes."
+        else
+            warn "Could not restart moonraker automatically — restart it manually (systemctl restart moonraker) for update_manager changes to take effect."
+        fi
+    fi
+}
+
+# Add KWC to Moonraker's update manager so updates show up in Mainsail /
+# Fluidd. Writes a dedicated include file (same pattern as obico's
+# moonraker-obico-update.cfg) and adds a single [include] line to
+# moonraker.conf — the user's other sections are left untouched. Best-effort:
+# failures warn and return 0 so the install never aborts over this.
+install_moonraker_updater() {
+    local config_dir moonraker_conf include_file content changed=0
+    config_dir="$(resolve_moonraker_config_dir)" || return 0
+    moonraker_conf="$config_dir/moonraker.conf"
+    [ -f "$moonraker_conf" ] || return 0
+    include_file="$config_dir/klipper-wire-configurator-update.cfg"
+
+    # If the user manages KWC directly in moonraker.conf, don't duplicate.
+    if grep -q '^\[update_manager klipper-wire-configurator\]' "$moonraker_conf"; then
+        return 0
+    fi
+
+    content="$(
+        echo "[update_manager klipper-wire-configurator]"
+        echo "type: git_repo"
+        echo "channel: dev"
+        echo "path: $INSTALL_DIR"
+        echo "origin: $REPO_URL"
+        echo "primary_branch: main"
+        echo "virtualenv: $INSTALL_DIR/venv"
+        echo "requirements: backend/requirements.txt"
+        echo "managed_services: klipper-wire-configurator"
+        echo "info_tags:"
+        printf '\tdesc=Klipper Wire Configurator\n'
+    )"
+    # Idempotent: only rewrite + restart when the include file differs.
+    if [ ! -f "$include_file" ] || ! cmp -s "$include_file" <(printf '%s' "$content") 2>/dev/null; then
+        write_file_elevated "$include_file" "$content" || return 0
+        changed=1
+    fi
+
+    if ! grep -q '^\[include klipper-wire-configurator-update\.cfg\]' "$moonraker_conf"; then
+        append_line_elevated "$moonraker_conf" "[include klipper-wire-configurator-update.cfg]" || true
+        changed=1
+    fi
+    if [ "$changed" -eq 1 ]; then
+        restart_moonraker
+    fi
+    return 0
+}
+
+# Remove the KWC update_manager include (file + include line) from the
+# Moonraker config directory. Best-effort.
+remove_moonraker_updater() {
+    local config_dir moonraker_conf include_file changed=0
+    config_dir="$(resolve_moonraker_config_dir)" || return 0
+    moonraker_conf="$config_dir/moonraker.conf"
+    include_file="$config_dir/klipper-wire-configurator-update.cfg"
+
+    if [ -e "$include_file" ]; then
+        if ! rm -f "$include_file" 2>/dev/null; then
+            sudo rm -f "$include_file" 2>/dev/null || true
+        fi
+        changed=1
+    fi
+    if [ -f "$moonraker_conf" ]; then
+        local had_line=0
+        if grep -q '^\[include klipper-wire-configurator-update\.cfg\]' "$moonraker_conf"; then
+            had_line=1
+        fi
+        if ! sed -i '/^\[include klipper-wire-configurator-update\.cfg\]$/d' "$moonraker_conf" 2>/dev/null; then
+            sudo sed -i '/^\[include klipper-wire-configurator-update\.cfg\]$/d' "$moonraker_conf" 2>/dev/null || true
+        fi
+        if [ "$had_line" -eq 1 ]; then
+            changed=1
+        fi
+    fi
+    if [ "$changed" -eq 1 ]; then
+        restart_moonraker
+    fi
+    return 0
+}
+
+# Merge (or remove) the KWC entry in Mainsail's navi.json. Keeps any other
+# custom navigation entries the user already has. Best-effort: failures warn
+# and return 0 so the install never aborts over this.
+edit_mainsail_navi() {
+    local action="$1"  # add | remove
+    local theme_dir navi_path kwc_url py_script
+    theme_dir="$(resolve_mainsail_theme_dir)" || return 0
+    navi_path="$theme_dir/navi.json"
+    kwc_url="http://${IP_ADDR:-localhost}:${KWC_PORT}"
+
+    # Nothing to clean if the navi file was never written.
+    if [ "$action" = "remove" ] && [ ! -f "$navi_path" ]; then
+        return 0
+    fi
+    # Only create the theme dir when adding — remove must not leave one behind.
+    if [ "$action" = "add" ] && ! mkdir -p "$theme_dir" 2>/dev/null; then
+        sudo mkdir -p "$theme_dir" 2>/dev/null || return 0
+    fi
+
+    py_script="$(mktemp)"
+    cat > "$py_script" <<'PYEOF'
+import json
+import os
+import shutil
+import sys
+
+action, path, url = sys.argv[1], sys.argv[2], sys.argv[3]
+
+# Load existing entries. A pre-existing navi.json must never be destroyed:
+# when the current content is not a parseable list (corrupt JSON or a
+# non-array shape), back it up before we replace it (add) or leave it alone
+# (remove).
+existing_raw = None
+entries = []
+parseable = True
+try:
+    with open(path, encoding="utf-8") as fh:
+        existing_raw = fh.read()
+    parsed = json.loads(existing_raw)
+    if not isinstance(parsed, list):
+        parseable = False
+    else:
+        entries = parsed
+except (OSError, ValueError):
+    parseable = False
+
+if not parseable:
+    # Don't touch a corrupt/unexpected file on remove.
+    if action == "remove":
+        sys.exit(0)
+    # Preserve the original before replacing it on add.
+    if existing_raw is not None:
+        try:
+            shutil.copy2(path, path + ".bak")
+        except OSError:
+            pass
+
+entries = [
+    e for e in entries
+    if not (isinstance(e, dict) and e.get("title") == "KWC")
+]
+
+if action == "remove":
+    # Delete the file when the KWC entry was the only custom entry; keep it
+    # (minus KWC) when the user has other custom navigation entries.
+    if entries:
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(entries, fh, indent=2)
+            fh.write("\n")
+    else:
+        try:
+            os.remove(path)
+        except OSError:
+            # Signal failure so the caller retries under sudo.
+            sys.exit(1)
+    sys.exit(0)
+
+if action == "add":
+    # KWC favicon mark (frontend/public/favicon.svg) converted to a single
+    # filled SVG path: the 4-spoke asterisk + tip dots, background square
+    # dropped (nav icons render monochrome with the sidebar text color).
+    # Coordinates shifted (-2,-4) from the favicon so the whole mark sits
+    # inside the 24x24 viewBox with margin — the original touched the right
+    # edge and overflowed the bottom, clipping the tip dots.
+    entries.append({
+        "title": "KWC",
+        "href": url,
+        "target": "_blank",
+        "position": 95,
+        "icon": "M6 13L22 13A1 1 0 0 1 22 11L6 11A1 1 0 0 1 6 13ZM13 4L13 20A1 1 0 0 1 15 20L15 4A1 1 0 0 1 13 4ZM7.293 6.707L19.293 18.707A1 1 0 0 1 20.707 17.293L8.707 5.293A1 1 0 0 1 7.293 6.707ZM19.293 5.293L7.293 17.293A1 1 0 0 1 8.707 18.707L20.707 6.707A1 1 0 0 1 19.293 5.293ZM4 12a2 2 0 1 0 4 0a2 2 0 1 0 -4 0ZM20 12a2 2 0 1 0 4 0a2 2 0 1 0 -4 0ZM12 4a2 2 0 1 0 4 0a2 2 0 1 0 -4 0ZM12 20a2 2 0 1 0 4 0a2 2 0 1 0 -4 0Z",
+    })
+
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(entries, fh, indent=2)
+    fh.write("\n")
+PYEOF
+
+    if ! python3 "$py_script" "$action" "$navi_path" "$kwc_url" 2>/dev/null; then
+        warn "No write access to $navi_path, retrying with sudo..."
+        if sudo python3 "$py_script" "$action" "$navi_path" "$kwc_url" 2>/dev/null; then
+            sudo chown "$USER" "$navi_path" 2>/dev/null || true
+        else
+            warn "Could not update $navi_path (permission denied). Skipping."
+        fi
+    fi
+    rm -f "$py_script"
+    return 0
 }
 
 on_error() {
@@ -122,6 +413,16 @@ if [ "${1:-}" = "--uninstall" ]; then
         info "Removing installation directory: $INSTALL_DIR"
         rm -rf "$INSTALL_DIR"
     fi
+
+    # Remove the KWC entry from Mainsail's navi.json (keeps any other custom
+    # navigation entries the user added). Best-effort — no config dir, no problem.
+    if mainsail_installed; then
+        info "Removing KWC entry from Mainsail sidebar..."
+        edit_mainsail_navi remove
+    fi
+
+    # Remove the Moonraker update_manager include (file + include line).
+    remove_moonraker_updater
 
     ok "Klipper Wire Configurator has been uninstalled."
     echo ""
@@ -425,6 +726,37 @@ fi
 IP_ADDR="$(hostname -I 2>/dev/null | awk '{print $1}')"
 if [ -z "$IP_ADDR" ]; then
     IP_ADDR="<your-pi-ip>"
+fi
+
+# --- Mainsail sidebar link (navi.json) ---
+# Mainsail supports custom sidebar entries via navi.json in its .theme folder
+# (inside the Klipper config dir). Fluidd and OctoPrint have no equivalent, so
+# this only runs when Mainsail is detected. The link targets _blank so the
+# Mainsail tab is preserved.
+if mainsail_installed; then
+    if resolve_mainsail_theme_dir > /dev/null; then
+        if [ -z "$IP_ADDR" ] || [ "$IP_ADDR" = "<your-pi-ip>" ]; then
+            # Never write a link with a placeholder URL — a navi.json entry
+            # pointing at "<your-pi-ip>" would silently 404 with no signal.
+            warn "Could not detect the Pi's IP address; skipping the Mainsail sidebar link."
+            warn "Add it later manually: a KWC entry in the .theme folder of your Klipper config dir (see README 'Mainsail sidebar link')."
+        else
+            info "Mainsail detected - adding KWC link to its sidebar (navi.json)..."
+            edit_mainsail_navi add
+            ok "Mainsail sidebar link configured."
+        fi
+    else
+        warn "Mainsail detected but no Klipper config directory found; skipping sidebar link."
+    fi
+fi
+
+# --- Moonraker update_manager entry ---
+# Register KWC with Moonraker's update manager so updates are visible in
+# Mainsail/Fluidd. Skips when there is no moonraker.conf (standalone SBC).
+if resolve_moonraker_config_dir > /dev/null && [ -f "$(resolve_moonraker_config_dir)/moonraker.conf" ]; then
+    info "Adding KWC to Moonraker update_manager..."
+    install_moonraker_updater
+    ok "Moonraker update_manager configured."
 fi
 
 # --- Done! ---

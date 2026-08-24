@@ -43,6 +43,9 @@ in logs and are never written to output files.
 Other useful flags:
     --questions 1-5,8     run only a subset of questions
     --start N             start at question N (runs N..end); ignored when --questions is set
+    --question TEXT       run ONE ad-hoc question of your own instead of the bank
+                          (takes priority over --questions/--start); repeatable
+                          --check TEXT adds case-insensitive pass criteria
     --list-questions      print the question bank and exit (no API calls)
     --output-dir DIR      where to write the log (default reports/ai-chat-accuracy)
     --include-memory      also test printer-memory auto-fill (MEMORY-01..03); the backend's
@@ -932,6 +935,46 @@ def build_trident_questions() -> list[TestQuestion]:
             ),
         ),
         TestQuestion(
+            qid="TRIDENT-15",
+            title="Real file: idle_timeout turns off all LEDs",
+            text=("Can you edit my idle_timeout in my printer.cfg so it times "
+                  "out after 5 minutes and has gcode to turn off all of my LEDs?"),
+            # Only printer.cfg is attached — Chamber_LEDs is visible there, but
+            # SB_LEDs (EBB.cfg) and hotkey_leds (Hotkey.cfg) must be discovered
+            # via read_user_config (the backend user_configs mirror has all
+            # three files).
+            context_files=printer_cfg,
+            expected_tools=("read_user_config",),
+            require_tool=True,
+            criteria=(
+                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
+                ("regex", r"timeout\s*:\s*300\b"),
+                ("contains", "SB_LEDs"),
+                ("contains", "Chamber_LEDs"),
+                ("contains", "hotkey_leds"),
+            ),
+        ),
+        TestQuestion(
+            qid="TRIDENT-16",
+            title="Real file: idle_timeout all LEDs (no file attached)",
+            text=("Can you edit my idle_timeout in my printer.cfg so it times "
+                  "out after 5 minutes and has gcode to turn off all of my LEDs?"),
+            # Harder variant of TRIDENT-15: NOTHING is attached — the model
+            # must discover printer.cfg's idle_timeout AND all three LED
+            # sections (SB_LEDs in EBB.cfg, Chamber_LEDs in printer.cfg,
+            # hotkey_leds in Hotkey.cfg) purely via tools.
+            context_files=(),
+            expected_tools=("read_user_config", "list_user_configs"),
+            require_tool=True,
+            criteria=(
+                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
+                ("regex", r"timeout\s*:\s*300\b"),
+                ("contains", "SB_LEDs"),
+                ("contains", "Chamber_LEDs"),
+                ("contains", "hotkey_leds"),
+            ),
+        ),
+        TestQuestion(
             qid="MINIDIFF-01",
             title="Mini-diff: level_bed adaptive (endif invariant)",
             text=("Modify my level_bed macro in printer.cfg to call "
@@ -1481,6 +1524,7 @@ class QuestionResult:
     error: str = ""
     checks: list[tuple[str, str, bool]] = field(default_factory=list)
     duration_s: float = 0.0
+    usage: dict | None = None
 
 
 # ── HTTP helpers (stdlib only) ─────────────────────────────────────────
@@ -1651,9 +1695,20 @@ def run_one_question(
         result.tool_names = list(response.get("mcpToolNames", []) or [])
         result.tool_turns = int(response.get("mcpToolTurns", 0) or 0)
         result.tool_calls = list(response.get("toolCalls", []) or [])
+        result.usage = response.get("usage")
 
         log.write(f"Response mcpToolTurns={result.tool_turns} "
                   f"mcpToolNames={result.tool_names}")
+        if result.usage:
+            log.write(
+                "Usage: completion_tokens=%s reasoning_tokens=%s truncated=%s "
+                "events=%s" % (
+                    result.usage.get("completionTokens"),
+                    result.usage.get("reasoningTokens"),
+                    result.usage.get("truncated"),
+                    json.dumps(result.usage.get("events", []))[:500],
+                )
+            )
         log.write(f"Raw response keys: {sorted(response.keys())}")
         log.write(f"Answer ({len(result.response)} chars):")
         log.write(result.response)
@@ -1865,6 +1920,15 @@ def main() -> int:
     parser.add_argument("--start", default=0, type=int,
                         help="Start at question N (1-based), running N..end. "
                              "Ignored when --questions is set.")
+    parser.add_argument("--question", action="append", default=[], metavar="TEXT",
+                        help="Ad-hoc question to run INSTEAD of the bank (repeatable "
+                             "for several one-offs). Takes priority over --questions "
+                             "and --start. QID: AD-01, AD-02, ...")
+    parser.add_argument("--check", action="append", default=[], metavar="TEXT",
+                        help="Case-insensitive substring the answer must contain "
+                             "(repeatable). With one --question every --check "
+                             "applies to it; with several, check N pairs with "
+                             "question N.")
     parser.add_argument("--list-questions", action="store_true",
                         help="Print the question bank and exit")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR),
@@ -1889,8 +1953,43 @@ def main() -> int:
             print(f"{q.qid:<5} {tools:<45} {q.title}")
         return 0
 
+    # Ad-hoc one-off questions (--question) are appended to the bank so they
+    # flow through the exact same request/eval path as bank questions. When
+    # any are given they take priority over --questions and --start: only the
+    # ad-hoc questions run.
+    #
+    # --check criteria pairing:
+    #   * exactly one --question  -> every --check applies to it (the common
+    #     "one prompt, several required substrings" case);
+    #   * several --question      -> check[i] pairs with question[i]; a question
+    #     with no check has no criteria (always passes, manual review).
+    # Without any --check the question always passes and the full answer +
+    # tools land in the log for manual review.
+    adhoc: list[TestQuestion] = []
+    for i, text in enumerate(args.question, start=1):
+        if not text.strip():
+            parser.error("--question requires non-empty text")
+        if len(args.question) == 1:
+            checks = args.check
+        else:
+            checks = [args.check[i - 1]] if i - 1 < len(args.check) else []
+        criteria = tuple(("contains", c) for c in checks)
+        adhoc.append(TestQuestion(
+            qid=f"AD-{i:02d}",
+            title=text.strip().splitlines()[0][:60],
+            text=text.strip(),
+            require_tool=False,
+            criteria=criteria,
+        ))
+    if len(args.question) > 1 and len(args.check) > len(args.question):
+        parser.error(f"--check given without a matching --question "
+                     f"({len(args.check)} checks for {len(args.question)} questions)")
+    if adhoc:
+        questions += adhoc
+
     # Validate --start before any interactive prompts so bad values fail fast.
-    if args.start and not args.questions and (args.start < 1 or args.start > len(questions)):
+    if args.start and not args.questions and not args.question \
+            and (args.start < 1 or args.start > len(questions)):
         parser.error(f"--start must be between 1 and {len(questions)}")
 
     settings = resolve_settings(args)
@@ -1930,7 +2029,10 @@ def main() -> int:
         print(msg, file=sys.stderr)
         return 1
 
-    if args.questions:
+    if adhoc:
+        # Ad-hoc questions only — the bank is listed in the log but not run.
+        selected = list(range(len(questions) - len(adhoc), len(questions)))
+    elif args.questions:
         selected = parse_question_filter(args.questions, len(questions))
     elif args.start:
         selected = list(range(args.start - 1, len(questions)))
@@ -1999,11 +2101,33 @@ def main() -> int:
                   f"{len(wrong_tool)} correct-but-wrong-tool")
     log.write(f"Answer accuracy: {len([r for r in results if r.answer_ok])}/{len(results)}")
     log.write(f"Tool-usage accuracy: {len([r for r in results if r.tool_ok])}/{len(results)}")
-    log.write("")
-    log.write(f"{'QID':<5} {'STATUS':<15} {'ANSWER':<7} {'TOOL':<7} {'TURNS':<6} TOOLS USED")
+    truncated_results = [r for r in results if (r.usage or {}).get("truncated")]
+    token_values: list[int] = []
     for r in results:
+        tok = (r.usage or {}).get("completionTokens")
+        if isinstance(tok, int):
+            token_values.append(tok)
+    avg_tokens = (sum(token_values) / len(token_values)) if token_values else None
+    log.write("")
+    log.write(f"{'QID':<5} {'STATUS':<15} {'ANSWER':<7} {'TOOL':<7} {'TURNS':<6} {'TOKENS':<8} TOOLS USED")
+    for r in results:
+        usage = r.usage or {}
+        tokens = usage.get("completionTokens")
+        tok_s = str(tokens) if tokens is not None else "-"
+        if usage.get("truncated"):
+            tok_s += "*"  # * = hit max_tokens (finish_reason=length), possibly truncated
         log.write(f"{r.qid:<5} {r.status:<15} {str(r.answer_ok):<7} {str(r.tool_ok):<7} "
-                  f"{r.tool_turns:<6} {','.join(r.tool_names) or '-'}")
+                  f"{r.tool_turns:<6} {tok_s:<8} {','.join(r.tool_names) or '-'}")
+    if truncated_results:
+        log.write("")
+        log.write(f"Truncated (hit max_tokens budget, finish_reason=length): {len(truncated_results)}")
+        for r in truncated_results:
+            usage = r.usage or {}
+            log.write(f"  {r.qid} {r.title} (tokens={usage.get('completionTokens')} "
+                      f"reasoning={usage.get('reasoningTokens')})")
+    if avg_tokens is not None:
+        log.write(f"Average completion tokens per question: {avg_tokens:.0f} "
+                  f"(over {len(token_values)} questions reporting usage)")
     if no_tool or wrong_tool:
         log.write("")
         log.write("Conditional passes (correct answer, tool requirement missed):")
@@ -2077,11 +2201,22 @@ def main() -> int:
           + (f", {len(conditional)} conditional" if conditional else "") + ")")
     print(f"Answer accuracy: {len([r for r in results if r.answer_ok])}/{len(results)}")
     print(f"Tool-usage accuracy: {len([r for r in results if r.tool_ok])}/{len(results)}")
+    if truncated_results:
+        print(f"Truncated (hit max_tokens): {len(truncated_results)} "
+              f"-> {', '.join(r.qid for r in truncated_results)}")
+    if avg_tokens is not None:
+        print(f"Average tokens per question: {avg_tokens:.0f} (over {len(token_values)} questions)")
     marks = {"PASS": "PASS", "PASS_NO_TOOL": "PASS*", "PASS_WRONG_TOOL": "PASS+",
              "ERROR": "ERR "}
     for r in results:
         mark = marks.get(r.status, "FAIL")
-        print(f"  {r.qid} {mark}  tools=[{','.join(r.tool_names) or '-'}]  {r.title}")
+        usage = r.usage or {}
+        tok = usage.get("completionTokens")
+        tok_s = f" tok={tok}" if tok is not None else ""
+        if usage.get("truncated"):
+            tok_s += " TRUNC"
+        print(f"  {r.qid} {mark}  tools=[{','.join(r.tool_names) or '-'}]"
+              f"{tok_s}  {r.title}")
     if conditional:
         print("  * = correct answer, required tool not called "
               "| + = correct answer, wrong tool called")

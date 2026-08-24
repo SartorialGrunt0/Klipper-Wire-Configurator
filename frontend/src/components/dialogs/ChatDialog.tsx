@@ -15,6 +15,8 @@ import { useAiStore, AiProvider, providerRequiresApiKey, type ChatMessage } from
 import { useChatHistoryStore } from '../../stores/chatHistoryStore';
 import { useConfigStore } from '../../stores/configStore';
 import { useGraphStore } from '../../stores/graphStore';
+import { useNativeStore } from '../../stores/nativeStore';
+import { restoreLayoutAfterRebuild } from '../../utils/layoutPersistence';
 import { usePrinterMemoryStore, DEFAULT_PRINTER_MEMORY, type PrinterMemory } from '../../stores/printerMemoryStore';
 import * as api from '../../services/api';
 import {
@@ -177,6 +179,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   const [editPort, setEditPort] = useState(settings.port);
   const [editMaxTokens, setEditMaxTokens] = useState(String(settings.maxTokens ?? 4096));
   const [editTemperature, setEditTemperature] = useState(String(settings.temperature ?? 0.7));
+  const [editToolProtocol, setEditToolProtocol] = useState<'auto' | 'native' | 'text'>(settings.toolProtocol ?? 'auto');
 
   const resolvedEditApiUrl = resolveProviderApiUrl(
     editApiProvider,
@@ -213,6 +216,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       setEditPort(settings.port);
       setEditMaxTokens(String(settings.maxTokens ?? 4096));
       setEditTemperature(String(settings.temperature ?? 0.7));
+      setEditToolProtocol(settings.toolProtocol ?? 'auto');
       setError(null);
       // Opening the dialog consumes any background completion signal — the
       // toolbar button returns to its default color (the user is looking at
@@ -264,6 +268,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       port: editPort,
       maxTokens: Math.max(256, parseInt(editMaxTokens, 10) || 4096),
       temperature: parseTemperature(editTemperature),
+      toolProtocol: editToolProtocol,
     });
     setShowSettings(false);
   }, [
@@ -275,6 +280,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     editModel,
     editProviderModels,
     editTemperature,
+    editToolProtocol,
     resolvedEditApiUrl,
     setSettings,
   ]);
@@ -368,6 +374,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           requestId: stopRequestId,
           maxTokens: Math.max(256, parseInt(editMaxTokens, 10) || 4096),
           temperature: parseTemperature(editTemperature),
+          toolProtocol: editToolProtocol,
           fullRewriteGuard: FULL_REWRITE_GUARD_ENABLED,
         };
 
@@ -767,6 +774,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       const latestConfigFiles = useConfigStore.getState().configFiles;
       const latestValidation = useConfigStore.getState().validation;
       buildProjectGraph(latestConfigFiles, graphStore, schemas, latestValidation);
+      // The rebuild renumbers node ids — re-apply the saved layout so
+      // accepting an AI edit doesn't auto-arrange over the user's current
+      // arrangement (and the autosave can't persist that reset).
+      await restoreLayoutAfterRebuild(graphStore, useNativeStore.getState().isNative);
       setError(null);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to accept assistant changes.');
@@ -797,6 +808,8 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     setEditMaxTokens,
     editTemperature,
     setEditTemperature,
+    editToolProtocol,
+    setEditToolProtocol,
     resolvedEditApiUrl,
     onSaveSettings: handleSaveSettings,
   };

@@ -29,6 +29,7 @@ from api.ai_routes import (  # noqa: E402
     _extract_native_tool_calls,
     _extract_tool_calls,
     _parse_kwargs,
+    _strip_bracket_tool_calls,
 )
 
 
@@ -90,6 +91,58 @@ def test_extract_tool_calls_llamacpp_tool_call_prefix_with_space():
         "name": "read_klipper_doc",
         "arguments": {"doc": "Pressure_Advance.md"},
     }]
+
+
+def test_extract_tool_calls_bracket_syntax_known_tool():
+    # Models sometimes emit OpenAI-style [tool(args)] calls as plain text —
+    # e.g. [read_user_config(filename=Hotkey.cfg)] — instead of the
+    # configured ```tool JSON block. Format 7 must recover them so the
+    # call executes instead of leaking into the chat (2026-08 user report).
+    text = "I need to check the LED names:\n[read_user_config(filename=Hotkey.cfg)]\n"
+    calls = _extract_tool_calls(text)
+    assert calls == [{"name": "read_user_config", "arguments": {"filename": "Hotkey.cfg"}}]
+
+
+def test_extract_tool_calls_bracket_syntax_multi_arg():
+    text = "[read_user_config(filename=printer.cfg, section=idle_timeout)]"
+    calls = _extract_tool_calls(text)
+    assert calls == [{
+        "name": "read_user_config",
+        "arguments": {"filename": "printer.cfg", "section": "idle_timeout"},
+    }]
+
+
+def test_extract_tool_calls_bracket_syntax_unknown_name_not_extracted():
+    # G-code commands and config headers are NOT tools — bracket calls for
+    # them must stay as text (format 7 gates on known tool names so the
+    # hallucinated-tool guard keeps working as designed for other formats).
+    text = "[set_fan_speed(0.5)]\n[probe]\n[include printer.cfg]"
+    calls = _extract_tool_calls(text)
+    assert calls == []
+
+
+def test_extract_tool_calls_bracket_syntax_config_sections_untouched():
+    # Regression guard: config section headers ([bed_mesh], [mcu]) and
+    # jinja bodies must never extract as bracket calls.
+    text = "[bed_mesh]\n[gcode_macro PRINT_START]\n{% set x = 1 %}"
+    calls = _extract_tool_calls(text)
+    assert calls == []
+
+
+def test_strip_bracket_tool_calls_removes_known_keeps_unknown():
+    # Cleanup is name-gated: a real tool's bracket call is removed from the
+    # visible reply, but config headers and non-tool names survive.
+    text = (
+        "Now let me check your Hotkey config:\n"
+        "[read_user_config(filename=Hotkey.cfg)]\n"
+        "Also note [probe] and [set_fan_speed(0.5)] are not tools.\n"
+    )
+    cleaned = _strip_bracket_tool_calls(text)
+    assert "read_user_config(filename=Hotkey.cfg)" not in cleaned
+    assert "[probe]" in cleaned
+    assert "[set_fan_speed(0.5)]" in cleaned
+    assert "Now let me check your Hotkey config:" in cleaned
+    assert "are not tools" in cleaned
 
 
 def test_extract_tool_calls_ignores_klipper_macro_jinja():

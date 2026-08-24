@@ -259,12 +259,12 @@ export default function AiDraftPreviewDialog({
                           key={`${fileDiff.filename}_${index}`}
                           className={
                             line.type === 'added'
-                              ? 'bg-green-500/15 px-3 text-green-400'
+                              ? 'w-max min-w-full bg-green-500/15 px-3 text-green-400'
                               : line.type === 'removed'
-                                ? 'bg-red-500/15 px-3 text-red-400'
+                                ? 'w-max min-w-full bg-red-500/15 px-3 text-red-400'
                                 : line.type === 'header'
-                                  ? 'bg-blue-500/10 px-3 py-0.5 text-blue-400'
-                                  : 'px-3 text-[var(--color-text-secondary)]'
+                                  ? 'w-max min-w-full bg-blue-500/10 px-3 py-0.5 text-blue-400'
+                                  : 'w-max min-w-full px-3 text-[var(--color-text-secondary)]'
                           }
                         >
                           <span className="mr-2 select-none opacity-40">

@@ -2057,6 +2057,35 @@ _register(SectionDef(
     params=[],
 ))
 
+# ── Moonraker ──
+# `[update_manager <name>]` sections are Moonraker config (not Klipper), so
+# they have no Klipper schema — register them as a known named section so the
+# validator stops flagging every one as "Unknown section type". No params are
+# required; the common Moonraker options are listed for form rendering.
+_register(SectionDef(
+    section_type="update_manager",
+    display_name="Moonraker Update Manager",
+    category="config_helper",
+    component_group="system",
+    is_named=True,
+    description="Moonraker update_manager entry (git_repo/web/command...) — validated by Moonraker, not Klipper",
+    params=[
+        _str("type", "Update source type (git_repo, web, command, zip, json_file)"),
+        _str("repo", "GitHub repo (owner/name)"),
+        _str("path", "Local path of the installed software"),
+        _str("origin", "Git remote origin URL"),
+        _str("primary_branch", "Primary branch tracked for updates"),
+        _str("channel", "Release channel (stable/beta/dev)"),
+        _str("managed_services", "Systemd services to restart after update"),
+        _str("install_script", "Path to the install script"),
+        _str("requirements", "Path to a pip requirements file"),
+        _str("system_dependencies", "System packages to install"),
+        _str("virtualenv", "Path to the virtualenv to update"),
+        _str("env", "Environment variables for the update command"),
+        _int("refresh_interval", "Update check interval (hours)"),
+    ],
+))
+
 
 def get_section_def(section_type: str) -> Optional[SectionDef]:
     """Get the schema for a section type."""

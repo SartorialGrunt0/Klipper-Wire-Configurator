@@ -553,6 +553,50 @@ def test_unknown_section_warning_can_be_acknowledged():
             del os.environ['KWC_LAYOUT_DIR']
 
 
+def test_update_manager_section_is_recognized():
+    """[update_manager <name>] is a known Moonraker section type — it must NOT
+    produce an unknown-section warning.
+
+    This test originally asserted the warning for `[update_manager
+    moonraker-obico]` (a multiline-param ack regression: the stored snippet
+    never matched the canonical form). Once update_manager is registered as a
+    known named section the warning is gone by construction, so the ack path
+    is moot — assert recognition directly.
+    """
+    with tempfile.TemporaryDirectory() as temp_dir:
+        os.environ['KWC_LAYOUT_DIR'] = temp_dir
+        try:
+            config = parse_config(
+                '[update_manager moonraker-obico]\n'
+                'type: git_repo\n'
+                'path: /home/clifgall/moonraker-obico\n'
+                'origin: https://github.com/TheSpaghettiDetective/moonraker-obico.git\n'
+                'env: /home/clifgall/moonraker-obico/../moonraker-obico-env/bin/python\n'
+                'requirements: requirements.txt\n'
+                'install_script: install.sh\n'
+                'managed_services:\n'
+                '  moonraker-obico\n',
+                'moonraker.conf',
+            )
+
+            before = validate_config(config)
+            assert not any(
+                error.severity == 'warning'
+                and 'Unknown section type' in error.message
+                for error in before.errors
+            )
+            assert not before.has_warnings
+
+            # The acknowledgment path remains a safe no-op for recognized
+            # sections (no snippet to store, no warning to clear).
+            acknowledge_warning_for_section(config.sections[0])
+
+            after = validate_config(config)
+            assert not after.has_warnings
+        finally:
+            del os.environ['KWC_LAYOUT_DIR']
+
+
 def test_duplicate_exact_stepper_section_across_active_files_is_warning():
     results = _validate_project({
         'printer.cfg': (

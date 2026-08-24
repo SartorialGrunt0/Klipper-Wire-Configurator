@@ -230,6 +230,36 @@ export function isMiniDiffBlock(configText: string): boolean {
   return hasHeader && hasMarker;
 }
 
+/**
+ * Strip the `-`/`+` mini-diff markers from a block, producing plain section
+ * text (used when the mini-diff cannot be applied against the base file and
+ * the block is treated as a FULL section write instead).
+ *
+ * Content handling follows the same convention as the apply path
+ * (MINI_DIFF_REMOVAL_RE): everything after the marker is the line's own
+ * content, indent included — that is how removals are matched against the
+ * base file. On top of that:
+ * - param-shaped lines (`key: value` / `key= value`, column 0 in Klipper
+ *   params) — trim to column 0. A model emitting `-  max_accel: 15500` must
+ *   NOT leave the leading space: an indented line is folded into the
+ *   PREVIOUS param's multi-line value by the parser, silently corrupting
+ *   the config.
+ * - all other lines (gcode bodies, jinja, comments) — kept verbatim, indent
+ *   included (harmless for gcode, keeps multi-line jinja indented blocks).
+ */
+export function stripMiniDiffMarkers(blockText: string): string {
+  return blockText
+    .split(/\r?\n/)
+    .map((line) => {
+      const marker = /^(\s*)[-+](.*)$/.exec(line);
+      if (!marker) return line;
+      const content = marker[2];
+      const trimmed = content.trimStart();
+      return PARAM_LINE_RE.test(trimmed) ? trimmed : content;
+    })
+    .join('\n');
+}
+
 /** Extract the operations for one section header from the block's lines. */
 function extractSectionOps(
   lines: string[],
@@ -295,6 +325,7 @@ function applyOpsToSection(
       continue;
     }
     const normalizedRemoval = normalizeLine(op.removal);
+    const strippedRemoval = normalizedRemoval.trimStart();
     let matchIndex = base.findIndex(
       (line, index) => !used.has(index) && line === normalizedRemoval,
     );
@@ -304,10 +335,22 @@ function applyOpsToSection(
       // (e.g. 4-space indent emitted for a column-0 [printer] line) must still
       // match. Only leading whitespace is ignored — a real content mismatch
       // still returns null and the caller falls back to legacy handling.
-      const strippedRemoval = normalizedRemoval.trimStart();
       matchIndex = base.findIndex(
         (line, index) => !used.has(index) && line.trimStart() === strippedRemoval,
       );
+    }
+    if (matchIndex === -1 && sectionHasGcodeBody(sectionLines) && strippedRemoval.trim() !== '') {
+      // gcode-body lines frequently carry trailing `# comments` that the model
+      // omits when it copies a line into the mini-diff. Klipper strips `#`
+      // comments unconditionally, so a match ignoring the base line's trailing
+      // comment is faithful. Only applies to gcode-like bodies and to non-
+      // comment removals (a removal of a comment line matches exactly above).
+      const noCommentRemoval = strippedRemoval.split('#')[0].trimEnd();
+      if (noCommentRemoval !== '') {
+        matchIndex = base.findIndex(
+          (line, index) => !used.has(index) && line.trimStart().split('#')[0].trimEnd() === noCommentRemoval,
+        );
+      }
     }
     if (matchIndex === -1) return null;
     used.add(matchIndex);
@@ -398,6 +441,12 @@ export function applyMiniDiffBlock(
   const blockLines = configText.split(/\r?\n/);
   const baseLines = baseFileText.split(/\r?\n/);
   const outputSections: string[] = [];
+  // Atomicity: if ANY section in the block cannot be applied (removal not
+  // matched, or the section is not in the base file), fail the WHOLE block so
+  // the caller can fall back to the model's block as a full section write.
+  // Partial application would silently drop the failed sections (or, with the
+  // raw fallback, leak the literal `-`/`+` markers into the config as gcode).
+  let anyFailed = false;
 
   for (let blockIndex = 0; blockIndex < blockLines.length; blockIndex += 1) {
     if (!SECTION_HEADER_RE.test(blockLines[blockIndex])) continue;
@@ -409,7 +458,10 @@ export function applyMiniDiffBlock(
       (baseLine) => SECTION_HEADER_RE.test(baseLine)
         && SECTION_HEADER_RE.exec(baseLine)![1] === header,
     );
-    if (headerIndex === -1) continue; // section not in base — fall back
+    if (headerIndex === -1) {
+      anyFailed = true;
+      continue; // section not in base — caller falls back
+    }
 
     // Section extent: from the header line to the next section header, then
     // trimmed to the section's own content (trailing comment banners belong
@@ -424,12 +476,15 @@ export function applyMiniDiffBlock(
 
     const sectionLines = baseLines.slice(headerIndex, sectionContentEnd(baseLines, headerIndex, endIndex));
     const reconstructed = applyOpsToSection(sectionLines, ops);
-    if (!reconstructed) continue;
+    if (!reconstructed) {
+      anyFailed = true;
+      continue;
+    }
 
     outputSections.push(reconstructed.join('\n'));
   }
 
-  if (outputSections.length === 0) {
+  if (anyFailed || outputSections.length === 0) {
     return { applied: false, text: configText };
   }
   return { applied: true, text: outputSections.join('\n\n') };

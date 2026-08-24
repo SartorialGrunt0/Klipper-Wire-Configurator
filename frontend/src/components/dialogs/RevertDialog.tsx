@@ -5,6 +5,7 @@ import { useMacroDesignerStore } from '../../stores/macroDesignerStore';
 import { useNativeStore } from '../../stores/nativeStore';
 import * as api from '../../services/api';
 import { buildProjectGraph } from '../../utils/graphBuilder';
+import { restoreLayoutAfterRebuild } from '../../utils/layoutPersistence';
 import type { ConfigFile, ValidationResult } from '../../types/config';
 
 interface RevertDialogProps {
@@ -73,6 +74,10 @@ export default function RevertDialog({ onClose }: RevertDialogProps) {
         // Rebuild graph
         const graphStore = useGraphStore.getState();
         buildProjectGraph(allConfigs, graphStore, schemas, allValidations);
+        // Re-apply the saved layout — the rebuild renumbers node ids, and
+        // the macro-state persist below must save the restored arrangement,
+        // not the auto-arranged one.
+        await restoreLayoutAfterRebuild(graphStore, isNative);
       } else {
         // Non-native mode: re-parse from originalTexts
         const { originalTexts } = configStore;
@@ -100,6 +105,8 @@ export default function RevertDialog({ onClose }: RevertDialogProps) {
         // Rebuild graph
         const graphStore = useGraphStore.getState();
         buildProjectGraph(allConfigs, graphStore, schemas, allValidations);
+        // Re-apply the saved layout (same reason as the native branch above).
+        await restoreLayoutAfterRebuild(graphStore, isNative);
       }
 
       if (clearMacroDesignerState) {

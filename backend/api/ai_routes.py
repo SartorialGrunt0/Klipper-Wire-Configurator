@@ -105,6 +105,17 @@ FUNC_CALL_CLEANUP_RE = re.compile(
     r"(?:^|\n)\s*(?:call[\s:]?\s*)?(?:tool_call[\s:]*)?\w+\s*\([^)]*\)\s*(?=\n|$)",
     re.DOTALL,
 )
+# Bracket-wrapped Python-style calls: [tool_name(arg1="val1", arg2=val2)].
+# Emitted as plain text by models that know the OpenAI-style [tool(args)]
+# rendering but not the configured protocol (observed 2026-08 on local
+# models: [read_user_config(filename=Hotkey.cfg)] leaked into chat because
+# FUNC_CALL_RE is line-anchored and the '[' defeats it). Extraction and
+# cleanup are gated on KNOWN tool names so config headers ([probe]) and
+# prose with parens are never treated as calls.
+BRACKET_CALL_RE = re.compile(
+    r"\[\s*(\w+)\s*\(\s*(.+?)\s*\)\s*\]",
+    re.DOTALL,
+)
 # DeepSeek DSML (Data Structure Markup Language) native tool-call markup.
 # DeepSeek V3.2/V4 models emit tool calls as:
 #   <||DSML||tool_calls>
@@ -1126,6 +1137,21 @@ def _extract_tool_calls(text: str) -> list[dict]:
                 arguments[key] = value
         calls.append({"name": name, "arguments": arguments})
 
+    # Format 7: bracket-wrapped calls [name(k=v, ...)] (see BRACKET_CALL_RE).
+    # Gated on known tool names — config headers ([probe]) and prose with
+    # parens must never extract as calls.
+    known_tool_names = {t["name"] for t in _mcp_server._list_tools()}
+    for bracket_match in BRACKET_CALL_RE.finditer(text):
+        content = bracket_match.group(0).strip()
+        if not content or content in seen_contents:
+            continue
+        name = bracket_match.group(1).strip()
+        if name not in known_tool_names:
+            continue
+        seen_contents.add(content)
+        arguments = _parse_kwargs(bracket_match.group(2).strip())
+        calls.append({"name": name, "arguments": arguments})
+
     if calls:
         names = [c["name"] for c in calls]
         logger.debug("Extracted %d tool call(s): %s", len(calls), names)
@@ -1146,6 +1172,20 @@ def _parse_kwargs(args_text: str) -> dict:
         arg_value = arg_match.group(2).strip().strip('"').strip("'")
         arguments[arg_name] = arg_value
     return arguments
+
+
+def _strip_bracket_tool_calls(text: str) -> str:
+    """Strip bracket-wrapped tool calls whose name is a REAL tool.
+
+    Name-gated mirror of BRACKET_CALL_RE: only known tool names are removed,
+    so config section headers ([probe], [include printer.cfg]) and prose with
+    parens survive the cleanup chain.
+    """
+    known_tool_names = {t["name"] for t in _mcp_server._list_tools()}
+    return BRACKET_CALL_RE.sub(
+        lambda m: "" if m.group(1).strip() in known_tool_names else m.group(0),
+        text,
+    )
 
 
 # llama.cpp/Gemma text-protocol templates wrap tool calls in decoration
@@ -1646,6 +1686,37 @@ def _extract_provider_content(provider: str, data: dict) -> str:
     return data.get("choices", [{}])[0].get("message", {}).get("content", "")
 
 
+def _extract_usage_info(data: dict) -> dict | None:
+    """Extract token usage + finish_reason from a provider response.
+
+    Used to surface per-turn budget consumption in /ai/chat responses so the
+    accuracy harness can tell a truncated answer (finish_reason=length) from
+    a genuinely wrong one. Thinking models report reasoning tokens under
+    usage.completion_tokens_details.reasoning_tokens — those count against the
+    same max_tokens budget as visible content.
+    """
+    if not isinstance(data, dict):
+        return None
+    usage = data.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    choice = (data.get("choices") or [{}])[0]
+    completion_tokens = usage.get("completion_tokens")
+    if not isinstance(completion_tokens, int):
+        return None
+    details = usage.get("completion_tokens_details")
+    reasoning_tokens = None
+    if isinstance(details, dict):
+        rt = details.get("reasoning_tokens")
+        if isinstance(rt, int):
+            reasoning_tokens = rt
+    return {
+        "completionTokens": completion_tokens,
+        "reasoningTokens": reasoning_tokens,
+        "finishReason": choice.get("finish_reason") or "",
+    }
+
+
 def _build_api_base_url(api_url: str) -> str:
     parsed = urlparse(api_url)
     if not parsed.scheme or not parsed.netloc:
@@ -1808,6 +1879,11 @@ async def chat_proxy(req: ChatRequest):
                 logger_context="initial",
                 stop_event=stop_event,
             )
+            usage_events: list[dict] = []
+            initial_usage = _extract_usage_info(current_data)
+            if initial_usage:
+                initial_usage["context"] = "initial"
+                usage_events.append(initial_usage)
 
             tool_turns = 0
             current_messages = list(messages)
@@ -1865,6 +1941,10 @@ async def chat_proxy(req: ChatRequest):
                             logger_context="config-fallback",
                             stop_event=stop_event,
                         )
+                        cfg_usage = _extract_usage_info(current_data)
+                        if cfg_usage:
+                            cfg_usage["context"] = "config-fallback"
+                            usage_events.append(cfg_usage)
 
             # ── Auto-search fallback ──
             # If the model didn't call any tools on the first pass, do a backend
@@ -1911,6 +1991,10 @@ async def chat_proxy(req: ChatRequest):
                             logger_context="auto-search",
                             stop_event=stop_event,
                         )
+                        search_usage = _extract_usage_info(current_data)
+                        if search_usage:
+                            search_usage["context"] = "auto-search"
+                            usage_events.append(search_usage)
 
             while tool_turns < MAX_MCP_TOOL_TURNS:
                 if stop_event is not None and stop_event.is_set():
@@ -1988,6 +2072,7 @@ async def chat_proxy(req: ChatRequest):
                         clean_content = ALT_TOOL_CALL_CONTENT_RE.sub("", clean_content).strip()
                         clean_content = CALL_SYNTAX_CLEANUP_RE.sub("", clean_content).strip()
                         clean_content = FUNC_CALL_CLEANUP_RE.sub("", clean_content).strip()
+                        clean_content = _strip_bracket_tool_calls(clean_content).strip()
                         clean_content = DSML_CLEANUP_RE.sub("", clean_content).strip()
                         clean_content = XML_TOOL_CALLS_CLEANUP_RE.sub("", clean_content).strip()
                         if clean_content:
@@ -2006,6 +2091,10 @@ async def chat_proxy(req: ChatRequest):
                     logger_context=f"tool-turn-{tool_turns}",
                     stop_event=stop_event,
                 )
+                turn_usage = _extract_usage_info(current_data)
+                if turn_usage:
+                    turn_usage["context"] = f"tool-turn-{tool_turns}"
+                    usage_events.append(turn_usage)
 
             # Clean up any remaining tool call blocks in the final content.
             # Check whether the content contained tool call blocks BEFORE cleanup
@@ -2022,6 +2111,7 @@ async def chat_proxy(req: ChatRequest):
             final_content = ALT_TOOL_CALL_CONTENT_RE.sub("", final_content).strip()
             final_content = CALL_SYNTAX_CLEANUP_RE.sub("", final_content).strip()
             final_content = FUNC_CALL_CLEANUP_RE.sub("", final_content).strip()
+            final_content = _strip_bracket_tool_calls(final_content).strip()
             final_content = DSML_CLEANUP_RE.sub("", final_content).strip()
             # If the cleanup left nothing but the original was a tool call,
             # don't restore the raw tool call text — return empty instead.
@@ -2073,6 +2163,10 @@ async def chat_proxy(req: ChatRequest):
                     logger_context=f"empty-reprompt-{empty_reprompts}",
                     stop_event=stop_event,
                 )
+                retry_usage = _extract_usage_info(current_data)
+                if retry_usage:
+                    retry_usage["context"] = f"empty-reprompt-{empty_reprompts}"
+                    usage_events.append(retry_usage)
 
                 # Some models (DeepSeek "flash", Qwen, ...) ignore the
                 # no-tools instruction and emit tool calls as plain text —
@@ -2095,6 +2189,7 @@ async def chat_proxy(req: ChatRequest):
                     clean_assistant = ALT_TOOL_CALL_CONTENT_RE.sub("", clean_assistant).strip()
                     clean_assistant = CALL_SYNTAX_CLEANUP_RE.sub("", clean_assistant).strip()
                     clean_assistant = FUNC_CALL_CLEANUP_RE.sub("", clean_assistant).strip()
+                    clean_assistant = _strip_bracket_tool_calls(clean_assistant).strip()
                     clean_assistant = DSML_CLEANUP_RE.sub("", clean_assistant).strip()
                     clean_assistant = XML_TOOL_CALLS_CLEANUP_RE.sub("", clean_assistant).strip()
                     if clean_assistant:
@@ -2117,6 +2212,7 @@ async def chat_proxy(req: ChatRequest):
                 final_content = ALT_TOOL_CALL_CONTENT_RE.sub("", final_content).strip()
                 final_content = CALL_SYNTAX_CLEANUP_RE.sub("", final_content).strip()
                 final_content = FUNC_CALL_CLEANUP_RE.sub("", final_content).strip()
+                final_content = _strip_bracket_tool_calls(final_content).strip()
                 final_content = DSML_CLEANUP_RE.sub("", final_content).strip()
                 final_content = XML_TOOL_CALLS_CLEANUP_RE.sub("", final_content).strip()
 
@@ -2152,6 +2248,18 @@ async def chat_proxy(req: ChatRequest):
                 "mcpToolNames": mcp_tool_names,
                 "toolCalls": executed_tool_calls,
                 "repromptCount": empty_reprompts,
+                "usage": {
+                    "completionTokens": sum(
+                        (e.get("completionTokens") or 0) for e in usage_events
+                    ),
+                    "reasoningTokens": sum(
+                        (e.get("reasoningTokens") or 0) for e in usage_events
+                    ),
+                    "events": usage_events,
+                    "truncated": any(
+                        (e.get("finishReason") or "") == "length" for e in usage_events
+                    ),
+                },
             }
         except ChatStoppedError:
             logger.info("Chat stopped by user | requestId=%s", req.requestId)

@@ -156,12 +156,7 @@ function CommunicationEdge(props: EdgeProps) {
             gap: 3,
           }}
         >
-          {isNotIncluded && (
-            <svg width="8" height="8" viewBox="0 0 10 10" fill="none" style={{ flexShrink: 0 }}>
-              <path d="M2 2l6 6M8 2l-6 6" stroke="#ef4444" strokeWidth="1.8" strokeLinecap="round" />
-            </svg>
-          )}
-          <span title={isNotIncluded ? undefined : description}>{label}</span>
+          <span title={description}>{label}</span>
         </div>
       </foreignObject>
       {/* Tooltip shown on hover when the comm line is inactive */}

@@ -2,8 +2,10 @@ import { useState, useRef, useCallback } from 'react';
 import JSZip from 'jszip';
 import { useConfigStore } from '../../stores/configStore';
 import { useGraphStore } from '../../stores/graphStore';
+import { useNativeStore } from '../../stores/nativeStore';
 import * as api from '../../services/api';
 import { buildProjectGraph } from '../../utils/graphBuilder';
+import { restoreLayoutAfterRebuild } from '../../utils/layoutPersistence';
 import { buildInitialSelection, findOverlappingFiles } from '../../utils/importSelection';
 import { countChangedLines, createConfigPatch } from '../../utils/configDiff';
 import type { ConfigFile } from '../../types/config';
@@ -149,6 +151,11 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
         allValidations[filename] = fileResult.validation;
       }
       buildProjectGraph(allConfigs, graphStore, schemas, allValidations);
+
+      // The rebuild renumbers node ids — re-apply the saved layout so an
+      // import doesn't auto-arrange over the user's arrangement (and the
+      // autosave can't persist that reset).
+      await restoreLayoutAfterRebuild(graphStore, useNativeStore.getState().isNative);
 
       // Sort results: main file first, then alphabetical
       importResults.sort((a, b) => {

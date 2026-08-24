@@ -45,7 +45,7 @@ import {
 import type { AssistantDraftChange } from '../utils/assistantDraftMerge';
 import { mergeAssistantSectionsIntoConfig, preprocessDeleteMarkers } from '../utils/assistantDraftMerge';
 import { normalizeDiffText } from '../utils/configDiff';
-import { isMiniDiffBlock, applyMiniDiffBlock } from '../utils/miniDiff';
+import { isMiniDiffBlock, applyMiniDiffBlock, stripMiniDiffMarkers } from '../utils/miniDiff';
 import { repairUnclosedJinjaInConfigText } from '../utils/jinjaBlockRepair';
 import type { ReplyValidator } from '../utils/replyValidation';
 
@@ -98,6 +98,8 @@ interface ChatRequestBase {
   maxTokens?: number;
   /** Sampling temperature for the provider (0-2). Omit for provider default. */
   temperature?: number;
+  /** Tool-calling protocol override: 'auto' (scheme split), 'native', 'text'. */
+  toolProtocol?: 'auto' | 'native' | 'text';
   /** Loaded user-config content for the backend config-grounding fallback. */
   contextFiles?: Record<string, { content: string; label: string }>;
   /** Full-rewrite guard state — sent to the backend to select prompt wording. */
@@ -210,19 +212,27 @@ export function useAssistantDraft() {
         // existing section, materialize the full section from the current file
         // text BEFORE parsing. Unchanged lines (including Jinja tags in macros)
         // are preserved verbatim from the base file, so the model can never
-        // drop them. If the edit cannot be applied (e.g. the section is not in
-        // the base file), fall back to the raw block so the normal parse and
-        // validation feedback handles it.
+        // drop them. If the edit cannot be applied, fall back to the model's
+        // block as a FULL section write (markers stripped) — never to the raw
+        // text with markers, which would leak literal '-'/'+' lines into the
+        // parsed config (visible as broken gcode in the merged draft).
         let draftConfigText = configText;
         const blockIsMiniDiff = isMiniDiffBlock(draftConfigText);
+        let miniDiffApplyFailed = false;
         if (blockIsMiniDiff) {
           const baseFileText = await getConfigText(assistantParseFilename);
           if (baseFileText) {
             const applied = applyMiniDiffBlock(draftConfigText, baseFileText);
             if (applied.applied) {
               draftConfigText = applied.text;
+            } else {
+              miniDiffApplyFailed = true;
             }
           }
+        }
+        if (miniDiffApplyFailed) {
+          console.warn('[AIDraft] Mini-diff could not be applied against the base file — treating it as a full section write (markers stripped). Review the diff before accepting.');
+          draftConfigText = stripMiniDiffMarkers(draftConfigText);
         }
 
         // Phase 4 deterministic auto-repair: when the model rewrote a macro
@@ -250,7 +260,7 @@ export function useAssistantDraft() {
           throw new Error('Unable to determine which config file should receive the assistant changes.');
         }
 
-        if (!blockIsMiniDiff) {
+        if (!blockIsMiniDiff || miniDiffApplyFailed) {
           for (const section of assistantResult.config.sections) {
             fullRewriteSections.push({ filename: targetFile, fullHeader: section.full_header });
           }

@@ -1,8 +1,11 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { useConfigStore } from '../stores/configStore';
 import { useGraphStore } from '../stores/graphStore';
+import { useNativeStore } from '../stores/nativeStore';
 import * as api from '../services/api';
 import ConfigReferenceDialog from './dialogs/ConfigReferenceDialog';
+import { buildProjectGraph } from '../utils/graphBuilder';
+import { restoreLayoutAfterRebuild } from '../utils/layoutPersistence';
 import type { ExampleConfig, ConfigFile, ConfigSection } from '../types/config';
 
 interface SearchResult {
@@ -581,11 +584,19 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
       });
       setActiveFile(name);
 
-      // Rebuild the whole graph so the new file's hardware/features appear —
-      // mirrors the import path (clearGraph first avoids duplicate nodes).
+      // Full rebuild over ALL config files (mirrors the import path).
+      // The previous code did clearGraph() + syncGraphWithConfig(name) —
+      // a single-file sync that can only add sections to EXISTING hardware
+      // nodes, so after clearGraph() deleted them nothing could be
+      // recreated and the canvas went empty.
+      const configStore = useConfigStore.getState();
       const graphStore = useGraphStore.getState();
       graphStore.clearGraph();
-      graphStore.syncGraphWithConfig(name);
+      buildProjectGraph(configStore.configFiles, graphStore, configStore.schemas, configStore.validation);
+      // The rebuild renumbers node ids — re-apply the saved layout so the
+      // new file appears in the user's existing arrangement instead of
+      // resetting every card to auto-arranged.
+      await restoreLayoutAfterRebuild(graphStore, useNativeStore.getState().isNative);
     } catch (err) {
       console.error('Failed to load reference config:', err);
     }

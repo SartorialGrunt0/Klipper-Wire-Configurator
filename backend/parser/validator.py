@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Optional
 
 import jinja2
@@ -332,6 +333,30 @@ _MACRO_JINJA_ENV = jinja2.Environment("{%", "%}", "{", "}")
 # Section types whose gcode bodies are Jinja templates evaluated by Klipper.
 _MACRO_TEMPLATE_SECTIONS = frozenset({"gcode_macro", "delayed_gcode"})
 
+# Compile results are cached by comment-stripped body: project validation runs
+# on every load (and per file), so a config with many macros spends most of its
+# startup time re-parsing the same template text. Line numbers returned are
+# body-relative and re-based at call time, so cached entries are safe to reuse
+# across sections/files. Bounded to keep memory in check.
+@lru_cache(maxsize=2048)
+def _compile_macro_template(body: str) -> tuple[str, int] | None:
+    """Compile a stripped gcode body as Klipper Jinja.
+
+    Returns None when the template is valid, or (message, body_lineno) on a
+    TemplateSyntaxError. body_lineno is 1-indexed within the gcode body.
+    """
+    # A body with no '{' at all is plain text — jinja2 can never raise on it.
+    # ~half of real-world macros are plain G-code, so skip the compile entirely
+    # (behavior-identical: from_string on text-only templates always succeeds).
+    if "{" not in body:
+        return None
+    try:
+        _MACRO_JINJA_ENV.from_string(body)
+        return None
+    except jinja2.exceptions.TemplateSyntaxError as exc:
+        # str(None) renders "None" — same output the caller's f-string produced.
+        return (str(exc.message), exc.lineno)
+
 
 def _strip_inline_comments(body: str) -> str:
     """Mirror Klipper's config parsing before templates reach jinja2.
@@ -371,21 +396,22 @@ def _validate_macro_jinja(section: ConfigSection, result: ValidationResult) -> N
     body = gcode_param.value
     if not body.strip():
         return
-    try:
-        # Klipper strips inline #/; comments from every config line before
-        # the body is templated; do the same so community comment styles do
-        # not false-positive.
-        _MACRO_JINJA_ENV.from_string(_strip_inline_comments(body))
-    except jinja2.exceptions.TemplateSyntaxError as exc:
-        # exc.lineno is 1-indexed within the gcode body, which starts on the
-        # line after the 'gcode:' key.
-        result.errors.append(ValidationError(
-            severity="error",
-            section=section.full_header,
-            param="gcode",
-            message=f"Jinja template error in macro: {exc.message}",
-            line_number=gcode_param.line_number + exc.lineno,
-        ))
+    # Klipper strips inline #/; comments from every config line before
+    # the body is templated; do the same so community comment styles do
+    # not false-positive.
+    outcome = _compile_macro_template(_strip_inline_comments(body))
+    if outcome is None:
+        return
+    message, body_lineno = outcome
+    # body_lineno is 1-indexed within the gcode body, which starts on the
+    # line after the 'gcode:' key.
+    result.errors.append(ValidationError(
+        severity="error",
+        section=section.full_header,
+        param="gcode",
+        message=f"Jinja template error in macro: {message}",
+        line_number=gcode_param.line_number + body_lineno,
+    ))
 
 
 def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> ValidationResult:

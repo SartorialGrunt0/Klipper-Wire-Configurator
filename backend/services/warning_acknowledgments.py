@@ -26,12 +26,17 @@ def _acknowledged_warnings_file() -> Path:
 
 
 def _serialize_param_value(value: str) -> list[str]:
-    parts = value.split("\n")
-    if len(parts) <= 1:
-        return [parts[0]]
-    lines = [parts[0]]
-    lines.extend(f"    {part}" for part in parts[1:])
-    return lines
+    """Split a param value into its physical lines for the canonical snippet.
+
+    Continuation lines MUST be emitted verbatim — with the exact indentation
+    the parser captured in the value. The acknowledgment comparison is
+    ``canonicalize_section(live) == canonicalize_section(parse(stored))``, and
+    the parser preserves continuation-line whitespace as-is. Any re-indentation
+    here inflates on every write->parse cycle, so the stored snippet never
+    matches the live config (real case: ``[update_manager moonraker-obico]``
+    with an indented ``managed_services:`` block could never be acknowledged).
+    """
+    return value.split("\n")
 
 
 def canonicalize_section(section: ConfigSection) -> str:
