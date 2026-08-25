@@ -38,6 +38,11 @@ class ValidationError:
     param: str  # Parameter name (empty if section-level)
     message: str
     line_number: int = 0
+    # Stable machine-facing identity for error classes that the frontend
+    # branches on (retry-exempt, acknowledge gate, Jinja repair derivation).
+    # Empty string when no consumer needs a code. `message` stays human-facing
+    # and may be reworded freely without breaking those branches.
+    code: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -46,6 +51,7 @@ class ValidationError:
             "param": self.param,
             "message": self.message,
             "line_number": self.line_number,
+            "code": self.code,
         }
 
 
@@ -400,12 +406,16 @@ def _validate_macro_jinja(section: ConfigSection, result: ValidationResult) -> N
     message, body_lineno = outcome
     # body_lineno is 1-indexed within the gcode body, which starts on the
     # line after the 'gcode:' key.
+    # Code only for the dropped-closer case: it's the class the AI repair
+    # loop derives a prescriptive "append {% endX %}" fix from. Other
+    # template errors (bad expression, stray brace) get no code.
     result.errors.append(ValidationError(
         severity="error",
         section=section.full_header,
         param="gcode",
         message=f"Jinja template error in macro: {message}",
         line_number=gcode_param.line_number + body_lineno,
+        code="macro_jinja_unterminated" if "Unexpected end of template" in message else "",
     ))
 
 
@@ -465,6 +475,7 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
                 param="",
                 message=f"Unknown section type '{sec_type}'. Parameters won't be validated.",
                 line_number=section.line_number,
+                code="unknown_section",
             ))
             continue
 
@@ -480,6 +491,7 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
                     param="",
                     message=f"Section [{sec_type}] can only be defined once.",
                     line_number=section.line_number,
+                    code="project_duplicate",
                 ))
 
         # Check required parameters
@@ -575,6 +587,7 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
                     param=param.key,
                     message=f"Unknown parameter '{param.key}' for section [{sec_type}].",
                     line_number=param.line_number,
+                    code="unknown_param",
                 ))
                 continue
 
@@ -678,6 +691,7 @@ def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, Valida
                 param="",
                 message=message,
                 line_number=section.line_number,
+                code="project_duplicate",
             ))
 
     _append_special_temperature_sensor_errors(
@@ -994,6 +1008,7 @@ def _check_pin_conflicts(used_pins: dict[str, list[PinUse]], result: ValidationR
             param=anchor.param,
             message=f"Pin '{pin}' is used by multiple sections: {', '.join(user.label for user in users)}",
             line_number=anchor.line_number,
+            code="shared_pin",
         ))
 
 
