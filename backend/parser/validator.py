@@ -939,6 +939,19 @@ def _validate_param_value(param, param_def, section, result):
                         f"Expected one of: {', '.join(param_def.enum_values)}",
                 line_number=param.line_number,
             ))
+        elif param_def.param_type in (ParamType.INT, ParamType.FLOAT, ParamType.BOOL, ParamType.PIN):
+            # A present-but-empty typed param is a Klipper startup hard-fail:
+            # the option IS present so the code's default is never used —
+            # getint('')/getfloat('')/getboolean('') raise, and lookup_pin('')
+            # fails in parse_pin with a traceback rather than a config error.
+            # STRING and MULTI_LINE params may legitimately be empty.
+            result.errors.append(ValidationError(
+                severity="error",
+                section=section.full_header,
+                param=param.key,
+                message=f"Empty value for '{param.key}'. This parameter requires a value.",
+                line_number=param.line_number,
+            ))
         return
 
     if param_def.param_type == ParamType.INT:
