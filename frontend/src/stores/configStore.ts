@@ -4,53 +4,10 @@ import type { ConfigFile, ConfigSection, ConfigParam, ValidationResult, SectionS
 /** Debounced revalidation timer — shared across all mutation methods. */
 let _revalidateTimer: ReturnType<typeof setTimeout> | null = null;
 
-const UNKNOWN_PARAM_WARNING_RE = /^Unknown parameter '([^']+)' for section \[([^\]]+)\]\.?$/;
-
 function matchesSectionIdentity(section: ConfigSection, fullHeader: string, lineNumber?: number): boolean {
   if (section.full_header !== fullHeader) return false;
   if (lineNumber == null || lineNumber === 0) return true;
   return section.line_number === lineNumber;
-}
-
-function sanitizeValidationResult(
-  result: ValidationResult,
-  schemas: Record<string, SectionSchema>,
-): ValidationResult {
-  if (result.errors.length === 0 || Object.keys(schemas).length === 0) {
-    return result;
-  }
-
-  const filteredErrors = result.errors.filter((error) => {
-    if (error.severity !== 'warning') return true;
-
-    const match = UNKNOWN_PARAM_WARNING_RE.exec(error.message);
-    if (!match) return true;
-
-    const [, paramName, sectionType] = match;
-    const schema = schemas[sectionType];
-    if (!schema) return true;
-
-    return !schema.params.some((param) => param.name === paramName);
-  });
-
-  if (filteredErrors.length === result.errors.length) {
-    return result;
-  }
-
-  return {
-    has_errors: filteredErrors.some((error) => error.severity === 'error'),
-    has_warnings: filteredErrors.some((error) => error.severity === 'warning'),
-    errors: filteredErrors,
-  };
-}
-
-function sanitizeValidationMap(
-  results: Record<string, ValidationResult>,
-  schemas: Record<string, SectionSchema>,
-): Record<string, ValidationResult> {
-  return Object.fromEntries(
-    Object.entries(results).map(([filename, result]) => [filename, sanitizeValidationResult(result, schemas)]),
-  );
 }
 
 async function _revalidateFile(
@@ -63,9 +20,8 @@ async function _revalidateFile(
   const api = await import('../services/api');
   try {
     const result = await api.validateConfig(cf);
-    const sanitized = sanitizeValidationResult(result, get().schemas);
     set((state) => ({
-      validation: { ...state.validation, [filename]: sanitized },
+      validation: { ...state.validation, [filename]: result },
     }));
   } catch {
     // Validation API unavailable — skip silently
@@ -73,7 +29,7 @@ async function _revalidateFile(
 }
 
 async function _revalidateAll(get: () => ConfigState, set: (partial: Partial<ConfigState> | ((s: ConfigState) => Partial<ConfigState>)) => void) {
-  const { configFiles, schemas } = get();
+  const { configFiles } = get();
   const filenames = Object.keys(configFiles);
   if (filenames.length === 0) return;
 
@@ -85,9 +41,8 @@ async function _revalidateAll(get: () => ConfigState, set: (partial: Partial<Con
   const api = await import('../services/api');
   try {
     const results = await api.validateProject(configFiles);
-    const sanitized = sanitizeValidationMap(results, schemas);
     set((state) => ({
-      validation: { ...state.validation, ...sanitized },
+      validation: { ...state.validation, ...results },
     }));
   } catch {
     for (const filename of filenames) {
@@ -238,16 +193,10 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
   setValidation: (filename, result) =>
     set((s) => ({
-      validation: { ...s.validation, [filename]: sanitizeValidationResult(result, s.schemas) },
+      validation: { ...s.validation, [filename]: result },
     })),
 
-  setSchemas: (schemas) =>
-    set((s) => ({
-      schemas,
-      validation: Object.fromEntries(
-        Object.entries(s.validation).map(([filename, result]) => [filename, sanitizeValidationResult(result, schemas)]),
-      ),
-    })),
+  setSchemas: (schemas) => set({ schemas }),
 
   setSelectedSection: (header, configFile, lineNumber) =>
     set({
