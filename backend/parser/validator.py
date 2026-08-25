@@ -101,6 +101,31 @@ REQUIREMENT_COMPONENT_GROUPS: dict[str, set[str]] = {
     "adxl345": {"accelerometer"},
 }
 
+# Base stepper sections each kinematics looks up BY EXACT NAME at startup.
+# Ground truth (Klipper source, verified 2026-08-25):
+#   cartesian/corexy/hybrid_corexy: LookupMultiRail(getsection('stepper_' + n))
+#       for n in 'xyz'  (cartesian.py:21, corexy.py:13, hybrid_corexy.py:15-17)
+#   delta/rotary_delta: rail_a/b/c from getsection('stepper_a'/'b'/'c')
+#       (delta.py, rotary_delta.py)
+#   deltesian: [getsection('stepper_' + s) for s in ('left','right','y')]
+#       (deltesian.py:19)
+#   polar: getsection('stepper_arm'/'stepper_bed'/'stepper_z') (polar.py)
+#   winch: loops 'stepper_a'..'stepper_z', getsection on the first present one
+#       (winch.py:13-17) — requires at least [stepper_a]
+# Numbered extras (stepper_x1, stepper_z2, ...) are OPTIONAL additional rails on
+# the same axis (LookupMultiRail appends them; winch adds anchors) and never
+# satisfy the base lookup, which is by exact section name.
+KINEMATICS_BASE_STEPPERS: dict[str, list[str]] = {
+    "cartesian": ["stepper_x", "stepper_y", "stepper_z"],
+    "corexy": ["stepper_x", "stepper_y", "stepper_z"],
+    "hybrid_corexy": ["stepper_x", "stepper_y", "stepper_z"],
+    "delta": ["stepper_a", "stepper_b", "stepper_c"],
+    "rotary_delta": ["stepper_a", "stepper_b", "stepper_c"],
+    "deltesian": ["stepper_left", "stepper_right", "stepper_y"],
+    "polar": ["stepper_arm", "stepper_bed", "stepper_z"],
+    "winch": ["stepper_a"],
+}
+
 PROBE_PLUGIN_SECTION_TYPES = {"beacon"}
 
 
@@ -789,6 +814,12 @@ def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, Valida
     # The cross-file check above already handles this correctly, so we remove the false warnings.
     _remove_false_single_file_probe_warnings(results, cross_file_warnings)
 
+    # Check that the printer's kinematics can find its base stepper sections
+    # somewhere in the active project (e.g. corexy needs [stepper_x/y/z]).
+    kinematics_warnings = _check_kinematics_stepper_requirements(configs, active_files=active_files)
+    for filename, warning in kinematics_warnings:
+        results[filename].errors.append(warning)
+
     return results
 
 
@@ -818,6 +849,80 @@ def _remove_false_single_file_probe_warnings(
                     continue
             filtered_errors.append(error)
         cfg.errors = filtered_errors
+
+
+def _check_kinematics_stepper_requirements(
+    configs: dict[str, ConfigFile],
+    active_files: set[str] | None = None,
+) -> list[tuple[str, ValidationError]]:
+    """Check that the base stepper sections the printer's kinematics requires exist.
+
+    Each kinematics looks up its rail sections BY EXACT NAME at startup
+    (see KINEMATICS_BASE_STEPPERS). A missing base section is a Klipper
+    startup hard-fail (configfile.getsection raises), but — like the other
+    cross-file project checks — this is emitted as an acknowledgeable
+    WARNING: KWC's loaded file set may not include every config file on
+    disk, and a save-blocking error would false-positive on an incomplete
+    project.
+
+    [printer] and the stepper sections routinely live in different files,
+    so this runs only against the full active project set (multi-file
+    mode). In single-file mode the kinematics cannot be combined with a
+    missing rail in the same file without it being caught by other checks,
+    and a lone [printer] file must not be warned about steppers that live
+    in files KWC was not asked to validate.
+    """
+    if active_files is None or len(active_files) <= 1:
+        return []
+
+    # Locate the active [printer] section (first one in active files).
+    printer_section: ConfigSection | None = None
+    printer_file: str | None = None
+    for filename in sorted(active_files):
+        for section in configs[filename].sections:
+            if section.section_type == "printer" and not section.is_commented_out:
+                printer_section = section
+                printer_file = filename
+                break
+        if printer_section is not None:
+            break
+    if printer_section is None or printer_file is None:
+        return []
+
+    kinematics = printer_section.get_value("kinematics").strip().lower()
+    required = KINEMATICS_BASE_STEPPERS.get(kinematics)
+    if not required:
+        # No [printer], no kinematics, or an unrecognized value — that is
+        # covered by other checks (unknown param / enum); do not guess here.
+        return []
+
+    present: set[str] = set()
+    for filename in active_files:
+        for section in configs[filename].sections:
+            if section.is_commented_out:
+                continue
+            if section.section_type in required:
+                present.add(section.section_type)
+
+    results: list[tuple[str, ValidationError]] = []
+    for stepper_type in required:
+        if stepper_type in present:
+            continue
+        results.append((printer_file, ValidationError(
+            severity="warning",
+            section="printer",
+            param="kinematics",
+            message=(
+                f"Kinematics '{kinematics}' requires [{stepper_type}], which is not "
+                "defined in any active config file. Klipper looks up this section "
+                "by exact name and will fail to start without it. (Numbered extra "
+                "steppers such as [stepper_z1] do not satisfy the base section.)"
+            ),
+            line_number=printer_section.line_number,
+            code="kinematics_stepper_missing",
+        )))
+
+    return results
 
 
 def _validate_param_value(param, param_def, section, result):
