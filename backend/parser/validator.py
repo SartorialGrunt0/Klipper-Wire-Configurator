@@ -444,7 +444,7 @@ def _validate_macro_jinja(section: ConfigSection, result: ValidationResult) -> N
     ))
 
 
-def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> ValidationResult:
+def validate_config(config: ConfigFile) -> ValidationResult:
     """Validate a full configuration file."""
     result = ValidationResult()
     acknowledged_sections = load_acknowledged_warning_sections()
@@ -662,7 +662,7 @@ def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, Valida
     user can acknowledge to clear the save-button flag.
     """
     results = {
-        filename: validate_config(config, is_multi_file=len(configs) > 1)
+        filename: validate_config(config)
         for filename, config in configs.items()
     }
 
