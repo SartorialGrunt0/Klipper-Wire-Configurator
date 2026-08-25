@@ -11,6 +11,7 @@ Checks for:
 """
 from __future__ import annotations
 
+import glob
 import re
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -670,6 +671,7 @@ def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, Valida
         return results
 
     active_files = _get_active_project_files(configs)
+    all_basenames = {_basename(filename) for filename in configs}
     acknowledged_duplicate_types = load_acknowledged_duplicate_section_types()
 
     singleton_sections: dict[str, list[tuple[str, ConfigSection]]] = {}
@@ -819,6 +821,41 @@ def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, Valida
     kinematics_warnings = _check_kinematics_stepper_requirements(configs, active_files=active_files)
     for filename, warning in kinematics_warnings:
         results[filename].errors.append(warning)
+
+    # Check that non-glob [include] targets exist in the loaded project
+    # (F19). A plain missing include is a Klipper startup hard-fail
+    # ("Include file ... does not exist", configfile.py _resolve_include),
+    # but KWC loads in-memory projects (uploads / AI draft sets), so the
+    # target is resolved against the LOADED files by basename. Warning
+    # (not error): KWC often loads a PARTIAL import and there is no
+    # filesystem to consult, so we only flag what we can see is absent.
+    # Globs are never flagged: a glob that matches nothing is legal in
+    # Klipper (glob.has_magic) and can never be "resolved" in-memory.
+    for filename, config in configs.items():
+        if filename not in active_files:
+            continue
+        for section in config.sections:
+            if section.section_type != "include" or section.is_commented_out:
+                continue
+            spec = section.section_name.strip()
+            if not spec or glob.has_magic(spec):
+                continue
+            if _basename(spec) not in all_basenames:
+                result = results[filename]
+                if any(
+                    error.severity == "warning"
+                    and error.section == section.full_header
+                    and error.message == f"Include file '{spec}' was not found in the loaded project."
+                    for error in result.errors
+                ):
+                    continue
+                result.errors.append(ValidationError(
+                    severity="warning",
+                    section=section.full_header,
+                    param="",
+                    message=f"Include file '{spec}' was not found in the loaded project.",
+                    line_number=section.line_number,
+                ))
 
     return results
 
