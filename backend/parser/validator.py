@@ -1003,6 +1003,40 @@ def _validate_param_value(param, param_def, section, result):
                 line_number=param.line_number,
             ))
 
+    # Range enforcement (F17): only params that actually carry bounds are
+    # checked — 0 ParamDefs have them yet, and populating them is Phase 6.
+    # A value that is not a plain number (a formula like 'homing_speed/2')
+    # cannot be range-checked and is skipped, matching the alpha-skip guard
+    # in the type branches above.
+    if param_def.param_type in (ParamType.INT, ParamType.FLOAT):
+        if param_def.min_val is not None or param_def.max_val is not None:
+            try:
+                numeric = float(value)
+            except ValueError:
+                numeric = None
+            if numeric is not None:
+                if param_def.min_val is not None and numeric < param_def.min_val:
+                    result.errors.append(ValidationError(
+                        severity="error",
+                        section=section.full_header,
+                        param=param.key,
+                        message=f"Value {value} for '{param.key}' is below the minimum of {_format_bound(param_def.min_val)}.",
+                        line_number=param.line_number,
+                    ))
+                elif param_def.max_val is not None and numeric > param_def.max_val:
+                    result.errors.append(ValidationError(
+                        severity="error",
+                        section=section.full_header,
+                        param=param.key,
+                        message=f"Value {value} for '{param.key}' is above the maximum of {_format_bound(param_def.max_val)}.",
+                        line_number=param.line_number,
+                    ))
+
+
+def _format_bound(value: float) -> str:
+    # Render integer-valued bounds without a trailing .0 (min_val=1 -> "1").
+    return str(int(value)) if float(value).is_integer() else str(value)
+
 
 def _skip_missing_required_param(section: ConfigSection, param_name: str, active_params: set[str]) -> bool:
     if "*" in param_name:
