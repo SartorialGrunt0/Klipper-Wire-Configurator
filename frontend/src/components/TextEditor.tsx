@@ -7,7 +7,8 @@ import ConfigReferenceDialog from './dialogs/ConfigReferenceDialog';
 import { buildProjectGraph } from '../utils/graphBuilder';
 import { restoreLayoutAfterRebuild } from '../utils/layoutPersistence';
 import { acknowledgeableWarning } from '../utils/warningAcknowledgment';
-import type { ExampleConfig, ConfigFile, ConfigSection } from '../types/config';
+import { resolveIssueLine } from '../utils/issueLine';
+import type { ExampleConfig, ConfigFile, ConfigSection, ValidationError } from '../types/config';
 
 interface SearchResult {
   file: string;
@@ -125,7 +126,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   const [showSectionsSidebar, setShowSectionsSidebar] = useState(true);
   const [showReferenceViewer, setShowReferenceViewer] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [liveValidation, setLiveValidation] = useState<Array<{ severity: string; section: string; param: string; message: string }>>([]);
+  const [liveValidation, setLiveValidation] = useState<ValidationError[]>([]);
   const [liveParsedConfig, setLiveParsedConfig] = useState<ConfigFile | null>(null);
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({});
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -231,32 +232,12 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     const errors = liveValidation;
     if (!errors || errors.length === 0) return [];
     const issues: TextIssue[] = [];
+    const lines = editText.split('\n');
     for (const err of errors) {
       if (err.severity === 'error' || err.severity === 'warning') {
-        // Find the line in the text that corresponds to this error
-        const lines = editText.split('\n');
-        let lineNum = 0;
-        if (err.section) {
-          // Find the section header line (may be commented out with #)
-          const sectionIdx = lines.findIndex((l) => {
-            const trimmed = l.trim();
-            return trimmed === `[${err.section}]` || trimmed === `#[${err.section}]`;
-          });
-          if (sectionIdx !== -1) {
-            if (err.param) {
-              // Find the param within the section
-              for (let i = sectionIdx + 1; i < lines.length; i++) {
-                if (lines[i].trim().startsWith('[') && lines[i].trim().endsWith(']')) break;
-                const trimmed = lines[i].replace(/^#/, '').trim();
-                if (trimmed.startsWith(err.param + ':') || trimmed.startsWith(err.param + ' ') || trimmed.startsWith(err.param + '=')) {
-                  lineNum = i + 1;
-                  break;
-                }
-              }
-            }
-            if (!lineNum) lineNum = sectionIdx + 1;
-          }
-        }
+        // Backend line_number is authoritative; the util falls back to the
+        // section/param string heuristic only when the backend gives 0.
+        const lineNum = resolveIssueLine(err, lines);
         const ack = err.severity === 'warning' ? acknowledgeableWarning(err.message) : null;
         issues.push({
           line: lineNum,
