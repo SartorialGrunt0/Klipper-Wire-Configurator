@@ -1019,6 +1019,21 @@ def _validate_param_value(param, param_def, section, result):
                     line_number=param.line_number,
                 ))
 
+    elif param_def.param_type == ParamType.BOOL:
+        # Ground truth: Klipper getboolean -> RawConfigParser.getboolean
+        # (klippy/configfile.py:73) = Python configparser. Accepts exactly
+        # BOOLEAN_STATES = true/false/yes/no/on/off/1/0 (case-insensitive,
+        # whitespace-stripped); anything else raises ValueError -> startup
+        # hard-fail. 'on'/'off' are valid — do not flag them.
+        if value.lower() not in ("true", "false", "yes", "no", "1", "0", "on", "off"):
+            result.errors.append(ValidationError(
+                severity="error",
+                section=section.full_header,
+                param=param.key,
+                message=f"Expected boolean (true/false/yes/no/on/off/1/0) for '{param.key}', got '{value}'.",
+                line_number=param.line_number,
+            ))
+
     elif param_def.param_type == ParamType.ENUM:
         if param_def.enum_values and value not in param_def.enum_values:
             result.errors.append(ValidationError(
