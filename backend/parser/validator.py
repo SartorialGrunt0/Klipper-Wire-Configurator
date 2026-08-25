@@ -75,6 +75,7 @@ class PinUse:
     section: str
     section_type: str
     param: str
+    line_number: int = 0
 
     @property
     def label(self) -> str:
@@ -590,6 +591,7 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
                         section=section.full_header,
                         section_type=section.section_type,
                         param=param.key,
+                        line_number=param.line_number,
                     ))
 
     # Check for required sections
@@ -983,11 +985,15 @@ def _check_pin_conflicts(used_pins: dict[str, list[PinUse]], result: ValidationR
         if len(users) <= 1 or _is_allowed_shared_pin(users):
             continue
 
+        # Anchor the warning to the first user so it renders in the gutter
+        # (line) and on the section node dot. The message still lists all users.
+        anchor = next((u for u in users if u.section), users[0])
         result.errors.append(ValidationError(
             severity="warning",
-            section="",
-            param="",
+            section=anchor.section,
+            param=anchor.param,
             message=f"Pin '{pin}' is used by multiple sections: {', '.join(user.label for user in users)}",
+            line_number=anchor.line_number,
         ))
 
 
