@@ -83,9 +83,12 @@ class PinUse:
     section_type: str
     param: str
     line_number: int = 0
+    filename: str = ""
 
     @property
     def label(self) -> str:
+        if self.filename:
+            return f"{self.filename}:[{self.section}] {self.param}"
         return f"[{self.section}] {self.param}"
 
 
@@ -605,20 +608,7 @@ def validate_config(config: ConfigFile) -> ValidationResult:
                 continue
 
             # Find param definition (case-insensitive match)
-            param_def = None
-            param_key_lower = param.key.lower()
-            for pd in sec_def.params:
-                wildcard_match = False
-                if "*" in pd.name:
-                    wildcard_prefix, wildcard_suffix = pd.name.lower().split("*", 1)
-                    wildcard_match = (
-                        param_key_lower.startswith(wildcard_prefix)
-                        and param_key_lower.endswith(wildcard_suffix)
-                    )
-
-                if pd.name == param.key or pd.name.lower() == param_key_lower or wildcard_match:
-                    param_def = pd
-                    break
+            param_def = _find_param_def(sec_def, param.key)
 
             if param_def is None:
                 result.errors.append(ValidationError(
@@ -636,16 +626,7 @@ def validate_config(config: ConfigFile) -> ValidationResult:
 
             # Track pin usage
             if param_def.param_type == ParamType.PIN and param.value:
-                for clean_pin in _normalize_pin_values(param.value):
-                    if clean_pin not in used_pins:
-                        used_pins[clean_pin] = []
-                    used_pins[clean_pin].append(PinUse(
-                        pin=clean_pin,
-                        section=section.full_header,
-                        section_type=section.section_type,
-                        param=param.key,
-                        line_number=param.line_number,
-                    ))
+                _track_pin_usage(param, section, used_pins)
 
     # Check for required sections
     _append_special_temperature_sensor_errors(
@@ -870,6 +851,11 @@ def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, Valida
                     message=f"Include file '{spec}' was not found in the loaded project.",
                     line_number=section.line_number,
                 ))
+
+    # Cross-file pin conflicts (F8): a pin shared by sections in different
+    # project files is the same conflict as within one file — Klipper loads
+    # the whole project into a single pin namespace.
+    _check_cross_file_pin_conflicts(configs, results)
 
     return results
 
@@ -1267,6 +1253,43 @@ def _dependency_is_satisfied(req: str, section_types: set[str], component_groups
     return bool(REQUIREMENT_COMPONENT_GROUPS.get(req, set()) & component_groups)
 
 
+def _find_param_def(sec_def, key: str):
+    """Match a config param key against a section's param defs.
+
+    Case-insensitive on both sides, with `prefix*suffix` wildcard names.
+    Returns the first matching ParamDef or None.
+    """
+    if sec_def is None:
+        return None
+    param_key_lower = key.lower()
+    for pd in sec_def.params:
+        wildcard_match = False
+        if "*" in pd.name:
+            wildcard_prefix, wildcard_suffix = pd.name.lower().split("*", 1)
+            wildcard_match = (
+                param_key_lower.startswith(wildcard_prefix)
+                and param_key_lower.endswith(wildcard_suffix)
+            )
+        if pd.name == key or pd.name.lower() == param_key_lower or wildcard_match:
+            return pd
+    return None
+
+
+def _track_pin_usage(param, section, used_pins: dict, filename: str = "") -> None:
+    """Record every normalized pin value of a PIN param into used_pins."""
+    for clean_pin in _normalize_pin_values(param.value):
+        if clean_pin not in used_pins:
+            used_pins[clean_pin] = []
+        used_pins[clean_pin].append(PinUse(
+            pin=clean_pin,
+            section=section.full_header,
+            section_type=section.section_type,
+            param=param.key,
+            line_number=param.line_number,
+            filename=filename,
+        ))
+
+
 def _check_pin_conflicts(used_pins: dict[str, list[PinUse]], result: ValidationResult):
     """Check for pins used by multiple sections."""
     for pin, users in used_pins.items():
@@ -1276,6 +1299,66 @@ def _check_pin_conflicts(used_pins: dict[str, list[PinUse]], result: ValidationR
         # Anchor the warning to the first user so it renders in the gutter
         # (line) and on the section node dot. The message still lists all users.
         anchor = next((u for u in users if u.section), users[0])
+        result.errors.append(ValidationError(
+            severity="warning",
+            section=anchor.section,
+            param=anchor.param,
+            message=f"Pin '{pin}' is used by multiple sections: {', '.join(user.label for user in users)}",
+            line_number=anchor.line_number,
+            code="shared_pin",
+        ))
+
+
+def _check_cross_file_pin_conflicts(configs: dict[str, ConfigFile], results: dict[str, ValidationResult]) -> None:
+    """Detect pins shared between sections in DIFFERENT project files.
+
+    Klipper loads the whole project into one config namespace and pins.py
+    tracks active pins across it, so a pin used by two sections in two files
+    is the same conflict as within one file. Per-file _check_pin_conflicts
+    cannot see across files; this pass aggregates PIN usage over active
+    files. Exemptions (_is_allowed_shared_pin) and dedup against already
+    reported in-file conflicts are reused, so each conflict is reported once.
+    """
+    used_pins: dict[str, list[PinUse]] = {}
+    active_files = _get_active_project_files(configs)
+    for filename in sorted(active_files):
+        config = configs[filename]
+        for section in config.sections:
+            if section.is_commented_out or section.section_type == "include":
+                continue
+            sec_def = get_section_def(section.section_type)
+            for param in section.params:
+                if param.is_commented_out or param.key == "_comment_":
+                    continue
+                param_def = _find_param_def(sec_def, param.key)
+                if param_def is not None and param_def.param_type == ParamType.PIN and param.value:
+                    _track_pin_usage(param, section, used_pins, filename=filename)
+
+    # Pins already reported by a per-file check (both users in the same file)
+    # are deduped by (pin, sorted user labels).
+    reported = set()
+    for result in results.values():
+        for err in result.errors:
+            if err.code != "shared_pin":
+                continue
+            reported.add((err.section, err.param, err.line_number))
+
+    for pin, users in used_pins.items():
+        if len(users) <= 1 or _is_allowed_shared_pin(users):
+            continue
+        files_involved = {u.filename for u in users}
+        if len(files_involved) < 2:
+            continue  # same-file conflict already reported per-file
+        anchor = next((u for u in users if u.section), users[0])
+        already = any(
+            (u.section, u.param, u.line_number) in reported
+            for u in users
+        )
+        if already:
+            continue
+        result = results.get(anchor.filename)
+        if result is None:
+            continue
         result.errors.append(ValidationError(
             severity="warning",
             section=anchor.section,
