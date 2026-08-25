@@ -718,3 +718,86 @@ def test_duplicate_reused_section_in_orphan_file_is_ignored():
     assert not results['printer.cfg'].has_errors
     assert not results['active-z.cfg'].has_warnings
     assert not results['orphan-z.cfg'].has_warnings
+
+
+def test_single_file_duplicate_singleton_section_is_warning_not_error():
+    # Klipper tolerates a duplicated singleton section (later definition
+    # wins), so KWC flags it as an acknowledgeable warning — not an error.
+    result = _validate(
+        '[virtual_sdcard]\n'
+        'path: /tmp/0.gcode\n\n'
+        '[virtual_sdcard]\n'
+        'path: /tmp/1.gcode\n'
+    )
+    assert not result.has_errors
+    assert any(
+        error.severity == 'warning'
+        and error.section == 'virtual_sdcard'
+        and error.message == 'Section [virtual_sdcard] can only be defined once.'
+        for error in result.errors
+    )
+
+
+def test_single_file_duplicate_warning_can_be_acknowledged_per_type():
+    with tempfile.TemporaryDirectory() as temp_dir:
+        os.environ['KWC_LAYOUT_DIR'] = temp_dir
+        try:
+            from services.warning_acknowledgments import (
+                acknowledge_duplicate_section_type,
+                load_acknowledged_duplicate_section_types,
+            )
+
+            text = (
+                '[idle_timeout]\n'
+                'timeout: 600\n\n'
+                '[idle_timeout]\n'
+                'timeout: 900\n'
+            )
+            before = validate_config(parse_config(text, 'printer.cfg'))
+            assert any(
+                error.severity == 'warning' and 'can only be defined once' in error.message
+                for error in before.errors
+            )
+            assert not before.has_errors
+
+            acknowledge_duplicate_section_type('idle_timeout')
+            assert load_acknowledged_duplicate_section_types() == {'idle_timeout'}
+
+            after = validate_config(parse_config(text, 'printer.cfg'))
+            assert not after.has_warnings
+            assert not after.has_errors
+        finally:
+            del os.environ['KWC_LAYOUT_DIR']
+
+
+def test_cross_file_duplicate_warning_can_be_acknowledged_per_type():
+    with tempfile.TemporaryDirectory() as temp_dir:
+        os.environ['KWC_LAYOUT_DIR'] = temp_dir
+        try:
+            from services.warning_acknowledgments import acknowledge_duplicate_section_type
+
+            files = {
+                'printer.cfg': '[include extra.cfg]\n',
+                'extra.cfg': '[virtual_sdcard]\npath: /tmp/0.gcode\n',
+                'override.cfg': '[virtual_sdcard]\npath: /tmp/1.gcode\n',
+            }
+            # printer.cfg does not include override.cfg, so only extra.cfg is
+            # active — make both active to trigger the cross-file check.
+            files['printer.cfg'] = '[include extra.cfg]\n[include override.cfg]\n'
+
+            results = _validate_project(files)
+            assert any(
+                error.severity == 'warning'
+                and 'is reused across active included config files' in error.message
+                for error in results['extra.cfg'].errors
+            )
+
+            acknowledge_duplicate_section_type('virtual_sdcard')
+            results = _validate_project(files)
+            for filename, result in results.items():
+                assert not any(
+                    'is reused across active included config files' in error.message
+                    for error in result.errors
+                ), f'{filename} still flags the acknowledged duplicate'
+        finally:
+            del os.environ['KWC_LAYOUT_DIR']

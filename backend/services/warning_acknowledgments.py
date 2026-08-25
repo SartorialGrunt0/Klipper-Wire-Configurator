@@ -1,8 +1,15 @@
 """Persistence for acknowledged validation warnings.
 
-Unknown plugin sections can be copied into a local cfg file outside the repo.
-If the same section configuration appears there, validation suppresses the
-unknown-section warning.
+Two acknowledgment flavors:
+
+1. Unknown plugin sections: the section's full normalized snippet is stored.
+   Unknown sections copied into a local cfg file outside the repo are
+   suppressed by the same snippet matching.
+2. Duplicate sections: only the section *type* is stored. Duplicating a
+   ``max_instances=1`` section (same file or across included files) is legal
+   in Klipper (later definition wins) but surprising, so it is flagged as a
+   warning the user can acknowledge once per type. Storing the type — not a
+   param snippet — keeps the ack stable across param edits.
 """
 from __future__ import annotations
 
@@ -23,6 +30,12 @@ def _acknowledged_warnings_file() -> Path:
     app_state_dir = _app_state_dir()
     app_state_dir.mkdir(parents=True, exist_ok=True)
     return app_state_dir / "acknowledged_warnings.cfg"
+
+
+def _acknowledged_duplicate_sections_file() -> Path:
+    app_state_dir = _app_state_dir()
+    app_state_dir.mkdir(parents=True, exist_ok=True)
+    return app_state_dir / "acknowledged_duplicate_sections.txt"
 
 
 def _serialize_param_value(value: str) -> list[str]:
@@ -91,5 +104,39 @@ def acknowledge_warning_for_section(section: ConfigSection) -> str:
 
     with path.open("a", encoding="utf-8") as handle:
         handle.write(f"{prefix}{snippet}\n")
+
+    return str(path)
+
+
+def load_acknowledged_duplicate_section_types() -> set[str]:
+    """Load section types whose duplicate-section warning has been acknowledged."""
+    path = _acknowledged_duplicate_sections_file()
+    if not path.exists():
+        return set()
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        return set()
+    return {
+        line.strip()
+        for line in content.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+
+
+def acknowledge_duplicate_section_type(section_type: str) -> str:
+    """Record that duplicate sections of ``section_type`` have been acknowledged."""
+    section_type = section_type.strip()
+    path = _acknowledged_duplicate_sections_file()
+    if not section_type:
+        return str(path)
+
+    if section_type in load_acknowledged_duplicate_section_types():
+        return str(path)
+
+    with path.open("a", encoding="utf-8") as handle:
+        if path.exists() and path.stat().st_size > 0:
+            handle.write("\n")
+        handle.write(f"{section_type}\n")
 
     return str(path)

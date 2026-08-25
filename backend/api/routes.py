@@ -35,7 +35,10 @@ from services.board_detector import (
     fuzzy_match_examples,
     get_available_examples,
 )
-from services.warning_acknowledgments import acknowledge_warning_for_section
+from services.warning_acknowledgments import (
+    acknowledge_duplicate_section_type,
+    acknowledge_warning_for_section,
+)
 
 router = APIRouter()
 
@@ -260,6 +263,22 @@ async def acknowledge_warning_api(data: WarningAcknowledgementRequest):
     )
     file_path = acknowledge_warning_for_section(section)
     return {"status": "acknowledged", "file": file_path}
+
+
+@router.post("/warning-acknowledgements/duplicate")
+async def acknowledge_duplicate_api(data: WarningAcknowledgementRequest):
+    """Persist acknowledgment of a duplicate-section warning for a section type.
+
+    Duplicate-section warnings are per section *type* (a singleton section
+    repeated in one file or across included files), so the ack is keyed by
+    ``section_type`` and suppresses the warning for every occurrence.
+    """
+    file_path = acknowledge_duplicate_section_type(data.section.section_type)
+    return {
+        "status": "acknowledged",
+        "file": file_path,
+        "section_type": data.section.section_type,
+    }
 
 
 # ── Export ──────────────────────────────────────────────────────

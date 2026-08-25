@@ -131,6 +131,13 @@ export async function acknowledgeWarning(section: ConfigSection): Promise<{ stat
   });
 }
 
+export async function acknowledgeDuplicateWarning(section: ConfigSection): Promise<{ status: string; file: string; section_type: string }> {
+  return request('/warning-acknowledgements/duplicate', {
+    method: 'POST',
+    body: JSON.stringify({ section }),
+  });
+}
+
 /* ── Export ───────────────────────────────────────────── */
 
 export async function exportConfig(config: ConfigFile): Promise<string> {

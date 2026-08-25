@@ -6,6 +6,7 @@ import * as api from '../services/api';
 import ConfigReferenceDialog from './dialogs/ConfigReferenceDialog';
 import { buildProjectGraph } from '../utils/graphBuilder';
 import { restoreLayoutAfterRebuild } from '../utils/layoutPersistence';
+import { acknowledgeableWarning } from '../utils/warningAcknowledgment';
 import type { ExampleConfig, ConfigFile, ConfigSection } from '../types/config';
 
 interface SearchResult {
@@ -23,9 +24,8 @@ interface TextIssue {
   section?: string;
   param?: string;
   acknowledgeSection?: ConfigSection;
+  acknowledgeKind?: 'unknown' | 'duplicate';
 }
-
-const ACKNOWLEDGEABLE_WARNING_PREFIX = 'Unknown section type ';
 
 interface ConfigParamEntry {
   key: string;
@@ -54,6 +54,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     removeConfigFile,
     setTextParseError,
     validation,
+    revalidateFile,
   } = useConfigStore();
   const isDirty = useConfigStore((s) => s.isDirty);
   const parseError = useConfigStore((s) => s.textParseErrors[activeFile]);
@@ -256,28 +257,37 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
             if (!lineNum) lineNum = sectionIdx + 1;
           }
         }
+        const ack = err.severity === 'warning' ? acknowledgeableWarning(err.message) : null;
         issues.push({
           line: lineNum,
           text: err.message,
           severity: err.severity as 'error' | 'warning',
           section: err.section,
           param: err.param,
-          acknowledgeSection: err.severity === 'warning' && err.message.startsWith(ACKNOWLEDGEABLE_WARNING_PREFIX)
+          acknowledgeSection: ack
             ? liveParsedConfig?.sections.find((section) => section.full_header === err.section)
             : undefined,
+          acknowledgeKind: ack ? ack.kind : undefined,
         });
       }
     }
     return issues;
   }, [liveValidation, editText, liveParsedConfig]);
 
-  const handleAcknowledgeWarning = useCallback(async (section: ConfigSection) => {
+  const handleAcknowledgeWarning = useCallback(async (section: ConfigSection, kind: 'unknown' | 'duplicate' = 'unknown') => {
+    if (kind === 'duplicate') {
+      await api.acknowledgeDuplicateWarning(section);
+      // Duplicates are cross-file (or same-file) section-type warnings, so the
+      // whole project must be revalidated to clear every occurrence's flag.
+      void revalidateFile(activeFile);
+      return;
+    }
     await api.acknowledgeWarning(section);
     const result = await api.parseConfigText(editText, activeFile);
     setLiveParsedConfig(result.config);
     setLiveValidation(result.validation.errors || []);
     setValidation(activeFile, result.validation);
-  }, [activeFile, editText, setValidation]);
+  }, [activeFile, editText, setValidation, revalidateFile]);
 
   // Map line numbers to issues for rendering
   const issuesByLine = useMemo(() => {
@@ -1056,10 +1066,12 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
                       <button
                         onClick={(event) => {
                           event.stopPropagation();
-                          void handleAcknowledgeWarning(issue.acknowledgeSection!);
+                          void handleAcknowledgeWarning(issue.acknowledgeSection!, issue.acknowledgeKind ?? 'unknown');
                         }}
                         className="shrink-0 rounded border border-[var(--color-warning)] px-2 py-0.5 text-[10px] font-medium text-[var(--color-warning)] hover:bg-[var(--color-warning)] hover:text-[var(--color-bg-primary)] transition-colors"
-                        title="Acknowledge this unknown section warning"
+                        title={issue.acknowledgeKind === 'duplicate'
+                          ? 'Acknowledge this duplicate section warning and stop flagging the save button'
+                          : 'Acknowledge this unknown section and hide its warning in future validations'}
                       >
                         Acknowledge
                       </button>

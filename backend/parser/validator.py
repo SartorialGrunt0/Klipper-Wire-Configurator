@@ -26,6 +26,7 @@ from parser.config_schema import (
 )
 from services.warning_acknowledgments import (
     canonicalize_section,
+    load_acknowledged_duplicate_section_types,
     load_acknowledged_warning_sections,
 )
 
@@ -170,18 +171,11 @@ def _get_active_project_files(configs: dict[str, ConfigFile]) -> set[str]:
     return active_files
 
 
-def _project_duplicate_severity(sec_type: str, category: str | None) -> str:
-    if sec_type != "printer" and category in ("sub_component", "feature"):
-        return "warning"
-    return "error"
-
-
-def _project_duplicate_message(sec_type: str, severity: str, other_files: list[str]) -> str:
-    if severity == "warning":
-        message = f"Section [{sec_type}] is reused across active included config files."
-    else:
-        message = f"Section [{sec_type}] can only be defined once across active included config files."
-
+def _project_duplicate_message(sec_type: str, other_files: list[str]) -> str:
+    # Cross-file duplication of a singleton section is a warning (Klipper
+    # merges them, later file wins), never an error — it is always
+    # acknowledgeable to clear the save-button flag.
+    message = f"Section [{sec_type}] is reused across active included config files."
     if other_files:
         message += f" Also defined in: {', '.join(other_files)}."
     return message
@@ -418,6 +412,7 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
     """Validate a full configuration file."""
     result = ValidationResult()
     acknowledged_sections = load_acknowledged_warning_sections()
+    acknowledged_duplicate_types = load_acknowledged_duplicate_section_types()
     printer_kinematics = _get_printer_kinematics(config)
 
     section_counts: dict[str, int] = {}
@@ -473,14 +468,18 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
             continue
 
         # Check max instances
+        # Klipper tolerates a duplicated singleton section (later definition
+        # wins), so this is a warning the user may acknowledge — not an error.
+        # An acknowledged section type suppresses the warning (ack is per type).
         if sec_def.max_instances == 1 and section_counts[sec_type] > 1:
-            result.errors.append(ValidationError(
-                severity="error",
-                section=section.full_header,
-                param="",
-                message=f"Section [{sec_type}] can only be defined once.",
-                line_number=section.line_number,
-            ))
+            if sec_type not in acknowledged_duplicate_types:
+                result.errors.append(ValidationError(
+                    severity="warning",
+                    section=section.full_header,
+                    param="",
+                    message=f"Section [{sec_type}] can only be defined once.",
+                    line_number=section.line_number,
+                ))
 
         # Check required parameters
         active_params = {
@@ -619,6 +618,8 @@ def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, Valida
     Single-file validation remains file-local. For multi-file projects, this
     adds cross-file checks for sections that Klipper allows only once across the
     effective configuration, such as [printer], [stepper_x], or [stepper_z].
+    Duplicates are warnings (Klipper merges them, later file wins) that the
+    user can acknowledge to clear the save-button flag.
     """
     results = {
         filename: validate_config(config, is_multi_file=len(configs) > 1)
@@ -629,6 +630,7 @@ def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, Valida
         return results
 
     active_files = _get_active_project_files(configs)
+    acknowledged_duplicate_types = load_acknowledged_duplicate_section_types()
 
     singleton_sections: dict[str, list[tuple[str, ConfigSection]]] = {}
     for filename, config in configs.items():
@@ -652,16 +654,16 @@ def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, Valida
         if len(entries) <= 1 or len(files) <= 1:
             continue
 
-        sec_def = get_section_def(sec_type)
-        severity = _project_duplicate_severity(sec_type, sec_def.category if sec_def else None)
+        if sec_type in acknowledged_duplicate_types:
+            continue
 
         for filename, section in entries:
             other_files = sorted(files - {filename})
-            message = _project_duplicate_message(sec_type, severity, other_files)
+            message = _project_duplicate_message(sec_type, other_files)
 
             result = results[filename]
             if any(
-                error.severity == severity
+                error.severity == "warning"
                 and error.section == section.full_header
                 and error.message == message
                 for error in result.errors
@@ -669,7 +671,7 @@ def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, Valida
                 continue
 
             result.errors.append(ValidationError(
-                severity=severity,
+                severity="warning",
                 section=section.full_header,
                 param="",
                 message=message,
