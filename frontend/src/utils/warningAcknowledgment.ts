@@ -1,35 +1,27 @@
-import type { ValidationError } from '../types/config';
-
-// Warning prefixes/messages that can be acknowledged to stop the save button
-// from staying flagged yellow. Mirrors the backend duplicate-section messages
-// (backend/parser/validator.py).
-export const UNKNOWN_SECTION_WARNING_PREFIX = 'Unknown section type ';
-
-const DUPLICATE_WARNING_PATTERNS = [
-  /^Section \[[^\]]+\] can only be defined once\.$/,
-  /^Section \[[^\]]+\] is reused across active included config files\./,
-];
-
-export function isUnknownSectionWarning(message: string): boolean {
-  return message.startsWith(UNKNOWN_SECTION_WARNING_PREFIX);
-}
-
-export function isDuplicateSectionWarning(message: string): boolean {
-  return DUPLICATE_WARNING_PATTERNS.some((pattern) => pattern.test(message));
-}
-
+/**
+ * Acknowledge-gate: which warnings can be acknowledged to clear the
+ * save-button flag. Branches on the stable `code` field (set by the backend
+ * at the emit site) — never on message text — so backend rewording cannot
+ * silently break the acknowledge action.
+ *
+ *   unknown_section   → kind 'unknown'   (ack stored per section snippet)
+ *   project_duplicate → kind 'duplicate' (ack stored per section type)
+ */
 export interface AcknowledgeableWarning {
   kind: 'unknown' | 'duplicate';
 }
 
-export function acknowledgeableWarning(message: string): AcknowledgeableWarning | null {
-  if (isUnknownSectionWarning(message)) return { kind: 'unknown' };
-  if (isDuplicateSectionWarning(message)) return { kind: 'duplicate' };
-  return null;
-}
-
-export function isAcknowledgeableWarning(message: string): boolean {
-  return acknowledgeableWarning(message) !== null;
+export function acknowledgeableWarning(
+  issue: Pick<{ code?: string }, 'code'>,
+): AcknowledgeableWarning | null {
+  switch (issue.code) {
+    case 'unknown_section':
+      return { kind: 'unknown' };
+    case 'project_duplicate':
+      return { kind: 'duplicate' };
+    default:
+      return null;
+  }
 }
 
 /**
@@ -38,12 +30,12 @@ export function isAcknowledgeableWarning(message: string): boolean {
  * only occur for known section types), so this is unambiguous.
  */
 export function ackKindForSection(
-  issues: ReadonlyArray<Pick<ValidationError, 'severity' | 'message'>>,
+  issues: ReadonlyArray<Pick<{ severity: string; code?: string }, 'severity' | 'code'>>,
 ): 'unknown' | 'duplicate' | null {
   let unknown = false;
   for (const issue of issues) {
     if (issue.severity !== 'warning') continue;
-    const kind = acknowledgeableWarning(issue.message);
+    const kind = acknowledgeableWarning(issue);
     if (kind === null) continue;
     if (kind.kind === 'duplicate') return 'duplicate';
     unknown = true;
@@ -51,6 +43,8 @@ export function ackKindForSection(
   return unknown ? 'unknown' : null;
 }
 
-export function sectionHasAcknowledgeableWarning(issues: ReadonlyArray<Pick<ValidationError, 'severity' | 'message'>>): boolean {
+export function sectionHasAcknowledgeableWarning(
+  issues: ReadonlyArray<Pick<{ severity: string; code?: string }, 'severity' | 'code'>>,
+): boolean {
   return ackKindForSection(issues) !== null;
 }

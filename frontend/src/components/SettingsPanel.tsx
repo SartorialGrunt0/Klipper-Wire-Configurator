@@ -210,8 +210,8 @@ export default function SettingsPanel() {
 
   // Get validation issues for this section
   const sectionIssues = useMemo(() => {
-    if (!sectionHeader) return [] as Array<{ severity: 'error' | 'warning'; message: string }>;
-    const issues: Array<{ severity: 'error' | 'warning'; message: string }> = [];
+    if (!sectionHeader) return [] as Array<{ severity: 'error' | 'warning'; message: string; code?: string }>;
+    const issues: Array<{ severity: 'error' | 'warning'; message: string; code?: string }> = [];
     const validationFiles = sectionConfigFile
       ? [sectionConfigFile]
       : nodeConfigFile
@@ -223,7 +223,7 @@ export default function SettingsPanel() {
       for (const issue of result.errors) {
         if (issue.section !== sectionHeader) continue;
         if (issue.severity === 'error' || issue.severity === 'warning') {
-          issues.push({ severity: issue.severity, message: issue.message });
+          issues.push({ severity: issue.severity, message: issue.message, code: issue.code });
         }
       }
     }

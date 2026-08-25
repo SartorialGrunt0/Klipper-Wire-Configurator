@@ -238,7 +238,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
         // Backend line_number is authoritative; the util falls back to the
         // section/param string heuristic only when the backend gives 0.
         const lineNum = resolveIssueLine(err, lines);
-        const ack = err.severity === 'warning' ? acknowledgeableWarning(err.message) : null;
+        const ack = err.severity === 'warning' ? acknowledgeableWarning(err) : null;
         issues.push({
           line: lineNum,
           text: err.message,

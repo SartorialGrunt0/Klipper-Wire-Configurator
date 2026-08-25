@@ -42,6 +42,13 @@ export interface ValidationError {
   param: string;
   message: string;
   line_number: number;
+  /**
+   * Stable machine-facing identity for error classes the frontend branches on
+   * (retry-exempt, acknowledge gate, Jinja repair derivation). Optional —
+   * only set where a consumer needs it. Never branch UI logic on `message`
+   * text; use this instead so backend rewording can't silently break it.
+   */
+  code?: string;
 }
 
 export interface ValidationResult {
