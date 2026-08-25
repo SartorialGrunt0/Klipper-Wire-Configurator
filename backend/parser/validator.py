@@ -357,8 +357,17 @@ def _append_special_temperature_sensor_errors(
 # would when loading the macro.
 _MACRO_JINJA_ENV = jinja2.Environment("{%", "%}", "{", "}")
 
-# Section types whose gcode bodies are Jinja templates evaluated by Klipper.
+# Section types whose bodies are Jinja templates evaluated by Klipper. The
+# gcode family stores the body in 'gcode'; display_template / display_data
+# store it in 'text' and load it through the same gcode_macro.load_template
+# machinery (klippy/extras/display/display.py DisplayTemplate.__init__ /
+# DisplayGroup.__init__), so both are validated with the identical env.
 _MACRO_TEMPLATE_SECTIONS = frozenset({"gcode_macro", "delayed_gcode"})
+_DISPLAY_TEMPLATE_SECTIONS = frozenset({"display_template", "display_data"})
+_TEMPLATE_SECTION_BODIES = {
+    **{sec: "gcode" for sec in _MACRO_TEMPLATE_SECTIONS},
+    **{sec: "text" for sec in _DISPLAY_TEMPLATE_SECTIONS},
+}
 
 # Compile results are cached by comment-stripped body: project validation runs
 # on every load (and per file), so a config with many macros spends most of its
@@ -409,15 +418,18 @@ def _strip_inline_comments(body: str) -> str:
 
 
 def _validate_macro_jinja(section: ConfigSection, result: ValidationResult) -> None:
-    """Validate a gcode_macro / delayed_gcode body as a Klipper Jinja template.
+    """Validate a Jinja-template body (gcode_macro / delayed_gcode /
+    display_template / display_data) as a Klipper Jinja template.
 
     Catches structural template errors (dropped {% endif %}, unbalanced
     {% for %}/{% endfor %}, malformed blocks) that a plain config parser
-    cannot see because the gcode body is opaque text to it. Uses the same
+    cannot see because the body is opaque text to it. Uses the same
     jinja2 environment Klipper builds for macros, so valid Klipper
-    single-brace syntax ({printer.x}) is accepted.
+    single-brace syntax ({printer.x}) is accepted. The body param is 'gcode'
+    for the gcode family and 'text' for the display family.
     """
-    gcode_param = section.get_param("gcode")
+    body_param = _TEMPLATE_SECTION_BODIES[section.section_type]
+    gcode_param = section.get_param(body_param)
     if gcode_param is None:
         return
     body = gcode_param.value
@@ -430,16 +442,17 @@ def _validate_macro_jinja(section: ConfigSection, result: ValidationResult) -> N
     if outcome is None:
         return
     message, body_lineno = outcome
-    # body_lineno is 1-indexed within the gcode body, which starts on the
-    # line after the 'gcode:' key.
+    # body_lineno is 1-indexed within the body, which starts on the
+    # line after the body key ('gcode:' / 'text:').
     # Code only for the dropped-closer case: it's the class the AI repair
     # loop derives a prescriptive "append {% endX %}" fix from. Other
     # template errors (bad expression, stray brace) get no code.
+    label = "macro" if section.section_type in _MACRO_TEMPLATE_SECTIONS else "display template"
     result.errors.append(ValidationError(
         severity="error",
         section=section.full_header,
-        param="gcode",
-        message=f"Jinja template error in macro: {message}",
+        param=body_param,
+        message=f"Jinja template error in {label}: {message}",
         line_number=gcode_param.line_number + body_lineno,
         code="macro_jinja_unterminated" if "Unexpected end of template" in message else "",
     ))
@@ -480,10 +493,11 @@ def validate_config(config: ConfigFile) -> ValidationResult:
         if _is_suppressed_for_validation(section, sec_def.category if sec_def else None):
             continue
 
-        # Validate gcode_macro / delayed_gcode bodies as Klipper Jinja
-        # templates so dropped {% endif %} and similar structural errors are
-        # caught in the graph/text editors and the AI draft retry loop.
-        if sec_type in _MACRO_TEMPLATE_SECTIONS:
+        # Validate Jinja-template bodies (gcode_macro / delayed_gcode use
+        # 'gcode'; display_template / display_data use 'text') so dropped
+        # {% endif %} and similar structural errors are caught in the
+        # graph/text editors and the AI draft retry loop.
+        if sec_type in _MACRO_TEMPLATE_SECTIONS or sec_type in _DISPLAY_TEMPLATE_SECTIONS:
             _validate_macro_jinja(section, result)
 
         defined_sections.add(section.full_header)
