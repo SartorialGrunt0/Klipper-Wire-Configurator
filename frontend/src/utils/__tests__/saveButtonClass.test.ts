@@ -52,4 +52,26 @@ describe('getSaveButtonClass', () => {
   it('empty validation map is green when dirty', () => {
     expect(getSaveButtonClass(true, {})).toBe('bg-green-600 text-white hover:bg-green-700');
   });
+
+  it('is red when dirty and a text file cannot be parsed, even if validation is clean', () => {
+    const result = getSaveButtonClass(true, { 'printer.cfg': val([]) }, true);
+    expect(result).toContain('bg-red-600');
+  });
+
+  it('parse error beats warnings (red, not yellow) when dirty', () => {
+    const result = getSaveButtonClass(true, { 'printer.cfg': val([{ severity: 'warning' }]) }, true);
+    expect(result).toContain('bg-red-600');
+  });
+
+  it('is grey when not dirty, even with a parse error present', () => {
+    expect(getSaveButtonClass(false, { 'printer.cfg': val([]) }, true)).toContain(
+      'bg-[var(--color-bg-tertiary)]',
+    );
+  });
+
+  it('defaults to no-parse-error when the third arg is omitted', () => {
+    expect(getSaveButtonClass(true, { 'printer.cfg': val([]) })).toBe(
+      'bg-green-600 text-white hover:bg-green-700',
+    );
+  });
 });

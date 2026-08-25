@@ -116,6 +116,7 @@ export default function Toolbar({
   const hasConfig = Object.keys(useConfigStore((s) => s.configFiles)).length > 0;
   const isConfigDirty = useConfigStore((s) => s.isDirty);
   const validation = useConfigStore((s) => s.validation);
+  const hasTextParseError = Object.keys(useConfigStore((s) => s.textParseErrors)).length > 0;
   const hasPendingChanges = isConfigDirty;
   const settingsButtonRef = useRef<HTMLButtonElement | null>(null);
   const settingsMenuRef = useRef<HTMLDivElement | null>(null);
@@ -232,9 +233,10 @@ export default function Toolbar({
     setShowVisibilityMenu(true);
   };
 
-  // Compute Save button color based on dirty state and validation
-  // (shared with the Apply/Save dialog so both always agree)
-  const saveButtonClass = getSaveButtonClass(isConfigDirty, validation);
+  // Compute Save button color based on dirty state, validation, and whether
+  // any file's text currently fails to parse (shared with the Apply/Save
+  // dialog so both always agree)
+  const saveButtonClass = getSaveButtonClass(isConfigDirty, validation, hasTextParseError);
   return (
     <div className="flex items-center gap-2 min-w-max">
       {/* Import */}

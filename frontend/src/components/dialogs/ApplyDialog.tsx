@@ -180,7 +180,8 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
   // dialog's actions always agree with it (grey/green/yellow/red).
   const isDirty = useConfigStore((s) => s.isDirty);
   const validation = useConfigStore((s) => s.validation);
-  const saveButtonClass = getSaveButtonClass(isDirty, validation);
+  const hasTextParseError = Object.keys(useConfigStore((s) => s.textParseErrors)).length > 0;
+  const saveButtonClass = getSaveButtonClass(isDirty, validation, hasTextParseError);
   // A file deleted since import is gone from configFiles but its original text
   // survives in originalTexts — union both so deletions show up in the diff
   // and are actually removed from disk on save.
