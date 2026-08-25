@@ -694,6 +694,62 @@ def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, Valida
                 code="project_duplicate",
             ))
 
+    # Cross-file EXACT-header duplicates for multi-instance section types
+    # (max_instances=0), e.g. two [gcode_macro FOO] or [tmc2209 stepper_x]
+    # across included files. Klipper merges duplicate headers
+    # case-insensitively (RawConfigParser(strict=False), later file wins)
+    # and never hard-fails, so — like singleton-type duplicates — this is an
+    # acknowledgeable warning, not an error. Ack is per section type, same
+    # store as the singleton path above.
+    header_sections: dict[str, list[tuple[str, ConfigSection]]] = {}
+    for filename, config in configs.items():
+        if filename not in active_files:
+            continue
+
+        for section in config.sections:
+            if section.section_type == "include" or section.is_commented_out:
+                continue
+
+            sec_def = get_section_def(section.section_type)
+            if _is_suppressed_for_validation(section, sec_def.category if sec_def else None):
+                continue
+            if sec_def is not None and sec_def.max_instances == 1:
+                # Singleton types are already covered by the pass above.
+                continue
+
+            header_sections.setdefault(section.full_header.lower(), []).append((filename, section))
+
+    for header_entries in header_sections.values():
+        files = {filename for filename, _ in header_entries}
+        if len(files) <= 1:
+            continue
+
+        sec_type = header_entries[0][1].section_type
+        if sec_type in acknowledged_duplicate_types:
+            continue
+
+        for filename, section in header_entries:
+            other_files = sorted(files - {filename})
+            message = _project_duplicate_message(section.full_header, other_files)
+
+            result = results[filename]
+            if any(
+                error.severity == "warning"
+                and error.section == section.full_header
+                and error.message == message
+                for error in result.errors
+            ):
+                continue
+
+            result.errors.append(ValidationError(
+                severity="warning",
+                section=section.full_header,
+                param="",
+                message=message,
+                line_number=section.line_number,
+                code="project_duplicate",
+            ))
+
     _append_special_temperature_sensor_errors(
         results,
         _collect_special_temperature_sensor_uses(configs, active_files=active_files),
