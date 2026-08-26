@@ -12,7 +12,8 @@ getint(name, dflt, minval=, maxval=) hard-fail out-of-range values
 
 Formula guard: a value that is not a plain number (e.g. 'homing_speed/2')
 cannot be range-checked and is skipped — matching the existing INT/FLOAT
-alpha-skip, but evaluated via float() so '1.5e3' IS still checked.
+tolerance (plan F22(a) keeps formula/pin shapes passing), but evaluated
+via float() so '1.5e3' IS still checked.
 """
 import sys
 from pathlib import Path
@@ -92,9 +93,9 @@ def test_boundaries_inclusive(bounded_microsteps):
 
 
 def test_formula_value_skipped_for_range():
-    # FLOAT formulas ('homing_speed/2') are already accepted by the alpha-skip
-    # in the type check — the range branch must likewise skip them, not try to
-    # parse and crash/flag. Use rotation_distance (FLOAT), bounded at runtime.
+    # Formula-shaped FLOAT values ('homing_speed/2') are tolerated by the
+    # type check (plan F22(a)) but cannot be range-checked — the range branch
+    # must skip them, not try to parse and crash/flag.
     pd = get_section_def("stepper_x").params
     rot = next(p for p in pd if p.name == "rotation_distance")
     saved = (rot.min_val, rot.max_val)

@@ -997,25 +997,37 @@ def _validate_param_value(param, param_def, section, result):
         return
 
     if param_def.param_type == ParamType.INT:
+        # Ground truth: getint -> RawConfigParser.getint = int(value).
+        # '16'/'-1'/'007' parse; '16.0', 'true', 'hello', formulas all
+        # raise (verified empirically 2026-08-25).
         try:
             int(value)
         except ValueError:
-            # Could be a boolean string
-            if value.lower() not in ("true", "false"):
-                result.errors.append(ValidationError(
-                    severity="error",
-                    section=section.full_header,
-                    param=param.key,
-                    message=f"Expected integer for '{param.key}', got '{value}'.",
-                    line_number=param.line_number,
-                ))
+            result.errors.append(ValidationError(
+                severity="error",
+                section=section.full_header,
+                param=param.key,
+                message=f"Expected integer for '{param.key}', got '{value}'.",
+                line_number=param.line_number,
+            ))
 
     elif param_def.param_type == ParamType.FLOAT:
         try:
             float(value)
         except ValueError:
-            # Allow formulas like "homing_speed/2"
-            if not any(c.isalpha() for c in value):
+            # Not a plain number. Klipper also tolerates pin references
+            # (position_endstop: ^PA0 when the endstop object supplies the
+            # position) and formula-shaped values (homing_speed/2) — the old
+            # alpha-skip existed to keep those passing. What we DO reject is a
+            # lone bare identifier ('hello', 'xyz', 'true'): a pure word that
+            # is neither a number, a pin, nor an expression, which can never be
+            # a valid Klipper numeric value. This is the F22(a) spec ("allow
+            # homing_speed/2 but reject hello").
+            # Ground truth (2026-08-25): Klipper has NO formula/symbol support
+            # in config parsing, so 'homing_speed/2' would in fact hard-fail —
+            # the formula tolerance is kept per the spec to avoid false
+            # positives on community configs. See plan F22(a).
+            if re.fullmatch(r"[A-Za-z_]+", value.strip()):
                 result.errors.append(ValidationError(
                     severity="error",
                     section=section.full_header,
@@ -1059,12 +1071,32 @@ def _validate_param_value(param, param_def, section, result):
                 message=f"Pin format '{value}' may be invalid for '{param.key}'.",
                 line_number=param.line_number,
             ))
+        # F22: a bare (unprefixed) pin name with no digits is not a pin shape
+        # — real pins are PB0/PE11/gpio20/AA1, chip-prefixed virtual pins
+        # (tmc2209_stepper_x:virtual_endstop — pin-part letters allowed),
+        # <placeholders>, or device paths. 'step_pin: abcd' passes PIN_RE but
+        # Klipper would look for a pin literally named 'abcd' and fail at
+        # connect/identify. Warning (not error): KWC's ceiling is config-load
+        # validation, and exotic board pin names may be legal.
+        for raw_pin in value.split(","):
+            clean_pin = raw_pin.strip().lstrip("!^~").strip()
+            if not clean_pin or clean_pin.startswith("<") or ":" in clean_pin or clean_pin.startswith("/"):
+                continue
+            if not any(c.isdigit() for c in clean_pin) and clean_pin.isidentifier():
+                result.errors.append(ValidationError(
+                    severity="warning",
+                    section=section.full_header,
+                    param=param.key,
+                    message=f"Pin '{clean_pin}' does not look like a valid pin (no chip prefix, no number). Klipper only validates pin names at connect time.",
+                    line_number=param.line_number,
+                ))
+                break
 
     # Range enforcement (F17): only params that actually carry bounds are
     # checked — 0 ParamDefs have them yet, and populating them is Phase 6.
-    # A value that is not a plain number (a formula like 'homing_speed/2')
-    # cannot be range-checked and is skipped, matching the alpha-skip guard
-    # in the type branches above.
+    # A value that float() can't parse is not range-checked (it is already a
+    # FLOAT/INT type error from the branch above; F22 removed formula
+    # tolerance since Klipper has no formula support).
     if param_def.param_type in (ParamType.INT, ParamType.FLOAT):
         if param_def.min_val is not None or param_def.max_val is not None:
             try:
