@@ -461,6 +461,33 @@ def _validate_macro_jinja(section: ConfigSection, result: ValidationResult) -> N
     ))
 
 
+def _validate_neopixel_color_order(section: ConfigSection, result: ValidationResult) -> None:
+    """Validate neopixel.color_order entries are permutations of RGB or RGBW.
+
+    Ground truth (klippy/extras/neopixel.py:29-37):
+        color_order = config.getlist("color_order", ["GRB"])
+        ...
+        for lidx, co in enumerate(color_order):
+            if sorted(co) not in (sorted("RGB"), sorted("RGBW")):
+                raise config.error("Invalid color_order '%s'" % (co,))
+    It is a per-chain list (one entry per LED chain), so it is checked entry
+    by entry rather than as a single enum value.
+    """
+    param = section.get_param("color_order")
+    if param is None or not param.value:
+        return
+    entries = [e.strip() for e in param.value.split(",") if e.strip()]
+    for entry in entries:
+        if sorted(entry) not in (sorted("RGB"), sorted("RGBW")):
+            result.errors.append(ValidationError(
+                severity="error",
+                section=section.full_header,
+                param="color_order",
+                message=f"Invalid color_order '{entry}'. Each entry must be a permutation of RGB or RGBW.",
+                line_number=param.line_number,
+            ))
+
+
 def validate_config(config: ConfigFile) -> ValidationResult:
     """Validate a full configuration file."""
     result = ValidationResult()
@@ -502,6 +529,12 @@ def validate_config(config: ConfigFile) -> ValidationResult:
         # graph/text editors and the AI draft retry loop.
         if sec_type in _MACRO_TEMPLATE_SECTIONS or sec_type in _DISPLAY_TEMPLATE_SECTIONS:
             _validate_macro_jinja(section, result)
+
+        # neopixel.color_order: each entry must be a permutation of RGB or
+        # RGBW (extras/neopixel.py:33-37). It is a per-chain list, not a plain
+        # enum, so it gets a dedicated check.
+        if sec_type == "neopixel":
+            _validate_neopixel_color_order(section, result)
 
         defined_sections.add(section.full_header)
 

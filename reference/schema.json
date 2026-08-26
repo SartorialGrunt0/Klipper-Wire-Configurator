@@ -7227,11 +7227,14 @@
         },
         {
           "name": "control",
-          "type": "string",
+          "type": "enum",
           "required": false,
           "default": "pid",
           "description": "Heater control algorithm (pid or watermark)",
-          "enum_values": [],
+          "enum_values": [
+            "watermark",
+            "pid"
+          ],
           "unit": ""
         },
         {
@@ -7629,11 +7632,14 @@
         },
         {
           "name": "control",
-          "type": "string",
+          "type": "enum",
           "required": false,
           "default": "pid",
           "description": "Heater control algorithm (pid or watermark)",
-          "enum_values": [],
+          "enum_values": [
+            "watermark",
+            "pid"
+          ],
           "unit": ""
         },
         {
@@ -8031,11 +8037,14 @@
         },
         {
           "name": "control",
-          "type": "string",
+          "type": "enum",
           "required": false,
           "default": "pid",
           "description": "Heater control algorithm (pid or watermark)",
-          "enum_values": [],
+          "enum_values": [
+            "watermark",
+            "pid"
+          ],
           "unit": ""
         },
         {
@@ -8433,11 +8442,14 @@
         },
         {
           "name": "control",
-          "type": "string",
+          "type": "enum",
           "required": false,
           "default": "pid",
           "description": "Heater control algorithm (pid or watermark)",
-          "enum_values": [],
+          "enum_values": [
+            "watermark",
+            "pid"
+          ],
           "unit": ""
         },
         {
@@ -8835,11 +8847,14 @@
         },
         {
           "name": "control",
-          "type": "string",
+          "type": "enum",
           "required": false,
           "default": "pid",
           "description": "Heater control algorithm (pid or watermark)",
-          "enum_values": [],
+          "enum_values": [
+            "watermark",
+            "pid"
+          ],
           "unit": ""
         },
         {
@@ -9237,11 +9252,14 @@
         },
         {
           "name": "control",
-          "type": "string",
+          "type": "enum",
           "required": false,
           "default": "pid",
           "description": "Heater control algorithm (pid or watermark)",
-          "enum_values": [],
+          "enum_values": [
+            "watermark",
+            "pid"
+          ],
           "unit": ""
         },
         {
@@ -9639,11 +9657,14 @@
         },
         {
           "name": "control",
-          "type": "string",
+          "type": "enum",
           "required": false,
           "default": "pid",
           "description": "Heater control algorithm (pid or watermark)",
-          "enum_values": [],
+          "enum_values": [
+            "watermark",
+            "pid"
+          ],
           "unit": ""
         },
         {
@@ -10041,11 +10062,14 @@
         },
         {
           "name": "control",
-          "type": "string",
+          "type": "enum",
           "required": false,
           "default": "pid",
           "description": "Heater control algorithm (pid or watermark)",
-          "enum_values": [],
+          "enum_values": [
+            "watermark",
+            "pid"
+          ],
           "unit": ""
         },
         {
@@ -10236,11 +10260,14 @@
         },
         {
           "name": "control",
-          "type": "string",
+          "type": "enum",
           "required": false,
           "default": "pid",
           "description": "Control algorithm",
-          "enum_values": [],
+          "enum_values": [
+            "watermark",
+            "pid"
+          ],
           "unit": ""
         },
         {
@@ -10431,11 +10458,14 @@
         },
         {
           "name": "control",
-          "type": "string",
+          "type": "enum",
           "required": false,
           "default": "pid",
           "description": "Control algorithm",
-          "enum_values": [],
+          "enum_values": [
+            "watermark",
+            "pid"
+          ],
           "unit": ""
         },
         {
@@ -12444,11 +12474,14 @@
         },
         {
           "name": "control",
-          "type": "string",
+          "type": "enum",
           "required": false,
           "default": "watermark",
           "description": "Control algorithm",
-          "enum_values": [],
+          "enum_values": [
+            "watermark",
+            "pid"
+          ],
           "unit": ""
         },
         {
@@ -12927,11 +12960,14 @@
         },
         {
           "name": "set_output_mode",
-          "type": "int",
+          "type": "enum",
           "required": false,
           "default": null,
           "description": "Output mode",
-          "enum_values": [],
+          "enum_values": [
+            "5V",
+            "OD"
+          ],
           "unit": ""
         }
       ]
@@ -16216,11 +16252,14 @@
         },
         {
           "name": "encoder_steps_per_detent",
-          "type": "int",
+          "type": "enum",
           "required": false,
           "default": null,
           "description": "Encoder steps per detent",
-          "enum_values": [],
+          "enum_values": [
+            "2",
+            "4"
+          ],
           "unit": ""
         },
         {
@@ -16729,11 +16768,15 @@
       "params": [
         {
           "name": "default_type",
-          "type": "string",
+          "type": "enum",
           "required": false,
           "default": "echo",
           "description": "Default response type",
-          "enum_values": [],
+          "enum_values": [
+            "echo",
+            "command",
+            "error"
+          ],
           "unit": ""
         },
         {
