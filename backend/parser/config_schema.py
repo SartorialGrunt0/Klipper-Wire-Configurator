@@ -32,6 +32,12 @@ class ParamDef:
     min_val: Optional[float] = None
     max_val: Optional[float] = None
     unit: str = ""
+    # Relational constraints (param-vs-param, same section). Ground truth:
+    # klippy/configfile.py _get_wrapper — above=X errors when v<=X (strict),
+    # below=X errors when v>=X (strict), between=(a,b) is INCLUSIVE.
+    rel_above: Optional[str] = None      # this param must be strictly > <rel_above>
+    rel_below: Optional[str] = None      # this param must be strictly < <rel_below>
+    rel_between: Optional[tuple[str, str]] = None  # (low_param, high_param), inclusive
 
 
 @dataclass
@@ -2085,6 +2091,46 @@ _register(SectionDef(
         _int("refresh_interval", "Update check interval (hours)"),
     ],
 ))
+
+
+def _set_rel(section_type: str, param_name: str, **kwargs) -> None:
+    """Apply a relational constraint to a param on a registered section."""
+    sd = SECTION_DEFS.get(section_type)
+    if sd is None:
+        return
+    pd = next((p for p in sd.params if p.name == param_name), None)
+    if pd is None:
+        return
+    for key, val in kwargs.items():
+        setattr(pd, key, val)
+
+
+def _seed_relational_constraints() -> None:
+    """Populate same-section param-vs-param relations (ground truth: Klipper's
+    getfloat above=/below= call sites, verified 2026-08-25).
+
+    Deliberately NOT seeded (cross-section -> 3r): delta.arm_length vs radius,
+    deltesian.arm_length vs arm_x. Stepper position relations are seeded only on
+    the primary Cartesian axes (stepper_x/y/z) — extruder/manual steppers use
+    need_position_minmax=False, and delta/polar/winch position semantics differ.
+    """
+    # Heater max_temp must be strictly above min_temp (heaters.py:29).
+    for sec in ("extruder", "extruder1", "extruder2", "heater_bed",
+                "heater_generic", "temperature_fan", "z_thermal_adjust"):
+        _set_rel(sec, "max_temp", rel_above="min_temp")
+
+    # Primary Cartesian steppers (stepper.py:350-357):
+    #   position_max strictly above position_min (above= -> v<=ref errors)
+    #   position_endstop within [position_min, position_max] (INCLUSIVE)
+    for sec in ("stepper_x", "stepper_y", "stepper_z"):
+        _set_rel(sec, "position_max", rel_above="position_min")
+        _set_rel(sec, "position_endstop", rel_between=("position_min", "position_max"))
+
+    # Servo maximum_pulse_width strictly above minimum_pulse_width (servo.py:17).
+    _set_rel("servo", "maximum_pulse_width", rel_above="minimum_pulse_width")
+
+
+_seed_relational_constraints()
 
 
 def get_section_def(section_type: str) -> Optional[SectionDef]:

@@ -657,6 +657,9 @@ def validate_config(config: ConfigFile) -> ValidationResult:
             # Type validation
             _validate_param_value(param, param_def, section, result)
 
+            # Relational validation (param A vs param B, same section)
+            _check_relational_param(param, param_def, section, result)
+
             # Track pin usage
             if param_def.param_type == ParamType.PIN and param.value:
                 _track_pin_usage(param, section, used_pins)
@@ -1158,6 +1161,73 @@ def _validate_param_value(param, param_def, section, result):
 def _format_bound(value: float) -> str:
     # Render integer-valued bounds without a trailing .0 (min_val=1 -> "1").
     return str(int(value)) if float(value).is_integer() else str(value)
+
+
+def _check_relational_param(param, param_def, section: ConfigSection, result: ValidationResult) -> None:
+    """Validate a same-section relational constraint (param A vs param B).
+
+    Ground truth (klippy/configfile.py _get_wrapper, verified 2026-08-25):
+        above=X  -> error when v <= X   (strictly above)
+        below=X  -> error when v >= X   (strictly below)
+    The `rel_between=(low, high)` form (stepper position_endstop within
+    [position_min, position_max]) is INCLUSIVE: error when v < low or v > high.
+
+    Skip when the param or its reference is absent/unparseable (a formula or
+    pin reference, e.g. position_endstop: ^PA0) — matching the range branch.
+    """
+    if param_def.rel_above is None and param_def.rel_below is None and param_def.rel_between is None:
+        return
+
+    def _num(value: str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+
+    my_num = _num(param.value) if param.value else None
+    if my_num is None:
+        return  # formula / pin reference / empty — not comparable
+
+    if param_def.rel_above is not None:
+        ref = section.get_value(param_def.rel_above)
+        ref_num = _num(ref) if ref else None
+        if ref_num is not None and my_num <= ref_num:
+            result.errors.append(ValidationError(
+                severity="error",
+                section=section.full_header,
+                param=param.key,
+                message=f"{param.key} ({param.value}) must be above {param_def.rel_above} ({ref}).",
+                line_number=param.line_number,
+            ))
+
+    if param_def.rel_below is not None:
+        ref = section.get_value(param_def.rel_below)
+        ref_num = _num(ref) if ref else None
+        if ref_num is not None and my_num >= ref_num:
+            result.errors.append(ValidationError(
+                severity="error",
+                section=section.full_header,
+                param=param.key,
+                message=f"{param.key} ({param.value}) must be below {param_def.rel_below} ({ref}).",
+                line_number=param.line_number,
+            ))
+
+    if param_def.rel_between is not None:
+        low_name, high_name = param_def.rel_between
+        low = section.get_value(low_name)
+        high = section.get_value(high_name)
+        low_num = _num(low) if low else None
+        high_num = _num(high) if high else None
+        if low_num is None or high_num is None:
+            return  # skip when either bound is missing/unparseable
+        if my_num < low_num or my_num > high_num:
+            result.errors.append(ValidationError(
+                severity="error",
+                section=section.full_header,
+                param=param.key,
+                message=f"{param.key} ({param.value}) must be between {low_name} ({low}) and {high_name} ({high}).",
+                line_number=param.line_number,
+            ))
 
 
 def _skip_missing_required_param(section: ConfigSection, param_name: str, active_params: set[str]) -> bool:
