@@ -11835,6 +11835,15 @@
           "description": "Idle current percent",
           "enum_values": [],
           "unit": ""
+        },
+        {
+          "name": "driver_*",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "TMC driver register override",
+          "enum_values": [],
+          "unit": ""
         }
       ]
     },
@@ -18690,16 +18699,91 @@
           "type": "float",
           "required": false,
           "default": "5.0",
-          "description": "Speed",
+          "description": "Probe speed",
           "enum_values": [],
-          "unit": ""
+          "unit": "mm/s"
+        },
+        {
+          "name": "lift_speed",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "Speed to raise the probe",
+          "enum_values": [],
+          "unit": "mm/s"
         },
         {
           "name": "samples",
           "type": "int",
           "required": false,
           "default": "1",
-          "description": "Samples",
+          "description": "Number of samples to take",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "sample_retract_dist",
+          "type": "float",
+          "required": false,
+          "default": "2.0",
+          "description": "Retract distance between samples",
+          "enum_values": [],
+          "unit": "mm"
+        },
+        {
+          "name": "samples_result",
+          "type": "enum",
+          "required": false,
+          "default": "average",
+          "description": "How to combine samples",
+          "enum_values": [
+            "median",
+            "average"
+          ],
+          "unit": ""
+        },
+        {
+          "name": "samples_tolerance",
+          "type": "float",
+          "required": false,
+          "default": "0.100",
+          "description": "Tolerance between samples",
+          "enum_values": [],
+          "unit": "mm"
+        },
+        {
+          "name": "samples_tolerance_retries",
+          "type": "int",
+          "required": false,
+          "default": "0",
+          "description": "Retries when samples exceed tolerance",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "deactivate_on_each_sample",
+          "type": "bool",
+          "required": false,
+          "default": "True",
+          "description": "Deactivate probe between samples",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "activate_gcode",
+          "type": "multi_line",
+          "required": false,
+          "default": null,
+          "description": "G-code to activate (stow) the probe",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "deactivate_gcode",
+          "type": "multi_line",
+          "required": false,
+          "default": null,
+          "description": "G-code to deactivate (deploy) the probe",
           "enum_values": [],
           "unit": ""
         }
@@ -18711,7 +18795,7 @@
       "category": "sub_component",
       "component_group": "probe",
       "is_named": true,
-      "description": "",
+      "description": "Eddy-current (LDC1612) Z probe. Analog probe \u2014 no endstop pin and no activate/deactivate gcode; inherits the probe sampling params and adds its own tap-calibration params.",
       "max_instances": 0,
       "requires": [],
       "params": [
@@ -18754,20 +18838,11 @@
           "unit": ""
         },
         {
-          "name": "i2c_address",
-          "type": "string",
-          "required": false,
-          "default": null,
-          "description": "I2C address",
-          "enum_values": [],
-          "unit": ""
-        },
-        {
           "name": "i2c_mcu",
           "type": "string",
           "required": false,
           "default": null,
-          "description": "I2C MCU name",
+          "description": "I2C MCU name (defaults to the main mcu)",
           "enum_values": [],
           "unit": ""
         },
@@ -18776,7 +18851,25 @@
           "type": "string",
           "required": false,
           "default": null,
-          "description": "I2C bus name",
+          "description": "I2C bus name (hardware I2C)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "i2c_address",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "I2C device address (0-127)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "i2c_speed",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "I2C clock speed in Hz",
           "enum_values": [],
           "unit": ""
         },
@@ -18795,15 +18888,6 @@
           "required": false,
           "default": null,
           "description": "Software I2C SDA pin",
-          "enum_values": [],
-          "unit": ""
-        },
-        {
-          "name": "i2c_speed",
-          "type": "int",
-          "required": false,
-          "default": null,
-          "description": "I2C speed",
           "enum_values": [],
           "unit": ""
         },
@@ -18839,7 +18923,91 @@
           "type": "float",
           "required": false,
           "default": "5.0",
-          "description": "Speed",
+          "description": "Probe speed",
+          "enum_values": [],
+          "unit": "mm/s"
+        },
+        {
+          "name": "lift_speed",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "Speed to raise the probe",
+          "enum_values": [],
+          "unit": "mm/s"
+        },
+        {
+          "name": "samples",
+          "type": "int",
+          "required": false,
+          "default": "1",
+          "description": "Number of samples to take",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "sample_retract_dist",
+          "type": "float",
+          "required": false,
+          "default": "2.0",
+          "description": "Retract distance between samples",
+          "enum_values": [],
+          "unit": "mm"
+        },
+        {
+          "name": "samples_result",
+          "type": "enum",
+          "required": false,
+          "default": "average",
+          "description": "How to combine samples",
+          "enum_values": [
+            "median",
+            "average"
+          ],
+          "unit": ""
+        },
+        {
+          "name": "samples_tolerance",
+          "type": "float",
+          "required": false,
+          "default": "0.100",
+          "description": "Tolerance between samples",
+          "enum_values": [],
+          "unit": "mm"
+        },
+        {
+          "name": "samples_tolerance_retries",
+          "type": "int",
+          "required": false,
+          "default": "0",
+          "description": "Retries when samples exceed tolerance",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tap_threshold",
+          "type": "float",
+          "required": false,
+          "default": "0",
+          "description": "Tap trigger threshold",
+          "enum_values": [],
+          "unit": "mm"
+        },
+        {
+          "name": "tap_z_offset",
+          "type": "float",
+          "required": false,
+          "default": "0",
+          "description": "Z offset applied for tap calibration",
+          "enum_values": [],
+          "unit": "mm"
+        },
+        {
+          "name": "calibrate",
+          "type": "multi_line",
+          "required": false,
+          "default": null,
+          "description": "Calibration data (frequency:z pairs, comma separated)",
           "enum_values": [],
           "unit": ""
         }
@@ -18873,7 +19041,7 @@
           "type": "pin",
           "required": false,
           "default": null,
-          "description": "Clock pin",
+          "description": "Clock pin (HX711/HX717)",
           "enum_values": [],
           "unit": ""
         },
@@ -18882,7 +19050,70 @@
           "type": "pin",
           "required": false,
           "default": null,
-          "description": "Data out pin",
+          "description": "Data out pin (HX711/HX717)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "cs_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "SPI chip select pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_bus",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "SPI bus name (hardware SPI)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_speed",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "SPI clock speed in Hz",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_software_sclk_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software SPI clock pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_software_mosi_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software SPI MOSI pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_software_miso_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software SPI MISO pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "data_ready_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "ADS1220 data-ready pin",
           "enum_values": [],
           "unit": ""
         },
@@ -18891,7 +19122,7 @@
           "type": "string",
           "required": false,
           "default": null,
-          "description": "Gain",
+          "description": "PGA gain (ADS1220 / HX717)",
           "enum_values": [],
           "unit": ""
         },
@@ -18900,7 +19131,61 @@
           "type": "string",
           "required": false,
           "default": null,
-          "description": "Sample rate",
+          "description": "Sample rate (ADS1220)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "vref",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "ADS1220 reference voltage",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "pga_bypass",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "ADS1220 bypass the PGA",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "input_mux",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "ADS1220 input multiplexer channel",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "counts_per_gram",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "ADC counts per gram",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "reference_tare_counts",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "Reference tare count offset",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "sensor_orientation",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Sensor orientation for tare compensation",
           "enum_values": [],
           "unit": ""
         }
@@ -19066,7 +19351,7 @@
       "category": "sub_component",
       "component_group": "stepper_driver",
       "is_named": true,
-      "description": "",
+      "description": "AD5206 DAC digipot (SPI) for stepper current/voltage reference",
       "max_instances": 0,
       "requires": [],
       "params": [
@@ -19080,20 +19365,11 @@
           "unit": ""
         },
         {
-          "name": "i2c_bus",
-          "type": "string",
+          "name": "cs_pin",
+          "type": "pin",
           "required": false,
           "default": null,
-          "description": "I2C bus",
-          "enum_values": [],
-          "unit": ""
-        },
-        {
-          "name": "i2c_address",
-          "type": "string",
-          "required": false,
-          "default": null,
-          "description": "I2C address",
+          "description": "SPI chip select pin",
           "enum_values": [],
           "unit": ""
         },
@@ -19102,16 +19378,43 @@
           "type": "string",
           "required": false,
           "default": null,
-          "description": "SPI bus",
+          "description": "SPI bus name (hardware SPI)",
           "enum_values": [],
           "unit": ""
         },
         {
-          "name": "cs_pin",
+          "name": "spi_speed",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "SPI clock speed in Hz",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_software_sclk_pin",
           "type": "pin",
           "required": false,
           "default": null,
-          "description": "SPI chip select",
+          "description": "Software SPI clock pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_software_mosi_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software SPI MOSI pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_software_miso_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software SPI MISO pin",
           "enum_values": [],
           "unit": ""
         },
@@ -19120,7 +19423,7 @@
           "type": "string",
           "required": false,
           "default": null,
-          "description": "Channel values",
+          "description": "Channel values (channel_0 .. channel_5)",
           "enum_values": [],
           "unit": ""
         },
@@ -19141,7 +19444,7 @@
       "category": "sub_component",
       "component_group": "stepper_driver",
       "is_named": true,
-      "description": "",
+      "description": "MCP4728 DAC digipot (I2C) for stepper current/voltage reference",
       "max_instances": 0,
       "requires": [],
       "params": [
@@ -19155,38 +19458,56 @@
           "unit": ""
         },
         {
+          "name": "i2c_mcu",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "I2C MCU name (defaults to the main mcu)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
           "name": "i2c_bus",
           "type": "string",
           "required": false,
           "default": null,
-          "description": "I2C bus",
+          "description": "I2C bus name (hardware I2C)",
           "enum_values": [],
           "unit": ""
         },
         {
           "name": "i2c_address",
-          "type": "string",
+          "type": "int",
           "required": false,
           "default": null,
-          "description": "I2C address",
+          "description": "I2C device address (0-127)",
           "enum_values": [],
           "unit": ""
         },
         {
-          "name": "spi_bus",
-          "type": "string",
+          "name": "i2c_speed",
+          "type": "int",
           "required": false,
           "default": null,
-          "description": "SPI bus",
+          "description": "I2C clock speed in Hz",
           "enum_values": [],
           "unit": ""
         },
         {
-          "name": "cs_pin",
+          "name": "i2c_software_scl_pin",
           "type": "pin",
           "required": false,
           "default": null,
-          "description": "SPI chip select",
+          "description": "Software I2C SCL pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "i2c_software_sda_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software I2C SDA pin",
           "enum_values": [],
           "unit": ""
         },
@@ -19195,7 +19516,7 @@
           "type": "string",
           "required": false,
           "default": null,
-          "description": "Channel values",
+          "description": "Channel values (channel_0 .. channel_5)",
           "enum_values": [],
           "unit": ""
         },
@@ -19230,20 +19551,38 @@
           "unit": ""
         },
         {
+          "name": "i2c_mcu",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "I2C MCU name (defaults to the main mcu)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
           "name": "i2c_bus",
           "type": "string",
           "required": false,
           "default": null,
-          "description": "I2C bus",
+          "description": "I2C bus name (hardware I2C)",
           "enum_values": [],
           "unit": ""
         },
         {
           "name": "i2c_address",
-          "type": "string",
+          "type": "int",
           "required": false,
           "default": null,
-          "description": "I2C address",
+          "description": "I2C device address (0-127)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "i2c_speed",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "I2C clock speed in Hz",
           "enum_values": [],
           "unit": ""
         },
@@ -19266,20 +19605,11 @@
           "unit": ""
         },
         {
-          "name": "i2c_speed",
-          "type": "int",
-          "required": false,
-          "default": null,
-          "description": "I2C speed",
-          "enum_values": [],
-          "unit": ""
-        },
-        {
           "name": "wiper_*",
           "type": "string",
           "required": false,
           "default": null,
-          "description": "Digital potentiometer wiper value",
+          "description": "Digital potentiometer wiper value (wiper_0 .. wiper_3)",
           "enum_values": [],
           "unit": ""
         },
@@ -19314,20 +19644,38 @@
           "unit": ""
         },
         {
+          "name": "i2c_mcu",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "I2C MCU name (defaults to the main mcu)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
           "name": "i2c_bus",
           "type": "string",
           "required": false,
           "default": null,
-          "description": "I2C bus",
+          "description": "I2C bus name (hardware I2C)",
           "enum_values": [],
           "unit": ""
         },
         {
           "name": "i2c_address",
-          "type": "string",
+          "type": "int",
           "required": false,
           "default": null,
-          "description": "I2C address",
+          "description": "I2C device address (0-127)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "i2c_speed",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "I2C clock speed in Hz",
           "enum_values": [],
           "unit": ""
         },
@@ -19350,20 +19698,11 @@
           "unit": ""
         },
         {
-          "name": "i2c_speed",
-          "type": "int",
-          "required": false,
-          "default": null,
-          "description": "I2C speed",
-          "enum_values": [],
-          "unit": ""
-        },
-        {
           "name": "wiper",
           "type": "string",
           "required": true,
           "default": null,
-          "description": "Digital potentiometer wiper value",
+          "description": "Digital potentiometer wiper value (0-1023)",
           "enum_values": [],
           "unit": ""
         },
@@ -19621,20 +19960,56 @@
       "requires": [],
       "params": [
         {
+          "name": "i2c_mcu",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "I2C MCU name (defaults to the main mcu)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
           "name": "i2c_bus",
           "type": "string",
           "required": false,
           "default": null,
-          "description": "I2C bus",
+          "description": "I2C bus name (hardware I2C)",
           "enum_values": [],
           "unit": ""
         },
         {
           "name": "i2c_address",
-          "type": "string",
+          "type": "int",
           "required": false,
           "default": null,
-          "description": "I2C address",
+          "description": "I2C device address (0-127)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "i2c_speed",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "I2C clock speed in Hz",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "i2c_software_scl_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software I2C SCL pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "i2c_software_sda_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software I2C SDA pin",
           "enum_values": [],
           "unit": ""
         },
@@ -19687,20 +20062,56 @@
       "requires": [],
       "params": [
         {
+          "name": "i2c_mcu",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "I2C MCU name (defaults to the main mcu)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
           "name": "i2c_bus",
           "type": "string",
           "required": false,
           "default": null,
-          "description": "I2C bus",
+          "description": "I2C bus name (hardware I2C)",
           "enum_values": [],
           "unit": ""
         },
         {
           "name": "i2c_address",
-          "type": "string",
+          "type": "int",
           "required": false,
           "default": null,
-          "description": "I2C address",
+          "description": "I2C device address (0-127)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "i2c_speed",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "I2C clock speed in Hz",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "i2c_software_scl_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software I2C SCL pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "i2c_software_sda_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software I2C SDA pin",
           "enum_values": [],
           "unit": ""
         },
@@ -19844,7 +20255,7 @@
       "category": "sub_component",
       "component_group": "temperature",
       "is_named": true,
-      "description": "",
+      "description": "Reports probe coil temperature, with optional thermal drift calibration for eddy-current probes (pairs with a same-named [probe_eddy_current] section).",
       "max_instances": 0,
       "requires": [],
       "params": [
@@ -19933,49 +20344,13 @@
           "unit": ""
         },
         {
-          "name": "spi_bus",
-          "type": "string",
-          "required": false,
-          "default": null,
-          "description": "SPI bus (for SPI sensors)",
-          "enum_values": [],
-          "unit": ""
-        },
-        {
-          "name": "spi_software_sclk_pin",
-          "type": "pin",
-          "required": false,
-          "default": null,
-          "description": "Software SPI clock",
-          "enum_values": [],
-          "unit": ""
-        },
-        {
-          "name": "spi_software_mosi_pin",
-          "type": "pin",
-          "required": false,
-          "default": null,
-          "description": "Software SPI MOSI",
-          "enum_values": [],
-          "unit": ""
-        },
-        {
-          "name": "spi_software_miso_pin",
-          "type": "pin",
-          "required": false,
-          "default": null,
-          "description": "Software SPI MISO",
-          "enum_values": [],
-          "unit": ""
-        },
-        {
-          "name": "horizontal_move_z",
+          "name": "smooth_time",
           "type": "float",
           "required": false,
-          "default": null,
-          "description": "Z height for probe moves",
+          "default": "2.0",
+          "description": "Measurement smoothing window",
           "enum_values": [],
-          "unit": ""
+          "unit": "s"
         },
         {
           "name": "min_temp",
@@ -19984,7 +20359,7 @@
           "default": "0",
           "description": "Min temp",
           "enum_values": [],
-          "unit": ""
+          "unit": "\u00b0C"
         },
         {
           "name": "max_temp",
@@ -19993,14 +20368,450 @@
           "default": "100",
           "description": "Max temp",
           "enum_values": [],
-          "unit": ""
+          "unit": "\u00b0C"
         },
         {
-          "name": "smooth_time",
+          "name": "gcode_id",
           "type": "string",
           "required": false,
           "default": null,
-          "description": "Smooth time",
+          "description": "G-code temperature status id (see heater_generic)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "speed",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "XY travel speed during calibration",
+          "enum_values": [],
+          "unit": "mm/s"
+        },
+        {
+          "name": "horizontal_move_z",
+          "type": "float",
+          "required": false,
+          "default": "2.0",
+          "description": "Z height for XY probe moves",
+          "enum_values": [],
+          "unit": "mm"
+        },
+        {
+          "name": "resting_z",
+          "type": "float",
+          "required": false,
+          "default": "0.4",
+          "description": "Z height where the tool rests to heat the coil",
+          "enum_values": [],
+          "unit": "mm"
+        },
+        {
+          "name": "calibration_position",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "X,Y,Z of the first manual probe (x,y,z)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "calibration_bed_temp",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "Max safe bed temp during drift calibration",
+          "enum_values": [],
+          "unit": "\u00b0C"
+        },
+        {
+          "name": "calibration_extruder_temp",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "Extruder temp during drift calibration",
+          "enum_values": [],
+          "unit": "\u00b0C"
+        },
+        {
+          "name": "extruder_heating_z",
+          "type": "float",
+          "required": false,
+          "default": "50",
+          "description": "Z height where extruder heating occurs",
+          "enum_values": [],
+          "unit": "mm"
+        },
+        {
+          "name": "max_validation_temp",
+          "type": "float",
+          "required": false,
+          "default": "60",
+          "description": "Max temp used to validate calibration",
+          "enum_values": [],
+          "unit": "\u00b0C"
+        },
+        {
+          "name": "calibration_temp",
+          "type": "float",
+          "required": false,
+          "default": "0",
+          "description": "Calibration target temperature",
+          "enum_values": [],
+          "unit": "\u00b0C"
+        },
+        {
+          "name": "drift_calibration",
+          "type": "multi_line",
+          "required": false,
+          "default": null,
+          "description": "Drift calibration data (frequency:z pairs, comma/line separated)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "drift_calibration_min_temp",
+          "type": "float",
+          "required": false,
+          "default": "0",
+          "description": "Min temp for drift calibration",
+          "enum_values": [],
+          "unit": "\u00b0C"
+        },
+        {
+          "name": "cs_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "SPI chip select pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_bus",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "SPI bus name (hardware SPI)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_speed",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "SPI clock speed in Hz",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_software_sclk_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software SPI clock pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_software_mosi_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software SPI MOSI pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_software_miso_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software SPI MISO pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "i2c_mcu",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "I2C MCU name (defaults to the main mcu)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "i2c_bus",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "I2C bus name (hardware I2C)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "i2c_address",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "I2C device address (0-127)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "i2c_speed",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "I2C clock speed in Hz",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "i2c_software_scl_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software I2C SCL pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "i2c_software_sda_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software I2C SDA pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "serial_no",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "DS18B20 sensor serial number",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "sensor_mcu",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "MCU the sensor is attached to",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "ds18_report_time",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "DS18B20 report interval",
+          "enum_values": [],
+          "unit": "s"
+        },
+        {
+          "name": "sensor_list",
+          "type": "multi_line",
+          "required": false,
+          "default": null,
+          "description": "Comma-separated list of sensor names to combine",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "combination_method",
+          "type": "enum",
+          "required": false,
+          "default": "mean",
+          "description": "How to combine the sensor_list",
+          "enum_values": [
+            "min",
+            "max",
+            "mean"
+          ],
+          "unit": ""
+        },
+        {
+          "name": "maximum_deviation",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "Max allowed deviation between combined sensors",
+          "enum_values": [],
+          "unit": "\u00b0C"
+        },
+        {
+          "name": "rtd_nominal_r",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "RTD nominal resistance at 0\u00b0C (ohms)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_num_of_wires",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "RTD wire count (2/3/4)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_reference_r",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "RTD reference wire resistance (ohms)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_use_50Hz_filter",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "Enable RTD 50 Hz noise filter",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_type",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Thermocouple type (K/J/T/E/N/R/S/B)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_use_50Hz_filter",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "Enable TC 50 Hz noise filter",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_averaging_count",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "TC sample averaging count",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "gain",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "ADS1220 PGA gain",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "sample_rate",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "ADS1220 sample rate",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "data_ready_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "ADS1220 data-ready pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "vref",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "ADS1220 reference voltage",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "pga_bypass",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "ADS1220 bypass the PGA",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "input_mux",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "ADS1220 input multiplexer channel",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "bme280_gas_heat_duration",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "BME280 gas sensor heat duration",
+          "enum_values": [],
+          "unit": "s"
+        },
+        {
+          "name": "bme280_gas_target_temp",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "BME280 gas sensor target temperature",
+          "enum_values": [],
+          "unit": "\u00b0C"
+        },
+        {
+          "name": "bme280_iir_filter",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "BME280 IIR filter coefficient",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "bme280_oversample_hum",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "BME280 humidity oversampling",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "bme280_oversample_pressure",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "BME280 pressure oversampling",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "bme280_oversample_temp",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "BME280 temperature oversampling",
           "enum_values": [],
           "unit": ""
         }
@@ -20342,6 +21153,449 @@
           "required": false,
           "default": null,
           "description": "Update check interval (hours)",
+          "enum_values": [],
+          "unit": ""
+        }
+      ]
+    },
+    "display_template": {
+      "section_type": "display_template",
+      "display_name": "Display Template",
+      "category": "config_helper",
+      "component_group": "display",
+      "is_named": true,
+      "description": "A Jinja display template (<group> <name>) for a configurable display",
+      "max_instances": 0,
+      "requires": [],
+      "params": [
+        {
+          "name": "text",
+          "type": "multi_line",
+          "required": false,
+          "default": null,
+          "description": "Jinja template body rendered onto the display",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "param_*",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Template parameters (param_*)",
+          "enum_values": [],
+          "unit": ""
+        }
+      ]
+    },
+    "display_data": {
+      "section_type": "display_data",
+      "display_name": "Display Data",
+      "category": "config_helper",
+      "component_group": "display",
+      "is_named": true,
+      "description": "A display data item (<group> <row,col>) for a configurable display",
+      "max_instances": 0,
+      "requires": [],
+      "params": [
+        {
+          "name": "position",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Grid position as 'row,col'",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "text",
+          "type": "multi_line",
+          "required": false,
+          "default": null,
+          "description": "Jinja template body for this data item",
+          "enum_values": [],
+          "unit": ""
+        }
+      ]
+    },
+    "static_pwm_clock": {
+      "section_type": "static_pwm_clock",
+      "display_name": "Static PWM Clock",
+      "category": "config_helper",
+      "component_group": "pin",
+      "is_named": true,
+      "description": "Static PWM clock output pin (provides a clock to other hardware)",
+      "max_instances": 0,
+      "requires": [],
+      "params": [
+        {
+          "name": "pin",
+          "type": "pin",
+          "required": true,
+          "default": null,
+          "description": "Output pin to configure as a clock",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "frequency",
+          "type": "int",
+          "required": false,
+          "default": "100",
+          "description": "Target output frequency",
+          "enum_values": [],
+          "unit": ""
+        }
+      ]
+    },
+    "load_cell_probe": {
+      "section_type": "load_cell_probe",
+      "display_name": "Load Cell Probe",
+      "category": "sub_component",
+      "component_group": "probe",
+      "is_named": false,
+      "description": "Force-based (load cell) Z probe. Analog \u2014 no endstop pin.",
+      "max_instances": 1,
+      "requires": [
+        "load_cell"
+      ],
+      "params": [
+        {
+          "name": "sensor_type",
+          "type": "enum",
+          "required": true,
+          "default": null,
+          "description": "Load cell sensor type",
+          "enum_values": [
+            "hx711",
+            "hx717",
+            "ads1220",
+            "ads131m02",
+            "ads131m04"
+          ],
+          "unit": ""
+        },
+        {
+          "name": "x_offset",
+          "type": "float",
+          "required": false,
+          "default": "0",
+          "description": "X offset",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "y_offset",
+          "type": "float",
+          "required": false,
+          "default": "0",
+          "description": "Y offset",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "z_offset",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "Z offset",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "speed",
+          "type": "float",
+          "required": false,
+          "default": "5.0",
+          "description": "Probe speed",
+          "enum_values": [],
+          "unit": "mm/s"
+        },
+        {
+          "name": "lift_speed",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "Speed to raise the probe",
+          "enum_values": [],
+          "unit": "mm/s"
+        },
+        {
+          "name": "samples",
+          "type": "int",
+          "required": false,
+          "default": "1",
+          "description": "Number of samples to take",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "sample_retract_dist",
+          "type": "float",
+          "required": false,
+          "default": "2.0",
+          "description": "Retract distance between samples",
+          "enum_values": [],
+          "unit": "mm"
+        },
+        {
+          "name": "samples_result",
+          "type": "enum",
+          "required": false,
+          "default": "average",
+          "description": "How to combine samples",
+          "enum_values": [
+            "median",
+            "average"
+          ],
+          "unit": ""
+        },
+        {
+          "name": "samples_tolerance",
+          "type": "float",
+          "required": false,
+          "default": "0.100",
+          "description": "Tolerance between samples",
+          "enum_values": [],
+          "unit": "mm"
+        },
+        {
+          "name": "samples_tolerance_retries",
+          "type": "int",
+          "required": false,
+          "default": "0",
+          "description": "Retries when samples exceed tolerance",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "trigger_force",
+          "type": "float",
+          "required": false,
+          "default": "75",
+          "description": "Trigger force in grams",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "force_safety_limit",
+          "type": "float",
+          "required": false,
+          "default": "2000",
+          "description": "Force safety limit in grams",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tare_time",
+          "type": "float",
+          "required": false,
+          "default": "0.067",
+          "description": "Time to average tare samples",
+          "enum_values": [],
+          "unit": "s"
+        }
+      ]
+    },
+    "hall_filament_width_sensor": {
+      "section_type": "hall_filament_width_sensor",
+      "display_name": "Hall Filament Width Sensor",
+      "category": "sub_component",
+      "component_group": "filament_sensor",
+      "is_named": false,
+      "description": "Hall-effect filament width sensor (dual ADC) for flow compensation",
+      "max_instances": 1,
+      "requires": [],
+      "params": [
+        {
+          "name": "adc1",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "First ADC input pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "adc2",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Second ADC input pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "Cal_dia1",
+          "type": "float",
+          "required": false,
+          "default": "1.5",
+          "description": "Calibration filament diameter for ADC1",
+          "enum_values": [],
+          "unit": "mm"
+        },
+        {
+          "name": "Cal_dia2",
+          "type": "float",
+          "required": false,
+          "default": "2.0",
+          "description": "Calibration filament diameter for ADC2",
+          "enum_values": [],
+          "unit": "mm"
+        },
+        {
+          "name": "Raw_dia1",
+          "type": "float",
+          "required": false,
+          "default": "9500",
+          "description": "Raw ADC1 reading for Cal_dia1",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "Raw_dia2",
+          "type": "float",
+          "required": false,
+          "default": "10500",
+          "description": "Raw ADC2 reading for Cal_dia2",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "measurement_interval",
+          "type": "int",
+          "required": false,
+          "default": "10",
+          "description": "Measurement interval",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "default_nominal_filament_diameter",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "Nominal filament diameter",
+          "enum_values": [],
+          "unit": "mm"
+        },
+        {
+          "name": "measurement_delay",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "Measurement delay",
+          "enum_values": [],
+          "unit": "s"
+        },
+        {
+          "name": "max_difference",
+          "type": "float",
+          "required": false,
+          "default": "0.2",
+          "description": "Max difference between the two ADCs",
+          "enum_values": [],
+          "unit": "mm"
+        },
+        {
+          "name": "enable",
+          "type": "bool",
+          "required": false,
+          "default": "False",
+          "description": "Enable the sensor",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "min_diameter",
+          "type": "float",
+          "required": false,
+          "default": "1.0",
+          "description": "Minimum filament diameter",
+          "enum_values": [],
+          "unit": "mm"
+        },
+        {
+          "name": "max_diameter",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "Maximum filament diameter",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "logging",
+          "type": "bool",
+          "required": false,
+          "default": "False",
+          "description": "Log measurements",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "enable_flow_compensation",
+          "type": "bool",
+          "required": false,
+          "default": "True",
+          "description": "Enable flow compensation",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "use_current_dia_while_delay",
+          "type": "bool",
+          "required": false,
+          "default": "False",
+          "description": "Use current diameter during delay",
+          "enum_values": [],
+          "unit": ""
+        }
+      ]
+    },
+    "tsl1401cl_filament_width_sensor": {
+      "section_type": "tsl1401cl_filament_width_sensor",
+      "display_name": "TSL1401CL Filament Width Sensor",
+      "category": "sub_component",
+      "component_group": "filament_sensor",
+      "is_named": false,
+      "description": "TSL1401CL linear position sensor filament width reader for flow compensation",
+      "max_instances": 1,
+      "requires": [],
+      "params": [
+        {
+          "name": "pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Sensor analog pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "default_nominal_filament_diameter",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "Nominal filament diameter",
+          "enum_values": [],
+          "unit": "mm"
+        },
+        {
+          "name": "measurement_delay",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "Measurement delay",
+          "enum_values": [],
+          "unit": "s"
+        },
+        {
+          "name": "max_difference",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "Max difference from expected width",
           "enum_values": [],
           "unit": ""
         }

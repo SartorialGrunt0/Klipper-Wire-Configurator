@@ -173,20 +173,35 @@ SENSOR_TYPE_ENUM = [
     "DS18B20", "temperature_combined",
 ]
 
-SOFTWARE_SPI_PARAMS = [
-    _str("spi_bus", "SPI bus"),
-    _pin("spi_software_sclk_pin", "Software SPI clock"),
-    _pin("spi_software_mosi_pin", "Software SPI MOSI"),
-    _pin("spi_software_miso_pin", "Software SPI MISO"),
+# Full SPI bus parameter family, mirroring bus.py MCU_SPI_from_config:
+# hardware bus (spi_bus) OR software bus (the three spi_software_* pins) plus
+# optional chip select and clock speed. Reused by every SPI-bus section so the
+# family is modeled once (like STEPPER_PARAMS).
+SPI_BUS_PARAMS = [
+    _pin("cs_pin", "SPI chip select pin"),
+    _str("spi_bus", "SPI bus name (hardware SPI)"),
+    _int("spi_speed", "SPI clock speed in Hz"),
+    _pin("spi_software_sclk_pin", "Software SPI clock pin"),
+    _pin("spi_software_mosi_pin", "Software SPI MOSI pin"),
+    _pin("spi_software_miso_pin", "Software SPI MISO pin"),
 ]
 
-SOFTWARE_I2C_PARAMS = [
-    _str("i2c_mcu", "I2C MCU name"),
-    _str("i2c_bus", "I2C bus name"),
+# Full I2C bus parameter family, mirroring bus.py MCU_I2C_from_config:
+# hardware bus (i2c_bus) OR software bus (the two i2c_software_* pins), with
+# address, speed, and an optional alternate MCU. Reused by every I2C-bus
+# section so the family is modeled once (like STEPPER_PARAMS).
+I2C_BUS_PARAMS = [
+    _str("i2c_mcu", "I2C MCU name (defaults to the main mcu)"),
+    _str("i2c_bus", "I2C bus name (hardware I2C)"),
+    _int("i2c_address", "I2C device address (0-127)"),
+    _int("i2c_speed", "I2C clock speed in Hz"),
     _pin("i2c_software_scl_pin", "Software I2C SCL pin"),
     _pin("i2c_software_sda_pin", "Software I2C SDA pin"),
-    _int("i2c_speed", "I2C speed"),
 ]
+
+# Backward-compatible aliases (previously an incomplete 4/5-param set).
+SOFTWARE_SPI_PARAMS = SPI_BUS_PARAMS
+SOFTWARE_I2C_PARAMS = I2C_BUS_PARAMS
 
 # ─── Section Definitions ────────────────────────────────────────
 
@@ -483,6 +498,7 @@ _register(SectionDef(
         _float("run_current", "Motor run current in amps", required=True),
         _float("sense_resistor", "Sense resistor value", required=True),
         _int("idle_current_percent", "Idle current percent", default="100"),
+        _str("driver_*", "TMC driver register override"),
     ],
 ))
 
@@ -1726,8 +1742,18 @@ _register(SectionDef(
         _float("x_offset", "X offset", default="0"),
         _float("y_offset", "Y offset", default="0"),
         _float("z_offset", "Z offset"),
-        _float("speed", "Speed", default="5.0"),
-        _int("samples", "Samples", default="1"),
+        _float("speed", "Probe speed", default="5.0", unit="mm/s"),
+        _float("lift_speed", "Speed to raise the probe", unit="mm/s"),
+        # Inherited probe sampling params (ProbeParameterHelper)
+        _int("samples", "Number of samples to take", default="1"),
+        _float("sample_retract_dist", "Retract distance between samples", default="2.0", unit="mm"),
+        _enum("samples_result", ["median", "average"], "How to combine samples", default="average"),
+        _float("samples_tolerance", "Tolerance between samples", default="0.100", unit="mm"),
+        _int("samples_tolerance_retries", "Retries when samples exceed tolerance", default="0"),
+        # Inherited probe activate/deactivate (ProbeEndstopWrapper)
+        _bool("deactivate_on_each_sample", "Deactivate probe between samples", default="True"),
+        _ml("activate_gcode", "G-code to activate (stow) the probe"),
+        _ml("deactivate_gcode", "G-code to deactivate (deploy) the probe"),
     ],
 ))
 
@@ -1737,21 +1763,31 @@ _register(SectionDef(
     category="sub_component",
     component_group="probe",
     is_named=True,
+    description="Eddy-current (LDC1612) Z probe. Analog probe — no endstop "
+                "pin and no activate/deactivate gcode; inherits the probe "
+                "sampling params and adds its own tap-calibration params.",
     params=[
         _enum("sensor_type", ["ldc1612"], "Sensor type", required=True),
         _int("frequency", "Sensor crystal frequency"),
         _pin("intb_pin", "Sensor interrupt pin"),
         _float("descend_z", "Probe descend distance", required=True),
-        _str("i2c_address", "I2C address"),
-        _str("i2c_mcu", "I2C MCU name"),
-        _str("i2c_bus", "I2C bus name"),
-        _pin("i2c_software_scl_pin", "Software I2C SCL pin"),
-        _pin("i2c_software_sda_pin", "Software I2C SDA pin"),
-        _int("i2c_speed", "I2C speed"),
+        # I2C bus (ldc1612) — full family
+        *I2C_BUS_PARAMS,
         _float("x_offset", "X offset", default="0"),
         _float("y_offset", "Y offset", default="0"),
         _float("z_offset", "Z offset"),
-        _float("speed", "Speed", default="5.0"),
+        # Inherited probe sampling params (EddyParameterHelper = ProbeParameterHelper)
+        _float("speed", "Probe speed", default="5.0", unit="mm/s"),
+        _float("lift_speed", "Speed to raise the probe", unit="mm/s"),
+        _int("samples", "Number of samples to take", default="1"),
+        _float("sample_retract_dist", "Retract distance between samples", default="2.0", unit="mm"),
+        _enum("samples_result", ["median", "average"], "How to combine samples", default="average"),
+        _float("samples_tolerance", "Tolerance between samples", default="0.100", unit="mm"),
+        _int("samples_tolerance_retries", "Retries when samples exceed tolerance", default="0"),
+        # Eddy-specific tap calibration
+        _float("tap_threshold", "Tap trigger threshold", default="0", unit="mm"),
+        _float("tap_z_offset", "Z offset applied for tap calibration", default="0", unit="mm"),
+        _ml("calibrate", "Calibration data (frequency:z pairs, comma separated)"),
     ],
 ))
 
@@ -1763,10 +1799,21 @@ _register(SectionDef(
     is_named=True,
     params=[
         _enum("sensor_type", ["HX711", "HX717", "ADS1220"], "Sensor type", required=True),
-        _pin("sclk_pin", "Clock pin"),
-        _pin("dout_pin", "Data out pin"),
-        _str("gain", "Gain"),
-        _str("sample_rate", "Sample rate"),
+        # HX711 / HX717 are bit-banged
+        _pin("sclk_pin", "Clock pin (HX711/HX717)"),
+        _pin("dout_pin", "Data out pin (HX711/HX717)"),
+        # ADS1220 is SPI
+        *SPI_BUS_PARAMS,
+        _pin("data_ready_pin", "ADS1220 data-ready pin"),
+        _str("gain", "PGA gain (ADS1220 / HX717)"),
+        _str("sample_rate", "Sample rate (ADS1220)"),
+        _str("vref", "ADS1220 reference voltage"),
+        _bool("pga_bypass", "ADS1220 bypass the PGA"),
+        _str("input_mux", "ADS1220 input multiplexer channel"),
+        # load_cell.py calibration params
+        _float("counts_per_gram", "ADC counts per gram"),
+        _float("reference_tare_counts", "Reference tare count offset"),
+        _str("sensor_orientation", "Sensor orientation for tare compensation"),
     ],
 ))
 
@@ -1804,24 +1851,37 @@ _register(SectionDef(
     ],
 ))
 
-# ── Digipots/DACs (brief) ──
-for chip_type in ["ad5206", "mcp4728"]:
-    _register(SectionDef(
-        section_type=chip_type,
-        display_name=chip_type.upper(),
-        category="sub_component",
-        component_group="stepper_driver",
-        is_named=True,
-        params=[
-            _pin("enable_pin", "Enable pin"),
-            _str("i2c_bus", "I2C bus"),
-            _str("i2c_address", "I2C address"),
-            _str("spi_bus", "SPI bus"),
-            _pin("cs_pin", "SPI chip select"),
-            _str("channel_*", "Channel values"),
-            _str("scale", "Scale factor"),
-        ],
-    ))
+# ── Digipot/DAC ──
+# ad5206 is SPI-only (bus.MCU_SPI_from_config); mcp4728 is I2C-only
+# (bus.MCU_I2C_from_config, default_addr=0x60). Model each with its real bus.
+_register(SectionDef(
+    section_type="ad5206",
+    display_name="AD5206",
+    category="sub_component",
+    component_group="stepper_driver",
+    is_named=True,
+    description="AD5206 DAC digipot (SPI) for stepper current/voltage reference",
+    params=[
+        _pin("enable_pin", "Enable pin"),
+        *SPI_BUS_PARAMS,
+        _str("channel_*", "Channel values (channel_0 .. channel_5)"),
+        _str("scale", "Scale factor"),
+    ],
+))
+_register(SectionDef(
+    section_type="mcp4728",
+    display_name="MCP4728",
+    category="sub_component",
+    component_group="stepper_driver",
+    is_named=True,
+    description="MCP4728 DAC digipot (I2C) for stepper current/voltage reference",
+    params=[
+        _pin("enable_pin", "Enable pin"),
+        *I2C_BUS_PARAMS,
+        _str("channel_*", "Channel values (channel_0 .. channel_5)"),
+        _str("scale", "Scale factor"),
+    ],
+))
 
 _register(SectionDef(
     section_type="mcp4451",
@@ -1831,12 +1891,8 @@ _register(SectionDef(
     is_named=True,
     params=[
         _pin("enable_pin", "Enable pin"),
-        _str("i2c_bus", "I2C bus"),
-        _str("i2c_address", "I2C address"),
-        _pin("i2c_software_scl_pin", "Software I2C SCL pin"),
-        _pin("i2c_software_sda_pin", "Software I2C SDA pin"),
-        _int("i2c_speed", "I2C speed"),
-        _str("wiper_*", "Digital potentiometer wiper value"),
+        *I2C_BUS_PARAMS,
+        _str("wiper_*", "Digital potentiometer wiper value (wiper_0 .. wiper_3)"),
         _str("scale", "Scale factor"),
     ],
 ))
@@ -1849,12 +1905,8 @@ _register(SectionDef(
     is_named=True,
     params=[
         _pin("enable_pin", "Enable pin"),
-        _str("i2c_bus", "I2C bus"),
-        _str("i2c_address", "I2C address"),
-        _pin("i2c_software_scl_pin", "Software I2C SCL pin"),
-        _pin("i2c_software_sda_pin", "Software I2C SDA pin"),
-        _int("i2c_speed", "I2C speed"),
-        _str("wiper", "Digital potentiometer wiper value", required=True),
+        *I2C_BUS_PARAMS,
+        _str("wiper", "Digital potentiometer wiper value (0-1023)", required=True),
         _str("scale", "Scale factor"),
     ],
 ))
@@ -1927,7 +1979,7 @@ _register(SectionDef(
     ],
 ))
 
-# ── PCA LED controllers ──
+# ── PCA LED controllers (I2C) ──
 for pca in ["pca9533", "pca9632"]:
     _register(SectionDef(
         section_type=pca,
@@ -1936,8 +1988,7 @@ for pca in ["pca9533", "pca9632"]:
         component_group="led",
         is_named=True,
         params=[
-            _str("i2c_bus", "I2C bus"),
-            _str("i2c_address", "I2C address"),
+            *I2C_BUS_PARAMS,
             _float("initial_RED", "Initial red", default="0"),
             _float("initial_GREEN", "Initial green", default="0"),
             _float("initial_BLUE", "Initial blue", default="0"),
@@ -1979,6 +2030,9 @@ _register(SectionDef(
     category="sub_component",
     component_group="temperature",
     is_named=True,
+    description="Reports probe coil temperature, with optional thermal drift "
+                "calibration for eddy-current probes (pairs with a same-named "
+                "[probe_eddy_current] section).",
     params=[
         _enum("sensor_type", SENSOR_TYPE_ENUM, "Sensor type", required=True),
         _pin("sensor_pin", "Sensor pin"),
@@ -1986,14 +2040,56 @@ _register(SectionDef(
         _float("voltage_offset", "ADC voltage offset"),
         _float("pullup_resistor", "Sensor pullup resistor", default="4700"),
         _float("inline_resistor", "Sensor inline resistor", default="0"),
-        _str("spi_bus", "SPI bus (for SPI sensors)"),
-        _pin("spi_software_sclk_pin", "Software SPI clock"),
-        _pin("spi_software_mosi_pin", "Software SPI MOSI"),
-        _pin("spi_software_miso_pin", "Software SPI MISO"),
-        _float("horizontal_move_z", "Z height for probe moves"),
-        _float("min_temp", "Min temp", default="0"),
-        _float("max_temp", "Max temp", default="100"),
-        _str("smooth_time", "Smooth time"),
+        _float("smooth_time", "Measurement smoothing window", default="2.0", unit="s"),
+        _float("min_temp", "Min temp", default="0", unit="°C"),
+        _float("max_temp", "Max temp", default="100", unit="°C"),
+        _str("gcode_id", "G-code temperature status id (see heater_generic)"),
+        # Probe calibration moves (speeds default from the paired probe section)
+        _float("speed", "XY travel speed during calibration", unit="mm/s"),
+        _float("horizontal_move_z", "Z height for XY probe moves", default="2.0", unit="mm"),
+        _float("resting_z", "Z height where the tool rests to heat the coil", default="0.4", unit="mm"),
+        _str("calibration_position", "X,Y,Z of the first manual probe (x,y,z)"),
+        _float("calibration_bed_temp", "Max safe bed temp during drift calibration", unit="°C"),
+        _float("calibration_extruder_temp", "Extruder temp during drift calibration", unit="°C"),
+        _float("extruder_heating_z", "Z height where extruder heating occurs", default="50", unit="mm"),
+        _float("max_validation_temp", "Max temp used to validate calibration", default="60", unit="°C"),
+        _float("calibration_temp", "Calibration target temperature", default="0", unit="°C"),
+        _ml("drift_calibration", "Drift calibration data (frequency:z pairs, comma/line separated)"),
+        _float("drift_calibration_min_temp", "Min temp for drift calibration", default="0", unit="°C"),
+        # SPI sensors (MAX6675/MAX31855/MAX31856/MAX31865)
+        *SPI_BUS_PARAMS,
+        # I2C sensors (BME280, AHT10, HTU21D, SHT21, lm75, DS18B20, ...)
+        *I2C_BUS_PARAMS,
+        # Serial number / MCU / report interval (DS18B20 on an alternate MCU)
+        _str("serial_no", "DS18B20 sensor serial number"),
+        _str("sensor_mcu", "MCU the sensor is attached to"),
+        _float("ds18_report_time", "DS18B20 report interval", unit="s"),
+        # Multi-sensor combine (temperature_combined)
+        _ml("sensor_list", "Comma-separated list of sensor names to combine"),
+        _enum("combination_method", ["min", "max", "mean"], "How to combine the sensor_list", default="mean"),
+        _float("maximum_deviation", "Max allowed deviation between combined sensors", unit="°C"),
+        # RTD / TC amplifier family (MAX31856 / MAX31865 / PT100 / PT1000)
+        _float("rtd_nominal_r", "RTD nominal resistance at 0°C (ohms)"),
+        _int("rtd_num_of_wires", "RTD wire count (2/3/4)"),
+        _float("rtd_reference_r", "RTD reference wire resistance (ohms)"),
+        _bool("rtd_use_50Hz_filter", "Enable RTD 50 Hz noise filter"),
+        _str("tc_type", "Thermocouple type (K/J/T/E/N/R/S/B)"),
+        _bool("tc_use_50Hz_filter", "Enable TC 50 Hz noise filter"),
+        _int("tc_averaging_count", "TC sample averaging count"),
+        # ADS1220 amplifier (PT100 / PT1000)
+        _str("gain", "ADS1220 PGA gain"),
+        _str("sample_rate", "ADS1220 sample rate"),
+        _pin("data_ready_pin", "ADS1220 data-ready pin"),
+        _str("vref", "ADS1220 reference voltage"),
+        _bool("pga_bypass", "ADS1220 bypass the PGA"),
+        _str("input_mux", "ADS1220 input multiplexer channel"),
+        # BME280 gas sensor
+        _float("bme280_gas_heat_duration", "BME280 gas sensor heat duration", unit="s"),
+        _float("bme280_gas_target_temp", "BME280 gas sensor target temperature", unit="°C"),
+        _int("bme280_iir_filter", "BME280 IIR filter coefficient"),
+        _int("bme280_oversample_hum", "BME280 humidity oversampling"),
+        _int("bme280_oversample_pressure", "BME280 pressure oversampling"),
+        _int("bme280_oversample_temp", "BME280 temperature oversampling"),
     ],
 ))
 
@@ -2103,6 +2199,125 @@ def _set_rel(section_type: str, param_name: str, **kwargs) -> None:
         return
     for key, val in kwargs.items():
         setattr(pd, key, val)
+
+
+# ── Display templates / data (configurable display) ──
+# display_template <group> <name> carries a Jinja body in 'text' plus any
+# number of param_* options. display_data <group> <row,col> items carry a
+# 'position' and a 'text' template. Both bodies load via gcode_macro.load_template
+# (KWC validates them as Jinja via _DISPLAY_TEMPLATE_SECTIONS).
+_register(SectionDef(
+    section_type="display_template",
+    display_name="Display Template",
+    category="config_helper",
+    component_group="display",
+    is_named=True,
+    description="A Jinja display template (<group> <name>) for a configurable display",
+    params=[
+        _ml("text", "Jinja template body rendered onto the display"),
+        _str("param_*", "Template parameters (param_*)"),
+    ],
+))
+_register(SectionDef(
+    section_type="display_data",
+    display_name="Display Data",
+    category="config_helper",
+    component_group="display",
+    is_named=True,
+    description="A display data item (<group> <row,col>) for a configurable display",
+    params=[
+        _str("position", "Grid position as 'row,col'"),
+        _ml("text", "Jinja template body for this data item"),
+    ],
+))
+
+# ── Static PWM clock (alias-style output pin) ──
+_register(SectionDef(
+    section_type="static_pwm_clock",
+    display_name="Static PWM Clock",
+    category="config_helper",
+    component_group="pin",
+    is_named=True,
+    description="Static PWM clock output pin (provides a clock to other hardware)",
+    params=[
+        _pin("pin", "Output pin to configure as a clock", required=True),
+        _int("frequency", "Target output frequency", default="100"),
+    ],
+))
+
+# ── Load cell probe (analog, force-based) ──
+# Uses LoadCellParameterHelper(=ProbeParameterHelper) + ProbeOffsetsHelper +
+# LoadCellProbeConfigHelper. Analog (trigger_analog) — no endstop pin. The
+# load_cell sensor params live in the paired [load_cell] section.
+_register(SectionDef(
+    section_type="load_cell_probe",
+    display_name="Load Cell Probe",
+    category="sub_component",
+    component_group="probe",
+    max_instances=1,
+    description="Force-based (load cell) Z probe. Analog — no endstop pin.",
+    requires=["load_cell"],
+    params=[
+        _enum("sensor_type", ["hx711", "hx717", "ads1220",
+                              "ads131m02", "ads131m04"],
+              "Load cell sensor type", required=True),
+        _float("x_offset", "X offset", default="0"),
+        _float("y_offset", "Y offset", default="0"),
+        _float("z_offset", "Z offset"),
+        _float("speed", "Probe speed", default="5.0", unit="mm/s"),
+        _float("lift_speed", "Speed to raise the probe", unit="mm/s"),
+        _int("samples", "Number of samples to take", default="1"),
+        _float("sample_retract_dist", "Retract distance between samples", default="2.0", unit="mm"),
+        _enum("samples_result", ["median", "average"], "How to combine samples", default="average"),
+        _float("samples_tolerance", "Tolerance between samples", default="0.100", unit="mm"),
+        _int("samples_tolerance_retries", "Retries when samples exceed tolerance", default="0"),
+        _float("trigger_force", "Trigger force in grams", default="75"),
+        _float("force_safety_limit", "Force safety limit in grams", default="2000"),
+        _float("tare_time", "Time to average tare samples", default="0.067", unit="s"),
+    ],
+))
+
+# ── Filament width sensors (flow compensation) ──
+_register(SectionDef(
+    section_type="hall_filament_width_sensor",
+    display_name="Hall Filament Width Sensor",
+    category="sub_component",
+    component_group="filament_sensor",
+    max_instances=1,
+    description="Hall-effect filament width sensor (dual ADC) for flow compensation",
+    params=[
+        _pin("adc1", "First ADC input pin"),
+        _pin("adc2", "Second ADC input pin"),
+        _float("Cal_dia1", "Calibration filament diameter for ADC1", default="1.5", unit="mm"),
+        _float("Cal_dia2", "Calibration filament diameter for ADC2", default="2.0", unit="mm"),
+        _float("Raw_dia1", "Raw ADC1 reading for Cal_dia1", default="9500"),
+        _float("Raw_dia2", "Raw ADC2 reading for Cal_dia2", default="10500"),
+        _int("measurement_interval", "Measurement interval", default="10"),
+        _float("default_nominal_filament_diameter", "Nominal filament diameter", unit="mm"),
+        _float("measurement_delay", "Measurement delay", unit="s"),
+        _float("max_difference", "Max difference between the two ADCs", default="0.2", unit="mm"),
+        _bool("enable", "Enable the sensor", default="False"),
+        _float("min_diameter", "Minimum filament diameter", default="1.0", unit="mm"),
+        _float("max_diameter", "Maximum filament diameter"),
+        _bool("logging", "Log measurements", default="False"),
+        _bool("enable_flow_compensation", "Enable flow compensation", default="True"),
+        _bool("use_current_dia_while_delay", "Use current diameter during delay", default="False"),
+    ],
+))
+_register(SectionDef(
+    section_type="tsl1401cl_filament_width_sensor",
+    display_name="TSL1401CL Filament Width Sensor",
+    category="sub_component",
+    component_group="filament_sensor",
+    max_instances=1,
+    description="TSL1401CL linear position sensor filament width reader for flow compensation",
+    params=[
+        _pin("pin", "Sensor analog pin"),
+        _float("default_nominal_filament_diameter", "Nominal filament diameter", unit="mm"),
+        _float("measurement_delay", "Measurement delay", unit="s"),
+        _float("max_difference", "Max difference from expected width"),
+    ],
+))
 
 
 def _seed_relational_constraints() -> None:
