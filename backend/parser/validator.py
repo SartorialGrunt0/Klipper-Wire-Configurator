@@ -857,6 +857,11 @@ def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, Valida
     # the whole project into a single pin namespace.
     _check_cross_file_pin_conflicts(configs, results)
 
+    # Pin-chip membership (F8): a pin's chip prefix must name a chip the
+    # project registers ([mcu NAME], probe, TMC virtual-endstop chips, ...),
+    # mirroring klippy/pins.py parse_pin's 'Unknown pin chip name' hard-fail.
+    _check_pin_chip_membership(configs, results, active_files)
+
     return results
 
 
@@ -1367,6 +1372,87 @@ def _check_cross_file_pin_conflicts(configs: dict[str, ConfigFile], results: dic
             line_number=anchor.line_number,
             code="shared_pin",
         ))
+
+
+def _collect_known_pin_chips(configs: dict[str, ConfigFile], active_files: set[str]) -> set[str]:
+    """Collect the pin-chip names Klipper would register for this project.
+
+    Ground truth (klippy/pins.py PrinterPins.register_chip call sites,
+    verified 2026-08-25). A pin with an explicit chip prefix must name one of
+    these, else `parse_pin` hard-fails `Unknown pin chip name '%s'`:
+      - 'mcu' is always registered (mcu.add_printer_objects)
+      - [mcu NAME]      -> NAME   (CAN chips too: [mcu EBBCan]+canbus_uuid;
+                                   there is NO [canbus] section)
+      - [probe]         -> 'probe'
+      - [multi_pin]     -> 'multi_pin'
+      - [replicape]     -> 'replicape'
+      - [tmc2130|tmc2209|tmc5160|tmc2240 NAME] -> '<type>_<name>'
+                                   (TMCVirtualPinHelper, sensorless
+                                   'virtual_endstop' pins)
+      - [adc_scaled NAME] / [ads1x1x NAME] -> NAME
+      - [sx1509 NAME]   -> 'sx1509_<name>'
+    Case-folded: Klipper section names are case-sensitive, so a config that
+    writes [mcu ebbcan] + pin ebbcan:PB0 works — accept either case.
+    """
+    chips = {"mcu"}
+    for filename in sorted(active_files):
+        config = configs[filename]
+        for section in config.sections:
+            if section.is_commented_out:
+                continue
+            sec_type = section.section_type
+            name = section.section_name.strip()
+            if sec_type == "mcu":
+                chips.add((name or "mcu").lower())
+            elif sec_type in ("probe", "multi_pin", "replicape"):
+                chips.add(sec_type.lower())
+            elif sec_type in ("tmc2130", "tmc2209", "tmc5160", "tmc2240") and name:
+                name_parts = name.split()
+                chips.add(f"{sec_type}_{name_parts[-1]}".lower())
+            elif sec_type in ("adc_scaled", "ads1x1x") and name:
+                chips.add(name.split()[-1].lower())
+            elif sec_type == "sx1509" and name:
+                chips.add(f"sx1509_{name.split()[0]}".lower())
+    return chips
+
+
+def _check_pin_chip_membership(configs: dict[str, ConfigFile], results: dict[str, ValidationResult], active_files: set[str]) -> None:
+    """Flag pins whose chip prefix names a chip Klipper never registers.
+
+    Mirrors klippy/pins.py parse_pin: split on the first ':', default chip
+    'mcu' when absent. Unprefixed pins always resolve (the builtin 'mcu' chip
+    is always present), so only explicit prefixes are checked. `<...>`
+    placeholders are skipped (not parseable pins). Project-pass only: in
+    single-file validation the defining section may live in another file.
+    """
+    known_chips = _collect_known_pin_chips(configs, active_files)
+    for filename in sorted(active_files):
+        config = configs[filename]
+        result = results.get(filename)
+        if result is None:
+            continue
+        for section in config.sections:
+            if section.is_commented_out or section.section_type == "include":
+                continue
+            sec_def = get_section_def(section.section_type)
+            for param in section.params:
+                if param.is_commented_out or param.key == "_comment_":
+                    continue
+                param_def = _find_param_def(sec_def, param.key)
+                if param_def is None or param_def.param_type != ParamType.PIN or not param.value:
+                    continue
+                for clean_pin in _normalize_pin_values(param.value):
+                    if ":" not in clean_pin or clean_pin.startswith("<"):
+                        continue
+                    chip_name = clean_pin.split(":", 1)[0].strip()
+                    if chip_name.lower() not in known_chips:
+                        result.errors.append(ValidationError(
+                            severity="error",
+                            section=section.full_header,
+                            param=param.key,
+                            message=f"Unknown pin chip name '{chip_name}'. No [mcu {chip_name}] (or driver section) defines this chip in the project.",
+                            line_number=param.line_number,
+                        ))
 
 
 def _is_allowed_shared_pin(users: list[PinUse]) -> bool:
