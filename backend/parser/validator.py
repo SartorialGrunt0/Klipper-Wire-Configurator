@@ -132,6 +132,23 @@ KINEMATICS_BASE_STEPPERS: dict[str, list[str]] = {
 
 PROBE_PLUGIN_SECTION_TYPES = {"beacon"}
 
+# TMC driver section types whose header word references the stepper section
+# the driver controls (name_references="stepper"). Ground truth (tmc.py
+# TMCMicrostepHelper, called unconditionally from the TMC base at tmc.py:339):
+#   stepper_name = " ".join(config.get_name().split()[1:])
+#   if not config.has_section(stepper_name):
+#       raise config.error("Could not find config section '[%s]' ...")
+#   mres = sconfig.getchoice('microsteps',
+#       {256: 0, 128: 1, 64: 2, 32: 3, 16: 4, 8: 5, 4: 6, 2: 7, 1: 8})
+# Both are config-load hard-fails. The microsteps restriction applies ONLY to
+# steppers a TMC driver references: a plain stepper reads microsteps as a
+# plain getint(minval=1) (stepper.py) and accepts any int — which is why the
+# microsteps schema enum could not be seeded statically (3n).
+TMC_STEPPER_DRIVER_TYPES = frozenset(
+    st for st, sd in SECTION_DEFS.items() if sd.name_references == "stepper"
+)
+TMC_MRES_VALUES = (1, 2, 4, 8, 16, 32, 64, 128, 256)
+
 
 @dataclass(frozen=True)
 class SpecialTemperatureSensorUse:
@@ -698,6 +715,12 @@ def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, Valida
         for filename, config in configs.items()
     }
 
+    # Cross-section references (F25): a TMC driver's header references the
+    # stepper section it drives; Klipper resolves it at config load
+    # regardless of file count (tmc.py), so this runs for single-file
+    # projects too (unlike the cross-file passes below it).
+    _check_tmc_stepper_references(configs, results, _get_active_project_files(configs))
+
     if len(configs) <= 1:
         return results
 
@@ -927,6 +950,94 @@ def _remove_false_single_file_probe_warnings(
                     continue
             filtered_errors.append(error)
         cfg.errors = filtered_errors
+
+
+def _check_tmc_stepper_references(
+    configs: dict[str, ConfigFile],
+    results: dict[str, ValidationResult],
+    active_files: set[str],
+) -> None:
+    """Validate TMC driver header references to their stepper sections (F25).
+
+    A `[tmcXXX <stepper>]` section references the section named `<stepper>`
+    (the words after the type). Klipper resolves it at config load
+    (tmc.py TMCMicrostepHelper):
+      1. the referenced section must exist, else
+         "Could not find config section '[<stepper>]' required by tmc driver";
+      2. that stepper's microsteps must be a TMC mres value
+         (1/2/4/8/16/32/64/128/256) via getchoice — any other int hard-fails.
+    Both are config-load hard-fails, so both are errors here. The reference is
+    resolved against the ACTIVE project (the stepper may be in an included
+    file), mirroring how Klipper loads all includes into one namespace.
+    """
+    # Map referenced section name (lowercased) -> first active ConfigSection.
+    referenced_sections: dict[str, tuple[str, ConfigSection]] = {}
+    for filename, config in configs.items():
+        if filename not in active_files:
+            continue
+        for section in config.sections:
+            if section.section_type == "include" or section.is_commented_out:
+                continue
+            key = section.section_type.lower()
+            if key not in referenced_sections:
+                referenced_sections[key] = (filename, section)
+
+    for filename, config in configs.items():
+        if filename not in active_files:
+            continue
+        for section in config.sections:
+            if section.section_type not in TMC_STEPPER_DRIVER_TYPES:
+                continue
+            if section.is_commented_out:
+                continue
+            ref_name = section.section_name.strip()
+            if not ref_name:
+                continue
+            ref_key = ref_name.lower()
+            result = results[filename]
+            if ref_key not in referenced_sections:
+                if not any(
+                    error.severity == "error"
+                    and error.section == section.full_header
+                    and error.message == f"Could not find config section '[{ref_name}]' required by tmc driver."
+                    for error in result.errors
+                ):
+                    result.errors.append(ValidationError(
+                        severity="error",
+                        section=section.full_header,
+                        param="",
+                        message=f"Could not find config section '[{ref_name}]' required by tmc driver.",
+                        line_number=section.line_number,
+                    ))
+                continue
+            # Referenced stepper exists — check its microsteps is a TMC mres.
+            ref_filename, ref_section = referenced_sections[ref_key]
+            ms_param = ref_section.get_param("microsteps")
+            if ms_param is None or not ms_param.value.strip():
+                continue
+            try:
+                ms = int(ms_param.value.strip())
+            except ValueError:
+                continue  # non-int microsteps are a type error, already reported
+            if ms not in TMC_MRES_VALUES:
+                message = (
+                    f"microsteps {ms} is not a valid TMC value "
+                    f"(must be one of {', '.join(str(v) for v in TMC_MRES_VALUES)})."
+                )
+                if not any(
+                    error.severity == "error"
+                    and error.section == section.full_header
+                    and error.param == "microsteps"
+                    and error.message == message
+                    for error in result.errors
+                ):
+                    result.errors.append(ValidationError(
+                        severity="error",
+                        section=section.full_header,
+                        param="microsteps",
+                        message=message,
+                        line_number=section.line_number,
+                    ))
 
 
 def _check_kinematics_stepper_requirements(
