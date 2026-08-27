@@ -7,7 +7,7 @@ import {
 
 // The ack gate branches on the stable `code` field, never message text, so
 // the fixtures carry realistic messages but only `code` drives the outcome.
-const issue = (severity: 'error' | 'warning', code?: string, message = 'msg') => ({
+const issue = (severity: 'error' | 'warning' | 'info', code?: string, message = 'msg') => ({
   severity,
   code,
   message,
@@ -50,6 +50,11 @@ describe('ackKindForSection', () => {
 
   it('ignores non-acknowledgeable warnings', () => {
     expect(ackKindForSection([issue('warning', 'shared_pin', "Pin 'PA0' is used by multiple sections")])).toBeNull();
+  });
+
+  it('info-level duplicates are not ack-gatable (3.5 — info needs no action)', () => {
+    expect(ackKindForSection([issue('info', 'project_duplicate', 'Section [x] is also defined in: a.cfg.')] )).toBeNull();
+    expect(sectionHasAcknowledgeableWarning([issue('info', 'project_duplicate')])).toBe(false);
   });
 });
 

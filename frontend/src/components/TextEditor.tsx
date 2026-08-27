@@ -8,6 +8,7 @@ import { buildProjectGraph } from '../utils/graphBuilder';
 import { restoreLayoutAfterRebuild } from '../utils/layoutPersistence';
 import { acknowledgeableWarning } from '../utils/warningAcknowledgment';
 import { resolveIssueLine } from '../utils/issueLine';
+import { ISSUE_MARKER } from '../utils/issueMarker';
 import type { ExampleConfig, ConfigFile, ConfigSection, ValidationError } from '../types/config';
 
 interface SearchResult {
@@ -21,7 +22,7 @@ interface SearchResult {
 interface TextIssue {
   line: number;
   text: string;
-  severity: 'error' | 'warning';
+  severity: 'error' | 'warning' | 'info';
   section?: string;
   param?: string;
   acknowledgeSection?: ConfigSection;
@@ -234,7 +235,9 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     const issues: TextIssue[] = [];
     const lines = editText.split('\n');
     for (const err of errors) {
-      if (err.severity === 'error' || err.severity === 'warning') {
+      // Info findings are legal, order-dependent context — shown in the
+      // gutter + issue list in muted grey, never as an alarm (3.5/Q1).
+      if (err.severity === 'error' || err.severity === 'warning' || err.severity === 'info') {
         // Backend line_number is authoritative; the util falls back to the
         // section/param string heuristic only when the backend gives 0.
         const lineNum = resolveIssueLine(err, lines);
@@ -242,7 +245,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
         issues.push({
           line: lineNum,
           text: err.message,
-          severity: err.severity as 'error' | 'warning',
+          severity: err.severity,
           section: err.section,
           param: err.param,
           acknowledgeSection: ack
@@ -991,15 +994,17 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
                   const lineNum = idx + 1;
                   const lineIssues = issuesByLine.get(lineNum);
                   const hasError = lineIssues?.some((i) => i.severity === 'error');
-                  const hasWarning = lineIssues?.some((i) => i.severity === 'warning');
+                  const hasWarning = !hasError && lineIssues?.some((i) => i.severity === 'warning');
+                  const hasInfo = !hasError && !hasWarning && lineIssues?.some((i) => i.severity === 'info');
                   return (
                     <div
                       key={lineNum}
                       className="h-[1.625em] flex items-center justify-end"
                       title={lineIssues?.map((i) => i.text).join('\n')}
                     >
-                      {hasError && <span className="w-2 h-2 rounded-full bg-[var(--color-error)] mr-1 shrink-0" />}
-                      {!hasError && hasWarning && <span className="w-2 h-2 rounded-full bg-[var(--color-warning)] mr-1 shrink-0" />}
+                      {hasError && <span className={`${ISSUE_MARKER.error.gutterDotClass} mr-1 shrink-0`} />}
+                      {hasWarning && <span className={`${ISSUE_MARKER.warning.gutterDotClass} mr-1 shrink-0`} />}
+                      {hasInfo && <span className={`${ISSUE_MARKER.info.gutterDotClass} mr-1 shrink-0`} />}
                       <span>{lineNum}</span>
                     </div>
                   );
@@ -1034,14 +1039,13 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
                 {inlineIssues.filter((i) => i.line > 0).map((issue, idx) => (
                   <div
                     key={idx}
-                    className={`flex items-center gap-2 px-3 py-1 text-xs cursor-pointer hover:bg-[var(--color-bg-tertiary)] ${
-                      issue.severity === 'error' ? 'text-[var(--color-error)]' : 'text-[var(--color-warning)]'
-                    }`}
+                    className="flex items-center gap-2 px-3 py-1 text-xs cursor-pointer hover:bg-[var(--color-bg-tertiary)]"
+                    style={{ color: ISSUE_MARKER[issue.severity].color }}
                     onClick={() => {
                       jumpToLine(issue.line);
                     }}
                   >
-                    <span>{issue.severity === 'error' ? '●' : '▲'}</span>
+                    <span>{ISSUE_MARKER[issue.severity].marker}</span>
                     <span className="min-w-0 flex-1 truncate">Line {issue.line}: {issue.text}</span>
                     {issue.acknowledgeSection && (
                       <button
@@ -1095,7 +1099,8 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
               const activeValidation = getFileValidation(activeFile);
               const sectionIssues = (activeValidation?.errors ?? []).filter((e) => e.section === entry.title);
               const hasSecError = sectionIssues.some((e) => e.severity === 'error');
-              const hasSecWarning = sectionIssues.some((e) => e.severity === 'warning');
+              const hasSecWarning = !hasSecError && sectionIssues.some((e) => e.severity === 'warning');
+              const hasSecInfo = !hasSecError && !hasSecWarning && sectionIssues.some((e) => e.severity === 'info');
               return (
                 <div key={entry.id} className="px-2 py-0.5">
                   <div className="flex items-start gap-1">
@@ -1120,6 +1125,8 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
                         <span className="w-2 h-2 rounded-full bg-[var(--color-error)] shrink-0" title="This section has validation errors" />
                       ) : hasSecWarning ? (
                         <span className="w-2 h-2 rounded-full bg-[var(--color-warning)] shrink-0" title="This section has warnings" />
+                      ) : hasSecInfo ? (
+                        <span className={`${ISSUE_MARKER.info.dotClass} shrink-0`} title="This section has info notes (legal, no action required)" />
                       ) : null}
                     </button>
                   </div>

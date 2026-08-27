@@ -78,7 +78,7 @@ describe('issue classification', () => {
   it('recognizes retry-exempt duplicate-section and shared-pin codes', () => {
     expect(isRetryExemptAssistantValidationIssue(error({
       code: 'project_duplicate',
-      message: 'Section [extruder] can only be defined once across active included config files.',
+      message: 'Section [extruder] is also defined in: a.cfg. Klipper merges duplicate sections — the later include takes precedence.',
     }))).toBe(true);
     expect(isRetryExemptAssistantValidationIssue(error({
       code: 'shared_pin',
@@ -91,10 +91,10 @@ describe('issue classification', () => {
 
   it('hasOnlyRetryExempt returns true when all issues are exempt', () => {
     expect(hasOnlyRetryExemptAssistantValidationIssues([
-      { filename: 'a.cfg', errors: [error({ code: 'project_duplicate', message: 'Section [x] can only be defined once.' })] },
+      { filename: 'a.cfg', errors: [error({ code: 'project_duplicate', message: 'Section [x] is defined multiple times in this file — the later definition wins.' })] },
     ])).toBe(true);
     expect(hasOnlyRetryExemptAssistantValidationIssues([
-      { filename: 'a.cfg', errors: [error({ message: 'Section [x] can only be defined once.' }), error()] },
+      { filename: 'a.cfg', errors: [error({ message: 'Section [x] is defined multiple times in this file — the later definition wins.' }), error()] },
     ])).toBe(false);
     expect(hasOnlyRetryExemptAssistantValidationIssues([])).toBe(false);
   });

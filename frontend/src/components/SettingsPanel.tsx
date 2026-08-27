@@ -210,8 +210,8 @@ export default function SettingsPanel() {
 
   // Get validation issues for this section
   const sectionIssues = useMemo(() => {
-    if (!sectionHeader) return [] as Array<{ severity: 'error' | 'warning'; message: string; code?: string }>;
-    const issues: Array<{ severity: 'error' | 'warning'; message: string; code?: string }> = [];
+    if (!sectionHeader) return [] as Array<{ severity: 'error' | 'warning' | 'info'; message: string; code?: string }>;
+    const issues: Array<{ severity: 'error' | 'warning' | 'info'; message: string; code?: string }> = [];
     const validationFiles = sectionConfigFile
       ? [sectionConfigFile]
       : nodeConfigFile
@@ -222,7 +222,10 @@ export default function SettingsPanel() {
       if (!result) continue;
       for (const issue of result.errors) {
         if (issue.section !== sectionHeader) continue;
-        if (issue.severity === 'error' || issue.severity === 'warning') {
+        // Info findings show like warnings here (same rows, muted grey) so
+        // they are visible when the card is selected — but never get an
+        // Acknowledge button: the ack gate only recognizes warning issues.
+        if (issue.severity === 'error' || issue.severity === 'warning' || issue.severity === 'info') {
           issues.push({ severity: issue.severity, message: issue.message, code: issue.code });
         }
       }
@@ -1284,7 +1287,12 @@ export default function SettingsPanel() {
       {sectionIssues.length > 0 && (
         <div className="border-b border-[var(--color-bg-tertiary)]">
           {sectionIssues.map((issue, i) => {
-            const color = issue.severity === 'error' ? 'var(--color-error)' : 'var(--color-warning)';
+            const color = issue.severity === 'error' ? 'var(--color-error)'
+              : issue.severity === 'warning' ? 'var(--color-warning)'
+              : 'var(--color-text-secondary)';
+            const icon = issue.severity === 'error' ? '●'
+              : issue.severity === 'warning' ? '⚠'
+              : '·';
             return (
               <div
                 key={`${issue.severity}_${i}`}
@@ -1295,7 +1303,7 @@ export default function SettingsPanel() {
                 }}
               >
                 <p className="text-xs" style={{ color }}>
-                  ⚠ {issue.message}
+                  {icon} {issue.message}
                 </p>
               </div>
             );
