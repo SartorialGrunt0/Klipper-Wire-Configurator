@@ -18,7 +18,13 @@ from models.config_models import (
     SectionUpdate,
     WarningAcknowledgementRequest,
 )
-from parser.config_parser import ConfigFile, ConfigParam, ConfigSection, parse_config
+from parser.config_parser import (
+    ConfigFile,
+    ConfigParam,
+    ConfigSection,
+    find_unclosed_headers,
+    parse_config,
+)
 from parser.config_schema import (
     SECTION_DEFS,
     ParamType,
@@ -674,6 +680,12 @@ def _config_update_to_config_file(data: ConfigUpdate) -> ConfigFile:
         sections=sections,
         includes=data.includes,
         header_comments=data.header_comments,
+        raw_text=data.raw_text or "",
+        # unclosed_headers is a parse-time field that to_dict() doesn't
+        # serialize, so re-derive it from the raw text when present — the
+        # validation endpoints otherwise reconstruct the file without it and
+        # the malformed-header check would silently never run.
+        unclosed_headers=find_unclosed_headers(data.raw_text) if data.raw_text else [],
     )
 
 

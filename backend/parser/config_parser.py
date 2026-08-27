@@ -156,6 +156,27 @@ NAMED_SECTION_TYPES = {
 }
 
 
+def find_unclosed_headers(text: str) -> list[tuple[int, str]]:
+    """Find malformed section headers in raw config text.
+
+    A malformed header is a column-0 line that opens '[' with no closing ']'
+    anywhere on the line (e.g. ``[mcu``). Klipper hard-fails on these.
+    Detected from the raw text because the main parse loop folds such a line
+    into the previous multi-line value or stashes it as a comment — but the
+    line is still visible in the text itself.
+
+    Indented lines and comment lines are never section headers in Klipper, so
+    they're skipped. Returns ``(line_number, header_text)`` pairs.
+    """
+    found: list[tuple[int, str]] = []
+    for idx, raw in enumerate(text.splitlines()):
+        if raw[:1] in (" ", "\t") or raw.lstrip().startswith("#"):
+            continue
+        if UNCLOSED_SECTION_RE.match(raw):
+            found.append((idx + 1, raw.strip()))
+    return found
+
+
 def parse_section_header(header: str) -> tuple[str, str]:
     """Parse a section header into (section_type, section_name).
 
@@ -469,16 +490,7 @@ def parse_config(text: str, filename: str = "printer.cfg") -> ConfigFile:
 
     config.save_config_start_line, config.save_config_sections = _parse_save_config_sections(lines)
 
-    # Malformed section headers: a column-0 line that opens '[' with no
-    # closing ']' on the line. Scanned from the raw lines so a header that
-    # the main loop folded into a previous multi-line value (or stashed as a
-    # comment) is still caught. Indented lines and comment lines are never
-    # headers in Klipper, so they're skipped.
-    for idx, raw in enumerate(lines):
-        if raw[:1] in (" ", "\t") or raw.lstrip().startswith("#"):
-            continue
-        if UNCLOSED_SECTION_RE.match(raw):
-            config.unclosed_headers.append((idx + 1, raw.strip()))
+    config.unclosed_headers = find_unclosed_headers(text)
 
     return config
 
