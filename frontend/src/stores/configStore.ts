@@ -20,8 +20,11 @@ async function _revalidateFile(
   const api = await import('../services/api');
   try {
     const result = await api.validateConfig(cf);
+    // Track the text this result was computed against so the editor can
+    // tell a stale line_number (user typed ahead) from an authoritative one.
     set((state) => ({
       validation: { ...state.validation, [filename]: result },
+      validationText: { ...state.validationText, [filename]: cf.raw_text ?? '' },
     }));
   } catch {
     // Validation API unavailable — skip silently
@@ -43,6 +46,10 @@ async function _revalidateAll(get: () => ConfigState, set: (partial: Partial<Con
     const results = await api.validateProject(configFiles);
     set((state) => ({
       validation: { ...state.validation, ...results },
+      validationText: {
+        ...state.validationText,
+        ...Object.fromEntries(filenames.map((fn) => [fn, configFiles[fn]?.raw_text ?? ''])),
+      },
     }));
   } catch {
     for (const filename of filenames) {
@@ -61,6 +68,12 @@ interface ConfigState {
   configFiles: Record<string, ConfigFile>;
   activeFile: string;
   validation: Record<string, ValidationResult>;
+  /** Per-file text snapshot the current validation result was computed
+   *  against (the model's raw_text at revalidation time). The text editor
+   *  compares this to the live textarea text: when the user has typed ahead,
+   *  a finding's backend line_number is stale and the editor re-resolves the
+   *  line locally instead of painting a dot on the wrong line. */
+  validationText: Record<string, string>;
   schemas: Record<string, SectionSchema>;
   selectedSection: string | null; // full_header of selected section
   selectedSectionFile: string | null; // config file owning the selected section (duplicate-header safe)
@@ -142,6 +155,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   configFiles: {},
   activeFile: 'printer.cfg',
   validation: {},
+  validationText: {},
   schemas: {},
   selectedSection: null,
   selectedSectionFile: null,
@@ -172,6 +186,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const nextValidation = { ...s.validation };
       delete nextValidation[filename];
 
+      const nextValidationText = { ...s.validationText };
+      delete nextValidationText[filename];
+
       const nextTextParseErrors = { ...s.textParseErrors };
       delete nextTextParseErrors[filename];
 
@@ -181,6 +198,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         isDirty: true,
         configFiles: nextConfigFiles,
         validation: nextValidation,
+        validationText: nextValidationText,
         textParseErrors: nextTextParseErrors,
         activeFile: s.activeFile === filename ? remainingFiles[0] || 'printer.cfg' : s.activeFile,
         selectedSection: s.activeFile === filename || s.selectedSectionFile === filename ? null : s.selectedSection,
@@ -194,6 +212,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   setValidation: (filename, result) =>
     set((s) => ({
       validation: { ...s.validation, [filename]: result },
+      validationText: { ...s.validationText, [filename]: s.configFiles[filename]?.raw_text ?? '' },
     })),
 
   setSchemas: (schemas) => set({ schemas }),
@@ -390,6 +409,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       configFiles: {},
       activeFile: 'printer.cfg',
       validation: {},
+      validationText: {},
       selectedSection: null,
       selectedSectionFile: null,
       selectedSectionLine: null,
@@ -445,6 +465,11 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         nextTextParseErrors[newName] = nextTextParseErrors[oldName];
         delete nextTextParseErrors[oldName];
       }
+      const nextValidationText = { ...s.validationText };
+      if (nextValidationText[oldName] != null) {
+        nextValidationText[newName] = nextValidationText[oldName];
+        delete nextValidationText[oldName];
+      }
       // Update include directives in other files that reference the old name
       for (const [fn, cf] of Object.entries(next)) {
         if (cf.includes.includes(oldName)) {
@@ -456,6 +481,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         configFiles: next,
         activeFile: s.activeFile === oldName ? newName : s.activeFile,
         validation: nextValidation,
+        validationText: nextValidationText,
         originalTexts: nextOriginals,
         textParseErrors: nextTextParseErrors,
         selectedSection: s.selectedSection,

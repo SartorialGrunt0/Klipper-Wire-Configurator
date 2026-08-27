@@ -60,6 +60,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   } = useConfigStore();
   const isDirty = useConfigStore((s) => s.isDirty);
   const parseError = useConfigStore((s) => s.textParseErrors[activeFile]);
+  const validationText = useConfigStore((s) => s.validationText);
 
   const config = configFiles[activeFile];
   const filenames = Object.keys(configFiles);
@@ -232,19 +233,30 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   // lone file can't know about — duplicate sections (info) and missing
   // includes (warning) — so the gutter + issue list stay in sync with the
   // right-hand section list, the save button, and the graph.
+  //
+  // Staleness guard: validation lags the textarea by the 800ms parse debounce
+  // + the 500ms revalidation debounce + network time. While the user is
+  // typing, the backend line_numbers describe the OLD layout — rendering them
+  // as-is paints a dot several lines off (the "info dot in the middle of a
+  // section" bug). When the live text has moved ahead of the text the
+  // validation was computed against, re-resolve each line from the current
+  // text (or hide the finding) until the fresh result lands.
   const inlineIssues = useMemo((): TextIssue[] => {
     const errors = validation[activeFile]?.errors ?? [];
     if (!errors || errors.length === 0) return [];
     const issues: TextIssue[] = [];
     const lines = editText.split('\n');
     const activeSections = configFiles[activeFile]?.sections ?? [];
+    const normalizeNewlines = (s: string) => s.replace(/\r\n?/g, '\n');
+    const validatedText = validationText[activeFile];
+    const validationStale =
+      validatedText != null &&
+      normalizeNewlines(validatedText) !== normalizeNewlines(editText);
     for (const err of errors) {
       // Info findings are legal, order-dependent context — shown in the
       // gutter + issue list in muted grey, never as an alarm (3.5/Q1).
       if (err.severity === 'error' || err.severity === 'warning' || err.severity === 'info') {
-        // Backend line_number is authoritative; the util falls back to the
-        // section/param string heuristic only when the backend gives 0.
-        const lineNum = resolveIssueLine(err, lines);
+        const lineNum = resolveIssueLine(err, lines, { stale: validationStale });
         const ack = err.severity === 'warning' ? acknowledgeableWarning(err) : null;
         issues.push({
           line: lineNum,
@@ -260,7 +272,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
       }
     }
     return issues;
-  }, [validation, activeFile, editText, configFiles]);
+  }, [validation, validationText, activeFile, editText, configFiles]);
 
   const handleAcknowledgeWarning = useCallback(async (section: ConfigSection, kind: 'unknown' | 'duplicate' = 'unknown') => {
     if (kind === 'duplicate') {

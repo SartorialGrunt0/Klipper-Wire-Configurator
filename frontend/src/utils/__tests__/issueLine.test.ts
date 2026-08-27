@@ -74,4 +74,45 @@ describe('resolveIssueLine', () => {
     const e = err({ line_number: 0, section: 'nonexistent', param: 'pin' });
     expect(resolveIssueLine(e, TEXT)).toBe(0);
   });
+
+  describe('stale results (user typed ahead of the revalidation)', () => {
+    // The validation result below was computed against OLD_TEXT, where
+    // stepper_x is at line 1. In CURRENT_TEXT the user inserted two lines at
+    // the top, so the section now sits at line 3.
+    const OLD_TEXT = ['[stepper_x]', 'step_pin: PB0'];
+    const CURRENT_TEXT = ['# new comment', '', '[stepper_x]', 'step_pin: PB0'];
+
+    it('ignores the stale backend line and re-resolves via the section header', () => {
+      const e = err({ line_number: 1, section: 'stepper_x', param: 'step_pin' });
+      // Without stale: trusts the (stale) backend number 1.
+      expect(resolveIssueLine(e, CURRENT_TEXT)).toBe(1);
+      // With stale: re-locates step_pin in the CURRENT text (line 4).
+      expect(resolveIssueLine(e, CURRENT_TEXT, { stale: true })).toBe(4);
+    });
+
+    it('falls back to the section header line when the param is gone', () => {
+      const e = err({ line_number: 1, section: 'stepper_x', param: 'gone_param' });
+      expect(resolveIssueLine(e, CURRENT_TEXT, { stale: true })).toBe(3);
+    });
+
+    it('keeps a stale unclosed-header line that still looks broken in the new text', () => {
+      // The broken '[mcu line did not move — the same text is still on the
+      // line the backend named, so the dot stays put instead of vanishing.
+      const broken = ['[printer]', 'kinematics: corexy', '[mcu', 'status_timeout: 500'];
+      const e = err({ line_number: 3, section: 'mcu', param: '' });
+      expect(resolveIssueLine(e, broken, { stale: true })).toBe(3);
+    });
+
+    it('hides the finding (0) when the section cannot be found in the new text', () => {
+      // User deleted the section after validation ran — the finding must not
+      // paint a dot on whatever line 1 now happens to be.
+      const e = err({ line_number: 1, section: 'stepper_x', param: 'step_pin' });
+      expect(resolveIssueLine(e, ['[printer]'], { stale: true })).toBe(0);
+    });
+
+    it('trusts the backend line when not stale, even if the heuristic disagrees', () => {
+      const e = err({ line_number: 4, section: 'stepper_x', param: 'step_pin' });
+      expect(resolveIssueLine(e, CURRENT_TEXT)).toBe(4);
+    });
+  });
 });
