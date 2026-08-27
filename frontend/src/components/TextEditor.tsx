@@ -413,9 +413,17 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     const lineLen = lines[line - 1]?.length ?? 0;
     textareaRef.current.focus();
     textareaRef.current.setSelectionRange(charPos, charPos + lineLen);
-    // Approximate scroll to bring line into view
-    const approxLineHeight = 21;
-    textareaRef.current.scrollTop = Math.max(0, (line - 5) * approxLineHeight);
+    // Scroll the target line into view using the textarea's ACTUAL metrics.
+    // The previous hardcoded 21px under-shot the real 22.75px line rhythm
+    // (14px font, leading-relaxed) plus the 16px top padding, so every jump
+    // landed a growing number of lines short (21 vs 22.75 → ~8px high per line).
+    const cs = window.getComputedStyle(textareaRef.current);
+    const lineHeight = parseFloat(cs.lineHeight) || 22.75;
+    const paddingTop = parseFloat(cs.paddingTop) || 16;
+    const lineTop = paddingTop + (line - 1) * lineHeight;
+    const viewportH = textareaRef.current.clientHeight || 400;
+    // Bring the line to ~20% down from the top of the visible area.
+    textareaRef.current.scrollTop = Math.max(0, lineTop - viewportH * 0.2);
     syncLineNumbersScroll();
   }, [syncLineNumbersScroll]);
 
