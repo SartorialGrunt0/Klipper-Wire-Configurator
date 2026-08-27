@@ -777,7 +777,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       // The rebuild renumbers node ids — re-apply the saved layout so
       // accepting an AI edit doesn't auto-arrange over the user's current
       // arrangement (and the autosave can't persist that reset).
-      await restoreLayoutAfterRebuild(graphStore, useNativeStore.getState().isNative);
+      await restoreLayoutAfterRebuild(useGraphStore.getState, useNativeStore.getState().isNative);
       setError(null);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to accept assistant changes.');

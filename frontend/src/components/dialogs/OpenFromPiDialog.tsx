@@ -142,7 +142,7 @@ export default function OpenFromPiDialog({ onClose }: OpenFromPiDialogProps) {
       // The rebuild renumbers node ids — re-apply the saved layout so an
       // open doesn't auto-arrange over the user's arrangement, and the
       // macro-state persist below saves the restored arrangement.
-      await restoreLayoutAfterRebuild(graphStore, isNative);
+      await restoreLayoutAfterRebuild(useGraphStore.getState, isNative);
 
       if (clearMacroDesignerState) {
         await persistClearedMacroDesignerState();
