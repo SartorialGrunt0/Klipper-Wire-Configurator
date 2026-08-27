@@ -84,6 +84,12 @@ class ConfigFile:
     raw_text: str = ""
     save_config_sections: list[ConfigSection] = field(default_factory=list)
     save_config_start_line: int = 0
+    # (line_number, header_text) for each malformed section header — a
+    # column-0 '[' with no closing ']' on the line. Detected at parse time
+    # from the raw text (the lines the parser folds into the previous value
+    # or a comment are still visible there), so validation can point at the
+    # exact line Klipper would refuse to load.
+    unclosed_headers: list[tuple[int, str]] = field(default_factory=list)
 
     def get_section(self, full_header: str) -> Optional[ConfigSection]:
         for s in self.sections:
@@ -108,6 +114,10 @@ class ConfigFile:
 SECTION_RE = re.compile(r"^\[([^\]]+)\]\s*(?:#.*)?$")
 COMMENTED_SECTION_RE = re.compile(r"^#\[([^\]]+)\]\s*(?:#.*)?$")
 INCLUDE_RE = re.compile(r"^\[include\s+([^\]]+)\]\s*(?:#.*)?$")
+# A section header line that opens a '[' at column 0 but has no closing
+# ']' anywhere on the line (e.g. "[mcu"). Klipper hard-fails on these
+# ("Unable to read section header"); KWC used to swallow them silently.
+UNCLOSED_SECTION_RE = re.compile(r"^\[[^\]]*$")
 PARAM_RE = re.compile(r"^(\w[\w]*)\s*([:=])\s*(.*?)(?:\s*#(.*))?$")
 COMMENTED_PARAM_RE = re.compile(r"^#\s*(\w[\w]*)\s*([:=])\s*(.*?)(?:\s*#(.*))?$")
 SAVE_CONFIG_BANNER_RE = re.compile(r"^#\*#\s*<.*SAVE_CONFIG.*>\s*$")
@@ -458,6 +468,17 @@ def parse_config(text: str, filename: str = "printer.cfg") -> ConfigFile:
             config.header_comments.extend(pending_comments)
 
     config.save_config_start_line, config.save_config_sections = _parse_save_config_sections(lines)
+
+    # Malformed section headers: a column-0 line that opens '[' with no
+    # closing ']' on the line. Scanned from the raw lines so a header that
+    # the main loop folded into a previous multi-line value (or stashed as a
+    # comment) is still caught. Indented lines and comment lines are never
+    # headers in Klipper, so they're skipped.
+    for idx, raw in enumerate(lines):
+        if raw[:1] in (" ", "\t") or raw.lstrip().startswith("#"):
+            continue
+        if UNCLOSED_SECTION_RE.match(raw):
+            config.unclosed_headers.append((idx + 1, raw.strip()))
 
     return config
 

@@ -513,6 +513,25 @@ def validate_config(config: ConfigFile) -> ValidationResult:
     acknowledged_duplicate_types = load_acknowledged_duplicate_section_types()
     printer_kinematics = _get_printer_kinematics(config)
 
+    # Malformed section header (column-0 '[' with no closing ']') — Klipper
+    # hard-fails at load with "Unable to read section header", so this is an
+    # error that blocks save. The parser records the exact line; the section
+    # header itself is absent from config.sections, so this check runs
+    # independently of the per-section loop below.
+    for line_number, header_text in config.unclosed_headers:
+        result.errors.append(ValidationError(
+            severity="error",
+            section=header_text.lstrip("[").strip() or header_text,
+            param="",
+            message=(
+                f"Section header '{header_text}' is missing its closing ']' — "
+                "Klipper will refuse to load this file. Add the closing "
+                "bracket (e.g. '[mcu mainboard]')."
+            ),
+            line_number=line_number,
+            code="unclosed_section_header",
+        ))
+
     section_counts: dict[str, int] = {}
     used_pins: dict[str, list[PinUse]] = {}
     defined_sections: set[str] = set()
