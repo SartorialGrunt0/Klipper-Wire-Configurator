@@ -225,12 +225,13 @@ def _get_active_project_files(configs: dict[str, ConfigFile]) -> set[str]:
 
 
 def _project_duplicate_message(sec_type: str, other_files: list[str]) -> str:
-    # Cross-file duplication of a singleton section is a warning (Klipper
-    # merges them, later file wins), never an error — it is always
-    # acknowledgeable to clear the save-button flag.
-    message = f"Section [{sec_type}] is reused across active included config files."
-    if other_files:
-        message += f" Also defined in: {', '.join(other_files)}."
+    # Cross-file duplication of a singleton section is INFO: Klipper merges
+    # duplicate sections (RawConfigParser(strict=False), later file wins) and
+    # never hard-fails. The finding's value is stating the precedence — which
+    # definition wins — not alarm.
+    message = f"Section [{sec_type}] is also defined in: {', '.join(other_files)}."
+    message += " Klipper merges duplicate sections — the later include"
+    message += " takes precedence."
     return message
 
 
@@ -573,16 +574,22 @@ def validate_config(config: ConfigFile) -> ValidationResult:
             continue
 
         # Check max instances
-        # Klipper tolerates a duplicated singleton section (later definition
-        # wins), so this is a warning the user may acknowledge — not an error.
-        # An acknowledged section type suppresses the warning (ack is per type).
+        # Klipper merges a duplicated singleton section (later definition
+        # wins) and never hard-fails, so this is info — legal, order-
+        # dependent, no action required. The old warning tier forced ack +
+        # save-button yellow on a finding that was not wrong (3.5).
+        # An acknowledged section type still suppresses the finding (ack is
+        # per type — existing users' acks stay effective).
         if sec_def.max_instances == 1 and section_counts[sec_type] > 1:
             if sec_type not in acknowledged_duplicate_types:
                 result.errors.append(ValidationError(
-                    severity="warning",
+                    severity="info",
                     section=section.full_header,
                     param="",
-                    message=f"Section [{sec_type}] can only be defined once.",
+                    message=(
+                        f"Section [{sec_type}] is defined multiple times in this"
+                        " file — the later definition wins."
+                    ),
                     line_number=section.line_number,
                     code="project_duplicate",
                 ))
@@ -696,7 +703,13 @@ def validate_config(config: ConfigFile) -> ValidationResult:
     )
 
     # Check for pin conflicts
-    _check_pin_conflicts(used_pins, result)
+    _check_pin_conflicts(
+        used_pins,
+        result,
+        _collect_duplicate_pin_override_pins(
+            {config.filename: config}, {config.filename},
+        ),
+    )
 
     return result
 
@@ -707,8 +720,8 @@ def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, Valida
     Single-file validation remains file-local. For multi-file projects, this
     adds cross-file checks for sections that Klipper allows only once across the
     effective configuration, such as [printer], [stepper_x], or [stepper_z].
-    Duplicates are warnings (Klipper merges them, later file wins) that the
-    user can acknowledge to clear the save-button flag.
+    Duplicates are info findings (Klipper merges them, later file wins —
+    legal, no action required); an acknowledged section type suppresses them.
     """
     results = {
         filename: validate_config(config)
@@ -759,7 +772,7 @@ def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, Valida
 
             result = results[filename]
             if any(
-                error.severity == "warning"
+                error.severity == "info"
                 and error.section == section.full_header
                 and error.message == message
                 for error in result.errors
@@ -767,7 +780,7 @@ def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, Valida
                 continue
 
             result.errors.append(ValidationError(
-                severity="warning",
+                severity="info",
                 section=section.full_header,
                 param="",
                 message=message,
@@ -780,8 +793,8 @@ def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, Valida
     # across included files. Klipper merges duplicate headers
     # case-insensitively (RawConfigParser(strict=False), later file wins)
     # and never hard-fails, so — like singleton-type duplicates — this is an
-    # acknowledgeable warning, not an error. Ack is per section type, same
-    # store as the singleton path above.
+    # info finding, not an error or warning. Ack (per section type) still
+    # suppresses it, same store as the singleton path above.
     header_sections: dict[str, list[tuple[str, ConfigSection]]] = {}
     for filename, config in configs.items():
         if filename not in active_files:
@@ -815,7 +828,7 @@ def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, Valida
 
             result = results[filename]
             if any(
-                error.severity == "warning"
+                error.severity == "info"
                 and error.section == section.full_header
                 and error.message == message
                 for error in result.errors
@@ -823,7 +836,7 @@ def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, Valida
                 continue
 
             result.errors.append(ValidationError(
-                severity="warning",
+                severity="info",
                 section=section.full_header,
                 param="",
                 message=message,
@@ -914,7 +927,11 @@ def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, Valida
     # Cross-file pin conflicts (F8): a pin shared by sections in different
     # project files is the same conflict as within one file — Klipper loads
     # the whole project into a single pin namespace.
-    _check_cross_file_pin_conflicts(configs, results)
+    _check_cross_file_pin_conflicts(
+        configs,
+        results,
+        _collect_duplicate_pin_override_pins(configs, active_files),
+    )
 
     # Pin-chip membership (F8): a pin's chip prefix must name a chip the
     # project registers ([mcu NAME], probe, TMC virtual-endstop chips, ...),
@@ -1541,26 +1558,52 @@ def _track_pin_usage(param, section, used_pins: dict, filename: str = "") -> Non
         ))
 
 
-def _check_pin_conflicts(used_pins: dict[str, list[PinUse]], result: ValidationResult):
-    """Check for pins used by multiple sections."""
+def _check_pin_conflicts(
+    used_pins: dict[str, list[PinUse]],
+    result: ValidationResult,
+    duplicate_pin_override_pins: frozenset[str] = frozenset(),
+) -> None:
+    """Check for pins used by multiple sections.
+
+    Severity: error. Klipper hard-fails a pin claimed twice
+    (klippy/pins.py: "pin %s used multiple times in config") unless the pin
+    is in allow_multi_use_pins ([duplicate_pin_override]) or the sharing goes
+    through a shared share_type — and _is_allowed_shared_pin models exactly
+    those share_type families, so every conflict that survives the exemptions
+    is a startup failure (ground-truthed on the Trident, plan 3.5/Q2).
+    """
     for pin, users in used_pins.items():
         if len(users) <= 1 or _is_allowed_shared_pin(users):
             continue
+        if pin in duplicate_pin_override_pins:
+            continue  # [duplicate_pin_override] registered it — legal multi-use
 
-        # Anchor the warning to the first user so it renders in the gutter
+        # Anchor the finding to the first user so it renders in the gutter
         # (line) and on the section node dot. The message still lists all users.
         anchor = next((u for u in users if u.section), users[0])
         result.errors.append(ValidationError(
-            severity="warning",
+            severity="error",
             section=anchor.section,
             param=anchor.param,
-            message=f"Pin '{pin}' is used by multiple sections: {', '.join(user.label for user in users)}",
+            message=_shared_pin_message(pin, users),
             line_number=anchor.line_number,
             code="shared_pin",
         ))
 
 
-def _check_cross_file_pin_conflicts(configs: dict[str, ConfigFile], results: dict[str, ValidationResult]) -> None:
+def _shared_pin_message(pin: str, users: list[PinUse]) -> str:
+    return (
+        f"Pin '{pin}' is used by multiple sections: "
+        f"{', '.join(user.label for user in users)} — Klipper will fail to"
+        " start (pin used multiple times in config)."
+    )
+
+
+def _check_cross_file_pin_conflicts(
+    configs: dict[str, ConfigFile],
+    results: dict[str, ValidationResult],
+    duplicate_pin_override_pins: frozenset[str] = frozenset(),
+) -> None:
     """Detect pins shared between sections in DIFFERENT project files.
 
     Klipper loads the whole project into one config namespace and pins.py
@@ -1597,6 +1640,8 @@ def _check_cross_file_pin_conflicts(configs: dict[str, ConfigFile], results: dic
     for pin, users in used_pins.items():
         if len(users) <= 1 or _is_allowed_shared_pin(users):
             continue
+        if pin in duplicate_pin_override_pins:
+            continue  # [duplicate_pin_override] registered it — legal multi-use
         files_involved = {u.filename for u in users}
         if len(files_involved) < 2:
             continue  # same-file conflict already reported per-file
@@ -1611,13 +1656,43 @@ def _check_cross_file_pin_conflicts(configs: dict[str, ConfigFile], results: dic
         if result is None:
             continue
         result.errors.append(ValidationError(
-            severity="warning",
+            severity="error",
             section=anchor.section,
             param=anchor.param,
-            message=f"Pin '{pin}' is used by multiple sections: {', '.join(user.label for user in users)}",
+            message=_shared_pin_message(pin, users),
             line_number=anchor.line_number,
             code="shared_pin",
         ))
+
+
+def _collect_duplicate_pin_override_pins(
+    configs: dict[str, ConfigFile],
+    active_files: set[str],
+) -> frozenset[str]:
+    """Collect pins registered by [duplicate_pin_override] in active files.
+
+    Ground truth (klippy/extras/duplicate_pin_override.py): the module adds
+    every pin from its `pins:` getlist to PrinterPins.allow_multi_use_pins,
+    where those pins may be claimed by multiple sections without the
+    "pin used multiple times in config" hard-fail (pins.py:103). KWC must
+    exempt the same pins so a legal override setup does not false-positive.
+    """
+    pins: set[str] = set()
+    for filename in sorted(active_files):
+        config = configs.get(filename)
+        if config is None:
+            continue
+        for section in config.sections:
+            if (
+                section.is_commented_out
+                or section.section_type != "duplicate_pin_override"
+            ):
+                continue
+            for param in section.params:
+                if param.is_commented_out or param.key != "pins" or not param.value:
+                    continue
+                pins.update(_normalize_pin_values(param.value))
+    return frozenset(pins)
 
 
 def _collect_known_pin_chips(configs: dict[str, ConfigFile], active_files: set[str]) -> set[str]:

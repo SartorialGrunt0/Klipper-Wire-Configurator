@@ -1,4 +1,5 @@
 import sys
+from itertools import chain
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'backend'))
@@ -51,9 +52,11 @@ def test_unknown_section_carries_code():
 
 def test_single_file_duplicate_carries_code():
     result = _validate('[virtual_sdcard]\nnetwork_drive: //x\n[virtual_sdcard]\nnetwork_drive: //y\n')
-    dups = [e for e in result.errors if 'can only be defined once' in e.message]
-    assert dups, "expected a duplicate-section warning"
-    assert all(e.code == 'project_duplicate' for e in dups)
+    dups = _with_code(result.errors, 'project_duplicate')
+    assert dups, "expected a duplicate-section finding"
+    assert all(e.severity == 'info' for e in dups), \
+        f"duplicate sections are legal (Klipper merges) — info, got {[e.severity for e in dups]}"
+    assert all('defined multiple times in this file' in e.message for e in dups)
 
 
 def test_cross_file_duplicate_carries_code():
@@ -63,9 +66,11 @@ def test_cross_file_duplicate_carries_code():
         'stepper-b.cfg': '[stepper_z]\nstep_pin: gpio21\ndir_pin: gpio20\nmicrosteps: 16\nrotation_distance: 40\n',
     })
     for filename in ('stepper-a.cfg', 'stepper-b.cfg'):
-        dups = [e for e in results[filename].errors if 'is reused across active included config files' in e.message]
-        assert dups, f"expected a cross-file duplicate warning in {filename}"
-        assert all(e.code == 'project_duplicate' for e in dups)
+        dups = _with_code(results[filename].errors, 'project_duplicate')
+        assert dups, f"expected a cross-file duplicate finding in {filename}"
+        assert all(e.severity == 'info' for e in dups)
+        assert all('is also defined in' in e.message for e in dups), \
+            f"message should name the other file(s): {[e.message for e in dups]}"
 
 
 # ── shared_pin ─────────────────────────────────────────────────────
@@ -80,8 +85,26 @@ def test_shared_pin_carries_code():
         'rotation_distance: 40\nendstop_pin: ^PB6\nposition_endstop: 0\nposition_max: 235\n'
     )
     pins = [e for e in result.errors if 'is used by multiple sections' in e.message]
-    assert pins, "expected a pin-conflict warning"
+    assert pins, "expected a pin-conflict finding"
     assert all(e.code == 'shared_pin' for e in pins)
+    assert all(e.severity == 'error' for e in pins), \
+        f"shared pin is a Klipper hard-fail — error, got {[e.severity for e in pins]}"
+
+
+def test_info_only_result_sets_neither_has_errors_nor_has_warnings():
+    # A result containing only info findings (e.g. cross-file duplicate
+    # sections) is clean for save/status purposes — info counts as neither
+    # errors nor warnings.
+    results = _validate_project({
+        'printer.cfg': '[include extra.cfg]\n[gcode_macro FOO]\ngcode: G28\n',
+        'extra.cfg': '[gcode_macro FOO]\ngcode: G1 X10\n',
+    })
+    dups = _with_code(list(chain(*[r.errors for r in results.values()])), 'project_duplicate')
+    assert dups, "expected duplicate findings in the fixture"
+    for result in results.values():
+        assert not result.has_errors
+        assert not result.has_warnings, \
+            f"info-only file must not set has_warnings: {[e.severity for e in result.errors]}"
 
 
 # ── macro_jinja_unterminated ───────────────────────────────────────

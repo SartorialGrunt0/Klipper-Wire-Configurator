@@ -9,9 +9,10 @@ every type with max_instances=0, so an exact-header duplicate like two
 [gcode_macro FOO] (or [tmc2209 stepper_x]) across included files was
 uncaught.
 
-These tests pin: warning severity, one warning per occurrence, both files
-flagged, ack-gating by section type, case-insensitive header matching, and
-no double-flagging of singleton types.
+These tests pin: info severity (Klipper merges duplicates — later file
+wins, no action required), one finding per occurrence, both files flagged,
+ack-gating by section type, case-insensitive header matching, and no
+double-flagging of singleton types.
 """
 import sys
 from pathlib import Path
@@ -36,7 +37,7 @@ def _dup_warnings(results: dict) -> list:
     ]
 
 
-def test_cross_file_macro_header_duplicate_is_warning():
+def test_cross_file_macro_header_duplicate_is_info():
     a = (
         "[include extra.cfg]\n"
         "\n"
@@ -50,7 +51,8 @@ def test_cross_file_macro_header_duplicate_is_warning():
     results = _project(a, b)
     dups = _dup_warnings(results)
     assert dups, "cross-file exact-header duplicate of a multi-instance section must be flagged"
-    assert all(e.severity == 'warning' for e in dups)
+    assert all(e.severity == 'info' for e in dups), \
+        f"duplicate sections are legal (Klipper merges, later wins) — info, got {[e.severity for e in dups]}"
     # One warning per occurrence, in the file that owns it.
     assert len(dups) == 2
     files = {fr for fr, res in results.items() for e in res.errors if e.code == 'project_duplicate'}

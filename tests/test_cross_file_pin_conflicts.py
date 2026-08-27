@@ -76,6 +76,31 @@ def test_cross_file_conflict_is_flagged():
                for e in warnings), f"message must list both users: {[e.message for e in warnings]}"
 
 
+def test_cross_file_conflict_is_error_severity():
+    # Same hard-fail as the in-file case: Klipper's active-pin tracking
+    # spans the whole loaded project (pins.py), so a cross-file conflict
+    # also breaks startup — error, not warning.
+    results = _project({
+        "printer.cfg": "[include extra.cfg]\n" + STEPPER_X,
+        "extra.cfg": _y_conflicting_pin("PB0"),
+    })
+    warnings = [e for e in _shared_pin_warnings(results) if "PB0" in e.message]
+    assert warnings
+    assert all(e.severity == "error" for e in warnings), \
+        f"cross-file shared pin must be an error, got {[e.severity for e in warnings]}"
+
+
+def test_duplicate_pin_override_suppresses_cross_file_conflict():
+    # [duplicate_pin_override] in an active file exempts its pins project-wide.
+    results = _project({
+        "printer.cfg": ("[include extra.cfg]\n" + STEPPER_X +
+                        "\n[duplicate_pin_override]\npins: PB0\n"),
+        "extra.cfg": _y_conflicting_pin("PB0"),
+    })
+    warnings = [e for e in _shared_pin_warnings(results) if "PB0" in e.message]
+    assert not warnings, f"override-listed pin must stay exempt: {[e.message for e in warnings]}"
+
+
 def test_cross_file_conflict_appears_once():
     results = _project({
         "printer.cfg": "[include extra.cfg]\n" + STEPPER_X,

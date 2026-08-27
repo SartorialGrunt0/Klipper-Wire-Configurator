@@ -597,7 +597,7 @@ def test_update_manager_section_is_recognized():
             del os.environ['KWC_LAYOUT_DIR']
 
 
-def test_duplicate_exact_stepper_section_across_active_files_is_warning():
+def test_duplicate_exact_stepper_section_across_active_files_is_info():
     results = _validate_project({
         'printer.cfg': (
             '[include stepper-a.cfg]\n'
@@ -619,8 +619,8 @@ def test_duplicate_exact_stepper_section_across_active_files_is_warning():
         ),
     })
 
-    assert any(error.severity == 'warning' and 'Section [stepper_z] is reused across active included config files.' in error.message for error in results['stepper-a.cfg'].errors)
-    assert any(error.severity == 'warning' and 'Section [stepper_z] is reused across active included config files.' in error.message for error in results['stepper-b.cfg'].errors)
+    assert any(error.severity == 'info' and 'Section [stepper_z] is also defined in' in error.message for error in results['stepper-a.cfg'].errors)
+    assert any(error.severity == 'info' and 'Section [stepper_z] is also defined in' in error.message for error in results['stepper-b.cfg'].errors)
     assert not results['printer.cfg'].has_errors
 
 
@@ -720,9 +720,10 @@ def test_duplicate_reused_section_in_orphan_file_is_ignored():
     assert not results['orphan-z.cfg'].has_warnings
 
 
-def test_single_file_duplicate_singleton_section_is_warning_not_error():
+def test_single_file_duplicate_singleton_section_is_info_not_error():
     # Klipper tolerates a duplicated singleton section (later definition
-    # wins), so KWC flags it as an acknowledgeable warning — not an error.
+    # wins), so KWC flags it as info — legal, order-dependent, no action
+    # required — and never as a warning or error.
     result = _validate(
         '[virtual_sdcard]\n'
         'path: /tmp/0.gcode\n\n'
@@ -730,10 +731,11 @@ def test_single_file_duplicate_singleton_section_is_warning_not_error():
         'path: /tmp/1.gcode\n'
     )
     assert not result.has_errors
+    assert not result.has_warnings
     assert any(
-        error.severity == 'warning'
+        error.severity == 'info'
         and error.section == 'virtual_sdcard'
-        and error.message == 'Section [virtual_sdcard] can only be defined once.'
+        and error.message == 'Section [virtual_sdcard] is defined multiple times in this file — the later definition wins.'
         for error in result.errors
     )
 
@@ -755,10 +757,11 @@ def test_single_file_duplicate_warning_can_be_acknowledged_per_type():
             )
             before = validate_config(parse_config(text, 'printer.cfg'))
             assert any(
-                error.severity == 'warning' and 'can only be defined once' in error.message
+                error.severity == 'info' and 'defined multiple times in this file' in error.message
                 for error in before.errors
             )
             assert not before.has_errors
+            assert not before.has_warnings
 
             acknowledge_duplicate_section_type('idle_timeout')
             assert load_acknowledged_duplicate_section_types() == {'idle_timeout'}
@@ -787,8 +790,8 @@ def test_cross_file_duplicate_warning_can_be_acknowledged_per_type():
 
             results = _validate_project(files)
             assert any(
-                error.severity == 'warning'
-                and 'is reused across active included config files' in error.message
+                error.severity == 'info'
+                and 'is also defined in' in error.message
                 for error in results['extra.cfg'].errors
             )
 
@@ -796,7 +799,7 @@ def test_cross_file_duplicate_warning_can_be_acknowledged_per_type():
             results = _validate_project(files)
             for filename, result in results.items():
                 assert not any(
-                    'is reused across active included config files' in error.message
+                    'is also defined in' in error.message
                     for error in result.errors
                 ), f'{filename} still flags the acknowledged duplicate'
         finally:

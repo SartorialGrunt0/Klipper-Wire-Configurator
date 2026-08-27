@@ -54,6 +54,78 @@ position_max: 235
     assert '[stepper_y] step_pin' in warn.message
 
 
+def test_pin_conflict_is_error_not_warning():
+    # Klipper hard-fails a pin claimed by two sections (pins.py:
+    # "pin %s used multiple times in config") unless it is exempted via
+    # [duplicate_pin_override] or a shared share_type. KWC's check only
+    # fires outside those exemptions, so every flagged conflict is a
+    # startup failure — error, not warning.
+    result = _validate(
+        '''
+[stepper_x]
+step_pin: PB0
+dir_pin: !PB1
+enable_pin: !PB2
+microsteps: 16
+rotation_distance: 40
+endstop_pin: ^PB3
+position_endstop: 0
+position_max: 235
+
+[stepper_y]
+step_pin: PB0
+dir_pin: !PB4
+enable_pin: !PB5
+microsteps: 16
+rotation_distance: 40
+endstop_pin: ^PB6
+position_endstop: 0
+position_max: 235
+'''
+    )
+
+    warns = _pin_conflict_warnings(result)
+    assert warns, "expected a pin-conflict finding"
+    assert all(w.severity == 'error' for w in warns), \
+        f"shared pin must be an error, got severities {[w.severity for w in warns]}"
+    assert result.has_errors
+
+
+def test_duplicate_pin_override_suppresses_conflict_single_file():
+    # [duplicate_pin_override] registers its pins in Klipper's
+    # allow_multi_use_pins — those pins may legally be claimed by many
+    # sections, so KWC must not flag them.
+    result = _validate(
+        '''
+[duplicate_pin_override]
+pins: PB0
+
+[stepper_x]
+step_pin: PB0
+dir_pin: !PB1
+enable_pin: !PB2
+microsteps: 16
+rotation_distance: 40
+endstop_pin: ^PB3
+position_endstop: 0
+position_max: 235
+
+[stepper_y]
+step_pin: PB0
+dir_pin: !PB4
+enable_pin: !PB5
+microsteps: 16
+rotation_distance: 40
+endstop_pin: ^PB6
+position_endstop: 0
+position_max: 235
+'''
+    )
+
+    assert _pin_conflict_warnings(result) == [], \
+        "pins listed in [duplicate_pin_override] must not be flagged"
+
+
 def test_pin_conflict_anchors_to_param_line_not_section_header():
     result = _validate(
         '''
