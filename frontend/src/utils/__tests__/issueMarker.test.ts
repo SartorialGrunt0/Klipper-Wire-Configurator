@@ -18,6 +18,11 @@ describe('issueMarker', () => {
     expect(ISSUE_MARKER.info.marker).not.toBe(ISSUE_MARKER.warning.marker);
   });
 
+  it('info row marker is the circle-i glyph (flash-menu info icon), not a dot', () => {
+    // Reuses the flash-menu "circle with an i" info icon, rendered grey.
+    expect(ISSUE_MARKER.info.marker).toBe('ⓘ');
+  });
+
   it('info is lower emphasis: smaller gutter dot with opacity', () => {
     expect(ISSUE_MARKER.info.gutterDotClass).toContain('w-1.5');
     expect(ISSUE_MARKER.info.gutterDotClass).toContain('opacity-');

@@ -127,8 +127,6 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   const [showSectionsSidebar, setShowSectionsSidebar] = useState(true);
   const [showReferenceViewer, setShowReferenceViewer] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [liveValidation, setLiveValidation] = useState<ValidationError[]>([]);
-  const [liveParsedConfig, setLiveParsedConfig] = useState<ConfigFile | null>(null);
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({});
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const lineNumbersRef = useRef<HTMLDivElement>(null);
@@ -174,8 +172,6 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
       try {
         const result = await api.parseConfigText(editText, activeFile);
         if (requestId !== liveValidateRequestRef.current) return;
-        setLiveParsedConfig(result.config);
-        setLiveValidation(result.validation.errors || []);
         setTextParseError(activeFile, null);
 
         const currentConfig = useConfigStore.getState().configFiles[activeFile];
@@ -210,15 +206,17 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
         useGraphStore.getState().pushHistory();
         // raw_text = editText so the backend export returns the user's text
         // verbatim — the text the user typed is the canonical content.
-        setConfigFile(activeFile, { ...result.config, raw_text: editText });
-        setValidation(activeFile, result.validation);
-        markDirty();
+        // updateConfigFile (not setConfigFile) so the store's debounced
+        // revalidation fires: for a multi-file project that runs the
+        // PROJECT validation, which is the only source of the cross-file
+        // findings (duplicate sections, missing includes) the gutter and
+        // issue list render from. A single-file /parse would overwrite the
+        // store with file-local findings and erase them (see 3.5 Q1).
+        updateConfigFile(activeFile, { ...result.config, raw_text: editText });
         useGraphStore.getState().syncGraphWithConfig(activeFile);
       } catch (err) {
         if (requestId !== liveValidateRequestRef.current) return;
         // Parse failed — don't keep stale validation on screen, hold last-good model
-        setLiveParsedConfig(null);
-        setLiveValidation([]);
         setTextParseError(activeFile, err instanceof Error ? err.message : 'Unable to parse configuration text.');
       }
     }, 800);
@@ -226,14 +224,20 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
       if (liveValidateTimerRef.current) clearTimeout(liveValidateTimerRef.current);
       liveValidateRequestRef.current++;
     };
-  }, [isActive, activeFile, editText, markDirty, setConfigFile, setTextParseError, setValidation]);
+  }, [isActive, activeFile, editText, updateConfigFile, setTextParseError]);
 
-  // Collect inline issues from live validation of the current text
+  // Collect inline issues for the center editor from the store's project
+  // validation of the active file. Project validation (not a single-file
+  // parse) is the authoritative source: it carries the cross-file findings a
+  // lone file can't know about — duplicate sections (info) and missing
+  // includes (warning) — so the gutter + issue list stay in sync with the
+  // right-hand section list, the save button, and the graph.
   const inlineIssues = useMemo((): TextIssue[] => {
-    const errors = liveValidation;
+    const errors = validation[activeFile]?.errors ?? [];
     if (!errors || errors.length === 0) return [];
     const issues: TextIssue[] = [];
     const lines = editText.split('\n');
+    const activeSections = configFiles[activeFile]?.sections ?? [];
     for (const err of errors) {
       // Info findings are legal, order-dependent context — shown in the
       // gutter + issue list in muted grey, never as an alarm (3.5/Q1).
@@ -249,14 +253,14 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
           section: err.section,
           param: err.param,
           acknowledgeSection: ack
-            ? liveParsedConfig?.sections.find((section) => section.full_header === err.section)
+            ? activeSections.find((section) => section.full_header === err.section)
             : undefined,
           acknowledgeKind: ack ? ack.kind : undefined,
         });
       }
     }
     return issues;
-  }, [liveValidation, editText, liveParsedConfig]);
+  }, [validation, activeFile, editText, configFiles]);
 
   const handleAcknowledgeWarning = useCallback(async (section: ConfigSection, kind: 'unknown' | 'duplicate' = 'unknown') => {
     if (kind === 'duplicate') {
@@ -268,10 +272,14 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     }
     await api.acknowledgeWarning(section);
     const result = await api.parseConfigText(editText, activeFile);
-    setLiveParsedConfig(result.config);
-    setLiveValidation(result.validation.errors || []);
-    setValidation(activeFile, result.validation);
-  }, [activeFile, editText, setValidation, revalidateFile]);
+    // Re-apply the (unchanged) model without marking dirty, then re-run
+    // validation so the acknowledged finding clears. revalidateFile performs
+    // the PROJECT revalidation for multi-file projects — the same source the
+    // gutter renders from. Writing the file-local /parse result into the
+    // store instead would erase cross-file findings.
+    setConfigFile(activeFile, { ...result.config, raw_text: editText });
+    void revalidateFile(activeFile);
+  }, [activeFile, editText, setConfigFile, revalidateFile]);
 
   // Map line numbers to issues for rendering
   const issuesByLine = useMemo(() => {
@@ -590,7 +598,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
       // The rebuild renumbers node ids — re-apply the saved layout so the
       // new file appears in the user's existing arrangement instead of
       // resetting every card to auto-arranged.
-      await restoreLayoutAfterRebuild(graphStore, useNativeStore.getState().isNative);
+      await restoreLayoutAfterRebuild(useGraphStore.getState, useNativeStore.getState().isNative);
     } catch (err) {
       console.error('Failed to load reference config:', err);
     }

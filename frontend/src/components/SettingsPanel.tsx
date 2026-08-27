@@ -1292,7 +1292,7 @@ export default function SettingsPanel() {
               : 'var(--color-text-secondary)';
             const icon = issue.severity === 'error' ? '●'
               : issue.severity === 'warning' ? '⚠'
-              : '·';
+              : 'ⓘ';
             return (
               <div
                 key={`${issue.severity}_${i}`}

@@ -40,7 +40,11 @@ export const ISSUE_MARKER: Record<IssueSeverity, IssueMarkerSpec> = {
     title: 'Validation warning',
   },
   info: {
-    marker: '·',
+    // ⓘ — the same "circle with an i" glyph the flash-menu info tooltip uses
+    // (FirmwareDialog HelpPopover), not a plain dot. Rendered in the UI grey;
+    // a muted small dot is still used in the line-number gutter where a full
+    // glyph would be too wide.
+    marker: 'ⓘ',
     color: 'var(--color-text-secondary)',
     dotClass: 'w-1.5 h-1.5 rounded-full bg-[var(--color-text-secondary)] opacity-70',
     gutterDotClass: 'w-1.5 h-1.5 rounded-full bg-[var(--color-text-secondary)] opacity-70',
