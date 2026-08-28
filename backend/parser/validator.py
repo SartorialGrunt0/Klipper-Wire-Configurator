@@ -12,6 +12,7 @@ Checks for:
 from __future__ import annotations
 
 import glob
+import os
 import re
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -910,11 +911,13 @@ def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, Valida
 
     # Check that non-glob [include] targets exist in the loaded project
     # (F19). A plain missing include is a Klipper startup hard-fail
-    # ("Include file ... does not exist", configfile.py _resolve_include),
-    # but KWC loads in-memory projects (uploads / AI draft sets), so the
-    # target is resolved against the LOADED files by basename. Warning
-    # (not error): KWC often loads a PARTIAL import and there is no
-    # filesystem to consult, so we only flag what we can see is absent.
+    # (configfile.py:187-189 "Include file '%s' does not exist"), so it is
+    # an ERROR (severity promotion 2026-08-28). The message carries the
+    # resolved path — include resolved relative to the directory of the
+    # including file, mirroring configfile.py:183-184 — so the user sees
+    # exactly where Klipper would have looked. KWC often loads a PARTIAL
+    # import, where the file may exist on disk; the save-gate wording
+    # ("will *likely* prevent Klipper from starting") keeps that honest.
     # Globs are never flagged: a glob that matches nothing is legal in
     # Klipper (glob.has_magic) and can never be "resolved" in-memory.
     for filename, config in configs.items():
@@ -927,20 +930,29 @@ def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, Valida
             if not spec or glob.has_magic(spec):
                 continue
             if _basename(spec) not in all_basenames:
+                include_dir = os.path.dirname(filename.replace("\\", "/"))
+                resolved = (
+                    f"{include_dir}/{spec}" if include_dir else spec
+                )
+                message = (
+                    f"Include file '{resolved}' was not found in the "
+                    "loaded project."
+                )
                 result = results[filename]
                 if any(
-                    error.severity == "warning"
+                    error.severity == "error"
                     and error.section == section.full_header
-                    and error.message == f"Include file '{spec}' was not found in the loaded project."
+                    and error.message == message
                     for error in result.errors
                 ):
                     continue
                 result.errors.append(ValidationError(
-                    severity="warning",
+                    severity="error",
                     section=section.full_header,
                     param="",
-                    message=f"Include file '{spec}' was not found in the loaded project.",
+                    message=message,
                     line_number=section.line_number,
+                    code="missing_include",
                 ))
 
     # Cross-file pin conflicts (F8): a pin shared by sections in different
@@ -1084,11 +1096,10 @@ def _check_kinematics_stepper_requirements(
 
     Each kinematics looks up its rail sections BY EXACT NAME at startup
     (see KINEMATICS_BASE_STEPPERS). A missing base section is a Klipper
-    startup hard-fail (configfile.getsection raises), but — like the other
-    cross-file project checks — this is emitted as an acknowledgeable
-    WARNING: KWC's loaded file set may not include every config file on
-    disk, and a save-blocking error would false-positive on an incomplete
-    project.
+    startup hard-fail: configfile.getsection raises at config load
+    (corexy.py:12, cartesian.py, delta.py, rotary_delta.py, deltesian.py,
+    polar.py, winch.py). ERROR (severity promotion 2026-08-28, plan Task
+    4.0) — Klipper deterministically refuses to load this config.
 
     [printer] and the stepper sections routinely live in different files,
     so this runs only against the full active project set (multi-file
@@ -1134,7 +1145,7 @@ def _check_kinematics_stepper_requirements(
         if stepper_type in present:
             continue
         results.append((printer_file, ValidationError(
-            severity="warning",
+            severity="error",
             section="printer",
             param="kinematics",
             message=(
@@ -1906,18 +1917,28 @@ def _check_virtual_endstop_without_probe(
     configs: dict[str, ConfigFile],
     active_files: set[str] | None = None,
 ) -> list[tuple[str, ValidationError]]:
-    """Check for endstop_pin = z_virtual_endstop without a probe section.
+    """Check for probe virtual endstops that fail at Klipper config load.
 
-    In Klipper, using z_virtual_endstop as an endstop_pin requires a probe
-    section (BLTouch, bed probe, eddy current probe, temperature_probe, etc.)
-    to be defined for Z-offset management. This warning is only valid when
-    checking multiple config files as a project.
+    Two cases, both load failures (severity promotion 2026-08-28, plan
+    Task 4.0):
+
+    1. endstop_pin uses 'z_virtual_endstop' but no probe section is
+       defined in the active project. The 'probe:' pin chip is registered
+       ONLY when a probe section loads (klippy/extras/probe.py:215);
+       without one, klippy/pins.py:81 raises "Unknown pin chip name
+       'probe'" during config load.
+    2. endstop_pin uses any other probe virtual value (currently
+       'manually_set_z_virtual_endstop' — not in current Klipper;
+       repo-wide search 2026-08-28: 0 hits). HomingViaProbeHelper.setup_pin
+       (probe.py:238-240) raises pins.error("Probe virtual endstop only
+       useful as endstop pin") at load for any value other than exactly
+       'z_virtual_endstop' — even when a probe section is present.
 
     Only probe sections in active (included) files are considered, because
     probes in non-included files won't actually be loaded by Klipper.
 
     Returns a list of (filename, ValidationError) tuples so the caller can
-    attach the warning to the correct file's results.
+    attach the finding to the correct file's results.
     """
     results: list[tuple[str, ValidationError]] = []
 
@@ -1946,11 +1967,48 @@ def _check_virtual_endstop_without_probe(
                     probe_sections.add(section.full_header)
 
     if probe_sections:
+        # Probe present — case 1 can't fire. But case 2 still must: any
+        # 'probe:' virtual value other than exactly 'z_virtual_endstop'
+        # fails at load in HomingViaProbeHelper.setup_pin (probe.py:238-240)
+        # even with a probe section defined.
+        for filename, cfg in configs.items():
+            if active_files is not None and filename not in active_files:
+                continue
+            for section in cfg.sections:
+                if section.is_commented_out:
+                    continue
+                for param in section.params:
+                    if param.is_commented_out or param.key != "endstop_pin":
+                        continue
+                    raw_value = param.value.strip()
+                    if ":" not in raw_value:
+                        continue
+                    # Only 'probe:'-chip values are virtual endstops; an
+                    # MCU-prefixed pin (e.g. 'EBBCan:PB0') is unrelated.
+                    chip = raw_value.split(":", 1)[0].strip().lstrip("!^~")
+                    if chip != "probe":
+                        continue
+                    base_value = _extract_virtual_endstop_value(raw_value)
+                    if base_value != "z_virtual_endstop":
+                        results.append((filename, ValidationError(
+                            severity="error",
+                            section=section.full_header,
+                            param="endstop_pin",
+                            message=(
+                                f"Section [{section.section_type}] uses "
+                                f"'probe:{base_value}' as the endstop_pin, "
+                                "but only 'z_virtual_endstop' is accepted — "
+                                "any other probe virtual value fails at"
+                                " config load even when a probe section is"
+                                " defined (probe.py:238-240)."
+                            ),
+                            line_number=param.line_number,
+                            code="z_virtual_endstop_without_probe",
+                        )))
         return results
 
-    # No probe found — check each ACTIVE file for z_virtual_endstop usage.
-    # Only active (included) files are checked because Klipper won't load
-    # sections from non-included files.
+    # No probe found — the 'probe:' pin chip never registers, so ANY
+    # 'probe:' virtual endstop value fails at load (pins.py:81 unknown chip).
     for filename, cfg in configs.items():
         if active_files is not None and filename not in active_files:
             continue
@@ -1960,19 +2018,35 @@ def _check_virtual_endstop_without_probe(
             for param in section.params:
                 if param.is_commented_out or param.key != "endstop_pin":
                     continue
-                base_value = _extract_virtual_endstop_value(param.value)
+                raw_value = param.value.strip()
+                if ":" not in raw_value:
+                    continue
+                chip = raw_value.split(":", 1)[0].strip().lstrip("!^~")
+                if chip != "probe":
+                    continue
+                base_value = _extract_virtual_endstop_value(raw_value)
                 if base_value in ("z_virtual_endstop", "manually_set_z_virtual_endstop"):
+                    message = (
+                        f"Section [{section.section_type}] uses "
+                        f"'{base_value}' as the endstop_pin, but no probe"
+                        " section (BLTouch, probe, scanner, etc.) is"
+                        " defined. Without one the 'probe:' pin chip never"
+                        " registers and Klipper fails at config load"
+                        " (pins.py:81)."
+                    )
+                    if base_value != "z_virtual_endstop":
+                        message += (
+                            f" Additionally '{base_value}' does not exist in"
+                            " current Klipper — only 'z_virtual_endstop' is"
+                            " accepted (probe.py:238-240)."
+                        )
                     results.append((filename, ValidationError(
-                        severity="warning",
+                        severity="error",
                         section=section.full_header,
                         param="endstop_pin",
-                        message=(
-                            f"Section [{section.section_type}] uses 'z_virtual_endstop' "
-                            "as the endstop_pin, but no probe section (BLTouch, probe, "
-                            "scanner, etc.) is defined. A probe is required for "
-                            "z_virtual_endstop to work."
-                        ),
+                        message=message,
                         line_number=param.line_number,
+                        code="z_virtual_endstop_without_probe",
                     )))
 
     return results

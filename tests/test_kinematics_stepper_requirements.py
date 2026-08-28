@@ -48,7 +48,7 @@ def _project(files: dict[str, str]) -> dict[str, ValidationResult]:
 
 # --- cartesian: base x/y/z required ------------------------------------------
 
-def test_cartesian_missing_stepper_z_warns():
+def test_cartesian_missing_stepper_z_errors():
     result = _project({
         "printer.cfg": (
             "[printer]\n"
@@ -86,12 +86,11 @@ def test_cartesian_missing_stepper_z_warns():
         e for e in result["printer.cfg"].errors
         if e.code == "kinematics_stepper_missing"
     ]
-    assert len(kin_warnings) == 1, f"expected one kinematics stepper warning, got: {[e.message for e in kin_warnings]}"
+    assert len(kin_warnings) == 1, f"expected one kinematics stepper finding, got: {[e.message for e in kin_warnings]}"
     assert "stepper_z" in kin_warnings[0].message
-    # Warning (not error): cross-file project checks are ack-able, because KWC's
-    # loaded file set may be incomplete — a save-blocking error would false-positive
-    # on a project that simply does not include the stepper file.
-    assert kin_warnings[0].severity == "warning"
+    # ERROR (severity promotion 2026-08-28, plan Task 4.0): Klipper raises
+    # config_error on this at config load (corexy.py:12 getsection pattern).
+    assert kin_warnings[0].severity == "error"
     assert kin_warnings[0].section == "printer"
 
 
@@ -144,7 +143,7 @@ def test_cartesian_with_all_base_steppers_no_warning():
 
 # --- corexy: base x/y/z required (x1/y1 are optional extra steppers) ----------
 
-def test_corexy_missing_stepper_y_warns():
+def test_corexy_missing_stepper_y_errors():
     result = _project({
         "printer.cfg": (
             "[printer]\n"
@@ -184,7 +183,7 @@ def test_corexy_missing_stepper_y_warns():
 
 # --- delta: stepper_a/b/c required -------------------------------------------
 
-def test_delta_missing_stepper_b_warns():
+def test_delta_missing_stepper_b_errors():
     # Multi-file project: the missing tower must be checked across the active
     # set, not within one file (a lone partial printer.cfg must not fire it).
     result = _project({

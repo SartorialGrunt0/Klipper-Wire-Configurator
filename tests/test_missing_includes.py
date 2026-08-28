@@ -13,9 +13,11 @@ while a GLOB that matches nothing is explicitly legal.
 
 KWC validates in-memory (uploads / the AI draft set), not a live config tree,
 so the target is resolved against the LOADED project files (basename match —
-mirroring the import route's include resolution). Severity: warning, because
-KWC often loads a PARTIAL import (single printer.cfg without its tree) and a
-hard error would false-positive on the user's own workflow (plan decision).
+mirroring the import route's include resolution). Severity: ERROR (severity
+promotion 2026-08-28, plan Task 4.0) — Klipper hard-fails at config load on
+a plain missing include. On a PARTIAL import the file may exist on disk and
+Klipper would load fine; the save-gate wording ("will *likely* prevent
+Klipper from starting") keeps that honest (plan open question 4).
 
 Globs are never flagged — in an in-memory set a glob can never be
 "resolved", and matching nothing is legal in Klipper.
@@ -35,21 +37,22 @@ def _project(files: dict[str, str]) -> dict:
     })
 
 
-def _include_warnings(results: dict) -> list:
+def _include_findings(results: dict) -> list:
     return [
         e for fr in results.values() for e in fr.errors
-        if e.severity == "warning" and "include" in e.section.lower()
+        if e.code == "missing_include"
     ]
 
 
-def test_missing_plain_include_is_warning():
+def test_missing_plain_include_is_error():
     results = _project({
         "printer.cfg": "[include missing.cfg]\n[printer]\nkinematics: cartesian\n",
         "other.cfg": "[gcode_macro X]\ngcode: G28\n",
     })
-    warnings = _include_warnings(results)
-    assert any("missing.cfg" in e.message for e in warnings), \
-        f"missing plain include must warn, got: {[e.message for e in warnings]}"
+    findings = _include_findings(results)
+    assert any("missing.cfg" in e.message for e in findings), \
+        f"missing plain include must be flagged, got: {[e.message for e in findings]}"
+    assert all(e.severity == "error" for e in findings)
 
 
 def test_present_include_not_flagged():
@@ -57,7 +60,7 @@ def test_present_include_not_flagged():
         "printer.cfg": "[include other.cfg]\n[printer]\nkinematics: cartesian\n",
         "other.cfg": "[gcode_macro X]\ngcode: G28\n",
     })
-    assert not _include_warnings(results), "present include must not warn"
+    assert not _include_findings(results), "present include must not be flagged"
 
 
 def test_subdir_include_resolves_by_basename():
@@ -65,17 +68,18 @@ def test_subdir_include_resolves_by_basename():
         "printer.cfg": "[include macros/other.cfg]\n[printer]\nkinematics: cartesian\n",
         "other.cfg": "[gcode_macro X]\ngcode: G28\n",
     })
-    assert not _include_warnings(results), "basename-matched include must not warn"
+    assert not _include_findings(results), "basename-matched include must not be flagged"
 
 
-def test_subdir_include_missing_warns():
+def test_subdir_include_missing_errors():
     results = _project({
         "printer.cfg": "[include macros/other.cfg]\n[printer]\nkinematics: cartesian\n",
         "unrelated.cfg": "[gcode_macro X]\ngcode: G28\n",
     })
-    warnings = _include_warnings(results)
-    assert any("other.cfg" in e.message for e in warnings), \
-        "include whose basename is absent must warn"
+    findings = _include_findings(results)
+    assert any("other.cfg" in e.message for e in findings), \
+        "include whose basename is absent must be flagged"
+    assert all(e.severity == "error" for e in findings)
 
 
 def test_glob_include_never_flagged():
@@ -90,7 +94,7 @@ def test_glob_include_never_flagged():
         ),
         "other.cfg": "[gcode_macro X]\ngcode: G28\n",
     })
-    assert not _include_warnings(results), "glob includes must never warn"
+    assert not _include_findings(results), "glob includes must never be flagged"
 
 
 def test_transitive_includes_checked():
@@ -100,9 +104,10 @@ def test_transitive_includes_checked():
         "printer.cfg": "[include a.cfg]\n[printer]\nkinematics: cartesian\n",
         "a.cfg": "[include b.cfg]\n[gcode_macro X]\ngcode: G28\n",
     })
-    warnings = _include_warnings(results)
-    assert any("b.cfg" in e.message for e in warnings), \
-        f"missing transitive include must warn, got: {[e.message for e in warnings]}"
+    findings = _include_findings(results)
+    assert any("b.cfg" in e.message for e in findings), \
+        f"missing transitive include must be flagged, got: {[e.message for e in findings]}"
+    assert all(e.severity == "error" for e in findings)
 
 
 def test_single_file_not_flagged():
