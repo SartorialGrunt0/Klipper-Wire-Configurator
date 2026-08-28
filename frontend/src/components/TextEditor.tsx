@@ -305,6 +305,30 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     return map;
   }, [inlineIssues]);
 
+  // Gutter numbers as ONE text block (see the editor gutter comment): one
+  // line per row, severity glyph + number, sharing the textarea's continuous
+  // line rhythm so alignment holds at any zoom / device scaling. Inline
+  // per-line spans keep the hover title without creating per-row layout boxes.
+  const gutterHtml = useMemo(() => {
+    const escapeAttr = (value: string) => escapeHtml(value).replace(/"/g, '&quot;');
+    const lines = editText.split('\n');
+    return lines
+      .map((_line, idx) => {
+        const lineNum = idx + 1;
+        const lineIssues = issuesByLine.get(lineNum);
+        if (!lineIssues?.length) return String(lineNum);
+        const severity = lineIssues.some((i) => i.severity === 'error')
+          ? 'error'
+          : lineIssues.some((i) => i.severity === 'warning')
+            ? 'warning'
+            : 'info';
+        const spec = ISSUE_MARKER[severity];
+        const title = escapeAttr(lineIssues.map((i) => i.text).join('\n'));
+        return `<span title="${title}"><span style="color:${spec.color}">${spec.marker}</span> ${lineNum}</span>`;
+      })
+      .join('\n');
+  }, [editText, issuesByLine]);
+
   // All files as text for search — exported via backend for accuracy
   const [allFilesText, setAllFilesText] = useState<Record<string, string>>({});
   useEffect(() => {
@@ -1012,31 +1036,25 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
         <div className="flex-1 flex overflow-hidden">
           <div className="flex flex-col flex-1 min-w-0 relative">
             <div className="flex-1 flex overflow-hidden" ref={editorScrollRef}>
-              {/* Line numbers + issue indicators */}
+              {/* Line numbers + issue indicators.
+                  Rendered as ONE text block (like the textarea's own lines)
+                  instead of per-row divs: 700+ flex rows round their offsets
+                  independently of the textarea's line boxes, so the numbers
+                  drift ±~1px vs the text and the offset flips with browser
+                  zoom / device scaling. A single block shares the textarea's
+                  exact line rhythm (same font-size/line-height/font/padding),
+                  so every number snaps to its text line at any zoom. */}
               <div
                 ref={lineNumbersRef}
-                className="shrink-0 overflow-hidden bg-[var(--color-bg-secondary)] text-right select-none pr-2 pl-2 pt-4 pb-4 font-mono text-sm leading-relaxed text-[var(--color-text-secondary)] border-r border-[var(--color-bg-tertiary)]"
+                className="shrink-0 overflow-hidden bg-[var(--color-bg-secondary)] select-none pl-2 pr-2 pt-4 pb-4 border-r border-[var(--color-bg-tertiary)]"
                 style={{ minWidth: '3rem' }}
               >
-                {editText.split('\n').map((_line, idx) => {
-                  const lineNum = idx + 1;
-                  const lineIssues = issuesByLine.get(lineNum);
-                  const hasError = lineIssues?.some((i) => i.severity === 'error');
-                  const hasWarning = !hasError && lineIssues?.some((i) => i.severity === 'warning');
-                  const hasInfo = !hasError && !hasWarning && lineIssues?.some((i) => i.severity === 'info');
-                  return (
-                    <div
-                      key={lineNum}
-                      className="h-[1.625em] flex items-center justify-end"
-                      title={lineIssues?.map((i) => i.text).join('\n')}
-                    >
-                      {hasError && <span className={`${ISSUE_MARKER.error.gutterDotClass} mr-1 shrink-0`} />}
-                      {hasWarning && <span className={`${ISSUE_MARKER.warning.gutterDotClass} mr-1 shrink-0`} />}
-                      {hasInfo && <span className={`${ISSUE_MARKER.info.gutterDotClass} mr-1 shrink-0`} />}
-                      <span>{lineNum}</span>
-                    </div>
-                  );
-                })}
+                <pre
+                  aria-hidden
+                  className="m-0 font-mono text-sm leading-relaxed text-right text-[var(--color-text-secondary)]"
+                  style={{ tabSize: 4 }}
+                  dangerouslySetInnerHTML={{ __html: gutterHtml }}
+                />
               </div>
               {/* Text area with syntax color parsing overlay */}
               <div className="relative flex-1 overflow-hidden">
