@@ -1015,7 +1015,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
               {/* Line numbers + issue indicators */}
               <div
                 ref={lineNumbersRef}
-                className="shrink-0 overflow-hidden bg-[var(--color-bg-secondary)] text-right select-none pr-2 pl-2 pt-4 font-mono text-sm leading-relaxed text-[var(--color-text-secondary)] border-r border-[var(--color-bg-tertiary)]"
+                className="shrink-0 overflow-hidden bg-[var(--color-bg-secondary)] text-right select-none pr-2 pl-2 pt-4 pb-4 font-mono text-sm leading-relaxed text-[var(--color-text-secondary)] border-r border-[var(--color-bg-tertiary)]"
                 style={{ minWidth: '3rem' }}
               >
                 {editText.split('\n').map((_line, idx) => {
