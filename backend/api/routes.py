@@ -9,6 +9,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import PlainTextResponse
 
 from models.config_models import (
+    BulkWarningAcknowledgementRequest,
     ConfigUpdate,
     ExportRequest,
     GenerateRequest,
@@ -44,6 +45,8 @@ from services.board_detector import (
 from services.warning_acknowledgments import (
     acknowledge_duplicate_section_type,
     acknowledge_warning_for_section,
+    acknowledge_warning_identities,
+    finding_identity,
 )
 
 router = APIRouter()
@@ -284,6 +287,35 @@ async def acknowledge_duplicate_api(data: WarningAcknowledgementRequest):
         "status": "acknowledged",
         "file": file_path,
         "section_type": data.section.section_type,
+    }
+
+
+@router.post("/warning-acknowledgements/bulk")
+async def acknowledge_bulk_warnings_api(
+    data: BulkWarningAcknowledgementRequest,
+):
+    """Bulk-acknowledge warning findings by stable identity (Phase 4 save gate).
+
+    Each identity is ``file|code|section|param|extra`` — ``extra`` is
+    DERIVED SERVER-SIDE (the include spec for missing includes; empty
+    otherwise) so suppression and the ack store always agree. Client
+    ``extra`` is accepted for API symmetry but ignored. Warnings only: the
+    validator never suppresses errors or info from this store. Idempotent;
+    the frontend revalidates the project afterwards so the warning state
+    clears.
+    """
+    if not data.identities:
+        raise HTTPException(
+            status_code=422, detail="No warning identities to acknowledge")
+    identities = [
+        finding_identity(item.file, item.code, item.section, item.param)
+        for item in data.identities
+    ]
+    file_path = acknowledge_warning_identities(identities)
+    return {
+        "status": "acknowledged",
+        "file": file_path,
+        "count": len(identities),
     }
 
 

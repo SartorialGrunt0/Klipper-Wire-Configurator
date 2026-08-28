@@ -28,7 +28,9 @@ from parser.config_schema import (
 )
 from services.warning_acknowledgments import (
     canonicalize_section,
+    finding_identity,
     load_acknowledged_duplicate_section_types,
+    load_acknowledged_warning_identities,
     load_acknowledged_warning_sections,
 )
 
@@ -507,6 +509,34 @@ def _validate_neopixel_color_order(section: ConfigSection, result: ValidationRes
             ))
 
 
+def _suppress_acknowledged_warning_identities(
+    filename: str, result: ValidationResult,
+) -> None:
+    """Drop warnings whose stable identity is bulk-acknowledged (Phase 4).
+
+    Warnings only — errors and info are never suppressed from the identity
+    store. Runs at the end of every ``validate_config`` call, so both
+    single-file and project validation get it (project mode calls this per
+    file first, then adds cross-file findings which are already filtered).
+    """
+    if not any(e.severity == "warning" and e.code for e in result.errors):
+        return
+    try:
+        acked = load_acknowledged_warning_identities()
+    except Exception:
+        return
+    if not acked:
+        return
+    result.errors = [
+        e for e in result.errors
+        if not (
+            e.severity == "warning"
+            and e.code
+            and finding_identity(filename, e.code, e.section, e.param) in acked
+        )
+    ]
+
+
 def validate_config(config: ConfigFile) -> ValidationResult:
     """Validate a full configuration file."""
     result = ValidationResult()
@@ -730,6 +760,13 @@ def validate_config(config: ConfigFile) -> ValidationResult:
             {config.filename: config}, {config.filename},
         ),
     )
+
+    # Bulk-ack suppression (Phase 4 save gate): drop warnings whose stable
+    # identity is in the identity store. Warnings ONLY — errors are never
+    # acknowledged (the save-gate override is per-save by design), and info
+    # is never suppressed from this store either. The per-section
+    # snippet/type stores consulted above keep working in parallel.
+    _suppress_acknowledged_warning_identities(config.filename, result)
 
     return result
 
@@ -968,6 +1005,11 @@ def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, Valida
     # project registers ([mcu NAME], probe, TMC virtual-endstop chips, ...),
     # mirroring klippy/pins.py parse_pin's 'Unknown pin chip name' hard-fail.
     _check_pin_chip_membership(configs, results, active_files)
+
+    # Bulk-ack suppression for the CROSS-FILE findings added above (per-file
+    # findings were already filtered inside validate_config). Warnings only.
+    for filename, result in results.items():
+        _suppress_acknowledged_warning_identities(filename, result)
 
     return results
 
