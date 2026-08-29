@@ -1,8 +1,9 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { createTwoFilesPatch } from 'diff';
 import { useConfigStore } from '../../stores/configStore';
 import { useNativeStore } from '../../stores/nativeStore';
 import { getSaveButtonClass } from '../../utils/saveButtonClass';
+import { selectSaveGateIssues, warningToBulkAck, type SaveGateFinding } from '../../utils/saveGate';
 import * as api from '../../services/api';
 import type { ConfigFile } from '../../types/config';
 import type { NativeStatus } from '../../services/api';
@@ -11,6 +12,10 @@ interface ApplyDialogProps {
   onClose: () => void;
   canAnalyzeWithAi?: boolean;
   onAnalyzeWithAi?: (prompt: string) => void;
+  /** Switch the main view to the text editor so a findings click can land on
+   *  the file/line (the text editor consumes the store's pending line jump
+   *  once its text is loaded). */
+  onShowTextView?: () => void;
 }
 
 interface DiffLine {
@@ -172,7 +177,7 @@ function buildRestartAnalysisPrompt(args: {
   return sections.join('\n\n');
 }
 
-export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnalyzeWithAi }: ApplyDialogProps) {
+export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnalyzeWithAi, onShowTextView }: ApplyDialogProps) {
   const storeSnapshot = useRef(useConfigStore.getState());
   const { configFiles, originalTexts } = storeSnapshot.current;
   const { configPath } = useNativeStore();
@@ -205,6 +210,123 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
   // Determine save mode
   const isNativeMode = useNativeStore((s) => s.isNative);
   const isLocalMode = isNativeMode === false || isNativeMode === null;
+
+  /* ── Phase 4 save gate: findings for the selected files ─────────────
+     Errors + warnings, never info (info is order-dependent context and
+     can't be fixed by acknowledging). Computed from the LIVE store state —
+     not the mount snapshot — so the gate reflects current validation. */
+  const textParseErrors = useConfigStore((s) => s.textParseErrors);
+  const gateIssues = useMemo(() => {
+    const selected = Array.from(selectedFiles);
+    return selectSaveGateIssues(validation, selected, textParseErrors);
+  }, [validation, selectedFiles, textParseErrors]);
+  const hasGateErrors = gateIssues.hasErrors;
+  const hasGateWarnings = gateIssues.hasWarnings;
+
+  // Confirmation flow: clicking Save with gate findings opens a single
+  // overlay (errors OR warnings, never both stacked — errors dominate).
+  // The checkbox acknowledges every listed warning in one bulk call.
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [ackAllChecked, setAckAllChecked] = useState(false);
+  const [ackBusy, setAckBusy] = useState(false);
+  const [ackError, setAckError] = useState('');
+
+  useEffect(() => {
+    // Reset the checkbox + errors every time the overlay reopens.
+    if (!confirmOpen) {
+      setAckAllChecked(false);
+      setAckError('');
+      setAckBusy(false);
+    }
+  }, [confirmOpen]);
+
+  const openConfirm = () => {
+    setConfirmOpen(true);
+  };
+
+  const handleFindingClick = (finding: SaveGateFinding) => {
+    if (finding.line_number < 1) return; // nothing to jump to
+    onShowTextView?.();
+    useConfigStore.getState().requestLineJump(finding.file, finding.line_number);
+    onClose(); // reveal the editor; the dialog's findings can be re-opened
+  };
+
+  const ackAllWarnings = async (): Promise<boolean> => {
+    setAckError('');
+    try {
+      await api.acknowledgeWarningsBulk(gateIssues.warnings.map(warningToBulkAck));
+      // Re-run PROJECT validation so the acknowledged warnings clear from
+      // the gutter, the save button, and this gate (one call revalidates
+      // the whole project for multi-file projects).
+      const firstFile = Array.from(selectedFiles)[0];
+      if (firstFile) void useConfigStore.getState().revalidateFile(firstFile);
+      return true;
+    } catch (err) {
+      setAckError(err instanceof Error ? err.message : 'Could not acknowledge warnings');
+      return false;
+    }
+  };
+
+  const handleAckAndSave = async () => {
+    if (!ackAllChecked || gateIssues.warnings.length === 0) return;
+    setAckBusy(true);
+    const ok = await ackAllWarnings();
+    setAckBusy(false);
+    if (!ok) return;
+    setConfirmOpen(false);
+    void handleApply();
+  };
+
+  const handleSaveWithoutAck = () => {
+    setConfirmOpen(false);
+    void handleApply();
+  };
+
+  // Errors-present path: "Continue saving anyway" — errors are never
+  // acknowledged; the user fixes them first (warnings can be bulk-acked
+  // on the next save, once the errors are gone).
+  const handleContinueAnyway = () => {
+    setConfirmOpen(false);
+    void handleApply();
+  };
+
+  const handleSaveClick = () => {
+    // Hard block first (spec): unparseable text in a selected file shows the
+    // existing inline error, no overlay.
+    if (gateIssues.blocked.length > 0) {
+      void handleApply();
+      return;
+    }
+    if (hasGateErrors || hasGateWarnings) {
+      openConfirm();
+      return;
+    }
+    void handleApply();
+  };
+
+  // One findings row (shared by the dialog list and the confirm overlay).
+  const renderFindingRow = (f: SaveGateFinding, kind: 'error' | 'warning', key: string) => (
+    <button
+      key={key}
+      type="button"
+      onClick={() => {
+        setConfirmOpen(false);
+        handleFindingClick(f);
+      }}
+      disabled={f.line_number < 1}
+      className="w-full flex items-start gap-2 px-2 py-1.5 text-left rounded-md hover:bg-[var(--color-bg-primary)] disabled:cursor-default disabled:opacity-60"
+    >
+      <span
+        className={`mt-1 w-2 h-2 rounded-full shrink-0 ${kind === 'error' ? 'bg-red-500' : 'bg-[var(--color-warning)]'}`}
+      />
+      <span className="flex-1 min-w-0">
+        <span className="block text-xs text-[var(--color-text-primary)] truncate">{f.message}</span>
+        <span className="block text-[10px] font-mono text-[var(--color-text-secondary)] truncate">
+          {f.file}{f.line_number > 0 ? `:${f.line_number}` : ''}{f.section ? ` · [${f.section}]` : ''}
+        </span>
+      </span>
+    </button>
+  );
 
   // Diff state
   const [currentTexts, setCurrentTexts] = useState<Record<string, string>>({});
@@ -529,6 +651,26 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
           </p>
         </div>
 
+        {/* Save gate: validation findings for the selected files (errors →
+            warnings; info never shown — it's order-dependent context). Click
+            a row to jump to it in the text view. */}
+        {(hasGateErrors || hasGateWarnings) && (
+          <div className="mx-4 mt-3 rounded-lg border border-[var(--color-bg-tertiary)] overflow-hidden">
+            <div className="flex items-center justify-between px-3 py-1.5 bg-[var(--color-bg-primary)]">
+              <span className="text-xs font-semibold text-[var(--color-text-primary)]">
+                Validation findings ({gateIssues.errors.length + gateIssues.warnings.length})
+              </span>
+              <span className="text-[10px] text-[var(--color-text-secondary)]">
+                click a finding to jump to it
+              </span>
+            </div>
+            <div className="max-h-48 overflow-y-auto p-1.5">
+              {gateIssues.errors.map((f, i) => renderFindingRow(f, 'error', `e-${i}`))}
+              {gateIssues.warnings.map((f, i) => renderFindingRow(f, 'warning', `w-${i}`))}
+            </div>
+          </div>
+        )}
+
         {/* Body */}
         <div className="flex flex-1 overflow-hidden">
           {/* Left: file list */}
@@ -716,7 +858,7 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
           </button>
           {status !== 'success' && (
             <button
-              onClick={handleApply}
+              onClick={handleSaveClick}
               disabled={status === 'exporting' || status === 'applying' || selectedFiles.size === 0}
               className={`px-4 py-1.5 rounded-md text-xs font-medium transition-colors disabled:opacity-50 ${saveButtonClass}`}
             >
@@ -755,6 +897,100 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
           )}
         </div>
       </div>
+
+      {/* Save-gate confirmation — a single overlay above the dialog (z-[60],
+          the app's nested-dialog pattern). Warnings-only → "Save with
+          warnings?" + optional bulk-ack checkbox; errors present →
+          "Active errors" + startup-failure line, never acked. */}
+      {confirmOpen && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60"
+          onClick={() => setConfirmOpen(false)}
+        >
+          <div
+            className="bg-[var(--color-bg-secondary)] rounded-xl shadow-2xl flex flex-col border border-[var(--color-bg-tertiary)] overflow-hidden"
+            style={{ width: 520, maxHeight: '85vh' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="p-4 border-b border-[var(--color-bg-tertiary)]">
+              <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
+                {hasGateErrors
+                  ? 'Active errors'
+                  : `Save with ${gateIssues.warnings.length} warning${gateIssues.warnings.length !== 1 ? 's' : ''}?`}
+              </h3>
+              {hasGateErrors ? (
+                <p className="text-xs text-red-300 mt-1">
+                  These errors will likely prevent Klipper from starting after a restart.
+                  {gateIssues.warnings.length > 0 && ` The ${gateIssues.warnings.length} listed warning${gateIssues.warnings.length !== 1 ? 's are' : ' is'} not acknowledged — fix the errors first.`}
+                </p>
+              ) : (
+                <p className="text-xs text-[var(--color-text-secondary)] mt-1">
+                  The warnings don't block the save. Check the box to acknowledge all of
+                  them at once so they stop flagging the save button.
+                </p>
+              )}
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-2">
+              {gateIssues.errors.map((f, i) => renderFindingRow(f, 'error', `ce-${i}`))}
+              {gateIssues.warnings.map((f, i) => renderFindingRow(f, 'warning', `cw-${i}`))}
+            </div>
+
+            {ackError && (
+              <p className="px-4 pb-1 text-xs text-red-400">{ackError}</p>
+            )}
+
+            <div className="p-4 border-t border-[var(--color-bg-tertiary)] flex items-center justify-between gap-2">
+              {!hasGateErrors && gateIssues.warnings.length > 0 ? (
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={ackAllChecked}
+                    onChange={(e) => setAckAllChecked(e.target.checked)}
+                    disabled={ackBusy}
+                    className="rounded"
+                  />
+                  <span className="text-xs text-[var(--color-text-primary)]">Acknowledge all</span>
+                </label>
+              ) : (
+                <span />
+              )}
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setConfirmOpen(false)}
+                  className="px-4 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-primary)] transition-colors"
+                >
+                  Cancel
+                </button>
+                {hasGateErrors ? (
+                  <button
+                    onClick={handleContinueAnyway}
+                    className="px-4 py-1.5 rounded-md text-xs font-medium bg-red-600 text-white hover:bg-red-700 transition-colors"
+                  >
+                    Continue saving anyway
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      onClick={handleSaveWithoutAck}
+                      className="px-4 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-primary)] transition-colors"
+                    >
+                      Save without acknowledging
+                    </button>
+                    <button
+                      onClick={() => void handleAckAndSave()}
+                      disabled={!ackAllChecked || ackBusy}
+                      className="px-4 py-1.5 rounded-md text-xs font-medium bg-green-600 text-white hover:bg-green-700 transition-colors disabled:opacity-50"
+                    >
+                      {ackBusy ? 'Acknowledging...' : 'Acknowledge & Save'}
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

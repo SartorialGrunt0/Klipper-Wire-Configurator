@@ -57,6 +57,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     setTextParseError,
     validation,
     revalidateFile,
+    pendingLineJump,
   } = useConfigStore();
   const isDirty = useConfigStore((s) => s.isDirty);
   const parseError = useConfigStore((s) => s.textParseErrors[activeFile]);
@@ -66,6 +67,12 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   const filenames = Object.keys(configFiles);
 
   const [editText, setEditText] = useState('');
+  // Which file the textarea text currently belongs to. Cross-file jumps must
+  // not consume against another file's text: on a file switch the export is
+  // async, so editText lags activeFile until it lands. Kept in sync by the
+  // export effect (sets it when a file's text lands) and the switch reset
+  // (clears it so a stale jump re-attempts after the new text arrives).
+  const [editTextFile, setEditTextFile] = useState(activeFile);
 
   // Helper: export config text via backend (preserves comments, whitespace, #*# markers).
   // Falls back to offline re-serialization when the backend is unreachable; callers use
@@ -111,6 +118,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     }
     if (!config) {
       setEditText('');
+      setEditTextFile('');
       return;
     }
     const requestId = ++exportTextRef.current;
@@ -118,6 +126,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     exportConfigText(config).then(({ text, usedFallback }) => {
       if (requestId === exportTextRef.current) {
         setEditText(text);
+        setEditTextFile(activeFile);
         markFallbackExport(activeFile, usedFallback);
       }
     });
@@ -450,6 +459,26 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     textareaRef.current.scrollTop = Math.max(0, lineTop - viewportH * 0.2);
     syncLineNumbersScroll();
   }, [syncLineNumbersScroll]);
+
+  // Consume one-shot line-jump requests (save dialog findings list → the
+  // editor). The target file may need switching first; the switch re-exports
+  // the file's text asynchronously, so re-attempt until the target file's
+  // text is actually in the textarea (editTextFile tracks the text's owner —
+  // a stale jump must never land on another file's layout).
+  useEffect(() => {
+    if (!pendingLineJump || !isActive) return;
+    if (pendingLineJump.file !== activeFile) {
+      setActiveFile(pendingLineJump.file);
+      setEditTextFile(''); // export is async — text is stale until it lands
+      return; // re-runs after the switch
+    }
+    if (editTextFile !== activeFile || !editText) {
+      return; // target file's text still in flight — re-runs when it lands
+    }
+    const line = pendingLineJump.line;
+    useConfigStore.getState().consumeLineJump();
+    setTimeout(() => jumpToLine(line), 0);
+  }, [pendingLineJump, activeFile, editText, editTextFile, isActive, jumpToLine, setActiveFile]);
 
   const handleSearchResultClick = (file: string, line: number) => {
     if (file !== activeFile) {

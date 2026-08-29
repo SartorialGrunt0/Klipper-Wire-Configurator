@@ -16,6 +16,9 @@ import FirmwareDialog from './dialogs/FirmwareDialog';
 interface ToolbarProps {
   showTextView: boolean;
   onToggleTextView: () => void;
+  /** Force the text view open (not a toggle) — used by the save dialog when
+   *  a validation finding is clicked so the editor can consume the jump. */
+  onShowTextView?: () => void;
   onToggleAddMenu?: () => void;
   onOpenMacroDesigner?: () => void;
 }
@@ -94,6 +97,7 @@ function loadHiddenItems(): ToolbarHiddenState {
 export default function Toolbar({
   showTextView,
   onToggleTextView,
+  onShowTextView,
   onToggleAddMenu,
   onOpenMacroDesigner,
 }: ToolbarProps) {
@@ -514,6 +518,7 @@ export default function Toolbar({
           onClose={() => setShowApply(false)}
           canAnalyzeWithAi={aiConfigured && showAiChatButton}
           onAnalyzeWithAi={queueAiAnalyzeRequest}
+          onShowTextView={onShowTextView}
         />
       )}
       {showFlash && <FirmwareDialog onClose={() => setShowFlash(false)} />}

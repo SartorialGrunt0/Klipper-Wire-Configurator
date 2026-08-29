@@ -81,6 +81,10 @@ interface ConfigState {
   originalTexts: Record<string, string>; // original exported text at import time
   isDirty: boolean; // true when config has unsaved changes
   textParseErrors: Record<string, string>; // per-file parse failures in the text view (last-good model is held)
+  /** One-shot "go to this line" request set by another surface (e.g. the
+   *  save dialog's findings list). The text editor consumes it once the
+   *  target file's text is in the textarea, then clears it. */
+  pendingLineJump: { file: string; line: number } | null;
 
   /* ── Actions ──────────────────────────────────────── */
   setConfigFile: (filename: string, config: ConfigFile) => void;
@@ -90,6 +94,11 @@ interface ConfigState {
   updateConfigFile: (filename: string, config: ConfigFile) => void;
   removeConfigFile: (filename: string) => void;
   setActiveFile: (filename: string) => void;
+  /** Request a one-shot jump to a line in a file (the text editor consumes
+   *  it when the target file's text is loaded into the textarea). */
+  requestLineJump: (file: string, line: number) => void;
+  /** Clear a pending line-jump request (called by the editor once consumed). */
+  consumeLineJump: () => void;
   setValidation: (filename: string, result: ValidationResult) => void;
   setSchemas: (schemas: Record<string, SectionSchema>) => void;
   setSelectedSection: (header: string | null, configFile?: string | null, lineNumber?: number | null) => void;
@@ -163,6 +172,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   originalTexts: {},
   isDirty: false,
   textParseErrors: {},
+  pendingLineJump: null,
 
   setConfigFile: (filename, config) =>
     set((s) => ({
@@ -208,6 +218,10 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     }),
 
   setActiveFile: (filename) => set({ activeFile: filename }),
+
+  requestLineJump: (file, line) => set({ pendingLineJump: { file, line } }),
+
+  consumeLineJump: () => set({ pendingLineJump: null }),
 
   setValidation: (filename, result) =>
     set((s) => ({
@@ -416,6 +430,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       originalTexts: {},
       isDirty: false,
       textParseErrors: {},
+      pendingLineJump: null,
     }),
 
   loadConfigs: (configs) =>
@@ -427,6 +442,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       selectedSectionFile: null,
       selectedSectionLine: null,
       textParseErrors: {},
+      pendingLineJump: null,
     }),
 
   setOriginalText: (filename, text) =>

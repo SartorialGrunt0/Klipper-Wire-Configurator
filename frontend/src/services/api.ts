@@ -138,6 +138,22 @@ export async function acknowledgeDuplicateWarning(section: ConfigSection): Promi
   });
 }
 
+/** Bulk-acknowledge warning findings by stable identity (Phase 4 save gate).
+ *  The backend derives the `extra` discriminator server-side, so the client
+ *  sends `''` — what must match is file|code|section|param. */
+export async function acknowledgeWarningsBulk(identities: Array<{
+  file: string;
+  code: string;
+  section: string;
+  param: string;
+  extra?: string;
+}>): Promise<{ status: string; file: string; count: number }> {
+  return request('/warning-acknowledgements/bulk', {
+    method: 'POST',
+    body: JSON.stringify({ identities }),
+  });
+}
+
 /* ── Export ───────────────────────────────────────────── */
 
 export async function exportConfig(config: ConfigFile): Promise<string> {

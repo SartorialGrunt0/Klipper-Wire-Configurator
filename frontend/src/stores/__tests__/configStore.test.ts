@@ -64,6 +64,7 @@ beforeEach(() => {
     originalTexts: {},
     isDirty: false,
     textParseErrors: {},
+    pendingLineJump: null,
   });
 });
 
@@ -395,6 +396,27 @@ describe('configStore dirty / text parse error tracking', () => {
     useConfigStore.getState().markClean();
     const state = useConfigStore.getState();
     expect(state.isDirty).toBe(false);
+  });
+});
+
+describe('configStore line-jump requests (save gate findings → editor)', () => {
+  it('requestLineJump stores the target; consumeLineJump clears it', () => {
+    useConfigStore.getState().requestLineJump('macros.cfg', 42);
+    expect(useConfigStore.getState().pendingLineJump).toEqual({ file: 'macros.cfg', line: 42 });
+    useConfigStore.getState().consumeLineJump();
+    expect(useConfigStore.getState().pendingLineJump).toBeNull();
+  });
+
+  it('clearAll resets a pending line jump', () => {
+    useConfigStore.getState().requestLineJump('a.cfg', 5);
+    useConfigStore.getState().clearAll();
+    expect(useConfigStore.getState().pendingLineJump).toBeNull();
+  });
+
+  it('loadConfigs resets a pending line jump', () => {
+    useConfigStore.getState().requestLineJump('a.cfg', 5);
+    useConfigStore.getState().loadConfigs({ 'new.cfg': makeConfigFile() });
+    expect(useConfigStore.getState().pendingLineJump).toBeNull();
   });
 });
 
