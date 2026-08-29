@@ -443,6 +443,12 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       selectedSectionLine: null,
       textParseErrors: {},
       pendingLineJump: null,
+      // The whole-project maps must not survive a project switch: a file
+      // present in the previous project but absent in this one would leave
+      // stale findings that drive getSaveButtonClass (which iterates the
+      // entire validation map) until revalidation lands.
+      validation: {},
+      validationText: {},
     }),
 
   setOriginalText: (filename, text) =>
