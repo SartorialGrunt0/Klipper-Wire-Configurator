@@ -58,12 +58,12 @@ def _pin(name: str, desc: str = "", required: bool = False, default: Optional[st
     return ParamDef(name=name, param_type=ParamType.PIN, required=required, default=default, description=desc)
 
 
-def _float(name: str, desc: str = "", required: bool = False, default: Optional[str] = None, unit: str = "") -> ParamDef:
-    return ParamDef(name=name, param_type=ParamType.FLOAT, required=required, default=default, description=desc, unit=unit)
+def _float(name: str, desc: str = "", required: bool = False, default: Optional[str] = None, unit: str = "", min_val: Optional[float] = None, max_val: Optional[float] = None) -> ParamDef:
+    return ParamDef(name=name, param_type=ParamType.FLOAT, required=required, default=default, description=desc, unit=unit, min_val=min_val, max_val=max_val)
 
 
-def _int(name: str, desc: str = "", required: bool = False, default: Optional[str] = None) -> ParamDef:
-    return ParamDef(name=name, param_type=ParamType.INT, required=required, default=default, description=desc)
+def _int(name: str, desc: str = "", required: bool = False, default: Optional[str] = None, min_val: Optional[float] = None, max_val: Optional[float] = None) -> ParamDef:
+    return ParamDef(name=name, param_type=ParamType.INT, required=required, default=default, description=desc, min_val=min_val, max_val=max_val)
 
 
 def _str(name: str, desc: str = "", required: bool = False, default: Optional[str] = None) -> ParamDef:
@@ -87,10 +87,10 @@ def _ml(name: str, desc: str = "", required: bool = False, default: Optional[str
 STEPPER_PARAMS = [
     _float("step_distance", "Distance per step in mm", default=""),
     _float("rotation_distance", "Distance per full rotation in mm", required=True),
-    _int("microsteps", "Microsteps per full step", required=True),
-    _int("full_steps_per_rotation", "Steps per full motor rotation", default="200"),
+    _int("microsteps", "Microsteps per full step", required=True, min_val=1),
+    _int("full_steps_per_rotation", "Steps per full motor rotation", default="200", min_val=1),
     _str("gear_ratio", "Gear ratio (e.g., 80:16 or 57:11, 2:1)"),
-    _float("step_pulse_duration", "Step pulse duration"),
+    _float("step_pulse_duration", "Step pulse duration", min_val=0, max_val=0.001),
     _pin("step_pin", "Step GPIO pin", required=True),
     _pin("dir_pin", "Direction GPIO pin", required=True),
     _pin("enable_pin", "Enable GPIO pin"),
@@ -222,7 +222,7 @@ _register(SectionDef(
     description="Micro-controller configuration",
     params=[
         _str("serial", "Serial port device path"),  # required only when not using canbus
-        _int("baud", "Baud rate", default="250000"),
+        _int("baud", "Baud rate", default="250000", min_val=2400),
         _str("canbus_uuid", "CAN bus UUID"),  # required only when not using serial
         _str("canbus_interface", "CAN bus interface", default="can0"),
         _enum("restart_method", ["arduino", "cheetah", "rpi_usb", "command"], "Restart method"),
@@ -285,8 +285,8 @@ for axis in ["x", "y", "z"]:
             description=f"Additional {axis.upper()}-axis stepper motor {i}",
             params=[
                 _float("rotation_distance", "Distance per full rotation in mm"),
-                _int("microsteps", "Microsteps per full step"),
-                _int("full_steps_per_rotation", "Steps per full motor rotation", default="200"),
+                _int("microsteps", "Microsteps per full step", min_val=1),
+                _int("full_steps_per_rotation", "Steps per full motor rotation", default="200", min_val=1),
                 _str("gear_ratio", "Gear ratio"),
                 _pin("step_pin", "Step GPIO pin", required=True),
                 _pin("dir_pin", "Direction GPIO pin", required=True),
@@ -300,10 +300,10 @@ for axis in ["x", "y", "z"]:
 LETTERED_STEPPER_PARAMS = [
     _float("step_distance", "Distance per step in mm", default=""),
     _float("rotation_distance", "Distance per full rotation in mm"),
-    _int("microsteps", "Microsteps per full step", required=True),
-    _int("full_steps_per_rotation", "Steps per full motor rotation", default="200"),
+    _int("microsteps", "Microsteps per full step", required=True, min_val=1),
+    _int("full_steps_per_rotation", "Steps per full motor rotation", default="200", min_val=1),
     _str("gear_ratio", "Gear ratio (for geared rotary_delta steppers)"),
-    _float("step_pulse_duration", "Step pulse duration"),
+    _float("step_pulse_duration", "Step pulse duration", min_val=0, max_val=0.001),
     _pin("step_pin", "Step GPIO pin", required=True),
     _pin("dir_pin", "Direction GPIO pin", required=True),
     _pin("enable_pin", "Enable GPIO pin"),
@@ -368,7 +368,7 @@ _register(SectionDef(
         _pin("spi_software_mosi_pin", "Software SPI MOSI"),
         _pin("spi_software_miso_pin", "Software SPI MISO"),
         _float("pullup_resistor", "Sensor pullup resistor", default="4700"),
-        _float("inline_resistor", "Sensor inline resistor", default="0"),
+        _float("inline_resistor", "Sensor inline resistor", default="0", min_val=0),
         _float("smooth_time", "Temperature smoothing window", default="1.0", unit="s"),
         _enum("control", ["watermark", "pid"], "Heater control algorithm (pid or watermark)", default="pid"),
         _float("pid_Kp", "PID proportional"),
@@ -382,7 +382,7 @@ _register(SectionDef(
         _float("min_extrude_temp", "Minimum extrude temperature", default="170", unit="°C"),
         _float("min_temp", "Minimum allowed temperature", default="0", unit="°C"),
         _float("max_temp", "Maximum allowed temperature", required=True, unit="°C"),
-        _float("pressure_advance", "Pressure advance coefficient", default="0"),
+        _float("pressure_advance", "Pressure advance coefficient", default="0", min_val=0),
         _float("pressure_advance_smooth_time", "Pressure advance smooth time", default="0.040", unit="s"),
     ],
 ))
@@ -495,7 +495,7 @@ _register(SectionDef(
         _pin("spi_software_mosi_pin", "Software SPI MOSI"),
         _pin("spi_software_miso_pin", "Software SPI MISO"),
         _bool("interpolate", "Enable 256 microstep interpolation", default="True"),
-        _float("run_current", "Motor run current in amps", required=True),
+        _float("run_current", "Motor run current in amps", required=True, min_val=0.1, max_val=2.4),
         _float("sense_resistor", "Sense resistor value", required=True),
         _int("idle_current_percent", "Idle current percent", default="100"),
         _str("driver_*", "TMC driver register override"),
@@ -512,14 +512,14 @@ _register(SectionDef(
     max_instances=1,
     params=[
         _pin("pin", "Fan output pin", required=True),
-        _float("max_power", "Maximum power", default="1.0"),
+        _float("max_power", "Maximum power", default="1.0", max_val=1),
         _float("shutdown_speed", "Shutdown speed", default="0"),
         _float("cycle_time", "PWM cycle time", default="0.010", unit="s"),
         _bool("hardware_pwm", "Use hardware PWM", default="False"),
-        _float("kick_start_time", "Kick start time", default="0.100", unit="s"),
-        _float("off_below", "Off below this speed", default="0.0"),
+        _float("kick_start_time", "Kick start time", default="0.100", unit="s", min_val=0),
+        _float("off_below", "Off below this speed", default="0.0", min_val=0, max_val=1),
         _pin("tachometer_pin", "Tachometer input pin"),
-        _int("tachometer_ppr", "Tachometer pulses per revolution", default="2"),
+        _int("tachometer_ppr", "Tachometer pulses per revolution", default="2", min_val=1),
         _float("tachometer_poll_interval", "Tachometer poll interval", default="0.0015"),
         _pin("enable_pin", "Enable pin"),
     ],
@@ -546,7 +546,7 @@ _register(SectionDef(
         _pin("enable_pin", "Enable pin"),
         _str("heater", "Associated heater", default="extruder"),
         _float("heater_temp", "Temp threshold to enable fan", default="50.0", unit="°C"),
-        _float("fan_speed", "Fan speed when heater active", default="1.0"),
+        _float("fan_speed", "Fan speed when heater active", default="1.0", min_val=0, max_val=1),
     ],
 ))
 
@@ -569,8 +569,8 @@ _register(SectionDef(
         _int("tachometer_ppr", "Tachometer pulses per revolution", default="2"),
         _float("tachometer_poll_interval", "Tachometer poll interval", default="0.0015"),
         _pin("enable_pin", "Enable pin"),
-        _float("fan_speed", "Fan speed when active", default="1.0"),
-        _float("idle_timeout", "Idle timeout before turning off", default="30", unit="s"),
+        _float("fan_speed", "Fan speed when active", default="1.0", min_val=0, max_val=1),
+        _float("idle_timeout", "Idle timeout before turning off", default="30", unit="s", min_val=0),
         _float("idle_speed", "Fan speed during idle", default="fan_speed"),
         _str("heater", "Associated heater"),
         _str("stepper", "Associated stepper"),
@@ -601,7 +601,7 @@ _register(SectionDef(
         _str("sensor_mcu", "Sensor MCU (for DS18B20)"),
         _str("serial_no", "DS18B20 serial number"),
         _float("ds18_report_time", "DS18B20 report interval", default="3.0", unit="s"),
-        _float("min_temp", "Minimum temperature", default="0"),
+        _float("min_temp", "Minimum temperature", default="0", min_val=-273.15),
         _float("max_temp", "Maximum temperature", required=True),
         _float("target_temp", "Target temperature", default="40.0", unit="°C"),
         _float("max_speed", "Maximum fan speed", default="1.0"),
@@ -653,10 +653,10 @@ _register(SectionDef(
         _float("y_offset", "Y offset from nozzle", default="0", unit="mm"),
         _float("z_offset", "Z offset", unit="mm"),
         _float("speed", "Probing speed", default="5.0", unit="mm/s"),
-        _int("samples", "Number of probe samples", default="1"),
+        _int("samples", "Number of probe samples", default="1", min_val=1),
         _float("sample_retract_dist", "Retract distance between samples", default="2", unit="mm"),
-        _float("samples_tolerance", "Sample tolerance", default="0.100", unit="mm"),
-        _int("samples_tolerance_retries", "Max retries for tolerance", default="0"),
+        _float("samples_tolerance", "Sample tolerance", default="0.100", unit="mm", min_val=0),
+        _int("samples_tolerance_retries", "Max retries for tolerance", default="0", min_val=0),
         _enum("samples_result", ["median", "average"], "How to calculate result", default="average"),
         _float("lift_speed", "Lift speed between samples", unit="mm/s"),
         _str("activate_gcode", "G-code to run before probing"),
@@ -710,7 +710,7 @@ _register(SectionDef(
         _str("mesh_min", "Minimum mesh X,Y coordinate (e.g. 35,6)"),
         _str("mesh_max", "Maximum mesh X,Y coordinate (e.g. 240,198)"),
         _str("probe_count", "Probe count X,Y (e.g. 3,3 or 5,5)", default="3,3"),
-        _int("round_probe_count", "Round bed probe count", default="5"),
+        _int("round_probe_count", "Round bed probe count", default="5", min_val=3),
         _str("mesh_pps", "Mesh points per segment", default="2,2"),
         _enum("algorithm", ["lagrange", "bicubic"], "Interpolation algorithm", default="lagrange"),
         _float("bicubic_tension", "Bicubic tension", default="0.2"),
@@ -721,7 +721,7 @@ _register(SectionDef(
         _float("move_check_distance", "Move check distance", default="5.0"),
         _str("zero_reference_position", "Zero reference X,Y"),
         _float("adaptive_margin", "Adaptive mesh margin", unit="mm"),
-        _float("scan_overshoot", "Rapid scan overshoot", unit="mm"),
+        _float("scan_overshoot", "Rapid scan overshoot", unit="mm", min_val=1),
     ],
 ))
 
@@ -737,7 +737,7 @@ _register(SectionDef(
         _ml("points", "Probe points for tilt calculation (one X,Y per line)", required=True),
         _float("speed", "Travel speed", default="50", unit="mm/s"),
         _float("horizontal_move_z", "Z height for moves", default="5", unit="mm"),
-        _int("retries", "Number of retries", default="0"),
+        _int("retries", "Number of retries", default="0", min_val=0),
         _float("retry_tolerance", "Retry tolerance", default="0"),
     ],
 ))
@@ -888,11 +888,11 @@ _register(SectionDef(
     params=[
         _enum("shaper_type", ["mzv", "ei", "2hump_ei", "3hump_ei", "zv", "zvd"], "Input shaper type for all axes"),
         _enum("shaper_type_x", ["mzv", "ei", "2hump_ei", "3hump_ei", "zv", "zvd"], "X shaper type", default="mzv"),
-        _float("shaper_freq_x", "X shaper frequency", default="0", unit="Hz"),
+        _float("shaper_freq_x", "X shaper frequency", default="0", unit="Hz", min_val=0),
         _enum("shaper_type_y", ["mzv", "ei", "2hump_ei", "3hump_ei", "zv", "zvd"], "Y shaper type", default="mzv"),
-        _float("shaper_freq_y", "Y shaper frequency", default="0", unit="Hz"),
+        _float("shaper_freq_y", "Y shaper frequency", default="0", unit="Hz", min_val=0),
         _enum("shaper_type_z", ["mzv", "ei", "2hump_ei", "3hump_ei", "zv", "zvd"], "Z shaper type"),
-        _float("shaper_freq_z", "Z shaper frequency", default="0", unit="Hz"),
+        _float("shaper_freq_z", "Z shaper frequency", default="0", unit="Hz", min_val=0),
         _float("damping_ratio_x", "X damping ratio", default="0.1"),
         _float("damping_ratio_y", "Y damping ratio", default="0.1"),
         _float("damping_ratio_z", "Z damping ratio", default="0.1"),
@@ -956,15 +956,15 @@ _register(SectionDef(
         _str("probe_points", "Probe points for testing (X,Y,Z)", required=True),
         _float("accel_per_hz", "Acceleration per Hz", default="75"),
         _float("accel_per_hz_z", "Z-axis acceleration per Hz", default="15"),
-        _float("hz_per_sec", "Hz per second", default="1"),
+        _float("hz_per_sec", "Hz per second", default="1", min_val=0.1, max_val=2),
         _float("max_freq", "Maximum frequency", default="133.33", unit="Hz"),
         _float("max_freq_z", "Maximum Z frequency", default="100", unit="Hz"),
-        _float("max_smoothing", "Maximum smoothing"),
-        _float("min_freq", "Minimum frequency", default="5", unit="Hz"),
+        _float("max_smoothing", "Maximum smoothing", min_val=0.05),
+        _float("min_freq", "Minimum frequency", default="5", unit="Hz", min_val=1),
         _float("move_speed", "Move speed between test points", default="50", unit="mm/s"),
         _float("sweeping_accel", "Sweeping move acceleration", default="400", unit="mm/s²"),
         _float("sweeping_accel_z", "Z-axis sweeping acceleration", default="50", unit="mm/s²"),
-        _float("sweeping_period", "Sweeping move period", default="1.2", unit="s"),
+        _float("sweeping_period", "Sweeping move period", default="1.2", unit="s", min_val=0),
     ],
 ))
 
@@ -1010,12 +1010,12 @@ _register(SectionDef(
         _float("adc_voltage", "ADC reference voltage"),
         _float("voltage_offset", "ADC voltage offset"),
         _float("pullup_resistor", "Sensor pullup resistor", default="4700"),
-        _float("inline_resistor", "Sensor inline resistor", default="0"),
+        _float("inline_resistor", "Sensor inline resistor", default="0", min_val=0),
         _str("spi_bus", "SPI bus (for SPI sensors)"),
         _pin("spi_software_sclk_pin", "Software SPI clock"),
         _pin("spi_software_mosi_pin", "Software SPI MOSI"),
         _pin("spi_software_miso_pin", "Software SPI MISO"),
-        _float("min_temp", "Minimum temperature", default="0"),
+        _float("min_temp", "Minimum temperature", default="0", min_val=-273.15),
         _float("max_temp", "Maximum temperature", default="100"),
         _str("gcode_id", "G-code ID for temperature reporting"),
     ],
@@ -1028,12 +1028,12 @@ _register(SectionDef(
     component_group="temperature",
     is_named=True,
     params=[
-        _float("temperature1", "First calibration temperature", required=True),
-        _float("resistance1", "First calibration resistance", required=True),
-        _float("temperature2", "Second calibration temperature"),
-        _float("resistance2", "Second calibration resistance"),
-        _float("temperature3", "Third calibration temperature"),
-        _float("resistance3", "Third calibration resistance"),
+        _float("temperature1", "First calibration temperature", required=True, min_val=-273.15),
+        _float("resistance1", "First calibration resistance", required=True, min_val=0),
+        _float("temperature2", "Second calibration temperature", min_val=-273.15),
+        _float("resistance2", "Second calibration resistance", min_val=0),
+        _float("temperature3", "Third calibration temperature", min_val=-273.15),
+        _float("resistance3", "Third calibration resistance", min_val=0),
         _float("beta", "Beta coefficient"),
     ],
 ))
@@ -1047,7 +1047,7 @@ _register(SectionDef(
     is_named=True,
     params=[
         _pin("pin", "Data pin", required=True),
-        _int("chain_count", "Number of LEDs in chain", default="1"),
+        _int("chain_count", "Number of LEDs in chain", default="1", min_val=1),
         _str("color_order", "Color order (can be comma-separated list for per-LED ordering)", default="GRB"),
         _float("initial_RED", "Initial red value", default="0.0"),
         _float("initial_GREEN", "Initial green value", default="0.0"),
@@ -1065,7 +1065,7 @@ _register(SectionDef(
     params=[
         _pin("data_pin", "Data pin", required=True),
         _pin("clock_pin", "Clock pin", required=True),
-        _int("chain_count", "Number of LEDs", default="1"),
+        _int("chain_count", "Number of LEDs", default="1", min_val=1),
         _float("initial_RED", "Initial red", default="0.0"),
         _float("initial_GREEN", "Initial green", default="0.0"),
         _float("initial_BLUE", "Initial blue", default="0.0"),
@@ -1085,10 +1085,10 @@ _register(SectionDef(
         _pin("white_pin", "White LED pin"),
         _float("cycle_time", "PWM cycle time", default="0.010"),
         _bool("hardware_pwm", "Use hardware PWM", default="False"),
-        _float("initial_RED", "Initial red", default="0.0"),
-        _float("initial_GREEN", "Initial green", default="0.0"),
-        _float("initial_BLUE", "Initial blue", default="0.0"),
-        _float("initial_WHITE", "Initial white", default="0.0"),
+        _float("initial_RED", "Initial red", default="0.0", min_val=0, max_val=1),
+        _float("initial_GREEN", "Initial green", default="0.0", min_val=0, max_val=1),
+        _float("initial_BLUE", "Initial blue", default="0.0", min_val=0, max_val=1),
+        _float("initial_WHITE", "Initial white", default="0.0", min_val=0, max_val=1),
     ],
 ))
 
@@ -1104,7 +1104,7 @@ _register(SectionDef(
         _float("maximum_servo_angle", "Maximum angle", default="180", unit="°"),
         _float("minimum_pulse_width", "Minimum pulse width", default="0.001", unit="s"),
         _float("maximum_pulse_width", "Maximum pulse width", default="0.002", unit="s"),
-        _float("initial_angle", "Initial angle", unit="°"),
+        _float("initial_angle", "Initial angle", unit="°", min_val=0, max_val=360),
         _float("initial_pulse_width", "Initial pulse width", unit="s"),
     ],
 ))
@@ -1156,7 +1156,7 @@ _register(SectionDef(
         _bool("pause_on_runout", "Pause on runout", default="True"),
         _ml("runout_gcode", "Runout G-code"),
         _ml("insert_gcode", "Insert G-code"),
-        _float("event_delay", "Event delay", default="3"),
+        _float("event_delay", "Event delay", default="3", min_val=0),
     ],
 ))
 
@@ -1278,7 +1278,7 @@ _register(SectionDef(
     params=[
         _ml("data", "16x16 glyph data"),
         _ml("hd44780_data", "5x8 hd44780 glyph data"),
-        _int("hd44780_slot", "hd44780 glyph slot"),
+        _int("hd44780_slot", "hd44780 glyph slot", min_val=0, max_val=7),
     ],
 ))
 
@@ -1313,10 +1313,10 @@ _register(SectionDef(
     component_group="gcode",
     max_instances=1,
     params=[
-        _float("retract_length", "Retraction length", default="0", unit="mm"),
-        _float("retract_speed", "Retraction speed", default="20", unit="mm/s"),
+        _float("retract_length", "Retraction length", default="0", unit="mm", min_val=0),
+        _float("retract_speed", "Retraction speed", default="20", unit="mm/s", min_val=1),
         _float("unretract_extra_length", "Extra unretract length", default="0", unit="mm"),
-        _float("unretract_speed", "Unretract speed", default="10", unit="mm/s"),
+        _float("unretract_speed", "Unretract speed", default="10", unit="mm/s", min_val=1),
     ],
 ))
 
@@ -1365,7 +1365,7 @@ _register(SectionDef(
     is_named=True,
     params=[
         _ml("gcode", "G-code commands", required=True),
-        _float("initial_duration", "Initial delay", default="0", unit="s"),
+        _float("initial_duration", "Initial delay", default="0", unit="s", min_val=0),
     ],
 ))
 
@@ -1498,9 +1498,9 @@ _register(SectionDef(
     component_group="heater",
     is_named=True,
     params=[
-        _float("max_error", "Maximum error", default="120"),
+        _float("max_error", "Maximum error", default="120", min_val=0),
         _float("check_gain_time", "Check gain time", default="20", unit="s"),
-        _float("hysteresis", "Hysteresis", default="5"),
+        _float("hysteresis", "Hysteresis", default="5", min_val=0),
         _float("heating_gain", "Minimum heating gain", default="2"),
     ],
 ))
@@ -1521,7 +1521,7 @@ _register(SectionDef(
         _pin("enable_pin", "Enable pin"),
         _pin("endstop_pin", "Endstop pin"),
         _float("velocity", "Max velocity", default="5", unit="mm/s"),
-        _float("accel", "Max acceleration", default="0"),
+        _float("accel", "Max acceleration", default="0", min_val=0),
     ],
 ))
 
@@ -1719,11 +1719,11 @@ _register(SectionDef(
     component_group="bed_leveling",
     max_instances=1,
     params=[
-        _float("temp_coeff", "Temperature coefficient"),
+        _float("temp_coeff", "Temperature coefficient", min_val=-1, max_val=1),
         _enum("sensor_type", SENSOR_TYPE_ENUM, "Sensor type"),
         _pin("sensor_pin", "Sensor pin"),
         _float("smooth_time", "Smooth time", default="2.0"),
-        _float("min_temp", "Min temp", default="0"),
+        _float("min_temp", "Min temp", default="0", min_val=-273.15),
         _float("max_temp", "Max temp", default="100"),
     ],
 ))
@@ -1737,8 +1737,8 @@ _register(SectionDef(
     params=[
         _pin("pin", "Probe pin", required=True),
         _pin("control_pin", "Control pin"),
-        _float("probe_accel", "Probe acceleration"),
-        _float("recovery_time", "Recovery time", default="0.4"),
+        _float("probe_accel", "Probe acceleration", min_val=0),
+        _float("recovery_time", "Recovery time", default="0.4", min_val=0),
         _float("x_offset", "X offset", default="0"),
         _float("y_offset", "Y offset", default="0"),
         _float("z_offset", "Z offset"),
@@ -1811,7 +1811,7 @@ _register(SectionDef(
         _bool("pga_bypass", "ADS1220 bypass the PGA"),
         _str("input_mux", "ADS1220 input multiplexer channel"),
         # load_cell.py calibration params
-        _float("counts_per_gram", "ADC counts per gram"),
+        _float("counts_per_gram", "ADC counts per gram", min_val=1),
         _float("reference_tare_counts", "Reference tare count offset"),
         _str("sensor_orientation", "Sensor orientation for tare compensation"),
     ],
@@ -2039,7 +2039,7 @@ _register(SectionDef(
         _float("adc_voltage", "ADC reference voltage"),
         _float("voltage_offset", "ADC voltage offset"),
         _float("pullup_resistor", "Sensor pullup resistor", default="4700"),
-        _float("inline_resistor", "Sensor inline resistor", default="0"),
+        _float("inline_resistor", "Sensor inline resistor", default="0", min_val=0),
         _float("smooth_time", "Measurement smoothing window", default="2.0", unit="s"),
         _float("min_temp", "Min temp", default="0", unit="°C"),
         _float("max_temp", "Max temp", default="100", unit="°C"),
@@ -2241,7 +2241,7 @@ _register(SectionDef(
     description="Static PWM clock output pin (provides a clock to other hardware)",
     params=[
         _pin("pin", "Output pin to configure as a clock", required=True),
-        _int("frequency", "Target output frequency", default="100"),
+        _int("frequency", "Target output frequency", default="100", max_val=520000000),
     ],
 ))
 
