@@ -1,11 +1,13 @@
 """
 Phase 6 (F17 data): round-trip guarantee that every schema param carrying
-min_val/max_val actually enforces it.
+min_val/max_val/strict_above/strict_below actually enforces it.
 
 For each bound-bearing ParamDef this test builds a minimal one-section config
 and asserts:
-  * an out-of-bounds value produces the range error, and
-  * the boundary value (inclusive, matching Klipper minval=/maxval=) does not.
+  * inclusive min_val/max_val (Klipper minval=/maxval=): an out-of-bounds
+    value errors; the boundary value passes (inclusive).
+  * strict strict_above/strict_below (Klipper above=/below=): the boundary
+    value itself ERRORS (strict); a value one step beyond it passes.
 
 The data was transcribed from the Klipper source (~/klipper) — see plan
 .hermes/plans/2026-08-24_014451-kwc-error-warning-flagging.md. If a param's
@@ -28,6 +30,8 @@ from parser.validator import validate_config  # noqa: E402
 
 
 def _bounded_params():
+    """Every (sec_type, ParamDef) carrying any bound kind, deduped by
+    (section_type, param name) across the whole schema."""
     seen = set()
     out = []
     for sec_type in get_all_section_types():
@@ -35,7 +39,8 @@ def _bounded_params():
         if sec_def is None:
             continue
         for p in sec_def.params:
-            if p.min_val is None and p.max_val is None:
+            if (p.min_val is None and p.max_val is None
+                    and p.strict_above is None and p.strict_below is None):
                 continue
             key = (sec_type, p.name)
             if key in seen:
@@ -62,53 +67,73 @@ def _fmt(value, is_int):
     return repr(value)
 
 
+def _step(p):
+    return 1 if p.param_type.name == 'INT' else 0.5
+
+
 def _range_errors(sec_type, param_name, value, is_int):
     cfg = f"[{sec_type}]\n{param_name}: {_fmt(value, is_int)}\n"
     errors = validate_config(parse_config(cfg, f'{sec_type}.cfg')).errors
     return [
         e for e in errors
-        if e.param == param_name and ('minimum of' in e.message or 'maximum of' in e.message)
+        if e.param == param_name and (
+            'minimum of' in e.message or 'maximum of' in e.message
+            or 'must be above' in e.message or 'must be below' in e.message
+        )
     ]
 
 
-def _out_of_bounds_value(p):
-    """A value guaranteed outside [min_val, max_val] for p's type."""
-    step = 1 if p.param_type.name == 'INT' else 0.5
-    if p.max_val is not None:
-        return p.max_val + step
-    return p.min_val - step
-
-
-def _in_bounds_value(p):
-    # Boundary values are inclusive (Klipper minval/maxval are inclusive).
+def _bad_values(p):
+    """Values that must error for this param's bound kinds."""
+    vals = []
     if p.min_val is not None:
-        return p.min_val
-    return p.max_val
+        vals.append(p.min_val - _step(p))
+    if p.max_val is not None:
+        vals.append(p.max_val + _step(p))
+    if p.strict_above is not None:
+        vals.append(p.strict_above)          # strict: the bound itself fails
+        vals.append(p.strict_above - _step(p))
+    if p.strict_below is not None:
+        vals.append(p.strict_below)          # strict: the bound itself fails
+        vals.append(p.strict_below + _step(p))
+    return vals
+
+
+def _good_values(p):
+    """Values that must pass for this param's bound kinds."""
+    vals = []
+    if p.min_val is not None:
+        vals.append(p.min_val)               # inclusive: boundary passes
+    if p.max_val is not None:
+        vals.append(p.max_val)
+    if p.strict_above is not None:
+        vals.append(p.strict_above + _step(p))
+    if p.strict_below is not None:
+        vals.append(p.strict_below - _step(p))
+    return vals
 
 
 @pytest.mark.parametrize(
-    'sec_type,param',
-    BOUNDED,
-    ids=[f'{s}.{p.name}' for s, p in BOUNDED],
+    'sec_type,param,value',
+    [(s, p, v) for s, p in BOUNDED for v in _bad_values(p)],
+    ids=[f'{s}.{p.name}@{v}' for s, p in BOUNDED for v in _bad_values(p)],
 )
-def test_out_of_bounds_is_error(sec_type, param):
-    bad = _range_errors(sec_type, param.name, _out_of_bounds_value(param),
-                        param.param_type.name == 'INT')
+def test_out_of_bounds_is_error(sec_type, param, value):
+    bad = _range_errors(sec_type, param.name, value, param.param_type.name == 'INT')
     assert bad, (
-        f"[{sec_type}] {param.name} (min={param.min_val}, max={param.max_val}) "
-        f"did not reject {_out_of_bounds_value(param)}"
+        f"[{sec_type}] {param.name} (min={param.min_val}, max={param.max_val}, "
+        f"sa={param.strict_above}, sb={param.strict_below}) did not reject {value}"
     )
 
 
 @pytest.mark.parametrize(
-    'sec_type,param',
-    BOUNDED,
-    ids=[f'{s}.{p.name}' for s, p in BOUNDED],
+    'sec_type,param,value',
+    [(s, p, v) for s, p in BOUNDED for v in _good_values(p)],
+    ids=[f'{s}.{p.name}@{v}' for s, p in BOUNDED for v in _good_values(p)],
 )
-def test_in_bounds_is_clean(sec_type, param):
-    bad = _range_errors(sec_type, param.name, _in_bounds_value(param),
-                        param.param_type.name == 'INT')
+def test_in_bounds_is_clean(sec_type, param, value):
+    bad = _range_errors(sec_type, param.name, value, param.param_type.name == 'INT')
     assert not bad, (
-        f"[{sec_type}] {param.name} (min={param.min_val}, max={param.max_val}) "
-        f"must accept the boundary value {_in_bounds_value(param)}"
+        f"[{sec_type}] {param.name} (min={param.min_val}, max={param.max_val}, "
+        f"sa={param.strict_above}, sb={param.strict_below}) must accept {value}"
     )

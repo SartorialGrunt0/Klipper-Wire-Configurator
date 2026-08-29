@@ -1329,12 +1329,15 @@ def _validate_param_value(param, param_def, section, result):
                 break
 
     # Range enforcement (F17): only params that actually carry bounds are
-    # checked — 0 ParamDefs have them yet, and populating them is Phase 6.
+    # checked. Inclusive min_val/max_val (Klipper minval=/maxval=) and strict
+    # strict_above/strict_below (Klipper above=/below=: v<=X / v>=X errors).
     # A value that float() can't parse is not range-checked (it is already a
     # FLOAT/INT type error from the branch above; F22 removed formula
     # tolerance since Klipper has no formula support).
     if param_def.param_type in (ParamType.INT, ParamType.FLOAT):
-        if param_def.min_val is not None or param_def.max_val is not None:
+        has_bounds = (param_def.min_val is not None or param_def.max_val is not None
+                      or param_def.strict_above is not None or param_def.strict_below is not None)
+        if has_bounds:
             try:
                 numeric = float(value)
             except ValueError:
@@ -1354,6 +1357,22 @@ def _validate_param_value(param, param_def, section, result):
                         section=section.full_header,
                         param=param.key,
                         message=f"Value {value} for '{param.key}' is above the maximum of {_format_bound(param_def.max_val)}.",
+                        line_number=param.line_number,
+                    ))
+                elif param_def.strict_above is not None and numeric <= param_def.strict_above:
+                    result.errors.append(ValidationError(
+                        severity="error",
+                        section=section.full_header,
+                        param=param.key,
+                        message=f"Value {value} for '{param.key}' must be above {_format_bound(param_def.strict_above)}.",
+                        line_number=param.line_number,
+                    ))
+                elif param_def.strict_below is not None and numeric >= param_def.strict_below:
+                    result.errors.append(ValidationError(
+                        severity="error",
+                        section=section.full_header,
+                        param=param.key,
+                        message=f"Value {value} for '{param.key}' must be below {_format_bound(param_def.strict_below)}.",
                         line_number=param.line_number,
                     ))
 
