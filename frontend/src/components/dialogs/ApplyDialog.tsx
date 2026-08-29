@@ -190,7 +190,10 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
   // A file deleted since import is gone from configFiles but its original text
   // survives in originalTexts — union both so deletions show up in the diff
   // and are actually removed from disk on save.
-  const filenames = Array.from(new Set([...Object.keys(configFiles), ...Object.keys(originalTexts)]));
+  const filenames = useMemo(
+    () => Array.from(new Set([...Object.keys(configFiles), ...Object.keys(originalTexts)])),
+    [configFiles, originalTexts],
+  );
   const deletedFilenames = filenames.filter((fn) => !(fn in configFiles) && fn in originalTexts);
 
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set(filenames));
@@ -332,11 +335,63 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
   const [currentTexts, setCurrentTexts] = useState<Record<string, string>>({});
   const [diffLoading, setDiffLoading] = useState(true);
 
-  const hasAnyOriginals = filenames.some((fn) => fn in originalTexts);
-  // New files (imported but never saved/Pi-loaded) have no original — show
-  // them with a "new file" badge in the diff panel instead of hiding it.
-  const hasAnyNewFiles = filenames.some((fn) => !(fn in originalTexts));
-  const showDiffPanel = hasAnyOriginals || hasAnyNewFiles;
+  /* ── Phase 4 revision: per-file review in the center area ────────────
+     Findings no longer sit in a banner above the file list — they render
+     under each file in the center review area (where the diff lives).
+     A file is "noteworthy" (shown in the left list, selectable) when it is
+     new, deleted, has changes, or carries gate findings. Unchanged files
+     with no findings are hidden to keep the review surface small. */
+  const gateFindingFiles = useMemo(() => {
+    const set = new Set<string>();
+    for (const f of [...gateIssues.errors, ...gateIssues.warnings]) set.add(f.file);
+    return set;
+  }, [gateIssues]);
+
+  const fileFindings = useMemo(() => {
+    const map: Record<string, (SaveGateFinding & { kind: 'error' | 'warning' })[]> = {};
+    for (const f of gateIssues.errors) {
+      (map[f.file] ??= []).push({ ...f, kind: 'error' });
+    }
+    for (const f of gateIssues.warnings) {
+      (map[f.file] ??= []).push({ ...f, kind: 'warning' });
+    }
+    for (const list of Object.values(map)) {
+      list.sort((a, b) => a.kind === b.kind
+        ? a.line_number - b.line_number
+        : a.kind === 'error' ? -1 : 1);
+    }
+    return map;
+  }, [gateIssues]);
+
+  const fileStatus = useMemo(() => {
+    const map: Record<string, { isDeleted: boolean; hasOriginal: boolean; hasChanges: boolean }> = {};
+    for (const fn of filenames) {
+      const hasOriginal = fn in originalTexts;
+      const isDeleted = hasOriginal && !(fn in configFiles);
+      const current = currentTexts[fn];
+      let hasChanges = false;
+      if (current !== undefined || isDeleted) {
+        // Deleted files diff against empty (every line removed); new files
+        // have no original (every line added).
+        const patch = createTwoFilesPatch(fn, fn, originalTexts[fn] ?? '', current ?? '', 'saved', isDeleted ? 'deleted' : 'current', { context: 3 });
+        hasChanges = parsePatch(patch).some((l) => l.type === 'added' || l.type === 'removed');
+      }
+      map[fn] = { isDeleted, hasOriginal, hasChanges };
+    }
+    return map;
+  }, [filenames, originalTexts, configFiles, currentTexts]);
+
+  const isNoteworthy = useCallback((fn: string) => {
+    const s = fileStatus[fn];
+    if (!s) return false;
+    return s.isDeleted || !s.hasOriginal || s.hasChanges || gateFindingFiles.has(fn);
+  }, [fileStatus, gateFindingFiles]);
+
+  const noteworthyFiles = useMemo(() => filenames.filter(isNoteworthy), [filenames, isNoteworthy]);
+  const hiddenFileCount = filenames.length - noteworthyFiles.length;
+  // The center review area is shown whenever there is anything notable to
+  // review (while diff export is in flight it shows the loading note).
+  const showReviewPanel = diffLoading || noteworthyFiles.length > 0;
 
   // Export all configs once on mount to get current text for diff.
   useEffect(() => {
@@ -618,7 +673,7 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
       <div
         className="bg-[var(--color-bg-secondary)] rounded-xl shadow-2xl flex flex-col border border-[var(--color-bg-tertiary)] overflow-hidden"
-        style={{ width: showDiffPanel ? 900 : 480, maxHeight: '85vh' }}
+        style={{ width: showReviewPanel ? 900 : 480, maxHeight: '85vh' }}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -651,30 +706,13 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
           </p>
         </div>
 
-        {/* Save gate: validation findings for the selected files (errors →
-            warnings; info never shown — it's order-dependent context). Click
-            a row to jump to it in the text view. */}
-        {(hasGateErrors || hasGateWarnings) && (
-          <div className="mx-4 mt-3 rounded-lg border border-[var(--color-bg-tertiary)] overflow-hidden">
-            <div className="flex items-center justify-between px-3 py-1.5 bg-[var(--color-bg-primary)]">
-              <span className="text-xs font-semibold text-[var(--color-text-primary)]">
-                Validation findings ({gateIssues.errors.length + gateIssues.warnings.length})
-              </span>
-              <span className="text-[10px] text-[var(--color-text-secondary)]">
-                click a finding to jump to it
-              </span>
-            </div>
-            <div className="max-h-48 overflow-y-auto p-1.5">
-              {gateIssues.errors.map((f, i) => renderFindingRow(f, 'error', `e-${i}`))}
-              {gateIssues.warnings.map((f, i) => renderFindingRow(f, 'warning', `w-${i}`))}
-            </div>
-          </div>
-        )}
-
         {/* Body */}
         <div className="flex flex-1 overflow-hidden">
-          {/* Left: file list */}
-          <div className={`flex flex-col ${showDiffPanel ? 'w-52 shrink-0 border-r border-[var(--color-bg-tertiary)]' : 'flex-1'}`}>
+          {/* Left: file list — only files with something notable (new,
+              removed, changed, or validation findings) are shown; unchanged
+              files are hidden to keep the review surface small. Checkboxes
+              select/deselect what gets written on save. */}
+          <div className={`flex flex-col ${showReviewPanel ? 'w-52 shrink-0 border-r border-[var(--color-bg-tertiary)]' : 'flex-1'}`}>
             <div className="flex-1 overflow-y-auto p-4">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-xs text-[var(--color-text-secondary)]">
@@ -682,8 +720,10 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
                 </span>
               </div>
               <div className="space-y-1">
-                {filenames.map((fn) => {
-                  const isDeleted = fn in originalTexts && !(fn in configFiles);
+                {noteworthyFiles.map((fn) => {
+                  const s = fileStatus[fn];
+                  const isDeleted = s.isDeleted;
+                  const findingCount = fileFindings[fn]?.length ?? 0;
                   return (
                     <label
                       key={fn}
@@ -707,6 +747,14 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
                       {isDeleted && (
                         <span className="shrink-0 text-[10px] font-semibold text-[var(--color-error)]">deleted</span>
                       )}
+                      {!s.hasOriginal && (
+                        <span className="shrink-0 text-[10px] font-semibold text-[var(--color-warning)]">new</span>
+                      )}
+                      {findingCount > 0 && (
+                        <span className="shrink-0 text-[10px] font-semibold text-[var(--color-text-secondary)]" title={`${findingCount} validation finding${findingCount !== 1 ? 's' : ''}`}>
+                          {findingCount}
+                        </span>
+                      )}
                       {appliedFiles.includes(fn) && (
                         <span className="w-11 shrink-0 text-right text-xs text-green-400">Saved</span>
                       )}
@@ -714,94 +762,123 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
                   );
                 })}
               </div>
+              {hiddenFileCount > 0 && (
+                <p className="mt-2 text-[10px] text-[var(--color-text-secondary)]">
+                  {hiddenFileCount} unchanged file{hiddenFileCount !== 1 ? 's' : ''} hidden — still selected for save
+                </p>
+              )}
             </div>
           </div>
 
-          {/* Right: diff panel (when originals exist or files are new) */}
-          {showDiffPanel && (
+          {/* Right: review area — per-file diff + validation findings.
+              Findings render under their file (click a row to jump to it in
+              the text view); unchanged files without findings are hidden. */}
+          {showReviewPanel && (
             <div className="flex-1 overflow-auto p-4 space-y-4">
               {diffLoading ? (
                 <p className="text-xs text-[var(--color-text-secondary)] text-center py-8">Generating diff...</p>
+              ) : noteworthyFiles.length === 0 ? (
+                <p className="text-xs text-[var(--color-text-secondary)] text-center py-8">
+                  No files to review — nothing changed, added, or flagged.
+                </p>
               ) : (
-                filenames
-                  .filter((fn) => selectedFiles.has(fn))
-                  .map((fn) => {
-                    const original = originalTexts[fn];
-                    const current = currentTexts[fn];
-                    const hasOriginal = fn in originalTexts;
-                    const isDeleted = hasOriginal && !(fn in configFiles);
+                noteworthyFiles.map((fn) => {
+                  const s = fileStatus[fn];
+                  const current = currentTexts[fn];
+                  let diffLines: DiffLine[] = [];
+                  if (current !== undefined || s.isDeleted) {
+                    // Deleted files have no current text — diff against empty
+                    // so every original line shows as removed. New files have
+                    // no original — diff against empty so every line shows as
+                    // added (moved sub-components/features stay visible).
+                    const patch = createTwoFilesPatch(fn, fn, originalTexts[fn] ?? '', current ?? '', 'saved', s.isDeleted ? 'deleted' : 'current', { context: 3 });
+                    diffLines = parsePatch(patch);
+                  }
+                  const findings = fileFindings[fn] ?? [];
+                  const errorCount = findings.filter((f) => f.kind === 'error').length;
+                  const changedCount = diffLines.filter((l) => l.type === 'added' || l.type === 'removed').length;
 
-                    let diffLines: DiffLine[] = [];
-                    let hasChanges = false;
-                    if (current !== undefined || isDeleted) {
-                      // Deleted files have no current text — diff against empty
-                      // so every original line shows as removed. New files have
-                      // no original — diff against empty so every line shows as
-                      // added (moved sub-components/features stay visible).
-                      const patch = createTwoFilesPatch(fn, fn, original ?? '', current ?? '', 'saved', isDeleted ? 'deleted' : 'current', { context: 3 });
-                      diffLines = parsePatch(patch);
-                      hasChanges = diffLines.some((l) => l.type === 'added' || l.type === 'removed');
-                    }
-
-                    return (
-                      <div key={fn}>
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className="text-xs font-semibold text-[var(--color-text-primary)]">{fn}</span>
-                          {isDeleted && (
+                  return (
+                    <div key={fn}>
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-xs font-semibold text-[var(--color-text-primary)]">{fn}</span>
+                        {s.isDeleted && (
+                          <>
                             <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-error)]/20 text-[var(--color-error)]">deleted</span>
-                          )}
-                          {!hasOriginal && (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-warning)]/20 text-[var(--color-warning)]">new file</span>
-                          )}
-                          {hasOriginal && !isDeleted && !hasChanges && (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">unchanged</span>
-                          )}
-                          {hasOriginal && !isDeleted && hasChanges && (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-accent)]/20 text-[var(--color-accent)]">
-                              {diffLines.filter((l) => l.type === 'added' || l.type === 'removed').length} lines changed
-                            </span>
-                          )}
-                          {isDeleted && (
                             <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-error)]/20 text-[var(--color-error)]">
                               {diffLines.filter((l) => l.type === 'removed').length} lines removed
                             </span>
-                          )}
-                        </div>
-
-                        {hasChanges && (
-                          <div className="rounded-lg border border-[var(--color-bg-tertiary)] overflow-hidden">
-                            <pre className="text-xs leading-5 font-mono overflow-x-auto">
-                              {diffLines.map((line, i) => (
-                                <div
-                                  key={i}
-                                  className={
-                                    line.type === 'added'
-                                      ? 'w-max min-w-full bg-green-500/15 text-green-400 px-3'
-                                      : line.type === 'removed'
-                                        ? 'w-max min-w-full bg-red-500/15 text-red-400 px-3'
-                                        : line.type === 'header'
-                                          ? 'w-max min-w-full bg-blue-500/10 text-blue-400 px-3 py-0.5'
-                                          : 'w-max min-w-full text-[var(--color-text-secondary)] px-3'
-                                  }
-                                >
-                                  <span className="select-none opacity-40 mr-2">
-                                    {line.type === 'added' ? '+' : line.type === 'removed' ? '-' : ' '}
-                                  </span>
-                                  {line.content || '\u00A0'}
-                                </div>
-                              ))}
-                            </pre>
-                          </div>
+                          </>
+                        )}
+                        {!s.hasOriginal && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-warning)]/20 text-[var(--color-warning)]">new file</span>
+                        )}
+                        {s.hasOriginal && !s.isDeleted && !s.hasChanges && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">unchanged</span>
+                        )}
+                        {s.hasOriginal && !s.isDeleted && s.hasChanges && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-accent)]/20 text-[var(--color-accent)]">
+                            {changedCount} lines changed
+                          </span>
+                        )}
+                        {findings.length > 0 && (
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${
+                            errorCount > 0
+                              ? 'bg-red-500/20 text-red-400'
+                              : 'bg-[var(--color-warning)]/20 text-[var(--color-warning)]'
+                          }`}>
+                            {findings.length} finding{findings.length !== 1 ? 's' : ''}
+                          </span>
                         )}
                       </div>
-                    );
-                  })
-              )}
 
-              {!diffLoading && filenames.filter((fn) => selectedFiles.has(fn) && fn in originalTexts).length === 0 && (
-                <p className="text-xs text-[var(--color-text-secondary)] text-center py-8">
-                  No original versions available to compare.
-                </p>
+                      {s.hasChanges && (
+                        <div className="rounded-lg border border-[var(--color-bg-tertiary)] overflow-hidden">
+                          <pre className="text-xs leading-5 font-mono overflow-x-auto">
+                            {diffLines.map((line, i) => (
+                              <div
+                                key={i}
+                                className={
+                                  line.type === 'added'
+                                    ? 'w-max min-w-full bg-green-500/15 text-green-400 px-3'
+                                    : line.type === 'removed'
+                                      ? 'w-max min-w-full bg-red-500/15 text-red-400 px-3'
+                                      : line.type === 'header'
+                                        ? 'w-max min-w-full bg-blue-500/10 text-blue-400 px-3 py-0.5'
+                                        : 'w-max min-w-full text-[var(--color-text-secondary)] px-3'
+                                }
+                              >
+                                <span className="select-none opacity-40 mr-2">
+                                  {line.type === 'added' ? '+' : line.type === 'removed' ? '-' : ' '}
+                                </span>
+                                {line.content || '\u00A0'}
+                              </div>
+                            ))}
+                          </pre>
+                        </div>
+                      )}
+
+                      {/* Findings for this file — click a row to jump to it
+                          in the text view (same behavior as before, just
+                          relocated under the file). */}
+                      {findings.length > 0 && (
+                        <div className="mt-1.5 rounded-lg border border-[var(--color-bg-tertiary)] overflow-hidden">
+                          <div className="flex items-center justify-between px-2 py-1 bg-[var(--color-bg-primary)]">
+                            <span className="text-[10px] font-semibold text-[var(--color-text-secondary)]">
+                              Validation findings ({findings.length})
+                            </span>
+                            <span className="text-[10px] text-[var(--color-text-secondary)]">
+                              click a finding to jump to it
+                            </span>
+                          </div>
+                          <div className="p-1">
+                            {findings.map((f, i) => renderFindingRow(f, f.kind, `f-${fn}-${i}`))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
               )}
             </div>
           )}
