@@ -34,15 +34,119 @@ async function exportConfigText(cf: ConfigFile): Promise<string> {
   return api.exportConfig(cf);
 }
 
+const FileListItem = ({
+  fn,
+  s,
+  v,
+  findingCount,
+  exportedOnce,
+  selectedFiles,
+  toggleFile,
+  exportStatus,
+}: {
+  fn: string;
+  s: { hasOriginal: boolean; hasChanges: boolean };
+  v: any;
+  findingCount: number;
+  exportedOnce: boolean;
+  selectedFiles: Set<string>;
+  toggleFile: (fn: string) => void;
+  exportStatus: string;
+}) => (
+  <label
+    className={`group flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer ${
+      exportedOnce && selectedFiles.has(fn) ? 'bg-green-500/10' : 'hover:bg-[var(--color-bg-primary)]'
+    }`}
+  >
+    <input
+      type="checkbox"
+      checked={selectedFiles.has(fn)}
+      onChange={() => toggleFile(fn)}
+      disabled={exportStatus === 'loading'}
+      className="rounded"
+    />
+    <div className="kwc-marquee-shell flex-1 min-w-0">
+      <div className="kwc-marquee-track">
+        <span className="kwc-marquee-text text-xs font-mono text-[var(--color-text-primary)]">{fn}</span>
+        <span aria-hidden="true" className="kwc-marquee-text text-xs font-mono text-[var(--color-text-primary)]">{fn}</span>
+      </div>
+    </div>
+    {!s.hasOriginal && (
+      <span className="shrink-0 text-[10px] font-semibold text-[var(--color-warning)]">new</span>
+    )}
+    {findingCount > 0 && (
+      <span className="shrink-0 text-[10px] font-semibold text-[var(--color-text-secondary)]" title={`${findingCount} validation finding${findingCount !== 1 ? 's' : ''}`}>
+        {findingCount}
+      </span>
+    )}
+  </label>
+);
+
+const ReviewItem = ({
+  fn,
+  s,
+  current,
+  originalTexts,
+  diffLines,
+  changedCount,
+}: {
+  fn: string;
+  s: { hasOriginal: boolean; hasChanges: boolean };
+  current: string | undefined;
+  originalTexts: Record<string, string>;
+  diffLines: DiffLine[];
+  changedCount: number;
+}) => (
+  <div key={fn}>
+    <div className="flex items-center gap-2 mb-1">
+      <span className="text-xs font-semibold text-[var(--color-text-primary)]">{fn}</span>
+      {!s.hasOriginal && (
+        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-warning)]/20 text-[var(--color-warning)]">new file</span>
+      )}
+      {s.hasOriginal && !s.hasChanges && (
+        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">unchanged</span>
+      )}
+      {s.hasOriginal && s.hasChanges && (
+        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-accent)]/20 text-[var(--color-accent)]">
+          {changedCount} lines changed
+        </span>
+      )}
+    </div>
+    {s.hasChanges && (
+      <div className="rounded-lg border border-[var(--color-bg-tertiary)] overflow-hidden">
+        <pre className="text-xs leading-5 font-mono overflow-x-auto">
+          {diffLines.map((line, i) => (
+            <div
+              key={i}
+              className={
+                line.type === 'added'
+                  ? 'w-max min-w-full bg-green-500/15 text-green-400 px-3'
+                  : line.type === 'removed'
+                    ? 'w-max min-w-full bg-red-500/15 text-red-400 px-3'
+                    : line.type === 'header'
+                      ? 'w-max min-w-full bg-blue-500/10 text-blue-400 px-3 py-0.5'
+                      : 'w-max min-w-full text-[var(--color-text-secondary)] px-3'
+              }
+            >
+              <span className="select-none opacity-40 mr-2">
+                {line.type === 'added' ? '+' : line.type === 'removed' ? '-' : ' '}
+              </span>
+              {line.content || '\u00A0'}
+            </div>
+          ))}
+        </pre>
+      </div>
+    )}
+  </div>
+);
+
 export default function ExportDialog({ onClose }: ExportDialogProps) {
-  // Snapshot store state once on mount to avoid re-triggering on Zustand updates.
   const storeSnapshot = useRef(useConfigStore.getState());
   const { configFiles, validation, originalTexts } = storeSnapshot.current;
-  // Mirror the Save dialog: union live files + originals so files deleted
-  // since import still appear in the list and their diff (all lines removed).
+
   const filenames = useMemo(
-    () => Array.from(new Set([...Object.keys(configFiles), ...Object.keys(originalTexts)])),
-    [configFiles, originalTexts],
+    () => Object.keys(configFiles),
+    [configFiles],
   );
 
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set(filenames));
@@ -51,11 +155,9 @@ export default function ExportDialog({ onClose }: ExportDialogProps) {
   const [exportFormat, setExportFormat] = useState<'files' | 'zip'>('zip');
   const [exportedOnce, setExportedOnce] = useState(false);
 
-  // Current exported texts (for diffing)
   const [currentTexts, setCurrentTexts] = useState<Record<string, string>>({});
   const [diffLoading, setDiffLoading] = useState(true);
 
-  // Export all configs once on mount to get current text for diff.
   useEffect(() => {
     let cancelled = false;
     async function fetchTexts() {
@@ -74,32 +176,23 @@ export default function ExportDialog({ onClose }: ExportDialogProps) {
     }
     fetchTexts();
     return () => { cancelled = true; };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // intentionally empty — snapshot via ref
+  }, []);
 
-  // Per-file status for badges + diffs (mirrors ApplyDialog's fileStatus).
-  // Deleted files diff against empty (every line removed); new files have no
-  // original (every line added).
   const fileStatus = useMemo(() => {
-    const map: Record<string, { isDeleted: boolean; hasOriginal: boolean; hasChanges: boolean }> = {};
+    const map: Record<string, { hasOriginal: boolean; hasChanges: boolean }> = {};
     for (const fn of filenames) {
       const hasOriginal = fn in originalTexts;
-      const isDeleted = hasOriginal && !(fn in configFiles);
       const current = currentTexts[fn];
       let hasChanges = false;
-      if (current !== undefined || isDeleted) {
-        const patch = createTwoFilesPatch(fn, fn, originalTexts[fn] ?? '', current ?? '', 'saved', isDeleted ? 'deleted' : 'current', { context: 3 });
+      if (current !== undefined) {
+        const patch = createTwoFilesPatch(fn, fn, originalTexts[fn] ?? '', current, 'saved', 'current', { context: 3 });
         hasChanges = parsePatch(patch).some((l) => l.type === 'added' || l.type === 'removed');
       }
-      map[fn] = { isDeleted, hasOriginal, hasChanges };
+      map[fn] = { hasOriginal, hasChanges };
     }
     return map;
-  }, [filenames, originalTexts, configFiles, currentTexts]);
+  }, [filenames, originalTexts, currentTexts]);
 
-  // Review panel shows every SELECTED file (unlike the Save dialog, which
-  // hides unchanged files — export wants the full picture). Width stays
-  // stable while checkboxes toggle: a deselected-all state still gets the
-  // panel with a hint, not a layout jump.
   const showReviewPanel = diffLoading || filenames.length > 0;
   const reviewFiles = useMemo(
     () => filenames.filter((fn) => selectedFiles.has(fn)),
@@ -119,20 +212,17 @@ export default function ExportDialog({ onClose }: ExportDialogProps) {
     setExportStatus('loading');
     try {
       const exportedFiles: Array<{ filename: string; text: string }> = [];
-
       for (const filename of selectedFiles) {
         const cf = configFiles[filename];
-        if (!cf) continue; // deleted files have nothing to export
+        if (!cf) continue;
         const text = currentTexts[filename] ?? await exportConfigText(cf);
         exportedFiles.push({ filename, text });
       }
-
       if (exportFormat === 'zip') {
         const zip = new JSZip();
         for (const file of exportedFiles) {
           zip.file(file.filename, file.text);
         }
-
         const zipBlob = await zip.generateAsync({ type: 'blob' });
         const zipUrl = URL.createObjectURL(zipBlob);
         const a = document.createElement('a');
@@ -151,7 +241,6 @@ export default function ExportDialog({ onClose }: ExportDialogProps) {
           URL.revokeObjectURL(url);
         }
       }
-
       setExportedOnce(true);
       setExportStatus('idle');
       onClose();
@@ -173,7 +262,6 @@ export default function ExportDialog({ onClose }: ExportDialogProps) {
         style={{ width: showReviewPanel ? 900 : 480, maxHeight: '85vh' }}
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-[var(--color-bg-tertiary)]">
           <div>
             <h2 className="text-base font-semibold text-[var(--color-text-primary)]">Export Configuration</h2>
@@ -187,12 +275,7 @@ export default function ExportDialog({ onClose }: ExportDialogProps) {
             </svg>
           </button>
         </div>
-
-        {/* Body */}
         <div className="flex flex-1 overflow-hidden">
-          {/* Left: file list — ALL files with checkboxes (the Save dialog
-              hides unchanged files; export shows everything so the full
-              project is selectable). */}
           <div className={`flex flex-col ${showReviewPanel ? 'w-52 shrink-0 border-r border-[var(--color-bg-tertiary)]' : 'flex-1'}`}>
             <div className="flex-1 overflow-y-auto p-4">
               <div className="flex items-center justify-between mb-2">
@@ -206,43 +289,22 @@ export default function ExportDialog({ onClose }: ExportDialogProps) {
                 <div className="space-y-1">
                   {filenames.map((fn) => {
                     const s = fileStatus[fn];
-                    const isDeleted = s.isDeleted;
                     const v = validation[fn];
                     const errorCount = v?.errors.filter((e) => e.severity === 'error').length ?? 0;
                     const warningCount = v?.errors.filter((e) => e.severity === 'warning').length ?? 0;
                     const findingCount = errorCount + warningCount;
                     return (
-                      <label
+                      <FileListItem
                         key={fn}
-                        className={`group flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer ${
-                          exportedOnce && selectedFiles.has(fn) ? 'bg-green-500/10' : 'hover:bg-[var(--color-bg-primary)]'
-                        }`}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={selectedFiles.has(fn)}
-                          onChange={() => toggleFile(fn)}
-                          disabled={exportStatus === 'loading'}
-                          className="rounded"
-                        />
-                        <div className="kwc-marquee-shell flex-1 min-w-0">
-                          <div className="kwc-marquee-track">
-                            <span className="kwc-marquee-text text-xs font-mono text-[var(--color-text-primary)]">{fn}</span>
-                            <span aria-hidden="true" className="kwc-marquee-text text-xs font-mono text-[var(--color-text-primary)]">{fn}</span>
-                          </div>
-                        </div>
-                        {isDeleted && (
-                          <span className="shrink-0 text-[10px] font-semibold text-[var(--color-error)]">deleted</span>
-                        )}
-                        {!s.hasOriginal && (
-                          <span className="shrink-0 text-[10px] font-semibold text-[var(--color-warning)]">new</span>
-                        )}
-                        {findingCount > 0 && (
-                          <span className="shrink-0 text-[10px] font-semibold text-[var(--color-text-secondary)]" title={`${findingCount} validation finding${findingCount !== 1 ? 's' : ''}`}>
-                            {findingCount}
-                          </span>
-                        )}
-                      </label>
+                        fn={fn}
+                        s={s}
+                        v={v}
+                        findingCount={findingCount}
+                        exportedOnce={exportedOnce}
+                        selectedFiles={selectedFiles}
+                        toggleFile={toggleFile}
+                        exportStatus={exportStatus}
+                      />
                     );
                   })}
                 </div>
@@ -254,9 +316,6 @@ export default function ExportDialog({ onClose }: ExportDialogProps) {
               )}
             </div>
           </div>
-
-          {/* Right: review area — per-file diff for every selected file,
-              including unchanged ones (shown with an "unchanged" badge). */}
           {showReviewPanel && (
             <div className="flex-1 overflow-auto p-4 space-y-4">
               {diffLoading ? (
@@ -270,77 +329,32 @@ export default function ExportDialog({ onClose }: ExportDialogProps) {
                   const s = fileStatus[fn];
                   const current = currentTexts[fn];
                   let diffLines: DiffLine[] = [];
-                  if (current !== undefined || s.isDeleted) {
-                    // Deleted files have no current text — diff against empty
-                    // so every original line shows as removed. New files have
-                    // no original — diff against empty so every line shows as
-                    // added.
-                    const patch = createTwoFilesPatch(fn, fn, originalTexts[fn] ?? '', current ?? '', 'saved', s.isDeleted ? 'deleted' : 'current', { context: 3 });
+                  if (current !== undefined) {
+                    const patch = createTwoFilesPatch(fn, fn, originalTexts[fn] ?? '', current, 'saved', 'current', { context: 3 });
                     diffLines = parsePatch(patch);
                   }
                   const changedCount = diffLines.filter((l) => l.type === 'added' || l.type === 'removed').length;
 
                   return (
-                    <div key={fn}>
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className="text-xs font-semibold text-[var(--color-text-primary)]">{fn}</span>
-                        {s.isDeleted && (
-                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-error)]/20 text-[var(--color-error)]">deleted</span>
-                        )}
-                        {!s.hasOriginal && (
-                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-warning)]/20 text-[var(--color-warning)]">new file</span>
-                        )}
-                        {s.hasOriginal && !s.isDeleted && !s.hasChanges && (
-                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">unchanged</span>
-                        )}
-                        {s.hasOriginal && !s.isDeleted && s.hasChanges && (
-                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-accent)]/20 text-[var(--color-accent)]">
-                            {changedCount} lines changed
-                          </span>
-                        )}
-                      </div>
-
-                      {s.hasChanges && (
-                        <div className="rounded-lg border border-[var(--color-bg-tertiary)] overflow-hidden">
-                          <pre className="text-xs leading-5 font-mono overflow-x-auto">
-                            {diffLines.map((line, i) => (
-                              <div
-                                key={i}
-                                className={
-                                  line.type === 'added'
-                                    ? 'w-max min-w-full bg-green-500/15 text-green-400 px-3'
-                                    : line.type === 'removed'
-                                      ? 'w-max min-w-full bg-red-500/15 text-red-400 px-3'
-                                      : line.type === 'header'
-                                        ? 'w-max min-w-full bg-blue-500/10 text-blue-400 px-3 py-0.5'
-                                        : 'w-max min-w-full text-[var(--color-text-secondary)] px-3'
-                                }
-                              >
-                                <span className="select-none opacity-40 mr-2">
-                                  {line.type === 'added' ? '+' : line.type === 'removed' ? '-' : ' '}
-                                </span>
-                                {line.content || '\u00A0'}
-                              </div>
-                            ))}
-                          </pre>
-                        </div>
-                      )}
-                    </div>
+                    <ReviewItem
+                      fn={fn}
+                      s={s}
+                      current={current}
+                      originalTexts={originalTexts}
+                      diffLines={diffLines}
+                      changedCount={changedCount}
+                    />
                   );
                 })
               )}
             </div>
           )}
         </div>
-
-        {/* Status */}
         {exportStatus === 'error' && (
           <div className="px-4 py-2 text-xs text-red-400">
             {exportMessage}
           </div>
         )}
-
-        {/* Footer */}
         <div className="p-4 border-t border-[var(--color-bg-tertiary)] flex justify-end gap-2">
           <div className="mr-auto flex items-center gap-2">
             <label htmlFor="export-format" className="text-xs text-[var(--color-text-secondary)]">
