@@ -1904,11 +1904,17 @@ def main() -> int:
                              "tool_calls for local llama.cpp servers too), "
                              "'text' (force the text protocol everywhere)")
     parser.add_argument("--merge-system-messages", action="store_true",
-                        help="Set mergeSystemMessages on the /ai/chat request: "
-                             "collapse every system message into a single "
-                             "leading one. Needed only for servers whose chat "
-                             "template rejects non-leading system messages "
-                             "(e.g. strict llama.cpp templates).")
+                        help="Deprecated no-op (kept for compat): the backend "
+                             "now merges system messages into a single leading "
+                             "one by default for every OpenAI-compatible "
+                             "request.")
+    parser.add_argument("--no-merge-system-messages", action="store_false",
+                        dest="merge_system_messages",
+                        help="A/B opt-out: send mergeSystemMessages=false to "
+                             "keep the trailing task anchor as its own system "
+                             "message (positionally meaningful for permissive "
+                             "chat templates).")
+    parser.set_defaults(merge_system_messages=True)
     parser.add_argument("--full-rewrite-guard", action="store_true",
                         help="Set fullRewriteGuard on the /ai/chat request: "
                              "the frontend rejects full block writes of "

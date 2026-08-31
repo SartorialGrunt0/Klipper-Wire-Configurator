@@ -334,9 +334,12 @@ class ChatRequest(BaseModel):
     # messages and the trailing task anchor is positionally meaningful
     # (it points the model at the last user message after tool rounds).
     # Some strict chat templates (e.g. models enforcing "system message
-    # must be at the beginning") reject any non-leading system message;
-    # set this True for those servers only.
-    mergeSystemMessages: bool = False
+    # must be at the beginning") reject any non-leading system message.
+    # Merge is now the DEFAULT for every OpenAI-compatible request — a
+    # single leading system message is the canonical shape every server
+    # accepts. Set False explicitly only for A/B testing the trailing
+    # task-anchor position.
+    mergeSystemMessages: bool = True
     # Full-rewrite guard state (frontend VITE_KWC_FULL_REWRITE_GUARD build
     # flag). True = the frontend retry loop rejects full block writes of
     # existing macro/Jinja sections and forces mini-diff re-emission, so the
@@ -1501,7 +1504,7 @@ def _build_provider_payload(
     max_tokens: int = 4096,
     temperature: float | None = None,
     tools: list[dict] | None = None,
-    merge_system: bool = False,
+    merge_system: bool = True,
 ) -> dict:
     """Build the request payload for the given provider.
 
@@ -1509,12 +1512,13 @@ def _build_provider_payload(
     formats with temperature settings. When tools is provided, native
     function-calling tool definitions are included.
 
-    merge_system: when True, collapse every system message into a single
-    leading system message. OpenAI-compatible servers that use strict
+    merge_system: when True (DEFAULT), collapse every system message into a
+    single leading system message. OpenAI-compatible servers that use strict
     chat templates (e.g. ones that enforce "system message must be at the
-    beginning") reject multiple system messages; a single merged message
-    is valid everywhere. Anthropic always merges (its API takes a single
-    top-level system field).
+    beginning") reject multiple system messages; a single merged message is
+    valid everywhere. Pass False explicitly to preserve the trailing task
+    anchor as its own message (positionally meaningful for permissive
+    templates) — kept for A/B testing.
     """
     if provider == "anthropic":
         # Anthropic takes a single top-level system field. Merge every system
@@ -1985,6 +1989,7 @@ async def chat_proxy(req: ChatRequest):
                             max_tokens=req.maxTokens,
                             temperature=req.temperature,
                             tools=native_tools,
+                            merge_system=req.mergeSystemMessages,
                         )
                         current_content, current_data = await _query_provider(
                             client, req.apiUrl, headers, tool_payload, req.apiProvider,
@@ -2085,6 +2090,7 @@ async def chat_proxy(req: ChatRequest):
                     max_tokens=req.maxTokens,
                     temperature=req.temperature,
                     tools=native_tools,
+                    merge_system=req.mergeSystemMessages,
                 )
                 current_content, current_data = await _query_provider(
                     client, req.apiUrl, headers, tool_payload, req.apiProvider,
@@ -2157,6 +2163,7 @@ async def chat_proxy(req: ChatRequest):
                     max_tokens=retry_max_tokens,
                     temperature=req.temperature,
                     tools=None,
+                    merge_system=req.mergeSystemMessages,
                 )
                 current_content, current_data = await _query_provider(
                     client, req.apiUrl, headers, retry_payload, req.apiProvider,
