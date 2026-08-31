@@ -6,7 +6,7 @@ validation, and default value management.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Optional
 
@@ -44,6 +44,8 @@ class ParamDef:
     rel_above: Optional[str] = None      # this param must be strictly > <rel_above>
     rel_below: Optional[str] = None      # this param must be strictly < <rel_below>
     rel_between: Optional[tuple[str, str]] = None  # (low_param, high_param), inclusive
+    rel_min: Optional[str] = None        # inclusive: error when v < <rel_min> (minval=ref)
+    rel_max: Optional[str] = None        # inclusive: error when v > <rel_max> (maxval=ref)
 
 
 @dataclass
@@ -2328,27 +2330,75 @@ _register(SectionDef(
 
 def _seed_relational_constraints() -> None:
     """Populate same-section param-vs-param relations (ground truth: Klipper's
-    getfloat above=/below= call sites, verified 2026-08-25).
+    getfloat above=/below=/minval=/maxval= call sites; verified 2026-08-25 and
+    2026-08-30).
 
     Deliberately NOT seeded (cross-section -> 3r): delta.arm_length vs radius,
-    deltesian.arm_length vs arm_x. Stepper position relations are seeded only on
-    the primary Cartesian axes (stepper_x/y/z) — extruder/manual steppers use
-    need_position_minmax=False, and delta/polar/winch position semantics differ.
+    deltesian.arm_length vs arm_x. Delta/deltesian/rotary_delta lettered
+    steppers pass need_position_minmax=False (delta.py:16-23,
+    deltesian.py:20-24, rotary_delta.py:13-18) — Klipper never reads their
+    position_min/position_max, so they must stay unseeded.
     """
-    # Heater max_temp must be strictly above min_temp (heaters.py:29).
+    # Heater max_temp must be strictly above min_temp (heaters.py:29,
+    # temperature_sensor.py:18, temperature_probe.py:88).
     for sec in ("extruder", "extruder1", "extruder2", "heater_bed",
-                "heater_generic", "temperature_fan", "z_thermal_adjust"):
+                "heater_generic", "temperature_fan", "z_thermal_adjust",
+                "temperature_sensor", "temperature_probe"):
         _set_rel(sec, "max_temp", rel_above="min_temp")
 
-    # Primary Cartesian steppers (stepper.py:350-357):
+    # Cartesian rails via LookupMultiRail/LookupRail with
+    # need_position_minmax=True (stepper.py:348-357):
     #   position_max strictly above position_min (above= -> v<=ref errors)
     #   position_endstop within [position_min, position_max] (INCLUSIVE)
-    for sec in ("stepper_x", "stepper_y", "stepper_z"):
+    # dual_carriage rail via cartesian.py:29 LookupMultiRail (same code path);
+    # stepper_arm via polar.py:34 LookupRail.
+    for sec in ("stepper_x", "stepper_y", "stepper_z",
+                "dual_carriage", "stepper_arm"):
         _set_rel(sec, "position_max", rel_above="position_min")
         _set_rel(sec, "position_endstop", rel_between=("position_min", "position_max"))
 
     # Servo maximum_pulse_width strictly above minimum_pulse_width (servo.py:17).
     _set_rel("servo", "maximum_pulse_width", rel_above="minimum_pulse_width")
+
+    # min_extrude_temp within [min_temp, max_temp] INCLUSIVE
+    # (heaters.py:34-35 minval=self.min_temp, maxval=self.max_temp).
+    # Seeding the base extruder propagates: extruder1..7 copy its ParamDef list.
+    _set_rel("extruder", "min_extrude_temp", rel_between=("min_temp", "max_temp"))
+
+    # temperature_fan target_temp within [min_temp, max_temp] INCLUSIVE
+    # (temperature_fan.py:34-36).
+    _set_rel("temperature_fan", "target_temp", rel_between=("min_temp", "max_temp"))
+
+    # resonance_tester max_freq / max_freq_z minval=self.min_freq INCLUSIVE
+    # (resonance_tester.py:60-64).
+    _set_rel("resonance_tester", "max_freq", rel_min="min_freq")
+    _set_rel("resonance_tester", "max_freq_z", rel_min="min_freq")
+
+    # filament_diameter minval=self.nozzle_diameter INCLUSIVE
+    # (kinematics/extruder.py:151-152).
+    _set_rel("extruder", "filament_diameter", rel_min="nozzle_diameter")
+
+    # Constant bounds found in the same call sites (verified 2026-08-30):
+    # servo.py:15-18 both widths below=SERVO_SIGNAL_PERIOD (0.020, strict);
+    # static_pwm_clock.py:16 frequency above=1/0.3 (strict).
+    _set_rel("servo", "minimum_pulse_width", strict_below=0.020)
+    _set_rel("servo", "maximum_pulse_width", strict_below=0.020)
+    _set_rel("static_pwm_clock", "frequency", strict_above=1 / 0.3)
+
+    # stepper_left/right share STEPPER_PARAMS objects with stepper_x, but
+    # deltesian.py:20-24 passes need_position_minmax=False — Klipper never
+    # reads their position bounds. Swap the shared position ParamDefs for
+    # private unseeded copies so the stepper_x relation cannot leak.
+    # (stepper_arm shares the SAME objects and SHOULD be seeded via polar.py
+    # LookupRail default — no copy there.)
+    for sec in ("stepper_left", "stepper_right"):
+        sd = SECTION_DEFS[sec]
+        sd.params = [
+            replace(p, rel_above=None, rel_below=None, rel_between=None,
+                    rel_min=None, rel_max=None)
+            if p.name in ("position_max", "position_endstop") else p
+            for p in sd.params
+        ]
 
 
 _seed_relational_constraints()

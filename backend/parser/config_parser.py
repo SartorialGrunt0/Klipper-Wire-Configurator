@@ -132,6 +132,8 @@ NAMED_SECTION_TYPES = {
     "temperature_sensor", "temperature_probe", "thermistor", "adc_temperature",
     "heater_generic", "verify_heater",
     "output_pin", "static_digital_output", "multi_pin", "pwm_tool", "pwm_cycle_time",
+    # static_pwm_clock.py uses load_config_prefix (named instances).
+    "static_pwm_clock",
     "servo", "gcode_button",
     "neopixel", "dotstar", "led", "pca9533", "pca9632",
     "filament_switch_sensor", "filament_motion_sensor",

@@ -1390,11 +1390,21 @@ def _check_relational_param(param, param_def, section: ConfigSection, result: Va
         below=X  -> error when v >= X   (strictly below)
     The `rel_between=(low, high)` form (stepper position_endstop within
     [position_min, position_max]) is INCLUSIVE: error when v < low or v > high.
+    `rel_min`/`rel_max` (verified 2026-08-30) are the single-sided inclusive
+    forms — Klipper's minval=<other param>/maxval=<other param> (e.g.
+    resonance_tester max_freq minval=self.min_freq, heaters.py
+    min_extrude_temp maxval=self.max_temp, extruder.py filament_diameter
+    minval=self.nozzle_diameter).
 
+    When the referenced param is ABSENT, Klipper still compares against the
+    reference's *default* (self.min_temp is set before it is referenced), so
+    resolve through the referenced ParamDef's schema default first.
     Skip when the param or its reference is absent/unparseable (a formula or
     pin reference, e.g. position_endstop: ^PA0) — matching the range branch.
     """
-    if param_def.rel_above is None and param_def.rel_below is None and param_def.rel_between is None:
+    if (param_def.rel_above is None and param_def.rel_below is None
+            and param_def.rel_between is None
+            and param_def.rel_min is None and param_def.rel_max is None):
         return
 
     def _num(value: str):
@@ -1403,13 +1413,25 @@ def _check_relational_param(param, param_def, section: ConfigSection, result: Va
         except ValueError:
             return None
 
+    def _resolve(name: str):
+        """(display, numeric) for a ref param: config value first, then the
+        referenced ParamDef's schema default (Klipper compares against the
+        resolved value, not the presence of the option)."""
+        val = section.get_value(name)
+        if val == "":
+            sd = SECTION_DEFS.get(section.section_type)
+            ref_def = next((p for p in sd.params if p.name == name), None) if sd else None
+            val = ref_def.default if ref_def is not None and ref_def.default else ""
+        if val == "":
+            return "", None
+        return val, _num(val)
+
     my_num = _num(param.value) if param.value else None
     if my_num is None:
         return  # formula / pin reference / empty — not comparable
 
     if param_def.rel_above is not None:
-        ref = section.get_value(param_def.rel_above)
-        ref_num = _num(ref) if ref else None
+        ref, ref_num = _resolve(param_def.rel_above)
         if ref_num is not None and my_num <= ref_num:
             result.errors.append(ValidationError(
                 severity="error",
@@ -1420,8 +1442,7 @@ def _check_relational_param(param, param_def, section: ConfigSection, result: Va
             ))
 
     if param_def.rel_below is not None:
-        ref = section.get_value(param_def.rel_below)
-        ref_num = _num(ref) if ref else None
+        ref, ref_num = _resolve(param_def.rel_below)
         if ref_num is not None and my_num >= ref_num:
             result.errors.append(ValidationError(
                 severity="error",
@@ -1433,18 +1454,39 @@ def _check_relational_param(param, param_def, section: ConfigSection, result: Va
 
     if param_def.rel_between is not None:
         low_name, high_name = param_def.rel_between
-        low = section.get_value(low_name)
-        high = section.get_value(high_name)
-        low_num = _num(low) if low else None
-        high_num = _num(high) if high else None
+        low, low_num = _resolve(low_name)
+        high, high_num = _resolve(high_name)
         if low_num is None or high_num is None:
-            return  # skip when either bound is missing/unparseable
+            return  # skip when either bound is unresolvable
         if my_num < low_num or my_num > high_num:
             result.errors.append(ValidationError(
                 severity="error",
                 section=section.full_header,
                 param=param.key,
                 message=f"{param.key} ({param.value}) must be between {low_name} ({low}) and {high_name} ({high}).",
+                line_number=param.line_number,
+            ))
+
+    # Single-sided inclusive refs: Klipper minval=<param> / maxval=<param>.
+    if param_def.rel_min is not None:
+        ref, ref_num = _resolve(param_def.rel_min)
+        if ref_num is not None and my_num < ref_num:
+            result.errors.append(ValidationError(
+                severity="error",
+                section=section.full_header,
+                param=param.key,
+                message=f"{param.key} ({param.value}) must be at or above {param_def.rel_min} ({ref}).",
+                line_number=param.line_number,
+            ))
+
+    if param_def.rel_max is not None:
+        ref, ref_num = _resolve(param_def.rel_max)
+        if ref_num is not None and my_num > ref_num:
+            result.errors.append(ValidationError(
+                severity="error",
+                section=section.full_header,
+                param=param.key,
+                message=f"{param.key} ({param.value}) must be at or below {param_def.rel_max} ({ref}).",
                 line_number=param.line_number,
             ))
 
