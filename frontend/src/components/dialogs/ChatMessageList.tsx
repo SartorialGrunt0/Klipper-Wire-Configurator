@@ -7,6 +7,7 @@
  */
 import React, { useState, useRef, useEffect, type ComponentPropsWithoutRef } from 'react';
 import { extractConfigCodeBlocks } from '../../utils/chatUtils';
+import { copyText } from '../../utils/clipboard';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -48,15 +49,10 @@ function MarkdownCode({ children, className, inline }: CodeProps) {
   }
 
   const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(content);
-      setCopyState('copied');
-    } catch {
-      setCopyState('error');
-    } finally {
-      if (resetTimerRef.current !== null) window.clearTimeout(resetTimerRef.current);
-      resetTimerRef.current = window.setTimeout(() => setCopyState('idle'), 2000);
-    }
+    const ok = await copyText(content);
+    setCopyState(ok ? 'copied' : 'error');
+    if (resetTimerRef.current !== null) window.clearTimeout(resetTimerRef.current);
+    resetTimerRef.current = window.setTimeout(() => setCopyState('idle'), 2000);
   };
 
   const buttonLabel = copyState === 'copied' ? 'Copied' : copyState === 'error' ? 'Copy failed' : 'Copy code';
@@ -152,15 +148,13 @@ const ToolCallDetailsPopup: React.FC<{ calls: AiToolCallDetail[]; onClose: () =>
   const [copyState, setCopyState] = useState<'idle' | 'copied'>('idle');
 
   const handleCopyAll = async () => {
-    try {
-      const text = calls
-        .map((call) => `## ${call.name}\n\nArguments:\n${call.arguments}\n\nOutput:\n${call.output}`)
-        .join('\n\n---\n\n');
-      await navigator.clipboard.writeText(text);
+    const text = calls
+      .map((call) => `## ${call.name}\n\nArguments:\n${call.arguments}\n\nOutput:\n${call.output}`)
+      .join('\n\n---\n\n');
+    const ok = await copyText(text);
+    if (ok) {
       setCopyState('copied');
       setTimeout(() => setCopyState('idle'), 2000);
-    } catch {
-      // Clipboard unavailable — ignore.
     }
   };
 
@@ -447,14 +441,15 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                     type="button"
                     onClick={() => {
                       void (async () => {
-                        try {
-                          await navigator.clipboard.writeText(msg.content);
-                          setCopyState((prev) => ({ ...prev, [i]: 'copied' }));
+                        const ok = await copyText(msg.content);
+                        setCopyState((prev) => ({
+                          ...prev,
+                          [i]: ok ? 'copied' : 'error',
+                        }));
+                        if (ok) {
                           setTimeout(() => {
                             setCopyState((prev) => ({ ...prev, [i]: 'idle' }));
                           }, 2000);
-                        } catch {
-                          setCopyState((prev) => ({ ...prev, [i]: 'error' }));
                         }
                       })();
                     }}
