@@ -37,7 +37,6 @@ async function exportConfigText(cf: ConfigFile): Promise<string> {
 const FileListItem = ({
   fn,
   s,
-  v,
   findingCount,
   exportedOnce,
   selectedFiles,
@@ -46,7 +45,6 @@ const FileListItem = ({
 }: {
   fn: string;
   s: { hasOriginal: boolean; hasChanges: boolean };
-  v: any;
   findingCount: number;
   exportedOnce: boolean;
   selectedFiles: Set<string>;
@@ -85,19 +83,15 @@ const FileListItem = ({
 const ReviewItem = ({
   fn,
   s,
-  current,
-  originalTexts,
   diffLines,
   changedCount,
 }: {
   fn: string;
   s: { hasOriginal: boolean; hasChanges: boolean };
-  current: string | undefined;
-  originalTexts: Record<string, string>;
   diffLines: DiffLine[];
   changedCount: number;
 }) => (
-  <div key={fn}>
+  <div>
     <div className="flex items-center gap-2 mb-1">
       <span className="text-xs font-semibold text-[var(--color-text-primary)]">{fn}</span>
       {!s.hasOriginal && (
@@ -298,7 +292,6 @@ export default function ExportDialog({ onClose }: ExportDialogProps) {
                         key={fn}
                         fn={fn}
                         s={s}
-                        v={v}
                         findingCount={findingCount}
                         exportedOnce={exportedOnce}
                         selectedFiles={selectedFiles}
@@ -337,10 +330,9 @@ export default function ExportDialog({ onClose }: ExportDialogProps) {
 
                   return (
                     <ReviewItem
+                      key={fn}
                       fn={fn}
                       s={s}
-                      current={current}
-                      originalTexts={originalTexts}
                       diffLines={diffLines}
                       changedCount={changedCount}
                     />
