@@ -181,12 +181,11 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
   const storeSnapshot = useRef(useConfigStore.getState());
   const { configFiles, originalTexts } = storeSnapshot.current;
   const { configPath } = useNativeStore();
-  // Live state for the Save-button color — matches the toolbar button so the
-  // dialog's actions always agree with it (grey/green/yellow/red).
   const isDirty = useConfigStore((s) => s.isDirty);
   const validation = useConfigStore((s) => s.validation);
-  const hasTextParseError = Object.keys(useConfigStore((s) => s.textParseErrors)).length > 0;
-  const saveButtonClass = getSaveButtonClass(isDirty, validation, hasTextParseError);
+  // saveButtonClass is computed AFTER gateIssues below — the dialog's Save
+  // button turns red only when a SELECTED file is blocked (the toolbar keeps
+  // the project-wide red; a deselected broken file doesn't block this save).
   // A file deleted since import is gone from configFiles but its original text
   // survives in originalTexts — union both so deletions show up in the diff
   // and are actually removed from disk on save.
@@ -225,6 +224,12 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
   }, [validation, selectedFiles, textParseErrors]);
   const hasGateErrors = gateIssues.hasErrors;
   const hasGateWarnings = gateIssues.hasWarnings;
+  // The dialog's Save button is red only when a SELECTED file's text can't
+  // parse (mirrors handleApply's hard block, which scans selectedFiles). The
+  // toolbar button stays project-wide red so a deselected broken file's issue
+  // remains visible there; the dialog must not claim a save is blocked that
+  // would actually proceed.
+  const saveButtonClass = getSaveButtonClass(isDirty, validation, gateIssues.blocked.length > 0);
 
   // Confirmation flow: clicking Save with gate findings opens a single
   // overlay (errors OR warnings, never both stacked — errors dominate).
@@ -388,9 +393,19 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
   }, [fileStatus, gateFindingFiles]);
 
   const noteworthyFiles = useMemo(() => filenames.filter(isNoteworthy), [filenames, isNoteworthy]);
+  // Center review only shows files SELECTED for save — a deselected file's
+  // diff/findings gate nothing. The left list keeps every noteworthy file
+  // with its checkbox, so a deselected file can be re-selected (filtering
+  // the left list by selection would hide the checkbox that re-selects it).
+  const reviewFiles = useMemo(
+    () => noteworthyFiles.filter((fn) => selectedFiles.has(fn)),
+    [noteworthyFiles, selectedFiles],
+  );
   const hiddenFileCount = filenames.length - noteworthyFiles.length;
   // The center review area is shown whenever there is anything notable to
-  // review (while diff export is in flight it shows the loading note).
+  // review (while diff export is in flight it shows the loading note). Width
+  // stays stable while checkboxes toggle — a deselected-all state still gets
+  // the panel with a hint, not a layout jump.
   const showReviewPanel = diffLoading || noteworthyFiles.length > 0;
 
   // Export all configs once on mount to get current text for diff.
@@ -777,12 +792,18 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
             <div className="flex-1 overflow-auto p-4 space-y-4">
               {diffLoading ? (
                 <p className="text-xs text-[var(--color-text-secondary)] text-center py-8">Generating diff...</p>
-              ) : noteworthyFiles.length === 0 ? (
-                <p className="text-xs text-[var(--color-text-secondary)] text-center py-8">
-                  No files to review — nothing changed, added, or flagged.
-                </p>
+              ) : reviewFiles.length === 0 ? (
+                noteworthyFiles.length > 0 ? (
+                  <p className="text-xs text-[var(--color-text-secondary)] text-center py-8">
+                    Changed or flagged files are deselected — tick them in the file list to review.
+                  </p>
+                ) : (
+                  <p className="text-xs text-[var(--color-text-secondary)] text-center py-8">
+                    No files to review — nothing changed, added, or flagged.
+                  </p>
+                )
               ) : (
-                noteworthyFiles.map((fn) => {
+                reviewFiles.map((fn) => {
                   const s = fileStatus[fn];
                   const current = currentTexts[fn];
                   let diffLines: DiffLine[] = [];

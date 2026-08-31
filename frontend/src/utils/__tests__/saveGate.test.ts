@@ -93,6 +93,21 @@ describe('selectSaveGateIssues', () => {
     expect(out.warnings).toEqual([]);
   });
 
+  it('a parse-error file NOT selected for save does not block', () => {
+    const validation: Record<string, ValidationResult> = {
+      'printer.cfg': result([['warning', 'idle_timeout', 'warn', { line: 1 }]]),
+      'broken.cfg': result([['warning', 'idle_timeout', 'warn', { line: 1 }]]),
+    };
+    const out = selectSaveGateIssues(
+      validation,
+      ['printer.cfg'], // broken.cfg deliberately not selected
+      { 'broken.cfg': 'unparseable' },
+    );
+    expect(out.blocked).toEqual([]);
+    // only the selected file's findings gate the save
+    expect(out.warnings.map((e) => e.file)).toEqual(['printer.cfg']);
+  });
+
   it('stable ordering: errors before warnings, then file, then line', () => {
     const validation: Record<string, ValidationResult> = {
       'b.cfg': result([
