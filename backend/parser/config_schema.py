@@ -366,7 +366,7 @@ _register(SectionDef(
         _pin("dir_pin", "Direction GPIO pin", required=True),
         _pin("enable_pin", "Enable GPIO pin"),
         _pin("heater_pin", "Heater GPIO pin", required=True),
-        _float("max_power", "Maximum heater power", default="1.0"),
+        _float("max_power", "Maximum heater power", default="1.0", max_val=1, strict_above=0),
         _enum("sensor_type", SENSOR_TYPE_ENUM, "Temperature sensor type", required=True),
         _pin("sensor_pin", "Sensor analog pin"),
         _str("spi_bus", "SPI bus (for SPI sensors)"),
@@ -425,7 +425,7 @@ _register(SectionDef(
         _float("pid_kd", "PID derivative (auto-saved)"),
         _float("min_temp", "Minimum temperature", default="0", unit="°C"),
         _float("max_temp", "Maximum temperature", required=True, unit="°C"),
-        _float("max_power", "Maximum heater power", default="1.0"),
+        _float("max_power", "Maximum heater power", default="1.0", max_val=1, strict_above=0),
         _float("max_delta", "Max temperature delta for watermark control", default="2.0"),
         _float("pwm_cycle_time", "PWM cycle time", default="0.100", unit="s"),
         _float("smooth_time", "Temperature smoothing window", default="1.0", unit="s"),
@@ -454,7 +454,7 @@ _register(SectionDef(
         _float("pid_kd", "PID derivative (auto-saved)"),
         _float("min_temp", "Minimum temperature", default="0", unit="°C"),
         _float("max_temp", "Maximum temperature", required=True, unit="°C"),
-        _float("max_power", "Maximum heater power", default="1.0"),
+        _float("max_power", "Maximum heater power", default="1.0", max_val=1, strict_above=0),
         _float("max_delta", "Max temperature delta for watermark control", default="2.0"),
         _float("pwm_cycle_time", "PWM cycle time", default="0.100", unit="s"),
     ],
@@ -540,7 +540,7 @@ _register(SectionDef(
     description="Fan that turns on when a heater is active",
     params=[
         _pin("pin", "Fan output pin", required=True),
-        _float("max_power", "Maximum power", default="1.0"),
+        _float("max_power", "Maximum power", default="1.0", max_val=1, strict_above=0),
         _float("shutdown_speed", "Shutdown speed", default="1.0"),
         _float("cycle_time", "PWM cycle time", default="0.010"),
         _bool("hardware_pwm", "Use hardware PWM", default="False"),
@@ -565,7 +565,7 @@ _register(SectionDef(
     description="Fan for cooling controller board",
     params=[
         _pin("pin", "Fan output pin", required=True),
-        _float("max_power", "Maximum power", default="1.0"),
+        _float("max_power", "Maximum power", default="1.0", max_val=1, strict_above=0),
         _float("shutdown_speed", "Shutdown speed", default="0"),
         _float("cycle_time", "PWM cycle time", default="0.010"),
         _bool("hardware_pwm", "Use hardware PWM", default="False"),
@@ -592,7 +592,7 @@ _register(SectionDef(
     description="Temperature-controlled fan",
     params=[
         _pin("pin", "Fan output pin", required=True),
-        _float("max_power", "Maximum power", default="1.0"),
+        _float("max_power", "Maximum power", default="1.0", max_val=1, strict_above=0),
         _float("shutdown_speed", "Shutdown speed", default="0"),
         _float("cycle_time", "PWM cycle time", default="0.010"),
         _bool("hardware_pwm", "Use hardware PWM", default="False"),
@@ -631,7 +631,7 @@ _register(SectionDef(
     description="Manually controlled generic fan",
     params=[
         _pin("pin", "Fan output pin", required=True),
-        _float("max_power", "Maximum power", default="1.0"),
+        _float("max_power", "Maximum power", default="1.0", max_val=1, strict_above=0),
         _float("shutdown_speed", "Shutdown speed", default="0"),
         _float("cycle_time", "PWM cycle time", default="0.010"),
         _bool("hardware_pwm", "Use hardware PWM", default="False"),
@@ -1055,10 +1055,10 @@ _register(SectionDef(
         _pin("pin", "Data pin", required=True),
         _int("chain_count", "Number of LEDs in chain", default="1", min_val=1),
         _str("color_order", "Color order (can be comma-separated list for per-LED ordering)", default="GRB"),
-        _float("initial_RED", "Initial red value", default="0.0"),
-        _float("initial_GREEN", "Initial green value", default="0.0"),
-        _float("initial_BLUE", "Initial blue value", default="0.0"),
-        _float("initial_WHITE", "Initial white value", default="0.0"),
+        _float("initial_RED", "Initial red value", default="0.0", min_val=0, max_val=1),
+        _float("initial_GREEN", "Initial green value", default="0.0", min_val=0, max_val=1),
+        _float("initial_BLUE", "Initial blue value", default="0.0", min_val=0, max_val=1),
+        _float("initial_WHITE", "Initial white value", default="0.0", min_val=0, max_val=1),
     ],
 ))
 
@@ -1072,9 +1072,9 @@ _register(SectionDef(
         _pin("data_pin", "Data pin", required=True),
         _pin("clock_pin", "Clock pin", required=True),
         _int("chain_count", "Number of LEDs", default="1", min_val=1),
-        _float("initial_RED", "Initial red", default="0.0"),
-        _float("initial_GREEN", "Initial green", default="0.0"),
-        _float("initial_BLUE", "Initial blue", default="0.0"),
+        _float("initial_RED", "Initial red", default="0.0", min_val=0, max_val=1),
+        _float("initial_GREEN", "Initial green", default="0.0", min_val=0, max_val=1),
+        _float("initial_BLUE", "Initial blue", default="0.0", min_val=0, max_val=1),
     ],
 ))
 
@@ -1995,10 +1995,10 @@ for pca in ["pca9533", "pca9632"]:
         is_named=True,
         params=[
             *I2C_BUS_PARAMS,
-            _float("initial_RED", "Initial red", default="0"),
-            _float("initial_GREEN", "Initial green", default="0"),
-            _float("initial_BLUE", "Initial blue", default="0"),
-            _float("initial_WHITE", "Initial white", default="0"),
+            _float("initial_RED", "Initial red", default="0", min_val=0, max_val=1),
+            _float("initial_GREEN", "Initial green", default="0", min_val=0, max_val=1),
+            _float("initial_BLUE", "Initial blue", default="0", min_val=0, max_val=1),
+            _float("initial_WHITE", "Initial white", default="0", min_val=0, max_val=1),
         ],
     ))
 

@@ -110,8 +110,8 @@ def test_formula_value_skipped_for_range():
 
 
 def test_unbounded_params_unaffected():
-    # rotation_distance carries no bounds in the real schema — any value passes.
+    # step_distance carries no bounds in the real schema — any value passes.
     errors = _errors(STEPPER_BASE.replace("dir_pin: PB1", "step_pin: PB0\ndir_pin: PB1")
-                     .replace("microsteps: 16\n", "microsteps: 16\nrotation_distance: -999\n"))
-    bad = [e for e in errors if e.param == "rotation_distance" and e.severity == "error"]
+                     .replace("microsteps: 16\n", "microsteps: 16\nstep_distance: -999\n"))
+    bad = [e for e in errors if e.param == "step_distance" and e.severity == "error"]
     assert not bad, f"unbounded param must not be range-checked, got: {[e.message for e in bad]}"
