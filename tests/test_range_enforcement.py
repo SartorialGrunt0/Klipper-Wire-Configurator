@@ -115,3 +115,52 @@ def test_unbounded_params_unaffected():
                      .replace("microsteps: 16\n", "microsteps: 16\nstep_distance: -999\n"))
     bad = [e for e in errors if e.param == "step_distance" and e.severity == "error"]
     assert not bad, f"unbounded param must not be range-checked, got: {[e.message for e in bad]}"
+
+
+# ── Regression: real-schema bounds (no fixtures — schema carries them) ──
+# These guard the Klipper-derived bounds that a targeted sweep initially missed
+# (shared STEPPER/TMC param lists + printer kinematics limits).
+
+def test_rotation_distance_negative_rejected():
+    # stepper.py: getfloat('rotation_distance', above=0.) — strictly above 0.
+    cfg = STEPPER_BASE.replace("dir_pin: PB1", "step_pin: PB0\ndir_pin: PB1")
+    for value, should_error in (("-20", True), ("0", True), ("40", False)):
+        errors = _errors(cfg.replace("microsteps: 16\n", f"microsteps: 16\nrotation_distance: {value}\n"))
+        bad = [e for e in errors if e.param == "rotation_distance" and e.severity == "error"]
+        assert bool(bad) is should_error, \
+            f"rotation_distance={value} should_error={should_error}, got: {[e.message for e in bad]}"
+
+
+def test_printer_velocity_limits_negative_rejected():
+    # toolhead.py: max_velocity/max_accel above=0. (strict);
+    # square_corner_velocity minval=0. (inclusive — 0 is a valid no-square-corners value).
+    base = "[printer]\nkinematics: corexy\nmax_velocity: 300\nmax_accel: 3000\nsquare_corner_velocity: 5\n"
+    for param, value, should_error in (
+        ("max_velocity", "-500", True), ("max_velocity", "0", True),
+        ("max_accel", "-10", True),
+        ("square_corner_velocity", "-1", True), ("square_corner_velocity", "0", False),
+        ("square_corner_velocity", "5", False),
+    ):
+        defaults = {"max_velocity": "300", "max_accel": "3000", "square_corner_velocity": "5"}
+        cfg = base.replace(f"{param}: {defaults[param]}", f"{param}: {value}")
+        errors = _errors(cfg)
+        bad = [e for e in errors if e.param == param and e.severity == "error"]
+        assert bool(bad) is should_error, \
+            f"{param}={value} should_error={should_error}, got: {[e.message for e in bad]}"
+
+
+def test_tmc_current_and_thresholds_negative_rejected():
+    # tmc2130.py TMCCurrentHelper: run_current/hold_current above=0. (strict);
+    # tmc.py: stealthchop/coolstep/high_velocity_threshold minval=0. (inclusive).
+    for param, value, should_error in (
+        ("run_current", "-0.5", True), ("run_current", "0", True), ("run_current", "0.8", False),
+        ("stealthchop_threshold", "-100", True),
+        ("stealthchop_threshold", "0", False), ("stealthchop_threshold", "250", False),
+    ):
+        cfg = f"[tmc2130]\ncs_pin: PA1\nrun_current: 0.8\nstealthchop_threshold: 250\n"
+        cfg = cfg.replace(f"run_current: 0.8", f"run_current: {value}") if param == "run_current" \
+            else cfg.replace(f"stealthchop_threshold: 250", f"stealthchop_threshold: {value}")
+        errors = _errors(cfg)
+        bad = [e for e in errors if e.param == param and e.severity == "error"]
+        assert bool(bad) is should_error, \
+            f"{param}={value} should_error={should_error}, got: {[e.message for e in bad]}"
