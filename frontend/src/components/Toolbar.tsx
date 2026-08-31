@@ -510,7 +510,7 @@ export default function Toolbar({
 
       {/* Dialogs */}
       {showImport && <ImportDialog onClose={() => setShowImport(false)} />}
-      {showExport && <ExportDialog onClose={() => setShowExport(false)} />}
+      {showExport && <ExportDialog onClose={() => setShowExport(false)} onShowTextView={onShowTextView} />}
       {showDiff && <DiffDialog onClose={() => setShowDiff(false)} />}
       {showOpenFromPi && <OpenFromPiDialog onClose={() => setShowOpenFromPi(false)} />}
       {showApply && (

@@ -2,11 +2,16 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { createTwoFilesPatch } from 'diff';
 import JSZip from 'jszip';
 import { useConfigStore } from '../../stores/configStore';
+import { selectSaveGateIssues, type SaveGateFinding } from '../../utils/saveGate';
 import * as api from '../../services/api';
 import type { ConfigFile } from '../../types/config';
 
 interface ExportDialogProps {
   onClose: () => void;
+  /** Switch the main view to the text editor so a findings click can land on
+   *  the file/line (the text editor consumes the store's pending line jump
+   *  once its text is loaded). */
+  onShowTextView?: () => void;
 }
 
 interface DiffLine {
@@ -85,58 +90,115 @@ const ReviewItem = ({
   s,
   diffLines,
   changedCount,
+  findings,
+  onFindingClick,
 }: {
   fn: string;
   s: { hasOriginal: boolean; hasChanges: boolean };
   diffLines: DiffLine[];
   changedCount: number;
-}) => (
-  <div>
-    <div className="flex items-center gap-2 mb-1">
-      <span className="text-xs font-semibold text-[var(--color-text-primary)]">{fn}</span>
-      {!s.hasOriginal && (
-        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-warning)]/20 text-[var(--color-warning)]">new file</span>
+  findings: (SaveGateFinding & { kind: 'error' | 'warning' })[];
+  onFindingClick: (f: SaveGateFinding) => void;
+}) => {
+  const errorCount = findings.filter((f) => f.kind === 'error').length;
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-1">
+        <span className="text-xs font-semibold text-[var(--color-text-primary)]">{fn}</span>
+        {!s.hasOriginal && (
+          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-warning)]/20 text-[var(--color-warning)]">new file</span>
+        )}
+        {s.hasOriginal && !s.hasChanges && (
+          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">unchanged</span>
+        )}
+        {s.hasOriginal && s.hasChanges && (
+          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-accent)]/20 text-[var(--color-accent)]">
+            {changedCount} lines changed
+          </span>
+        )}
+        {findings.length > 0 && (
+          <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${
+            errorCount > 0
+              ? 'bg-red-500/20 text-red-400'
+              : 'bg-[var(--color-warning)]/20 text-[var(--color-warning)]'
+          }`}>
+            {findings.length} finding{findings.length !== 1 ? 's' : ''}
+          </span>
+        )}
+      </div>
+      {s.hasChanges && (
+        <div className="rounded-lg border border-[var(--color-bg-tertiary)] overflow-hidden">
+          <pre className="text-xs leading-5 font-mono overflow-x-auto">
+            {diffLines.map((line, i) => (
+              <div
+                key={i}
+                className={
+                  line.type === 'added'
+                    ? 'w-max min-w-full bg-green-500/15 text-green-400 px-3'
+                    : line.type === 'removed'
+                      ? 'w-max min-w-full bg-red-500/15 text-red-400 px-3'
+                      : line.type === 'header'
+                        ? 'w-max min-w-full bg-blue-500/10 text-blue-400 px-3 py-0.5'
+                        : 'w-max min-w-full text-[var(--color-text-secondary)] px-3'
+                }
+              >
+                <span className="select-none opacity-40 mr-2">
+                  {line.type === 'added' ? '+' : line.type === 'removed' ? '-' : ' '}
+                </span>
+                {line.content || '\u00A0'}
+              </div>
+            ))}
+          </pre>
+        </div>
       )}
-      {s.hasOriginal && !s.hasChanges && (
-        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">unchanged</span>
-      )}
-      {s.hasOriginal && s.hasChanges && (
-        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-accent)]/20 text-[var(--color-accent)]">
-          {changedCount} lines changed
-        </span>
+
+      {/* Findings for this file — click a row to jump to it in the text
+          view (same behavior as the Save dialog). */}
+      {findings.length > 0 && (
+        <div className="mt-1.5 rounded-lg border border-[var(--color-bg-tertiary)] overflow-hidden">
+          <div className="flex items-center justify-between px-2 py-1 bg-[var(--color-bg-primary)]">
+            <span className="text-[10px] font-semibold text-[var(--color-text-secondary)]">
+              Validation findings ({findings.length})
+            </span>
+            <span className="text-[10px] text-[var(--color-text-secondary)]">
+              click a finding to jump to it
+            </span>
+          </div>
+          <div className="p-1">
+            {findings.map((f, i) => (
+              <button
+                key={`f-${fn}-${i}`}
+                type="button"
+                onClick={() => onFindingClick(f)}
+                disabled={f.line_number < 1}
+                className="w-full flex items-start gap-2 px-2 py-1.5 text-left rounded-md hover:bg-[var(--color-bg-primary)] disabled:cursor-default disabled:opacity-60"
+              >
+                <span
+                  className={`mt-1 w-2 h-2 rounded-full shrink-0 ${f.kind === 'error' ? 'bg-red-500' : 'bg-[var(--color-warning)]'}`}
+                />
+                <span className="flex-1 min-w-0">
+                  <span className="block text-xs text-[var(--color-text-primary)] truncate">{f.message}</span>
+                  <span className="block text-[10px] font-mono text-[var(--color-text-secondary)] truncate">
+                    {f.file}{f.line_number > 0 ? `:${f.line_number}` : ''}{f.section ? ` · [${f.section}]` : ''}
+                  </span>
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
       )}
     </div>
-    {s.hasChanges && (
-      <div className="rounded-lg border border-[var(--color-bg-tertiary)] overflow-hidden">
-        <pre className="text-xs leading-5 font-mono overflow-x-auto">
-          {diffLines.map((line, i) => (
-            <div
-              key={i}
-              className={
-                line.type === 'added'
-                  ? 'w-max min-w-full bg-green-500/15 text-green-400 px-3'
-                  : line.type === 'removed'
-                    ? 'w-max min-w-full bg-red-500/15 text-red-400 px-3'
-                    : line.type === 'header'
-                      ? 'w-max min-w-full bg-blue-500/10 text-blue-400 px-3 py-0.5'
-                      : 'w-max min-w-full text-[var(--color-text-secondary)] px-3'
-              }
-            >
-              <span className="select-none opacity-40 mr-2">
-                {line.type === 'added' ? '+' : line.type === 'removed' ? '-' : ' '}
-              </span>
-              {line.content || '\u00A0'}
-            </div>
-          ))}
-        </pre>
-      </div>
-    )}
-  </div>
-);
+  );
+};
 
-export default function ExportDialog({ onClose }: ExportDialogProps) {
+export default function ExportDialog({ onClose, onShowTextView }: ExportDialogProps) {
   const storeSnapshot = useRef(useConfigStore.getState());
-  const { configFiles, validation, originalTexts } = storeSnapshot.current;
+  const { configFiles, originalTexts } = storeSnapshot.current;
+
+  // Validation reads the LIVE store (same as the Save dialog) so the
+  // findings lists, badges, and export never show stale severities.
+  const validation = useConfigStore((s) => s.validation);
+  const textParseErrors = useConfigStore((s) => s.textParseErrors);
 
   const filenames = useMemo(
     () => Object.keys(configFiles),
@@ -192,6 +254,37 @@ export default function ExportDialog({ onClose }: ExportDialogProps) {
     () => filenames.filter((fn) => selectedFiles.has(fn)),
     [filenames, selectedFiles],
   );
+
+  /* Validation findings — same selection-scoped gate the Save dialog uses
+     (errors + warnings, never info; parse-error files hard-block its save,
+     here they just surface as findings since export writes nothing). */
+  const gateIssues = useMemo(() => {
+    const selected = Array.from(selectedFiles);
+    return selectSaveGateIssues(validation, selected, textParseErrors);
+  }, [validation, selectedFiles, textParseErrors]);
+
+  const fileFindings = useMemo(() => {
+    const map: Record<string, (SaveGateFinding & { kind: 'error' | 'warning' })[]> = {};
+    for (const f of gateIssues.errors) {
+      (map[f.file] ??= []).push({ ...f, kind: 'error' });
+    }
+    for (const f of gateIssues.warnings) {
+      (map[f.file] ??= []).push({ ...f, kind: 'warning' });
+    }
+    for (const list of Object.values(map)) {
+      list.sort((a, b) => a.kind === b.kind
+        ? a.line_number - b.line_number
+        : a.kind === 'error' ? -1 : 1);
+    }
+    return map;
+  }, [gateIssues]);
+
+  const handleFindingClick = (finding: SaveGateFinding) => {
+    if (finding.line_number < 1) return; // nothing to jump to
+    onShowTextView?.();
+    useConfigStore.getState().requestLineJump(finding.file, finding.line_number);
+    onClose(); // reveal the editor; the dialog's findings can be re-opened
+  };
 
   const toggleFile = (fn: string) => {
     setSelectedFiles((prev) => {
@@ -283,10 +376,7 @@ export default function ExportDialog({ onClose }: ExportDialogProps) {
                 <div className="space-y-1">
                   {filenames.map((fn) => {
                     const s = fileStatus[fn];
-                    const v = validation[fn];
-                    const errorCount = v?.errors.filter((e) => e.severity === 'error').length ?? 0;
-                    const warningCount = v?.errors.filter((e) => e.severity === 'warning').length ?? 0;
-                    const findingCount = errorCount + warningCount;
+                    const findingCount = fileFindings[fn]?.length ?? 0;
                     return (
                       <FileListItem
                         key={fn}
@@ -335,6 +425,8 @@ export default function ExportDialog({ onClose }: ExportDialogProps) {
                       s={s}
                       diffLines={diffLines}
                       changedCount={changedCount}
+                      findings={fileFindings[fn] ?? []}
+                      onFindingClick={handleFindingClick}
                     />
                   );
                 })
