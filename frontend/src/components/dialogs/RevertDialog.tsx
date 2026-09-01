@@ -76,8 +76,10 @@ export default function RevertDialog({ onClose }: RevertDialogProps) {
         buildProjectGraph(allConfigs, graphStore, schemas, allValidations);
         // Re-apply the saved layout — the rebuild renumbers node ids, and
         // the macro-state persist below must save the restored arrangement,
-        // not the auto-arranged one.
-        await restoreLayoutAfterRebuild(graphStore, isNative);
+        // not the auto-arranged one. Pass the state GETTER (not the
+        // pre-build snapshot, which is empty right after clearGraph()) so
+        // the layout lands on the freshly built graph.
+        await restoreLayoutAfterRebuild(useGraphStore.getState, isNative);
       } else {
         // Non-native mode: re-parse from originalTexts
         const { originalTexts } = configStore;
@@ -105,8 +107,9 @@ export default function RevertDialog({ onClose }: RevertDialogProps) {
         // Rebuild graph
         const graphStore = useGraphStore.getState();
         buildProjectGraph(allConfigs, graphStore, schemas, allValidations);
-        // Re-apply the saved layout (same reason as the native branch above).
-        await restoreLayoutAfterRebuild(graphStore, isNative);
+        // Re-apply the saved layout (same reason as the native branch above);
+        // getter, not pre-build snapshot — see restoreLayoutAfterRebuild.
+        await restoreLayoutAfterRebuild(useGraphStore.getState, isNative);
       }
 
       if (clearMacroDesignerState) {

@@ -388,13 +388,17 @@ export async function loadSavedLayout(isNative: boolean | null): Promise<SavedLa
  * autosave timer then persists that auto-arrangement OVER the user's saved
  * layout.
  *
- * Content-key matching means this is a no-op (except for genuinely new
- * cards, which keep their auto-arranged slot) when the config is
- * unchanged, and restores the user's arrangement when the rebuild shifted
- * node ids.
+ * Takes a STATE GETTER, not a snapshot: callers capture
+ * `useGraphStore.getState()` BEFORE the rebuild (often right after
+ * clearGraph(), so nodes are empty), but the layout must be applied to the
+ * REBUILT graph. A stale empty snapshot would make setNodes([]) wipe the
+ * freshly built graph (the "graph disappears after revert" bug). Content-key
+ * matching means this is a no-op (except for genuinely new cards, which keep
+ * their auto-arranged slot) when the config is unchanged, and restores the
+ * user's arrangement when the rebuild shifted node ids.
  */
 export async function restoreLayoutAfterRebuild(
-  graphStore: {
+  getGraphState: () => {
     nodes: AppNode[];
     edges: AppEdge[];
     setNodes: (n: AppNode[]) => void;
@@ -404,7 +408,7 @@ export async function restoreLayoutAfterRebuild(
 ): Promise<void> {
   const saved = await loadSavedLayout(isNative);
   if (!saved) return;
-  const fresh = graphStore;
+  const fresh = getGraphState();
   fresh.setNodes(applySavedNodePositions(fresh.nodes, saved.graphNodes));
   fresh.setEdges(applySavedEdgeLayout(fresh.edges, saved.graphEdges, fresh.nodes, saved.graphNodes));
 }

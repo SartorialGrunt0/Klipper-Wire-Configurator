@@ -64,6 +64,7 @@ beforeEach(() => {
     originalTexts: {},
     isDirty: false,
     textParseErrors: {},
+    pendingLineJump: null,
   });
 });
 
@@ -188,12 +189,24 @@ describe('configStore file operations', () => {
     store.markDirty();
     store.setTextParseError('a.cfg', 'stale boom');
     store.setSelectedSection('extruder', 'a.cfg', 12);
+    store.setValidation('a.cfg', {
+      has_errors: true,
+      has_warnings: false,
+      errors: [
+        { section: 'mcu', severity: 'error', message: 'stale finding', param: 'serial', line_number: 1 },
+      ],
+    });
     useConfigStore.getState().loadConfigs({ 'new.cfg': makeConfigFile() });
     const state = useConfigStore.getState();
     expect(Object.keys(state.configFiles)).toEqual(['new.cfg']);
     expect(state.activeFile).toBe('new.cfg');
     expect(state.isDirty).toBe(false);
     expect(state.textParseErrors).toEqual({});
+    // Stale whole-project findings must not survive the project switch:
+    // getSaveButtonClass iterates the entire validation map, so a leftover
+    // 'a.cfg' error would paint the NEW project's save button red.
+    expect(state.validation).toEqual({});
+    expect(state.validationText).toEqual({});
     // The stale section selection must not survive into the new project,
     // or it resolves against the wrong file and the sidebar shows it.
     expect(state.selectedSection).toBeNull();
@@ -395,6 +408,27 @@ describe('configStore dirty / text parse error tracking', () => {
     useConfigStore.getState().markClean();
     const state = useConfigStore.getState();
     expect(state.isDirty).toBe(false);
+  });
+});
+
+describe('configStore line-jump requests (save gate findings → editor)', () => {
+  it('requestLineJump stores the target; consumeLineJump clears it', () => {
+    useConfigStore.getState().requestLineJump('macros.cfg', 42);
+    expect(useConfigStore.getState().pendingLineJump).toEqual({ file: 'macros.cfg', line: 42 });
+    useConfigStore.getState().consumeLineJump();
+    expect(useConfigStore.getState().pendingLineJump).toBeNull();
+  });
+
+  it('clearAll resets a pending line jump', () => {
+    useConfigStore.getState().requestLineJump('a.cfg', 5);
+    useConfigStore.getState().clearAll();
+    expect(useConfigStore.getState().pendingLineJump).toBeNull();
+  });
+
+  it('loadConfigs resets a pending line jump', () => {
+    useConfigStore.getState().requestLineJump('a.cfg', 5);
+    useConfigStore.getState().loadConfigs({ 'new.cfg': makeConfigFile() });
+    expect(useConfigStore.getState().pendingLineJump).toBeNull();
   });
 });
 

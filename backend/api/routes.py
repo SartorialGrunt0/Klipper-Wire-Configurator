@@ -9,6 +9,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import PlainTextResponse
 
 from models.config_models import (
+    BulkWarningAcknowledgementRequest,
     ConfigUpdate,
     ExportRequest,
     GenerateRequest,
@@ -18,7 +19,13 @@ from models.config_models import (
     SectionUpdate,
     WarningAcknowledgementRequest,
 )
-from parser.config_parser import ConfigFile, ConfigParam, ConfigSection, parse_config
+from parser.config_parser import (
+    ConfigFile,
+    ConfigParam,
+    ConfigSection,
+    find_unclosed_headers,
+    parse_config,
+)
 from parser.config_schema import (
     SECTION_DEFS,
     ParamType,
@@ -35,7 +42,12 @@ from services.board_detector import (
     fuzzy_match_examples,
     get_available_examples,
 )
-from services.warning_acknowledgments import acknowledge_warning_for_section
+from services.warning_acknowledgments import (
+    acknowledge_duplicate_section_type,
+    acknowledge_warning_for_section,
+    acknowledge_warning_identities,
+    finding_identity,
+)
 
 router = APIRouter()
 
@@ -260,6 +272,51 @@ async def acknowledge_warning_api(data: WarningAcknowledgementRequest):
     )
     file_path = acknowledge_warning_for_section(section)
     return {"status": "acknowledged", "file": file_path}
+
+
+@router.post("/warning-acknowledgements/duplicate")
+async def acknowledge_duplicate_api(data: WarningAcknowledgementRequest):
+    """Persist acknowledgment of a duplicate-section warning for a section type.
+
+    Duplicate-section warnings are per section *type* (a singleton section
+    repeated in one file or across included files), so the ack is keyed by
+    ``section_type`` and suppresses the warning for every occurrence.
+    """
+    file_path = acknowledge_duplicate_section_type(data.section.section_type)
+    return {
+        "status": "acknowledged",
+        "file": file_path,
+        "section_type": data.section.section_type,
+    }
+
+
+@router.post("/warning-acknowledgements/bulk")
+async def acknowledge_bulk_warnings_api(
+    data: BulkWarningAcknowledgementRequest,
+):
+    """Bulk-acknowledge warning findings by stable identity (Phase 4 save gate).
+
+    Each identity is ``file|code|section|param|extra`` — ``extra`` is
+    DERIVED SERVER-SIDE (the include spec for missing includes; empty
+    otherwise) so suppression and the ack store always agree. Client
+    ``extra`` is accepted for API symmetry but ignored. Warnings only: the
+    validator never suppresses errors or info from this store. Idempotent;
+    the frontend revalidates the project afterwards so the warning state
+    clears.
+    """
+    if not data.identities:
+        raise HTTPException(
+            status_code=422, detail="No warning identities to acknowledge")
+    identities = [
+        finding_identity(item.file, item.code, item.section, item.param)
+        for item in data.identities
+    ]
+    file_path = acknowledge_warning_identities(identities)
+    return {
+        "status": "acknowledged",
+        "file": file_path,
+        "count": len(identities),
+    }
 
 
 # ── Export ──────────────────────────────────────────────────────
@@ -655,6 +712,12 @@ def _config_update_to_config_file(data: ConfigUpdate) -> ConfigFile:
         sections=sections,
         includes=data.includes,
         header_comments=data.header_comments,
+        raw_text=data.raw_text or "",
+        # unclosed_headers is a parse-time field that to_dict() doesn't
+        # serialize, so re-derive it from the raw text when present — the
+        # validation endpoints otherwise reconstruct the file without it and
+        # the malformed-header check would silently never run.
+        unclosed_headers=find_unclosed_headers(data.raw_text) if data.raw_text else [],
     )
 
 

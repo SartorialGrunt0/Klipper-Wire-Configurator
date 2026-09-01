@@ -6,7 +6,10 @@ import * as api from '../services/api';
 import ConfigReferenceDialog from './dialogs/ConfigReferenceDialog';
 import { buildProjectGraph } from '../utils/graphBuilder';
 import { restoreLayoutAfterRebuild } from '../utils/layoutPersistence';
-import type { ExampleConfig, ConfigFile, ConfigSection } from '../types/config';
+import { acknowledgeableWarning } from '../utils/warningAcknowledgment';
+import { resolveIssueLine } from '../utils/issueLine';
+import { ISSUE_MARKER } from '../utils/issueMarker';
+import type { ExampleConfig, ConfigFile, ConfigSection, ValidationError } from '../types/config';
 
 interface SearchResult {
   file: string;
@@ -19,13 +22,12 @@ interface SearchResult {
 interface TextIssue {
   line: number;
   text: string;
-  severity: 'error' | 'warning';
+  severity: 'error' | 'warning' | 'info';
   section?: string;
   param?: string;
   acknowledgeSection?: ConfigSection;
+  acknowledgeKind?: 'unknown' | 'duplicate';
 }
-
-const ACKNOWLEDGEABLE_WARNING_PREFIX = 'Unknown section type ';
 
 interface ConfigParamEntry {
   key: string;
@@ -54,14 +56,23 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     removeConfigFile,
     setTextParseError,
     validation,
+    revalidateFile,
+    pendingLineJump,
   } = useConfigStore();
   const isDirty = useConfigStore((s) => s.isDirty);
   const parseError = useConfigStore((s) => s.textParseErrors[activeFile]);
+  const validationText = useConfigStore((s) => s.validationText);
 
   const config = configFiles[activeFile];
   const filenames = Object.keys(configFiles);
 
   const [editText, setEditText] = useState('');
+  // Which file the textarea text currently belongs to. Cross-file jumps must
+  // not consume against another file's text: on a file switch the export is
+  // async, so editText lags activeFile until it lands. Kept in sync by the
+  // export effect (sets it when a file's text lands) and the switch reset
+  // (clears it so a stale jump re-attempts after the new text arrives).
+  const [editTextFile, setEditTextFile] = useState(activeFile);
 
   // Helper: export config text via backend (preserves comments, whitespace, #*# markers).
   // Falls back to offline re-serialization when the backend is unreachable; callers use
@@ -107,6 +118,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     }
     if (!config) {
       setEditText('');
+      setEditTextFile('');
       return;
     }
     const requestId = ++exportTextRef.current;
@@ -114,6 +126,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     exportConfigText(config).then(({ text, usedFallback }) => {
       if (requestId === exportTextRef.current) {
         setEditText(text);
+        setEditTextFile(activeFile);
         markFallbackExport(activeFile, usedFallback);
       }
     });
@@ -124,8 +137,6 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   const [showSectionsSidebar, setShowSectionsSidebar] = useState(true);
   const [showReferenceViewer, setShowReferenceViewer] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [liveValidation, setLiveValidation] = useState<Array<{ severity: string; section: string; param: string; message: string }>>([]);
-  const [liveParsedConfig, setLiveParsedConfig] = useState<ConfigFile | null>(null);
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({});
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const lineNumbersRef = useRef<HTMLDivElement>(null);
@@ -171,8 +182,6 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
       try {
         const result = await api.parseConfigText(editText, activeFile);
         if (requestId !== liveValidateRequestRef.current) return;
-        setLiveParsedConfig(result.config);
-        setLiveValidation(result.validation.errors || []);
         setTextParseError(activeFile, null);
 
         const currentConfig = useConfigStore.getState().configFiles[activeFile];
@@ -207,15 +216,17 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
         useGraphStore.getState().pushHistory();
         // raw_text = editText so the backend export returns the user's text
         // verbatim — the text the user typed is the canonical content.
-        setConfigFile(activeFile, { ...result.config, raw_text: editText });
-        setValidation(activeFile, result.validation);
-        markDirty();
+        // updateConfigFile (not setConfigFile) so the store's debounced
+        // revalidation fires: for a multi-file project that runs the
+        // PROJECT validation, which is the only source of the cross-file
+        // findings (duplicate sections, missing includes) the gutter and
+        // issue list render from. A single-file /parse would overwrite the
+        // store with file-local findings and erase them (see 3.5 Q1).
+        updateConfigFile(activeFile, { ...result.config, raw_text: editText });
         useGraphStore.getState().syncGraphWithConfig(activeFile);
       } catch (err) {
         if (requestId !== liveValidateRequestRef.current) return;
         // Parse failed — don't keep stale validation on screen, hold last-good model
-        setLiveParsedConfig(null);
-        setLiveValidation([]);
         setTextParseError(activeFile, err instanceof Error ? err.message : 'Unable to parse configuration text.');
       }
     }, 800);
@@ -223,61 +234,73 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
       if (liveValidateTimerRef.current) clearTimeout(liveValidateTimerRef.current);
       liveValidateRequestRef.current++;
     };
-  }, [isActive, activeFile, editText, markDirty, setConfigFile, setTextParseError, setValidation]);
+  }, [isActive, activeFile, editText, updateConfigFile, setTextParseError]);
 
-  // Collect inline issues from live validation of the current text
+  // Collect inline issues for the center editor from the store's project
+  // validation of the active file. Project validation (not a single-file
+  // parse) is the authoritative source: it carries the cross-file findings a
+  // lone file can't know about — duplicate sections (info) and missing
+  // includes (warning) — so the gutter + issue list stay in sync with the
+  // right-hand section list, the save button, and the graph.
+  //
+  // Staleness guard: validation lags the textarea by the 800ms parse debounce
+  // + the 500ms revalidation debounce + network time. While the user is
+  // typing, the backend line_numbers describe the OLD layout — rendering them
+  // as-is paints a dot several lines off (the "info dot in the middle of a
+  // section" bug). When the live text has moved ahead of the text the
+  // validation was computed against, re-resolve each line from the current
+  // text (or hide the finding) until the fresh result lands.
   const inlineIssues = useMemo((): TextIssue[] => {
-    const errors = liveValidation;
+    const errors = validation[activeFile]?.errors ?? [];
     if (!errors || errors.length === 0) return [];
     const issues: TextIssue[] = [];
+    const lines = editText.split('\n');
+    const activeSections = configFiles[activeFile]?.sections ?? [];
+    const normalizeNewlines = (s: string) => s.replace(/\r\n?/g, '\n');
+    const validatedText = validationText[activeFile];
+    const validationStale =
+      validatedText != null &&
+      normalizeNewlines(validatedText) !== normalizeNewlines(editText);
     for (const err of errors) {
-      if (err.severity === 'error' || err.severity === 'warning') {
-        // Find the line in the text that corresponds to this error
-        const lines = editText.split('\n');
-        let lineNum = 0;
-        if (err.section) {
-          // Find the section header line (may be commented out with #)
-          const sectionIdx = lines.findIndex((l) => {
-            const trimmed = l.trim();
-            return trimmed === `[${err.section}]` || trimmed === `#[${err.section}]`;
-          });
-          if (sectionIdx !== -1) {
-            if (err.param) {
-              // Find the param within the section
-              for (let i = sectionIdx + 1; i < lines.length; i++) {
-                if (lines[i].trim().startsWith('[') && lines[i].trim().endsWith(']')) break;
-                const trimmed = lines[i].replace(/^#/, '').trim();
-                if (trimmed.startsWith(err.param + ':') || trimmed.startsWith(err.param + ' ') || trimmed.startsWith(err.param + '=')) {
-                  lineNum = i + 1;
-                  break;
-                }
-              }
-            }
-            if (!lineNum) lineNum = sectionIdx + 1;
-          }
-        }
+      // Info findings are legal, order-dependent context — shown in the
+      // gutter + issue list in muted grey, never as an alarm (3.5/Q1).
+      if (err.severity === 'error' || err.severity === 'warning' || err.severity === 'info') {
+        const lineNum = resolveIssueLine(err, lines, { stale: validationStale });
+        const ack = err.severity === 'warning' ? acknowledgeableWarning(err) : null;
         issues.push({
           line: lineNum,
           text: err.message,
-          severity: err.severity as 'error' | 'warning',
+          severity: err.severity,
           section: err.section,
           param: err.param,
-          acknowledgeSection: err.severity === 'warning' && err.message.startsWith(ACKNOWLEDGEABLE_WARNING_PREFIX)
-            ? liveParsedConfig?.sections.find((section) => section.full_header === err.section)
+          acknowledgeSection: ack
+            ? activeSections.find((section) => section.full_header === err.section)
             : undefined,
+          acknowledgeKind: ack ? ack.kind : undefined,
         });
       }
     }
     return issues;
-  }, [liveValidation, editText, liveParsedConfig]);
+  }, [validation, validationText, activeFile, editText, configFiles]);
 
-  const handleAcknowledgeWarning = useCallback(async (section: ConfigSection) => {
+  const handleAcknowledgeWarning = useCallback(async (section: ConfigSection, kind: 'unknown' | 'duplicate' = 'unknown') => {
+    if (kind === 'duplicate') {
+      await api.acknowledgeDuplicateWarning(section);
+      // Duplicates are cross-file (or same-file) section-type warnings, so the
+      // whole project must be revalidated to clear every occurrence's flag.
+      void revalidateFile(activeFile);
+      return;
+    }
     await api.acknowledgeWarning(section);
     const result = await api.parseConfigText(editText, activeFile);
-    setLiveParsedConfig(result.config);
-    setLiveValidation(result.validation.errors || []);
-    setValidation(activeFile, result.validation);
-  }, [activeFile, editText, setValidation]);
+    // Re-apply the (unchanged) model without marking dirty, then re-run
+    // validation so the acknowledged finding clears. revalidateFile performs
+    // the PROJECT revalidation for multi-file projects — the same source the
+    // gutter renders from. Writing the file-local /parse result into the
+    // store instead would erase cross-file findings.
+    setConfigFile(activeFile, { ...result.config, raw_text: editText });
+    void revalidateFile(activeFile);
+  }, [activeFile, editText, setConfigFile, revalidateFile]);
 
   // Map line numbers to issues for rendering
   const issuesByLine = useMemo(() => {
@@ -290,6 +313,30 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     }
     return map;
   }, [inlineIssues]);
+
+  // Gutter numbers as ONE text block (see the editor gutter comment): one
+  // line per row, severity glyph + number, sharing the textarea's continuous
+  // line rhythm so alignment holds at any zoom / device scaling. Inline
+  // per-line spans keep the hover title without creating per-row layout boxes.
+  const gutterHtml = useMemo(() => {
+    const escapeAttr = (value: string) => escapeHtml(value).replace(/"/g, '&quot;');
+    const lines = editText.split('\n');
+    return lines
+      .map((_line, idx) => {
+        const lineNum = idx + 1;
+        const lineIssues = issuesByLine.get(lineNum);
+        if (!lineIssues?.length) return String(lineNum);
+        const severity = lineIssues.some((i) => i.severity === 'error')
+          ? 'error'
+          : lineIssues.some((i) => i.severity === 'warning')
+            ? 'warning'
+            : 'info';
+        const spec = ISSUE_MARKER[severity];
+        const title = escapeAttr(lineIssues.map((i) => i.text).join('\n'));
+        return `<span title="${title}"><span style="color:${spec.color}">${spec.marker}</span> ${lineNum}</span>`;
+      })
+      .join('\n');
+  }, [editText, issuesByLine]);
 
   // All files as text for search — exported via backend for accuracy
   const [allFilesText, setAllFilesText] = useState<Record<string, string>>({});
@@ -399,11 +446,39 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     const lineLen = lines[line - 1]?.length ?? 0;
     textareaRef.current.focus();
     textareaRef.current.setSelectionRange(charPos, charPos + lineLen);
-    // Approximate scroll to bring line into view
-    const approxLineHeight = 21;
-    textareaRef.current.scrollTop = Math.max(0, (line - 5) * approxLineHeight);
+    // Scroll the target line into view using the textarea's ACTUAL metrics.
+    // The previous hardcoded 21px under-shot the real 22.75px line rhythm
+    // (14px font, leading-relaxed) plus the 16px top padding, so every jump
+    // landed a growing number of lines short (21 vs 22.75 → ~8px high per line).
+    const cs = window.getComputedStyle(textareaRef.current);
+    const lineHeight = parseFloat(cs.lineHeight) || 22.75;
+    const paddingTop = parseFloat(cs.paddingTop) || 16;
+    const lineTop = paddingTop + (line - 1) * lineHeight;
+    const viewportH = textareaRef.current.clientHeight || 400;
+    // Bring the line to ~20% down from the top of the visible area.
+    textareaRef.current.scrollTop = Math.max(0, lineTop - viewportH * 0.2);
     syncLineNumbersScroll();
   }, [syncLineNumbersScroll]);
+
+  // Consume one-shot line-jump requests (save dialog findings list → the
+  // editor). The target file may need switching first; the switch re-exports
+  // the file's text asynchronously, so re-attempt until the target file's
+  // text is actually in the textarea (editTextFile tracks the text's owner —
+  // a stale jump must never land on another file's layout).
+  useEffect(() => {
+    if (!pendingLineJump || !isActive) return;
+    if (pendingLineJump.file !== activeFile) {
+      setActiveFile(pendingLineJump.file);
+      setEditTextFile(''); // export is async — text is stale until it lands
+      return; // re-runs after the switch
+    }
+    if (editTextFile !== activeFile || !editText) {
+      return; // target file's text still in flight — re-runs when it lands
+    }
+    const line = pendingLineJump.line;
+    useConfigStore.getState().consumeLineJump();
+    setTimeout(() => jumpToLine(line), 0);
+  }, [pendingLineJump, activeFile, editText, editTextFile, isActive, jumpToLine, setActiveFile]);
 
   const handleSearchResultClick = (file: string, line: number) => {
     if (file !== activeFile) {
@@ -596,7 +671,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
       // The rebuild renumbers node ids — re-apply the saved layout so the
       // new file appears in the user's existing arrangement instead of
       // resetting every card to auto-arranged.
-      await restoreLayoutAfterRebuild(graphStore, useNativeStore.getState().isNative);
+      await restoreLayoutAfterRebuild(useGraphStore.getState, useNativeStore.getState().isNative);
     } catch (err) {
       console.error('Failed to load reference config:', err);
     }
@@ -990,29 +1065,25 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
         <div className="flex-1 flex overflow-hidden">
           <div className="flex flex-col flex-1 min-w-0 relative">
             <div className="flex-1 flex overflow-hidden" ref={editorScrollRef}>
-              {/* Line numbers + issue indicators */}
+              {/* Line numbers + issue indicators.
+                  Rendered as ONE text block (like the textarea's own lines)
+                  instead of per-row divs: 700+ flex rows round their offsets
+                  independently of the textarea's line boxes, so the numbers
+                  drift ±~1px vs the text and the offset flips with browser
+                  zoom / device scaling. A single block shares the textarea's
+                  exact line rhythm (same font-size/line-height/font/padding),
+                  so every number snaps to its text line at any zoom. */}
               <div
                 ref={lineNumbersRef}
-                className="shrink-0 overflow-hidden bg-[var(--color-bg-secondary)] text-right select-none pr-2 pl-2 pt-4 font-mono text-sm leading-relaxed text-[var(--color-text-secondary)] border-r border-[var(--color-bg-tertiary)]"
+                className="shrink-0 overflow-hidden bg-[var(--color-bg-secondary)] select-none pl-2 pr-2 pt-4 pb-4 border-r border-[var(--color-bg-tertiary)]"
                 style={{ minWidth: '3rem' }}
               >
-                {editText.split('\n').map((_line, idx) => {
-                  const lineNum = idx + 1;
-                  const lineIssues = issuesByLine.get(lineNum);
-                  const hasError = lineIssues?.some((i) => i.severity === 'error');
-                  const hasWarning = lineIssues?.some((i) => i.severity === 'warning');
-                  return (
-                    <div
-                      key={lineNum}
-                      className="h-[1.625em] flex items-center justify-end"
-                      title={lineIssues?.map((i) => i.text).join('\n')}
-                    >
-                      {hasError && <span className="w-2 h-2 rounded-full bg-[var(--color-error)] mr-1 shrink-0" />}
-                      {!hasError && hasWarning && <span className="w-2 h-2 rounded-full bg-[var(--color-warning)] mr-1 shrink-0" />}
-                      <span>{lineNum}</span>
-                    </div>
-                  );
-                })}
+                <pre
+                  aria-hidden
+                  className="m-0 font-mono text-sm leading-relaxed text-right text-[var(--color-text-secondary)]"
+                  style={{ tabSize: 4 }}
+                  dangerouslySetInnerHTML={{ __html: gutterHtml }}
+                />
               </div>
               {/* Text area with syntax color parsing overlay */}
               <div className="relative flex-1 overflow-hidden">
@@ -1043,23 +1114,24 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
                 {inlineIssues.filter((i) => i.line > 0).map((issue, idx) => (
                   <div
                     key={idx}
-                    className={`flex items-center gap-2 px-3 py-1 text-xs cursor-pointer hover:bg-[var(--color-bg-tertiary)] ${
-                      issue.severity === 'error' ? 'text-[var(--color-error)]' : 'text-[var(--color-warning)]'
-                    }`}
+                    className="flex items-center gap-2 px-3 py-1 text-xs cursor-pointer hover:bg-[var(--color-bg-tertiary)]"
+                    style={{ color: ISSUE_MARKER[issue.severity].color }}
                     onClick={() => {
                       jumpToLine(issue.line);
                     }}
                   >
-                    <span>{issue.severity === 'error' ? '●' : '▲'}</span>
+                    <span>{ISSUE_MARKER[issue.severity].marker}</span>
                     <span className="min-w-0 flex-1 truncate">Line {issue.line}: {issue.text}</span>
                     {issue.acknowledgeSection && (
                       <button
                         onClick={(event) => {
                           event.stopPropagation();
-                          void handleAcknowledgeWarning(issue.acknowledgeSection!);
+                          void handleAcknowledgeWarning(issue.acknowledgeSection!, issue.acknowledgeKind ?? 'unknown');
                         }}
                         className="shrink-0 rounded border border-[var(--color-warning)] px-2 py-0.5 text-[10px] font-medium text-[var(--color-warning)] hover:bg-[var(--color-warning)] hover:text-[var(--color-bg-primary)] transition-colors"
-                        title="Acknowledge this unknown section warning"
+                        title={issue.acknowledgeKind === 'duplicate'
+                          ? 'Acknowledge this duplicate section warning and stop flagging the save button'
+                          : 'Acknowledge this unknown section and hide its warning in future validations'}
                       >
                         Acknowledge
                       </button>
@@ -1102,7 +1174,8 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
               const activeValidation = getFileValidation(activeFile);
               const sectionIssues = (activeValidation?.errors ?? []).filter((e) => e.section === entry.title);
               const hasSecError = sectionIssues.some((e) => e.severity === 'error');
-              const hasSecWarning = sectionIssues.some((e) => e.severity === 'warning');
+              const hasSecWarning = !hasSecError && sectionIssues.some((e) => e.severity === 'warning');
+              const hasSecInfo = !hasSecError && !hasSecWarning && sectionIssues.some((e) => e.severity === 'info');
               return (
                 <div key={entry.id} className="px-2 py-0.5">
                   <div className="flex items-start gap-1">
@@ -1127,6 +1200,8 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
                         <span className="w-2 h-2 rounded-full bg-[var(--color-error)] shrink-0" title="This section has validation errors" />
                       ) : hasSecWarning ? (
                         <span className="w-2 h-2 rounded-full bg-[var(--color-warning)] shrink-0" title="This section has warnings" />
+                      ) : hasSecInfo ? (
+                        <span className={`${ISSUE_MARKER.info.dotClass} shrink-0`} title="This section has info notes (legal, no action required)" />
                       ) : null}
                     </button>
                   </div>

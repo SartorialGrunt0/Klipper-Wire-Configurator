@@ -4,10 +4,15 @@ import type { ValidationResult } from '../types/config';
  * Tailwind class string for the Save button's state color. Shared between the
  * toolbar Save button and the Save (Apply) dialog so both always agree:
  * grey = no unsaved changes, green = valid, yellow = warnings, red = errors.
+ *
+ * `textParseError` mirrors the Apply dialog's block: when the active text can't
+ * be parsed, the latest text would be dropped on save, so the button goes red
+ * even if the last full validation (of the last-good model) was clean.
  */
 export function getSaveButtonClass(
   isDirty: boolean,
   validation: Record<string, ValidationResult>,
+  textParseError: boolean = false,
 ): string {
   if (!isDirty) {
     // No changes — normal grey
@@ -19,7 +24,7 @@ export function getSaveButtonClass(
   const hasWarnings = Object.values(validation).some((v) =>
     v.errors.some((e) => e.severity === 'warning'),
   );
-  if (hasErrors) {
+  if (textParseError || hasErrors) {
     return 'bg-red-600 text-white hover:bg-red-700';
   }
   if (hasWarnings) {

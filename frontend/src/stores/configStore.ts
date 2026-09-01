@@ -4,53 +4,10 @@ import type { ConfigFile, ConfigSection, ConfigParam, ValidationResult, SectionS
 /** Debounced revalidation timer — shared across all mutation methods. */
 let _revalidateTimer: ReturnType<typeof setTimeout> | null = null;
 
-const UNKNOWN_PARAM_WARNING_RE = /^Unknown parameter '([^']+)' for section \[([^\]]+)\]\.?$/;
-
 function matchesSectionIdentity(section: ConfigSection, fullHeader: string, lineNumber?: number): boolean {
   if (section.full_header !== fullHeader) return false;
   if (lineNumber == null || lineNumber === 0) return true;
   return section.line_number === lineNumber;
-}
-
-function sanitizeValidationResult(
-  result: ValidationResult,
-  schemas: Record<string, SectionSchema>,
-): ValidationResult {
-  if (result.errors.length === 0 || Object.keys(schemas).length === 0) {
-    return result;
-  }
-
-  const filteredErrors = result.errors.filter((error) => {
-    if (error.severity !== 'warning') return true;
-
-    const match = UNKNOWN_PARAM_WARNING_RE.exec(error.message);
-    if (!match) return true;
-
-    const [, paramName, sectionType] = match;
-    const schema = schemas[sectionType];
-    if (!schema) return true;
-
-    return !schema.params.some((param) => param.name === paramName);
-  });
-
-  if (filteredErrors.length === result.errors.length) {
-    return result;
-  }
-
-  return {
-    has_errors: filteredErrors.some((error) => error.severity === 'error'),
-    has_warnings: filteredErrors.some((error) => error.severity === 'warning'),
-    errors: filteredErrors,
-  };
-}
-
-function sanitizeValidationMap(
-  results: Record<string, ValidationResult>,
-  schemas: Record<string, SectionSchema>,
-): Record<string, ValidationResult> {
-  return Object.fromEntries(
-    Object.entries(results).map(([filename, result]) => [filename, sanitizeValidationResult(result, schemas)]),
-  );
 }
 
 async function _revalidateFile(
@@ -63,9 +20,11 @@ async function _revalidateFile(
   const api = await import('../services/api');
   try {
     const result = await api.validateConfig(cf);
-    const sanitized = sanitizeValidationResult(result, get().schemas);
+    // Track the text this result was computed against so the editor can
+    // tell a stale line_number (user typed ahead) from an authoritative one.
     set((state) => ({
-      validation: { ...state.validation, [filename]: sanitized },
+      validation: { ...state.validation, [filename]: result },
+      validationText: { ...state.validationText, [filename]: cf.raw_text ?? '' },
     }));
   } catch {
     // Validation API unavailable — skip silently
@@ -73,7 +32,7 @@ async function _revalidateFile(
 }
 
 async function _revalidateAll(get: () => ConfigState, set: (partial: Partial<ConfigState> | ((s: ConfigState) => Partial<ConfigState>)) => void) {
-  const { configFiles, schemas } = get();
+  const { configFiles } = get();
   const filenames = Object.keys(configFiles);
   if (filenames.length === 0) return;
 
@@ -85,9 +44,12 @@ async function _revalidateAll(get: () => ConfigState, set: (partial: Partial<Con
   const api = await import('../services/api');
   try {
     const results = await api.validateProject(configFiles);
-    const sanitized = sanitizeValidationMap(results, schemas);
     set((state) => ({
-      validation: { ...state.validation, ...sanitized },
+      validation: { ...state.validation, ...results },
+      validationText: {
+        ...state.validationText,
+        ...Object.fromEntries(filenames.map((fn) => [fn, configFiles[fn]?.raw_text ?? ''])),
+      },
     }));
   } catch {
     for (const filename of filenames) {
@@ -106,6 +68,12 @@ interface ConfigState {
   configFiles: Record<string, ConfigFile>;
   activeFile: string;
   validation: Record<string, ValidationResult>;
+  /** Per-file text snapshot the current validation result was computed
+   *  against (the model's raw_text at revalidation time). The text editor
+   *  compares this to the live textarea text: when the user has typed ahead,
+   *  a finding's backend line_number is stale and the editor re-resolves the
+   *  line locally instead of painting a dot on the wrong line. */
+  validationText: Record<string, string>;
   schemas: Record<string, SectionSchema>;
   selectedSection: string | null; // full_header of selected section
   selectedSectionFile: string | null; // config file owning the selected section (duplicate-header safe)
@@ -113,6 +81,10 @@ interface ConfigState {
   originalTexts: Record<string, string>; // original exported text at import time
   isDirty: boolean; // true when config has unsaved changes
   textParseErrors: Record<string, string>; // per-file parse failures in the text view (last-good model is held)
+  /** One-shot "go to this line" request set by another surface (e.g. the
+   *  save dialog's findings list). The text editor consumes it once the
+   *  target file's text is in the textarea, then clears it. */
+  pendingLineJump: { file: string; line: number } | null;
 
   /* ── Actions ──────────────────────────────────────── */
   setConfigFile: (filename: string, config: ConfigFile) => void;
@@ -122,6 +94,11 @@ interface ConfigState {
   updateConfigFile: (filename: string, config: ConfigFile) => void;
   removeConfigFile: (filename: string) => void;
   setActiveFile: (filename: string) => void;
+  /** Request a one-shot jump to a line in a file (the text editor consumes
+   *  it when the target file's text is loaded into the textarea). */
+  requestLineJump: (file: string, line: number) => void;
+  /** Clear a pending line-jump request (called by the editor once consumed). */
+  consumeLineJump: () => void;
   setValidation: (filename: string, result: ValidationResult) => void;
   setSchemas: (schemas: Record<string, SectionSchema>) => void;
   setSelectedSection: (header: string | null, configFile?: string | null, lineNumber?: number | null) => void;
@@ -187,6 +164,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   configFiles: {},
   activeFile: 'printer.cfg',
   validation: {},
+  validationText: {},
   schemas: {},
   selectedSection: null,
   selectedSectionFile: null,
@@ -194,6 +172,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   originalTexts: {},
   isDirty: false,
   textParseErrors: {},
+  pendingLineJump: null,
 
   setConfigFile: (filename, config) =>
     set((s) => ({
@@ -217,6 +196,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const nextValidation = { ...s.validation };
       delete nextValidation[filename];
 
+      const nextValidationText = { ...s.validationText };
+      delete nextValidationText[filename];
+
       const nextTextParseErrors = { ...s.textParseErrors };
       delete nextTextParseErrors[filename];
 
@@ -226,6 +208,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         isDirty: true,
         configFiles: nextConfigFiles,
         validation: nextValidation,
+        validationText: nextValidationText,
         textParseErrors: nextTextParseErrors,
         activeFile: s.activeFile === filename ? remainingFiles[0] || 'printer.cfg' : s.activeFile,
         selectedSection: s.activeFile === filename || s.selectedSectionFile === filename ? null : s.selectedSection,
@@ -236,18 +219,17 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
   setActiveFile: (filename) => set({ activeFile: filename }),
 
+  requestLineJump: (file, line) => set({ pendingLineJump: { file, line } }),
+
+  consumeLineJump: () => set({ pendingLineJump: null }),
+
   setValidation: (filename, result) =>
     set((s) => ({
-      validation: { ...s.validation, [filename]: sanitizeValidationResult(result, s.schemas) },
+      validation: { ...s.validation, [filename]: result },
+      validationText: { ...s.validationText, [filename]: s.configFiles[filename]?.raw_text ?? '' },
     })),
 
-  setSchemas: (schemas) =>
-    set((s) => ({
-      schemas,
-      validation: Object.fromEntries(
-        Object.entries(s.validation).map(([filename, result]) => [filename, sanitizeValidationResult(result, schemas)]),
-      ),
-    })),
+  setSchemas: (schemas) => set({ schemas }),
 
   setSelectedSection: (header, configFile, lineNumber) =>
     set({
@@ -441,12 +423,14 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       configFiles: {},
       activeFile: 'printer.cfg',
       validation: {},
+      validationText: {},
       selectedSection: null,
       selectedSectionFile: null,
       selectedSectionLine: null,
       originalTexts: {},
       isDirty: false,
       textParseErrors: {},
+      pendingLineJump: null,
     }),
 
   loadConfigs: (configs) =>
@@ -458,6 +442,13 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       selectedSectionFile: null,
       selectedSectionLine: null,
       textParseErrors: {},
+      pendingLineJump: null,
+      // The whole-project maps must not survive a project switch: a file
+      // present in the previous project but absent in this one would leave
+      // stale findings that drive getSaveButtonClass (which iterates the
+      // entire validation map) until revalidation lands.
+      validation: {},
+      validationText: {},
     }),
 
   setOriginalText: (filename, text) =>
@@ -496,6 +487,11 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         nextTextParseErrors[newName] = nextTextParseErrors[oldName];
         delete nextTextParseErrors[oldName];
       }
+      const nextValidationText = { ...s.validationText };
+      if (nextValidationText[oldName] != null) {
+        nextValidationText[newName] = nextValidationText[oldName];
+        delete nextValidationText[oldName];
+      }
       // Update include directives in other files that reference the old name
       for (const [fn, cf] of Object.entries(next)) {
         if (cf.includes.includes(oldName)) {
@@ -507,6 +503,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         configFiles: next,
         activeFile: s.activeFile === oldName ? newName : s.activeFile,
         validation: nextValidation,
+        validationText: nextValidationText,
         originalTexts: nextOriginals,
         textParseErrors: nextTextParseErrors,
         selectedSection: s.selectedSection,

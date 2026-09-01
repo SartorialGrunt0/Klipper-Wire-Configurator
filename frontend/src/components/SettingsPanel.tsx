@@ -11,7 +11,8 @@ import { resolveSection } from '../utils/sectionResolver';
 import { hasFeatureSectionType as hasFeatureSectionTypeInFiles } from '../utils/featureSections';
 import { toggleSectionSuppressed } from '../utils/sectionSuppress';
 import { applyMcuRenameToFiles, planPrimarySwap, applyNodeUpdates, applyGroupChildRenames, mcuHeaderFor } from '../utils/mcuPrimary';
-import { acknowledgeWarning } from '../services/api';
+import { ackKindForSection } from '../utils/warningAcknowledgment';
+import { acknowledgeWarning, acknowledgeDuplicateWarning } from '../services/api';
 import WarningBadge from './nodes/WarningBadge';
 import McuNameDialog from './dialogs/McuNameDialog';
 
@@ -209,8 +210,8 @@ export default function SettingsPanel() {
 
   // Get validation issues for this section
   const sectionIssues = useMemo(() => {
-    if (!sectionHeader) return [] as Array<{ severity: 'error' | 'warning'; message: string }>;
-    const issues: Array<{ severity: 'error' | 'warning'; message: string }> = [];
+    if (!sectionHeader) return [] as Array<{ severity: 'error' | 'warning' | 'info'; message: string; code?: string }>;
+    const issues: Array<{ severity: 'error' | 'warning' | 'info'; message: string; code?: string }> = [];
     const validationFiles = sectionConfigFile
       ? [sectionConfigFile]
       : nodeConfigFile
@@ -221,18 +222,23 @@ export default function SettingsPanel() {
       if (!result) continue;
       for (const issue of result.errors) {
         if (issue.section !== sectionHeader) continue;
-        if (issue.severity === 'error' || issue.severity === 'warning') {
-          issues.push({ severity: issue.severity, message: issue.message });
+        // Info findings show like warnings here (same rows, muted grey) so
+        // they are visible when the card is selected — but never get an
+        // Acknowledge button: the ack gate only recognizes warning issues.
+        if (issue.severity === 'error' || issue.severity === 'warning' || issue.severity === 'info') {
+          issues.push({ severity: issue.severity, message: issue.message, code: issue.code });
         }
       }
     }
     return issues;
   }, [nodeConfigFile, sectionConfigFile, sectionHeader, validation]);
 
-  const hasAcknowledgeableWarning = useMemo(
-    () => sectionIssues.some((issue) => issue.severity === 'warning' && issue.message.startsWith('Unknown section type ')),
+  const sectionAckKind = useMemo(
+    () => ackKindForSection(sectionIssues),
     [sectionIssues],
   );
+
+  const hasAcknowledgeableWarning = sectionAckKind !== null;
 
   // Active params (not commented out)
   const activeParams = useMemo(
@@ -761,9 +767,15 @@ export default function SettingsPanel() {
 
   const handleAcknowledgeWarning = useCallback(async () => {
     if (!section || !sectionConfigFile) return;
-    await acknowledgeWarning(section);
+    if (sectionAckKind === 'duplicate') {
+      await acknowledgeDuplicateWarning(section);
+    } else {
+      await acknowledgeWarning(section);
+    }
+    // Duplicates (and cross-file warnings generally) live on other files too,
+    // so revalidate the whole project — not just this file.
     void revalidateFile(sectionConfigFile);
-  }, [section, sectionConfigFile, revalidateFile]);
+  }, [section, sectionConfigFile, sectionAckKind, revalidateFile]);
 
   // MCU name dialog overlay (rendered above all other content)
   const mcuNameDialog = mcuNamePrompt ? (
@@ -1242,7 +1254,9 @@ export default function SettingsPanel() {
             <button
               onClick={() => { void handleAcknowledgeWarning(); }}
               className="text-xs px-2 py-1 rounded bg-[var(--color-bg-tertiary)] hover:bg-[var(--color-warning)] hover:text-[var(--color-bg-primary)] transition-colors"
-              title="Acknowledge this unknown section and hide its warning in future validations"
+              title={sectionAckKind === 'duplicate'
+                ? 'Acknowledge this duplicate section and stop flagging the save button'
+                : 'Acknowledge this unknown section and hide its warning in future validations'}
             >
               Acknowledge Warning
             </button>
@@ -1273,7 +1287,12 @@ export default function SettingsPanel() {
       {sectionIssues.length > 0 && (
         <div className="border-b border-[var(--color-bg-tertiary)]">
           {sectionIssues.map((issue, i) => {
-            const color = issue.severity === 'error' ? 'var(--color-error)' : 'var(--color-warning)';
+            const color = issue.severity === 'error' ? 'var(--color-error)'
+              : issue.severity === 'warning' ? 'var(--color-warning)'
+              : 'var(--color-text-secondary)';
+            const icon = issue.severity === 'error' ? '●'
+              : issue.severity === 'warning' ? '⚠'
+              : 'ⓘ';
             return (
               <div
                 key={`${issue.severity}_${i}`}
@@ -1284,7 +1303,7 @@ export default function SettingsPanel() {
                 }}
               >
                 <p className="text-xs" style={{ color }}>
-                  ⚠ {issue.message}
+                  {icon} {issue.message}
                 </p>
               </div>
             );

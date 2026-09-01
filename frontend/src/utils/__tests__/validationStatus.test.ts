@@ -68,6 +68,22 @@ describe('sectionValidationStatus', () => {
     ];
     expect(sectionValidationStatus(errors, 'mcu')).toBe('error');
   });
+
+  it('info-only sections stay valid — info never degrades status (3.5)', () => {
+    const errors = [issue({ section: 'mcu', severity: 'info' })];
+    expect(sectionValidationStatus(errors, 'mcu')).toBe('valid');
+  });
+
+  it('info + warning → warning; info + error → error', () => {
+    expect(sectionValidationStatus([
+      issue({ section: 'mcu', severity: 'info' }),
+      issue({ section: 'mcu', severity: 'warning' }),
+    ], 'mcu')).toBe('warning');
+    expect(sectionValidationStatus([
+      issue({ section: 'mcu', severity: 'info' }),
+      issue({ section: 'mcu', severity: 'error' }),
+    ], 'mcu')).toBe('error');
+  });
 });
 
 describe('getValidationStatusColor', () => {

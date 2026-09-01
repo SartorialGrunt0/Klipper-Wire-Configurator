@@ -84,6 +84,12 @@ class ConfigFile:
     raw_text: str = ""
     save_config_sections: list[ConfigSection] = field(default_factory=list)
     save_config_start_line: int = 0
+    # (line_number, header_text) for each malformed section header — a
+    # column-0 '[' with no closing ']' on the line. Detected at parse time
+    # from the raw text (the lines the parser folds into the previous value
+    # or a comment are still visible there), so validation can point at the
+    # exact line Klipper would refuse to load.
+    unclosed_headers: list[tuple[int, str]] = field(default_factory=list)
 
     def get_section(self, full_header: str) -> Optional[ConfigSection]:
         for s in self.sections:
@@ -108,6 +114,10 @@ class ConfigFile:
 SECTION_RE = re.compile(r"^\[([^\]]+)\]\s*(?:#.*)?$")
 COMMENTED_SECTION_RE = re.compile(r"^#\[([^\]]+)\]\s*(?:#.*)?$")
 INCLUDE_RE = re.compile(r"^\[include\s+([^\]]+)\]\s*(?:#.*)?$")
+# A section header line that opens a '[' at column 0 but has no closing
+# ']' anywhere on the line (e.g. "[mcu"). Klipper hard-fails on these
+# ("Unable to read section header"); KWC used to swallow them silently.
+UNCLOSED_SECTION_RE = re.compile(r"^\[[^\]]*$")
 PARAM_RE = re.compile(r"^(\w[\w]*)\s*([:=])\s*(.*?)(?:\s*#(.*))?$")
 COMMENTED_PARAM_RE = re.compile(r"^#\s*(\w[\w]*)\s*([:=])\s*(.*?)(?:\s*#(.*))?$")
 SAVE_CONFIG_BANNER_RE = re.compile(r"^#\*#\s*<.*SAVE_CONFIG.*>\s*$")
@@ -122,6 +132,8 @@ NAMED_SECTION_TYPES = {
     "temperature_sensor", "temperature_probe", "thermistor", "adc_temperature",
     "heater_generic", "verify_heater",
     "output_pin", "static_digital_output", "multi_pin", "pwm_tool", "pwm_cycle_time",
+    # static_pwm_clock.py uses load_config_prefix (named instances).
+    "static_pwm_clock",
     "servo", "gcode_button",
     "neopixel", "dotstar", "led", "pca9533", "pca9632",
     "filament_switch_sensor", "filament_motion_sensor",
@@ -144,6 +156,27 @@ NAMED_SECTION_TYPES = {
     # section type and must not be flagged as unknown by the validator.
     "update_manager",
 }
+
+
+def find_unclosed_headers(text: str) -> list[tuple[int, str]]:
+    """Find malformed section headers in raw config text.
+
+    A malformed header is a column-0 line that opens '[' with no closing ']'
+    anywhere on the line (e.g. ``[mcu``). Klipper hard-fails on these.
+    Detected from the raw text because the main parse loop folds such a line
+    into the previous multi-line value or stashes it as a comment — but the
+    line is still visible in the text itself.
+
+    Indented lines and comment lines are never section headers in Klipper, so
+    they're skipped. Returns ``(line_number, header_text)`` pairs.
+    """
+    found: list[tuple[int, str]] = []
+    for idx, raw in enumerate(text.splitlines()):
+        if raw[:1] in (" ", "\t") or raw.lstrip().startswith("#"):
+            continue
+        if UNCLOSED_SECTION_RE.match(raw):
+            found.append((idx + 1, raw.strip()))
+    return found
 
 
 def parse_section_header(header: str) -> tuple[str, str]:
@@ -458,6 +491,8 @@ def parse_config(text: str, filename: str = "printer.cfg") -> ConfigFile:
             config.header_comments.extend(pending_comments)
 
     config.save_config_start_line, config.save_config_sections = _parse_save_config_sections(lines)
+
+    config.unclosed_headers = find_unclosed_headers(text)
 
     return config
 

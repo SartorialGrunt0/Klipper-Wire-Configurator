@@ -16,6 +16,9 @@ import FirmwareDialog from './dialogs/FirmwareDialog';
 interface ToolbarProps {
   showTextView: boolean;
   onToggleTextView: () => void;
+  /** Force the text view open (not a toggle) — used by the save dialog when
+   *  a validation finding is clicked so the editor can consume the jump. */
+  onShowTextView?: () => void;
   onToggleAddMenu?: () => void;
   onOpenMacroDesigner?: () => void;
 }
@@ -94,6 +97,7 @@ function loadHiddenItems(): ToolbarHiddenState {
 export default function Toolbar({
   showTextView,
   onToggleTextView,
+  onShowTextView,
   onToggleAddMenu,
   onOpenMacroDesigner,
 }: ToolbarProps) {
@@ -116,6 +120,7 @@ export default function Toolbar({
   const hasConfig = Object.keys(useConfigStore((s) => s.configFiles)).length > 0;
   const isConfigDirty = useConfigStore((s) => s.isDirty);
   const validation = useConfigStore((s) => s.validation);
+  const hasTextParseError = Object.keys(useConfigStore((s) => s.textParseErrors)).length > 0;
   const hasPendingChanges = isConfigDirty;
   const settingsButtonRef = useRef<HTMLButtonElement | null>(null);
   const settingsMenuRef = useRef<HTMLDivElement | null>(null);
@@ -232,9 +237,10 @@ export default function Toolbar({
     setShowVisibilityMenu(true);
   };
 
-  // Compute Save button color based on dirty state and validation
-  // (shared with the Apply/Save dialog so both always agree)
-  const saveButtonClass = getSaveButtonClass(isConfigDirty, validation);
+  // Compute Save button color based on dirty state, validation, and whether
+  // any file's text currently fails to parse (shared with the Apply/Save
+  // dialog so both always agree)
+  const saveButtonClass = getSaveButtonClass(isConfigDirty, validation, hasTextParseError);
   return (
     <div className="flex items-center gap-2 min-w-max">
       {/* Import */}
@@ -504,7 +510,7 @@ export default function Toolbar({
 
       {/* Dialogs */}
       {showImport && <ImportDialog onClose={() => setShowImport(false)} />}
-      {showExport && <ExportDialog onClose={() => setShowExport(false)} />}
+      {showExport && <ExportDialog onClose={() => setShowExport(false)} onShowTextView={onShowTextView} />}
       {showDiff && <DiffDialog onClose={() => setShowDiff(false)} />}
       {showOpenFromPi && <OpenFromPiDialog onClose={() => setShowOpenFromPi(false)} />}
       {showApply && (
@@ -512,6 +518,7 @@ export default function Toolbar({
           onClose={() => setShowApply(false)}
           canAnalyzeWithAi={aiConfigured && showAiChatButton}
           onAnalyzeWithAi={queueAiAnalyzeRequest}
+          onShowTextView={onShowTextView}
         />
       )}
       {showFlash && <FirmwareDialog onClose={() => setShowFlash(false)} />}

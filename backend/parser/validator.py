@@ -11,6 +11,8 @@ Checks for:
 """
 from __future__ import annotations
 
+import glob
+import os
 import re
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -26,6 +28,9 @@ from parser.config_schema import (
 )
 from services.warning_acknowledgments import (
     canonicalize_section,
+    finding_identity,
+    load_acknowledged_duplicate_section_types,
+    load_acknowledged_warning_identities,
     load_acknowledged_warning_sections,
 )
 
@@ -37,6 +42,11 @@ class ValidationError:
     param: str  # Parameter name (empty if section-level)
     message: str
     line_number: int = 0
+    # Stable machine-facing identity for error classes that the frontend
+    # branches on (retry-exempt, acknowledge gate, Jinja repair derivation).
+    # Empty string when no consumer needs a code. `message` stays human-facing
+    # and may be reworded freely without breaking those branches.
+    code: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -45,6 +55,7 @@ class ValidationError:
             "param": self.param,
             "message": self.message,
             "line_number": self.line_number,
+            "code": self.code,
         }
 
 
@@ -74,9 +85,13 @@ class PinUse:
     section: str
     section_type: str
     param: str
+    line_number: int = 0
+    filename: str = ""
 
     @property
     def label(self) -> str:
+        if self.filename:
+            return f"{self.filename}:[{self.section}] {self.param}"
         return f"[{self.section}] {self.param}"
 
 
@@ -93,7 +108,49 @@ REQUIREMENT_COMPONENT_GROUPS: dict[str, set[str]] = {
     "adxl345": {"accelerometer"},
 }
 
+# Base stepper sections each kinematics looks up BY EXACT NAME at startup.
+# Ground truth (Klipper source, verified 2026-08-25):
+#   cartesian/corexy/hybrid_corexy: LookupMultiRail(getsection('stepper_' + n))
+#       for n in 'xyz'  (cartesian.py:21, corexy.py:13, hybrid_corexy.py:15-17)
+#   delta/rotary_delta: rail_a/b/c from getsection('stepper_a'/'b'/'c')
+#       (delta.py, rotary_delta.py)
+#   deltesian: [getsection('stepper_' + s) for s in ('left','right','y')]
+#       (deltesian.py:19)
+#   polar: getsection('stepper_arm'/'stepper_bed'/'stepper_z') (polar.py)
+#   winch: loops 'stepper_a'..'stepper_z', getsection on the first present one
+#       (winch.py:13-17) — requires at least [stepper_a]
+# Numbered extras (stepper_x1, stepper_z2, ...) are OPTIONAL additional rails on
+# the same axis (LookupMultiRail appends them; winch adds anchors) and never
+# satisfy the base lookup, which is by exact section name.
+KINEMATICS_BASE_STEPPERS: dict[str, list[str]] = {
+    "cartesian": ["stepper_x", "stepper_y", "stepper_z"],
+    "corexy": ["stepper_x", "stepper_y", "stepper_z"],
+    "hybrid_corexy": ["stepper_x", "stepper_y", "stepper_z"],
+    "delta": ["stepper_a", "stepper_b", "stepper_c"],
+    "rotary_delta": ["stepper_a", "stepper_b", "stepper_c"],
+    "deltesian": ["stepper_left", "stepper_right", "stepper_y"],
+    "polar": ["stepper_arm", "stepper_bed", "stepper_z"],
+    "winch": ["stepper_a"],
+}
+
 PROBE_PLUGIN_SECTION_TYPES = {"beacon"}
+
+# TMC driver section types whose header word references the stepper section
+# the driver controls (name_references="stepper"). Ground truth (tmc.py
+# TMCMicrostepHelper, called unconditionally from the TMC base at tmc.py:339):
+#   stepper_name = " ".join(config.get_name().split()[1:])
+#   if not config.has_section(stepper_name):
+#       raise config.error("Could not find config section '[%s]' ...")
+#   mres = sconfig.getchoice('microsteps',
+#       {256: 0, 128: 1, 64: 2, 32: 3, 16: 4, 8: 5, 4: 6, 2: 7, 1: 8})
+# Both are config-load hard-fails. The microsteps restriction applies ONLY to
+# steppers a TMC driver references: a plain stepper reads microsteps as a
+# plain getint(minval=1) (stepper.py) and accepts any int — which is why the
+# microsteps schema enum could not be seeded statically (3n).
+TMC_STEPPER_DRIVER_TYPES = frozenset(
+    st for st, sd in SECTION_DEFS.items() if sd.name_references == "stepper"
+)
+TMC_MRES_VALUES = (1, 2, 4, 8, 16, 32, 64, 128, 256)
 
 
 @dataclass(frozen=True)
@@ -170,20 +227,14 @@ def _get_active_project_files(configs: dict[str, ConfigFile]) -> set[str]:
     return active_files
 
 
-def _project_duplicate_severity(sec_type: str, category: str | None) -> str:
-    if sec_type != "printer" and category in ("sub_component", "feature"):
-        return "warning"
-    return "error"
-
-
-def _project_duplicate_message(sec_type: str, severity: str, other_files: list[str]) -> str:
-    if severity == "warning":
-        message = f"Section [{sec_type}] is reused across active included config files."
-    else:
-        message = f"Section [{sec_type}] can only be defined once across active included config files."
-
-    if other_files:
-        message += f" Also defined in: {', '.join(other_files)}."
+def _project_duplicate_message(sec_type: str, other_files: list[str]) -> str:
+    # Cross-file duplication of a singleton section is INFO: Klipper merges
+    # duplicate sections (RawConfigParser(strict=False), later file wins) and
+    # never hard-fails. The finding's value is stating the precedence — which
+    # definition wins — not alarm.
+    message = f"Section [{sec_type}] is also defined in: {', '.join(other_files)}."
+    message += " Klipper merges duplicate sections — the later include"
+    message += " takes precedence."
     return message
 
 
@@ -330,8 +381,17 @@ def _append_special_temperature_sensor_errors(
 # would when loading the macro.
 _MACRO_JINJA_ENV = jinja2.Environment("{%", "%}", "{", "}")
 
-# Section types whose gcode bodies are Jinja templates evaluated by Klipper.
+# Section types whose bodies are Jinja templates evaluated by Klipper. The
+# gcode family stores the body in 'gcode'; display_template / display_data
+# store it in 'text' and load it through the same gcode_macro.load_template
+# machinery (klippy/extras/display/display.py DisplayTemplate.__init__ /
+# DisplayGroup.__init__), so both are validated with the identical env.
 _MACRO_TEMPLATE_SECTIONS = frozenset({"gcode_macro", "delayed_gcode"})
+_DISPLAY_TEMPLATE_SECTIONS = frozenset({"display_template", "display_data"})
+_TEMPLATE_SECTION_BODIES = {
+    **{sec: "gcode" for sec in _MACRO_TEMPLATE_SECTIONS},
+    **{sec: "text" for sec in _DISPLAY_TEMPLATE_SECTIONS},
+}
 
 # Compile results are cached by comment-stripped body: project validation runs
 # on every load (and per file), so a config with many macros spends most of its
@@ -382,15 +442,18 @@ def _strip_inline_comments(body: str) -> str:
 
 
 def _validate_macro_jinja(section: ConfigSection, result: ValidationResult) -> None:
-    """Validate a gcode_macro / delayed_gcode body as a Klipper Jinja template.
+    """Validate a Jinja-template body (gcode_macro / delayed_gcode /
+    display_template / display_data) as a Klipper Jinja template.
 
     Catches structural template errors (dropped {% endif %}, unbalanced
     {% for %}/{% endfor %}, malformed blocks) that a plain config parser
-    cannot see because the gcode body is opaque text to it. Uses the same
+    cannot see because the body is opaque text to it. Uses the same
     jinja2 environment Klipper builds for macros, so valid Klipper
-    single-brace syntax ({printer.x}) is accepted.
+    single-brace syntax ({printer.x}) is accepted. The body param is 'gcode'
+    for the gcode family and 'text' for the display family.
     """
-    gcode_param = section.get_param("gcode")
+    body_param = _TEMPLATE_SECTION_BODIES[section.section_type]
+    gcode_param = section.get_param(body_param)
     if gcode_param is None:
         return
     body = gcode_param.value
@@ -403,22 +466,102 @@ def _validate_macro_jinja(section: ConfigSection, result: ValidationResult) -> N
     if outcome is None:
         return
     message, body_lineno = outcome
-    # body_lineno is 1-indexed within the gcode body, which starts on the
-    # line after the 'gcode:' key.
+    # body_lineno is 1-indexed within the body, which starts on the
+    # line after the body key ('gcode:' / 'text:').
+    # Code only for the dropped-closer case: it's the class the AI repair
+    # loop derives a prescriptive "append {% endX %}" fix from. Other
+    # template errors (bad expression, stray brace) get no code.
+    label = "macro" if section.section_type in _MACRO_TEMPLATE_SECTIONS else "display template"
     result.errors.append(ValidationError(
         severity="error",
         section=section.full_header,
-        param="gcode",
-        message=f"Jinja template error in macro: {message}",
+        param=body_param,
+        message=f"Jinja template error in {label}: {message}",
         line_number=gcode_param.line_number + body_lineno,
+        code="macro_jinja_unterminated" if "Unexpected end of template" in message else "",
     ))
 
 
-def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> ValidationResult:
+def _validate_neopixel_color_order(section: ConfigSection, result: ValidationResult) -> None:
+    """Validate neopixel.color_order entries are permutations of RGB or RGBW.
+
+    Ground truth (klippy/extras/neopixel.py:29-37):
+        color_order = config.getlist("color_order", ["GRB"])
+        ...
+        for lidx, co in enumerate(color_order):
+            if sorted(co) not in (sorted("RGB"), sorted("RGBW")):
+                raise config.error("Invalid color_order '%s'" % (co,))
+    It is a per-chain list (one entry per LED chain), so it is checked entry
+    by entry rather than as a single enum value.
+    """
+    param = section.get_param("color_order")
+    if param is None or not param.value:
+        return
+    entries = [e.strip() for e in param.value.split(",") if e.strip()]
+    for entry in entries:
+        if sorted(entry) not in (sorted("RGB"), sorted("RGBW")):
+            result.errors.append(ValidationError(
+                severity="error",
+                section=section.full_header,
+                param="color_order",
+                message=f"Invalid color_order '{entry}'. Each entry must be a permutation of RGB or RGBW.",
+                line_number=param.line_number,
+            ))
+
+
+def _suppress_acknowledged_warning_identities(
+    filename: str, result: ValidationResult,
+) -> None:
+    """Drop warnings whose stable identity is bulk-acknowledged (Phase 4).
+
+    Warnings only — errors and info are never suppressed from the identity
+    store. Runs at the end of every ``validate_config`` call, so both
+    single-file and project validation get it (project mode calls this per
+    file first, then adds cross-file findings which are already filtered).
+    """
+    if not any(e.severity == "warning" and e.code for e in result.errors):
+        return
+    try:
+        acked = load_acknowledged_warning_identities()
+    except Exception:
+        return
+    if not acked:
+        return
+    result.errors = [
+        e for e in result.errors
+        if not (
+            e.severity == "warning"
+            and e.code
+            and finding_identity(filename, e.code, e.section, e.param) in acked
+        )
+    ]
+
+
+def validate_config(config: ConfigFile) -> ValidationResult:
     """Validate a full configuration file."""
     result = ValidationResult()
     acknowledged_sections = load_acknowledged_warning_sections()
+    acknowledged_duplicate_types = load_acknowledged_duplicate_section_types()
     printer_kinematics = _get_printer_kinematics(config)
+
+    # Malformed section header (column-0 '[' with no closing ']') — Klipper
+    # hard-fails at load with "Unable to read section header", so this is an
+    # error that blocks save. The parser records the exact line; the section
+    # header itself is absent from config.sections, so this check runs
+    # independently of the per-section loop below.
+    for line_number, header_text in config.unclosed_headers:
+        result.errors.append(ValidationError(
+            severity="error",
+            section=header_text.lstrip("[").strip() or header_text,
+            param="",
+            message=(
+                f"Section header '{header_text}' is missing its closing ']' — "
+                "Klipper will refuse to load this file. Add the closing "
+                "bracket (e.g. '[mcu mainboard]')."
+            ),
+            line_number=line_number,
+            code="unclosed_section_header",
+        ))
 
     section_counts: dict[str, int] = {}
     used_pins: dict[str, list[PinUse]] = {}
@@ -448,11 +591,18 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
         if _is_suppressed_for_validation(section, sec_def.category if sec_def else None):
             continue
 
-        # Validate gcode_macro / delayed_gcode bodies as Klipper Jinja
-        # templates so dropped {% endif %} and similar structural errors are
-        # caught in the graph/text editors and the AI draft retry loop.
-        if sec_type in _MACRO_TEMPLATE_SECTIONS:
+        # Validate Jinja-template bodies (gcode_macro / delayed_gcode use
+        # 'gcode'; display_template / display_data use 'text') so dropped
+        # {% endif %} and similar structural errors are caught in the
+        # graph/text editors and the AI draft retry loop.
+        if sec_type in _MACRO_TEMPLATE_SECTIONS or sec_type in _DISPLAY_TEMPLATE_SECTIONS:
             _validate_macro_jinja(section, result)
+
+        # neopixel.color_order: each entry must be a permutation of RGB or
+        # RGBW (extras/neopixel.py:33-37). It is a per-chain list, not a plain
+        # enum, so it gets a dedicated check.
+        if sec_type == "neopixel":
+            _validate_neopixel_color_order(section, result)
 
         defined_sections.add(section.full_header)
 
@@ -469,18 +619,30 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
                 param="",
                 message=f"Unknown section type '{sec_type}'. Parameters won't be validated.",
                 line_number=section.line_number,
+                code="unknown_section",
             ))
             continue
 
         # Check max instances
+        # Klipper merges a duplicated singleton section (later definition
+        # wins) and never hard-fails, so this is info — legal, order-
+        # dependent, no action required. The old warning tier forced ack +
+        # save-button yellow on a finding that was not wrong (3.5).
+        # An acknowledged section type still suppresses the finding (ack is
+        # per type — existing users' acks stay effective).
         if sec_def.max_instances == 1 and section_counts[sec_type] > 1:
-            result.errors.append(ValidationError(
-                severity="error",
-                section=section.full_header,
-                param="",
-                message=f"Section [{sec_type}] can only be defined once.",
-                line_number=section.line_number,
-            ))
+            if sec_type not in acknowledged_duplicate_types:
+                result.errors.append(ValidationError(
+                    severity="info",
+                    section=section.full_header,
+                    param="",
+                    message=(
+                        f"Section [{sec_type}] is defined multiple times in this"
+                        " file — the later definition wins."
+                    ),
+                    line_number=section.line_number,
+                    code="project_duplicate",
+                ))
 
         # Check required parameters
         active_params = {
@@ -553,20 +715,7 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
                 continue
 
             # Find param definition (case-insensitive match)
-            param_def = None
-            param_key_lower = param.key.lower()
-            for pd in sec_def.params:
-                wildcard_match = False
-                if "*" in pd.name:
-                    wildcard_prefix, wildcard_suffix = pd.name.lower().split("*", 1)
-                    wildcard_match = (
-                        param_key_lower.startswith(wildcard_prefix)
-                        and param_key_lower.endswith(wildcard_suffix)
-                    )
-
-                if pd.name == param.key or pd.name.lower() == param_key_lower or wildcard_match:
-                    param_def = pd
-                    break
+            param_def = _find_param_def(sec_def, param.key)
 
             if param_def is None:
                 result.errors.append(ValidationError(
@@ -575,23 +724,19 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
                     param=param.key,
                     message=f"Unknown parameter '{param.key}' for section [{sec_type}].",
                     line_number=param.line_number,
+                    code="unknown_param",
                 ))
                 continue
 
             # Type validation
             _validate_param_value(param, param_def, section, result)
 
+            # Relational validation (param A vs param B, same section)
+            _check_relational_param(param, param_def, section, result)
+
             # Track pin usage
             if param_def.param_type == ParamType.PIN and param.value:
-                for clean_pin in _normalize_pin_values(param.value):
-                    if clean_pin not in used_pins:
-                        used_pins[clean_pin] = []
-                    used_pins[clean_pin].append(PinUse(
-                        pin=clean_pin,
-                        section=section.full_header,
-                        section_type=section.section_type,
-                        param=param.key,
-                    ))
+                _track_pin_usage(param, section, used_pins)
 
     # Check for required sections
     _append_special_temperature_sensor_errors(
@@ -608,7 +753,20 @@ def validate_config(config: ConfigFile, *, is_multi_file: bool = False) -> Valid
     )
 
     # Check for pin conflicts
-    _check_pin_conflicts(used_pins, result)
+    _check_pin_conflicts(
+        used_pins,
+        result,
+        _collect_duplicate_pin_override_pins(
+            {config.filename: config}, {config.filename},
+        ),
+    )
+
+    # Bulk-ack suppression (Phase 4 save gate): drop warnings whose stable
+    # identity is in the identity store. Warnings ONLY — errors are never
+    # acknowledged (the save-gate override is per-save by design), and info
+    # is never suppressed from this store either. The per-section
+    # snippet/type stores consulted above keep working in parallel.
+    _suppress_acknowledged_warning_identities(config.filename, result)
 
     return result
 
@@ -619,16 +777,26 @@ def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, Valida
     Single-file validation remains file-local. For multi-file projects, this
     adds cross-file checks for sections that Klipper allows only once across the
     effective configuration, such as [printer], [stepper_x], or [stepper_z].
+    Duplicates are info findings (Klipper merges them, later file wins —
+    legal, no action required); an acknowledged section type suppresses them.
     """
     results = {
-        filename: validate_config(config, is_multi_file=len(configs) > 1)
+        filename: validate_config(config)
         for filename, config in configs.items()
     }
+
+    # Cross-section references (F25): a TMC driver's header references the
+    # stepper section it drives; Klipper resolves it at config load
+    # regardless of file count (tmc.py), so this runs for single-file
+    # projects too (unlike the cross-file passes below it).
+    _check_tmc_stepper_references(configs, results, _get_active_project_files(configs))
 
     if len(configs) <= 1:
         return results
 
     active_files = _get_active_project_files(configs)
+    all_basenames = {_basename(filename) for filename in configs}
+    acknowledged_duplicate_types = load_acknowledged_duplicate_section_types()
 
     singleton_sections: dict[str, list[tuple[str, ConfigSection]]] = {}
     for filename, config in configs.items():
@@ -652,16 +820,16 @@ def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, Valida
         if len(entries) <= 1 or len(files) <= 1:
             continue
 
-        sec_def = get_section_def(sec_type)
-        severity = _project_duplicate_severity(sec_type, sec_def.category if sec_def else None)
+        if sec_type in acknowledged_duplicate_types:
+            continue
 
         for filename, section in entries:
             other_files = sorted(files - {filename})
-            message = _project_duplicate_message(sec_type, severity, other_files)
+            message = _project_duplicate_message(sec_type, other_files)
 
             result = results[filename]
             if any(
-                error.severity == severity
+                error.severity == "info"
                 and error.section == section.full_header
                 and error.message == message
                 for error in result.errors
@@ -669,11 +837,68 @@ def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, Valida
                 continue
 
             result.errors.append(ValidationError(
-                severity=severity,
+                severity="info",
                 section=section.full_header,
                 param="",
                 message=message,
                 line_number=section.line_number,
+                code="project_duplicate",
+            ))
+
+    # Cross-file EXACT-header duplicates for multi-instance section types
+    # (max_instances=0), e.g. two [gcode_macro FOO] or [tmc2209 stepper_x]
+    # across included files. Klipper merges duplicate headers
+    # case-insensitively (RawConfigParser(strict=False), later file wins)
+    # and never hard-fails, so — like singleton-type duplicates — this is an
+    # info finding, not an error or warning. Ack (per section type) still
+    # suppresses it, same store as the singleton path above.
+    header_sections: dict[str, list[tuple[str, ConfigSection]]] = {}
+    for filename, config in configs.items():
+        if filename not in active_files:
+            continue
+
+        for section in config.sections:
+            if section.section_type == "include" or section.is_commented_out:
+                continue
+
+            sec_def = get_section_def(section.section_type)
+            if _is_suppressed_for_validation(section, sec_def.category if sec_def else None):
+                continue
+            if sec_def is not None and sec_def.max_instances == 1:
+                # Singleton types are already covered by the pass above.
+                continue
+
+            header_sections.setdefault(section.full_header.lower(), []).append((filename, section))
+
+    for header_entries in header_sections.values():
+        files = {filename for filename, _ in header_entries}
+        if len(files) <= 1:
+            continue
+
+        sec_type = header_entries[0][1].section_type
+        if sec_type in acknowledged_duplicate_types:
+            continue
+
+        for filename, section in header_entries:
+            other_files = sorted(files - {filename})
+            message = _project_duplicate_message(section.full_header, other_files)
+
+            result = results[filename]
+            if any(
+                error.severity == "info"
+                and error.section == section.full_header
+                and error.message == message
+                for error in result.errors
+            ):
+                continue
+
+            result.errors.append(ValidationError(
+                severity="info",
+                section=section.full_header,
+                param="",
+                message=message,
+                line_number=section.line_number,
+                code="project_duplicate",
             ))
 
     _append_special_temperature_sensor_errors(
@@ -715,6 +940,77 @@ def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, Valida
     # The cross-file check above already handles this correctly, so we remove the false warnings.
     _remove_false_single_file_probe_warnings(results, cross_file_warnings)
 
+    # Check that the printer's kinematics can find its base stepper sections
+    # somewhere in the active project (e.g. corexy needs [stepper_x/y/z]).
+    kinematics_warnings = _check_kinematics_stepper_requirements(configs, active_files=active_files)
+    for filename, warning in kinematics_warnings:
+        results[filename].errors.append(warning)
+
+    # Check that non-glob [include] targets exist in the loaded project
+    # (F19). A plain missing include is a Klipper startup hard-fail
+    # (configfile.py:187-189 "Include file '%s' does not exist"), so it is
+    # an ERROR (severity promotion 2026-08-28). The message carries the
+    # resolved path — include resolved relative to the directory of the
+    # including file, mirroring configfile.py:183-184 — so the user sees
+    # exactly where Klipper would have looked. KWC often loads a PARTIAL
+    # import, where the file may exist on disk; the save-gate wording
+    # ("will *likely* prevent Klipper from starting") keeps that honest.
+    # Globs are never flagged: a glob that matches nothing is legal in
+    # Klipper (glob.has_magic) and can never be "resolved" in-memory.
+    for filename, config in configs.items():
+        if filename not in active_files:
+            continue
+        for section in config.sections:
+            if section.section_type != "include" or section.is_commented_out:
+                continue
+            spec = section.section_name.strip()
+            if not spec or glob.has_magic(spec):
+                continue
+            if _basename(spec) not in all_basenames:
+                include_dir = os.path.dirname(filename.replace("\\", "/"))
+                resolved = (
+                    f"{include_dir}/{spec}" if include_dir else spec
+                )
+                message = (
+                    f"Include file '{resolved}' was not found in the "
+                    "loaded project."
+                )
+                result = results[filename]
+                if any(
+                    error.severity == "error"
+                    and error.section == section.full_header
+                    and error.message == message
+                    for error in result.errors
+                ):
+                    continue
+                result.errors.append(ValidationError(
+                    severity="error",
+                    section=section.full_header,
+                    param="",
+                    message=message,
+                    line_number=section.line_number,
+                    code="missing_include",
+                ))
+
+    # Cross-file pin conflicts (F8): a pin shared by sections in different
+    # project files is the same conflict as within one file — Klipper loads
+    # the whole project into a single pin namespace.
+    _check_cross_file_pin_conflicts(
+        configs,
+        results,
+        _collect_duplicate_pin_override_pins(configs, active_files),
+    )
+
+    # Pin-chip membership (F8): a pin's chip prefix must name a chip the
+    # project registers ([mcu NAME], probe, TMC virtual-endstop chips, ...),
+    # mirroring klippy/pins.py parse_pin's 'Unknown pin chip name' hard-fail.
+    _check_pin_chip_membership(configs, results, active_files)
+
+    # Bulk-ack suppression for the CROSS-FILE findings added above (per-file
+    # findings were already filtered inside validate_config). Warnings only.
+    for filename, result in results.items():
+        _suppress_acknowledged_warning_identities(filename, result)
+
     return results
 
 
@@ -746,6 +1042,167 @@ def _remove_false_single_file_probe_warnings(
         cfg.errors = filtered_errors
 
 
+def _check_tmc_stepper_references(
+    configs: dict[str, ConfigFile],
+    results: dict[str, ValidationResult],
+    active_files: set[str],
+) -> None:
+    """Validate TMC driver header references to their stepper sections (F25).
+
+    A `[tmcXXX <stepper>]` section references the section named `<stepper>`
+    (the words after the type). Klipper resolves it at config load
+    (tmc.py TMCMicrostepHelper):
+      1. the referenced section must exist, else
+         "Could not find config section '[<stepper>]' required by tmc driver";
+      2. that stepper's microsteps must be a TMC mres value
+         (1/2/4/8/16/32/64/128/256) via getchoice — any other int hard-fails.
+    Both are config-load hard-fails, so both are errors here. The reference is
+    resolved against the ACTIVE project (the stepper may be in an included
+    file), mirroring how Klipper loads all includes into one namespace.
+    """
+    # Map referenced section name (lowercased) -> first active ConfigSection.
+    referenced_sections: dict[str, tuple[str, ConfigSection]] = {}
+    for filename, config in configs.items():
+        if filename not in active_files:
+            continue
+        for section in config.sections:
+            if section.section_type == "include" or section.is_commented_out:
+                continue
+            key = section.section_type.lower()
+            if key not in referenced_sections:
+                referenced_sections[key] = (filename, section)
+
+    for filename, config in configs.items():
+        if filename not in active_files:
+            continue
+        for section in config.sections:
+            if section.section_type not in TMC_STEPPER_DRIVER_TYPES:
+                continue
+            if section.is_commented_out:
+                continue
+            ref_name = section.section_name.strip()
+            if not ref_name:
+                continue
+            ref_key = ref_name.lower()
+            result = results[filename]
+            if ref_key not in referenced_sections:
+                if not any(
+                    error.severity == "error"
+                    and error.section == section.full_header
+                    and error.message == f"Could not find config section '[{ref_name}]' required by tmc driver."
+                    for error in result.errors
+                ):
+                    result.errors.append(ValidationError(
+                        severity="error",
+                        section=section.full_header,
+                        param="",
+                        message=f"Could not find config section '[{ref_name}]' required by tmc driver.",
+                        line_number=section.line_number,
+                    ))
+                continue
+            # Referenced stepper exists — check its microsteps is a TMC mres.
+            ref_filename, ref_section = referenced_sections[ref_key]
+            ms_param = ref_section.get_param("microsteps")
+            if ms_param is None or not ms_param.value.strip():
+                continue
+            try:
+                ms = int(ms_param.value.strip())
+            except ValueError:
+                continue  # non-int microsteps are a type error, already reported
+            if ms not in TMC_MRES_VALUES:
+                message = (
+                    f"microsteps {ms} is not a valid TMC value "
+                    f"(must be one of {', '.join(str(v) for v in TMC_MRES_VALUES)})."
+                )
+                if not any(
+                    error.severity == "error"
+                    and error.section == section.full_header
+                    and error.param == "microsteps"
+                    and error.message == message
+                    for error in result.errors
+                ):
+                    result.errors.append(ValidationError(
+                        severity="error",
+                        section=section.full_header,
+                        param="microsteps",
+                        message=message,
+                        line_number=section.line_number,
+                    ))
+
+
+def _check_kinematics_stepper_requirements(
+    configs: dict[str, ConfigFile],
+    active_files: set[str] | None = None,
+) -> list[tuple[str, ValidationError]]:
+    """Check that the base stepper sections the printer's kinematics requires exist.
+
+    Each kinematics looks up its rail sections BY EXACT NAME at startup
+    (see KINEMATICS_BASE_STEPPERS). A missing base section is a Klipper
+    startup hard-fail: configfile.getsection raises at config load
+    (corexy.py:12, cartesian.py, delta.py, rotary_delta.py, deltesian.py,
+    polar.py, winch.py). ERROR (severity promotion 2026-08-28, plan Task
+    4.0) — Klipper deterministically refuses to load this config.
+
+    [printer] and the stepper sections routinely live in different files,
+    so this runs only against the full active project set (multi-file
+    mode). In single-file mode the kinematics cannot be combined with a
+    missing rail in the same file without it being caught by other checks,
+    and a lone [printer] file must not be warned about steppers that live
+    in files KWC was not asked to validate.
+    """
+    if active_files is None or len(active_files) <= 1:
+        return []
+
+    # Locate the active [printer] section (first one in active files).
+    printer_section: ConfigSection | None = None
+    printer_file: str | None = None
+    for filename in sorted(active_files):
+        for section in configs[filename].sections:
+            if section.section_type == "printer" and not section.is_commented_out:
+                printer_section = section
+                printer_file = filename
+                break
+        if printer_section is not None:
+            break
+    if printer_section is None or printer_file is None:
+        return []
+
+    kinematics = printer_section.get_value("kinematics").strip().lower()
+    required = KINEMATICS_BASE_STEPPERS.get(kinematics)
+    if not required:
+        # No [printer], no kinematics, or an unrecognized value — that is
+        # covered by other checks (unknown param / enum); do not guess here.
+        return []
+
+    present: set[str] = set()
+    for filename in active_files:
+        for section in configs[filename].sections:
+            if section.is_commented_out:
+                continue
+            if section.section_type in required:
+                present.add(section.section_type)
+
+    results: list[tuple[str, ValidationError]] = []
+    for stepper_type in required:
+        if stepper_type in present:
+            continue
+        results.append((printer_file, ValidationError(
+            severity="error",
+            section="printer",
+            param="kinematics",
+            message=(
+                f"Kinematics '{kinematics}' requires [{stepper_type}], which is not "
+                "defined in any active config file. Klipper looks up this section "
+                "by exact name and will fail to start without it. (Numbered extra "
+                "steppers such as [stepper_z1] do not satisfy the base section.)"
+            ),
+            line_number=printer_section.line_number,
+            code="kinematics_stepper_missing",
+        )))
+
+    return results
+
+
 def _validate_param_value(param, param_def, section, result):
     """Validate a parameter value against its definition."""
     value = param.value.strip()
@@ -760,28 +1217,53 @@ def _validate_param_value(param, param_def, section, result):
                         f"Expected one of: {', '.join(param_def.enum_values)}",
                 line_number=param.line_number,
             ))
+        elif param_def.param_type in (ParamType.INT, ParamType.FLOAT, ParamType.BOOL, ParamType.PIN):
+            # A present-but-empty typed param is a Klipper startup hard-fail:
+            # the option IS present so the code's default is never used —
+            # getint('')/getfloat('')/getboolean('') raise, and lookup_pin('')
+            # fails in parse_pin with a traceback rather than a config error.
+            # STRING and MULTI_LINE params may legitimately be empty.
+            result.errors.append(ValidationError(
+                severity="error",
+                section=section.full_header,
+                param=param.key,
+                message=f"Empty value for '{param.key}'. This parameter requires a value.",
+                line_number=param.line_number,
+            ))
         return
 
     if param_def.param_type == ParamType.INT:
+        # Ground truth: getint -> RawConfigParser.getint = int(value).
+        # '16'/'-1'/'007' parse; '16.0', 'true', 'hello', formulas all
+        # raise (verified empirically 2026-08-25).
         try:
             int(value)
         except ValueError:
-            # Could be a boolean string
-            if value.lower() not in ("true", "false"):
-                result.errors.append(ValidationError(
-                    severity="error",
-                    section=section.full_header,
-                    param=param.key,
-                    message=f"Expected integer for '{param.key}', got '{value}'.",
-                    line_number=param.line_number,
-                ))
+            result.errors.append(ValidationError(
+                severity="error",
+                section=section.full_header,
+                param=param.key,
+                message=f"Expected integer for '{param.key}', got '{value}'.",
+                line_number=param.line_number,
+            ))
 
     elif param_def.param_type == ParamType.FLOAT:
         try:
             float(value)
         except ValueError:
-            # Allow formulas like "homing_speed/2"
-            if not any(c.isalpha() for c in value):
+            # Not a plain number. Klipper also tolerates pin references
+            # (position_endstop: ^PA0 when the endstop object supplies the
+            # position) and formula-shaped values (homing_speed/2) — the old
+            # alpha-skip existed to keep those passing. What we DO reject is a
+            # lone bare identifier ('hello', 'xyz', 'true'): a pure word that
+            # is neither a number, a pin, nor an expression, which can never be
+            # a valid Klipper numeric value. This is the F22(a) spec ("allow
+            # homing_speed/2 but reject hello").
+            # Ground truth (2026-08-25): Klipper has NO formula/symbol support
+            # in config parsing, so 'homing_speed/2' would in fact hard-fail —
+            # the formula tolerance is kept per the spec to avoid false
+            # positives on community configs. See plan F22(a).
+            if re.fullmatch(r"[A-Za-z_]+", value.strip()):
                 result.errors.append(ValidationError(
                     severity="error",
                     section=section.full_header,
@@ -789,6 +1271,21 @@ def _validate_param_value(param, param_def, section, result):
                     message=f"Expected number for '{param.key}', got '{value}'.",
                     line_number=param.line_number,
                 ))
+
+    elif param_def.param_type == ParamType.BOOL:
+        # Ground truth: Klipper getboolean -> RawConfigParser.getboolean
+        # (klippy/configfile.py:73) = Python configparser. Accepts exactly
+        # BOOLEAN_STATES = true/false/yes/no/on/off/1/0 (case-insensitive,
+        # whitespace-stripped); anything else raises ValueError -> startup
+        # hard-fail. 'on'/'off' are valid — do not flag them.
+        if value.lower() not in ("true", "false", "yes", "no", "1", "0", "on", "off"):
+            result.errors.append(ValidationError(
+                severity="error",
+                section=section.full_header,
+                param=param.key,
+                message=f"Expected boolean (true/false/yes/no/on/off/1/0) for '{param.key}', got '{value}'.",
+                line_number=param.line_number,
+            ))
 
     elif param_def.param_type == ParamType.ENUM:
         if param_def.enum_values and value not in param_def.enum_values:
@@ -808,6 +1305,188 @@ def _validate_param_value(param, param_def, section, result):
                 section=section.full_header,
                 param=param.key,
                 message=f"Pin format '{value}' may be invalid for '{param.key}'.",
+                line_number=param.line_number,
+            ))
+        # F22: a bare (unprefixed) pin name with no digits is not a pin shape
+        # — real pins are PB0/PE11/gpio20/AA1, chip-prefixed virtual pins
+        # (tmc2209_stepper_x:virtual_endstop — pin-part letters allowed),
+        # <placeholders>, or device paths. 'step_pin: abcd' passes PIN_RE but
+        # Klipper would look for a pin literally named 'abcd' and fail at
+        # connect/identify. Warning (not error): KWC's ceiling is config-load
+        # validation, and exotic board pin names may be legal.
+        for raw_pin in value.split(","):
+            clean_pin = raw_pin.strip().lstrip("!^~").strip()
+            if not clean_pin or clean_pin.startswith("<") or ":" in clean_pin or clean_pin.startswith("/"):
+                continue
+            if not any(c.isdigit() for c in clean_pin) and clean_pin.isidentifier():
+                result.errors.append(ValidationError(
+                    severity="warning",
+                    section=section.full_header,
+                    param=param.key,
+                    message=f"Pin '{clean_pin}' does not look like a valid pin (no chip prefix, no number). Klipper only validates pin names at connect time.",
+                    line_number=param.line_number,
+                ))
+                break
+
+    # Range enforcement (F17): only params that actually carry bounds are
+    # checked. Inclusive min_val/max_val (Klipper minval=/maxval=) and strict
+    # strict_above/strict_below (Klipper above=/below=: v<=X / v>=X errors).
+    # A value that float() can't parse is not range-checked (it is already a
+    # FLOAT/INT type error from the branch above; F22 removed formula
+    # tolerance since Klipper has no formula support).
+    if param_def.param_type in (ParamType.INT, ParamType.FLOAT):
+        has_bounds = (param_def.min_val is not None or param_def.max_val is not None
+                      or param_def.strict_above is not None or param_def.strict_below is not None)
+        if has_bounds:
+            try:
+                numeric = float(value)
+            except ValueError:
+                numeric = None
+            if numeric is not None:
+                if param_def.min_val is not None and numeric < param_def.min_val:
+                    result.errors.append(ValidationError(
+                        severity="error",
+                        section=section.full_header,
+                        param=param.key,
+                        message=f"Value {value} for '{param.key}' is below the minimum of {_format_bound(param_def.min_val)}.",
+                        line_number=param.line_number,
+                    ))
+                elif param_def.max_val is not None and numeric > param_def.max_val:
+                    result.errors.append(ValidationError(
+                        severity="error",
+                        section=section.full_header,
+                        param=param.key,
+                        message=f"Value {value} for '{param.key}' is above the maximum of {_format_bound(param_def.max_val)}.",
+                        line_number=param.line_number,
+                    ))
+                elif param_def.strict_above is not None and numeric <= param_def.strict_above:
+                    result.errors.append(ValidationError(
+                        severity="error",
+                        section=section.full_header,
+                        param=param.key,
+                        message=f"Value {value} for '{param.key}' must be above {_format_bound(param_def.strict_above)}.",
+                        line_number=param.line_number,
+                    ))
+                elif param_def.strict_below is not None and numeric >= param_def.strict_below:
+                    result.errors.append(ValidationError(
+                        severity="error",
+                        section=section.full_header,
+                        param=param.key,
+                        message=f"Value {value} for '{param.key}' must be below {_format_bound(param_def.strict_below)}.",
+                        line_number=param.line_number,
+                    ))
+
+
+def _format_bound(value: float) -> str:
+    # Render integer-valued bounds without a trailing .0 (min_val=1 -> "1").
+    return str(int(value)) if float(value).is_integer() else str(value)
+
+
+def _check_relational_param(param, param_def, section: ConfigSection, result: ValidationResult) -> None:
+    """Validate a same-section relational constraint (param A vs param B).
+
+    Ground truth (klippy/configfile.py _get_wrapper, verified 2026-08-25):
+        above=X  -> error when v <= X   (strictly above)
+        below=X  -> error when v >= X   (strictly below)
+    The `rel_between=(low, high)` form (stepper position_endstop within
+    [position_min, position_max]) is INCLUSIVE: error when v < low or v > high.
+    `rel_min`/`rel_max` (verified 2026-08-30) are the single-sided inclusive
+    forms — Klipper's minval=<other param>/maxval=<other param> (e.g.
+    resonance_tester max_freq minval=self.min_freq, heaters.py
+    min_extrude_temp maxval=self.max_temp, extruder.py filament_diameter
+    minval=self.nozzle_diameter).
+
+    When the referenced param is ABSENT, Klipper still compares against the
+    reference's *default* (self.min_temp is set before it is referenced), so
+    resolve through the referenced ParamDef's schema default first.
+    Skip when the param or its reference is absent/unparseable (a formula or
+    pin reference, e.g. position_endstop: ^PA0) — matching the range branch.
+    """
+    if (param_def.rel_above is None and param_def.rel_below is None
+            and param_def.rel_between is None
+            and param_def.rel_min is None and param_def.rel_max is None):
+        return
+
+    def _num(value: str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+
+    def _resolve(name: str):
+        """(display, numeric) for a ref param: config value first, then the
+        referenced ParamDef's schema default (Klipper compares against the
+        resolved value, not the presence of the option)."""
+        val = section.get_value(name)
+        if val == "":
+            sd = SECTION_DEFS.get(section.section_type)
+            ref_def = next((p for p in sd.params if p.name == name), None) if sd else None
+            val = ref_def.default if ref_def is not None and ref_def.default else ""
+        if val == "":
+            return "", None
+        return val, _num(val)
+
+    my_num = _num(param.value) if param.value else None
+    if my_num is None:
+        return  # formula / pin reference / empty — not comparable
+
+    if param_def.rel_above is not None:
+        ref, ref_num = _resolve(param_def.rel_above)
+        if ref_num is not None and my_num <= ref_num:
+            result.errors.append(ValidationError(
+                severity="error",
+                section=section.full_header,
+                param=param.key,
+                message=f"{param.key} ({param.value}) must be above {param_def.rel_above} ({ref}).",
+                line_number=param.line_number,
+            ))
+
+    if param_def.rel_below is not None:
+        ref, ref_num = _resolve(param_def.rel_below)
+        if ref_num is not None and my_num >= ref_num:
+            result.errors.append(ValidationError(
+                severity="error",
+                section=section.full_header,
+                param=param.key,
+                message=f"{param.key} ({param.value}) must be below {param_def.rel_below} ({ref}).",
+                line_number=param.line_number,
+            ))
+
+    if param_def.rel_between is not None:
+        low_name, high_name = param_def.rel_between
+        low, low_num = _resolve(low_name)
+        high, high_num = _resolve(high_name)
+        if low_num is None or high_num is None:
+            return  # skip when either bound is unresolvable
+        if my_num < low_num or my_num > high_num:
+            result.errors.append(ValidationError(
+                severity="error",
+                section=section.full_header,
+                param=param.key,
+                message=f"{param.key} ({param.value}) must be between {low_name} ({low}) and {high_name} ({high}).",
+                line_number=param.line_number,
+            ))
+
+    # Single-sided inclusive refs: Klipper minval=<param> / maxval=<param>.
+    if param_def.rel_min is not None:
+        ref, ref_num = _resolve(param_def.rel_min)
+        if ref_num is not None and my_num < ref_num:
+            result.errors.append(ValidationError(
+                severity="error",
+                section=section.full_header,
+                param=param.key,
+                message=f"{param.key} ({param.value}) must be at or above {param_def.rel_min} ({ref}).",
+                line_number=param.line_number,
+            ))
+
+    if param_def.rel_max is not None:
+        ref, ref_num = _resolve(param_def.rel_max)
+        if ref_num is not None and my_num > ref_num:
+            result.errors.append(ValidationError(
+                severity="error",
+                section=section.full_header,
+                param=param.key,
+                message=f"{param.key} ({param.value}) must be at or below {param_def.rel_max} ({ref}).",
                 line_number=param.line_number,
             ))
 
@@ -975,18 +1654,259 @@ def _dependency_is_satisfied(req: str, section_types: set[str], component_groups
     return bool(REQUIREMENT_COMPONENT_GROUPS.get(req, set()) & component_groups)
 
 
-def _check_pin_conflicts(used_pins: dict[str, list[PinUse]], result: ValidationResult):
-    """Check for pins used by multiple sections."""
+def _find_param_def(sec_def, key: str):
+    """Match a config param key against a section's param defs.
+
+    Case-insensitive on both sides, with `prefix*suffix` wildcard names.
+    Returns the first matching ParamDef or None.
+    """
+    if sec_def is None:
+        return None
+    param_key_lower = key.lower()
+    for pd in sec_def.params:
+        wildcard_match = False
+        if "*" in pd.name:
+            wildcard_prefix, wildcard_suffix = pd.name.lower().split("*", 1)
+            wildcard_match = (
+                param_key_lower.startswith(wildcard_prefix)
+                and param_key_lower.endswith(wildcard_suffix)
+            )
+        if pd.name == key or pd.name.lower() == param_key_lower or wildcard_match:
+            return pd
+    return None
+
+
+def _track_pin_usage(param, section, used_pins: dict, filename: str = "") -> None:
+    """Record every normalized pin value of a PIN param into used_pins."""
+    for clean_pin in _normalize_pin_values(param.value):
+        if clean_pin not in used_pins:
+            used_pins[clean_pin] = []
+        used_pins[clean_pin].append(PinUse(
+            pin=clean_pin,
+            section=section.full_header,
+            section_type=section.section_type,
+            param=param.key,
+            line_number=param.line_number,
+            filename=filename,
+        ))
+
+
+def _check_pin_conflicts(
+    used_pins: dict[str, list[PinUse]],
+    result: ValidationResult,
+    duplicate_pin_override_pins: frozenset[str] = frozenset(),
+) -> None:
+    """Check for pins used by multiple sections.
+
+    Severity: error. Klipper hard-fails a pin claimed twice
+    (klippy/pins.py: "pin %s used multiple times in config") unless the pin
+    is in allow_multi_use_pins ([duplicate_pin_override]) or the sharing goes
+    through a shared share_type — and _is_allowed_shared_pin models exactly
+    those share_type families, so every conflict that survives the exemptions
+    is a startup failure (ground-truthed on the Trident, plan 3.5/Q2).
+    """
     for pin, users in used_pins.items():
         if len(users) <= 1 or _is_allowed_shared_pin(users):
             continue
+        if pin in duplicate_pin_override_pins:
+            continue  # [duplicate_pin_override] registered it — legal multi-use
 
+        # Anchor the finding to the first user so it renders in the gutter
+        # (line) and on the section node dot. The message still lists all users.
+        anchor = next((u for u in users if u.section), users[0])
         result.errors.append(ValidationError(
-            severity="warning",
-            section="",
-            param="",
-            message=f"Pin '{pin}' is used by multiple sections: {', '.join(user.label for user in users)}",
+            severity="error",
+            section=anchor.section,
+            param=anchor.param,
+            message=_shared_pin_message(pin, users),
+            line_number=anchor.line_number,
+            code="shared_pin",
         ))
+
+
+def _shared_pin_message(pin: str, users: list[PinUse]) -> str:
+    return (
+        f"Pin '{pin}' is used by multiple sections: "
+        f"{', '.join(user.label for user in users)} — Klipper will fail to"
+        " start (pin used multiple times in config)."
+    )
+
+
+def _check_cross_file_pin_conflicts(
+    configs: dict[str, ConfigFile],
+    results: dict[str, ValidationResult],
+    duplicate_pin_override_pins: frozenset[str] = frozenset(),
+) -> None:
+    """Detect pins shared between sections in DIFFERENT project files.
+
+    Klipper loads the whole project into one config namespace and pins.py
+    tracks active pins across it, so a pin used by two sections in two files
+    is the same conflict as within one file. Per-file _check_pin_conflicts
+    cannot see across files; this pass aggregates PIN usage over active
+    files. Exemptions (_is_allowed_shared_pin) and dedup against already
+    reported in-file conflicts are reused, so each conflict is reported once.
+    """
+    used_pins: dict[str, list[PinUse]] = {}
+    active_files = _get_active_project_files(configs)
+    for filename in sorted(active_files):
+        config = configs[filename]
+        for section in config.sections:
+            if section.is_commented_out or section.section_type == "include":
+                continue
+            sec_def = get_section_def(section.section_type)
+            for param in section.params:
+                if param.is_commented_out or param.key == "_comment_":
+                    continue
+                param_def = _find_param_def(sec_def, param.key)
+                if param_def is not None and param_def.param_type == ParamType.PIN and param.value:
+                    _track_pin_usage(param, section, used_pins, filename=filename)
+
+    # Pins already reported by a per-file check (both users in the same file)
+    # are deduped by (pin, sorted user labels).
+    reported = set()
+    for result in results.values():
+        for err in result.errors:
+            if err.code != "shared_pin":
+                continue
+            reported.add((err.section, err.param, err.line_number))
+
+    for pin, users in used_pins.items():
+        if len(users) <= 1 or _is_allowed_shared_pin(users):
+            continue
+        if pin in duplicate_pin_override_pins:
+            continue  # [duplicate_pin_override] registered it — legal multi-use
+        files_involved = {u.filename for u in users}
+        if len(files_involved) < 2:
+            continue  # same-file conflict already reported per-file
+        anchor = next((u for u in users if u.section), users[0])
+        already = any(
+            (u.section, u.param, u.line_number) in reported
+            for u in users
+        )
+        if already:
+            continue
+        result = results.get(anchor.filename)
+        if result is None:
+            continue
+        result.errors.append(ValidationError(
+            severity="error",
+            section=anchor.section,
+            param=anchor.param,
+            message=_shared_pin_message(pin, users),
+            line_number=anchor.line_number,
+            code="shared_pin",
+        ))
+
+
+def _collect_duplicate_pin_override_pins(
+    configs: dict[str, ConfigFile],
+    active_files: set[str],
+) -> frozenset[str]:
+    """Collect pins registered by [duplicate_pin_override] in active files.
+
+    Ground truth (klippy/extras/duplicate_pin_override.py): the module adds
+    every pin from its `pins:` getlist to PrinterPins.allow_multi_use_pins,
+    where those pins may be claimed by multiple sections without the
+    "pin used multiple times in config" hard-fail (pins.py:103). KWC must
+    exempt the same pins so a legal override setup does not false-positive.
+    """
+    pins: set[str] = set()
+    for filename in sorted(active_files):
+        config = configs.get(filename)
+        if config is None:
+            continue
+        for section in config.sections:
+            if (
+                section.is_commented_out
+                or section.section_type != "duplicate_pin_override"
+            ):
+                continue
+            for param in section.params:
+                if param.is_commented_out or param.key != "pins" or not param.value:
+                    continue
+                pins.update(_normalize_pin_values(param.value))
+    return frozenset(pins)
+
+
+def _collect_known_pin_chips(configs: dict[str, ConfigFile], active_files: set[str]) -> set[str]:
+    """Collect the pin-chip names Klipper would register for this project.
+
+    Ground truth (klippy/pins.py PrinterPins.register_chip call sites,
+    verified 2026-08-25). A pin with an explicit chip prefix must name one of
+    these, else `parse_pin` hard-fails `Unknown pin chip name '%s'`:
+      - 'mcu' is always registered (mcu.add_printer_objects)
+      - [mcu NAME]      -> NAME   (CAN chips too: [mcu EBBCan]+canbus_uuid;
+                                   there is NO [canbus] section)
+      - [probe]         -> 'probe'
+      - [multi_pin]     -> 'multi_pin'
+      - [replicape]     -> 'replicape'
+      - [tmc2130|tmc2209|tmc5160|tmc2240 NAME] -> '<type>_<name>'
+                                   (TMCVirtualPinHelper, sensorless
+                                   'virtual_endstop' pins)
+      - [adc_scaled NAME] / [ads1x1x NAME] -> NAME
+      - [sx1509 NAME]   -> 'sx1509_<name>'
+    Case-folded: Klipper section names are case-sensitive, so a config that
+    writes [mcu ebbcan] + pin ebbcan:PB0 works — accept either case.
+    """
+    chips = {"mcu"}
+    for filename in sorted(active_files):
+        config = configs[filename]
+        for section in config.sections:
+            if section.is_commented_out:
+                continue
+            sec_type = section.section_type
+            name = section.section_name.strip()
+            if sec_type == "mcu":
+                chips.add((name or "mcu").lower())
+            elif sec_type in ("probe", "multi_pin", "replicape"):
+                chips.add(sec_type.lower())
+            elif sec_type in ("tmc2130", "tmc2209", "tmc5160", "tmc2240") and name:
+                name_parts = name.split()
+                chips.add(f"{sec_type}_{name_parts[-1]}".lower())
+            elif sec_type in ("adc_scaled", "ads1x1x") and name:
+                chips.add(name.split()[-1].lower())
+            elif sec_type == "sx1509" and name:
+                chips.add(f"sx1509_{name.split()[0]}".lower())
+    return chips
+
+
+def _check_pin_chip_membership(configs: dict[str, ConfigFile], results: dict[str, ValidationResult], active_files: set[str]) -> None:
+    """Flag pins whose chip prefix names a chip Klipper never registers.
+
+    Mirrors klippy/pins.py parse_pin: split on the first ':', default chip
+    'mcu' when absent. Unprefixed pins always resolve (the builtin 'mcu' chip
+    is always present), so only explicit prefixes are checked. `<...>`
+    placeholders are skipped (not parseable pins). Project-pass only: in
+    single-file validation the defining section may live in another file.
+    """
+    known_chips = _collect_known_pin_chips(configs, active_files)
+    for filename in sorted(active_files):
+        config = configs[filename]
+        result = results.get(filename)
+        if result is None:
+            continue
+        for section in config.sections:
+            if section.is_commented_out or section.section_type == "include":
+                continue
+            sec_def = get_section_def(section.section_type)
+            for param in section.params:
+                if param.is_commented_out or param.key == "_comment_":
+                    continue
+                param_def = _find_param_def(sec_def, param.key)
+                if param_def is None or param_def.param_type != ParamType.PIN or not param.value:
+                    continue
+                for clean_pin in _normalize_pin_values(param.value):
+                    if ":" not in clean_pin or clean_pin.startswith("<"):
+                        continue
+                    chip_name = clean_pin.split(":", 1)[0].strip()
+                    if chip_name.lower() not in known_chips:
+                        result.errors.append(ValidationError(
+                            severity="error",
+                            section=section.full_header,
+                            param=param.key,
+                            message=f"Unknown pin chip name '{chip_name}'. No [mcu {chip_name}] (or driver section) defines this chip in the project.",
+                            line_number=param.line_number,
+                        ))
 
 
 def _is_allowed_shared_pin(users: list[PinUse]) -> bool:
@@ -1100,18 +2020,28 @@ def _check_virtual_endstop_without_probe(
     configs: dict[str, ConfigFile],
     active_files: set[str] | None = None,
 ) -> list[tuple[str, ValidationError]]:
-    """Check for endstop_pin = z_virtual_endstop without a probe section.
+    """Check for probe virtual endstops that fail at Klipper config load.
 
-    In Klipper, using z_virtual_endstop as an endstop_pin requires a probe
-    section (BLTouch, bed probe, eddy current probe, temperature_probe, etc.)
-    to be defined for Z-offset management. This warning is only valid when
-    checking multiple config files as a project.
+    Two cases, both load failures (severity promotion 2026-08-28, plan
+    Task 4.0):
+
+    1. endstop_pin uses 'z_virtual_endstop' but no probe section is
+       defined in the active project. The 'probe:' pin chip is registered
+       ONLY when a probe section loads (klippy/extras/probe.py:215);
+       without one, klippy/pins.py:81 raises "Unknown pin chip name
+       'probe'" during config load.
+    2. endstop_pin uses any other probe virtual value (currently
+       'manually_set_z_virtual_endstop' — not in current Klipper;
+       repo-wide search 2026-08-28: 0 hits). HomingViaProbeHelper.setup_pin
+       (probe.py:238-240) raises pins.error("Probe virtual endstop only
+       useful as endstop pin") at load for any value other than exactly
+       'z_virtual_endstop' — even when a probe section is present.
 
     Only probe sections in active (included) files are considered, because
     probes in non-included files won't actually be loaded by Klipper.
 
     Returns a list of (filename, ValidationError) tuples so the caller can
-    attach the warning to the correct file's results.
+    attach the finding to the correct file's results.
     """
     results: list[tuple[str, ValidationError]] = []
 
@@ -1140,11 +2070,48 @@ def _check_virtual_endstop_without_probe(
                     probe_sections.add(section.full_header)
 
     if probe_sections:
+        # Probe present — case 1 can't fire. But case 2 still must: any
+        # 'probe:' virtual value other than exactly 'z_virtual_endstop'
+        # fails at load in HomingViaProbeHelper.setup_pin (probe.py:238-240)
+        # even with a probe section defined.
+        for filename, cfg in configs.items():
+            if active_files is not None and filename not in active_files:
+                continue
+            for section in cfg.sections:
+                if section.is_commented_out:
+                    continue
+                for param in section.params:
+                    if param.is_commented_out or param.key != "endstop_pin":
+                        continue
+                    raw_value = param.value.strip()
+                    if ":" not in raw_value:
+                        continue
+                    # Only 'probe:'-chip values are virtual endstops; an
+                    # MCU-prefixed pin (e.g. 'EBBCan:PB0') is unrelated.
+                    chip = raw_value.split(":", 1)[0].strip().lstrip("!^~")
+                    if chip != "probe":
+                        continue
+                    base_value = _extract_virtual_endstop_value(raw_value)
+                    if base_value != "z_virtual_endstop":
+                        results.append((filename, ValidationError(
+                            severity="error",
+                            section=section.full_header,
+                            param="endstop_pin",
+                            message=(
+                                f"Section [{section.section_type}] uses "
+                                f"'probe:{base_value}' as the endstop_pin, "
+                                "but only 'z_virtual_endstop' is accepted — "
+                                "any other probe virtual value fails at"
+                                " config load even when a probe section is"
+                                " defined (probe.py:238-240)."
+                            ),
+                            line_number=param.line_number,
+                            code="z_virtual_endstop_without_probe",
+                        )))
         return results
 
-    # No probe found — check each ACTIVE file for z_virtual_endstop usage.
-    # Only active (included) files are checked because Klipper won't load
-    # sections from non-included files.
+    # No probe found — the 'probe:' pin chip never registers, so ANY
+    # 'probe:' virtual endstop value fails at load (pins.py:81 unknown chip).
     for filename, cfg in configs.items():
         if active_files is not None and filename not in active_files:
             continue
@@ -1154,19 +2121,35 @@ def _check_virtual_endstop_without_probe(
             for param in section.params:
                 if param.is_commented_out or param.key != "endstop_pin":
                     continue
-                base_value = _extract_virtual_endstop_value(param.value)
+                raw_value = param.value.strip()
+                if ":" not in raw_value:
+                    continue
+                chip = raw_value.split(":", 1)[0].strip().lstrip("!^~")
+                if chip != "probe":
+                    continue
+                base_value = _extract_virtual_endstop_value(raw_value)
                 if base_value in ("z_virtual_endstop", "manually_set_z_virtual_endstop"):
+                    message = (
+                        f"Section [{section.section_type}] uses "
+                        f"'{base_value}' as the endstop_pin, but no probe"
+                        " section (BLTouch, probe, scanner, etc.) is"
+                        " defined. Without one the 'probe:' pin chip never"
+                        " registers and Klipper fails at config load"
+                        " (pins.py:81)."
+                    )
+                    if base_value != "z_virtual_endstop":
+                        message += (
+                            f" Additionally '{base_value}' does not exist in"
+                            " current Klipper — only 'z_virtual_endstop' is"
+                            " accepted (probe.py:238-240)."
+                        )
                     results.append((filename, ValidationError(
-                        severity="warning",
+                        severity="error",
                         section=section.full_header,
                         param="endstop_pin",
-                        message=(
-                            f"Section [{section.section_type}] uses 'z_virtual_endstop' "
-                            "as the endstop_pin, but no probe section (BLTouch, probe, "
-                            "scanner, etc.) is defined. A probe is required for "
-                            "z_virtual_endstop to work."
-                        ),
+                        message=message,
                         line_number=param.line_number,
+                        code="z_virtual_endstop_without_probe",
                     )))
 
     return results

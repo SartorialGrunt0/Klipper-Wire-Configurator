@@ -11,8 +11,11 @@ import type { ValidationError, ValidationResult, ConfigSection } from '../types/
 export const MAX_ASSISTANT_DRAFT_VALIDATION_ATTEMPTS = 3;
 export const MAX_ASSISTANT_HINT_USER_MESSAGES = 3;
 
-const RETRY_EXEMPT_DUPLICATE_SECTION_RE = /^Section \[[^\]]+\] (?:can only be defined once(?: across active included config files)?\.|is reused across active included config files\.)(?: Also defined in: .+)?$/;
-const RETRY_EXEMPT_SHARED_PIN_RE = /^Pin '.*' is used by multiple sections: .+$/;
+// Retry-exempt classes: the model cannot resolve these by regenerating a
+// draft, so a reply blocked ONLY by them is kept with an explanation rather
+// than retried. Branch on the stable `code` (set by the backend / the
+// full-rewrite guard), not message text.
+const RETRY_EXEMPT_CODES = new Set(['project_duplicate', 'shared_pin']);
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -101,6 +104,7 @@ export function buildFullRewriteSectionIssues(
       section: target.fullHeader,
       param: '',
       line_number: 0,
+      code: 'macro_full_rewrite',
     });
   }
   return errors;
@@ -126,7 +130,7 @@ export function suppressValidationErrorsShadowedByFullRewrite(
   const guardKeys = new Set<string>();
   for (const group of blockingIssues) {
     for (const error of group.errors) {
-      if (error.message.includes('was returned as a full rewrite')) {
+      if (error.code === 'macro_full_rewrite') {
         guardKeys.add(`${group.filename}::${error.section}`);
       }
     }
@@ -137,14 +141,14 @@ export function suppressValidationErrorsShadowedByFullRewrite(
       ...group,
       errors: group.errors.filter((error) => {
         const key = `${group.filename}::${error.section}`;
-        return !guardKeys.has(key) || error.message.includes('was returned as a full rewrite');
+        return !guardKeys.has(key) || error.code === 'macro_full_rewrite';
       }),
     }))
     .filter((group) => group.errors.length > 0);
 }
 
 export function isRetryExemptAssistantValidationIssue(error: ValidationError): boolean {
-  return RETRY_EXEMPT_DUPLICATE_SECTION_RE.test(error.message) || RETRY_EXEMPT_SHARED_PIN_RE.test(error.message);
+  return error.code !== undefined && RETRY_EXEMPT_CODES.has(error.code);
 }
 
 export function hasOnlyRetryExemptAssistantValidationIssues(
@@ -225,7 +229,9 @@ export function deriveJinjaRepairCommands(
   const seen = new Set<string>();
   for (const group of blockingIssues) {
     for (const error of group.errors) {
-      if (!error.message.includes('Unexpected end of template')) continue;
+      // Class identity via code; the innermost block NAME is still data
+      // extracted from the message (it's the repair target, not the class).
+      if (error.code !== 'macro_jinja_unterminated') continue;
       const match = JINJA_INNERMOST_BLOCK_RE.exec(error.message);
       if (!match) continue;
       const closer = JINJA_CLOSER_BY_OPENER[match[1].toLowerCase()];

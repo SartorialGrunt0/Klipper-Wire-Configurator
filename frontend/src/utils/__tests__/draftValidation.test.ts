@@ -39,7 +39,7 @@ describe('issue classification', () => {
         errors: [
           error({ section: 'bed_mesh', param: 'mesh_min', message: "Required parameter 'mesh_min' is missing." }),
           error({ section: 'bed_mesh', param: 'mesh_max', message: "Required parameter 'mesh_max' is missing." }),
-          error({ section: 'bed_mesh', param: '', message: guardMessage }),
+          error({ section: 'bed_mesh', param: '', message: guardMessage, code: 'macro_full_rewrite' }),
         ],
       },
     ];
@@ -55,7 +55,7 @@ describe('issue classification', () => {
       {
         filename: 'printer.cfg',
         errors: [
-          error({ section: 'bed_mesh', param: '', message: guardMessage }),
+          error({ section: 'bed_mesh', param: '', message: guardMessage, code: 'macro_full_rewrite' }),
           error({ section: 'extruder', param: 'max_temp', message: 'max_temp too low' }),
         ],
       },
@@ -75,11 +75,13 @@ describe('issue classification', () => {
     expect(suppressValidationErrorsShadowedByFullRewrite(issues)).toBe(issues);
   });
 
-  it('recognizes retry-exempt duplicate-section and shared-pin messages', () => {
+  it('recognizes retry-exempt duplicate-section and shared-pin codes', () => {
     expect(isRetryExemptAssistantValidationIssue(error({
-      message: 'Section [extruder] can only be defined once across active included config files.',
+      code: 'project_duplicate',
+      message: 'Section [extruder] is also defined in: a.cfg. Klipper merges duplicate sections — the later include takes precedence.',
     }))).toBe(true);
     expect(isRetryExemptAssistantValidationIssue(error({
+      code: 'shared_pin',
       message: "Pin 'PA0' is used by multiple sections: [heater_bed], [extruder]",
     }))).toBe(true);
     expect(isRetryExemptAssistantValidationIssue(error({
@@ -89,10 +91,10 @@ describe('issue classification', () => {
 
   it('hasOnlyRetryExempt returns true when all issues are exempt', () => {
     expect(hasOnlyRetryExemptAssistantValidationIssues([
-      { filename: 'a.cfg', errors: [error({ message: 'Section [x] can only be defined once.' })] },
+      { filename: 'a.cfg', errors: [error({ code: 'project_duplicate', message: 'Section [x] is defined multiple times in this file — the later definition wins.' })] },
     ])).toBe(true);
     expect(hasOnlyRetryExemptAssistantValidationIssues([
-      { filename: 'a.cfg', errors: [error({ message: 'Section [x] can only be defined once.' }), error()] },
+      { filename: 'a.cfg', errors: [error({ message: 'Section [x] is defined multiple times in this file — the later definition wins.' }), error()] },
     ])).toBe(false);
     expect(hasOnlyRetryExemptAssistantValidationIssues([])).toBe(false);
   });
@@ -205,8 +207,8 @@ describe('formatting', () => {
 });
 
 describe('deriveJinjaRepairCommands', () => {
-  const jinjaError = (section: string, message: string): ValidationError =>
-    error({ section, param: '', message });
+  const jinjaError = (section: string, message: string, code?: string): ValidationError =>
+    error({ section, param: '', message, code });
 
   it('derives a direct fix from a Klippy unexpected-end-of-template error', () => {
     const commands = deriveJinjaRepairCommands([{
@@ -214,6 +216,7 @@ describe('deriveJinjaRepairCommands', () => {
       errors: [jinjaError(
         'gcode_macro M109',
         "Error loading template 'gcode_macro M109:gcode' line 2: {% if printer.quad_gantry_level is defined %} # Unexpected end of template. Jinja was looking for the following tags: 'elif' or 'else' or 'endif'. The innermost block that needs to be closed is 'if'.",
+        'macro_jinja_unterminated',
       )],
     }]);
     expect(commands).toEqual([

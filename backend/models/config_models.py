@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pydantic import BaseModel
-from typing import Optional
+from typing import List, Optional
 
 
 class ParamUpdate(BaseModel):
@@ -38,6 +38,19 @@ class ProjectValidationRequest(BaseModel):
 
 class WarningAcknowledgementRequest(BaseModel):
     section: SectionUpdate
+
+
+class BulkWarningIdentity(BaseModel):
+    """One warning finding to bulk-acknowledge (Phase 4 save gate)."""
+    file: str
+    code: str
+    section: str
+    param: str = ""
+    extra: str = ""
+
+
+class BulkWarningAcknowledgementRequest(BaseModel):
+    identities: List[BulkWarningIdentity]
 
 
 class ProjectFile(BaseModel):

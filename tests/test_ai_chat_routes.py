@@ -265,11 +265,12 @@ def test_build_provider_payload_openai_compatible():
     }
 
 
-def test_build_provider_payload_openai_merges_system_messages():
+def test_build_provider_payload_openai_merges_system_messages_by_default():
     # Strict chat templates (e.g. ones that enforce "system message must be
-    # at the beginning") reject multiple system messages. When merge_system
-    # is set, the OpenAI-compatible builder must merge them into a single
-    # leading system message so every server accepts the payload.
+    # at the beginning") reject multiple system messages. A single leading
+    # system message is the canonical OpenAI-compatible shape, so the
+    # builder merges by DEFAULT (no flag needed) — this is what fixes
+    # qwen3.8-flash-next on strict llama.cpp templates in the real UI.
     payload = ai_routes._build_provider_payload(
         'chatgpt',
         [
@@ -278,7 +279,6 @@ def test_build_provider_payload_openai_merges_system_messages():
             {'role': 'system', 'content': 'System two.'},
         ],
         'gpt-4o',
-        merge_system=True,
     )
     assert payload['model'] == 'gpt-4o'
     assert payload['messages'] == [
@@ -288,10 +288,10 @@ def test_build_provider_payload_openai_merges_system_messages():
     assert payload['max_tokens'] == 4096
 
 
-def test_build_provider_payload_openai_keeps_multiple_system_messages_by_default():
-    # Default (merge_system=False) must preserve the trailing task anchor
-    # as its own system message — it is positionally meaningful for models
-    # whose chat templates accept multiple system messages.
+def test_build_provider_payload_openai_can_keep_trailing_anchor_when_opted_out():
+    # Explicit merge_system=False preserves the trailing task anchor as its
+    # own system message — positionally meaningful for models whose chat
+    # templates accept multiple system messages. Kept for A/B testing only.
     payload = ai_routes._build_provider_payload(
         'chatgpt',
         [
@@ -300,6 +300,7 @@ def test_build_provider_payload_openai_keeps_multiple_system_messages_by_default
             {'role': 'system', 'content': 'System two.'},
         ],
         'gpt-4o',
+        merge_system=False,
     )
     assert payload['messages'] == [
         {'role': 'system', 'content': 'System one.'},

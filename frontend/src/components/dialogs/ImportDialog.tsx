@@ -155,7 +155,7 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
       // The rebuild renumbers node ids — re-apply the saved layout so an
       // import doesn't auto-arrange over the user's arrangement (and the
       // autosave can't persist that reset).
-      await restoreLayoutAfterRebuild(graphStore, useNativeStore.getState().isNative);
+      await restoreLayoutAfterRebuild(useGraphStore.getState, useNativeStore.getState().isNative);
 
       // Sort results: main file first, then alphabetical
       importResults.sort((a, b) => {

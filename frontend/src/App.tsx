@@ -1010,6 +1010,7 @@ export default function App() {
               showTextView={showTextView}
               onToggleAddMenu={() => setShowAddMenu(!showAddMenu)}
               onOpenMacroDesigner={() => setShowMacroDesigner(true)}
+              onShowTextView={() => setShowTextView(true)}
               onToggleTextView={() => {
                 // Text edits apply to the model live, so switching views is
                 // always safe — nothing to apply, nothing to lose.

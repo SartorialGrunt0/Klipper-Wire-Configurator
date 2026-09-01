@@ -1,8 +1,9 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { createTwoFilesPatch } from 'diff';
 import { useConfigStore } from '../../stores/configStore';
 import { useNativeStore } from '../../stores/nativeStore';
 import { getSaveButtonClass } from '../../utils/saveButtonClass';
+import { selectSaveGateIssues, warningToBulkAck, type SaveGateFinding } from '../../utils/saveGate';
 import * as api from '../../services/api';
 import type { ConfigFile } from '../../types/config';
 import type { NativeStatus } from '../../services/api';
@@ -11,6 +12,10 @@ interface ApplyDialogProps {
   onClose: () => void;
   canAnalyzeWithAi?: boolean;
   onAnalyzeWithAi?: (prompt: string) => void;
+  /** Switch the main view to the text editor so a findings click can land on
+   *  the file/line (the text editor consumes the store's pending line jump
+   *  once its text is loaded). */
+  onShowTextView?: () => void;
 }
 
 interface DiffLine {
@@ -172,19 +177,22 @@ function buildRestartAnalysisPrompt(args: {
   return sections.join('\n\n');
 }
 
-export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnalyzeWithAi }: ApplyDialogProps) {
+export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnalyzeWithAi, onShowTextView }: ApplyDialogProps) {
   const storeSnapshot = useRef(useConfigStore.getState());
   const { configFiles, originalTexts } = storeSnapshot.current;
   const { configPath } = useNativeStore();
-  // Live state for the Save-button color — matches the toolbar button so the
-  // dialog's actions always agree with it (grey/green/yellow/red).
   const isDirty = useConfigStore((s) => s.isDirty);
   const validation = useConfigStore((s) => s.validation);
-  const saveButtonClass = getSaveButtonClass(isDirty, validation);
+  // saveButtonClass is computed AFTER gateIssues below — the dialog's Save
+  // button turns red only when a SELECTED file is blocked (the toolbar keeps
+  // the project-wide red; a deselected broken file doesn't block this save).
   // A file deleted since import is gone from configFiles but its original text
   // survives in originalTexts — union both so deletions show up in the diff
   // and are actually removed from disk on save.
-  const filenames = Array.from(new Set([...Object.keys(configFiles), ...Object.keys(originalTexts)]));
+  const filenames = useMemo(
+    () => Array.from(new Set([...Object.keys(configFiles), ...Object.keys(originalTexts)])),
+    [configFiles, originalTexts],
+  );
   const deletedFilenames = filenames.filter((fn) => !(fn in configFiles) && fn in originalTexts);
 
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set(filenames));
@@ -205,15 +213,200 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
   const isNativeMode = useNativeStore((s) => s.isNative);
   const isLocalMode = isNativeMode === false || isNativeMode === null;
 
+  /* ── Phase 4 save gate: findings for the selected files ─────────────
+     Errors + warnings, never info (info is order-dependent context and
+     can't be fixed by acknowledging). Computed from the LIVE store state —
+     not the mount snapshot — so the gate reflects current validation. */
+  const textParseErrors = useConfigStore((s) => s.textParseErrors);
+  const gateIssues = useMemo(() => {
+    const selected = Array.from(selectedFiles);
+    return selectSaveGateIssues(validation, selected, textParseErrors);
+  }, [validation, selectedFiles, textParseErrors]);
+  const hasGateErrors = gateIssues.hasErrors;
+  const hasGateWarnings = gateIssues.hasWarnings;
+  // The dialog's Save button is red only when a SELECTED file's text can't
+  // parse (mirrors handleApply's hard block, which scans selectedFiles). The
+  // toolbar button stays project-wide red so a deselected broken file's issue
+  // remains visible there; the dialog must not claim a save is blocked that
+  // would actually proceed.
+  const saveButtonClass = getSaveButtonClass(isDirty, validation, gateIssues.blocked.length > 0);
+
+  // Confirmation flow: clicking Save with gate findings opens a single
+  // overlay (errors OR warnings, never both stacked — errors dominate).
+  // The checkbox acknowledges every listed warning in one bulk call.
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [ackAllChecked, setAckAllChecked] = useState(false);
+  const [ackBusy, setAckBusy] = useState(false);
+  const [ackError, setAckError] = useState('');
+
+  useEffect(() => {
+    // Reset the checkbox + errors every time the overlay reopens.
+    if (!confirmOpen) {
+      setAckAllChecked(false);
+      setAckError('');
+      setAckBusy(false);
+    }
+  }, [confirmOpen]);
+
+  const openConfirm = () => {
+    setConfirmOpen(true);
+  };
+
+  const handleFindingClick = (finding: SaveGateFinding) => {
+    if (finding.line_number < 1) return; // nothing to jump to
+    onShowTextView?.();
+    useConfigStore.getState().requestLineJump(finding.file, finding.line_number);
+    onClose(); // reveal the editor; the dialog's findings can be re-opened
+  };
+
+  const ackAllWarnings = async (): Promise<boolean> => {
+    setAckError('');
+    try {
+      await api.acknowledgeWarningsBulk(gateIssues.warnings.map(warningToBulkAck));
+      // Re-run PROJECT validation so the acknowledged warnings clear from
+      // the gutter, the save button, and this gate (one call revalidates
+      // the whole project for multi-file projects).
+      const firstFile = Array.from(selectedFiles)[0];
+      if (firstFile) void useConfigStore.getState().revalidateFile(firstFile);
+      return true;
+    } catch (err) {
+      setAckError(err instanceof Error ? err.message : 'Could not acknowledge warnings');
+      return false;
+    }
+  };
+
+  const handleAckAndSave = async () => {
+    if (!ackAllChecked || gateIssues.warnings.length === 0) return;
+    setAckBusy(true);
+    const ok = await ackAllWarnings();
+    setAckBusy(false);
+    if (!ok) return;
+    setConfirmOpen(false);
+    void handleApply();
+  };
+
+  const handleSaveWithoutAck = () => {
+    setConfirmOpen(false);
+    void handleApply();
+  };
+
+  // Errors-present path: "Continue saving anyway" — errors are never
+  // acknowledged; the user fixes them first (warnings can be bulk-acked
+  // on the next save, once the errors are gone).
+  const handleContinueAnyway = () => {
+    setConfirmOpen(false);
+    void handleApply();
+  };
+
+  const handleSaveClick = () => {
+    // Hard block first (spec): unparseable text in a selected file shows the
+    // existing inline error, no overlay.
+    if (gateIssues.blocked.length > 0) {
+      void handleApply();
+      return;
+    }
+    if (hasGateErrors || hasGateWarnings) {
+      openConfirm();
+      return;
+    }
+    void handleApply();
+  };
+
+  // One findings row (shared by the dialog list and the confirm overlay).
+  const renderFindingRow = (f: SaveGateFinding, kind: 'error' | 'warning', key: string) => (
+    <button
+      key={key}
+      type="button"
+      onClick={() => {
+        setConfirmOpen(false);
+        handleFindingClick(f);
+      }}
+      disabled={f.line_number < 1}
+      className="w-full flex items-start gap-2 px-2 py-1.5 text-left rounded-md hover:bg-[var(--color-bg-primary)] disabled:cursor-default disabled:opacity-60"
+    >
+      <span
+        className={`mt-1 w-2 h-2 rounded-full shrink-0 ${kind === 'error' ? 'bg-red-500' : 'bg-[var(--color-warning)]'}`}
+      />
+      <span className="flex-1 min-w-0">
+        <span className="block text-xs text-[var(--color-text-primary)] truncate">{f.message}</span>
+        <span className="block text-[10px] font-mono text-[var(--color-text-secondary)] truncate">
+          {f.file}{f.line_number > 0 ? `:${f.line_number}` : ''}{f.section ? ` · [${f.section}]` : ''}
+        </span>
+      </span>
+    </button>
+  );
+
   // Diff state
   const [currentTexts, setCurrentTexts] = useState<Record<string, string>>({});
   const [diffLoading, setDiffLoading] = useState(true);
 
-  const hasAnyOriginals = filenames.some((fn) => fn in originalTexts);
-  // New files (imported but never saved/Pi-loaded) have no original — show
-  // them with a "new file" badge in the diff panel instead of hiding it.
-  const hasAnyNewFiles = filenames.some((fn) => !(fn in originalTexts));
-  const showDiffPanel = hasAnyOriginals || hasAnyNewFiles;
+  /* ── Phase 4 revision: per-file review in the center area ────────────
+     Findings no longer sit in a banner above the file list — they render
+     under each file in the center review area (where the diff lives).
+     A file is "noteworthy" (shown in the left list, selectable) when it is
+     new, deleted, has changes, or carries gate findings. Unchanged files
+     with no findings are hidden to keep the review surface small. */
+  const gateFindingFiles = useMemo(() => {
+    const set = new Set<string>();
+    for (const f of [...gateIssues.errors, ...gateIssues.warnings]) set.add(f.file);
+    return set;
+  }, [gateIssues]);
+
+  const fileFindings = useMemo(() => {
+    const map: Record<string, (SaveGateFinding & { kind: 'error' | 'warning' })[]> = {};
+    for (const f of gateIssues.errors) {
+      (map[f.file] ??= []).push({ ...f, kind: 'error' });
+    }
+    for (const f of gateIssues.warnings) {
+      (map[f.file] ??= []).push({ ...f, kind: 'warning' });
+    }
+    for (const list of Object.values(map)) {
+      list.sort((a, b) => a.kind === b.kind
+        ? a.line_number - b.line_number
+        : a.kind === 'error' ? -1 : 1);
+    }
+    return map;
+  }, [gateIssues]);
+
+  const fileStatus = useMemo(() => {
+    const map: Record<string, { isDeleted: boolean; hasOriginal: boolean; hasChanges: boolean }> = {};
+    for (const fn of filenames) {
+      const hasOriginal = fn in originalTexts;
+      const isDeleted = hasOriginal && !(fn in configFiles);
+      const current = currentTexts[fn];
+      let hasChanges = false;
+      if (current !== undefined || isDeleted) {
+        // Deleted files diff against empty (every line removed); new files
+        // have no original (every line added).
+        const patch = createTwoFilesPatch(fn, fn, originalTexts[fn] ?? '', current ?? '', 'saved', isDeleted ? 'deleted' : 'current', { context: 3 });
+        hasChanges = parsePatch(patch).some((l) => l.type === 'added' || l.type === 'removed');
+      }
+      map[fn] = { isDeleted, hasOriginal, hasChanges };
+    }
+    return map;
+  }, [filenames, originalTexts, configFiles, currentTexts]);
+
+  const isNoteworthy = useCallback((fn: string) => {
+    const s = fileStatus[fn];
+    if (!s) return false;
+    return s.isDeleted || !s.hasOriginal || s.hasChanges || gateFindingFiles.has(fn);
+  }, [fileStatus, gateFindingFiles]);
+
+  const noteworthyFiles = useMemo(() => filenames.filter(isNoteworthy), [filenames, isNoteworthy]);
+  // Center review only shows files SELECTED for save — a deselected file's
+  // diff/findings gate nothing. The left list keeps every noteworthy file
+  // with its checkbox, so a deselected file can be re-selected (filtering
+  // the left list by selection would hide the checkbox that re-selects it).
+  const reviewFiles = useMemo(
+    () => noteworthyFiles.filter((fn) => selectedFiles.has(fn)),
+    [noteworthyFiles, selectedFiles],
+  );
+  const hiddenFileCount = filenames.length - noteworthyFiles.length;
+  // The center review area is shown whenever there is anything notable to
+  // review (while diff export is in flight it shows the loading note). Width
+  // stays stable while checkboxes toggle — a deselected-all state still gets
+  // the panel with a hint, not a layout jump.
+  const showReviewPanel = diffLoading || noteworthyFiles.length > 0;
 
   // Export all configs once on mount to get current text for diff.
   useEffect(() => {
@@ -495,7 +688,7 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
       <div
         className="bg-[var(--color-bg-secondary)] rounded-xl shadow-2xl flex flex-col border border-[var(--color-bg-tertiary)] overflow-hidden"
-        style={{ width: showDiffPanel ? 900 : 480, maxHeight: '85vh' }}
+        style={{ width: showReviewPanel ? 900 : 480, maxHeight: '85vh' }}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -530,8 +723,11 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
 
         {/* Body */}
         <div className="flex flex-1 overflow-hidden">
-          {/* Left: file list */}
-          <div className={`flex flex-col ${showDiffPanel ? 'w-52 shrink-0 border-r border-[var(--color-bg-tertiary)]' : 'flex-1'}`}>
+          {/* Left: file list — only files with something notable (new,
+              removed, changed, or validation findings) are shown; unchanged
+              files are hidden to keep the review surface small. Checkboxes
+              select/deselect what gets written on save. */}
+          <div className={`flex flex-col ${showReviewPanel ? 'w-52 shrink-0 border-r border-[var(--color-bg-tertiary)]' : 'flex-1'}`}>
             <div className="flex-1 overflow-y-auto p-4">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-xs text-[var(--color-text-secondary)]">
@@ -539,8 +735,10 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
                 </span>
               </div>
               <div className="space-y-1">
-                {filenames.map((fn) => {
-                  const isDeleted = fn in originalTexts && !(fn in configFiles);
+                {noteworthyFiles.map((fn) => {
+                  const s = fileStatus[fn];
+                  const isDeleted = s.isDeleted;
+                  const findingCount = fileFindings[fn]?.length ?? 0;
                   return (
                     <label
                       key={fn}
@@ -564,6 +762,14 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
                       {isDeleted && (
                         <span className="shrink-0 text-[10px] font-semibold text-[var(--color-error)]">deleted</span>
                       )}
+                      {!s.hasOriginal && (
+                        <span className="shrink-0 text-[10px] font-semibold text-[var(--color-warning)]">new</span>
+                      )}
+                      {findingCount > 0 && (
+                        <span className="shrink-0 text-[10px] font-semibold text-[var(--color-text-secondary)]" title={`${findingCount} validation finding${findingCount !== 1 ? 's' : ''}`}>
+                          {findingCount}
+                        </span>
+                      )}
                       {appliedFiles.includes(fn) && (
                         <span className="w-11 shrink-0 text-right text-xs text-green-400">Saved</span>
                       )}
@@ -571,94 +777,129 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
                   );
                 })}
               </div>
+              {hiddenFileCount > 0 && (
+                <p className="mt-2 text-[10px] text-[var(--color-text-secondary)]">
+                  {hiddenFileCount} unchanged file{hiddenFileCount !== 1 ? 's' : ''} hidden — still selected for save
+                </p>
+              )}
             </div>
           </div>
 
-          {/* Right: diff panel (when originals exist or files are new) */}
-          {showDiffPanel && (
+          {/* Right: review area — per-file diff + validation findings.
+              Findings render under their file (click a row to jump to it in
+              the text view); unchanged files without findings are hidden. */}
+          {showReviewPanel && (
             <div className="flex-1 overflow-auto p-4 space-y-4">
               {diffLoading ? (
                 <p className="text-xs text-[var(--color-text-secondary)] text-center py-8">Generating diff...</p>
+              ) : reviewFiles.length === 0 ? (
+                noteworthyFiles.length > 0 ? (
+                  <p className="text-xs text-[var(--color-text-secondary)] text-center py-8">
+                    Changed or flagged files are deselected — tick them in the file list to review.
+                  </p>
+                ) : (
+                  <p className="text-xs text-[var(--color-text-secondary)] text-center py-8">
+                    No files to review — nothing changed, added, or flagged.
+                  </p>
+                )
               ) : (
-                filenames
-                  .filter((fn) => selectedFiles.has(fn))
-                  .map((fn) => {
-                    const original = originalTexts[fn];
-                    const current = currentTexts[fn];
-                    const hasOriginal = fn in originalTexts;
-                    const isDeleted = hasOriginal && !(fn in configFiles);
+                reviewFiles.map((fn) => {
+                  const s = fileStatus[fn];
+                  const current = currentTexts[fn];
+                  let diffLines: DiffLine[] = [];
+                  if (current !== undefined || s.isDeleted) {
+                    // Deleted files have no current text — diff against empty
+                    // so every original line shows as removed. New files have
+                    // no original — diff against empty so every line shows as
+                    // added (moved sub-components/features stay visible).
+                    const patch = createTwoFilesPatch(fn, fn, originalTexts[fn] ?? '', current ?? '', 'saved', s.isDeleted ? 'deleted' : 'current', { context: 3 });
+                    diffLines = parsePatch(patch);
+                  }
+                  const findings = fileFindings[fn] ?? [];
+                  const errorCount = findings.filter((f) => f.kind === 'error').length;
+                  const changedCount = diffLines.filter((l) => l.type === 'added' || l.type === 'removed').length;
 
-                    let diffLines: DiffLine[] = [];
-                    let hasChanges = false;
-                    if (current !== undefined || isDeleted) {
-                      // Deleted files have no current text — diff against empty
-                      // so every original line shows as removed. New files have
-                      // no original — diff against empty so every line shows as
-                      // added (moved sub-components/features stay visible).
-                      const patch = createTwoFilesPatch(fn, fn, original ?? '', current ?? '', 'saved', isDeleted ? 'deleted' : 'current', { context: 3 });
-                      diffLines = parsePatch(patch);
-                      hasChanges = diffLines.some((l) => l.type === 'added' || l.type === 'removed');
-                    }
-
-                    return (
-                      <div key={fn}>
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className="text-xs font-semibold text-[var(--color-text-primary)]">{fn}</span>
-                          {isDeleted && (
+                  return (
+                    <div key={fn}>
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-xs font-semibold text-[var(--color-text-primary)]">{fn}</span>
+                        {s.isDeleted && (
+                          <>
                             <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-error)]/20 text-[var(--color-error)]">deleted</span>
-                          )}
-                          {!hasOriginal && (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-warning)]/20 text-[var(--color-warning)]">new file</span>
-                          )}
-                          {hasOriginal && !isDeleted && !hasChanges && (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">unchanged</span>
-                          )}
-                          {hasOriginal && !isDeleted && hasChanges && (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-accent)]/20 text-[var(--color-accent)]">
-                              {diffLines.filter((l) => l.type === 'added' || l.type === 'removed').length} lines changed
-                            </span>
-                          )}
-                          {isDeleted && (
                             <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-error)]/20 text-[var(--color-error)]">
                               {diffLines.filter((l) => l.type === 'removed').length} lines removed
                             </span>
-                          )}
-                        </div>
-
-                        {hasChanges && (
-                          <div className="rounded-lg border border-[var(--color-bg-tertiary)] overflow-hidden">
-                            <pre className="text-xs leading-5 font-mono overflow-x-auto">
-                              {diffLines.map((line, i) => (
-                                <div
-                                  key={i}
-                                  className={
-                                    line.type === 'added'
-                                      ? 'w-max min-w-full bg-green-500/15 text-green-400 px-3'
-                                      : line.type === 'removed'
-                                        ? 'w-max min-w-full bg-red-500/15 text-red-400 px-3'
-                                        : line.type === 'header'
-                                          ? 'w-max min-w-full bg-blue-500/10 text-blue-400 px-3 py-0.5'
-                                          : 'w-max min-w-full text-[var(--color-text-secondary)] px-3'
-                                  }
-                                >
-                                  <span className="select-none opacity-40 mr-2">
-                                    {line.type === 'added' ? '+' : line.type === 'removed' ? '-' : ' '}
-                                  </span>
-                                  {line.content || '\u00A0'}
-                                </div>
-                              ))}
-                            </pre>
-                          </div>
+                          </>
+                        )}
+                        {!s.hasOriginal && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-warning)]/20 text-[var(--color-warning)]">new file</span>
+                        )}
+                        {s.hasOriginal && !s.isDeleted && !s.hasChanges && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">unchanged</span>
+                        )}
+                        {s.hasOriginal && !s.isDeleted && s.hasChanges && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-accent)]/20 text-[var(--color-accent)]">
+                            {changedCount} lines changed
+                          </span>
+                        )}
+                        {findings.length > 0 && (
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${
+                            errorCount > 0
+                              ? 'bg-red-500/20 text-red-400'
+                              : 'bg-[var(--color-warning)]/20 text-[var(--color-warning)]'
+                          }`}>
+                            {findings.length} finding{findings.length !== 1 ? 's' : ''}
+                          </span>
                         )}
                       </div>
-                    );
-                  })
-              )}
 
-              {!diffLoading && filenames.filter((fn) => selectedFiles.has(fn) && fn in originalTexts).length === 0 && (
-                <p className="text-xs text-[var(--color-text-secondary)] text-center py-8">
-                  No original versions available to compare.
-                </p>
+                      {s.hasChanges && (
+                        <div className="rounded-lg border border-[var(--color-bg-tertiary)] overflow-hidden">
+                          <pre className="text-xs leading-5 font-mono overflow-x-auto">
+                            {diffLines.map((line, i) => (
+                              <div
+                                key={i}
+                                className={
+                                  line.type === 'added'
+                                    ? 'w-max min-w-full bg-green-500/15 text-green-400 px-3'
+                                    : line.type === 'removed'
+                                      ? 'w-max min-w-full bg-red-500/15 text-red-400 px-3'
+                                      : line.type === 'header'
+                                        ? 'w-max min-w-full bg-blue-500/10 text-blue-400 px-3 py-0.5'
+                                        : 'w-max min-w-full text-[var(--color-text-secondary)] px-3'
+                                }
+                              >
+                                <span className="select-none opacity-40 mr-2">
+                                  {line.type === 'added' ? '+' : line.type === 'removed' ? '-' : ' '}
+                                </span>
+                                {line.content || '\u00A0'}
+                              </div>
+                            ))}
+                          </pre>
+                        </div>
+                      )}
+
+                      {/* Findings for this file — click a row to jump to it
+                          in the text view (same behavior as before, just
+                          relocated under the file). */}
+                      {findings.length > 0 && (
+                        <div className="mt-1.5 rounded-lg border border-[var(--color-bg-tertiary)] overflow-hidden">
+                          <div className="flex items-center justify-between px-2 py-1 bg-[var(--color-bg-primary)]">
+                            <span className="text-[10px] font-semibold text-[var(--color-text-secondary)]">
+                              Validation findings ({findings.length})
+                            </span>
+                            <span className="text-[10px] text-[var(--color-text-secondary)]">
+                              click a finding to jump to it
+                            </span>
+                          </div>
+                          <div className="p-1">
+                            {findings.map((f, i) => renderFindingRow(f, f.kind, `f-${fn}-${i}`))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
               )}
             </div>
           )}
@@ -715,7 +956,7 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
           </button>
           {status !== 'success' && (
             <button
-              onClick={handleApply}
+              onClick={handleSaveClick}
               disabled={status === 'exporting' || status === 'applying' || selectedFiles.size === 0}
               className={`px-4 py-1.5 rounded-md text-xs font-medium transition-colors disabled:opacity-50 ${saveButtonClass}`}
             >
@@ -754,6 +995,100 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
           )}
         </div>
       </div>
+
+      {/* Save-gate confirmation — a single overlay above the dialog (z-[60],
+          the app's nested-dialog pattern). Warnings-only → "Save with
+          warnings?" + optional bulk-ack checkbox; errors present →
+          "Active errors" + startup-failure line, never acked. */}
+      {confirmOpen && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60"
+          onClick={() => setConfirmOpen(false)}
+        >
+          <div
+            className="bg-[var(--color-bg-secondary)] rounded-xl shadow-2xl flex flex-col border border-[var(--color-bg-tertiary)] overflow-hidden"
+            style={{ width: 520, maxHeight: '85vh' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="p-4 border-b border-[var(--color-bg-tertiary)]">
+              <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
+                {hasGateErrors
+                  ? 'Active errors'
+                  : `Save with ${gateIssues.warnings.length} warning${gateIssues.warnings.length !== 1 ? 's' : ''}?`}
+              </h3>
+              {hasGateErrors ? (
+                <p className="text-xs text-red-300 mt-1">
+                  These errors will likely prevent Klipper from starting after a restart.
+                  {gateIssues.warnings.length > 0 && ` The ${gateIssues.warnings.length} listed warning${gateIssues.warnings.length !== 1 ? 's are' : ' is'} not acknowledged — fix the errors first.`}
+                </p>
+              ) : (
+                <p className="text-xs text-[var(--color-text-secondary)] mt-1">
+                  The warnings don't block the save. Check the box to acknowledge all of
+                  them at once so they stop flagging the save button.
+                </p>
+              )}
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-2">
+              {gateIssues.errors.map((f, i) => renderFindingRow(f, 'error', `ce-${i}`))}
+              {gateIssues.warnings.map((f, i) => renderFindingRow(f, 'warning', `cw-${i}`))}
+            </div>
+
+            {ackError && (
+              <p className="px-4 pb-1 text-xs text-red-400">{ackError}</p>
+            )}
+
+            <div className="p-4 border-t border-[var(--color-bg-tertiary)] flex items-center justify-between gap-2">
+              {!hasGateErrors && gateIssues.warnings.length > 0 ? (
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={ackAllChecked}
+                    onChange={(e) => setAckAllChecked(e.target.checked)}
+                    disabled={ackBusy}
+                    className="rounded"
+                  />
+                  <span className="text-xs text-[var(--color-text-primary)]">Acknowledge all</span>
+                </label>
+              ) : (
+                <span />
+              )}
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setConfirmOpen(false)}
+                  className="px-4 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-primary)] transition-colors"
+                >
+                  Cancel
+                </button>
+                {hasGateErrors ? (
+                  <button
+                    onClick={handleContinueAnyway}
+                    className="px-4 py-1.5 rounded-md text-xs font-medium bg-red-600 text-white hover:bg-red-700 transition-colors"
+                  >
+                    Continue saving anyway
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      onClick={handleSaveWithoutAck}
+                      className="px-4 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-primary)] transition-colors"
+                    >
+                      Save without acknowledging
+                    </button>
+                    <button
+                      onClick={() => void handleAckAndSave()}
+                      disabled={!ackAllChecked || ackBusy}
+                      className="px-4 py-1.5 rounded-md text-xs font-medium bg-green-600 text-white hover:bg-green-700 transition-colors disabled:opacity-50"
+                    >
+                      {ackBusy ? 'Acknowledging...' : 'Acknowledge & Save'}
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
