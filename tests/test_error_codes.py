@@ -143,6 +143,104 @@ def test_unknown_param_carries_code():
     assert all('Unknown parameter' in e.message for e in unknowns)
 
 
+def test_update_manager_info_tags_is_known():
+    # Moonraker update_manager (validated by Moonraker, not Klipper): the
+    # common option set must not produce unknown_param warnings. Regression:
+    # KWC's own klipper-wire-configurator-update.cfg ships `info_tags:` with
+    # a continuation value, which the schema previously didn't model.
+    result = _validate(
+        '[update_manager klipper-wire-configurator]\n'
+        'type: git_repo\n'
+        'channel: dev\n'
+        'path: /home/clifgall/Klipper-Wire-Configurator\n'
+        'origin: https://github.com/SartorialGrunt0/Klipper-Wire-Configurator.git\n'
+        'primary_branch: main\n'
+        'virtualenv: /home/clifgall/Klipper-Wire-Configurator/venv\n'
+        'requirements: backend/requirements.txt\n'
+        'managed_services: klipper-wire-configurator\n'
+        'info_tags:\n'
+        '\tdesc=Klipper Wire Configurator\n'
+    )
+    unknowns = [e for e in result.errors if e.param == 'info_tags']
+    assert not unknowns, (
+        "info_tags is a real Moonraker update_manager option "
+        f"(app_deploy.py getlist) — got: {[e.message for e in unknowns]}"
+    )
+    assert not _with_code(result.errors, 'unknown_param'), (
+        f"no option in the shipped update_manager file should be unknown; "
+        f"got: {[e.message for e in result.errors]}"
+    )
+
+
+def test_update_manager_bogus_param_still_warns():
+    # Adding real options must not loosen the advisory unknown-param check.
+    result = _validate(
+        '[update_manager klipper-wire-configurator]\n'
+        'type: git_repo\n'
+        'totally_fake_option: 1\n'
+    )
+    unknowns = _with_code(result.errors, 'unknown_param')
+    assert any('totally_fake_option' in e.message for e in unknowns), (
+        "bogus update_manager option must still warn"
+    )
+
+
+def test_update_manager_full_moonraker_option_set_known():
+    # Every option Moonraker reads for named [update_manager <name>]
+    # extension sections (source: components/update_manager/{update_manager,
+    # git_deploy, app_deploy}.py + docs/configuration.md) must be modeled —
+    # no unknown_param warnings on a config Moonraker accepts.
+    result = _validate(
+        '[update_manager my_ext]\n'
+        'type: git_repo\n'
+        'channel: beta\n'
+        'path: ~/my_ext\n'
+        'origin: https://github.com/owner/repo.git\n'
+        'primary_branch: main\n'
+        'virtualenv: ~/my_ext/venv\n'
+        'env: ~/my_ext/venv/bin/python\n'
+        'venv_args: --system-site-packages\n'
+        'requirements: requirements.txt\n'
+        'system_dependencies: system_dependencies.json\n'
+        'install_script: install.sh\n'
+        'enable_node_updates: True\n'
+        'is_system_service: False\n'
+        'managed_services: klipper\n'
+        'info_tags:\n'
+        '\tdesc=My Extension\n'
+        '\taction=webcam_restart\n'
+        'pinned_commit: 79930ed99a1fc284f41af5755908aa1fab948ce1\n'
+        'report_anomalies: False\n'
+        'persistent_files:\n'
+        '\tdata.json\n'
+        'refresh_interval: 168\n'
+        # web-type form of repo + python-type options also ride the same set
+        'repo: owner/repo\n'
+    )
+    unknowns = _with_code(result.errors, 'unknown_param')
+    assert not unknowns, (
+        f"all real Moonraker update_manager options must be modeled; "
+        f"got: {sorted(e.param for e in unknowns)}"
+    )
+
+
+def test_update_manager_primary_section_options_known():
+    # The unnamed primary [update_manager] section options are modeled too,
+    # so a primary section in a loaded .cfg doesn't warn.
+    result = _validate(
+        '[update_manager]\n'
+        'enable_auto_refresh: False\n'
+        'enable_system_updates: True\n'
+        'refresh_window: 0-5\n'
+        'refresh_interval: 672\n'
+    )
+    unknowns = _with_code(result.errors, 'unknown_param')
+    assert not unknowns, (
+        f"primary update_manager options must be modeled; "
+        f"got: {sorted(e.param for e in unknowns)}"
+    )
+
+
 # ── Messages with no consumer regex stay codeless ──────────────────
 
 def test_required_param_error_has_no_code():

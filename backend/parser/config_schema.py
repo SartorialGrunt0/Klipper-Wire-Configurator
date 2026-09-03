@@ -2180,7 +2180,7 @@ _register(SectionDef(
     is_named=True,
     description="Moonraker update_manager entry (git_repo/web/command...) — validated by Moonraker, not Klipper",
     params=[
-        _str("type", "Update source type (git_repo, web, command, zip, json_file)"),
+        _str("type", "Update source type (web, git_repo, zip, executable, python)"),
         _str("repo", "GitHub repo (owner/name)"),
         _str("path", "Local path of the installed software"),
         _str("origin", "Git remote origin URL"),
@@ -2192,6 +2192,19 @@ _register(SectionDef(
         _str("system_dependencies", "System packages to install"),
         _str("virtualenv", "Path to the virtualenv to update"),
         _str("env", "Environment variables for the update command"),
+        _str("venv_args", "Extra arguments passed to the virtualenv creation"),
+        _str("info_tags", "Tags shown in the update manager UI (key=value lines)"),
+        _bool("enable_node_updates", "Run npm ci --only=prod when package-lock.json changes"),
+        _bool("is_system_service", "Treat the section name as the managed service (default True)"),
+        _str("pinned_commit", "Git commit hash to pin updates to"),
+        _bool("report_anomalies", "Report detected anomalies to frontends (default True)"),
+        _str("persistent_files", "Files preserved across web/zip updates"),
+        _str("moved_origin", "Previous origin URL Moonraker updates from"),
+        # Primary `[update_manager]` (unnamed) section options — valid only
+        # there, but modeled so a primary section in a loaded .cfg doesn't warn.
+        _bool("enable_auto_refresh", "Periodically fetch update state (primary section)"),
+        _bool("enable_system_updates", "Allow system package updates (primary section)"),
+        _str("refresh_window", "Hours for periodic checks, e.g. 0-5 (primary section)"),
         _int("refresh_interval", "Update check interval (hours)"),
     ],
 ))
