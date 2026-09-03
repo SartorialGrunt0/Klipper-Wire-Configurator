@@ -21044,7 +21044,7 @@
           "type": "string",
           "required": false,
           "default": null,
-          "description": "Update source type (git_repo, web, command, zip, json_file)",
+          "description": "Update source type (web, git_repo, zip, executable, python)",
           "enum_values": [],
           "unit": ""
         },
@@ -21148,11 +21148,101 @@
           "unit": ""
         },
         {
+          "name": "venv_args",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Extra arguments passed to the virtualenv creation",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
           "name": "info_tags",
           "type": "string",
           "required": false,
           "default": null,
           "description": "Tags shown in the update manager UI (key=value lines)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "enable_node_updates",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "Run npm ci --only=prod when package-lock.json changes",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "is_system_service",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "Treat the section name as the managed service (default True)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "pinned_commit",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Git commit hash to pin updates to",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "report_anomalies",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "Report detected anomalies to frontends (default True)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "persistent_files",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Files preserved across web/zip updates",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "moved_origin",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Previous origin URL Moonraker updates from",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "enable_auto_refresh",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "Periodically fetch update state (primary section)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "enable_system_updates",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "Allow system package updates (primary section)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "refresh_window",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Hours for periodic checks, e.g. 0-5 (primary section)",
           "enum_values": [],
           "unit": ""
         },
