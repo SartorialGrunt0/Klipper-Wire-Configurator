@@ -143,6 +143,48 @@ def test_unknown_param_carries_code():
     assert all('Unknown parameter' in e.message for e in unknowns)
 
 
+def test_update_manager_info_tags_is_known():
+    # Moonraker update_manager (validated by Moonraker, not Klipper): the
+    # common option set must not produce unknown_param warnings. Regression:
+    # KWC's own klipper-wire-configurator-update.cfg ships `info_tags:` with
+    # a continuation value, which the schema previously didn't model.
+    result = _validate(
+        '[update_manager klipper-wire-configurator]\n'
+        'type: git_repo\n'
+        'channel: dev\n'
+        'path: /home/clifgall/Klipper-Wire-Configurator\n'
+        'origin: https://github.com/SartorialGrunt0/Klipper-Wire-Configurator.git\n'
+        'primary_branch: main\n'
+        'virtualenv: /home/clifgall/Klipper-Wire-Configurator/venv\n'
+        'requirements: backend/requirements.txt\n'
+        'managed_services: klipper-wire-configurator\n'
+        'info_tags:\n'
+        '\tdesc=Klipper Wire Configurator\n'
+    )
+    unknowns = [e for e in result.errors if e.param == 'info_tags']
+    assert not unknowns, (
+        "info_tags is a real Moonraker update_manager option "
+        f"(app_deploy.py getlist) — got: {[e.message for e in unknowns]}"
+    )
+    assert not _with_code(result.errors, 'unknown_param'), (
+        f"no option in the shipped update_manager file should be unknown; "
+        f"got: {[e.message for e in result.errors]}"
+    )
+
+
+def test_update_manager_bogus_param_still_warns():
+    # Adding real options must not loosen the advisory unknown-param check.
+    result = _validate(
+        '[update_manager klipper-wire-configurator]\n'
+        'type: git_repo\n'
+        'totally_fake_option: 1\n'
+    )
+    unknowns = _with_code(result.errors, 'unknown_param')
+    assert any('totally_fake_option' in e.message for e in unknowns), (
+        "bogus update_manager option must still warn"
+    )
+
+
 # ── Messages with no consumer regex stay codeless ──────────────────
 
 def test_required_param_error_has_no_code():

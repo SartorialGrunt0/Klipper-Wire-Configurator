@@ -2192,6 +2192,7 @@ _register(SectionDef(
         _str("system_dependencies", "System packages to install"),
         _str("virtualenv", "Path to the virtualenv to update"),
         _str("env", "Environment variables for the update command"),
+        _str("info_tags", "Tags shown in the update manager UI (key=value lines)"),
         _int("refresh_interval", "Update check interval (hours)"),
     ],
 ))

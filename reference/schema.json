@@ -21148,6 +21148,15 @@
           "unit": ""
         },
         {
+          "name": "info_tags",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Tags shown in the update manager UI (key=value lines)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
           "name": "refresh_interval",
           "type": "int",
           "required": false,
