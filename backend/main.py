@@ -1,5 +1,6 @@
 """Klipper Wire Configurator - Backend Application"""
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,9 +13,26 @@ from api.ai_routes import router as ai_router
 from api.printer_memory_routes import router as printer_memory_router
 from api.macro_log_routes import router as macro_log_router
 from mcp_server import McpServer, get_index
+from services.mainsail_sidebar import self_heal_sidebar
 from fastapi.responses import JSONResponse
 
-app = FastAPI(title="Klipper Wire Configurator", version="1.0.0")
+
+@asynccontextmanager
+async def _app_lifespan(app: FastAPI):
+    """Re-assert the Mainsail sidebar entry on every service start.
+
+    Moonraker's update_manager never runs install.sh on update (git_repo
+    type = git pull + pip + managed_services restart), so the sidebar link
+    — which lives in the Moonraker config dir, outside the repo — can only
+    self-repair here. Best-effort: self_heal_sidebar never raises.
+    """
+    status = self_heal_sidebar()
+    if status in ("added", "updated"):
+        print(f"[startup] Mainsail sidebar entry {status}.")
+    yield
+
+
+app = FastAPI(title="Klipper Wire Configurator", version="1.0.0", lifespan=_app_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
