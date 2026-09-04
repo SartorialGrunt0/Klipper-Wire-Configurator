@@ -176,7 +176,13 @@ def _get_printer_kinematics(config: ConfigFile) -> str | None:
 def _normalize_pin_values(value: str) -> list[str]:
     pins: list[str] = []
     for raw_pin in value.split(","):
-        clean_pin = re.sub(r"\s*:\s*", ":", raw_pin.lstrip("!^~").strip())
+        # Mirror klippy/pins.py parse_pin order: strip whitespace, THEN drop
+        # the pullup/invert prefixes, then whitespace again (pins.py:66-76).
+        # Order matters: a comma list puts a leading space on every element
+        # after the first (" ^menu:PA0"), and lstrip("!^~") before the
+        # whitespace strip leaves "^menu" to be checked as the chip name
+        # (V2.6.0 false "Unknown pin chip name '^menu'" on encoder_pins).
+        clean_pin = re.sub(r"\s*:\s*", ":", raw_pin.strip().lstrip("!^~").strip())
         if clean_pin and not clean_pin.startswith("<"):
             pins.append(clean_pin)
     return pins
