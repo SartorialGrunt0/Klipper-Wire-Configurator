@@ -188,6 +188,162 @@ def _normalize_pin_values(value: str) -> list[str]:
     return pins
 
 
+# klippy/extras/tmc.py: TMCVirtualPinHelper allocates its diag pin ONLY
+# inside setup_pin — i.e. only when a stepper's endstop_pin references
+# <driver_type>_<driver_name>:virtual_endstop. With sensorless homing off
+# (the common "diag wired but unused" layout — MPMDV2 cross-wires diag to
+# the other axis' physical endstops), the diag pin is never claimed, so it
+# legally collides with any other section's pin.
+TMC_DIAG_PARAM_NAMES = frozenset({"diag_pin", "diag0_pin", "diag1_pin"})
+
+
+def _collect_active_virtual_endstop_chips(sections) -> set[str]:
+    """Chip names referenced as '<chip>:virtual_endstop' by ANY param value.
+
+    A TMC driver's diag pin is live only when its registered chip name
+    (tmc.py:583 `register_chip(f'{type}_{name}')`) appears here. Case-folded
+    to match the chip registry's normalization.
+    """
+    chips: set[str] = set()
+    for section in sections:
+        if section.is_commented_out:
+            continue
+        for param in section.params:
+            if param.is_commented_out or not param.value:
+                continue
+            for clean in _normalize_pin_values(param.value):
+                head, sep, tail = clean.partition(":")
+                if sep and tail.strip().lower() == "virtual_endstop":
+                    chips.add(head.strip().lower())
+    return chips
+
+
+def _is_dead_tmc_diag_use(param, section, active_virtual_chips: set[str]) -> bool:
+    """True when a TMC diag param will never be allocated by klippy."""
+    if param.key.strip().lower() not in TMC_DIAG_PARAM_NAMES:
+        return False
+    driver_chip = f"{section.section_type}_{section.section_name}".strip().lower()
+    return driver_chip not in active_virtual_chips
+
+
+def _project_file_order(configs: dict[str, ConfigFile], main_file: str) -> list[str]:
+    """Files in effective-merge order: deepest includes first, main LAST.
+
+    Approximation of Klipper's linear parse (configfile.py _parse_config
+    processes an [include] at its line position). KWC's parser does not keep
+    include line numbers, so we assume the conventional layout — include
+    directives at the top, own definitions below — which makes the including
+    file's own content win over anything its includes define. The live
+    Trident/voron configs all follow this layout (printer.cfg's
+    [idle_timeout] overriding Hotkey.cfg's is exactly this precedence).
+    Worst case (an [include] placed BELOW a duplicated section) the shadow
+    is attributed to the wrong side; conventional layout makes that rare.
+    """
+    basename_map = {_basename(filename): filename for filename in configs}
+    ordered: list[str] = []
+    seen: set[str] = set()
+
+    def visit(filename: str) -> None:
+        if filename in seen:
+            return
+        seen.add(filename)
+        config = configs.get(filename)
+        if config is not None:
+            for include_path in config.includes:
+                target = include_path if include_path in configs else basename_map.get(_basename(include_path))
+                if target is not None:
+                    visit(target)
+        ordered.append(filename)
+
+    visit(main_file)
+    return ordered
+
+
+def _collect_live_pin_values(configs: dict[str, ConfigFile], active_files: set[str]) -> dict[tuple[str, str], set[str]]:
+    """Winning pin values per (section-header, param) under Klipper's merge.
+
+    RawConfigParser(strict=False) merges duplicate sections as a per-option
+    union where the LAST definition of an option wins. A pin value from an
+    earlier definition of the same (header, param) that the winner doesn't
+    contain is never allocated — ground-truthed with real klippy (dup
+    [fan] pin shadowing a [heater_fan] pin loads clean). Only keys defined
+    more than once appear in the map.
+    """
+    main_file = _find_main_project_file(configs)
+    if main_file is None:
+        return {}
+
+    values_by_key: dict[tuple[str, str], list[set[str]]] = {}
+    for filename in _project_file_order(configs, main_file):
+        if filename not in active_files:
+            continue
+        for section in configs[filename].sections:
+            if section.is_commented_out or section.section_type == "include":
+                continue
+            sec_def = get_section_def(section.section_type)
+            for param in section.params:
+                if param.is_commented_out or param.key == "_comment_" or not param.value:
+                    continue
+                param_def = _find_param_def(sec_def, param.key)
+                if param_def is None or param_def.param_type != ParamType.PIN:
+                    continue
+                key = (section.full_header.lower(), param.key.lower())
+                values_by_key.setdefault(key, []).append(set(_normalize_pin_values(param.value)))
+
+    return {
+        key: occs[-1]
+        for key, occs in values_by_key.items()
+        if len(occs) > 1
+    }
+
+
+def _collect_live_pin_values_single_file(config: ConfigFile) -> dict[tuple[str, str], set[str]]:
+    """Same merge semantics as _collect_live_pin_values, scoped to one file:
+    duplicate sections inside a file merge in definition order, last wins."""
+    values_by_key: dict[tuple[str, str], list[set[str]]] = {}
+    for section in config.sections:
+        if section.is_commented_out or section.section_type == "include":
+            continue
+        sec_def = get_section_def(section.section_type)
+        for param in section.params:
+            if param.is_commented_out or param.key == "_comment_" or not param.value:
+                continue
+            param_def = _find_param_def(sec_def, param.key)
+            if param_def is None or param_def.param_type != ParamType.PIN:
+                continue
+            key = (section.full_header.lower(), param.key.lower())
+            values_by_key.setdefault(key, []).append(set(_normalize_pin_values(param.value)))
+
+    return {
+        key: occs[-1]
+        for key, occs in values_by_key.items()
+        if len(occs) > 1
+    }
+
+
+def _drop_shadowed_pin_uses(used_pins: dict[str, list[PinUse]], live_pin_values: dict[tuple[str, str], set[str]]) -> None:
+    """Remove pin uses that Klipper's section merge never allocates."""
+    if not live_pin_values:
+        return
+    for pin in list(used_pins):
+        kept = [u for u in used_pins[pin] if not _is_shadowed_pin_use(u, live_pin_values)]
+        if kept:
+            used_pins[pin] = kept
+        else:
+            del used_pins[pin]
+
+
+def _is_shadowed_pin_use(use: PinUse, live_pin_values: dict[tuple[str, str], set[str]]) -> bool:
+    """True when this pin's value was overridden by a later definition."""
+    if not live_pin_values:
+        return False
+    key = (use.section.lower(), use.param.lower())
+    winners = live_pin_values.get(key)
+    if winners is None:
+        return False
+    return use.pin not in winners
+
+
 def _find_main_project_file(configs: dict[str, ConfigFile]) -> str | None:
     if not configs:
         return None
@@ -572,6 +728,11 @@ def validate_config(config: ConfigFile) -> ValidationResult:
     section_counts: dict[str, int] = {}
     used_pins: dict[str, list[PinUse]] = {}
     defined_sections: set[str] = set()
+    # A TMC driver's diag pin is allocated only while sensorless homing is
+    # active for that driver (tmc.py TMCVirtualPinHelper.setup_pin); compute
+    # the set of '<chip>:virtual_endstop' references once per file so dead
+    # diag pins never enter the conflict ledger.
+    active_virtual_chips = _collect_active_virtual_endstop_chips(config.sections)
     save_config_params_by_header: dict[str, set[str]] = {}
     save_config_section_types: set[str] = set()
     save_config_component_groups: set[str] = set()
@@ -660,6 +821,11 @@ def validate_config(config: ConfigFile) -> ValidationResult:
         for param_def in sec_def.params:
             if not param_def.required or param_def.name in active_params:
                 continue
+            if param_def.name == "rotation_distance" and "gear_ratio" in active_params:
+                # klippy/stepper.py parse_step_distance (297-309):
+                # rotation_distance is read only when gear_ratio is absent
+                # (the units_in_radians path fixes one rotation at 2*pi).
+                continue
             if _skip_missing_required_param(section, param_def.name, active_params):
                 continue
             result.errors.append(ValidationError(
@@ -742,6 +908,8 @@ def validate_config(config: ConfigFile) -> ValidationResult:
 
             # Track pin usage
             if param_def.param_type == ParamType.PIN and param.value:
+                if _is_dead_tmc_diag_use(param, section, active_virtual_chips):
+                    continue
                 _track_pin_usage(param, section, used_pins)
 
     # Check for required sections
@@ -758,7 +926,10 @@ def validate_config(config: ConfigFile) -> ValidationResult:
         result,
     )
 
-    # Check for pin conflicts
+    # Check for pin conflicts (drop uses shadowed by duplicate-section merge —
+    # a pin value overridden by a later definition of the same section is
+    # never allocated by Klipper)
+    _drop_shadowed_pin_uses(used_pins, _collect_live_pin_values_single_file(config))
     _check_pin_conflicts(
         used_pins,
         result,
@@ -1754,6 +1925,9 @@ def _check_cross_file_pin_conflicts(
     """
     used_pins: dict[str, list[PinUse]] = {}
     active_files = _get_active_project_files(configs)
+    active_virtual_chips: set[str] = set()
+    for filename in sorted(active_files):
+        active_virtual_chips |= _collect_active_virtual_endstop_chips(configs[filename].sections)
     for filename in sorted(active_files):
         config = configs[filename]
         for section in config.sections:
@@ -1765,7 +1939,13 @@ def _check_cross_file_pin_conflicts(
                     continue
                 param_def = _find_param_def(sec_def, param.key)
                 if param_def is not None and param_def.param_type == ParamType.PIN and param.value:
+                    if _is_dead_tmc_diag_use(param, section, active_virtual_chips):
+                        continue
                     _track_pin_usage(param, section, used_pins, filename=filename)
+
+    # Uses shadowed by the duplicate-section merge (later definition wins)
+    # are never allocated by Klipper — drop them before conflict detection.
+    _drop_shadowed_pin_uses(used_pins, _collect_live_pin_values(configs, active_files))
 
     # Pins already reported by a per-file check (both users in the same file)
     # are deduped by (pin, sorted user labels).
@@ -1783,7 +1963,13 @@ def _check_cross_file_pin_conflicts(
             continue  # [duplicate_pin_override] registered it — legal multi-use
         files_involved = {u.filename for u in users}
         if len(files_involved) < 2:
-            continue  # same-file conflict already reported per-file
+            # Same-file pair: normally the per-file pass already reported it
+            # (deduped by `already` below), but that pass may have SUPPRESSED
+            # the pair while the pin looked dead locally — e.g. both TMC diag
+            # pins in drivers.cfg while the <chip>:virtual_endstop reference
+            # lives in printer.cfg. The project-wide ledger sees them live,
+            # so let the finding through when no per-file one exists.
+            pass
         anchor = next((u for u in users if u.section), users[0])
         already = any(
             (u.section, u.param, u.line_number) in reported
@@ -1866,6 +2052,17 @@ def _collect_known_pin_chips(configs: dict[str, ConfigFile], active_files: set[s
                 chips.add((name or "mcu").lower())
             elif sec_type in ("probe", "multi_pin", "replicape"):
                 chips.add(sec_type.lower())
+            elif _is_probe_like_section_type(sec_type):
+                # klippy/extras/probe.py:215 — HomingViaProbeHelper.__init__
+                # registers the 'probe' chip, and it is constructed by
+                # [bltouch] (bltouch.py:292), [smart_effector]
+                # (smart_effector.py:169), [load_cell_probe] (698),
+                # [probe_eddy_current] (729) in addition to [probe] itself
+                # (probe.py:619). A probe-family section therefore makes
+                # probe:z_virtual_endstop resolvable (klipper_backup audit
+                # 2026-09-04: bltouch-only configs hard-failed the old check
+                # despite loading clean).
+                chips.add("probe")
             elif sec_type in ("tmc2130", "tmc2209", "tmc5160", "tmc2240") and name:
                 name_parts = name.split()
                 chips.add(f"{sec_type}_{name_parts[-1]}".lower())
