@@ -219,6 +219,15 @@
           "description": "Square corner velocity",
           "enum_values": [],
           "unit": "mm/s"
+        },
+        {
+          "name": "max_angular_velocity",
+          "type": "float",
+          "required": false,
+          "default": "0",
+          "description": "Maximum angular velocity",
+          "enum_values": [],
+          "unit": ""
         }
       ]
     },
@@ -13805,10 +13814,10 @@
       "params": [
         {
           "name": "endstop_accuracy",
-          "type": "int",
+          "type": "float",
           "required": false,
           "default": null,
-          "description": "Endstop accuracy",
+          "description": "Endstop accuracy (mm)",
           "enum_values": [],
           "unit": ""
         },
@@ -15164,6 +15173,83 @@
           "default": null,
           "description": "Software SPI MISO",
           "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "i2c_mcu",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "I2C MCU name (defaults to the main mcu)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "i2c_bus",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "I2C bus name (hardware I2C)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "i2c_address",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "I2C device address (0-127)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "i2c_speed",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "I2C clock speed in Hz",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "i2c_software_scl_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software I2C SCL pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "i2c_software_sda_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software I2C SDA pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "htu21d_hold_master",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "HTU21D clock-stretch hold during read",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "htu21d_resolution",
+          "type": "enum",
+          "required": false,
+          "default": "TEMP12_HUM08",
+          "description": "HTU21D measurement resolution",
+          "enum_values": [
+            "TEMP14_HUM12",
+            "TEMP13_HUM10",
+            "TEMP12_HUM08",
+            "TEMP11_HUM11"
+          ],
           "unit": ""
         },
         {
@@ -19340,6 +19426,126 @@
           "required": false,
           "default": "0.1",
           "description": "Auto cancel variation",
+          "enum_values": [],
+          "unit": ""
+        }
+      ]
+    },
+    "dac084S085": {
+      "section_type": "dac084S085",
+      "display_name": "DAC084S085",
+      "category": "sub_component",
+      "component_group": "stepper_driver",
+      "is_named": true,
+      "description": "DAC084S085 SPI digipot (stepper current reference), e.g. Alligator r2/r3",
+      "max_instances": 0,
+      "requires": [],
+      "params": [
+        {
+          "name": "enable_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "CS/enable pin (SPI chip select role)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "cs_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "SPI chip select pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_bus",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "SPI bus name (hardware SPI)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_speed",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "SPI clock speed in Hz",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_software_sclk_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software SPI clock pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_software_mosi_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software SPI MOSI pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_software_miso_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software SPI MISO pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "scale",
+          "type": "float",
+          "required": false,
+          "default": "1.0",
+          "description": "Channel value scale (amps)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "channel_A",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "Channel A value (0..scale)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "channel_B",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "Channel B value (0..scale)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "channel_C",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "Channel C value (0..scale)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "channel_D",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "Channel D value (0..scale)",
           "enum_values": [],
           "unit": ""
         }

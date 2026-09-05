@@ -87,6 +87,10 @@ class PinUse:
     param: str
     line_number: int = 0
     filename: str = ""
+    # cs_pin of a daisy-chained TMC2130/TMC5160 (chain_length >= 2): klippy
+    # looks it up with share_type="tmc_spi_cs" (tmc2130.py:190-194), so
+    # pins.py permits several such drivers on one pin.
+    tmc_spi_chain_cs: bool = False
 
     @property
     def label(self) -> str:
@@ -728,6 +732,16 @@ def validate_config(config: ConfigFile) -> ValidationResult:
     section_counts: dict[str, int] = {}
     used_pins: dict[str, list[PinUse]] = {}
     defined_sections: set[str] = set()
+    # User-defined [thermistor NAME] sections are registered as sensor
+    # factories by heaters.py at load, so they are valid sensor_type values
+    # alongside the builtin enum (heaters.py add_factory, exact-name
+    # lookup — configparser section names are case-sensitive).
+    user_thermistor_names = {
+        section.section_name.strip()
+        for section in config.sections
+        if section.section_type == "thermistor" and not section.is_commented_out
+        and section.section_name.strip()
+    }
     # A TMC driver's diag pin is allocated only while sensorless homing is
     # active for that driver (tmc.py TMCVirtualPinHelper.setup_pin); compute
     # the set of '<chip>:virtual_endstop' references once per file so dead
@@ -900,8 +914,17 @@ def validate_config(config: ConfigFile) -> ValidationResult:
                 ))
                 continue
 
-            # Type validation
-            _validate_param_value(param, param_def, section, result)
+            # sensor_type is validated against the BUILTIN Klipper sensor
+            # list, but heaters.py add_factory also registers every user
+            # [thermistor NAME] section in the config (Config_Reference:
+            # "if one defines a [thermistor my_thermistor] section then one
+            # may use sensor_type: my_thermistor"). Skip the enum check for
+            # those names; unknown names still error.
+            if not (
+                param.key == "sensor_type"
+                and param.value.strip() in user_thermistor_names
+            ):
+                _validate_param_value(param, param_def, section, result)
 
             # Relational validation (param A vs param B, same section)
             _check_relational_param(param, param_def, section, result)
@@ -938,6 +961,11 @@ def validate_config(config: ConfigFile) -> ValidationResult:
         ),
     )
 
+    # TMC SPI daisy-chain consistency (same length / unique positions).
+    _check_tmc_spi_chain_conflicts(
+        {config.filename: config}, {config.filename: result}, {config.filename},
+    )
+
     # Bulk-ack suppression (Phase 4 save gate): drop warnings whose stable
     # identity is in the identity store. Warnings ONLY — errors are never
     # acknowledged (the save-gate override is per-save by design), and info
@@ -967,6 +995,31 @@ def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, Valida
     # regardless of file count (tmc.py), so this runs for single-file
     # projects too (unlike the cross-file passes below it).
     _check_tmc_stepper_references(configs, results, _get_active_project_files(configs))
+
+    # A [thermistor NAME] in ANY active file registers a sensor factory for
+    # the whole project (Klipper loads includes into one namespace), so a
+    # sensor_type error raised file-locally is a false positive when the
+    # name is defined elsewhere in the project.
+    if len(configs) > 1:
+        project_thermistor_names = {
+            section.section_name.strip()
+            for filename, config in configs.items()
+            if filename in _get_active_project_files(configs)
+            for section in config.sections
+            if section.section_type == "thermistor" and not section.is_commented_out
+            and section.section_name.strip()
+        }
+        if project_thermistor_names:
+            for filename, result in results.items():
+                result.errors = [
+                    e for e in result.errors
+                    if not (
+                        e.severity == "error"
+                        and e.param == "sensor_type"
+                        and e.message.startswith("Invalid value '")
+                        and e.message.split("'")[1] in project_thermistor_names
+                    )
+                ]
 
     if len(configs) <= 1:
         return results
@@ -1178,6 +1231,10 @@ def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, Valida
         _collect_duplicate_pin_override_pins(configs, active_files),
     )
 
+    # TMC SPI daisy chains can span files (drivers in an included file);
+    # the per-file pass only sees one file's drivers.
+    _check_tmc_spi_chain_conflicts(configs, results, active_files)
+
     # Pin-chip membership (F8): a pin's chip prefix must name a chip the
     # project registers ([mcu NAME], probe, TMC virtual-endstop chips, ...),
     # mirroring klippy/pins.py parse_pin's 'Unknown pin chip name' hard-fail.
@@ -1238,6 +1295,10 @@ def _check_tmc_stepper_references(
     file), mirroring how Klipper loads all includes into one namespace.
     """
     # Map referenced section name (lowercased) -> first active ConfigSection.
+    # Keyed by FULL HEADER: klippy joins every word after the driver type
+    # (" ".join(config.get_name().split()[1:])) and calls has_section on the
+    # result, so [tmc2208 manual_stepper gear_stepper] resolves to the FULL
+    # header [manual_stepper gear_stepper], not the bare type 'manual_stepper'.
     referenced_sections: dict[str, tuple[str, ConfigSection]] = {}
     for filename, config in configs.items():
         if filename not in active_files:
@@ -1245,7 +1306,7 @@ def _check_tmc_stepper_references(
         for section in config.sections:
             if section.section_type == "include" or section.is_commented_out:
                 continue
-            key = section.section_type.lower()
+            key = section.full_header.lower()
             if key not in referenced_sections:
                 referenced_sections[key] = (filename, section)
 
@@ -1855,6 +1916,7 @@ def _find_param_def(sec_def, key: str):
 
 def _track_pin_usage(param, section, used_pins: dict, filename: str = "") -> None:
     """Record every normalized pin value of a PIN param into used_pins."""
+    chain_cs = _is_tmc_spi_chain_cs(param, section)
     for clean_pin in _normalize_pin_values(param.value):
         if clean_pin not in used_pins:
             used_pins[clean_pin] = []
@@ -1865,7 +1927,37 @@ def _track_pin_usage(param, section, used_pins: dict, filename: str = "") -> Non
             param=param.key,
             line_number=param.line_number,
             filename=filename,
+            tmc_spi_chain_cs=chain_cs,
         ))
+
+
+# TMC drivers whose SPI path shares cs_pin via share_type="tmc_spi_cs"
+# when daisy-chained: tmc2130 and tmc5160 route through
+# tmc2130.MCU_TMC_SPI (tmc5160.py:328), and SPI-mode tmc2240 does too
+# (tmc2240.py:358, only when uart_pin is absent). tmc2660 uses its OWN
+# MCU_SPI_from_config WITHOUT share_type (tmc2660.py:196) — chaining there
+# is meaningless and cs_pin stays exclusive.
+TMC_SPI_CHAINABLE_TYPES = frozenset({"tmc2130", "tmc2240", "tmc5160"})
+
+
+def _is_tmc_spi_chain_cs(param, section) -> bool:
+    """True when this cs_pin use belongs to a daisy-chained SPI TMC driver.
+
+    Ground truth (tmc2130.py lookup_tmc_spi_chain + MCU_TMC_SPI_chain):
+    with chain_length >= 2 the cs_pin is looked up with
+    share_type='tmc_spi_cs', so pins.py permits it on several chained
+    drivers; without chain_length the lookup is unshared and a second user
+    hard-fails 'pin ... used multiple times'.
+    """
+    if param.key != "cs_pin" or section.section_type not in TMC_SPI_CHAINABLE_TYPES:
+        return False
+    if section.section_type == "tmc2240" and section.get_value("uart_pin").strip():
+        return False  # UART-mode 2240 never touches the SPI chain path
+    chain_len = section.get_value("chain_length").strip()
+    try:
+        return int(chain_len) >= 2
+    except ValueError:
+        return False
 
 
 def _check_pin_conflicts(
@@ -2118,7 +2210,118 @@ def _is_allowed_shared_pin(users: list[PinUse]) -> bool:
         or _is_allowed_shared_enable_pin(users)
         or _is_allowed_shared_communication_pin(users)
         or _is_allowed_shared_display_button_pin(users)
+        or _is_allowed_shared_tmc_spi_chain_cs_pin(users)
     )
+
+
+def _is_allowed_shared_tmc_spi_chain_cs_pin(users: list[PinUse]) -> bool:
+    """Daisy-chained TMC2130/2240/5160 drivers may share one cs_pin.
+
+    Only the cs_pin itself is shareable (share_type='tmc_spi_cs'); any
+    other param on the pin keeps the conflict. Chain-internal errors
+    (mismatched chain_length, duplicate chain_position) are separate
+    Klipper hard-fails reported by _check_tmc_spi_chain_conflicts, so this
+    exemption never hides them.
+    """
+    if not users:
+        return False
+    return all(u.param == "cs_pin" and u.tmc_spi_chain_cs for u in users)
+
+
+def _check_tmc_spi_chain_conflicts(
+    configs: dict,
+    results: dict,
+    active_files: set,
+) -> None:
+    """Mirror lookup_tmc_spi_chain's two chain hard-fails (tmc2130.py:244-257).
+
+    Drivers sharing one daisy-chain cs_pin must declare the same
+    chain_length ("TMC SPI chain must have same length") and distinct
+    chain_positions ("TMC SPI chain can not have duplicate position").
+    Grouped by normalized cs_pin across the active project.
+    """
+    groups: dict[str, list[tuple[str, "ConfigSection", int]]] = {}
+    for filename in sorted(active_files):
+        for section in configs[filename].sections:
+            if section.is_commented_out or section.section_type == "include":
+                continue
+            if section.section_type not in TMC_SPI_CHAINABLE_TYPES:
+                continue
+            if section.section_type == "tmc2240" and section.get_value("uart_pin").strip():
+                continue
+            try:
+                chain_len = int(section.get_value("chain_length").strip())
+            except ValueError:
+                continue
+            if chain_len < 2:
+                continue
+            for pin in _normalize_pin_values(section.get_value("cs_pin")):
+                groups.setdefault(pin, []).append((filename, section, chain_len))
+
+    for _pin, entries in groups.items():
+        lengths = {e[2] for e in entries}
+        seen_pos: dict[str, int] = {}
+
+        def _already(result, param, message):
+            return any(
+                e.severity == "error" and e.param == param and e.message == message
+                for e in result.errors
+            )
+
+        for filename, section, chain_len in entries:
+            result = results.get(filename)
+            if result is None:
+                continue
+            if len(lengths) > 1 and chain_len != sorted(lengths)[0]:
+                message = (
+                    f"TMC SPI chain must have same length — this section "
+                    f"declares chain_length {chain_len}, another driver on "
+                    f"the same cs_pin declares {sorted(lengths)[0]}. Klipper "
+                    "fails to start."
+                )
+                if not _already(result, "chain_length", message):
+                    result.errors.append(ValidationError(
+                        severity="error",
+                        section=section.full_header,
+                        param="chain_length",
+                        message=message,
+                        line_number=section.line_number,
+                    ))
+            pos = section.get_value("chain_position").strip()
+            if pos:
+                try:
+                    pos_int = int(pos)
+                except ValueError:
+                    pos_int = 0
+                if not 1 <= pos_int <= chain_len:
+                    message = (
+                        f"chain_position '{pos}' is outside 1..chain_length "
+                        f"{chain_len} — Klipper rejects it at startup."
+                    )
+                    if not _already(result, "chain_position", message):
+                        result.errors.append(ValidationError(
+                            severity="error",
+                            section=section.full_header,
+                            param="chain_position",
+                            message=message,
+                            line_number=section.line_number,
+                        ))
+                if pos in seen_pos:
+                    message = (
+                        f"TMC SPI chain can not have duplicate position "
+                        f"'{pos}' — another driver on the same cs_pin uses "
+                        "it. Klipper fails to start."
+                    )
+                    if not _already(result, "chain_position", message):
+                        result.errors.append(ValidationError(
+                            severity="error",
+                            section=section.full_header,
+                            param="chain_position",
+                            message=message,
+                            line_number=section.line_number,
+                        ))
+                else:
+                    seen_pos[pos] = chain_len
 
 
 def _is_allowed_shared_tmc_uart_pin(users: list[PinUse]) -> bool:

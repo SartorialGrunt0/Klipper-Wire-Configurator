@@ -267,6 +267,8 @@ _register(SectionDef(
         _float("shoulder_height", "Rotary delta shoulder height", unit="mm", strict_above=0),
         _float("minimum_cruise_ratio", "Minimum cruise ratio", default="0.5", min_val=0, strict_below=1),
         _float("square_corner_velocity", "Square corner velocity", default="5.0", unit="mm/s", min_val=0),
+        # polar kinematics only (kinematics/polar.py:52 getfloat, above=0, default 0).
+        _float("max_angular_velocity", "Maximum angular velocity", default="0", strict_above=0),
     ],
 ))
 
@@ -880,7 +882,9 @@ _register(SectionDef(
     component_group="homing",
     is_named=True,
     params=[
-        _int("endstop_accuracy", "Endstop accuracy", strict_above=0),
+        # klippy endstop_phase.py:78 reads it with config.getfloat (mm,
+        # fractional values like .200 are the norm).
+        _float("endstop_accuracy", "Endstop accuracy (mm)", strict_above=0),
         _str("trigger_phase", "Trigger phase"),
         _bool("endstop_align_zero", "Align endstop to zero"),
     ],
@@ -1023,6 +1027,12 @@ _register(SectionDef(
         _pin("spi_software_sclk_pin", "Software SPI clock"),
         _pin("spi_software_mosi_pin", "Software SPI MOSI"),
         _pin("spi_software_miso_pin", "Software SPI MISO"),
+        # I2C sensor chips (HTU21D/LM75/BME280/...) configure their bus here
+        # (Config_Reference: HTU21D section -> common I2C settings).
+        *I2C_BUS_PARAMS,
+        _bool("htu21d_hold_master", "HTU21D clock-stretch hold during read"),
+        # htu21d.py:38-43 HTU21D_RESOLUTIONS keys (default TEMP12_HUM08).
+        _enum("htu21d_resolution", ["TEMP14_HUM12", "TEMP13_HUM10", "TEMP12_HUM08", "TEMP11_HUM11"], "HTU21D measurement resolution", default="TEMP12_HUM08"),
         _float("min_temp", "Minimum temperature", default="0", min_val=-273.15),
         _float("max_temp", "Maximum temperature", default="100"),
         _str("gcode_id", "G-code ID for temperature reporting"),
@@ -1862,6 +1872,25 @@ _register(SectionDef(
 # ── Digipot/DAC ──
 # ad5206 is SPI-only (bus.MCU_SPI_from_config); mcp4728 is I2C-only
 # (bus.MCU_I2C_from_config, default_addr=0x60). Model each with its real bus.
+_register(SectionDef(
+    section_type="dac084S085",
+    display_name="DAC084S085",
+    category="sub_component",
+    component_group="stepper_driver",
+    is_named=True,
+    description="DAC084S085 SPI digipot (stepper current reference), e.g. Alligator r2/r3",
+    # klippy/extras/dac084S085.py: MCU_SPI_from_config with pin_option
+    # "enable_pin", scale float (amps), channel_A..D each 0..scale.
+    params=[
+        _pin("enable_pin", "CS/enable pin (SPI chip select role)"),
+        *SPI_BUS_PARAMS,
+        _float("scale", "Channel value scale (amps)", default="1.0", strict_above=0),
+        _float("channel_A", "Channel A value (0..scale)", min_val=0),
+        _float("channel_B", "Channel B value (0..scale)", min_val=0),
+        _float("channel_C", "Channel C value (0..scale)", min_val=0),
+        _float("channel_D", "Channel D value (0..scale)", min_val=0),
+    ],
+))
 _register(SectionDef(
     section_type="ad5206",
     display_name="AD5206",

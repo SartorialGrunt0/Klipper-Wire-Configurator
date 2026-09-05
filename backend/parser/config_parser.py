@@ -146,6 +146,9 @@ NAMED_SECTION_TYPES = {
     "stepper", "carriage", "extra_carriage", "dual_carriage",
     "stepper_z1", "stepper_z2", "stepper_z3",
     "ad5206", "mcp4451", "mcp4728", "mcp4018",
+    # load_config_prefix modules missing above: dac084S085.py (Alligator
+    # digipot) and canbus_stats.py (CAN traffic stats).
+    "dac084S085", "canbus_stats",
     "sx1509", "samd_sercom", "adc_scaled", "ads1x1x",
     "load_cell", "load_cell_probe",
     "adxl345", "lis2dw", "lis3dh", "bmi160", "mpu9250", "icm20948",
