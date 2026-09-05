@@ -327,12 +327,26 @@ def _collect_live_pin_values_single_file(config: ConfigFile) -> dict[tuple[str, 
 
 def _drop_shadowed_pin_uses(used_pins: dict[str, list[PinUse]], live_pin_values: dict[tuple[str, str], set[str]]) -> None:
     """Remove pin uses that Klipper's section merge never allocates."""
-    if not live_pin_values:
-        return
     for pin in list(used_pins):
         kept = [u for u in used_pins[pin] if not _is_shadowed_pin_use(u, live_pin_values)]
-        if kept:
-            used_pins[pin] = kept
+        # Duplicate section definitions merge per-option (last wins), so a
+        # given (section, param) key allocates the pin at most ONCE even when
+        # several definitions repeat the identical value — the mirrored
+        # toolhead-board pattern where [extruder] appears verbatim in
+        # printer.cfg and an include. Collapse same-key uses to the LAST
+        # occurrence (the winner). Real report 2026-09-05; ground-truthed:
+        # identical dup [extruder] reaches 'Starting serial connect' clean.
+        seen_keys: set[tuple[str, str, str]] = set()
+        collapsed: list[PinUse] = []
+        for use in reversed(kept):
+            key = (use.section.lower(), use.param.lower(), use.pin)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            collapsed.append(use)
+        collapsed.reverse()
+        if collapsed:
+            used_pins[pin] = collapsed
         else:
             del used_pins[pin]
 

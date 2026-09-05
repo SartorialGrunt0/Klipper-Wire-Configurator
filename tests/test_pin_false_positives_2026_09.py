@@ -441,3 +441,201 @@ def test_rotation_distance_still_required_without_gear_ratio():
     assert not [e for e in result.errors if 'rotation_distance' in e.message]
     result2 = _validate(_stepper_x("#rotation_distance: 40"))
     assert [e for e in result2.errors if 'rotation_distance' in e.message]
+
+
+# ── 3b. Identical duplicate definitions (mirror files) ──────────────────────
+# Real report 2026-09-05 (V0 live config): [extruder] defined VERBATIM in
+# printer.cfg and in an included toolhead_board.cfg. The 4892884 shadow-drop
+# only removed pin values OVERRIDDEN by the later definition; with identical
+# values both uses survive and the conflict pass sees a double claim.
+# Ground truth: real klippy merges the definitions into ONE section and
+# allocates each option exactly once — fixture reaches 'Starting serial
+# connect' with no pins.error (/tmp/dup-extruder-fp, verified 2026-09-05).
+
+_MIRROR_EXTRUDER = """
+step_pin: EBBCan: PD0
+dir_pin: !EBBCan: PD1
+enable_pin: !EBBCan: PD2
+microsteps: 16
+rotation_distance: 53.494165
+gear_ratio: 44:10, 37:17
+nozzle_diameter: 0.400
+filament_diameter: 1.750
+heater_pin: EBBCan: PB13
+sensor_type: ATC Semitec 104GT-2
+sensor_pin: EBBCan: PA3
+control: pid
+pid_Kp: 21.527
+pid_Ki: 1.063
+pid_Kd: 108.982
+min_temp: 0
+max_temp: 300
+"""
+
+
+def test_identical_duplicate_section_across_files_is_not_a_conflict():
+    """V0 pattern: [extruder] mirrored verbatim in printer.cfg + include."""
+    printer = f"""
+[mcu]
+serial: /tmp/klippy.sock
+[mcu EBBCan]
+canbus_uuid: aabbccddee11
+
+[printer]
+kinematics: corexy
+max_velocity: 300
+max_accel: 5000
+max_z_velocity: 15
+max_z_accel: 100
+
+[stepper_x]
+step_pin: PE2
+dir_pin: !PE1
+enable_pin: !PE3
+microsteps: 16
+rotation_distance: 40
+endstop_pin: ^PG0
+position_endstop: 0
+position_max: 350
+
+[stepper_y]
+step_pin: PD3
+dir_pin: !PD6
+enable_pin: !PD5
+microsteps: 16
+rotation_distance: 40
+endstop_pin: ^PL0
+position_endstop: 0
+position_max: 350
+
+[stepper_z]
+step_pin: PD1
+dir_pin: PA0
+enable_pin: !PA2
+microsteps: 16
+rotation_distance: 8
+endstop_pin: ^PC4
+position_endstop: 0
+position_max: 330
+
+[extruder]
+{_MIRROR_EXTRUDER}
+
+[include toolhead_board.cfg]
+"""
+    results = _project({'printer.cfg': printer, 'toolhead_board.cfg': f"[extruder]\n{_MIRROR_EXTRUDER}"})
+    assert _shared_pin_errors(results) == []
+
+
+def test_identical_duplicate_section_in_one_file_is_not_a_conflict():
+    """Same mirror pattern inside a single file."""
+    text = f"""
+[mcu]
+canbus_uuid: aabbccddee11
+
+[printer]
+kinematics: corexy
+max_velocity: 300
+max_accel: 5000
+max_z_velocity: 15
+max_z_accel: 100
+
+[stepper_x]
+step_pin: PE2
+dir_pin: !PE1
+enable_pin: !PE3
+microsteps: 16
+rotation_distance: 40
+endstop_pin: ^PG0
+position_endstop: 0
+position_max: 350
+
+[stepper_y]
+step_pin: PD3
+dir_pin: !PD6
+enable_pin: !PD5
+microsteps: 16
+rotation_distance: 40
+endstop_pin: ^PL0
+position_endstop: 0
+position_max: 350
+
+[stepper_z]
+step_pin: PD1
+dir_pin: PA0
+enable_pin: !PA2
+microsteps: 16
+rotation_distance: 8
+endstop_pin: ^PC4
+position_endstop: 0
+position_max: 330
+
+[extruder]
+{_MIRROR_EXTRUDER}
+
+[extruder]
+{_MIRROR_EXTRUDER}
+"""
+    result = _validate(text)
+    assert _shared_pin_errors(result) == []
+
+
+def test_genuine_conflict_survives_identical_duplicate_of_other_section():
+    """The dedup must not swallow real conflicts: the merged [extruder]
+    value still collides with a DIFFERENT section claiming the same pin."""
+    printer = f"""
+[mcu]
+serial: /tmp/klippy.sock
+[mcu EBBCan]
+canbus_uuid: aabbccddee11
+
+[printer]
+kinematics: corexy
+max_velocity: 300
+max_accel: 5000
+max_z_velocity: 15
+max_z_accel: 100
+
+[stepper_x]
+step_pin: PE2
+dir_pin: !PE1
+enable_pin: !PE3
+microsteps: 16
+rotation_distance: 40
+endstop_pin: ^PG0
+position_endstop: 0
+position_max: 350
+
+[stepper_y]
+step_pin: PD3
+dir_pin: !PD6
+enable_pin: !PD5
+microsteps: 16
+rotation_distance: 40
+endstop_pin: ^PL0
+position_endstop: 0
+position_max: 350
+
+[stepper_z]
+step_pin: PD1
+dir_pin: PA0
+enable_pin: !PA2
+microsteps: 16
+rotation_distance: 8
+endstop_pin: ^PC4
+position_endstop: 0
+position_max: 330
+
+[extruder]
+{_MIRROR_EXTRUDER}
+
+[heater_fan hotend_fan]
+pin: EBBCan: PB13
+heater: extruder
+heater_temp: 50.0
+
+[include toolhead_board.cfg]
+"""
+    results = _project({'printer.cfg': printer, 'toolhead_board.cfg': f"[extruder]\n{_MIRROR_EXTRUDER}"})
+    errs = _shared_pin_errors(results)
+    assert any('PB13' in e.message for e in errs), errs
