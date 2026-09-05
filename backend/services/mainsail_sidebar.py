@@ -14,15 +14,19 @@ entry at every service start — and every update_manager update restarts the
 service via managed_services.
 
 All operations are best-effort: any failure is swallowed to a status string
-so app startup can never break on this.
+so app startup can never break on this. Failures are still logged (warning
+level or above) so silent permission/IO problems are diagnosable.
 """
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import socket
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # KWC favicon mark (frontend/public/favicon.svg) converted to a single filled
 # SVG path — identical to the icon strings/install.sh writes. Coordinates
@@ -122,7 +126,10 @@ def ensure_sidebar_entry(theme_dir: Path, url: str) -> str:
             try:
                 shutil.copy2(navi_path, str(navi_path) + ".bak")
             except OSError:
-                pass
+                logger.warning(
+                    "Could not back up corrupt navi.json at %s", navi_path,
+                    exc_info=True,
+                )
         entries = []
 
     before = len(entries)
@@ -142,6 +149,10 @@ def ensure_sidebar_entry(theme_dir: Path, url: str) -> str:
         theme_dir.mkdir(parents=True, exist_ok=True)
         _write_navi(navi_path, entries)
     except OSError:
+        logger.warning(
+            "Failed to write Mainsail sidebar entry to %s "
+            "(permission or IO error)", navi_path, exc_info=True,
+        )
         return "failed"
     return "updated" if was_present else "added"
 
@@ -179,4 +190,5 @@ def self_heal_sidebar(port: int | None = None, ip_addr: str | None = None) -> st
             pass
         return ensure_sidebar_entry(theme_dir, url)
     except Exception:
+        logger.exception("Unexpected error while self-healing Mainsail sidebar entry")
         return "failed"

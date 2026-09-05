@@ -159,6 +159,45 @@ def test_ensure_sidebar_entry_unwritable_dir_is_noop(fake_home, monkeypatch):
     assert ensure_sidebar_entry(theme, "http://1.2.3.4:8099") == "failed"
 
 
+def test_ensure_sidebar_entry_write_failure_is_logged(fake_home, monkeypatch, caplog):
+    # The noop above proves startup survives; this proves the failure is not
+    # silent — a warning with the navi.json path must be logged so
+    # permission/IO problems are diagnosable from service logs.
+    (fake_home / "mainsail").mkdir()
+    theme = fake_home / "printer_data" / "config" / ".theme"
+    theme.mkdir()
+    monkeypatch.setattr(
+        "services.mainsail_sidebar._write_navi",
+        lambda *a, **k: (_ for _ in ()).throw(PermissionError("ro")),
+    )
+    navi = theme / "navi.json"
+    with caplog.at_level("WARNING", logger="services.mainsail_sidebar"):
+        assert ensure_sidebar_entry(theme, "http://1.2.3.4:8099") == "failed"
+    assert any(
+        "Failed to write Mainsail sidebar entry" in r.message
+        and str(navi) in r.message
+        and r.exc_info is not None
+        for r in caplog.records
+    )
+
+
+def test_self_heal_unexpected_error_is_logged(fake_home, monkeypatch, caplog):
+    # The catch-all in self_heal_sidebar must log a traceback rather than
+    # swallowing the exception to a bare "failed".
+    (fake_home / "mainsail").mkdir()
+    monkeypatch.setattr(
+        "services.mainsail_sidebar.ensure_sidebar_entry",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    with caplog.at_level("ERROR", logger="services.mainsail_sidebar"):
+        assert self_heal_sidebar(port=8099, ip_addr="192.168.1.50") == "failed"
+    assert any(
+        "Unexpected error while self-healing" in r.message
+        and r.exc_info is not None
+        for r in caplog.records
+    )
+
+
 def test_startup_hook_runs_heal(fake_home, monkeypatch):
     # Functional: booting the app must write the sidebar entry — that is
     # what makes update_manager updates self-repairing (managed_services
