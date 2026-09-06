@@ -29,7 +29,9 @@ KWC_GIT_REF="${KWC_GIT_REF:-}"
 PYTHON_MIN_VERSION="3.10"
 NODE_MIN_VERSION="18"
 LOG_DIR="${TMPDIR:-/tmp}"
-LOG_FILE="${LOG_DIR}/klipper-wire-configurator-install-$(date +%Y%m%d-%H%M%S).log"
+# LOG_FILE is honoured from the environment so the sudo-guard re-exec can
+# hand the same log path to the child (one continuous install log).
+LOG_FILE="${LOG_FILE:-${LOG_DIR}/klipper-wire-configurator-install-$(date +%Y%m%d-%H%M%S).log}"
 SYSTEM_SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 LEGACY_USER_SERVICE_FILE="$HOME/.config/systemd/user/${SERVICE_NAME}.service"
 
@@ -56,17 +58,27 @@ error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ] && [ -f "${BASH_SOURCE[0]}" ]; then
     real_home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
     warn "Running under sudo; re-executing as '$SUDO_USER' (the installer must run as your user)."
+    # The main log tee isn't installed yet (it lives below the function
+    # definitions), so seed the log file with this notice ourselves; the
+    # re-exec'd child inherits LOG_FILE and continues the same log.
+    # The seed file is created root-owned here (the exec below skips the
+    # tee-site chmod), so loosen it or the user child can't append.
+    mkdir -p "$LOG_DIR" 2>/dev/null || true
+    echo "[sudo-guard] re-executing installer as '$SUDO_USER'" >> "$LOG_FILE" 2>/dev/null || true
+    chmod 666 "$LOG_FILE" 2>/dev/null || true
     # Unset SUDO_USER for the re-exec so the guard can't loop even if the
     # child still somehow sees EUID 0. Supported KWC_* env vars are passed
     # explicitly because sudo's -E preservation needs sudoers `setenv` and
     # fails open otherwise.
-    kwc_env=("KWC_PORT=${KWC_PORT:-8099}" "KWC_GIT_REF=${KWC_GIT_REF:-}")
+    kwc_env=("KWC_PORT=${KWC_PORT:-8099}" "KWC_GIT_REF=${KWC_GIT_REF:-}" "LOG_FILE=$LOG_FILE")
     [ -n "${KWC_PROJECTS_DIR:-}" ] && kwc_env+=("KWC_PROJECTS_DIR=$KWC_PROJECTS_DIR")
     exec env -u SUDO_USER sudo -u "$SUDO_USER" \
         env "HOME=$real_home" "USER=$SUDO_USER" "${kwc_env[@]}" \
         bash "${BASH_SOURCE[0]}" "$@"
 fi
 if [ "$(id -u)" -eq 0 ]; then
+    mkdir -p "$LOG_DIR" 2>/dev/null || true
+    echo "[sudo-guard] refused: installer run as root without SUDO_USER" >> "$LOG_FILE" 2>/dev/null || true
     error "Do not run this installer as root. Run it as your normal user WITHOUT sudo (it escalates internally where needed): bash scripts/install.sh"
 fi
 
@@ -388,6 +400,14 @@ on_error() {
 }
 
 mkdir -p "$LOG_DIR"
+# Pre-create the log BEFORE the tee opens it. Under `sudo bash install.sh`
+# this runs as root just before the guard re-execs the install as the
+# invoking user; a file created lazily by tee would be root-owned 644 and
+# the user child could not append. Creating it here and loosening it keeps
+# one continuous install log across the re-exec. (Same tradeoff /tmp temp
+# files already make: any local user may append to a timestamped log.)
+touch "$LOG_FILE"
+chmod 666 "$LOG_FILE" 2>/dev/null || true
 exec > >(tee -a "$LOG_FILE") 2>&1
 trap 'on_error "$LINENO" "$?"' ERR
 
