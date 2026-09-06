@@ -676,6 +676,21 @@ ok "Python dependencies installed."
 deactivate
 
 # --- Build frontend ---
+# Low-memory guard: Node's default V8 old-space is tiny on 32-bit ARM
+# (~128 MB) and the process ABORTS at that ceiling long before the
+# system's swap is used (swap is invisible to a self-imposed heap limit).
+# On devices with < 2 GB combined RAM+swap, size the heap to ~half of
+# that total so npm/Vite page into swap instead of aborting. Verified on
+# a Pi Zero 2 W (424 MB RAM + 1 GB swap): npm ci died at ~130 MB with
+# "Reached heap limit" until this was set (2026-09-06).
+total_mem_mb=$(awk '/MemTotal/ {m=$2} /SwapTotal/ {s=$2} END {printf "%d", (m+s)/1024}' /proc/meminfo 2>/dev/null || echo 0)
+if [ "${total_mem_mb:-0}" -lt 2048 ]; then
+    node_heap_mb=$(( total_mem_mb / 2 ))
+    [ "$node_heap_mb" -lt 384 ] && node_heap_mb=384
+    export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=$node_heap_mb"
+    info "Low-memory device (${total_mem_mb} MB RAM+swap): Node heap raised to ${node_heap_mb} MB."
+fi
+
 info "Installing frontend dependencies..."
 cd "$INSTALL_DIR/frontend"
 if ! npm ci; then
