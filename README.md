@@ -97,7 +97,7 @@ cd Klipper-Wire-Configurator
 bash scripts/install.sh
 ```
 
-Run **without sudo** — the installer escalates internally wherever needed (apt, systemd, and writes into the Moonraker config dir). `sudo bash scripts/install.sh` resets `$HOME` to `/root`, so the Moonraker config directory isn't found, the update_manager/Mainsail sidebar setup is silently skipped, and the app installs into `/root` instead of your user's home.
+Run **without sudo** — the installer escalates internally wherever needed (apt, systemd, and writes into the Moonraker config dir). `sudo bash scripts/install.sh` resets `$HOME` to `/root`, so the Moonraker config directory isn't found, the update_manager/Mainsail sidebar setup is silently skipped, and the app installs into `/root` instead of your user's home. If you do run it with sudo anyway, the installer detects this and re-runs itself as your real user. (`curl ... | sudo bash` can't recover the invoking user and is rejected outright.)
 
 Note: On 32-bit Raspberry Pi OS (`armv7` / `armhf`), the installer automatically uses the distro `nodejs` package.
 A successful install ends by checking the service health and printing the installer log path under `/tmp/klipper-wire-configurator-install-*.log`.

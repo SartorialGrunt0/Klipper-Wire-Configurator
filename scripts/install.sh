@@ -12,7 +12,8 @@
 # config dir). Running `sudo bash scripts/install.sh` resets $HOME to /root,
 # so the Moonraker config directory is not found and the update_manager /
 # Mainsail sidebar setup is silently skipped (and the app installs into
-# /root instead of your user's home).
+# /root instead of your user's home). If sudo is used anyway, the guard
+# below re-execs the script as the invoking user automatically.
 #
 # Uninstall:
 #   bash scripts/install.sh --uninstall
@@ -43,6 +44,31 @@ info()  { echo -e "${BLUE}[INFO]${NC} $*"; }
 ok()    { echo -e "${GREEN}[OK]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
+
+# --- Sudo guard ---
+# The installer must run as the invoking (non-root) user: INSTALL_DIR, the
+# Moonraker config-dir lookup, and Mainsail detection all hang off $HOME,
+# which `sudo` rewrites to /root. If someone runs the script under sudo
+# anyway, re-exec it as the original user (SUDO_USER) with that user's
+# HOME restored and the supported KWC_* vars passed through explicitly.
+# Running as root without sudo (direct root login, or curl | sudo bash)
+# is unrecoverable, so fail loudly.
+if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+    real_home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+    warn "Running under sudo; re-executing as '$SUDO_USER' (the installer must run as your user)."
+    # Unset SUDO_USER for the re-exec so the guard can't loop even if the
+    # child still somehow sees EUID 0. Supported KWC_* env vars are passed
+    # explicitly because sudo's -E preservation needs sudoers `setenv` and
+    # fails open otherwise.
+    kwc_env=("KWC_PORT=${KWC_PORT:-8099}" "KWC_GIT_REF=${KWC_GIT_REF:-}")
+    [ -n "${KWC_PROJECTS_DIR:-}" ] && kwc_env+=("KWC_PROJECTS_DIR=$KWC_PROJECTS_DIR")
+    exec env -u SUDO_USER sudo -u "$SUDO_USER" \
+        env "HOME=$real_home" "USER=$SUDO_USER" "${kwc_env[@]}" \
+        bash "${BASH_SOURCE[0]}" "$@"
+fi
+if [ "$(id -u)" -eq 0 ]; then
+    error "Do not run this installer as root. Run it as your normal user WITHOUT sudo (it escalates internally where needed): bash scripts/install.sh"
+fi
 
 is_legacy_user_service_active() {
     systemctl --user is-active --quiet "$SERVICE_NAME" 2>/dev/null
