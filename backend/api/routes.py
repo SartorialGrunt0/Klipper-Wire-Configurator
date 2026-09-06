@@ -23,6 +23,7 @@ from parser.config_parser import (
     ConfigFile,
     ConfigParam,
     ConfigSection,
+    find_save_config_sections,
     find_unclosed_headers,
     parse_config,
 )
@@ -707,6 +708,14 @@ def _config_update_to_config_file(data: ConfigUpdate) -> ConfigFile:
         )
         sections.append(section)
 
+    # Same contract for the #*# SAVE_CONFIG tail: Klipper appends the
+    # autosave data into the loaded config, so its values satisfy required
+    # params. Dropped here, delta/vendor configs with tail-only
+    # position_endstop/arm_length/delta_radius false-error
+    # "Required parameter is missing".
+    save_start, save_sections = (
+        find_save_config_sections(data.raw_text) if data.raw_text else (0, [])
+    )
     return ConfigFile(
         filename=data.filename,
         sections=sections,
@@ -718,6 +727,8 @@ def _config_update_to_config_file(data: ConfigUpdate) -> ConfigFile:
         # validation endpoints otherwise reconstruct the file without it and
         # the malformed-header check would silently never run.
         unclosed_headers=find_unclosed_headers(data.raw_text) if data.raw_text else [],
+        save_config_start_line=save_start,
+        save_config_sections=save_sections,
     )
 
 
