@@ -7362,6 +7362,69 @@
           "description": "Pressure advance smooth time",
           "enum_values": [],
           "unit": "s"
+        },
+        {
+          "name": "rtd_nominal_r",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "RTD nominal resistance at 0\u00b0C (ohms)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_num_of_wires",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "RTD wire count (2/3/4)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_reference_r",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "RTD reference wire resistance (ohms)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_use_50Hz_filter",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "Enable RTD 50 Hz noise filter",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_type",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Thermocouple type (K/J/T/E/N/R/S/B)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_use_50Hz_filter",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "Enable TC 50 Hz noise filter",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_averaging_count",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "TC sample averaging count",
+          "enum_values": [],
+          "unit": ""
         }
       ]
     },
@@ -7767,6 +7830,69 @@
           "description": "Pressure advance smooth time",
           "enum_values": [],
           "unit": "s"
+        },
+        {
+          "name": "rtd_nominal_r",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "RTD nominal resistance at 0\u00b0C (ohms)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_num_of_wires",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "RTD wire count (2/3/4)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_reference_r",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "RTD reference wire resistance (ohms)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_use_50Hz_filter",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "Enable RTD 50 Hz noise filter",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_type",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Thermocouple type (K/J/T/E/N/R/S/B)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_use_50Hz_filter",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "Enable TC 50 Hz noise filter",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_averaging_count",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "TC sample averaging count",
+          "enum_values": [],
+          "unit": ""
         }
       ]
     },
@@ -8172,6 +8298,69 @@
           "description": "Pressure advance smooth time",
           "enum_values": [],
           "unit": "s"
+        },
+        {
+          "name": "rtd_nominal_r",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "RTD nominal resistance at 0\u00b0C (ohms)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_num_of_wires",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "RTD wire count (2/3/4)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_reference_r",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "RTD reference wire resistance (ohms)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_use_50Hz_filter",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "Enable RTD 50 Hz noise filter",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_type",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Thermocouple type (K/J/T/E/N/R/S/B)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_use_50Hz_filter",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "Enable TC 50 Hz noise filter",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_averaging_count",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "TC sample averaging count",
+          "enum_values": [],
+          "unit": ""
         }
       ]
     },
@@ -8577,6 +8766,69 @@
           "description": "Pressure advance smooth time",
           "enum_values": [],
           "unit": "s"
+        },
+        {
+          "name": "rtd_nominal_r",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "RTD nominal resistance at 0\u00b0C (ohms)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_num_of_wires",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "RTD wire count (2/3/4)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_reference_r",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "RTD reference wire resistance (ohms)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_use_50Hz_filter",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "Enable RTD 50 Hz noise filter",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_type",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Thermocouple type (K/J/T/E/N/R/S/B)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_use_50Hz_filter",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "Enable TC 50 Hz noise filter",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_averaging_count",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "TC sample averaging count",
+          "enum_values": [],
+          "unit": ""
         }
       ]
     },
@@ -8982,6 +9234,69 @@
           "description": "Pressure advance smooth time",
           "enum_values": [],
           "unit": "s"
+        },
+        {
+          "name": "rtd_nominal_r",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "RTD nominal resistance at 0\u00b0C (ohms)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_num_of_wires",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "RTD wire count (2/3/4)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_reference_r",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "RTD reference wire resistance (ohms)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_use_50Hz_filter",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "Enable RTD 50 Hz noise filter",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_type",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Thermocouple type (K/J/T/E/N/R/S/B)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_use_50Hz_filter",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "Enable TC 50 Hz noise filter",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_averaging_count",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "TC sample averaging count",
+          "enum_values": [],
+          "unit": ""
         }
       ]
     },
@@ -9387,6 +9702,69 @@
           "description": "Pressure advance smooth time",
           "enum_values": [],
           "unit": "s"
+        },
+        {
+          "name": "rtd_nominal_r",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "RTD nominal resistance at 0\u00b0C (ohms)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_num_of_wires",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "RTD wire count (2/3/4)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_reference_r",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "RTD reference wire resistance (ohms)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_use_50Hz_filter",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "Enable RTD 50 Hz noise filter",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_type",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Thermocouple type (K/J/T/E/N/R/S/B)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_use_50Hz_filter",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "Enable TC 50 Hz noise filter",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_averaging_count",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "TC sample averaging count",
+          "enum_values": [],
+          "unit": ""
         }
       ]
     },
@@ -9792,6 +10170,69 @@
           "description": "Pressure advance smooth time",
           "enum_values": [],
           "unit": "s"
+        },
+        {
+          "name": "rtd_nominal_r",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "RTD nominal resistance at 0\u00b0C (ohms)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_num_of_wires",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "RTD wire count (2/3/4)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_reference_r",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "RTD reference wire resistance (ohms)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_use_50Hz_filter",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "Enable RTD 50 Hz noise filter",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_type",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Thermocouple type (K/J/T/E/N/R/S/B)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_use_50Hz_filter",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "Enable TC 50 Hz noise filter",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_averaging_count",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "TC sample averaging count",
+          "enum_values": [],
+          "unit": ""
         }
       ]
     },
@@ -10197,6 +10638,69 @@
           "description": "Pressure advance smooth time",
           "enum_values": [],
           "unit": "s"
+        },
+        {
+          "name": "rtd_nominal_r",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "RTD nominal resistance at 0\u00b0C (ohms)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_num_of_wires",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "RTD wire count (2/3/4)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_reference_r",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "RTD reference wire resistance (ohms)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_use_50Hz_filter",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "Enable RTD 50 Hz noise filter",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_type",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Thermocouple type (K/J/T/E/N/R/S/B)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_use_50Hz_filter",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "Enable TC 50 Hz noise filter",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_averaging_count",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "TC sample averaging count",
+          "enum_values": [],
+          "unit": ""
         }
       ]
     },
@@ -10395,6 +10899,123 @@
           "description": "Pullup resistor",
           "enum_values": [],
           "unit": ""
+        },
+        {
+          "name": "cs_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "SPI chip select pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_bus",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "SPI bus name (hardware SPI)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_speed",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "SPI clock speed in Hz",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_software_sclk_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software SPI clock pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_software_mosi_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software SPI MOSI pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_software_miso_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software SPI MISO pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_nominal_r",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "RTD nominal resistance at 0\u00b0C (ohms)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_num_of_wires",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "RTD wire count (2/3/4)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_reference_r",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "RTD reference wire resistance (ohms)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_use_50Hz_filter",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "Enable RTD 50 Hz noise filter",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_type",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Thermocouple type (K/J/T/E/N/R/S/B)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_use_50Hz_filter",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "Enable TC 50 Hz noise filter",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_averaging_count",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "TC sample averaging count",
+          "enum_values": [],
+          "unit": ""
         }
       ]
     },
@@ -10575,6 +11196,123 @@
           "description": "PWM cycle time",
           "enum_values": [],
           "unit": "s"
+        },
+        {
+          "name": "cs_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "SPI chip select pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_bus",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "SPI bus name (hardware SPI)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_speed",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "SPI clock speed in Hz",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_software_sclk_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software SPI clock pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_software_mosi_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software SPI MOSI pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_software_miso_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software SPI MISO pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_nominal_r",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "RTD nominal resistance at 0\u00b0C (ohms)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_num_of_wires",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "RTD wire count (2/3/4)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_reference_r",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "RTD reference wire resistance (ohms)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_use_50Hz_filter",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "Enable RTD 50 Hz noise filter",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_type",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Thermocouple type (K/J/T/E/N/R/S/B)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_use_50Hz_filter",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "Enable TC 50 Hz noise filter",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_averaging_count",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "TC sample averaging count",
+          "enum_values": [],
+          "unit": ""
         }
       ]
     },
@@ -12589,6 +13327,123 @@
           "required": false,
           "default": null,
           "description": "G-code temperature report ID",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "cs_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "SPI chip select pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_bus",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "SPI bus name (hardware SPI)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_speed",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "SPI clock speed in Hz",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_software_sclk_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software SPI clock pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_software_mosi_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software SPI MOSI pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_software_miso_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software SPI MISO pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_nominal_r",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "RTD nominal resistance at 0\u00b0C (ohms)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_num_of_wires",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "RTD wire count (2/3/4)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_reference_r",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "RTD reference wire resistance (ohms)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_use_50Hz_filter",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "Enable RTD 50 Hz noise filter",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_type",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Thermocouple type (K/J/T/E/N/R/S/B)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_use_50Hz_filter",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "Enable TC 50 Hz noise filter",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_averaging_count",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "TC sample averaging count",
           "enum_values": [],
           "unit": ""
         }
@@ -15312,6 +16167,69 @@
           "required": false,
           "default": null,
           "description": "G-code ID for temperature reporting",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_nominal_r",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "RTD nominal resistance at 0\u00b0C (ohms)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_num_of_wires",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "RTD wire count (2/3/4)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_reference_r",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "RTD reference wire resistance (ohms)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_use_50Hz_filter",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "Enable RTD 50 Hz noise filter",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_type",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Thermocouple type (K/J/T/E/N/R/S/B)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_use_50Hz_filter",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "Enable TC 50 Hz noise filter",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_averaging_count",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "TC sample averaging count",
           "enum_values": [],
           "unit": ""
         }
@@ -18738,6 +19656,123 @@
           "required": false,
           "default": "100",
           "description": "Max temp",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "cs_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "SPI chip select pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_bus",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "SPI bus name (hardware SPI)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_speed",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "SPI clock speed in Hz",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_software_sclk_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software SPI clock pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_software_mosi_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software SPI MOSI pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "spi_software_miso_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software SPI MISO pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_nominal_r",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "RTD nominal resistance at 0\u00b0C (ohms)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_num_of_wires",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "RTD wire count (2/3/4)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_reference_r",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "RTD reference wire resistance (ohms)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rtd_use_50Hz_filter",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "Enable RTD 50 Hz noise filter",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_type",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Thermocouple type (K/J/T/E/N/R/S/B)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_use_50Hz_filter",
+          "type": "bool",
+          "required": false,
+          "default": null,
+          "description": "Enable TC 50 Hz noise filter",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tc_averaging_count",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "TC sample averaging count",
           "enum_values": [],
           "unit": ""
         }

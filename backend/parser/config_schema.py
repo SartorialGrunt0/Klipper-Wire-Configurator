@@ -181,6 +181,25 @@ SENSOR_TYPE_ENUM = [
     "DS18B20", "temperature_combined",
 ]
 
+# RTD / thermocouple sensor-class params (spi_temperature.py MAX31865/MAX31856).
+# A sensor class is instantiated with the config of WHATEVER section declares
+# it: heaters.py Heater.__init__ -> setup_sensor(config) (heaters.py:280-300)
+# passes the SAME section to the sensor factory, so [extruder] with
+# sensor_type: MAX31865 reads rtd_nominal_r / rtd_reference_r (:285-286),
+# rtd_use_50Hz_filter (:334) and rtd_num_of_wires (:336) right there. Spread
+# into every section whose sensor_type takes the generic SENSOR_TYPE_ENUM —
+# NOT into fixed-enum sections ([angle], [load_cell], [probe_eddy_current],
+# [load_cell_probe]), which cannot host an RTD/TC chip.
+RTD_TC_PARAMS = [
+    _float("rtd_nominal_r", "RTD nominal resistance at 0°C (ohms)", strict_above=0),
+    _int("rtd_num_of_wires", "RTD wire count (2/3/4)"),
+    _float("rtd_reference_r", "RTD reference wire resistance (ohms)", strict_above=0),
+    _bool("rtd_use_50Hz_filter", "Enable RTD 50 Hz noise filter"),
+    _str("tc_type", "Thermocouple type (K/J/T/E/N/R/S/B)"),
+    _bool("tc_use_50Hz_filter", "Enable TC 50 Hz noise filter"),
+    _int("tc_averaging_count", "TC sample averaging count"),
+]
+
 # Full SPI bus parameter family, mirroring bus.py MCU_SPI_from_config:
 # hardware bus (spi_bus) OR software bus (the three spi_software_* pins) plus
 # optional chip select and clock speed. Reused by every SPI-bus section so the
@@ -394,6 +413,7 @@ _register(SectionDef(
         _float("max_temp", "Maximum allowed temperature", required=True, unit="°C"),
         _float("pressure_advance", "Pressure advance coefficient", default="0", min_val=0),
         _float("pressure_advance_smooth_time", "Pressure advance smooth time", default="0.040", unit="s", strict_above=0),
+        *RTD_TC_PARAMS,
     ],
 ))
 
@@ -434,6 +454,10 @@ _register(SectionDef(
         _float("pwm_cycle_time", "PWM cycle time", default="0.100", unit="s", strict_above=0),
         _float("smooth_time", "Temperature smoothing window", default="1.0", unit="s", strict_above=0),
         _float("pullup_resistor", "Pullup resistor", default="4700", strict_above=0),
+        # SPI sensor chips (MAX31865/MAX31856) read their bus from THIS section
+        # (heaters.py setup_sensor passes the heater config to the factory).
+        *SPI_BUS_PARAMS,
+        *RTD_TC_PARAMS,
     ],
 ))
 
@@ -461,6 +485,9 @@ _register(SectionDef(
         _float("max_power", "Maximum heater power", default="1.0", max_val=1, strict_above=0),
         _float("max_delta", "Max temperature delta for watermark control", default="2.0", strict_above=0),
         _float("pwm_cycle_time", "PWM cycle time", default="0.100", unit="s", strict_above=0),
+        # SPI sensor chips read their bus from this section (setup_sensor).
+        *SPI_BUS_PARAMS,
+        *RTD_TC_PARAMS,
     ],
 ))
 
@@ -644,6 +671,9 @@ _register(SectionDef(
         _float("pid_Kd", "PID derivative"),
         _float("pid_deriv_time", "PID derivative time", default="2.0", strict_above=0),
         _str("gcode_id", "G-code temperature report ID"),
+        # SPI sensor chips read their bus from this section (setup_sensor).
+        *SPI_BUS_PARAMS,
+        *RTD_TC_PARAMS,
     ],
 ))
 
@@ -1057,6 +1087,7 @@ _register(SectionDef(
         _float("min_temp", "Minimum temperature", default="0", min_val=-273.15),
         _float("max_temp", "Maximum temperature", default="100"),
         _str("gcode_id", "G-code ID for temperature reporting"),
+        *RTD_TC_PARAMS,
     ],
 ))
 
@@ -1764,6 +1795,9 @@ _register(SectionDef(
         _float("smooth_time", "Smooth time", default="2.0", strict_above=0),
         _float("min_temp", "Min temp", default="0", min_val=-273.15),
         _float("max_temp", "Max temp", default="100"),
+        # SPI sensor chips read their bus from this section (setup_sensor).
+        *SPI_BUS_PARAMS,
+        *RTD_TC_PARAMS,
     ],
 ))
 
