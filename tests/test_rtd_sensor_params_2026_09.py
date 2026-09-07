@@ -171,3 +171,73 @@ def test_rtd_bounds_match_klipper():
     assert params["rtd_nominal_r"].strict_above == "0" or float(params["rtd_nominal_r"].strict_above) == 0.0
     assert params["rtd_reference_r"].strict_above is not None
     assert params["rtd_num_of_wires"].min_val is None or int(params["rtd_num_of_wires"].min_val) <= 0
+
+
+# ── 5. tc_type / tc_averaging_count are getchoice-read: invalid values are
+#       config-load hard-fails (spi_temperature.py:165-184, configfile.py:84) ──
+
+def test_invalid_tc_type_is_error():
+    text = """
+[heater_generic chamber]
+heater_pin: PF6
+sensor_type: MAX31856
+spi_bus: spi1
+sensor_pin: PB2
+tc_type: Z
+max_power: 1.0
+min_temp: 0
+max_temp: 90
+"""
+    result = _validate(text)
+    errs = [e for e in result.errors
+            if e.severity == "error" and e.param == "tc_type"]
+    assert len(errs) == 1, f"tc_type Z is not a getchoice value — must error: {result.errors}"
+
+
+def test_invalid_tc_averaging_count_is_error():
+    text = """
+[heater_generic chamber]
+heater_pin: PF6
+sensor_type: MAX31856
+spi_bus: spi1
+sensor_pin: PB2
+tc_type: K
+tc_averaging_count: 3
+max_power: 1.0
+min_temp: 0
+max_temp: 90
+"""
+    result = _validate(text)
+    errs = [e for e in result.errors
+            if e.severity == "error" and e.param == "tc_averaging_count"]
+    assert len(errs) == 1, f"tc_averaging_count 3 is not a getchoice value — must error: {result.errors}"
+
+
+def test_temperature_probe_tc_params_are_enums():
+    # temperature_probe carries its own copy of the RTD/TC family.
+    params = {p.name: p for p in SECTION_DEFS["temperature_probe"].params}
+    assert params["tc_type"].enum_values == ["B", "E", "J", "K", "N", "R", "S", "T"]
+    assert params["tc_averaging_count"].enum_values == ["1", "2", "4", "8", "16"]
+
+
+# ── 6. spi_speed is read unconditionally by bus.py MCU_SPI_from_config ──
+
+def test_spi_speed_accepted_on_extruder_and_temperature_sensor():
+    for sec in ("extruder", "temperature_sensor"):
+        names = {p.name for p in SECTION_DEFS[sec].params}
+        assert "spi_speed" in names, f"{sec} must accept spi_speed (bus.py:137)"
+    text = """
+[temperature_sensor rtd_probe]
+sensor_type: MAX31865
+spi_bus: spi1
+spi_speed: 500000
+sensor_pin: PB2
+rtd_nominal_r: 100
+rtd_reference_r: 400
+min_temp: 0
+max_temp: 300
+"""
+    result = _validate(text)
+    assert _unknown_params(result) == [], (
+        f"spi_speed under [temperature_sensor] must be known: {_unknown_params(result)}"
+    )

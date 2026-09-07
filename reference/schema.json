@@ -7181,6 +7181,15 @@
           "unit": ""
         },
         {
+          "name": "spi_speed",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "SPI bus clock speed",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
           "name": "spi_software_sclk_pin",
           "type": "pin",
           "required": false,
@@ -7401,11 +7410,20 @@
         },
         {
           "name": "tc_type",
-          "type": "string",
+          "type": "enum",
           "required": false,
-          "default": null,
-          "description": "Thermocouple type (K/J/T/E/N/R/S/B)",
-          "enum_values": [],
+          "default": "K",
+          "description": "Thermocouple type",
+          "enum_values": [
+            "B",
+            "E",
+            "J",
+            "K",
+            "N",
+            "R",
+            "S",
+            "T"
+          ],
           "unit": ""
         },
         {
@@ -7419,11 +7437,17 @@
         },
         {
           "name": "tc_averaging_count",
-          "type": "int",
+          "type": "enum",
           "required": false,
-          "default": null,
+          "default": "1",
           "description": "TC sample averaging count",
-          "enum_values": [],
+          "enum_values": [
+            "1",
+            "2",
+            "4",
+            "8",
+            "16"
+          ],
           "unit": ""
         }
       ]
@@ -7649,6 +7673,15 @@
           "unit": ""
         },
         {
+          "name": "spi_speed",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "SPI bus clock speed",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
           "name": "spi_software_sclk_pin",
           "type": "pin",
           "required": false,
@@ -7869,11 +7902,20 @@
         },
         {
           "name": "tc_type",
-          "type": "string",
+          "type": "enum",
           "required": false,
-          "default": null,
-          "description": "Thermocouple type (K/J/T/E/N/R/S/B)",
-          "enum_values": [],
+          "default": "K",
+          "description": "Thermocouple type",
+          "enum_values": [
+            "B",
+            "E",
+            "J",
+            "K",
+            "N",
+            "R",
+            "S",
+            "T"
+          ],
           "unit": ""
         },
         {
@@ -7887,11 +7929,17 @@
         },
         {
           "name": "tc_averaging_count",
-          "type": "int",
+          "type": "enum",
           "required": false,
-          "default": null,
+          "default": "1",
           "description": "TC sample averaging count",
-          "enum_values": [],
+          "enum_values": [
+            "1",
+            "2",
+            "4",
+            "8",
+            "16"
+          ],
           "unit": ""
         }
       ]
@@ -8117,6 +8165,15 @@
           "unit": ""
         },
         {
+          "name": "spi_speed",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "SPI bus clock speed",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
           "name": "spi_software_sclk_pin",
           "type": "pin",
           "required": false,
@@ -8337,11 +8394,20 @@
         },
         {
           "name": "tc_type",
-          "type": "string",
+          "type": "enum",
           "required": false,
-          "default": null,
-          "description": "Thermocouple type (K/J/T/E/N/R/S/B)",
-          "enum_values": [],
+          "default": "K",
+          "description": "Thermocouple type",
+          "enum_values": [
+            "B",
+            "E",
+            "J",
+            "K",
+            "N",
+            "R",
+            "S",
+            "T"
+          ],
           "unit": ""
         },
         {
@@ -8355,11 +8421,17 @@
         },
         {
           "name": "tc_averaging_count",
-          "type": "int",
+          "type": "enum",
           "required": false,
-          "default": null,
+          "default": "1",
           "description": "TC sample averaging count",
-          "enum_values": [],
+          "enum_values": [
+            "1",
+            "2",
+            "4",
+            "8",
+            "16"
+          ],
           "unit": ""
         }
       ]
@@ -8585,6 +8657,15 @@
           "unit": ""
         },
         {
+          "name": "spi_speed",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "SPI bus clock speed",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
           "name": "spi_software_sclk_pin",
           "type": "pin",
           "required": false,
@@ -8805,11 +8886,20 @@
         },
         {
           "name": "tc_type",
-          "type": "string",
+          "type": "enum",
           "required": false,
-          "default": null,
-          "description": "Thermocouple type (K/J/T/E/N/R/S/B)",
-          "enum_values": [],
+          "default": "K",
+          "description": "Thermocouple type",
+          "enum_values": [
+            "B",
+            "E",
+            "J",
+            "K",
+            "N",
+            "R",
+            "S",
+            "T"
+          ],
           "unit": ""
         },
         {
@@ -8823,11 +8913,17 @@
         },
         {
           "name": "tc_averaging_count",
-          "type": "int",
+          "type": "enum",
           "required": false,
-          "default": null,
+          "default": "1",
           "description": "TC sample averaging count",
-          "enum_values": [],
+          "enum_values": [
+            "1",
+            "2",
+            "4",
+            "8",
+            "16"
+          ],
           "unit": ""
         }
       ]
@@ -9053,6 +9149,15 @@
           "unit": ""
         },
         {
+          "name": "spi_speed",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "SPI bus clock speed",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
           "name": "spi_software_sclk_pin",
           "type": "pin",
           "required": false,
@@ -9273,11 +9378,20 @@
         },
         {
           "name": "tc_type",
-          "type": "string",
+          "type": "enum",
           "required": false,
-          "default": null,
-          "description": "Thermocouple type (K/J/T/E/N/R/S/B)",
-          "enum_values": [],
+          "default": "K",
+          "description": "Thermocouple type",
+          "enum_values": [
+            "B",
+            "E",
+            "J",
+            "K",
+            "N",
+            "R",
+            "S",
+            "T"
+          ],
           "unit": ""
         },
         {
@@ -9291,11 +9405,17 @@
         },
         {
           "name": "tc_averaging_count",
-          "type": "int",
+          "type": "enum",
           "required": false,
-          "default": null,
+          "default": "1",
           "description": "TC sample averaging count",
-          "enum_values": [],
+          "enum_values": [
+            "1",
+            "2",
+            "4",
+            "8",
+            "16"
+          ],
           "unit": ""
         }
       ]
@@ -9521,6 +9641,15 @@
           "unit": ""
         },
         {
+          "name": "spi_speed",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "SPI bus clock speed",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
           "name": "spi_software_sclk_pin",
           "type": "pin",
           "required": false,
@@ -9741,11 +9870,20 @@
         },
         {
           "name": "tc_type",
-          "type": "string",
+          "type": "enum",
           "required": false,
-          "default": null,
-          "description": "Thermocouple type (K/J/T/E/N/R/S/B)",
-          "enum_values": [],
+          "default": "K",
+          "description": "Thermocouple type",
+          "enum_values": [
+            "B",
+            "E",
+            "J",
+            "K",
+            "N",
+            "R",
+            "S",
+            "T"
+          ],
           "unit": ""
         },
         {
@@ -9759,11 +9897,17 @@
         },
         {
           "name": "tc_averaging_count",
-          "type": "int",
+          "type": "enum",
           "required": false,
-          "default": null,
+          "default": "1",
           "description": "TC sample averaging count",
-          "enum_values": [],
+          "enum_values": [
+            "1",
+            "2",
+            "4",
+            "8",
+            "16"
+          ],
           "unit": ""
         }
       ]
@@ -9989,6 +10133,15 @@
           "unit": ""
         },
         {
+          "name": "spi_speed",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "SPI bus clock speed",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
           "name": "spi_software_sclk_pin",
           "type": "pin",
           "required": false,
@@ -10209,11 +10362,20 @@
         },
         {
           "name": "tc_type",
-          "type": "string",
+          "type": "enum",
           "required": false,
-          "default": null,
-          "description": "Thermocouple type (K/J/T/E/N/R/S/B)",
-          "enum_values": [],
+          "default": "K",
+          "description": "Thermocouple type",
+          "enum_values": [
+            "B",
+            "E",
+            "J",
+            "K",
+            "N",
+            "R",
+            "S",
+            "T"
+          ],
           "unit": ""
         },
         {
@@ -10227,11 +10389,17 @@
         },
         {
           "name": "tc_averaging_count",
-          "type": "int",
+          "type": "enum",
           "required": false,
-          "default": null,
+          "default": "1",
           "description": "TC sample averaging count",
-          "enum_values": [],
+          "enum_values": [
+            "1",
+            "2",
+            "4",
+            "8",
+            "16"
+          ],
           "unit": ""
         }
       ]
@@ -10457,6 +10625,15 @@
           "unit": ""
         },
         {
+          "name": "spi_speed",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "SPI bus clock speed",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
           "name": "spi_software_sclk_pin",
           "type": "pin",
           "required": false,
@@ -10677,11 +10854,20 @@
         },
         {
           "name": "tc_type",
-          "type": "string",
+          "type": "enum",
           "required": false,
-          "default": null,
-          "description": "Thermocouple type (K/J/T/E/N/R/S/B)",
-          "enum_values": [],
+          "default": "K",
+          "description": "Thermocouple type",
+          "enum_values": [
+            "B",
+            "E",
+            "J",
+            "K",
+            "N",
+            "R",
+            "S",
+            "T"
+          ],
           "unit": ""
         },
         {
@@ -10695,11 +10881,17 @@
         },
         {
           "name": "tc_averaging_count",
-          "type": "int",
+          "type": "enum",
           "required": false,
-          "default": null,
+          "default": "1",
           "description": "TC sample averaging count",
-          "enum_values": [],
+          "enum_values": [
+            "1",
+            "2",
+            "4",
+            "8",
+            "16"
+          ],
           "unit": ""
         }
       ]
@@ -10992,11 +11184,20 @@
         },
         {
           "name": "tc_type",
-          "type": "string",
+          "type": "enum",
           "required": false,
-          "default": null,
-          "description": "Thermocouple type (K/J/T/E/N/R/S/B)",
-          "enum_values": [],
+          "default": "K",
+          "description": "Thermocouple type",
+          "enum_values": [
+            "B",
+            "E",
+            "J",
+            "K",
+            "N",
+            "R",
+            "S",
+            "T"
+          ],
           "unit": ""
         },
         {
@@ -11010,11 +11211,17 @@
         },
         {
           "name": "tc_averaging_count",
-          "type": "int",
+          "type": "enum",
           "required": false,
-          "default": null,
+          "default": "1",
           "description": "TC sample averaging count",
-          "enum_values": [],
+          "enum_values": [
+            "1",
+            "2",
+            "4",
+            "8",
+            "16"
+          ],
           "unit": ""
         }
       ]
@@ -11289,11 +11496,20 @@
         },
         {
           "name": "tc_type",
-          "type": "string",
+          "type": "enum",
           "required": false,
-          "default": null,
-          "description": "Thermocouple type (K/J/T/E/N/R/S/B)",
-          "enum_values": [],
+          "default": "K",
+          "description": "Thermocouple type",
+          "enum_values": [
+            "B",
+            "E",
+            "J",
+            "K",
+            "N",
+            "R",
+            "S",
+            "T"
+          ],
           "unit": ""
         },
         {
@@ -11307,11 +11523,17 @@
         },
         {
           "name": "tc_averaging_count",
-          "type": "int",
+          "type": "enum",
           "required": false,
-          "default": null,
+          "default": "1",
           "description": "TC sample averaging count",
-          "enum_values": [],
+          "enum_values": [
+            "1",
+            "2",
+            "4",
+            "8",
+            "16"
+          ],
           "unit": ""
         }
       ]
@@ -13422,11 +13644,20 @@
         },
         {
           "name": "tc_type",
-          "type": "string",
+          "type": "enum",
           "required": false,
-          "default": null,
-          "description": "Thermocouple type (K/J/T/E/N/R/S/B)",
-          "enum_values": [],
+          "default": "K",
+          "description": "Thermocouple type",
+          "enum_values": [
+            "B",
+            "E",
+            "J",
+            "K",
+            "N",
+            "R",
+            "S",
+            "T"
+          ],
           "unit": ""
         },
         {
@@ -13440,11 +13671,17 @@
         },
         {
           "name": "tc_averaging_count",
-          "type": "int",
+          "type": "enum",
           "required": false,
-          "default": null,
+          "default": "1",
           "description": "TC sample averaging count",
-          "enum_values": [],
+          "enum_values": [
+            "1",
+            "2",
+            "4",
+            "8",
+            "16"
+          ],
           "unit": ""
         }
       ]
@@ -16040,6 +16277,15 @@
           "unit": ""
         },
         {
+          "name": "spi_speed",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "SPI bus clock speed",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
           "name": "spi_software_sclk_pin",
           "type": "pin",
           "required": false,
@@ -16208,11 +16454,20 @@
         },
         {
           "name": "tc_type",
-          "type": "string",
+          "type": "enum",
           "required": false,
-          "default": null,
-          "description": "Thermocouple type (K/J/T/E/N/R/S/B)",
-          "enum_values": [],
+          "default": "K",
+          "description": "Thermocouple type",
+          "enum_values": [
+            "B",
+            "E",
+            "J",
+            "K",
+            "N",
+            "R",
+            "S",
+            "T"
+          ],
           "unit": ""
         },
         {
@@ -16226,11 +16481,17 @@
         },
         {
           "name": "tc_averaging_count",
-          "type": "int",
+          "type": "enum",
           "required": false,
-          "default": null,
+          "default": "1",
           "description": "TC sample averaging count",
-          "enum_values": [],
+          "enum_values": [
+            "1",
+            "2",
+            "4",
+            "8",
+            "16"
+          ],
           "unit": ""
         }
       ]
@@ -19751,11 +20012,20 @@
         },
         {
           "name": "tc_type",
-          "type": "string",
+          "type": "enum",
           "required": false,
-          "default": null,
-          "description": "Thermocouple type (K/J/T/E/N/R/S/B)",
-          "enum_values": [],
+          "default": "K",
+          "description": "Thermocouple type",
+          "enum_values": [
+            "B",
+            "E",
+            "J",
+            "K",
+            "N",
+            "R",
+            "S",
+            "T"
+          ],
           "unit": ""
         },
         {
@@ -19769,11 +20039,17 @@
         },
         {
           "name": "tc_averaging_count",
-          "type": "int",
+          "type": "enum",
           "required": false,
-          "default": null,
+          "default": "1",
           "description": "TC sample averaging count",
-          "enum_values": [],
+          "enum_values": [
+            "1",
+            "2",
+            "4",
+            "8",
+            "16"
+          ],
           "unit": ""
         }
       ]
@@ -21959,11 +22235,20 @@
         },
         {
           "name": "tc_type",
-          "type": "string",
+          "type": "enum",
           "required": false,
-          "default": null,
-          "description": "Thermocouple type (K/J/T/E/N/R/S/B)",
-          "enum_values": [],
+          "default": "K",
+          "description": "Thermocouple type",
+          "enum_values": [
+            "B",
+            "E",
+            "J",
+            "K",
+            "N",
+            "R",
+            "S",
+            "T"
+          ],
           "unit": ""
         },
         {
@@ -21977,11 +22262,17 @@
         },
         {
           "name": "tc_averaging_count",
-          "type": "int",
+          "type": "enum",
           "required": false,
-          "default": null,
+          "default": "1",
           "description": "TC sample averaging count",
-          "enum_values": [],
+          "enum_values": [
+            "1",
+            "2",
+            "4",
+            "8",
+            "16"
+          ],
           "unit": ""
         },
         {

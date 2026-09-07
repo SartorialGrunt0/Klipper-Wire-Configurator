@@ -195,9 +195,12 @@ RTD_TC_PARAMS = [
     _int("rtd_num_of_wires", "RTD wire count (2/3/4)"),
     _float("rtd_reference_r", "RTD reference wire resistance (ohms)", strict_above=0),
     _bool("rtd_use_50Hz_filter", "Enable RTD 50 Hz noise filter"),
-    _str("tc_type", "Thermocouple type (K/J/T/E/N/R/S/B)"),
+    # tc_type / tc_averaging_count are getchoice-read by MAX31856
+    # (spi_temperature.py:165-184): an invalid value is a config-load
+    # hard-fail, so they must be enums, not free-form str/int.
+    _enum("tc_type", ["B", "E", "J", "K", "N", "R", "S", "T"], "Thermocouple type", default="K"),
     _bool("tc_use_50Hz_filter", "Enable TC 50 Hz noise filter"),
-    _int("tc_averaging_count", "TC sample averaging count"),
+    _enum("tc_averaging_count", ["1", "2", "4", "8", "16"], "TC sample averaging count", default="1"),
 ]
 
 # Full SPI bus parameter family, mirroring bus.py MCU_SPI_from_config:
@@ -393,6 +396,7 @@ _register(SectionDef(
         _enum("sensor_type", SENSOR_TYPE_ENUM, "Temperature sensor type", required=True),
         _pin("sensor_pin", "Sensor analog pin"),
         _str("spi_bus", "SPI bus (for SPI sensors)"),
+        _int("spi_speed", "SPI bus clock speed", min_val=100000),
         _pin("spi_software_sclk_pin", "Software SPI clock"),
         _pin("spi_software_mosi_pin", "Software SPI MOSI"),
         _pin("spi_software_miso_pin", "Software SPI MISO"),
@@ -1075,6 +1079,7 @@ _register(SectionDef(
         _float("pullup_resistor", "Sensor pullup resistor", default="4700", strict_above=0),
         _float("inline_resistor", "Sensor inline resistor", default="0", min_val=0),
         _str("spi_bus", "SPI bus (for SPI sensors)"),
+        _int("spi_speed", "SPI bus clock speed", min_val=100000),
         _pin("spi_software_sclk_pin", "Software SPI clock"),
         _pin("spi_software_mosi_pin", "Software SPI MOSI"),
         _pin("spi_software_miso_pin", "Software SPI MISO"),
@@ -2165,9 +2170,11 @@ _register(SectionDef(
         _int("rtd_num_of_wires", "RTD wire count (2/3/4)"),
         _float("rtd_reference_r", "RTD reference wire resistance (ohms)", strict_above=0),
         _bool("rtd_use_50Hz_filter", "Enable RTD 50 Hz noise filter"),
-        _str("tc_type", "Thermocouple type (K/J/T/E/N/R/S/B)"),
+        # getchoice-read by MAX31856 (spi_temperature.py:165-184) — invalid
+        # value = config-load hard-fail, so modeled as enums.
+        _enum("tc_type", ["B", "E", "J", "K", "N", "R", "S", "T"], "Thermocouple type", default="K"),
         _bool("tc_use_50Hz_filter", "Enable TC 50 Hz noise filter"),
-        _int("tc_averaging_count", "TC sample averaging count"),
+        _enum("tc_averaging_count", ["1", "2", "4", "8", "16"], "TC sample averaging count", default="1"),
         # ADS1220 amplifier (PT100 / PT1000)
         _str("gain", "ADS1220 PGA gain"),
         _str("sample_rate", "ADS1220 sample rate"),
