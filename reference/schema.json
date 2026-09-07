@@ -11385,7 +11385,7 @@
       "category": "sub_component",
       "component_group": "stepper_driver",
       "is_named": true,
-      "description": "TMC2240 stepper driver (SPI)",
+      "description": "TMC2240 stepper driver (SPI, or UART when uart_pin is set)",
       "max_instances": 0,
       "requires": [],
       "params": [
@@ -11557,6 +11557,42 @@
           "required": false,
           "default": null,
           "description": "TMC driver register override",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "uart_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "UART RX pin (switches the driver to UART mode)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "tx_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "UART TX pin (if separate)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "select_pins",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Select pins for UART mux",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "uart_address",
+          "type": "int",
+          "required": false,
+          "default": "0",
+          "description": "UART address (0-7)",
           "enum_values": [],
           "unit": ""
         }

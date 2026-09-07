@@ -489,6 +489,27 @@ for tmc_type in ["tmc2130", "tmc2240", "tmc5160"]:
         params=TMC_SPI_PARAMS[:],
     ))
 
+# tmc2240 is dual-mode (tmc2240.py:352): with uart_pin present it talks over
+# the bit-banged TMC UART (tmc_uart.MCU_TMC_uart, max_addr=7 — uart_address
+# goes 0..7, wider than the 2208/2209's 0..3) and NEVER reads cs_pin;
+# without uart_pin it is the plain SPI path above. cs_pin's requiredness is
+# conditional, enforced in validator._skip_missing_required_param.
+_register(SectionDef(
+    section_type="tmc2240",
+    display_name="TMC2240",
+    category="sub_component",
+    component_group="stepper_driver",
+    is_named=True,
+    name_references="stepper",
+    description="TMC2240 stepper driver (SPI, or UART when uart_pin is set)",
+    params=TMC_SPI_PARAMS[:] + [
+        _pin("uart_pin", "UART RX pin (switches the driver to UART mode)"),
+        _pin("tx_pin", "UART TX pin (if separate)"),
+        _str("select_pins", "Select pins for UART mux"),
+        _int("uart_address", "UART address (0-7)", default="0", min_val=0, max_val=7),
+    ],
+))
+
 _register(SectionDef(
     section_type="tmc2660",
     display_name="TMC2660",

@@ -353,6 +353,52 @@ chain_length: 2
     assert hits
 
 
+def test_duplicate_chain_position_numeric_forms_flagged():
+    # klippy reads chain_position with config.getint (tmc2130.py:254), so
+    # '1' and '01' are the SAME position — hard-fail. String comparison
+    # missed it (PR #29 review 2026-09-07).
+    result = _validate(_CHAIN_BASE + """
+[tmc2130 stepper_x]
+cs_pin: PF5
+run_current: 0.800
+sense_resistor: 0.075
+chain_position: 1
+chain_length: 2
+
+[tmc2130 stepper_y]
+cs_pin: PF5
+run_current: 0.800
+sense_resistor: 0.075
+chain_position: 01
+chain_length: 2
+""")
+    hits = [e for e in _errors(result) if "duplicate position" in e.message]
+    assert hits
+
+
+def test_unparseable_chain_positions_not_duplicate_flagged():
+    # klippy getint raises on 'abc' before any duplicate-position check —
+    # unparseable values get the range error only, never each other's
+    # 'duplicate' (both would coerce to 0 under a naive int fallback).
+    result = _validate(_CHAIN_BASE + """
+[tmc2130 stepper_x]
+cs_pin: PF5
+run_current: 0.800
+sense_resistor: 0.075
+chain_position: abc
+chain_length: 2
+
+[tmc2130 stepper_y]
+cs_pin: PF5
+run_current: 0.800
+sense_resistor: 0.075
+chain_position: xyz
+chain_length: 2
+""")
+    dups = [e for e in _errors(result) if "duplicate position" in e.message]
+    assert not dups
+
+
 def test_chain_position_beyond_length_flagged():
     # tmc2130.py:254 getint('chain_position', minval=1, maxval=chain_len)
     result = _validate(_CHAIN_BASE + """
@@ -529,3 +575,56 @@ rotation_distance: 40
 """)
     hits = [e for e in result.errors if e.code == "unknown_section"]
     assert hits and "stepper_1" in hits[0].message
+
+
+# ── 8. [tmc2240] UART mode (PR #29 review 2026-09-07) ──────────────────
+
+def test_tmc2240_uart_mode_valid():
+    # tmc2240.py:352 — config.get("uart_pin") present => UART comm
+    # (tmc_uart.MCU_TMC_uart, max_addr=7), cs_pin not read at all.
+    # uart_address goes 0..7 for the 2240 (tmc2240.py:355 passes 7).
+    result = _validate("""
+[tmc2240 stepper_x]
+uart_pin: PB0
+run_current: 0.800
+sense_resistor: 0.110
+uart_address: 3
+""")
+    hits = [e for e in result.errors
+            if e.code in ("unknown_param",) and e.param in ("uart_pin", "uart_address")]
+    assert not hits, hits
+    # cs_pin must NOT be demanded in UART mode
+    missing = [e for e in result.errors if "cs_pin" in e.message]
+    assert not missing, missing
+
+
+def test_tmc2240_spi_mode_still_requires_cs_pin():
+    result = _validate("""
+[tmc2240 stepper_x]
+run_current: 0.800
+sense_resistor: 0.110
+""")
+    hits = [e for e in result.errors
+            if e.severity == "error" and "cs_pin" in e.message]
+    assert hits
+
+
+def test_tmc2240_uart_pin_shareable_on_one_uart_line():
+    # tmc_uart.py:196-202 — rx/tx looked up with share_type
+    # tmc_uart_rx/tx, so multiple UART-mode drivers legally share one
+    # line (same as the existing 2208/2209 exemption).
+    result = _validate("""
+[tmc2240 stepper_x]
+uart_pin: PB0
+uart_address: 0
+run_current: 0.800
+sense_resistor: 0.110
+
+[tmc2240 stepper_y]
+uart_pin: PB0
+uart_address: 1
+run_current: 0.800
+sense_resistor: 0.110
+""")
+    hits = [e for e in _errors(result, "shared_pin") if "PB0" in e.message]
+    assert not hits, hits

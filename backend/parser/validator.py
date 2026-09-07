@@ -1753,6 +1753,15 @@ def _skip_missing_required_param(section: ConfigSection, param_name: str, active
     if section.section_type == "dual_carriage" and "primary_carriage" in active_params:
         return param_name in {"axis", "step_pin", "dir_pin", "microsteps", "rotation_distance"}
 
+    if (
+        section.section_type == "tmc2240"
+        and param_name == "cs_pin"
+        and "uart_pin" in active_params
+    ):
+        # tmc2240.py:352 — uart_pin present selects the UART path; cs_pin
+        # is never read (SPI-mode-only requirement).
+        return True
+
     return False
 
 
@@ -2274,7 +2283,7 @@ def _check_tmc_spi_chain_conflicts(
 
     for _pin, entries in groups.items():
         lengths = {e[2] for e in entries}
-        seen_pos: dict[str, int] = {}
+        seen_pos: dict[int, int] = {}
 
         def _already(result, param, message):
             return any(
@@ -2320,22 +2329,28 @@ def _check_tmc_spi_chain_conflicts(
                             message=message,
                             line_number=section.line_number,
                         ))
-                if pos in seen_pos:
-                    message = (
-                        f"TMC SPI chain can not have duplicate position "
-                        f"'{pos}' — another driver on the same cs_pin uses "
-                        "it. Klipper fails to start."
-                    )
-                    if not _already(result, "chain_position", message):
-                        result.errors.append(ValidationError(
-                            severity="error",
-                            section=section.full_header,
-                            param="chain_position",
-                            message=message,
-                            line_number=section.line_number,
-                        ))
-                else:
-                    seen_pos[pos] = chain_len
+                # klippy reads the position with config.getint (tmc2130.py:254),
+                # so '1' and '01' are the SAME position — dedupe on the int,
+                # not the string. Unparseable values raise in getint before
+                # klipper ever reaches its duplicate check, so they stay out
+                # of the ledger (the range error above already covers them).
+                if pos_int >= 1:
+                    if pos_int in seen_pos:
+                        message = (
+                            f"TMC SPI chain can not have duplicate position "
+                            f"'{pos}' — another driver on the same cs_pin uses "
+                            f"{pos_int}. Klipper fails to start."
+                        )
+                        if not _already(result, "chain_position", message):
+                            result.errors.append(ValidationError(
+                                severity="error",
+                                section=section.full_header,
+                                param="chain_position",
+                                message=message,
+                                line_number=section.line_number,
+                            ))
+                    else:
+                        seen_pos[pos_int] = chain_len
 
 
 def _is_allowed_shared_tmc_uart_pin(users: list[PinUse]) -> bool:
@@ -2343,7 +2358,11 @@ def _is_allowed_shared_tmc_uart_pin(users: list[PinUse]) -> bool:
         return False
 
     shared_params = {"uart_pin", "tx_pin"}
-    shared_driver_types = {"tmc2208", "tmc2209"}
+    # tmc_uart.py:196-202 looks rx/tx up with share_type tmc_uart_rx/tx, so
+    # any bit-banged-UART driver may share the line: 2208/2209 (UART-only)
+    # and 2240 in UART mode (tmc2240.py:352). A 2240 in SPI mode never
+    # registers its uart_pin — such a config errors elsewhere anyway.
+    shared_driver_types = {"tmc2208", "tmc2209", "tmc2240"}
     return all(user.section_type in shared_driver_types and user.param in shared_params for user in users)
 
 
