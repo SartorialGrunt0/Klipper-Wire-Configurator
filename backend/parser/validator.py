@@ -87,6 +87,10 @@ class PinUse:
     param: str
     line_number: int = 0
     filename: str = ""
+    # cs_pin of a daisy-chained TMC2130/TMC5160 (chain_length >= 2): klippy
+    # looks it up with share_type="tmc_spi_cs" (tmc2130.py:190-194), so
+    # pins.py permits several such drivers on one pin.
+    tmc_spi_chain_cs: bool = False
 
     @property
     def label(self) -> str:
@@ -176,10 +180,186 @@ def _get_printer_kinematics(config: ConfigFile) -> str | None:
 def _normalize_pin_values(value: str) -> list[str]:
     pins: list[str] = []
     for raw_pin in value.split(","):
-        clean_pin = re.sub(r"\s*:\s*", ":", raw_pin.lstrip("!^~").strip())
+        # Mirror klippy/pins.py parse_pin order: strip whitespace, THEN drop
+        # the pullup/invert prefixes, then whitespace again (pins.py:66-76).
+        # Order matters: a comma list puts a leading space on every element
+        # after the first (" ^menu:PA0"), and lstrip("!^~") before the
+        # whitespace strip leaves "^menu" to be checked as the chip name
+        # (V2.6.0 false "Unknown pin chip name '^menu'" on encoder_pins).
+        clean_pin = re.sub(r"\s*:\s*", ":", raw_pin.strip().lstrip("!^~").strip())
         if clean_pin and not clean_pin.startswith("<"):
             pins.append(clean_pin)
     return pins
+
+
+# klippy/extras/tmc.py: TMCVirtualPinHelper allocates its diag pin ONLY
+# inside setup_pin — i.e. only when a stepper's endstop_pin references
+# <driver_type>_<driver_name>:virtual_endstop. With sensorless homing off
+# (the common "diag wired but unused" layout — MPMDV2 cross-wires diag to
+# the other axis' physical endstops), the diag pin is never claimed, so it
+# legally collides with any other section's pin.
+TMC_DIAG_PARAM_NAMES = frozenset({"diag_pin", "diag0_pin", "diag1_pin"})
+
+
+def _collect_active_virtual_endstop_chips(sections) -> set[str]:
+    """Chip names referenced as '<chip>:virtual_endstop' by ANY param value.
+
+    A TMC driver's diag pin is live only when its registered chip name
+    (tmc.py:583 `register_chip(f'{type}_{name}')`) appears here. Case-folded
+    to match the chip registry's normalization.
+    """
+    chips: set[str] = set()
+    for section in sections:
+        if section.is_commented_out:
+            continue
+        for param in section.params:
+            if param.is_commented_out or not param.value:
+                continue
+            for clean in _normalize_pin_values(param.value):
+                head, sep, tail = clean.partition(":")
+                if sep and tail.strip().lower() == "virtual_endstop":
+                    chips.add(head.strip().lower())
+    return chips
+
+
+def _is_dead_tmc_diag_use(param, section, active_virtual_chips: set[str]) -> bool:
+    """True when a TMC diag param will never be allocated by klippy."""
+    if param.key.strip().lower() not in TMC_DIAG_PARAM_NAMES:
+        return False
+    driver_chip = f"{section.section_type}_{section.section_name}".strip().lower()
+    return driver_chip not in active_virtual_chips
+
+
+def _project_file_order(configs: dict[str, ConfigFile], main_file: str) -> list[str]:
+    """Files in effective-merge order: deepest includes first, main LAST.
+
+    Approximation of Klipper's linear parse (configfile.py _parse_config
+    processes an [include] at its line position). KWC's parser does not keep
+    include line numbers, so we assume the conventional layout — include
+    directives at the top, own definitions below — which makes the including
+    file's own content win over anything its includes define. The live
+    Trident/voron configs all follow this layout (printer.cfg's
+    [idle_timeout] overriding Hotkey.cfg's is exactly this precedence).
+    Worst case (an [include] placed BELOW a duplicated section) the shadow
+    is attributed to the wrong side; conventional layout makes that rare.
+    """
+    basename_map = {_basename(filename): filename for filename in configs}
+    ordered: list[str] = []
+    seen: set[str] = set()
+
+    def visit(filename: str) -> None:
+        if filename in seen:
+            return
+        seen.add(filename)
+        config = configs.get(filename)
+        if config is not None:
+            for include_path in config.includes:
+                target = include_path if include_path in configs else basename_map.get(_basename(include_path))
+                if target is not None:
+                    visit(target)
+        ordered.append(filename)
+
+    visit(main_file)
+    return ordered
+
+
+def _collect_live_pin_values(configs: dict[str, ConfigFile], active_files: set[str]) -> dict[tuple[str, str], set[str]]:
+    """Winning pin values per (section-header, param) under Klipper's merge.
+
+    RawConfigParser(strict=False) merges duplicate sections as a per-option
+    union where the LAST definition of an option wins. A pin value from an
+    earlier definition of the same (header, param) that the winner doesn't
+    contain is never allocated — ground-truthed with real klippy (dup
+    [fan] pin shadowing a [heater_fan] pin loads clean). Only keys defined
+    more than once appear in the map.
+    """
+    main_file = _find_main_project_file(configs)
+    if main_file is None:
+        return {}
+
+    values_by_key: dict[tuple[str, str], list[set[str]]] = {}
+    for filename in _project_file_order(configs, main_file):
+        if filename not in active_files:
+            continue
+        for section in configs[filename].sections:
+            if section.is_commented_out or section.section_type == "include":
+                continue
+            sec_def = get_section_def(section.section_type)
+            for param in section.params:
+                if param.is_commented_out or param.key == "_comment_" or not param.value:
+                    continue
+                param_def = _find_param_def(sec_def, param.key)
+                if param_def is None or param_def.param_type != ParamType.PIN:
+                    continue
+                key = (section.full_header.lower(), param.key.lower())
+                values_by_key.setdefault(key, []).append(set(_normalize_pin_values(param.value)))
+
+    return {
+        key: occs[-1]
+        for key, occs in values_by_key.items()
+        if len(occs) > 1
+    }
+
+
+def _collect_live_pin_values_single_file(config: ConfigFile) -> dict[tuple[str, str], set[str]]:
+    """Same merge semantics as _collect_live_pin_values, scoped to one file:
+    duplicate sections inside a file merge in definition order, last wins."""
+    values_by_key: dict[tuple[str, str], list[set[str]]] = {}
+    for section in config.sections:
+        if section.is_commented_out or section.section_type == "include":
+            continue
+        sec_def = get_section_def(section.section_type)
+        for param in section.params:
+            if param.is_commented_out or param.key == "_comment_" or not param.value:
+                continue
+            param_def = _find_param_def(sec_def, param.key)
+            if param_def is None or param_def.param_type != ParamType.PIN:
+                continue
+            key = (section.full_header.lower(), param.key.lower())
+            values_by_key.setdefault(key, []).append(set(_normalize_pin_values(param.value)))
+
+    return {
+        key: occs[-1]
+        for key, occs in values_by_key.items()
+        if len(occs) > 1
+    }
+
+
+def _drop_shadowed_pin_uses(used_pins: dict[str, list[PinUse]], live_pin_values: dict[tuple[str, str], set[str]]) -> None:
+    """Remove pin uses that Klipper's section merge never allocates."""
+    for pin in list(used_pins):
+        kept = [u for u in used_pins[pin] if not _is_shadowed_pin_use(u, live_pin_values)]
+        # Duplicate section definitions merge per-option (last wins), so a
+        # given (section, param) key allocates the pin at most ONCE even when
+        # several definitions repeat the identical value — the mirrored
+        # toolhead-board pattern where [extruder] appears verbatim in
+        # printer.cfg and an include. Collapse same-key uses to the LAST
+        # occurrence (the winner). Real report 2026-09-05; ground-truthed:
+        # identical dup [extruder] reaches 'Starting serial connect' clean.
+        seen_keys: set[tuple[str, str, str]] = set()
+        collapsed: list[PinUse] = []
+        for use in reversed(kept):
+            key = (use.section.lower(), use.param.lower(), use.pin)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            collapsed.append(use)
+        collapsed.reverse()
+        if collapsed:
+            used_pins[pin] = collapsed
+        else:
+            del used_pins[pin]
+
+
+def _is_shadowed_pin_use(use: PinUse, live_pin_values: dict[tuple[str, str], set[str]]) -> bool:
+    """True when this pin's value was overridden by a later definition."""
+    if not live_pin_values:
+        return False
+    key = (use.section.lower(), use.param.lower())
+    winners = live_pin_values.get(key)
+    if winners is None:
+        return False
+    return use.pin not in winners
 
 
 def _find_main_project_file(configs: dict[str, ConfigFile]) -> str | None:
@@ -566,6 +746,21 @@ def validate_config(config: ConfigFile) -> ValidationResult:
     section_counts: dict[str, int] = {}
     used_pins: dict[str, list[PinUse]] = {}
     defined_sections: set[str] = set()
+    # User-defined [thermistor NAME] sections are registered as sensor
+    # factories by heaters.py at load, so they are valid sensor_type values
+    # alongside the builtin enum (heaters.py add_factory, exact-name
+    # lookup — configparser section names are case-sensitive).
+    user_thermistor_names = {
+        section.section_name.strip()
+        for section in config.sections
+        if section.section_type == "thermistor" and not section.is_commented_out
+        and section.section_name.strip()
+    }
+    # A TMC driver's diag pin is allocated only while sensorless homing is
+    # active for that driver (tmc.py TMCVirtualPinHelper.setup_pin); compute
+    # the set of '<chip>:virtual_endstop' references once per file so dead
+    # diag pins never enter the conflict ledger.
+    active_virtual_chips = _collect_active_virtual_endstop_chips(config.sections)
     save_config_params_by_header: dict[str, set[str]] = {}
     save_config_section_types: set[str] = set()
     save_config_component_groups: set[str] = set()
@@ -654,6 +849,11 @@ def validate_config(config: ConfigFile) -> ValidationResult:
         for param_def in sec_def.params:
             if not param_def.required or param_def.name in active_params:
                 continue
+            if param_def.name == "rotation_distance" and "gear_ratio" in active_params:
+                # klippy/stepper.py parse_step_distance (297-309):
+                # rotation_distance is read only when gear_ratio is absent
+                # (the units_in_radians path fixes one rotation at 2*pi).
+                continue
             if _skip_missing_required_param(section, param_def.name, active_params):
                 continue
             result.errors.append(ValidationError(
@@ -728,14 +928,25 @@ def validate_config(config: ConfigFile) -> ValidationResult:
                 ))
                 continue
 
-            # Type validation
-            _validate_param_value(param, param_def, section, result)
+            # sensor_type is validated against the BUILTIN Klipper sensor
+            # list, but heaters.py add_factory also registers every user
+            # [thermistor NAME] section in the config (Config_Reference:
+            # "if one defines a [thermistor my_thermistor] section then one
+            # may use sensor_type: my_thermistor"). Skip the enum check for
+            # those names; unknown names still error.
+            if not (
+                param.key == "sensor_type"
+                and param.value.strip() in user_thermistor_names
+            ):
+                _validate_param_value(param, param_def, section, result)
 
             # Relational validation (param A vs param B, same section)
             _check_relational_param(param, param_def, section, result)
 
             # Track pin usage
             if param_def.param_type == ParamType.PIN and param.value:
+                if _is_dead_tmc_diag_use(param, section, active_virtual_chips):
+                    continue
                 _track_pin_usage(param, section, used_pins)
 
     # Check for required sections
@@ -752,13 +963,21 @@ def validate_config(config: ConfigFile) -> ValidationResult:
         result,
     )
 
-    # Check for pin conflicts
+    # Check for pin conflicts (drop uses shadowed by duplicate-section merge —
+    # a pin value overridden by a later definition of the same section is
+    # never allocated by Klipper)
+    _drop_shadowed_pin_uses(used_pins, _collect_live_pin_values_single_file(config))
     _check_pin_conflicts(
         used_pins,
         result,
         _collect_duplicate_pin_override_pins(
             {config.filename: config}, {config.filename},
         ),
+    )
+
+    # TMC SPI daisy-chain consistency (same length / unique positions).
+    _check_tmc_spi_chain_conflicts(
+        {config.filename: config}, {config.filename: result}, {config.filename},
     )
 
     # Bulk-ack suppression (Phase 4 save gate): drop warnings whose stable
@@ -790,6 +1009,31 @@ def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, Valida
     # regardless of file count (tmc.py), so this runs for single-file
     # projects too (unlike the cross-file passes below it).
     _check_tmc_stepper_references(configs, results, _get_active_project_files(configs))
+
+    # A [thermistor NAME] in ANY active file registers a sensor factory for
+    # the whole project (Klipper loads includes into one namespace), so a
+    # sensor_type error raised file-locally is a false positive when the
+    # name is defined elsewhere in the project.
+    if len(configs) > 1:
+        project_thermistor_names = {
+            section.section_name.strip()
+            for filename, config in configs.items()
+            if filename in _get_active_project_files(configs)
+            for section in config.sections
+            if section.section_type == "thermistor" and not section.is_commented_out
+            and section.section_name.strip()
+        }
+        if project_thermistor_names:
+            for filename, result in results.items():
+                result.errors = [
+                    e for e in result.errors
+                    if not (
+                        e.severity == "error"
+                        and e.param == "sensor_type"
+                        and e.message.startswith("Invalid value '")
+                        and e.message.split("'")[1] in project_thermistor_names
+                    )
+                ]
 
     if len(configs) <= 1:
         return results
@@ -1001,6 +1245,10 @@ def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, Valida
         _collect_duplicate_pin_override_pins(configs, active_files),
     )
 
+    # TMC SPI daisy chains can span files (drivers in an included file);
+    # the per-file pass only sees one file's drivers.
+    _check_tmc_spi_chain_conflicts(configs, results, active_files)
+
     # Pin-chip membership (F8): a pin's chip prefix must name a chip the
     # project registers ([mcu NAME], probe, TMC virtual-endstop chips, ...),
     # mirroring klippy/pins.py parse_pin's 'Unknown pin chip name' hard-fail.
@@ -1061,6 +1309,10 @@ def _check_tmc_stepper_references(
     file), mirroring how Klipper loads all includes into one namespace.
     """
     # Map referenced section name (lowercased) -> first active ConfigSection.
+    # Keyed by FULL HEADER: klippy joins every word after the driver type
+    # (" ".join(config.get_name().split()[1:])) and calls has_section on the
+    # result, so [tmc2208 manual_stepper gear_stepper] resolves to the FULL
+    # header [manual_stepper gear_stepper], not the bare type 'manual_stepper'.
     referenced_sections: dict[str, tuple[str, ConfigSection]] = {}
     for filename, config in configs.items():
         if filename not in active_files:
@@ -1068,7 +1320,7 @@ def _check_tmc_stepper_references(
         for section in config.sections:
             if section.section_type == "include" or section.is_commented_out:
                 continue
-            key = section.section_type.lower()
+            key = section.full_header.lower()
             if key not in referenced_sections:
                 referenced_sections[key] = (filename, section)
 
@@ -1678,6 +1930,7 @@ def _find_param_def(sec_def, key: str):
 
 def _track_pin_usage(param, section, used_pins: dict, filename: str = "") -> None:
     """Record every normalized pin value of a PIN param into used_pins."""
+    chain_cs = _is_tmc_spi_chain_cs(param, section)
     for clean_pin in _normalize_pin_values(param.value):
         if clean_pin not in used_pins:
             used_pins[clean_pin] = []
@@ -1688,7 +1941,37 @@ def _track_pin_usage(param, section, used_pins: dict, filename: str = "") -> Non
             param=param.key,
             line_number=param.line_number,
             filename=filename,
+            tmc_spi_chain_cs=chain_cs,
         ))
+
+
+# TMC drivers whose SPI path shares cs_pin via share_type="tmc_spi_cs"
+# when daisy-chained: tmc2130 and tmc5160 route through
+# tmc2130.MCU_TMC_SPI (tmc5160.py:328), and SPI-mode tmc2240 does too
+# (tmc2240.py:358, only when uart_pin is absent). tmc2660 uses its OWN
+# MCU_SPI_from_config WITHOUT share_type (tmc2660.py:196) — chaining there
+# is meaningless and cs_pin stays exclusive.
+TMC_SPI_CHAINABLE_TYPES = frozenset({"tmc2130", "tmc2240", "tmc5160"})
+
+
+def _is_tmc_spi_chain_cs(param, section) -> bool:
+    """True when this cs_pin use belongs to a daisy-chained SPI TMC driver.
+
+    Ground truth (tmc2130.py lookup_tmc_spi_chain + MCU_TMC_SPI_chain):
+    with chain_length >= 2 the cs_pin is looked up with
+    share_type='tmc_spi_cs', so pins.py permits it on several chained
+    drivers; without chain_length the lookup is unshared and a second user
+    hard-fails 'pin ... used multiple times'.
+    """
+    if param.key != "cs_pin" or section.section_type not in TMC_SPI_CHAINABLE_TYPES:
+        return False
+    if section.section_type == "tmc2240" and section.get_value("uart_pin").strip():
+        return False  # UART-mode 2240 never touches the SPI chain path
+    chain_len = section.get_value("chain_length").strip()
+    try:
+        return int(chain_len) >= 2
+    except ValueError:
+        return False
 
 
 def _check_pin_conflicts(
@@ -1748,6 +2031,9 @@ def _check_cross_file_pin_conflicts(
     """
     used_pins: dict[str, list[PinUse]] = {}
     active_files = _get_active_project_files(configs)
+    active_virtual_chips: set[str] = set()
+    for filename in sorted(active_files):
+        active_virtual_chips |= _collect_active_virtual_endstop_chips(configs[filename].sections)
     for filename in sorted(active_files):
         config = configs[filename]
         for section in config.sections:
@@ -1759,7 +2045,13 @@ def _check_cross_file_pin_conflicts(
                     continue
                 param_def = _find_param_def(sec_def, param.key)
                 if param_def is not None and param_def.param_type == ParamType.PIN and param.value:
+                    if _is_dead_tmc_diag_use(param, section, active_virtual_chips):
+                        continue
                     _track_pin_usage(param, section, used_pins, filename=filename)
+
+    # Uses shadowed by the duplicate-section merge (later definition wins)
+    # are never allocated by Klipper — drop them before conflict detection.
+    _drop_shadowed_pin_uses(used_pins, _collect_live_pin_values(configs, active_files))
 
     # Pins already reported by a per-file check (both users in the same file)
     # are deduped by (pin, sorted user labels).
@@ -1777,7 +2069,13 @@ def _check_cross_file_pin_conflicts(
             continue  # [duplicate_pin_override] registered it — legal multi-use
         files_involved = {u.filename for u in users}
         if len(files_involved) < 2:
-            continue  # same-file conflict already reported per-file
+            # Same-file pair: normally the per-file pass already reported it
+            # (deduped by `already` below), but that pass may have SUPPRESSED
+            # the pair while the pin looked dead locally — e.g. both TMC diag
+            # pins in drivers.cfg while the <chip>:virtual_endstop reference
+            # lives in printer.cfg. The project-wide ledger sees them live,
+            # so let the finding through when no per-file one exists.
+            pass
         anchor = next((u for u in users if u.section), users[0])
         already = any(
             (u.section, u.param, u.line_number) in reported
@@ -1860,6 +2158,17 @@ def _collect_known_pin_chips(configs: dict[str, ConfigFile], active_files: set[s
                 chips.add((name or "mcu").lower())
             elif sec_type in ("probe", "multi_pin", "replicape"):
                 chips.add(sec_type.lower())
+            elif _is_probe_like_section_type(sec_type):
+                # klippy/extras/probe.py:215 — HomingViaProbeHelper.__init__
+                # registers the 'probe' chip, and it is constructed by
+                # [bltouch] (bltouch.py:292), [smart_effector]
+                # (smart_effector.py:169), [load_cell_probe] (698),
+                # [probe_eddy_current] (729) in addition to [probe] itself
+                # (probe.py:619). A probe-family section therefore makes
+                # probe:z_virtual_endstop resolvable (klipper_backup audit
+                # 2026-09-04: bltouch-only configs hard-failed the old check
+                # despite loading clean).
+                chips.add("probe")
             elif sec_type in ("tmc2130", "tmc2209", "tmc5160", "tmc2240") and name:
                 name_parts = name.split()
                 chips.add(f"{sec_type}_{name_parts[-1]}".lower())
@@ -1915,7 +2224,118 @@ def _is_allowed_shared_pin(users: list[PinUse]) -> bool:
         or _is_allowed_shared_enable_pin(users)
         or _is_allowed_shared_communication_pin(users)
         or _is_allowed_shared_display_button_pin(users)
+        or _is_allowed_shared_tmc_spi_chain_cs_pin(users)
     )
+
+
+def _is_allowed_shared_tmc_spi_chain_cs_pin(users: list[PinUse]) -> bool:
+    """Daisy-chained TMC2130/2240/5160 drivers may share one cs_pin.
+
+    Only the cs_pin itself is shareable (share_type='tmc_spi_cs'); any
+    other param on the pin keeps the conflict. Chain-internal errors
+    (mismatched chain_length, duplicate chain_position) are separate
+    Klipper hard-fails reported by _check_tmc_spi_chain_conflicts, so this
+    exemption never hides them.
+    """
+    if not users:
+        return False
+    return all(u.param == "cs_pin" and u.tmc_spi_chain_cs for u in users)
+
+
+def _check_tmc_spi_chain_conflicts(
+    configs: dict,
+    results: dict,
+    active_files: set,
+) -> None:
+    """Mirror lookup_tmc_spi_chain's two chain hard-fails (tmc2130.py:244-257).
+
+    Drivers sharing one daisy-chain cs_pin must declare the same
+    chain_length ("TMC SPI chain must have same length") and distinct
+    chain_positions ("TMC SPI chain can not have duplicate position").
+    Grouped by normalized cs_pin across the active project.
+    """
+    groups: dict[str, list[tuple[str, "ConfigSection", int]]] = {}
+    for filename in sorted(active_files):
+        for section in configs[filename].sections:
+            if section.is_commented_out or section.section_type == "include":
+                continue
+            if section.section_type not in TMC_SPI_CHAINABLE_TYPES:
+                continue
+            if section.section_type == "tmc2240" and section.get_value("uart_pin").strip():
+                continue
+            try:
+                chain_len = int(section.get_value("chain_length").strip())
+            except ValueError:
+                continue
+            if chain_len < 2:
+                continue
+            for pin in _normalize_pin_values(section.get_value("cs_pin")):
+                groups.setdefault(pin, []).append((filename, section, chain_len))
+
+    for _pin, entries in groups.items():
+        lengths = {e[2] for e in entries}
+        seen_pos: dict[str, int] = {}
+
+        def _already(result, param, message):
+            return any(
+                e.severity == "error" and e.param == param and e.message == message
+                for e in result.errors
+            )
+
+        for filename, section, chain_len in entries:
+            result = results.get(filename)
+            if result is None:
+                continue
+            if len(lengths) > 1 and chain_len != sorted(lengths)[0]:
+                message = (
+                    f"TMC SPI chain must have same length — this section "
+                    f"declares chain_length {chain_len}, another driver on "
+                    f"the same cs_pin declares {sorted(lengths)[0]}. Klipper "
+                    "fails to start."
+                )
+                if not _already(result, "chain_length", message):
+                    result.errors.append(ValidationError(
+                        severity="error",
+                        section=section.full_header,
+                        param="chain_length",
+                        message=message,
+                        line_number=section.line_number,
+                    ))
+            pos = section.get_value("chain_position").strip()
+            if pos:
+                try:
+                    pos_int = int(pos)
+                except ValueError:
+                    pos_int = 0
+                if not 1 <= pos_int <= chain_len:
+                    message = (
+                        f"chain_position '{pos}' is outside 1..chain_length "
+                        f"{chain_len} — Klipper rejects it at startup."
+                    )
+                    if not _already(result, "chain_position", message):
+                        result.errors.append(ValidationError(
+                            severity="error",
+                            section=section.full_header,
+                            param="chain_position",
+                            message=message,
+                            line_number=section.line_number,
+                        ))
+                if pos in seen_pos:
+                    message = (
+                        f"TMC SPI chain can not have duplicate position "
+                        f"'{pos}' — another driver on the same cs_pin uses "
+                        "it. Klipper fails to start."
+                    )
+                    if not _already(result, "chain_position", message):
+                        result.errors.append(ValidationError(
+                            severity="error",
+                            section=section.full_header,
+                            param="chain_position",
+                            message=message,
+                            line_number=section.line_number,
+                        ))
+                else:
+                    seen_pos[pos] = chain_len
 
 
 def _is_allowed_shared_tmc_uart_pin(users: list[PinUse]) -> bool:

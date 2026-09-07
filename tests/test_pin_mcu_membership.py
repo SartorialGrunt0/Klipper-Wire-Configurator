@@ -162,6 +162,48 @@ def test_chip_name_case_insensitive():
     assert not _unknown_chip_errors(results), "chip matching must be case-insensitive"
 
 
+def test_pullup_prefixed_chip_resolves():
+    # V2.6.0 user report 2026-09-03: encoder_pins: ^menu:PA0, ^menu:PA1 with
+    # [mcu menu] defined threw "Unknown pin chip name '^menu'".
+    # Ground truth (klippy/pins.py parse_pin): pullup/invert prefixes are
+    # stripped BEFORE the chip split, so '^menu:PA0' resolves against chip
+    # 'menu'. The comma-separated list form also puts a leading space on the
+    # second pin — normalization must strip whitespace before the prefix.
+    # Two-file project: the membership check is a cross-file pass that
+    # early-returns for single-file projects.
+    results = _project({
+        "printer.cfg": "[mcu]\n[include menu.cfg]\n",
+        "menu.cfg": (
+            "[mcu menu]\n"
+            "serial: /dev/serial/by-id/usb-Klipper_stm32f042x6_x-if00\n"
+            "[display]\n"
+            "lcd_type: uc1701\n"
+            "encoder_pins: ^menu:PA0, ^menu:PA1\n"
+            "click_pin: ^!menu:PB1\n"
+        ),
+    })
+    assert not _unknown_chip_errors(results), "pullup-prefixed chip-pinned values in a comma list must resolve"
+
+
+def test_pullup_prefixed_chip_still_flags_unknown_chip():
+    # The fix must not weaken the check: an unknown chip stays an error even
+    # when wrapped in polarity prefixes inside a comma list.
+    results = _project({
+        "printer.cfg": "[mcu]\n[include menu.cfg]\n",
+        "menu.cfg": (
+            "[display]\n"
+            "lcd_type: uc1701\n"
+            "encoder_pins: ^ghost:PA0, ^ghost:PA1\n"
+        ),
+    })
+    errors = _unknown_chip_errors(results)
+    assert errors, "pullup-prefixed pins of an undefined chip must still error"
+    assert "^" not in errors[0].message.split("Unknown pin chip name ")[1].split("'")[0], (
+        "error must name the chip without its polarity prefix"
+    )
+    assert "ghost" in errors[0].message
+
+
 def test_single_file_mode_does_not_check_membership():
     # validate_config has no project context — the chip may live in another
     # file. Membership is a project-pass check only.
