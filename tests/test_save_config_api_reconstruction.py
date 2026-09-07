@@ -152,3 +152,121 @@ def test_missing_required_still_errors_when_no_tail():
     assert res.status_code == 200
     missing = _tail_missing_errors(res.json()["errors"])
     assert {e["param"] for e in missing} == TAIL_REQUIRED, missing
+
+
+# ── Param line numbers across the reconstruction boundary ──────────────
+# ParamUpdate carries no line_number, so every reconstructed param is 0.
+# Section-anchored findings survive, but macro Jinja findings are computed
+# as param.line + body offset: with param.line=0 they collapse to the bare
+# offset (e.g. line 3) — a CONFIDENT wrong number the frontend treats as
+# fresh and authoritative (the same class as the historical "dot on the
+# wrong line" reports). The reconstructor now re-derives param lines from
+# raw_text; a finding emitted for the rebuilt file must carry the same line
+# as the same finding emitted from the fresh parse.
+
+_FILLER = "\n".join(f"# filler line {i}" for i in range(1, 200))
+
+JINJA_TEXT = _FILLER + """
+[gcode_macro START_PRINT]
+gcode:
+  {% set foo = 1 %}
+  {% if foo %}
+    M117 hi
+"""
+
+
+def test_macro_jinja_line_matches_fresh_parse():
+    fresh = client.post("/api/validate", json=_config_dict(JINJA_TEXT)).json()
+    fresh_lines = [
+        e["line_number"] for e in fresh["errors"]
+        if e.get("code") == "macro_jinja_unterminated"
+    ]
+    assert len(fresh_lines) == 1, fresh["errors"]
+    assert fresh_lines[0] > 200, "control: body offset must be file-absolute on parse"
+
+    # Same payload shape the editor sends (to_dict + raw_text): the finding
+    # must keep the authoritative line, not collapse to the body offset.
+    res = client.post("/api/validate", json=_config_dict(JINJA_TEXT))
+    rebuilt = [
+        e for e in res.json()["errors"]
+        if e.get("code") == "macro_jinja_unterminated"
+    ]
+    assert rebuilt and rebuilt[0]["line_number"] == fresh_lines[0], rebuilt
+
+
+def test_param_value_error_line_restored_via_reconstruction():
+    """A value error deep in the file keeps its param line (0 → heuristic
+    fallback was the old behavior; the gutter dot for e.g. 'microsteps: abc'
+    should anchor on the param line authoritatively)."""
+    text = _FILLER + """
+
+[printer]
+kinematics: cartesian
+max_velocity: 300
+max_accel: 3000
+
+[stepper_x]
+step_pin: PF0
+dir_pin: PF1
+enable_pin: !PD7
+microsteps: abc
+rotation_distance: 40
+endstop_pin: ^PE5
+position_endstop: 0
+position_max: 200
+
+[stepper_y]
+step_pin: PF6
+dir_pin: !PF7
+enable_pin: !PF2
+microsteps: 16
+rotation_distance: 40
+endstop_pin: ^PJ1
+position_endstop: 0
+position_max: 200
+
+[stepper_z]
+step_pin: PL3
+dir_pin: PL1
+enable_pin: !PK0
+microsteps: 16
+rotation_distance: 8
+endstop_pin: ^PD3
+position_endstop: 0
+position_max: 200
+
+[mcu]
+serial: /dev/ttyFAKE
+"""
+    d = _config_dict(text)
+    microsteps_line = next(
+        i for i, l in enumerate(text.splitlines(), start=1)
+        if l.startswith("microsteps: abc")
+    )
+    res = client.post("/api/validate", json=d)
+    errs = [e for e in res.json()["errors"] if e["param"] == "microsteps"]
+    assert errs, res.json()["errors"]
+    assert errs[0]["line_number"] == microsteps_line, errs
+
+
+def test_renamed_param_line_stays_zero():
+    """Params that don't exist in raw_text (graph-editor additions) must stay
+    line 0 so the frontend heuristic resolves them — the matcher must not
+    misattribute a neighboring param's line."""
+    d = _config_dict("[printer]\nkinematics: cartesian\nmax_velocity: 300\nmax_accel: 3000\n")
+    # Inject a brand-new section with a bad value that raw_text doesn't have.
+    d["sections"].append({
+        "full_header": "fan", "section_type": "fan", "section_name": "",
+        "line_number": 0,
+        "params": [
+            {"key": "pin", "value": "PB0", "is_commented_out": False, "comment": "", "separator": ":"},
+            {"key": "cycle_time", "value": "hello", "is_commented_out": False, "comment": "", "separator": ":"},
+        ],
+        "header_comments": [], "trailing_comments": [], "is_commented_out": False,
+    })
+    res = client.post("/api/validate", json=d)
+    errs = [e for e in res.json()["errors"] if e["param"] == "cycle_time"]
+    assert errs, res.json()["errors"]
+    assert errs[0]["line_number"] == 0, (
+        "invented params must not borrow a line from raw_text", errs)
+

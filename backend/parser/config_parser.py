@@ -251,20 +251,6 @@ def _parse_save_config_sections(lines: list[str]) -> tuple[int, list[ConfigSecti
     return save_config_start, sections
 
 
-def find_save_config_sections(text: str) -> tuple[int, list[ConfigSection]]:
-    """Re-derive the ``#*#`` SAVE_CONFIG tail from raw text.
-
-    Same contract as find_unclosed_headers: the validation API endpoints
-    reconstruct ConfigFile from the serialized model, and to_dict() does not
-    carry save_config_sections. Without re-derivation the reconstructed file
-    looks like it has no autosave tail, so required-param checks that Klipper
-    satisfies from SAVE_CONFIG values (delta position_endstop/arm_length,
-    delta_radius, bed_mesh defaults, ...) fire false "Required parameter is
-    missing" errors. Returns (start_line, sections); (0, []) when absent.
-    """
-    return _parse_save_config_sections(text.splitlines())
-
-
 def parse_config(text: str, filename: str = "printer.cfg") -> ConfigFile:
     """Parse a Klipper config file from text content.
 

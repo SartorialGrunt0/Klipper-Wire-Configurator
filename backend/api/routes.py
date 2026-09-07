@@ -23,8 +23,6 @@ from parser.config_parser import (
     ConfigFile,
     ConfigParam,
     ConfigSection,
-    find_save_config_sections,
-    find_unclosed_headers,
     parse_config,
 )
 from parser.config_schema import (
@@ -682,6 +680,38 @@ async def load_saved_configs():
 # ── Helpers ─────────────────────────────────────────────────────
 
 
+def _reconcile_param_lines(sections: list[ConfigSection], originals: list[ConfigSection]) -> None:
+    """Restore param line numbers onto rebuilt sections from a fresh parse.
+
+    ParamUpdate cannot carry line_number (and to_dict() never serialized
+    params' lines), so every reconstructed param is 0. Section-level errors
+    survive, but findings computed FROM a param's line — macro Jinja body
+    offsets (param.line + body offset) above all — produce a confident but
+    wrong line_number (offset-only), which the frontend treats as fresh and
+    authoritative and paints on the wrong line. Re-match each rebuilt section
+    to its original (by line number, falling back to header order) and copy
+    param lines while the key order agrees; renamed/inserted params stay 0
+    and the frontend heuristic re-resolves them as designed.
+    """
+    by_header: dict[str, list[ConfigSection]] = {}
+    for sec in originals:
+        by_header.setdefault(sec.full_header, []).append(sec)
+    consumed: set[int] = set()
+    for sec in sections:
+        pool = [s for s in by_header.get(sec.full_header, []) if id(s) not in consumed]
+        if not pool:
+            continue
+        original = next(
+            (s for s in pool if sec.line_number and s.line_number == sec.line_number),
+            pool[0],
+        )
+        consumed.add(id(original))
+        for param, orig_param in zip(sec.params, original.params):
+            if param.key != orig_param.key:
+                break
+            param.line_number = orig_param.line_number
+
+
 def _config_update_to_config_file(data: ConfigUpdate) -> ConfigFile:
     """Convert API model to parser model."""
     sections = []
@@ -708,14 +738,19 @@ def _config_update_to_config_file(data: ConfigUpdate) -> ConfigFile:
         )
         sections.append(section)
 
-    # Same contract for the #*# SAVE_CONFIG tail: Klipper appends the
-    # autosave data into the loaded config, so its values satisfy required
-    # params. Dropped here, delta/vendor configs with tail-only
-    # position_endstop/arm_length/delta_radius false-error
-    # "Required parameter is missing".
-    save_start, save_sections = (
-        find_save_config_sections(data.raw_text) if data.raw_text else (0, [])
-    )
+    # Parse-time fields do not survive the API model: to_dict() drops the
+    # #*# SAVE_CONFIG tail and ParamUpdate has no line_number. Klipper
+    # appends the autosave data into the loaded config (its values satisfy
+    # required params), so dropping the tail made delta/vendor configs with
+    # tail-only position_endstop/arm_length/delta_radius false-error
+    # "Required parameter is missing". And param-anchored findings (macro
+    # Jinja body offsets especially) collapse to a confident wrong line
+    # when param lines are 0. Re-derive both from ONE fresh parse of the raw
+    # text; params that only exist in the submitted model (graph-editor
+    # additions) stay at line 0 so the frontend heuristic resolves them.
+    rederived = parse_config(data.raw_text, data.filename) if data.raw_text else None
+    if rederived is not None:
+        _reconcile_param_lines(sections, rederived.sections)
     return ConfigFile(
         filename=data.filename,
         sections=sections,
@@ -726,9 +761,9 @@ def _config_update_to_config_file(data: ConfigUpdate) -> ConfigFile:
         # serialize, so re-derive it from the raw text when present — the
         # validation endpoints otherwise reconstruct the file without it and
         # the malformed-header check would silently never run.
-        unclosed_headers=find_unclosed_headers(data.raw_text) if data.raw_text else [],
-        save_config_start_line=save_start,
-        save_config_sections=save_sections,
+        unclosed_headers=rederived.unclosed_headers if rederived else [],
+        save_config_start_line=rederived.save_config_start_line if rederived else 0,
+        save_config_sections=rederived.save_config_sections if rederived else [],
     )
 
 
