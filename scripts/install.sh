@@ -12,7 +12,8 @@
 # config dir). Running `sudo bash scripts/install.sh` resets $HOME to /root,
 # so the Moonraker config directory is not found and the update_manager /
 # Mainsail sidebar setup is silently skipped (and the app installs into
-# /root instead of your user's home).
+# /root instead of your user's home). If sudo is used anyway, the guard
+# below re-execs the script as the invoking user automatically.
 #
 # Uninstall:
 #   bash scripts/install.sh --uninstall
@@ -28,7 +29,9 @@ KWC_GIT_REF="${KWC_GIT_REF:-}"
 PYTHON_MIN_VERSION="3.10"
 NODE_MIN_VERSION="18"
 LOG_DIR="${TMPDIR:-/tmp}"
-LOG_FILE="${LOG_DIR}/klipper-wire-configurator-install-$(date +%Y%m%d-%H%M%S).log"
+# LOG_FILE is honoured from the environment so the sudo-guard re-exec can
+# hand the same log path to the child (one continuous install log).
+LOG_FILE="${LOG_FILE:-${LOG_DIR}/klipper-wire-configurator-install-$(date +%Y%m%d-%H%M%S).log}"
 SYSTEM_SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 LEGACY_USER_SERVICE_FILE="$HOME/.config/systemd/user/${SERVICE_NAME}.service"
 
@@ -43,6 +46,41 @@ info()  { echo -e "${BLUE}[INFO]${NC} $*"; }
 ok()    { echo -e "${GREEN}[OK]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
+
+# --- Sudo guard ---
+# The installer must run as the invoking (non-root) user: INSTALL_DIR, the
+# Moonraker config-dir lookup, and Mainsail detection all hang off $HOME,
+# which `sudo` rewrites to /root. If someone runs the script under sudo
+# anyway, re-exec it as the original user (SUDO_USER) with that user's
+# HOME restored and the supported KWC_* vars passed through explicitly.
+# Running as root without sudo (direct root login, or curl | sudo bash)
+# is unrecoverable, so fail loudly.
+if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+    real_home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+    warn "Running under sudo; re-executing as '$SUDO_USER' (the installer must run as your user)."
+    # The main log tee isn't installed yet (it lives below the function
+    # definitions), so seed the log file with this notice ourselves; the
+    # re-exec'd child inherits LOG_FILE and continues the same log.
+    # The seed file is created root-owned here (the exec below skips the
+    # tee-site chmod), so loosen it or the user child can't append.
+    mkdir -p "$LOG_DIR" 2>/dev/null || true
+    echo "[sudo-guard] re-executing installer as '$SUDO_USER'" >> "$LOG_FILE" 2>/dev/null || true
+    chmod 666 "$LOG_FILE" 2>/dev/null || true
+    # Unset SUDO_USER for the re-exec so the guard can't loop even if the
+    # child still somehow sees EUID 0. Supported KWC_* env vars are passed
+    # explicitly because sudo's -E preservation needs sudoers `setenv` and
+    # fails open otherwise.
+    kwc_env=("KWC_PORT=${KWC_PORT:-8099}" "KWC_GIT_REF=${KWC_GIT_REF:-}" "LOG_FILE=$LOG_FILE")
+    [ -n "${KWC_PROJECTS_DIR:-}" ] && kwc_env+=("KWC_PROJECTS_DIR=$KWC_PROJECTS_DIR")
+    exec env -u SUDO_USER sudo -u "$SUDO_USER" \
+        env "HOME=$real_home" "USER=$SUDO_USER" "${kwc_env[@]}" \
+        bash "${BASH_SOURCE[0]}" "$@"
+fi
+if [ "$(id -u)" -eq 0 ]; then
+    mkdir -p "$LOG_DIR" 2>/dev/null || true
+    echo "[sudo-guard] refused: installer run as root without SUDO_USER" >> "$LOG_FILE" 2>/dev/null || true
+    error "Do not run this installer as root. Run it as your normal user WITHOUT sudo (it escalates internally where needed): bash scripts/install.sh"
+fi
 
 is_legacy_user_service_active() {
     systemctl --user is-active --quiet "$SERVICE_NAME" 2>/dev/null
@@ -362,6 +400,14 @@ on_error() {
 }
 
 mkdir -p "$LOG_DIR"
+# Pre-create the log BEFORE the tee opens it. Under `sudo bash install.sh`
+# this runs as root just before the guard re-execs the install as the
+# invoking user; a file created lazily by tee would be root-owned 644 and
+# the user child could not append. Creating it here and loosening it keeps
+# one continuous install log across the re-exec. (Same tradeoff /tmp temp
+# files already make: any local user may append to a timestamped log.)
+touch "$LOG_FILE"
+chmod 666 "$LOG_FILE" 2>/dev/null || true
 exec > >(tee -a "$LOG_FILE") 2>&1
 trap 'on_error "$LINENO" "$?"' ERR
 
@@ -630,6 +676,21 @@ ok "Python dependencies installed."
 deactivate
 
 # --- Build frontend ---
+# Low-memory guard: Node's default V8 old-space is tiny on 32-bit ARM
+# (~128 MB) and the process ABORTS at that ceiling long before the
+# system's swap is used (swap is invisible to a self-imposed heap limit).
+# On devices with < 2 GB combined RAM+swap, size the heap to ~half of
+# that total so npm/Vite page into swap instead of aborting. Verified on
+# a Pi Zero 2 W (424 MB RAM + 1 GB swap): npm ci died at ~130 MB with
+# "Reached heap limit" until this was set (2026-09-06).
+total_mem_mb=$(awk '/MemTotal/ {m=$2} /SwapTotal/ {s=$2} END {printf "%d", (m+s)/1024}' /proc/meminfo 2>/dev/null || echo 0)
+if [ "${total_mem_mb:-0}" -lt 2048 ]; then
+    node_heap_mb=$(( total_mem_mb / 2 ))
+    [ "$node_heap_mb" -lt 384 ] && node_heap_mb=384
+    export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=$node_heap_mb"
+    info "Low-memory device (${total_mem_mb} MB RAM+swap): Node heap raised to ${node_heap_mb} MB."
+fi
+
 info "Installing frontend dependencies..."
 cd "$INSTALL_DIR/frontend"
 if ! npm ci; then

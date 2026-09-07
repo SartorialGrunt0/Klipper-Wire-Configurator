@@ -181,6 +181,28 @@ SENSOR_TYPE_ENUM = [
     "DS18B20", "temperature_combined",
 ]
 
+# RTD / thermocouple sensor-class params (spi_temperature.py MAX31865/MAX31856).
+# A sensor class is instantiated with the config of WHATEVER section declares
+# it: heaters.py Heater.__init__ -> setup_sensor(config) (heaters.py:280-300)
+# passes the SAME section to the sensor factory, so [extruder] with
+# sensor_type: MAX31865 reads rtd_nominal_r / rtd_reference_r (:285-286),
+# rtd_use_50Hz_filter (:334) and rtd_num_of_wires (:336) right there. Spread
+# into every section whose sensor_type takes the generic SENSOR_TYPE_ENUM —
+# NOT into fixed-enum sections ([angle], [load_cell], [probe_eddy_current],
+# [load_cell_probe]), which cannot host an RTD/TC chip.
+RTD_TC_PARAMS = [
+    _float("rtd_nominal_r", "RTD nominal resistance at 0°C (ohms)", strict_above=0),
+    _int("rtd_num_of_wires", "RTD wire count (2/3/4)"),
+    _float("rtd_reference_r", "RTD reference wire resistance (ohms)", strict_above=0),
+    _bool("rtd_use_50Hz_filter", "Enable RTD 50 Hz noise filter"),
+    # tc_type / tc_averaging_count are getchoice-read by MAX31856
+    # (spi_temperature.py:165-184): an invalid value is a config-load
+    # hard-fail, so they must be enums, not free-form str/int.
+    _enum("tc_type", ["B", "E", "J", "K", "N", "R", "S", "T"], "Thermocouple type", default="K"),
+    _bool("tc_use_50Hz_filter", "Enable TC 50 Hz noise filter"),
+    _enum("tc_averaging_count", ["1", "2", "4", "8", "16"], "TC sample averaging count", default="1"),
+]
+
 # Full SPI bus parameter family, mirroring bus.py MCU_SPI_from_config:
 # hardware bus (spi_bus) OR software bus (the three spi_software_* pins) plus
 # optional chip select and clock speed. Reused by every SPI-bus section so the
@@ -267,6 +289,8 @@ _register(SectionDef(
         _float("shoulder_height", "Rotary delta shoulder height", unit="mm", strict_above=0),
         _float("minimum_cruise_ratio", "Minimum cruise ratio", default="0.5", min_val=0, strict_below=1),
         _float("square_corner_velocity", "Square corner velocity", default="5.0", unit="mm/s", min_val=0),
+        # polar kinematics only (kinematics/polar.py:52 getfloat, above=0, default 0).
+        _float("max_angular_velocity", "Maximum angular velocity", default="0", strict_above=0),
     ],
 ))
 
@@ -372,6 +396,7 @@ _register(SectionDef(
         _enum("sensor_type", SENSOR_TYPE_ENUM, "Temperature sensor type", required=True),
         _pin("sensor_pin", "Sensor analog pin"),
         _str("spi_bus", "SPI bus (for SPI sensors)"),
+        _int("spi_speed", "SPI bus clock speed", min_val=100000),
         _pin("spi_software_sclk_pin", "Software SPI clock"),
         _pin("spi_software_mosi_pin", "Software SPI MOSI"),
         _pin("spi_software_miso_pin", "Software SPI MISO"),
@@ -392,6 +417,7 @@ _register(SectionDef(
         _float("max_temp", "Maximum allowed temperature", required=True, unit="°C"),
         _float("pressure_advance", "Pressure advance coefficient", default="0", min_val=0),
         _float("pressure_advance_smooth_time", "Pressure advance smooth time", default="0.040", unit="s", strict_above=0),
+        *RTD_TC_PARAMS,
     ],
 ))
 
@@ -432,6 +458,10 @@ _register(SectionDef(
         _float("pwm_cycle_time", "PWM cycle time", default="0.100", unit="s", strict_above=0),
         _float("smooth_time", "Temperature smoothing window", default="1.0", unit="s", strict_above=0),
         _float("pullup_resistor", "Pullup resistor", default="4700", strict_above=0),
+        # SPI sensor chips (MAX31865/MAX31856) read their bus from THIS section
+        # (heaters.py setup_sensor passes the heater config to the factory).
+        *SPI_BUS_PARAMS,
+        *RTD_TC_PARAMS,
     ],
 ))
 
@@ -459,6 +489,9 @@ _register(SectionDef(
         _float("max_power", "Maximum heater power", default="1.0", max_val=1, strict_above=0),
         _float("max_delta", "Max temperature delta for watermark control", default="2.0", strict_above=0),
         _float("pwm_cycle_time", "PWM cycle time", default="0.100", unit="s", strict_above=0),
+        # SPI sensor chips read their bus from this section (setup_sensor).
+        *SPI_BUS_PARAMS,
+        *RTD_TC_PARAMS,
     ],
 ))
 
@@ -486,6 +519,27 @@ for tmc_type in ["tmc2130", "tmc2240", "tmc5160"]:
         description=f"{tmc_type.upper()} stepper driver (SPI)",
         params=TMC_SPI_PARAMS[:],
     ))
+
+# tmc2240 is dual-mode (tmc2240.py:352): with uart_pin present it talks over
+# the bit-banged TMC UART (tmc_uart.MCU_TMC_uart, max_addr=7 — uart_address
+# goes 0..7, wider than the 2208/2209's 0..3) and NEVER reads cs_pin;
+# without uart_pin it is the plain SPI path above. cs_pin's requiredness is
+# conditional, enforced in validator._skip_missing_required_param.
+_register(SectionDef(
+    section_type="tmc2240",
+    display_name="TMC2240",
+    category="sub_component",
+    component_group="stepper_driver",
+    is_named=True,
+    name_references="stepper",
+    description="TMC2240 stepper driver (SPI, or UART when uart_pin is set)",
+    params=TMC_SPI_PARAMS[:] + [
+        _pin("uart_pin", "UART RX pin (switches the driver to UART mode)"),
+        _pin("tx_pin", "UART TX pin (if separate)"),
+        _str("select_pins", "Select pins for UART mux"),
+        _int("uart_address", "UART address (0-7)", default="0", min_val=0, max_val=7),
+    ],
+))
 
 _register(SectionDef(
     section_type="tmc2660",
@@ -621,6 +675,9 @@ _register(SectionDef(
         _float("pid_Kd", "PID derivative"),
         _float("pid_deriv_time", "PID derivative time", default="2.0", strict_above=0),
         _str("gcode_id", "G-code temperature report ID"),
+        # SPI sensor chips read their bus from this section (setup_sensor).
+        *SPI_BUS_PARAMS,
+        *RTD_TC_PARAMS,
     ],
 ))
 
@@ -880,7 +937,9 @@ _register(SectionDef(
     component_group="homing",
     is_named=True,
     params=[
-        _int("endstop_accuracy", "Endstop accuracy", strict_above=0),
+        # klippy endstop_phase.py:78 reads it with config.getfloat (mm,
+        # fractional values like .200 are the norm).
+        _float("endstop_accuracy", "Endstop accuracy (mm)", strict_above=0),
         _str("trigger_phase", "Trigger phase"),
         _bool("endstop_align_zero", "Align endstop to zero"),
     ],
@@ -1020,12 +1079,20 @@ _register(SectionDef(
         _float("pullup_resistor", "Sensor pullup resistor", default="4700", strict_above=0),
         _float("inline_resistor", "Sensor inline resistor", default="0", min_val=0),
         _str("spi_bus", "SPI bus (for SPI sensors)"),
+        _int("spi_speed", "SPI bus clock speed", min_val=100000),
         _pin("spi_software_sclk_pin", "Software SPI clock"),
         _pin("spi_software_mosi_pin", "Software SPI MOSI"),
         _pin("spi_software_miso_pin", "Software SPI MISO"),
+        # I2C sensor chips (HTU21D/LM75/BME280/...) configure their bus here
+        # (Config_Reference: HTU21D section -> common I2C settings).
+        *I2C_BUS_PARAMS,
+        _bool("htu21d_hold_master", "HTU21D clock-stretch hold during read"),
+        # htu21d.py:38-43 HTU21D_RESOLUTIONS keys (default TEMP12_HUM08).
+        _enum("htu21d_resolution", ["TEMP14_HUM12", "TEMP13_HUM10", "TEMP12_HUM08", "TEMP11_HUM11"], "HTU21D measurement resolution", default="TEMP12_HUM08"),
         _float("min_temp", "Minimum temperature", default="0", min_val=-273.15),
         _float("max_temp", "Maximum temperature", default="100"),
         _str("gcode_id", "G-code ID for temperature reporting"),
+        *RTD_TC_PARAMS,
     ],
 ))
 
@@ -1733,6 +1800,9 @@ _register(SectionDef(
         _float("smooth_time", "Smooth time", default="2.0", strict_above=0),
         _float("min_temp", "Min temp", default="0", min_val=-273.15),
         _float("max_temp", "Max temp", default="100"),
+        # SPI sensor chips read their bus from this section (setup_sensor).
+        *SPI_BUS_PARAMS,
+        *RTD_TC_PARAMS,
     ],
 ))
 
@@ -1862,6 +1932,25 @@ _register(SectionDef(
 # ── Digipot/DAC ──
 # ad5206 is SPI-only (bus.MCU_SPI_from_config); mcp4728 is I2C-only
 # (bus.MCU_I2C_from_config, default_addr=0x60). Model each with its real bus.
+_register(SectionDef(
+    section_type="dac084S085",
+    display_name="DAC084S085",
+    category="sub_component",
+    component_group="stepper_driver",
+    is_named=True,
+    description="DAC084S085 SPI digipot (stepper current reference), e.g. Alligator r2/r3",
+    # klippy/extras/dac084S085.py: MCU_SPI_from_config with pin_option
+    # "enable_pin", scale float (amps), channel_A..D each 0..scale.
+    params=[
+        _pin("enable_pin", "CS/enable pin (SPI chip select role)"),
+        *SPI_BUS_PARAMS,
+        _float("scale", "Channel value scale (amps)", default="1.0", strict_above=0),
+        _float("channel_A", "Channel A value (0..scale)", min_val=0),
+        _float("channel_B", "Channel B value (0..scale)", min_val=0),
+        _float("channel_C", "Channel C value (0..scale)", min_val=0),
+        _float("channel_D", "Channel D value (0..scale)", min_val=0),
+    ],
+))
 _register(SectionDef(
     section_type="ad5206",
     display_name="AD5206",
@@ -2081,9 +2170,11 @@ _register(SectionDef(
         _int("rtd_num_of_wires", "RTD wire count (2/3/4)"),
         _float("rtd_reference_r", "RTD reference wire resistance (ohms)", strict_above=0),
         _bool("rtd_use_50Hz_filter", "Enable RTD 50 Hz noise filter"),
-        _str("tc_type", "Thermocouple type (K/J/T/E/N/R/S/B)"),
+        # getchoice-read by MAX31856 (spi_temperature.py:165-184) — invalid
+        # value = config-load hard-fail, so modeled as enums.
+        _enum("tc_type", ["B", "E", "J", "K", "N", "R", "S", "T"], "Thermocouple type", default="K"),
         _bool("tc_use_50Hz_filter", "Enable TC 50 Hz noise filter"),
-        _int("tc_averaging_count", "TC sample averaging count"),
+        _enum("tc_averaging_count", ["1", "2", "4", "8", "16"], "TC sample averaging count", default="1"),
         # ADS1220 amplifier (PT100 / PT1000)
         _str("gain", "ADS1220 PGA gain"),
         _str("sample_rate", "ADS1220 sample rate"),
