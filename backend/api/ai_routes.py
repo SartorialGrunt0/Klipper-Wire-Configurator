@@ -12,7 +12,7 @@ import httpx
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from api.printer_memory_routes import (
+from api.printer_memory_routes import (  # noqa: E402
     load_printer_memory,
     printer_memory_to_context,
     is_printer_memory_blank,
@@ -349,6 +349,14 @@ class ChatRequest(BaseModel):
     # a flip changes acceptance AND prompt together. The harness sends this
     # via --full-rewrite-guard for A/B runs.
     fullRewriteGuard: bool = False
+    # Server-side merged-result validation + ONE lean repair pass (#1).
+    # Backend-only switch (env KWC_SERVER_DRAFT_VALIDATION=1): the frontend
+    # never sends this. When enabled, the backend applies the final reply to
+    # contextFiles, validates the MERGED result with the project validator,
+    # and — if new errors appeared — issues exactly one REPAIR-01-shaped
+    # lean repair query instead of relying on the frontend 3-attempt loop.
+    # Disabled (default) keeps the fenced-cfg path byte-identical.
+    serverDraftValidation: bool = False
 
 
 class ChatStopRequest(BaseModel):
@@ -967,6 +975,27 @@ def _minimal_prompt_enabled() -> bool:
     with the env var set, then run the accuracy harness.
     """
     return os.environ.get("KWC_MINIMAL_PROMPT", "0") != "0"
+
+
+def _server_draft_validation_enabled() -> bool:
+    """Server-side merged-result validation + ONE repair pass toggle.
+
+    Env KWC_SERVER_DRAFT_VALIDATION=1 enables the backend apply→validate→
+    one-lean-repair harness (#1). Default OFF: the frontend retry loop stays
+    the only validation path until the A/B harness (REPAIR gate on the
+    accuracy bank) says otherwise.
+    """
+    return os.environ.get("KWC_SERVER_DRAFT_VALIDATION", "0") != "0"
+
+
+def _server_audit_enabled() -> bool:
+    """Deterministic post-apply audit footer toggle (#3).
+
+    Env KWC_POST_APPLY_AUDIT=1. Default OFF for byte-identical rollout; the
+    frontend's ChatMessageList strips no markup so the audit footer renders
+    as a visible note. Only replies that touched config get audited.
+    """
+    return os.environ.get("KWC_POST_APPLY_AUDIT", "0") != "0"
 
 
 def _config_fallback_enabled() -> bool:
@@ -1863,6 +1892,226 @@ async def list_models(req: ModelsRequest):
     return {"models": ids}
 
 
+# ── Server-side merged-result validation + ONE lean repair (#1) ───────
+#
+# When KWC_SERVER_DRAFT_VALIDATION=1, after the tool loop produces a final
+# reply the backend applies it to the loaded context files (ported merge
+# engine, services/ai_draft_apply), validates the MERGED result with the
+# project validator, and — when new errors appear (delta vs baseline, same
+# semantics as the frontend's collectNewValidationErrors) — issues exactly
+# ONE REPAIR-01-shaped repair query (lean: error + imperative fix, previous
+# reply never quoted). If the repair reply validates, it replaces the
+# original; otherwise the ORIGINAL reply stands and `serverRepair` reports
+# the failure so the frontend loop (or the user) can act. The reply is
+# never rejected outright — Apply & Review remains the user's gate.
+#
+# The deterministic audit (#3, services/ai_reply_audit) runs unconditionally
+# (flag-gated only) on every reply that changed config: stated-requirement
+# check, macro precondition table, LED inventory sweep. Notes attach as a
+# footer; they never change routing or acceptance.
+
+def _context_files_to_config_files(context_files: dict[str, dict[str, str]]) -> dict:
+    """Convert the frontend contextFiles payload to parseable ConfigFiles."""
+    from parser.config_parser import parse_config
+
+    configs = {}
+    for filename, meta in context_files.items():
+        content = (meta or {}).get("content", "")
+        if not content.strip():
+            continue
+        try:
+            configs[filename] = parse_config(content, filename)
+        except Exception:
+            logger.warning("Context file parse failed | file=%s", filename)
+    return configs
+
+
+async def _server_validate_and_repair(
+    client: httpx.AsyncClient,
+    req: ChatRequest,
+    headers: dict,
+    final_content: str,
+    current_messages: list[dict],
+    usage_events: list[dict],
+    stop_event: "asyncio.Event | None",
+) -> tuple[str, dict | None]:
+    """Apply → validate merged → ONE lean repair. Returns (content, info).
+
+    ``info`` is the ``serverRepair`` response field: ``None`` when nothing
+    needed repair / repair was not possible (no context files), else a dict
+    ``{attempted, repaired, issuesAfter}``.
+    """
+    from services.ai_draft_apply import apply_reply_to_configs
+    from services.ai_draft_validation import (
+        build_validation_feedback,
+        collect_new_validation_errors,
+        has_only_retry_exempt_issues,
+        suppress_errors_shadowed_by_full_rewrite,
+    )
+    from services.ai_reply_audit import build_audit_footer, run_post_apply_audit
+    from parser.validator import validate_project_configs
+
+    base_configs = _context_files_to_config_files(req.contextFiles)
+    if not base_configs:
+        return final_content, None
+
+    apply_result = apply_reply_to_configs(final_content, base_configs)
+    merged_files = {
+        filename: entry["merged_config"]
+        for filename, entry in apply_result["files"].items()
+    }
+    if not merged_files:
+        # Prose-only reply or apply failure — nothing merged to validate.
+        return final_content, None
+
+    # Baseline = the untouched project; candidate = base with merged files.
+    project = dict(base_configs)
+    project.update(merged_files)
+    baseline_validations = {
+        filename: result.to_dict()
+        for filename, result in validate_project_configs(base_configs).items()
+    }
+    candidate_validations = {
+        filename: result.to_dict()
+        for filename, result in validate_project_configs(project).items()
+    }
+    blocking = suppress_errors_shadowed_by_full_rewrite(
+        collect_new_validation_errors(baseline_validations, candidate_validations)
+    )
+    if not blocking:
+        # Clean apply: run the deterministic audit and attach its footer.
+        notes = _run_audit_on_apply(
+            req, apply_result, merged_files, project,
+            run_post_apply_audit,
+        )
+        if notes:
+            final_content = final_content + build_audit_footer(notes)
+        return final_content, {"attempted": False, "repaired": False, "issuesAfter": []}
+
+    if not _server_draft_validation_enabled():
+        # Audit-only mode (KWC_POST_APPLY_AUDIT without validation): the
+        # deterministic notes still apply; repair stays off.
+        notes = _run_audit_on_apply(
+            req, apply_result, merged_files, project, run_post_apply_audit,
+        )
+        if notes:
+            final_content = final_content + build_audit_footer(notes)
+        return final_content, None
+
+    if has_only_retry_exempt_issues(blocking):
+        # The model cannot fix duplicates/reused pins by regenerating —
+        # do not burn a repair query (retry-exempt semantics).
+        return final_content, {
+            "attempted": False,
+            "repaired": False,
+            "issuesAfter": blocking,
+            "reason": "retry-exempt",
+        }
+
+    # ── ONE lean repair (REPAIR-01 shape) ──
+    feedback = build_validation_feedback(blocking, None)
+    repair_messages = list(current_messages) + [
+        {"role": "user", "content": feedback},
+    ]
+    repair_max_tokens = req.maxTokens
+    if _is_local_provider(req.apiProvider, req.apiUrl):
+        repair_max_tokens = max(req.maxTokens, EMPTY_REPROMPT_MAX_TOKENS)
+    logger.info(
+        "Server repair | issuing ONE lean repair (issue_groups=%d)", len(blocking),
+    )
+    try:
+        repair_payload = _build_provider_payload(
+            req.apiProvider, repair_messages, req.model,
+            max_tokens=repair_max_tokens,
+            temperature=req.temperature,
+            tools=_resolve_native_tools(req.apiProvider, req.apiUrl, req.toolProtocol),
+            merge_system=req.mergeSystemMessages,
+        )
+        repair_content, repair_data = await _query_provider(
+            client, req.apiUrl, headers, repair_payload, req.apiProvider,
+            logger_context="server-repair-1",
+            stop_event=stop_event,
+        )
+        repair_usage = _extract_usage_info(repair_data)
+        if repair_usage:
+            repair_usage["context"] = "server-repair-1"
+            usage_events.append(repair_usage)
+    except ChatStoppedError:
+        raise
+    except (ValueError, httpx.HTTPError) as exc:
+        logger.warning("Server repair query failed | %s", exc)
+        return final_content, {"attempted": True, "repaired": False, "issuesAfter": blocking}
+
+    repair_clean = final_content  # fallback keeps original
+    repaired_content = repair_content
+    for pattern in (
+        MCP_TOOL_BLOCK_RE, ALT_TOOL_CALL_CONTENT_RE, CALL_SYNTAX_CLEANUP_RE,
+        FUNC_CALL_CLEANUP_RE, DSML_CLEANUP_RE, XML_TOOL_CALLS_CLEANUP_RE,
+    ):
+        repaired_content = pattern.sub("", repaired_content).strip()
+    repaired_content = _strip_bracket_tool_calls(repaired_content).strip()
+
+    if repaired_content:
+        repair_apply = apply_reply_to_configs(repaired_content, base_configs)
+        repair_merged = {
+            filename: entry["merged_config"]
+            for filename, entry in repair_apply["files"].items()
+        }
+        if repair_merged:
+            repair_project = dict(base_configs)
+            repair_project.update(repair_merged)
+            repair_candidate = {
+                filename: result.to_dict()
+                for filename, result in validate_project_configs(repair_project).items()
+            }
+            repair_blocking = suppress_errors_shadowed_by_full_rewrite(
+                collect_new_validation_errors(baseline_validations, repair_candidate)
+            )
+            if not repair_blocking:
+                notes = _run_audit_on_apply(
+                    req, repair_apply, repair_merged, repair_project,
+                    run_post_apply_audit,
+                )
+                if notes:
+                    repaired_content = repaired_content + build_audit_footer(notes)
+                logger.info("Server repair | repaired=1")
+                return repaired_content, {
+                    "attempted": True, "repaired": True, "issuesAfter": [],
+                }
+            # Repair still dirty: keep the ORIGINAL reply (never show a
+            # worse one) but report the exact remaining issues.
+            return repair_clean, {
+                "attempted": True, "repaired": False, "issuesAfter": repair_blocking,
+            }
+
+    return final_content, {"attempted": True, "repaired": False, "issuesAfter": blocking}
+
+
+def _run_audit_on_apply(req, apply_result, merged_files, project, audit_fn) -> list[str]:
+    """Collect the audit inputs from an apply result and run all checks."""
+    changed_headers: list[str] = []
+    changed_gcode: list[tuple[str, str]] = []
+    for entry in apply_result["files"].values():
+        for change in entry["changes"]:
+            header = change.get("fullHeader", "")
+            if header and header not in changed_headers:
+                changed_headers.append(header)
+        merged_cfg = entry["merged_config"]
+        for section in merged_cfg.sections:
+            if section.full_header in changed_headers and section.section_type == "gcode_macro":
+                body = section.get_value("gcode", "")
+                if body:
+                    changed_gcode.append((section.full_header, body))
+    if not changed_headers:
+        return []
+    return audit_fn(
+        _latest_user_message_text(req.messages),
+        project,
+        changed_gcode,
+        changed_headers,
+    )
+
+
 @router.post("/ai/chat")
 async def chat_proxy(req: ChatRequest):
     """Proxy chat messages to the user's configured API provider."""
@@ -2273,6 +2522,31 @@ async def chat_proxy(req: ChatRequest):
             if not mcp_tool_names and executed_tool_names:
                 mcp_tool_names = list(dict.fromkeys(executed_tool_names))
 
+            # ── Server-side merged-result validation + ONE lean repair (#1) ──
+            # Flag-gated (KWC_SERVER_DRAFT_VALIDATION=1). Needs the loaded
+            # config content (contextFiles); replies that merge cleanly get
+            # the deterministic audit footer (#3) when KWC_POST_APPLY_AUDIT=1.
+            # The frontend fenced-cfg path is untouched: worst case the reply
+            # stands as-is and `serverRepair` reports what happened.
+            server_repair_info = None
+            server_audit_enabled = _server_audit_enabled()
+            if (
+                final_content
+                and (
+                    _server_draft_validation_enabled()
+                    or server_audit_enabled
+                )
+            ):
+                try:
+                    final_content, server_repair_info = await _server_validate_and_repair(
+                        client, req, headers, final_content,
+                        current_messages, usage_events, stop_event,
+                    )
+                except ChatStoppedError:
+                    raise
+                except Exception:
+                    logger.exception("Server draft validation failed | replying unchanged")
+
             logger.info(
                 "Returning response | final_chars=%d tool_turns=%d tools=%s empty=%s",
                 len(final_content), tool_turns,
@@ -2298,6 +2572,11 @@ async def chat_proxy(req: ChatRequest):
                 "mcpToolNames": mcp_tool_names,
                 "toolCalls": executed_tool_calls,
                 "repromptCount": empty_reprompts,
+                # Set when KWC_SERVER_DRAFT_VALIDATION ran ({attempted,
+                # repaired, issuesAfter[, reason]}); null otherwise. The
+                # frontend may use it to skip its own retry loop when the
+                # server already repaired the reply.
+                "serverRepair": server_repair_info,
                 "usage": {
                     "completionTokens": sum(
                         (e.get("completionTokens") or 0) for e in usage_events

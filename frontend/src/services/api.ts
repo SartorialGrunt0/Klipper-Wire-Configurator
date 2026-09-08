@@ -875,6 +875,18 @@ export interface AiChatResponse {
   toolCalls?: AiToolCallDetail[];
   /** Number of empty-response re-prompts the backend performed before content. */
   repromptCount?: number;
+  /**
+   * Server-side merged-result validation result (backend
+   * KWC_SERVER_DRAFT_VALIDATION=1). Null when the server pass did not run.
+   * `repaired: true` means the returned content already passed merged
+   * validation — the client retry loop can trust it.
+   */
+  serverRepair?: {
+    attempted: boolean;
+    repaired: boolean;
+    issuesAfter: Array<{ filename: string; errors: unknown[] }>;
+    reason?: string;
+  } | null;
 }
 
 /**
