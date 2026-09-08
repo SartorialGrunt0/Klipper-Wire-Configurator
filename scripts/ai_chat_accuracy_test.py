@@ -1290,6 +1290,170 @@ def build_setup_questions() -> list[TestQuestion]:
     ]
 
 
+def build_live_context_questions() -> list[TestQuestion]:
+    """Live-context tools (feature/config-mcp-tools, 2026-09): the four
+    host-grounded tools validate_config_project, list_connected_devices,
+    get_section_schema, get_klippy_status — plus the draft-vs-disk and
+    schema-vs-reference routing boundaries.
+
+    HOST PREREQUISITES (run against a NATIVE backend, e.g. the dev Pi
+    :8099): the config dir ON THE SERVER is what the validate/device tools
+    read — the harness attaches no files here; the tool call IS the
+    context. Dev-Pi ground truth these criteria were written against:
+    KAMP_Settings.cfg has missing-include errors (./KAMP/*.cfg not on
+    disk), duplicate [idle_timeout]/M109 sections surface as info, a
+    Klipper RP2040 sits on /dev/serial/by-id/, and NO klippy socket exists
+    (get_klippy_status must report not-responding). On the Trident the
+    ground truth differs (klippy ready) — LIVE-06/07 criteria accept a
+    correct readout of EITHER state; the strong gate is the tool call.
+
+    Routing note: LIVE-04's expected_tools is the schema tool ALONE, so a
+    correct-but-reference answer grades PASS_WRONG_TOOL — that column IS
+    the routing measurement for the 2026-09 snippet reroute; read the
+    tools column, not just the pass count.
+    """
+    return [
+        TestQuestion(
+            qid="LIVE-01",
+            title="Live validate: 'validate my config' must call the project validator",
+            text="can you validate my config? tell me what's wrong with it",
+            # No context_files on purpose: the ONLY way to see the real
+            # errors is the tool. Routing test for the trigger-phrase
+            # snippet (observed 2026-09-07: model instead called
+            # list_user_configs + read_user_config and judged by eye).
+            context_files=(),
+            expected_tools=("validate_config_project",),
+            require_tool=True,
+            criteria=(
+                # Ground truth from the tool output on the dev Pi: the
+                # ERRORS are the KAMP missing includes. The model must
+                # relay error findings, not claim the config is clean.
+                ("regex", r"kamp|include"),
+                ("regex", r"error"),
+            ),
+        ),
+        TestQuestion(
+            qid="LIVE-02",
+            title="Draft boundary: pasted snippet is validated as draft, not disk",
+            text=("check this section for errors:\n\n"
+                  "[printer]\n"
+                  "kinematics: corexy\n"
+                  "max_velocity: 300\n"),
+            # The snippet is IN the prompt — the draft tool is the right
+            # call; validate_config_project would check unrelated disk
+            # files. Ground truth (verified against the validator
+            # 2026-09-08): [printer] missing max_accel → error
+            # (max_z_velocity is OPTIONAL with default 5 — do NOT require
+            # the answer to mention it; criterion-bug pattern caught in
+            # the no-network smoke pass).
+            context_files=(),
+            expected_tools=("validate_klipper_config",),
+            require_tool=True,
+            criteria=(
+                # Must relay the genuinely missing required param
+                # (accept humanized phrasing — prose answers get no retry
+                # loop; catalog #14 underscore-vs-space rule).
+                ("regex", r"max[_\s]?accel"),
+                # Proof the DRAFT was validated (not disk files): the call
+                # must carry config_text.
+                ("tool_args", "validate_klipper_config:config_text"),
+            ),
+        ),
+        TestQuestion(
+            qid="LIVE-03",
+            title="Devices: list what's plugged in for an [mcu] serial line",
+            text=("what devices can I use for the serial: line in my [mcu] "
+                  "section? list what's actually plugged into this machine."),
+            # Dev-Pi ground truth: one Klipper RP2040 under
+            # /dev/serial/by-id/. The answer must quote a REAL device from
+            # the tool output, not a generic example path.
+            context_files=(),
+            expected_tools=("list_connected_devices",),
+            require_tool=True,
+            criteria=(
+                ("regex", r"rp2040|ttyACM0|by.id"),
+                # Must frame it as the serial:/by-id value.
+                ("regex", r"serial|/dev/"),
+            ),
+        ),
+        TestQuestion(
+            qid="LIVE-04",
+            title="Schema routing: allowed bed_mesh params (typed lookup expected)",
+            text=("what parameters are allowed in the [bed_mesh] section and "
+                  "which ones are required? don't explain what they do, just "
+                  "the parameter names and which are required."),
+            # Routing test for the 2026-09 reroute: expected_tools is the
+            # schema tool ALONE, so a correct-but-reference answer grades
+            # PASS_WRONG_TOOL — that IS the routing signal. bed_mesh has
+            # NO required params (all optional per schema), so the answer
+            # gate is param-name coverage only.
+            context_files=(),
+            expected_tools=("get_section_schema",),
+            require_tool=True,
+            criteria=(
+                ("contains", "mesh_min"),
+                ("contains", "probe_count"),
+                ("contains", "speed"),
+            ),
+        ),
+        TestQuestion(
+            qid="LIVE-05",
+            title="Reference routing: prose WHY question (input_shaper explanation)",
+            text=("what does the [input_shaper] section actually do and how do "
+                  "I choose a shaper frequency for my printer?"),
+            # The other half of the boundary: this NEEDS prose — schema
+            # alone can't answer 'how do I choose'. Any doc tool is
+            # legitimate (correct output = pass).
+            context_files=(),
+            expected_tools=("get_config_reference_section", "search_klipper_docs",
+                            "get_section_schema"),
+            require_tool=False,
+            criteria=(
+                # Explanatory substance, not a param dump.
+                ("regex", r"resonan|vibration|ringing"),
+                # Must name real shaper concepts, proving it read real
+                # content rather than vague advice.
+                ("regex", r"\bzv\b|mz_?h|shaper_type"),
+            ),
+        ),
+        TestQuestion(
+            qid="LIVE-06",
+            title="Klippy status: 'why won't the printer connect?' must check live state",
+            text="why won't my printer connect? is klipper even running?",
+            # Dev Pi: no klippy socket → correct answer relays
+            # 'not responding / socket not found'. On the Trident the
+            # correct readout is 'ready' — both accepted; the hard gate is
+            # the status tool call. Fabricated diagnoses without the tool
+            # fail tool_ok.
+            context_files=(),
+            expected_tools=("get_klippy_status",),
+            require_tool=True,
+            criteria=(
+                ("regex", r"not responding|not running|stopped|not found|"
+                          r"cannot (?:be )?reach|no socket|startup|"
+                          r"ready|shut ?down"),
+            ),
+        ),
+        TestQuestion(
+            qid="LIVE-07",
+            title="Restart safety: 'can I firmware restart now?' checks print state first",
+            text="can I do a FIRMWARE_RESTART right now to apply my config changes?",
+            # The tool description makes the model call status BEFORE
+            # recommending a restart (mid-print interruption guard).
+            # Criteria accept either correct verdict (ready/safe vs not
+            # running vs printing-warning); tool_ok is the assertion.
+            context_files=(),
+            expected_tools=("get_klippy_status",),
+            require_tool=True,
+            criteria=(
+                ("regex", r"restart"),
+                ("regex", r"not running|not responding|stopped|ready|safe|"
+                          r"startup|interrupt|printing|start klipper|already"),
+            ),
+        ),
+    ]
+
+
 _MEMORY_CONFIG_SNIPPET = """[mcu]
 serial: /dev/serial/by-id/usb-Klipper_stm32f446xx_3D002B000E50505734393820-if00
 
@@ -1948,7 +2112,7 @@ def main() -> int:
                              "printer memory, blank it, run MEMORY-01..03, then restore it")
     args = parser.parse_args()
 
-    questions = build_questions() + build_macro_questions() + build_trident_questions() + build_ambiguity_questions() + build_setup_questions()
+    questions = build_questions() + build_macro_questions() + build_trident_questions() + build_ambiguity_questions() + build_setup_questions() + build_live_context_questions()
     if args.include_memory:
         questions += build_memory_questions()
     if args.list_questions:
