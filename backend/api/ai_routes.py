@@ -594,9 +594,12 @@ _MCP_TOOL_SNIPPETS: dict[str, str] = {
     "validate_config_project": (
         "Validate the user's CURRENT config project on this host (all files, "
         "includes expanded) against the full schema — errors/warnings/infos "
-        "with file+line. No args validates everything; filenames=['printer.cfg'] "
-        "for a subset. Use for 'is my config OK?' and before advising "
-        "FIRMWARE_RESTART; validate_klipper_config is for drafts you wrote"
+        "with file+line. Call this for 'validate/check/review my config', "
+        "'is my config OK?', 'what's wrong with my config' — instead of "
+        "reading config files and judging by eye. No args validates "
+        "everything; filenames=['printer.cfg'] for a subset. Use before "
+        "advising FIRMWARE_RESTART; validate_klipper_config is for drafts "
+        "you wrote"
     ),
     "list_connected_devices": (
         "List USB serial (/dev/serial/by-id paths for [mcu] serial:), UART, "
