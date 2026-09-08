@@ -585,8 +585,9 @@ _MCP_TOOL_SNIPPETS: dict[str, str] = {
     "search_example_configs": "Search example configs by board or printer (query='voron', limit=N)",
     "read_example_config": "Read a full example config file (filename='generic-....cfg')",
     "validate_klipper_config": (
-        "Validate config section block against the klipper config rules "
-        "(config_text='...' required)"
+        "Validate a config draft YOU wrote (config_text='...' required) — "
+        "for a section/snippet in your reply, not the user's saved files; "
+        "use validate_config_project to check what's actually on disk"
     ),
     "validate_macro": (
         "Validate a gcode_macro against Klipper's Jinja rules (macro_text='...' required)"

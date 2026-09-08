@@ -652,10 +652,14 @@ class McpServer:
             {
                 "name": "validate_klipper_config",
                 "description": (
-                    "Validate that a new or existing config section block is valid "
-                    "and free of errors. Parse and validate a Klipper config block. "
-                    "Returns structured results: parsed sections with their parameters, "
-                    "any errors or warnings, and the raw config text."
+                    "Validate a config text BLOCK YOU WROTE in this "
+                    "conversation (a draft section or snippet). Parse and "
+                    "validate a Klipper config block. Returns structured "
+                    "results: parsed sections with their parameters, any "
+                    "errors or warnings, and the raw config text. To check "
+                    "the user's ACTUAL saved config files instead, use "
+                    "validate_config_project — this tool only validates the "
+                    "text you pass it."
                 ),
                 "inputSchema": {
                     "type": "object",
