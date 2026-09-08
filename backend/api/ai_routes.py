@@ -585,9 +585,12 @@ _MCP_TOOL_SNIPPETS: dict[str, str] = {
     "search_example_configs": "Search example configs by board or printer (query='voron', limit=N)",
     "read_example_config": "Read a full example config file (filename='generic-....cfg')",
     "validate_klipper_config": (
-        "Validate a config draft YOU wrote (config_text='...' required) — "
-        "for a section/snippet in your reply, not the user's saved files; "
-        "use validate_config_project to check what's actually on disk"
+        "VERIFY config TEXT for errors (config_text='...' required) — "
+        "'check this for errors' / 'is this section correct' about ANY "
+        "config text you can see, pasted by the user or written by you: "
+        "required params, types, ranges. A schema or reference list CANNOT "
+        "check text — never approve config text from a listing alone. For "
+        "the user's saved files use validate_config_project"
     ),
     "validate_macro": (
         "Validate a gcode_macro against Klipper's Jinja rules (macro_text='...' required)"
@@ -609,12 +612,13 @@ _MCP_TOOL_SNIPPETS: dict[str, str] = {
         "lines and 'which board is plugged in?'"
     ),
     "get_section_schema": (
-        "VERIFY a section's allowed parameters against the schema "
+        "LIST a section's allowed parameters from the schema "
         "(section='bed_mesh' or sections=['extruder','gcode_arcs']): types, "
-        "defaults, required flags, enum values, numeric bounds. Call BEFORE "
-        "adding or editing a section's parameters — this is the fast check "
-        "for WHICH params and values are legal; get_config_reference_section "
-        "only for prose explanations and examples"
+        "defaults, required flags, enum values, numeric bounds. Use to "
+        "learn WHICH params/values are legal BEFORE writing a new section; "
+        "it cannot check text — for 'is this config correct?' use "
+        "validate_klipper_config; get_config_reference_section only for "
+        "prose explanations and examples"
     ),
     "get_klippy_status": (
         "Get Klipper's live state (ready / startup error / shutdown), the "

@@ -1420,9 +1420,11 @@ def build_live_context_questions() -> list[TestQuestion]:
             qid="LIVE-06",
             title="Klippy status: 'why won't the printer connect?' must check live state",
             text="why won't my printer connect? is klipper even running?",
-            # Dev Pi: no klippy socket → correct answer relays
-            # 'not responding / socket not found'. On the Trident the
-            # correct readout is 'ready' — both accepted; the hard gate is
+            # Dev Pi's actual klippy state is STARTUP ERROR (KAMP missing
+            # include) — not the no-socket case the criteria first assumed;
+            # 'error' joined the verdict list after the 2026-09-08 live run
+            # false-failed a correct 'error state' relay. Correct relays of
+            # not-responding, ready, OR error all pass; the hard gate is
             # the status tool call. Fabricated diagnoses without the tool
             # fail tool_ok.
             context_files=(),
@@ -1431,24 +1433,27 @@ def build_live_context_questions() -> list[TestQuestion]:
             criteria=(
                 ("regex", r"not responding|not running|stopped|not found|"
                           r"cannot (?:be )?reach|no socket|startup|"
-                          r"ready|shut ?down"),
+                          r"ready|shut ?down|error|crash"),
             ),
         ),
         TestQuestion(
             qid="LIVE-07",
             title="Restart safety: 'can I firmware restart now?' checks print state first",
             text="can I do a FIRMWARE_RESTART right now to apply my config changes?",
-            # The tool description makes the model call status BEFORE
-            # recommending a restart (mid-print interruption guard).
-            # Criteria accept either correct verdict (ready/safe vs not
-            # running vs printing-warning); tool_ok is the assertion.
+            # Criteria accept any correct verdict (ready/safe vs not
+            # running vs startup-ERROR vs printing-warning). The dev Pi
+            # actually reports startup error (KAMP missing include) —
+            # 'error' had to join the verdict list after first live run
+            # (2026-09-08) when the model correctly relayed 'error state'
+            # and got false-failed. tool_ok is the assertion.
             context_files=(),
             expected_tools=("get_klippy_status",),
             require_tool=True,
             criteria=(
                 ("regex", r"restart"),
                 ("regex", r"not running|not responding|stopped|ready|safe|"
-                          r"startup|interrupt|printing|start klipper|already"),
+                          r"startup|interrupt|printing|start klipper|already|"
+                          r"error"),
             ),
         ),
     ]
@@ -1550,6 +1555,13 @@ ALL_TOOLS = (
     "list_user_configs",
     "list_user_config_sections",
     "read_user_config",
+    # Live-context tools (feature/config-mcp-tools, 2026-09). When adding
+    # an MCP tool, update this tuple too or the summary lists real calls
+    # under "Unknown tool attempts" (LIVE-01 false alarm, 2026-09-08).
+    "validate_config_project",
+    "list_connected_devices",
+    "get_section_schema",
+    "get_klippy_status",
     "detect_board",
     "calculate_rotation_distance",
     "generate_macro_template",
