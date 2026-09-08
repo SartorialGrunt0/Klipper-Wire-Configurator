@@ -550,11 +550,14 @@ _MCP_TOOL_SNIPPETS: dict[str, str] = {
         "get_config_reference_section(section_name=...)"
     ),
     "get_config_reference_section": (
-        "VERIFY a config section's valid name and parameters in "
-        "Config_Reference (section_name='firmware_retraction'); use BEFORE "
-        "adding or editing a section — never invent section names or params "
-        "from memory. list_sections=true returns ONLY the section headers "
-        "to pick from; sections=['a','b'] fetches several in one call"
+        "READ the Config_Reference PROSE for a section — what the parameters "
+        "do, setup examples, detailed semantics (section_name="
+        "'firmware_retraction'). Use when designing a section you don't "
+        "fully understand yet. For a quick check of allowed param names, "
+        "defaults, enums, and bounds, call get_section_schema instead — "
+        "never invent section names or params from memory either way. "
+        "list_sections=true returns ONLY the section headers to pick from; "
+        "sections=['a','b'] fetches several in one call"
     ),
     "read_user_config": (
         "Read a user config file (filename='printer.cfg' required): "
@@ -602,11 +605,12 @@ _MCP_TOOL_SNIPPETS: dict[str, str] = {
         "lines and 'which board is plugged in?'"
     ),
     "get_section_schema": (
-        "Get a section's exact allowed parameters from the schema "
+        "VERIFY a section's allowed parameters against the schema "
         "(section='bed_mesh' or sections=['extruder','gcode_arcs']): types, "
-        "defaults, required flags, enum values, numeric bounds — use to check "
-        "WHICH params a section accepts; get_config_reference_section for "
-        "explanations"
+        "defaults, required flags, enum values, numeric bounds. Call BEFORE "
+        "adding or editing a section's parameters — this is the fast check "
+        "for WHICH params and values are legal; get_config_reference_section "
+        "only for prose explanations and examples"
     ),
     "get_klippy_status": (
         "Get Klipper's live state (ready / startup error / shutdown), the "
@@ -649,11 +653,14 @@ def _build_mcp_tool_context() -> str:
         "validate_macro for drafts. Do not guess when a tool can answer. "
         "read_user_config / list_user_config_sections show only what ALREADY "
         "exists in the user's files; list_config_reference_sections / "
-        "get_config_reference_section / search_klipper_docs show what Klipper "
-        "SUPPORTS. When the user asks to ADD or SETUP a section or parameter, "
-        "look it up with list_config_reference_sections (then "
-        "get_config_reference_section) or search_klipper_docs first — a valid "
-        "Klipper section may not be in the user's config yet.",
+        "get_config_reference_section / get_section_schema / "
+        "search_klipper_docs show what Klipper SUPPORTS. When the user asks "
+        "to ADD or SETUP a section or parameter, look it up first — a valid "
+        "Klipper section may not be in the user's config yet. To verify "
+        "which PARAMETERS and values a section accepts, call "
+        "get_section_schema (fast, exact types/defaults/enums/bounds); use "
+        "get_config_reference_section only when you need the prose "
+        "explanation or examples of what the section does.",
         "",
         "Text format (used by providers without native function calling): put a JSON ",
         "code block tagged `tool` in your reply:",
