@@ -23,6 +23,7 @@ from services.native_services import (
     list_flash_profiles,
     list_config_files,
     load_flash_profile,
+    load_native_project,
     query_canbus_uuids,
     read_config_file,
     write_config_file,
@@ -145,67 +146,21 @@ def read_config_files(data: dict):
         raise HTTPException(status_code=400, detail="No filenames provided")
 
     base = Path(config_path)
-    # Validate all paths are under the config directory (don't resolve symlinks)
-    for fn in filenames:
-        if '..' in fn or fn.startswith('/'):
-            raise HTTPException(status_code=400, detail=f"Invalid filename: {fn}")
-        candidate = base / fn
-        # Check the un-resolved path is under base
-        try:
-            candidate.relative_to(base)
-        except ValueError:
-            raise HTTPException(status_code=400, detail=f"Invalid filename: {fn}")
-
-    configs = {}
-    raw_texts = {}
-    board_infos = {}
-    for fn in filenames:
-        file_path = base / fn
-        if not file_path.exists():
-            continue
-        text = read_config_file(str(file_path))
-        config = parse_config(text, fn)
-        configs[fn] = config
-        raw_texts[fn] = text
-        board_infos[fn] = detect_board_from_config(config)
-
-    # Expand to the on-disk include closure. list_config_files hides files
-    # whose symlink target escapes the config root (traversal guard), but
-    # Klipper follows include symlinks wherever they point at load
-    # (configfile.py _resolve_include: os.path.join(dirname, include_spec)
-    # then a plain open). Third-party configs (KAMP, moonraker-obico,
-    # mainsail macros) are commonly symlinked INTO the config dir from
-    # elsewhere, so a native project must load them or every such include
-    # becomes a false "missing include" error on a config Klipper loads fine.
-    # Includes resolve relative to the directory of the INCLUDING file —
-    # mirroring Klipper. Only ACTIVE (non-commented) includes are followed;
-    # globs are skipped (never resolvable in-memory, legal when empty).
-    pending = list(configs)
-    while pending:
-        fn = pending.pop()
-        for include_spec in configs[fn].includes:
-            spec = include_spec.strip()
-            if not spec or glob.has_magic(spec):
-                continue
-            inc_dir = os.path.dirname(fn.replace("\\", "/"))
-            rel = os.path.normpath(
-                os.path.join(inc_dir, spec) if inc_dir else spec
-            )
-            # The include ENTRY must stay lexically inside the config dir (the
-            # same boundary read_config_files enforces for requested names);
-            # its symlink target may live anywhere, exactly like Klipper.
-            if os.path.isabs(rel) or Path(rel).parts[0] == "..":
-                continue
-            if rel in configs:
-                continue
-            file_path = base / rel
-            if not file_path.exists():  # follows symlinks
-                continue
-            text = read_config_file(str(file_path))
-            configs[rel] = parse_config(text, rel)
-            raw_texts[rel] = text
-            board_infos[rel] = detect_board_from_config(configs[rel])
-            pending.append(rel)
+    # Read + on-disk include-closure expansion lives in the shared service
+    # loader (also used by the MCP validate_config_project tool), so the
+    # V2.6.0 symlink-closure semantics can't fork between surfaces:
+    # list_config_files hides files whose symlink target escapes the config
+    # root (traversal guard), but Klipper follows include symlinks wherever
+    # they point at load (configfile.py _resolve_include). Third-party
+    # configs (KAMP, moonraker-obico, mainsail macros) are commonly symlinked
+    # INTO the config dir from elsewhere, so a native project must load them
+    # or every such include becomes a false "missing include" error on a
+    # config Klipper loads fine.
+    try:
+        configs, raw_texts, _skipped = load_native_project(base, filenames)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    board_infos = {fn: detect_board_from_config(cfg) for fn, cfg in configs.items()}
 
     validations = validate_project_configs(configs)
     results = {

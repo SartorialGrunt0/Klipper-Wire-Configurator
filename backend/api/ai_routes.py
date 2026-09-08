@@ -588,6 +588,34 @@ _MCP_TOOL_SNIPPETS: dict[str, str] = {
     "validate_macro": (
         "Validate a gcode_macro against Klipper's Jinja rules (macro_text='...' required)"
     ),
+    "validate_config_project": (
+        "Validate the user's CURRENT config project on this host (all files, "
+        "includes expanded) against the full schema — errors/warnings/infos "
+        "with file+line. No args validates everything; filenames=['printer.cfg'] "
+        "for a subset. Use for 'is my config OK?' and before advising "
+        "FIRMWARE_RESTART; validate_klipper_config is for drafts you wrote"
+    ),
+    "list_connected_devices": (
+        "List USB serial (/dev/serial/by-id paths for [mcu] serial:), UART, "
+        "and CAN devices on this host, with CAN UUIDs from canbus_query "
+        "(scan_can_uuids=false skips the bus scan). Use for serial:/canbus_uuid "
+        "lines and 'which board is plugged in?'"
+    ),
+    "get_section_schema": (
+        "Get a section's exact allowed parameters from the schema "
+        "(section='bed_mesh' or sections=['extruder','gcode_arcs']): types, "
+        "defaults, required flags, enum values, numeric bounds — use to check "
+        "WHICH params a section accepts; get_config_reference_section for "
+        "explanations"
+    ),
+    "get_klippy_status": (
+        "Get Klipper's live state (ready / startup error / shutdown), the "
+        "active print job, and klippy.log error context (attached "
+        "automatically when not ready; include_log_excerpt=true with optional "
+        "section_name/error_text forces it while ready). Call BEFORE "
+        "recommending FIRMWARE_RESTART — it warns if a print would be "
+        "interrupted"
+    ),
     "generate_macro_template": (
         "Generate a ready-to-use macro template (macro_name='PRINT_START'|'PRINT_END'|"
         "'PAUSE'|'RESUME'|'CANCEL_PRINT'; include_bed_mesh option)"
