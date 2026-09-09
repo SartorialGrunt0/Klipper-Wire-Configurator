@@ -323,8 +323,10 @@ def test_retry_exempt_does_not_burn_query(monkeypatch):
 
 
 def test_audit_footer_on_clean_apply(monkeypatch):
+    # Audit-only mode: both harness flags default ON (2026-09-09), so
+    # validation must be explicitly disabled to isolate the audit path.
     monkeypatch.setenv("KWC_POST_APPLY_AUDIT", "1")
-    monkeypatch.delenv("KWC_SERVER_DRAFT_VALIDATION", raising=False)
+    monkeypatch.setenv("KWC_SERVER_DRAFT_VALIDATION", "0")
     req = _chat_request(_ctx())
     req.messages = [{"role": "user", "content": "set max_accel to 99999"}]
     content, info = _run_validate(req, CLEAN_REPLY, repair_response=None)

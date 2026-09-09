@@ -54,7 +54,12 @@ _mcp_server = McpServer()
 # Match fenced code blocks tagged ```tool ... ```
 # Captures the JSON payload which we parse with json.loads
 MCP_TOOL_BLOCK_RE = re.compile(
-    r"```tool\s*\n(.+?)\n```",
+    # The closing fence may sit on the SAME line as the JSON
+    # (`{"name": ...}```) — qwen3.5-4b does this constantly (observed live
+    # 2026-09-09 accuracy bank, LIVE-06/07). Requiring a newline before the
+    # closer made such calls undetectable AND un-strippable: raw markup
+    # reached the chat bubble. Consumers strip() the group themselves.
+    r"```tool\s*\n(.+?)```",
     re.DOTALL,
 )
 # A fenced ```printer-memory block signals a complete structured proposal —
@@ -980,22 +985,23 @@ def _minimal_prompt_enabled() -> bool:
 def _server_draft_validation_enabled() -> bool:
     """Server-side merged-result validation + ONE repair pass toggle.
 
-    Env KWC_SERVER_DRAFT_VALIDATION=1 enables the backend apply→validate→
-    one-lean-repair harness (#1). Default OFF: the frontend retry loop stays
-    the only validation path until the A/B harness (REPAIR gate on the
-    accuracy bank) says otherwise.
+    DEFAULTS TO ENABLED (2026-09-09 A/B: both flags ON across the full 69-q
+    bank on gemma-4-12b + qwen3.5-4b with zero false-positive repairs, zero
+    latency complaints, and the harness at its best gemma scores; repair and
+    audit paths verified unit-level + live smoke). Set env
+    KWC_SERVER_DRAFT_VALIDATION=0 to revert to the frontend-only retry path.
     """
-    return os.environ.get("KWC_SERVER_DRAFT_VALIDATION", "0") != "0"
+    return os.environ.get("KWC_SERVER_DRAFT_VALIDATION", "1") != "0"
 
 
 def _server_audit_enabled() -> bool:
     """Deterministic post-apply audit footer toggle (#3).
 
-    Env KWC_POST_APPLY_AUDIT=1. Default OFF for byte-identical rollout; the
-    frontend's ChatMessageList strips no markup so the audit footer renders
-    as a visible note. Only replies that touched config get audited.
+    DEFAULTS TO ENABLED (same 2026-09-09 A/B: footers appeared only on
+    config-touching replies and only with real observations — zero noise
+    across 138 replies). Set env KWC_POST_APPLY_AUDIT=0 to disable.
     """
-    return os.environ.get("KWC_POST_APPLY_AUDIT", "0") != "0"
+    return os.environ.get("KWC_POST_APPLY_AUDIT", "1") != "0"
 
 
 def _config_fallback_enabled() -> bool:
@@ -1086,6 +1092,12 @@ def _extract_tool_calls(text: str) -> list[dict]:
             # up. The fence is unambiguous tool intent, not prose.
             recovered_call = _recover_fenced_tool_call(raw_json)
             if recovered_call:
+                # Counted so the A/B can separate silent recoveries from
+                # re-prompt corrections (only the latter logs a WARNING).
+                logger.debug(
+                    "Recovered malformed tool fence | name=%s preview=%s",
+                    recovered_call["name"], raw_json[:100].replace("\n", " "),
+                )
                 calls.append(recovered_call)
             continue
         name = parsed.get("name", "")

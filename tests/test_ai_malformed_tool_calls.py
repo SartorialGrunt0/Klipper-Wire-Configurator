@@ -25,6 +25,17 @@ client = TestClient(app)
 # ── extractor-level recovery ─────────────────────────────────────────
 
 
+def test_extract_parses_same_line_closing_fence():
+    # qwen3.5-4b constantly closes the fence on the SAME line as the JSON:
+    # ```tool\n{"name": ...}``` — the newline-then-backticks requirement made
+    # these calls undetectable AND un-strippable (live 2026-09-09 bank).
+    text = '```tool\n{"name": "get_klippy_status", "arguments": {}}```'
+    calls = ai_routes._extract_tool_calls(text)
+    assert calls == [{"name": "get_klippy_status", "arguments": {}}]
+    # And the fence must not leak into cleaned content.
+    assert "```" not in ai_routes.MCP_TOOL_BLOCK_RE.sub("", text).strip()
+
+
 def test_extract_recovers_python_call_inside_tool_fence():
     # name(k=v) inside an explicit ```tool fence is unambiguous tool
     # intent — recovered mechanically, no re-prompt needed.
