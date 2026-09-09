@@ -1079,8 +1079,14 @@ def _extract_tool_calls(text: str) -> list[dict]:
         try:
             parsed = json.loads(raw_json)
         except json.JSONDecodeError:
-            continue
+            parsed = None
         if not isinstance(parsed, dict):
+            # Broken JSON inside an explicit tool fence — attempt mechanical
+            # recovery (python-call form, smart/single quotes) before giving
+            # up. The fence is unambiguous tool intent, not prose.
+            recovered_call = _recover_fenced_tool_call(raw_json)
+            if recovered_call:
+                calls.append(recovered_call)
             continue
         name = parsed.get("name", "")
         arguments = parsed.get("arguments", {})
@@ -1247,6 +1253,123 @@ def _parse_kwargs(args_text: str) -> dict:
         arg_value = arg_match.group(2).strip().strip('"').strip("'")
         arguments[arg_name] = arg_value
     return arguments
+
+
+# Unterminated ```tool fence: the model opened a tool block and the stream
+# ended (or it forgot the closing fence). Such a fence is never legitimate
+# content — everything after it is part of the broken call.
+UNTERMINATED_TOOL_FENCE_RE = re.compile(
+    r"```tool\b(?:(?!```)[\s\S])*$"
+)
+# Python-call form inside a ```tool fence: name(k=v, ...) / call name(...).
+_FENCED_PY_CALL_RE = re.compile(
+    r"^(?:call[\s:]?\s*)?(\w+)\s*\((.*)\)\s*$",
+    re.DOTALL,
+)
+# Brace-call form inside a ```tool fence: name{k=v, ...} / call name{...}.
+_FENCED_BRACE_CALL_RE = re.compile(
+    r"^(?:call[\s:]?\s*)?(\w+)\s*\{(.*)\}\s*$",
+    re.DOTALL,
+)
+
+
+def _recover_fenced_tool_call(raw_json: str) -> dict | None:
+    """Recover a tool call from a ```tool fence whose JSON failed to parse.
+
+    A ```tool fence is explicit tool-call intent, so repairs are scoped to
+    fence bodies ONLY (never guessed from prose, per the intent law). Small
+    models (qwen 4B class) produce three recurring breakage shapes here:
+    python-style ``name(k=v)``, single/smart-quoted pseudo-JSON, and
+    unescaped quotes inside values. All are mechanically recoverable.
+    """
+    # 1) Smart quotes → ASCII, then plain JSON retry.
+    normalized = (
+        raw_json.replace("\u201c", '"').replace("\u201d", '"')
+        .replace("\u2018", "'").replace("\u2019", "'")
+    )
+    if normalized != raw_json:
+        try:
+            parsed = json.loads(normalized)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            name = parsed.get("name", "")
+            arguments = parsed.get("arguments", {})
+            if isinstance(name, str) and name and isinstance(arguments, dict):
+                return {"name": name, "arguments": arguments}
+    # 2) Python call form: name(k=v, ...).
+    call_match = _FENCED_PY_CALL_RE.match(normalized.strip())
+    if call_match and call_match.group(1):
+        return {
+            "name": call_match.group(1),
+            "arguments": _parse_kwargs(call_match.group(2)),
+        }
+    # 3) Brace call form: name{k=v, ...}. The brace body may itself be
+    #    JSON (llama.cpp `call:tool{"name": ..., "arguments": {...}}`
+    #    decoration) — try that before treating it as bare kwargs.
+    brace_match = _FENCED_BRACE_CALL_RE.match(normalized.strip())
+    if brace_match and brace_match.group(1):
+        try:
+            parsed = json.loads("{" + brace_match.group(2) + "}")
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            name = parsed.get("name", "")
+            arguments = parsed.get("arguments", {})
+            if isinstance(name, str) and name and isinstance(arguments, dict):
+                return {"name": name, "arguments": arguments}
+        return {
+            "name": brace_match.group(1),
+            "arguments": _parse_kwargs(brace_match.group(2)),
+        }
+    # 4) Single-quoted pseudo-JSON (only when there are no double quotes to
+    #    protect): {"name": ...} with ' throughout.
+    if "'" in normalized and '"' not in normalized:
+        try:
+            parsed = json.loads(normalized.replace("'", '"'))
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            name = parsed.get("name", "")
+            arguments = parsed.get("arguments", {})
+            if isinstance(name, str) and name and isinstance(arguments, dict):
+                return {"name": name, "arguments": arguments}
+    return None
+
+
+def _malformed_tool_call_detected(text: str, calls: list[dict]) -> bool:
+    """True when the reply contains tool-call intent that failed to parse.
+
+    Deterministic post-hoc detection over explicit ```tool protocol fences
+    only: a fence body that mentions a name/call shape but yielded no call,
+    or an unterminated ```tool fence (truncated stream). Prose that merely
+    mentions tools never triggers this.
+    """
+    if calls:
+        return False
+    for fence in MCP_TOOL_BLOCK_RE.finditer(text):
+        body = fence.group(1)
+        if re.search(r"\bname\b|\bcall\b|\w+\s*[({]", body):
+            return True
+    return bool(UNTERMINATED_TOOL_FENCE_RE.search(text))
+
+
+# One protocol-correction re-prompt for a malformed tool call. The broken
+# call is NEVER quoted (REPAIR-01: models copy broken drafts verbatim) —
+# the model only gets the exact format and a clean path back.
+MALFORMED_TOOL_REPROMPT_LIMIT = 1
+MALFORMED_TOOL_FORMAT_FEEDBACK = (
+    "Your previous response contained a tool call that could not be parsed, "
+    "so it was not executed. Do not copy or repeat your previous response. "
+    'To call a tool, respond with exactly one fenced block in this format:\n\n'
+    "```tool\n"
+    '{"name": "<tool_name>", "arguments": {"key": "value"}}\n'
+    "```\n\n"
+    'Use double quotes around every name and string value, keep the JSON on '
+    'valid one-line or multi-line form, and always close the fence. If you '
+    "no longer need a tool, answer the user's question directly in text "
+    "instead."
+)
 
 
 def _strip_bracket_tool_calls(text: str) -> str:
@@ -2185,6 +2308,9 @@ async def chat_proxy(req: ChatRequest):
             current_messages = list(messages)
             executed_tool_names: list[str] = []
             executed_tool_calls: list[dict] = []
+            # Re-prompts issued to correct a malformed ```tool fence (see the
+            # malformed tool-call guard in the loop below).
+            malformed_reprompts = 0
 
             # ── Config-grounding fallback (Phase 4) ──
             # If the model didn't call any tools on the first pass, inject the
@@ -2303,6 +2429,46 @@ async def chat_proxy(req: ChatRequest):
                 native_calls = _extract_native_tool_calls(req.apiProvider, current_data)
                 tool_calls = native_calls or _extract_tool_calls(current_content)
                 if not tool_calls:
+                    # ── Malformed tool-call guard ──
+                    # A ```tool fence that failed to parse (or an unterminated
+                    # fence) is unambiguous tool intent — without this, the
+                    # loop sees "no tool calls, non-empty text", stops, and
+                    # the raw broken markup leaks into the chat bubble. Issue
+                    # ONE format-correction re-prompt (never quoting the
+                    # broken call — REPAIR-01) instead of terminating.
+                    if (
+                        malformed_reprompts < MALFORMED_TOOL_REPROMPT_LIMIT
+                        and _malformed_tool_call_detected(current_content, tool_calls)
+                    ):
+                        malformed_reprompts += 1
+                        tool_turns += 1
+                        logger.warning(
+                            "Malformed tool call | re-prompting with format "
+                            "correction (%d/%d) preview=%s",
+                            malformed_reprompts, MALFORMED_TOOL_REPROMPT_LIMIT,
+                            current_content[:120].replace("\n", " "),
+                        )
+                        current_messages.append({
+                            "role": "user",
+                            "content": MALFORMED_TOOL_FORMAT_FEEDBACK,
+                        })
+                        malformed_payload = _build_provider_payload(
+                            req.apiProvider, current_messages, req.model,
+                            max_tokens=req.maxTokens,
+                            temperature=req.temperature,
+                            tools=native_tools,
+                            merge_system=req.mergeSystemMessages,
+                        )
+                        current_content, current_data = await _query_provider(
+                            client, req.apiUrl, headers, malformed_payload, req.apiProvider,
+                            logger_context=f"malformed-reprompt-{malformed_reprompts}",
+                            stop_event=stop_event,
+                        )
+                        malformed_usage = _extract_usage_info(current_data)
+                        if malformed_usage:
+                            malformed_usage["context"] = f"malformed-reprompt-{malformed_reprompts}"
+                            usage_events.append(malformed_usage)
+                        continue
                     if tool_turns > 0:
                         logger.info("Tool call loop done | turns=%d final_chars=%d", tool_turns, len(current_content))
                     break
@@ -2404,6 +2570,7 @@ async def chat_proxy(req: ChatRequest):
                 or FUNC_CALL_CLEANUP_RE.search(current_content)
                 or DSML_CLEANUP_RE.search(current_content)
                 or XML_TOOL_CALLS_CLEANUP_RE.search(current_content)
+                or UNTERMINATED_TOOL_FENCE_RE.search(current_content)
             )
             final_content = MCP_TOOL_BLOCK_RE.sub("", current_content).strip()
             final_content = ALT_TOOL_CALL_CONTENT_RE.sub("", final_content).strip()
@@ -2411,6 +2578,10 @@ async def chat_proxy(req: ChatRequest):
             final_content = FUNC_CALL_CLEANUP_RE.sub("", final_content).strip()
             final_content = _strip_bracket_tool_calls(final_content).strip()
             final_content = DSML_CLEANUP_RE.sub("", final_content).strip()
+            # An unterminated ```tool fence (truncated broken call) would
+            # otherwise leak raw markup into the bubble — it always extends
+            # to end of content, so a tail-strip is safe.
+            final_content = UNTERMINATED_TOOL_FENCE_RE.sub("", final_content).strip()
             # If the cleanup left nothing but the original was a tool call,
             # don't restore the raw tool call text — return empty instead.
             if not final_content and not had_tool_blocks:
