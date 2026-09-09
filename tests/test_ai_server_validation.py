@@ -86,6 +86,19 @@ def test_requirement_check_grid_value():
     assert check_stated_requirements("change probe_count to 3x3", files) == []
 
 
+def test_requirement_check_alias_param_name():
+    # "set max_acceleration to 9000" applied as `max_accel: 9000` must NOT
+    # warn: prefix-alias sibling (max_acceleration ⊃ max_accel) carries the
+    # value (HARNESS-01 live finding, 2026-09-09).
+    files = _files()
+    files["printer.cfg"].sections[0].params.append(
+        parse_config("[printer]\nmax_accel: 9000\n", "x.cfg").sections[0].params[0]
+    )
+    assert check_stated_requirements("set max_acceleration to 9000", files) == []
+    # ...but a different value still flags.
+    assert check_stated_requirements("set max_acceleration to 9500", files) != []
+
+
 def test_requirement_check_ignores_questions():
     assert check_stated_requirements("what is max_velocity?", _files()) == []
 

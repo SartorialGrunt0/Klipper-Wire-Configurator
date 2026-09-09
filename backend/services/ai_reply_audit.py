@@ -96,6 +96,24 @@ def check_stated_requirements(
     available = _merged_param_values(merged_files)
     notes: list[str] = []
     for key, values in requested.items():
+        if key not in available:
+            # Typo/alias tolerance: 'max_acceleration' → real param
+            # 'max_accel' (prefix match). The validator rejects unknown
+            # params outright, so an unknown stated key with a close real
+            # sibling means the repair pipeline already resolved it —
+            # check the sibling instead of crying wolf. GUARDED: siblings
+            # must be ≥8 chars and ≥half the requested key's length, or a
+            # bare `probe` would swallow `probe_count` (different params).
+            aliases = [
+                k for k in available
+                if (k.startswith(key) or key.startswith(k))
+                and min(len(k), len(key)) >= 8
+                and min(len(k), len(key)) * 2 >= max(len(k), len(key))
+            ]
+            if aliases:
+                key = min(aliases, key=len)
+            # Unknown key with no sibling: fall through so it is flagged as
+            # "no value" — the requirement demonstrably did not land.
         have = available.get(key, [])
         for want in values:
             # Grid values: "5x5" matches stored "5,5" / "5, 5" / "5x5".
@@ -105,11 +123,15 @@ def check_stated_requirements(
             norm_have = [_norm_grid(h) for h in have]
             if any(_num_eq(want, h) or _norm_grid(want) == h for h in norm_have):
                 continue
+            if not have:
+                found_desc = "no value"
+            elif len(have) == 1:
+                found_desc = f"`{have[0]}`"
+            else:
+                found_desc = f"`{have[0]}` (found: {', '.join('`' + h + '`' for h in have[:4])})"
             notes.append(
                 f"Your message asked for `{key}` = `{want}`, but the merged config has "
-                f"{'`' + have[0] + '`' if have else 'no'}"
-                + (f" (found: {', '.join('`' + h + '`' for h in have[:4])})" if len(have) > 1 else "")
-                + " for that parameter. Review whether the change landed."
+                f"{found_desc} for that parameter. Review whether the change landed."
             )
     return notes
 
@@ -169,27 +191,48 @@ def check_macro_preconditions(changed_gcode_bodies: list[tuple[str, str]]) -> li
 # ── 3. LED / sibling-section inventory sweep ─────────────────────────
 
 _LED_TYPE_RE = re.compile(r"^(neopixel|dotstar|led|pca9533|pca9685)\b")
+# LED commands in changed gcode count as touching that LED even when the
+# EDITED section isn't an LED section (TRIDENT-15 class: SET_LED added to
+# [idle_timeout] for one strip only). Literal command-argument matching on
+# the AST-enumerated strip names — deterministic, observation-only.
+_LED_CMD_RE = re.compile(r"\bSET_LED\b|\bSTOP_LED_EFFECTS\b|\bSET_LED_EFFECTS\b",
+                         re.IGNORECASE)
 
 
 def check_led_inventory(
     changed_section_headers: list[str],
     project_files: dict[str, ConfigFile],
+    changed_gcode_bodies: list[tuple[str, str]] | None = None,
 ) -> list[str]:
-    """If the change touched an LED section, list every LED section in the
-    project so none is silently left inconsistent."""
+    """If the change touched an LED section (or runs an LED command naming
+    a strip), list every LED section in the project so none is silently
+    left inconsistent."""
     touched_led = [h for h in changed_section_headers if _LED_TYPE_RE.match(h)]
-    if not touched_led:
+    touched_names = {h.split(None, 1)[1] for h in touched_led if " " in h}
+    for _, body in changed_gcode_bodies or []:
+        if not _LED_CMD_RE.search(body):
+            continue
+        for filename, cfg in project_files.items():
+            for section in cfg.sections:
+                if _LED_TYPE_RE.match(section.full_header) and " " in section.full_header:
+                    strip_name = section.full_header.split(None, 1)[1]
+                    if re.search(rf"\b{re.escape(strip_name)}\b", body):
+                        touched_names.add(strip_name)
+    if not touched_names:
         return []
     inventory: list[str] = []
     for filename, cfg in project_files.items():
         for section in cfg.sections:
-            if _LED_TYPE_RE.match(section.full_header) and section.full_header not in touched_led:
+            if not _LED_TYPE_RE.match(section.full_header):
+                continue
+            strip_name = section.full_header.split(None, 1)[1] if " " in section.full_header else ""
+            if strip_name and strip_name not in touched_names:
                 inventory.append(f"[{section.full_header}] ({filename})")
     if not inventory:
         return []
     return [
         "This change touches "
-        + ", ".join(f"`[{h}]`" for h in touched_led)
+        + ", ".join(f"`{n}`" for n in sorted(touched_names))
         + ". Other LED sections in the project were NOT changed: "
         + ", ".join(inventory)
         + ". Check whether they need the same change."
@@ -217,5 +260,7 @@ def run_post_apply_audit(
     notes: list[str] = []
     notes.extend(check_stated_requirements(user_message, merged_files))
     notes.extend(check_macro_preconditions(changed_gcode_bodies))
-    notes.extend(check_led_inventory(changed_section_headers, merged_files))
+    notes.extend(check_led_inventory(
+        changed_section_headers, merged_files, changed_gcode_bodies
+    ))
     return notes

@@ -2233,10 +2233,13 @@ def _run_audit_on_apply(req, apply_result, merged_files, project, audit_fn) -> l
                 changed_headers.append(header)
         merged_cfg = entry["merged_config"]
         for section in merged_cfg.sections:
-            if section.full_header in changed_headers and section.section_type == "gcode_macro":
-                body = section.get_value("gcode", "")
-                if body:
-                    changed_gcode.append((section.full_header, body))
+            # Any section with a gcode param: gcode_macro/delayed_gcode AND
+            # idle_timeout/force_move etc. — the idle_timeout LED class
+            # (#TRIDENT-15) lives on [idle_timeout], not a macro.
+            body = (section.get_value("gcode", "")
+                    if section.full_header in changed_headers else "")
+            if body:
+                changed_gcode.append((section.full_header, body))
     if not changed_headers:
         return []
     return audit_fn(
