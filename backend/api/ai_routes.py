@@ -997,11 +997,16 @@ def _server_draft_validation_enabled() -> bool:
 def _server_audit_enabled() -> bool:
     """Deterministic post-apply audit footer toggle (#3).
 
-    DEFAULTS TO ENABLED (same 2026-09-09 A/B: footers appeared only on
-    config-touching replies and only with real observations — zero noise
-    across 138 replies). Set env KWC_POST_APPLY_AUDIT=0 to disable.
+    DEFAULTS TO DISABLED (2026-09-10 design review): the stated-requirement
+    regex parses English prose, which fails Sir's standing bar — harness-tier
+    checks must parse structure (AST/config), not prose. Checks 2/3
+    (precondition table, LED inventory) are structural but ship together with
+    check 1; the whole module is scheduled for removal when tool-mediated
+    editing lands (see .hermes/plans/2026-09-10_tool-mediated-config-editing.md,
+    Phase 6). Set env KWC_POST_APPLY_AUDIT=1 to re-enable (harness probes
+    HARNESS-01..03 and dogfooding still work with it on).
     """
-    return os.environ.get("KWC_POST_APPLY_AUDIT", "1") != "0"
+    return os.environ.get("KWC_POST_APPLY_AUDIT", "0") == "1"
 
 
 def _config_fallback_enabled() -> bool:
