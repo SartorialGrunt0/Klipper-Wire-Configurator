@@ -48,6 +48,14 @@ const SECTION_HEADER_RE = /^\s*(\[[^\]]+\])\s*$/;
 const DELETE_MARKER_RE = /^\s*\*\[[^\]]+\]\s*$/;
 /** Column-0 param line (`key: value` / `key= value`) — mirrors the parser. */
 const PARAM_LINE_RE = /^(\w[\w]*)\s*[:=]/;
+
+/** Param key of a param-shaped line, else null. G-code command lines,
+ * jinja tags, and comments never match (see the key-tolerant fallback in
+ * applyOpsToSection). */
+function paramKey(line: string): string | null {
+  return PARAM_LINE_RE.exec(line)?.[1] ?? null;
+}
+
 /** Config-file hint line such as `# file: printer.cfg`. */
 const FILE_HINT_RE = /^\s*[#;]\s*file\s*:/i;
 
@@ -338,6 +346,25 @@ function applyOpsToSection(
       matchIndex = base.findIndex(
         (line, index) => !used.has(index) && line.trimStart() === strippedRemoval,
       );
+    }
+    if (matchIndex === -1 && strippedRemoval.trim() !== '') {
+      // Key-tolerant fallback for PARAM-SHAPED removals: models routinely
+      // emit a stale old value (e.g. `-probe_count: 7,7` against a section
+      // that already reads `3,3`). When the removed line is `key: value`/
+      // `key= value` shaped and the KEY exists in the base section, the
+      // intent is unambiguous — trust the key over the value. Without this
+      // the whole block aborts, the strip+full-section-write fallback keeps
+      // BOTH sides of every -/+ pair, and first-wins parsing silently
+      // selects the OLD value while dropping untouched section params
+      // (2026-09-09 HARNESS-03 finding; mirrored in
+      // backend/services/ai_draft_apply.py). G-code lines are not
+      // param-shaped and never key-match — stale gcode still falls back.
+      const removalKey = paramKey(strippedRemoval);
+      if (removalKey) {
+        matchIndex = base.findIndex(
+          (line, index) => !used.has(index) && paramKey(line.trimStart()) === removalKey,
+        );
+      }
     }
     if (matchIndex === -1 && sectionHasGcodeBody(sectionLines) && strippedRemoval.trim() !== '') {
       // gcode-body lines frequently carry trailing `# comments` that the model

@@ -646,6 +646,16 @@ RE_DELETE_MARKER = re.compile(r'^\s*\*\[[^\]]+\]\s*$')
 RE_PARAM_LINE = re.compile(r'^(\w[\w]*)\s*[:=]')
 
 
+def _param_key(line: str) -> str | None:
+    """Param key of a `key: value` / `key= value` line, else None.
+
+    G-code command lines (`SET_LED LED=x`, `G28`), jinja tags, and comments
+    never match — the mini-diff key-tolerant fallback relies on that to keep
+    stale gcode removals falling back instead of key-matching."""
+    match = RE_PARAM_LINE.match(line)
+    return match.group(1) if match else None
+
+
 def _normalize_line(line: str) -> str:
     """Strip CR and trailing whitespace only (JS normalizeLine)."""
     return line.rstrip()
@@ -791,6 +801,25 @@ def _apply_ops_to_section(
             match_index = _find_base_index(
                 base, used, lambda line: line.lstrip() == stripped_removal
             )
+        if match_index == -1 and stripped_removal.strip() != '':
+            # Key-tolerant fallback for PARAM-SHAPED removals: models
+            # routinely emit a stale old value (e.g. `-probe_count: 7,7`
+            # against a section that already reads `3,3`). When the removed
+            # line is `key: value`/`key= value` shaped and the KEY exists in
+            # the base section, the intent is unambiguous — trust the key
+            # over the value. Without this the whole block aborts, the
+            # strip+full-section-write fallback keeps BOTH sides of every
+            # -/+ pair, and first-wins parsing silently selects the OLD
+            # value while dropping untouched section params (2026-09-09
+            # HARNESS-03 finding; the stated-requirement audit caught the
+            # corruption it caused). G-code lines are not param-shaped and
+            # never key-match — stale gcode content still falls back.
+            removal_key = _param_key(stripped_removal)
+            if removal_key is not None:
+                match_index = _find_base_index(
+                    base, used,
+                    lambda line: _param_key(line.lstrip()) == removal_key,
+                )
         if match_index == -1 and _section_has_gcode_body(section_lines) \
                 and stripped_removal.strip() != '':
             no_comment_removal = stripped_removal.split('#')[0].rstrip()
