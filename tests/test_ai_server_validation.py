@@ -336,8 +336,8 @@ def test_retry_exempt_does_not_burn_query(monkeypatch):
 
 
 def test_audit_footer_on_clean_apply(monkeypatch):
-    # Audit-only mode: both harness flags default ON (2026-09-09), so
-    # validation must be explicitly disabled to isolate the audit path.
+    # Audit-only mode: KWC_POST_APPLY_AUDIT must be explicitly enabled
+    # (default is OFF since e351669), validation disabled to isolate it.
     monkeypatch.setenv("KWC_POST_APPLY_AUDIT", "1")
     monkeypatch.setenv("KWC_SERVER_DRAFT_VALIDATION", "0")
     req = _chat_request(_ctx())
@@ -347,3 +347,28 @@ def test_audit_footer_on_clean_apply(monkeypatch):
     # 99999 was NOT applied (reply set 12000) → requirement note attached.
     assert "Harness checks" in content
     assert "99999" in content
+
+
+def test_shipped_defaults_no_audit_footer(monkeypatch):
+    """Shipped default combo (no env set): validation ON, audit OFF (e351669).
+
+    A clean-apply reply must NOT carry the 'Harness checks' footer — the
+    audit call sites inside _server_validate_and_repair honor
+    _server_audit_enabled(). Regression guard for the finding that the
+    validation-on path ran the audit regardless of KWC_POST_APPLY_AUDIT.
+    The reply is a genuinely clean mini-diff (satisfies the requirement the
+    stated-req checker would inspect) and no repair stub is configured, so
+    any repair query also fails the test.
+    """
+    monkeypatch.delenv("KWC_POST_APPLY_AUDIT", raising=False)
+    monkeypatch.delenv("KWC_SERVER_DRAFT_VALIDATION", raising=False)
+    req = _chat_request(_ctx())
+    # Stated value (99999) deliberately NOT what the clean edit applies
+    # (12000): with the audit wrongly running, its requirement note would
+    # attach the footer. With the flag honored, zero notes, no footer.
+    req.messages = [{"role": "user", "content": "set max_accel to 99999"}]
+    clean_mini = "Sure:\n\n```cfg\n# file: printer.cfg\n[printer]\n-max_accel: 3000\n+max_accel: 12000\n```"
+    content, info = _run_validate(req, clean_mini, repair_response=None)
+    assert "Harness checks" not in content
+    # Validation path itself still ran, clean apply, no repair attempted.
+    assert info == {"attempted": False, "repaired": False, "issuesAfter": []}

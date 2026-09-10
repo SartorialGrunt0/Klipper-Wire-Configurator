@@ -2119,10 +2119,12 @@ async def _server_validate_and_repair(
         collect_new_validation_errors(baseline_validations, candidate_validations)
     )
     if not blocking:
-        # Clean apply: run the deterministic audit and attach its footer.
-        notes = _run_audit_on_apply(
-            req, apply_result, merged_files, project,
-            run_post_apply_audit,
+        # Clean apply: run the deterministic audit (ONLY when its own flag
+        # is on — the outer gate lets us in for validation alone) and
+        # attach its footer.
+        notes = (
+            _run_audit_on_apply(req, apply_result, merged_files, project, run_post_apply_audit)
+            if _server_audit_enabled() else []
         )
         if notes:
             final_content = final_content + build_audit_footer(notes)
@@ -2131,8 +2133,9 @@ async def _server_validate_and_repair(
     if not _server_draft_validation_enabled():
         # Audit-only mode (KWC_POST_APPLY_AUDIT without validation): the
         # deterministic notes still apply; repair stays off.
-        notes = _run_audit_on_apply(
-            req, apply_result, merged_files, project, run_post_apply_audit,
+        notes = (
+            _run_audit_on_apply(req, apply_result, merged_files, project, run_post_apply_audit)
+            if _server_audit_enabled() else []
         )
         if notes:
             final_content = final_content + build_audit_footer(notes)
@@ -2208,9 +2211,9 @@ async def _server_validate_and_repair(
                 collect_new_validation_errors(baseline_validations, repair_candidate)
             )
             if not repair_blocking:
-                notes = _run_audit_on_apply(
-                    req, repair_apply, repair_merged, repair_project,
-                    run_post_apply_audit,
+                notes = (
+                    _run_audit_on_apply(req, repair_apply, repair_merged, repair_project, run_post_apply_audit)
+                    if _server_audit_enabled() else []
                 )
                 if notes:
                     repaired_content = repaired_content + build_audit_footer(notes)
