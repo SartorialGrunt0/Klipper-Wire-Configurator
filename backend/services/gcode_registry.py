@@ -179,15 +179,15 @@ def build_project_context(configs: dict) -> ProjectGcodeContext:
                 continue
             section_types.add(section.section_type)
             if section.section_type == "gcode_macro":
-                rename = section.get_value("rename_existing", "").strip()
                 macro = section.section_name.strip().upper()
                 if macro:
                     user_macros.add(macro)
-                # rename_existing means the ORIGINAL command stays
-                # available under its registry name (e.g. a PRINT_START
-                # wrapping G28 keeps G28 valid).
+                # rename_existing registers the WRAPPED original command
+                # under the alias (gcode_macro.py:170) — PAUSE_BASE, G106,
+                # _PRINT_G28 etc. are real runtime commands, not macros.
+                rename = section.get_value("rename_existing", "").strip()
                 if rename:
-                    user_macros.discard(rename.upper())
+                    user_macros.add(rename.upper())
     return ProjectGcodeContext(
         section_types=frozenset(section_types),
         user_macros=frozenset(user_macros))
@@ -216,12 +216,28 @@ _CMD_TOKEN_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 #   token regex (has spaces / symbols).
 _PARAM_CONT_RE = re.compile(r"^(\w+):\s*(.*)$")  # key: value continuation start
 
+# Extended-GCode statement keywords (Klipper's SET/ADD commands and Jinja
+# flow words when bare at line start). Never command tokens.
+NON_COMMAND_TOKENS: frozenset[str] = frozenset({
+    "SET", "ADD", "ELSE", "ENDIF", "ELIF", "ENDWHILE", "WHILE",
+    "ADD_LINE_NUMBER", "ADD_M118_RESPONSE",
+})
+
 
 def _strip_jinja_inline(line: str) -> str:
     """Remove {expression} and {%...%} spans so `SET_LED LED={led}` checks
     only SET_LED; keeps the command token position."""
     out = re.sub(r"\{[%{].*?[%}]}", " ", line)
     return out
+
+
+# Guard pattern: {% if printer.<name> ... %} / {% elif printer.<name> %}.
+# A command inside such a block is intentionally conditional on the section
+# that gates it (mainsail's `{% if printer.configfile.settings.quad_gantry_level
+# %} QUAD_GANTRY_LEVEL {% endif %}` idiom) — conditional_out must not warn.
+_JINJA_IF_RE = re.compile(r"^\s*\{%-?\s*(?:el)?if\b(.*?)%}", re.S)
+_JINJA_ENDIF_RE = re.compile(r"^\s*\{%-?\s*endif\b.*%}")
+_PRINTER_REF_RE = re.compile(r"printer(?:\.configfile\.settings)?\.([a-z_][a-z0-9_]*)")
 
 
 def iter_gcode_command_tokens(text: str):
@@ -252,6 +268,8 @@ def iter_gcode_command_tokens(text: str):
             continue
         if not token or not _CMD_TOKEN_RE.match(token):
             continue
+        if token.upper() in NON_COMMAND_TOKENS:
+            continue
         yield i, token.upper()
 
 
@@ -259,11 +277,46 @@ def scan_gcode_body(text: str, context: ProjectGcodeContext | None = None):
     """Yield (line_no, CommandVerdict) for problem verdicts in a body.
 
     Only conditional_out/unknown are yielded; valid tokens produce nothing.
+    conditional_out findings inside a Jinja block guarded on the gating
+    section (`{% if printer.<section> %}`, incl. the
+    printer.configfile.settings.<section> idiom) are suppressed: the macro
+    author already handled the absence.
     """
-    for line_no, token in iter_gcode_command_tokens(text):
-        verdict = classify_command(token, context)
+    guard_stack: list[set[str]] = []
+    for i, raw in enumerate(text.splitlines(), start=1):
+        stripped_raw = raw.strip()
+        if_line = _JINJA_IF_RE.match(stripped_raw)
+        if if_line or _JINJA_ENDIF_RE.match(stripped_raw):
+            if if_line:
+                refs = {m.lower()
+                        for m in _PRINTER_REF_RE.findall(if_line.group(1))}
+                guard_stack.append(refs)
+            elif guard_stack:
+                guard_stack.pop()
+            continue
+        line = _COMMENT_RE.sub("", raw).strip()
+        if not line:
+            continue
+        line = _strip_jinja_inline(line)
+        if not line.strip():
+            continue
+        token = line.split()[0]
+        if token.endswith(":"):
+            continue
+        if not token or not _CMD_TOKEN_RE.match(token):
+            continue
+        if token.upper() in NON_COMMAND_TOKENS:
+            continue
+        verdict = classify_command(token.upper(), context)
+        if verdict.status == STATUS_CONDITIONAL_OUT:
+            guarded: set[str] = set()
+            for entry in guard_stack:
+                guarded |= entry
+            if guarded.intersection(s.lower()
+                                    for s in verdict.required_sections):
+                continue
         if verdict.is_problem:
-            yield line_no, verdict
+            yield i, verdict
 
 
 def _cli(argv: list[str]) -> int:

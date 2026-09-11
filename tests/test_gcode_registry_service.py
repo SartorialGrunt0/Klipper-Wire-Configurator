@@ -142,6 +142,22 @@ def test_rename_existing_keeps_original_valid():
     assert classify_command("G28", ctx).status == STATUS_VALID
 
 
+def test_rename_existing_alias_is_valid():
+    # mainsail idiom: [gcode_macro PAUSE] rename_existing:PAUSE_BASE —
+    # PAUSE_BASE is callable at runtime and must not flag unknown.
+    cfg = _mk_config("mainsail.cfg", [
+        ConfigSection(section_type="gcode_macro", section_name="PAUSE",
+                      full_header="gcode_macro PAUSE",
+                      params=[
+                          ConfigParam(key="rename_existing",
+                                      value="PAUSE_BASE"),
+                          ConfigParam(key="gcode", value="PAUSE_BASE")]),
+    ])
+    ctx = build_project_context({"mainsail.cfg": cfg})
+    assert classify_command("PAUSE_BASE", ctx).status == STATUS_VALID
+    assert classify_command("PAUSE_BASE", ctx).source == "user_macro"
+
+
 def test_available_commands_gate_filtering():
     cfg = _mk_config("a.cfg", [
         ConfigSection(section_type="probe", section_name="",
@@ -201,6 +217,48 @@ def test_scan_body_reports_only_problems():
                                             STATUS_CONDITIONAL_OUT]
     assert found[0][0] == 2  # line numbers
     assert found[0][1].name == "SET_NEOPIXEL_COLOR"
+
+
+def test_scan_body_jinja_guarded_conditional_suppressed():
+    # mainsail Test_Speed idiom: QGL inside an if-printer guard
+    body = (
+        "{% if printer.configfile.settings.quad_gantry_level %}\n"
+        "    QUAD_GANTRY_LEVEL\n"
+        "{% endif %}\n"
+        "QUAD_GANTRY_LEVEL\n"
+    )
+    ctx = _ctx()  # no quad_gantry_level section
+    found = list(scan_gcode_body(body, ctx))
+    assert len(found) == 1          # only the UNGUARDED call flags
+    assert found[0][0] == 4         # line number of the unguarded one
+
+
+def test_scan_body_guard_on_other_section_does_not_suppress():
+    body = (
+        "{% if printer.save_variables %}\n"
+        "    QUAD_GANTRY_LEVEL\n"
+        "{% endif %}\n"
+    )
+    ctx = _ctx()
+    found = list(scan_gcode_body(body, ctx))
+    assert len(found) == 1          # guard is unrelated to QGL's gate
+
+
+def test_scan_body_unguarded_e_gcode_macro_valid():
+    body = ("{% if printer['gcode_macro FAN_BEEP'] %}\n"
+            "FAN_BEEP\n"
+            "{% endif %}\n")
+    ctx = _ctx(macros=["FAN_BEEP"])
+    assert list(scan_gcode_body(body, ctx)) == []
+
+
+def test_scan_body_egcode_macro_undefined_still_flags():
+    body = ("{% if printer['gcode_macro NOPE'] %}\n"
+            "NOPE\n"
+            "{% endif %}\n")
+    ctx = _ctx()
+    found = list(scan_gcode_body(body, ctx))
+    assert len(found) == 1          # undefined macro: real problem
 
 
 # ── real Trident fixture ────────────────────────────────────────────────
