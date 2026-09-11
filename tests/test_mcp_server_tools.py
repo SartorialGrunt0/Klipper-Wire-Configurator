@@ -1094,7 +1094,9 @@ def test_tools_list(tmp_path):
     assert "list_user_configs" in names
     assert "list_config_reference_sections" in names
     assert "list_user_config_sections" in names
-    assert len(names) == 16  # get_section_schema removed (redundant w/ reference)
+    assert len(names) == 20  # +4 live-context tools (2026-09): validate_config_project,
+    # list_connected_devices, get_section_schema (re-added with typed output —
+    # the old prose-duplicate version was removed), get_klippy_status
 
 
 def test_tools_call_unknown_tool(tmp_path):

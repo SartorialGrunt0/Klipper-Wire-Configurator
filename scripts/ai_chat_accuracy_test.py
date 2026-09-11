@@ -190,7 +190,12 @@ def build_questions() -> list[TestQuestion]:
             title="Docs: [bed_mesh] horizontal_move_z",
             text="What does the `horizontal_move_z` parameter in the `[bed_mesh]` section do, "
                  "and what is its default value?",
-            expected_tools=("search_klipper_docs", "get_config_reference_section"),
+            expected_tools=("search_klipper_docs", "get_config_reference_section",
+                            # get_section_schema legitimately answers parameter/
+                            # default questions (added 2026-09; bank criteria
+                            # predated it — 2026-09-09 A/B flagged PASS_WRONG_TOOL
+                            # for perfect answers routed through it).
+                            "get_section_schema"),
             criteria=(
                 ("contains", "horizontal_move_z"),
                 ("regex", r"\b5\b"),
@@ -201,7 +206,8 @@ def build_questions() -> list[TestQuestion]:
             title="Docs: [probe] section parameters",
             text="List all the parameters supported by the [probe] section in Klipper, "
                  "with their types where possible.",
-            expected_tools=("get_config_reference_section", "search_klipper_docs"),
+            expected_tools=("get_config_reference_section", "search_klipper_docs",
+                            "get_section_schema"),
             criteria=(
                 ("contains", "z_offset"),
                 ("contains", "samples"),
@@ -239,7 +245,8 @@ def build_questions() -> list[TestQuestion]:
             title="Schema: [heater_fan] section schema",
             text="What is the section schema for [heater_fan]? "
                  "List the supported parameters and their types.",
-            expected_tools=("get_config_reference_section",),
+            # get_section_schema is THE purpose-built tool for this now.
+            expected_tools=("get_config_reference_section", "get_section_schema"),
             criteria=(
                 ("contains", "heater_fan"),
                 ("contains", "max_power"),
@@ -382,7 +389,8 @@ def build_questions() -> list[TestQuestion]:
             qid="Q18",
             title="Grounding: pressure_advance default",
             text="What is the default value of pressure_advance in the [extruder] section?",
-            expected_tools=("search_klipper_docs", "get_config_reference_section"),
+            expected_tools=("search_klipper_docs", "get_config_reference_section",
+                            "get_section_schema"),
             criteria=(
                 ("regex", r"default.{0,120}?\b0\b"),
             ),
@@ -507,7 +515,10 @@ def build_macro_questions() -> list[TestQuestion]:
                 # produced the variable names is no longer advertised.
                 ("regex", r"(?:PARK_X[^\n]*100|X100)"),
                 ("regex", r"(?:PARK_Y[^\n]*150|Y150)"),
-                ("regex", r"(?:LIFT_Z[^\n]*20|Z20\b)"),
+                # Variable-name-agnostic: models pick LIFT_Z or Z_LIFT (or
+                # inline Z_LIFT=20 / Z20); requiring the exact identifier
+                # measured model quality zero (2026-09-09 both runs).
+                ("regex", r"(?:LIFT[^\n]*20|Z[^\n]*LIFT[^\n]*20|\bZ20\b)"),
                 ("regex", r"(?:RETRACT[^\n]*3\b|E-?3\b)"),
             ),
         ),
@@ -659,6 +670,39 @@ def _load_kinematics_bugged_printer_cfg() -> str:
             "could not plant kinematics bug — marker not found in printer.cfg"
         )
     return bugged
+
+
+def _load_probe_params_printer_cfg() -> str:
+    """Real Trident printer.cfg with [bed_mesh] probe_count 7,7 -> 3,3.
+
+    HARNESS-03 fixture: the requirement checker's stated-value pattern
+    (`probe_count` `3x3`) is PRE-SATISFIED in the base config, so a correct
+    edit that merely keeps it must produce NO audit footer — this question
+    watches for checker false positives while legitimately exercising the
+    clean-apply audit path."""
+    content = _load_trident_config("printer.cfg")
+    bugged = content.replace("probe_count: 7,7", "probe_count: 3,3", 1)
+    if bugged == content:
+        raise RuntimeError(
+            "could not plant probe_count — marker not found in printer.cfg"
+        )
+    return bugged
+
+
+def _load_trident_led_context() -> tuple[tuple[str, str, str], ...]:
+    """printer.cfg + EBB.cfg + Hotkey.cfg together — all three real LED
+    sections (SB_LEDs, Chamber_LEDs, hotkey_leds) visible in one project.
+
+    HARNESS-02 fixture: the prompt asks to kill "all lights" via
+    idle_timeout; every model tested so far (gemma AND qwen, TRIDENT-15/16
+    history) turns off exactly one strip. With all three sections present
+    the deterministic LED inventory MUST append its footer naming the two
+    untouched strips — this is the audit's live-firing probe. The timeout
+    is left at the stock 1800 so the model has a real edit to make."""
+    return tuple(
+        (fname, TRIDENT_FILE_LABEL, _load_trident_config(fname))
+        for fname in ("printer.cfg", "EBB.cfg", "Hotkey.cfg")
+    )
 
 
 def _context_with(content: str,
@@ -974,6 +1018,76 @@ def build_trident_questions() -> list[TestQuestion]:
                 ("contains", "hotkey_leds"),
             ),
         ),
+        # ── HARNESS-01..03: probes for the server-side apply/validate/
+        # repair (#1) and post-apply audit (#3) machinery. These judge
+        # the HARNESS, not the model: each is engineered so the pipeline
+        # has a deterministic observable, captured via the serverRepair
+        # response field / audit footer in the report JSON.
+        TestQuestion(
+            qid="HARNESS-01",
+            title="Repair-probe: typo'd param name must trigger ONE repair",
+            text=("In printer.cfg set the printer's max_acceleration to 9000. "
+                  "Only change that one value."),
+            # max_acceleration is NOT a real [printer] param (the real one
+            # is max_accel) — a plain user typo. If the model writes it
+            # verbatim, the merged result fails validation (unknown_param)
+            # and the server harness MUST fire its ONE repair pass. Pass =
+            # the reply standing in front of the user carries the correct
+            # param (repaired, or never wrong). The serverRepair field in
+            # the report records whether repair actually fired.
+            context_files=printer_cfg,
+            require_tool=False,
+            criteria=(
+                ("regex", r"max_accel(?!eration)\s*:\s*9000"),
+                ("not_contains", "max_acceleration: 9000"),
+            ),
+        ),
+        TestQuestion(
+            qid="HARNESS-02",
+            title="Audit-probe: partial LED edit must surface the inventory footer",
+            text=("Add SET_LED commands for Chamber_LEDs only to my "
+                  "idle_timeout gcode in printer.cfg, and set the timeout to "
+                  "300 seconds. Do exactly that — no other changes."),
+            # Deterministic partial edit: the user (deliberately) asks for
+            # only ONE strip while all three LED sections (SB_LEDs,
+            # Chamber_LEDs, hotkey_leds) are visible in the project. The
+            # model SHOULD comply — and the deterministic LED inventory
+            # MUST append the 'Harness checks' footer naming the two
+            # untouched strips, because the edit touches an LED via
+            # SET_LED. This is the user-protection path: a real user who
+            # didn't think to say "all LEDs" gets the observation.
+            # (2026-09-09 finding behind this design: when asked for "all
+            # LEDs" with all files attached, gemma turns off ALL three —
+            # TRIDENT-15's historic failure was context visibility, not
+            # capability. So the audit's live-firing probe needs the
+            # partial request, not the complete one.)
+            context_files=_load_trident_led_context(),
+            require_tool=False,
+            criteria=(
+                ("regex", r"timeout\s*:\s*300\b"),
+                ("regex", r"Harness checks"),
+                ("regex", r"SB_LEDs"),
+                ("regex", r"hotkey_leds"),
+            ),
+        ),
+        TestQuestion(
+            qid="HARNESS-03",
+            title="Audit false-positive probe: pre-satisfied requirement = silent footer",
+            text=("Set my bed mesh probe speed to 8 in printer.cfg and keep "
+                  "the current probe_count of 3x3."),
+            # Fixture has probe_count 3,3 PRE-SATISFIED so a correct edit
+            # that keeps it must produce NO requirement-checker note. The
+            # stated-value pattern ('probe_count ... 3x3') is exercised
+            # live; a footer here = checker false positive = product bug.
+            # (Real stock value is 7,7 — fixture only. The real [bed_mesh]
+            # param is 'speed'; 'probe speed' is how users say it.)
+            context_files=_context_with(_load_probe_params_printer_cfg()),
+            require_tool=False,
+            criteria=(
+                ("regex", r"speed\s*:\s*8"),
+                ("not_contains", "Harness checks"),
+            ),
+        ),
         TestQuestion(
             qid="MINIDIFF-01",
             title="Mini-diff: level_bed adaptive (endif invariant)",
@@ -1061,7 +1175,12 @@ def build_ambiguity_questions() -> list[TestQuestion]:
             require_tool=False,
             criteria=(
                 ("regex", r"ender\s*3"),
-                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
+                # Its own docstring: a draft OR a clarifying question are both
+                # legitimate outcomes (2026-09-09: gemma AND qwen both asked
+                # which mainboard — the correct refusal when board hardware is
+                # unknowable). Accept either.
+                ("regex", r"#\s*file\s*:\s*printer\.cfg"
+                          r"|mainboard|board|MCU|provide|need to know"),
             ),
         ),
         TestQuestion(
@@ -1290,6 +1409,175 @@ def build_setup_questions() -> list[TestQuestion]:
     ]
 
 
+def build_live_context_questions() -> list[TestQuestion]:
+    """Live-context tools (feature/config-mcp-tools, 2026-09): the four
+    host-grounded tools validate_config_project, list_connected_devices,
+    get_section_schema, get_klippy_status — plus the draft-vs-disk and
+    schema-vs-reference routing boundaries.
+
+    HOST PREREQUISITES (run against a NATIVE backend, e.g. the dev Pi
+    :8099): the config dir ON THE SERVER is what the validate/device tools
+    read — the harness attaches no files here; the tool call IS the
+    context. Dev-Pi ground truth these criteria were written against:
+    KAMP_Settings.cfg has missing-include errors (./KAMP/*.cfg not on
+    disk), duplicate [idle_timeout]/M109 sections surface as info, a
+    Klipper RP2040 sits on /dev/serial/by-id/, and NO klippy socket exists
+    (get_klippy_status must report not-responding). On the Trident the
+    ground truth differs (klippy ready) — LIVE-06/07 criteria accept a
+    correct readout of EITHER state; the strong gate is the tool call.
+
+    Routing note: LIVE-04's expected_tools is the schema tool ALONE, so a
+    correct-but-reference answer grades PASS_WRONG_TOOL — that column IS
+    the routing measurement for the 2026-09 snippet reroute; read the
+    tools column, not just the pass count.
+    """
+    return [
+        TestQuestion(
+            qid="LIVE-01",
+            title="Live validate: 'validate my config' must call the project validator",
+            text="can you validate my config? tell me what's wrong with it",
+            # No context_files on purpose: the ONLY way to see the real
+            # errors is the tool. Routing test for the trigger-phrase
+            # snippet (observed 2026-09-07: model instead called
+            # list_user_configs + read_user_config and judged by eye).
+            context_files=(),
+            expected_tools=("validate_config_project",),
+            require_tool=True,
+            criteria=(
+                # Ground truth from the tool output on the dev Pi: the
+                # ERRORS are the KAMP missing includes. The model must
+                # relay error findings, not claim the config is clean.
+                ("regex", r"kamp|include"),
+                ("regex", r"error"),
+            ),
+        ),
+        TestQuestion(
+            qid="LIVE-02",
+            title="Draft boundary: pasted snippet is validated as draft, not disk",
+            text=("check this section for errors:\n\n"
+                  "[printer]\n"
+                  "kinematics: corexy\n"
+                  "max_velocity: 300\n"),
+            # The snippet is IN the prompt — the draft tool is the right
+            # call; validate_config_project would check unrelated disk
+            # files. Ground truth (verified against the validator
+            # 2026-09-08): [printer] missing max_accel → error
+            # (max_z_velocity is OPTIONAL with default 5 — do NOT require
+            # the answer to mention it; criterion-bug pattern caught in
+            # the no-network smoke pass).
+            context_files=(),
+            expected_tools=("validate_klipper_config",),
+            require_tool=True,
+            criteria=(
+                # Must relay the genuinely missing required param
+                # (accept humanized phrasing — prose answers get no retry
+                # loop; catalog #14 underscore-vs-space rule).
+                ("regex", r"max[_\s]?accel"),
+                # Proof the DRAFT was validated (not disk files): the call
+                # must carry config_text.
+                ("tool_args", "validate_klipper_config:config_text"),
+            ),
+        ),
+        TestQuestion(
+            qid="LIVE-03",
+            title="Devices: list what's plugged in for an [mcu] serial line",
+            text=("what devices can I use for the serial: line in my [mcu] "
+                  "section? list what's actually plugged into this machine."),
+            # Dev-Pi ground truth: one Klipper RP2040 under
+            # /dev/serial/by-id/. The answer must quote a REAL device from
+            # the tool output, not a generic example path.
+            context_files=(),
+            expected_tools=("list_connected_devices",),
+            require_tool=True,
+            criteria=(
+                ("regex", r"rp2040|ttyACM0|by.id"),
+                # Must frame it as the serial:/by-id value.
+                ("regex", r"serial|/dev/"),
+            ),
+        ),
+        TestQuestion(
+            qid="LIVE-04",
+            title="Schema routing: allowed bed_mesh params (typed lookup expected)",
+            text=("what parameters are allowed in the [bed_mesh] section and "
+                  "which ones are required? don't explain what they do, just "
+                  "the parameter names and which are required."),
+            # Routing test for the 2026-09 reroute: expected_tools is the
+            # schema tool ALONE, so a correct-but-reference answer grades
+            # PASS_WRONG_TOOL — that IS the routing signal. bed_mesh has
+            # NO required params (all optional per schema), so the answer
+            # gate is param-name coverage only.
+            context_files=(),
+            expected_tools=("get_section_schema",),
+            require_tool=True,
+            criteria=(
+                ("contains", "mesh_min"),
+                ("contains", "probe_count"),
+                ("contains", "speed"),
+            ),
+        ),
+        TestQuestion(
+            qid="LIVE-05",
+            title="Reference routing: prose WHY question (input_shaper explanation)",
+            text=("what does the [input_shaper] section actually do and how do "
+                  "I choose a shaper frequency for my printer?"),
+            # The other half of the boundary: this NEEDS prose — schema
+            # alone can't answer 'how do I choose'. Any doc tool is
+            # legitimate (correct output = pass).
+            context_files=(),
+            expected_tools=("get_config_reference_section", "search_klipper_docs",
+                            "get_section_schema"),
+            require_tool=False,
+            criteria=(
+                # Explanatory substance, not a param dump.
+                ("regex", r"resonan|vibration|ringing"),
+                # Must name real shaper concepts, proving it read real
+                # content rather than vague advice.
+                ("regex", r"\bzv\b|mz_?h|shaper_type"),
+            ),
+        ),
+        TestQuestion(
+            qid="LIVE-06",
+            title="Klippy status: 'why won't the printer connect?' must check live state",
+            text="why won't my printer connect? is klipper even running?",
+            # Dev Pi's actual klippy state is STARTUP ERROR (KAMP missing
+            # include) — not the no-socket case the criteria first assumed;
+            # 'error' joined the verdict list after the 2026-09-08 live run
+            # false-failed a correct 'error state' relay. Correct relays of
+            # not-responding, ready, OR error all pass; the hard gate is
+            # the status tool call. Fabricated diagnoses without the tool
+            # fail tool_ok.
+            context_files=(),
+            expected_tools=("get_klippy_status",),
+            require_tool=True,
+            criteria=(
+                ("regex", r"not responding|not running|stopped|not found|"
+                          r"cannot (?:be )?reach|no socket|startup|"
+                          r"ready|shut ?down|error|crash"),
+            ),
+        ),
+        TestQuestion(
+            qid="LIVE-07",
+            title="Restart safety: 'can I firmware restart now?' checks print state first",
+            text="can I do a FIRMWARE_RESTART right now to apply my config changes?",
+            # Criteria accept any correct verdict (ready/safe vs not
+            # running vs startup-ERROR vs printing-warning). The dev Pi
+            # actually reports startup error (KAMP missing include) —
+            # 'error' had to join the verdict list after first live run
+            # (2026-09-08) when the model correctly relayed 'error state'
+            # and got false-failed. tool_ok is the assertion.
+            context_files=(),
+            expected_tools=("get_klippy_status",),
+            require_tool=True,
+            criteria=(
+                ("regex", r"restart"),
+                ("regex", r"not running|not responding|stopped|ready|safe|"
+                          r"startup|interrupt|printing|start klipper|already|"
+                          r"error"),
+            ),
+        ),
+    ]
+
+
 _MEMORY_CONFIG_SNIPPET = """[mcu]
 serial: /dev/serial/by-id/usb-Klipper_stm32f446xx_3D002B000E50505734393820-if00
 
@@ -1386,6 +1674,13 @@ ALL_TOOLS = (
     "list_user_configs",
     "list_user_config_sections",
     "read_user_config",
+    # Live-context tools (feature/config-mcp-tools, 2026-09). When adding
+    # an MCP tool, update this tuple too or the summary lists real calls
+    # under "Unknown tool attempts" (LIVE-01 false alarm, 2026-09-08).
+    "validate_config_project",
+    "list_connected_devices",
+    "get_section_schema",
+    "get_klippy_status",
     "detect_board",
     "calculate_rotation_distance",
     "generate_macro_template",
@@ -1425,13 +1720,27 @@ def extract_printer_memory(content: str) -> tuple[str, dict | None]:
 # ── Evaluation ─────────────────────────────────────────────────────────
 def criterion_ok(kind: str, value: str, content: str,
                  memory: tuple[str, dict | None] | None = None,
-                 tool_calls: list[dict] | None = None) -> bool:
+                 tool_calls: list[dict] | None = None,
+                 server_repair: dict | None = None) -> bool:
     if kind == "contains":
         return value.lower() in content.lower()
     if kind == "not_contains":
         return value.lower() not in content.lower()
     if kind == "regex":
         return re.search(value, content, re.IGNORECASE | re.DOTALL) is not None
+    if kind == "server_repair_or_absent":
+        # HARNESS-01 (repair-probe): pass when the server-side repair
+        # actually fired (attempted=True — machinery proven), OR when the
+        # token never landed in a cfg BLOCK (prose mentions are fine — a
+        # repaired reply legitimately says "removed bogus_param"). Only
+        # FAILS when the invalid token was applied AND the server harness
+        # stayed silent.
+        token = value.lower()
+        if server_repair and server_repair.get("attempted"):
+            return True
+        blocks = re.findall(r"```[a-zA-Z]*\n.*?```", content, re.DOTALL)
+        scope = "\n".join(blocks) if blocks else content
+        return token not in scope.lower()
     if kind == "memory_block":
         return bool(memory and memory[0])
     if kind == "memory_valid":
@@ -1525,6 +1834,10 @@ class QuestionResult:
     checks: list[tuple[str, str, bool]] = field(default_factory=list)
     duration_s: float = 0.0
     usage: dict | None = None
+    # Server-side apply/validate/repair outcome (#1): {attempted, repaired,
+    # issuesAfter} or None when the pipeline was skipped (no config block or
+    # no contextFiles). Tallied across runs to measure the harness itself.
+    server_repair: dict | None = None
 
 
 # ── HTTP helpers (stdlib only) ─────────────────────────────────────────
@@ -1592,8 +1905,17 @@ def chat_request(base_url: str, question: TestQuestion, settings: dict,
     Returns (response_dict, error_string). Exactly one is set.
     """
     request_id = f"accuracy-{question.qid}-{int(time.time())}"
+    # Production parity (2026-09-09): the frontend sends the checked files as
+    # contextFiles so the server-side apply/validate/repair + audit (#1/#3)
+    # can actually run. Without this, the bank tests a path the app never
+    # takes and the server harness is structurally unexercisable.
+    context_files = {
+        filename: {"content": content}
+        for filename, _label, content in question.context_files
+    }
     payload = {
         "messages": _build_chat_messages(question),
+        "contextFiles": context_files,
         "apiKey": settings["api_key"],
         "model": settings["model"],
         "apiUrl": settings["api_url"],
@@ -1696,6 +2018,7 @@ def run_one_question(
         result.tool_turns = int(response.get("mcpToolTurns", 0) or 0)
         result.tool_calls = list(response.get("toolCalls", []) or [])
         result.usage = response.get("usage")
+        result.server_repair = response.get("serverRepair")
 
         log.write(f"Response mcpToolTurns={result.tool_turns} "
                   f"mcpToolNames={result.tool_names}")
@@ -1730,7 +2053,8 @@ def run_one_question(
             memory = extract_printer_memory(result.response)
             for kind, value in q.criteria:
                 ok = criterion_ok(kind, value, result.response, memory=memory,
-                                  tool_calls=result.tool_calls)
+                                  tool_calls=result.tool_calls,
+                                  server_repair=result.server_repair)
                 result.checks.append((kind, value, ok))
             result.answer_ok = all(ok for _, _, ok in result.checks)
             if result.answer_ok and result.tool_ok:
@@ -1948,7 +2272,7 @@ def main() -> int:
                              "printer memory, blank it, run MEMORY-01..03, then restore it")
     args = parser.parse_args()
 
-    questions = build_questions() + build_macro_questions() + build_trident_questions() + build_ambiguity_questions() + build_setup_questions()
+    questions = build_questions() + build_macro_questions() + build_trident_questions() + build_ambiguity_questions() + build_setup_questions() + build_live_context_questions()
     if args.include_memory:
         questions += build_memory_questions()
     if args.list_questions:

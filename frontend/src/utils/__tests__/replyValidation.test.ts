@@ -222,3 +222,96 @@ describe('runReplyValidationPipeline', () => {
     expect(result.retryCount).toBe(1);
   });
 });
+
+describe('serverRetryExemptWarning (finding #4)', () => {
+  it('returns null for absent/clean/non-exempt verdicts', async () => {
+    const { serverRetryExemptWarning } = await import('@/utils/replyValidation');
+    expect(serverRetryExemptWarning(null)).toBeNull();
+    expect(serverRetryExemptWarning(undefined)).toBeNull();
+    expect(
+      serverRetryExemptWarning({ attempted: false, repaired: false, issuesAfter: [] }),
+    ).toBeNull();
+    expect(
+      serverRetryExemptWarning({
+        attempted: true, repaired: false, issuesAfter: [], reason: 'something-else',
+      }),
+    ).toBeNull();
+  });
+
+  it('renders the server findings when reason is retry-exempt', async () => {
+    const { serverRetryExemptWarning } = await import('@/utils/replyValidation');
+    const warning = serverRetryExemptWarning({
+      attempted: false,
+      repaired: false,
+      reason: 'retry-exempt',
+      issuesAfter: [{
+        filename: 'printer.cfg',
+        errors: [{ severity: 'error', section: 'fan', param: 'pin', message: "Pin 'PB3' is used by multiple sections" }],
+      }],
+    });
+    expect(warning).toContain('printer.cfg');
+    expect(warning).toContain('[fan] pin');
+    expect(warning).toContain('cannot fix by regenerating');
+  });
+});
+
+describe('runReplyValidationPipeline serverRepair plumbing', () => {
+  function params(over: Partial<ReplyValidationPipelineParams>): ReplyValidationPipelineParams {
+    return {
+      requestFn: async () => attempt(assistant('y')),
+      requestConversation: [{ role: 'user', content: 'q' }],
+      validationConversation: [user('q')],
+      initialAttempt: attempt(assistant('x')),
+      validators: [],
+      ...over,
+    };
+  }
+
+  it('passes the attempt serverRepair verdict into the validator context', async () => {
+    const verdict = {
+      attempted: false, repaired: false, reason: 'retry-exempt',
+      issuesAfter: [{ filename: 'printer.cfg', errors: [] }],
+    };
+    let seen: unknown = 'unset';
+    const validator: ReplyValidator = {
+      name: 'ctx-probe',
+      maxAttempts: 3,
+      failMode: 'warn',
+      validate: (_content, context) => {
+        seen = context.serverRepair;
+        return { applicable: false, issues: [], failureReason: null };
+      },
+      buildFeedback: () => null,
+      onMaxAttemptsReached: () => null,
+    };
+    const p = params({
+      initialAttempt: { ...attempt(assistant('x')), serverRepair: verdict },
+      requestFn: async () => attempt(assistant('y')),
+      validators: [validator],
+    });
+    await runReplyValidationPipeline(p);
+    expect(seen).toEqual(verdict);
+  });
+
+  it('defaults the context verdict to null when the attempt has none', async () => {
+    let seen: unknown = 'unset';
+    const validator: ReplyValidator = {
+      name: 'ctx-probe',
+      maxAttempts: 3,
+      failMode: 'warn',
+      validate: (_content, context) => {
+        seen = context.serverRepair;
+        return { applicable: false, issues: [], failureReason: null };
+      },
+      buildFeedback: () => null,
+      onMaxAttemptsReached: () => null,
+    };
+    const p = params({
+      initialAttempt: attempt(assistant('x')),
+      requestFn: async () => attempt(assistant('y')),
+      validators: [validator],
+    });
+    await runReplyValidationPipeline(p);
+    expect(seen).toBeNull();
+  });
+});

@@ -652,10 +652,14 @@ class McpServer:
             {
                 "name": "validate_klipper_config",
                 "description": (
-                    "Validate that a new or existing config section block is valid "
-                    "and free of errors. Parse and validate a Klipper config block. "
-                    "Returns structured results: parsed sections with their parameters, "
-                    "any errors or warnings, and the raw config text."
+                    "Validate a config text BLOCK YOU WROTE in this "
+                    "conversation (a draft section or snippet). Parse and "
+                    "validate a Klipper config block. Returns structured "
+                    "results: parsed sections with their parameters, any "
+                    "errors or warnings, and the raw config text. To check "
+                    "the user's ACTUAL saved config files instead, use "
+                    "validate_config_project — this tool only validates the "
+                    "text you pass it."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -1014,6 +1018,151 @@ class McpServer:
                     "required": ["macro_text"],
                 },
             },
+            {
+                "name": "validate_config_project",
+                "description": (
+                    "Validate the user's CURRENT Klipper project — every "
+                    "config file on this host with includes expanded the way "
+                    "Klipper loads them — against the full config schema. "
+                    "Reports every active finding by severity: errors (Klipper "
+                    "would refuse to start or a value is invalid), warnings "
+                    "(likely problems; acknowledged ones are already hidden), "
+                    "and info (legal-but-noteworthy, e.g. merged duplicate "
+                    "sections), each with file, section, parameter, and line "
+                    "number. Read-only: changes nothing on disk. Use it to "
+                    "check the current state after an edit, before advising a "
+                    "FIRMWARE_RESTART, or when the user asks 'is my config "
+                    "OK?'. For validating a DRAFT snippet you wrote in chat, "
+                    "use validate_klipper_config instead."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "filenames": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Optional subset of config files to validate "
+                                "(e.g. ['printer.cfg', 'macros.cfg']). Their "
+                                "include closure is still expanded. Omit to "
+                                "validate the whole project."
+                            ),
+                        },
+                    },
+                },
+            },
+            {
+                "name": "list_connected_devices",
+                "description": (
+                    "List the serial devices attached to this host for [mcu] "
+                    "and CAN wiring: USB serial devices by their "
+                    "/dev/serial/by-id/ path (the value that belongs in a "
+                    "config's serial: parameter), UART devices (/dev/ttyAMA0 "
+                    "etc. for serial: /dev/ttyS... on-board MCUs), CAN "
+                    "interfaces with up/down state and bitrate, and — when a "
+                    "scan runs — each interface's Klipper CAN UUIDs from "
+                    "canbus_query. Use when setting or debugging a "
+                    "canbus_uuid, serial: or CAN interface line, or when the "
+                    "user asks which board is plugged in. The scan takes a "
+                    "few seconds; set scan_can_uuids=false to only enumerate "
+                    "interfaces without probing the bus."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "scan_can_uuids": {
+                            "type": "boolean",
+                            "description": (
+                                "Probe each CAN interface for Klipper CAN "
+                                "UUIDs (default true). Set false to skip the "
+                                "bus scan."
+                            ),
+                        },
+                    },
+                },
+            },
+            {
+                "name": "get_section_schema",
+                "description": (
+                    "Look up the exact parameter spec of Klipper config "
+                    "sections from the structured schema: every parameter's "
+                    "type (float/int/bool/pin/enum/multi_line), default "
+                    "value, required flag, allowed enum values, and numeric "
+                    "bounds — plus whether the section takes a name (e.g. "
+                    "[heater_generic my_heater]) and which sections it "
+                    "requires. Faster and more precise than reading the "
+                    "Config_Reference prose when you only need to know WHICH "
+                    "parameters are allowed and what values they accept. "
+                    "Pass sections=['bed_mesh', 'input_shaper'] to fetch "
+                    "several in one call. For explanations and examples, use "
+                    "get_config_reference_section instead."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "section": {
+                            "type": "string",
+                            "description": (
+                                "Section type name, with or without brackets "
+                                "(e.g. 'bed_mesh' or '[extruder]')"
+                            ),
+                        },
+                        "sections": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Optional list of section types to fetch in "
+                                "one call (e.g. ['extruder', 'gcode_arcs'])."
+                            ),
+                        },
+                    },
+                },
+            },
+            {
+                "name": "get_klippy_status",
+                "description": (
+                    "Report Klipper's live state on this host: ready / "
+                    "startup error / shutdown, the state message, and the "
+                    "active print job (state and filename, via Moonraker). "
+                    "When Klipper is NOT ready, recent klippy.log error "
+                    "context is attached automatically so you can diagnose "
+                    "without a second call. Optionally attach a klippy.log "
+                    "excerpt for a section or error even while ready "
+                    "(include_log_excerpt=true, optionally section_name / "
+                    "error_text to match). Use this BEFORE recommending "
+                    "FIRMWARE_RESTART — restarting interrupts an active "
+                    "print — and whenever the user says the printer won't "
+                    "start, has a config error, or the app shows Klipper not "
+                    "ready."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "include_log_excerpt": {
+                            "type": "boolean",
+                            "description": (
+                                "Also pull a klippy.log excerpt even when "
+                                "Klipper is ready (default false; excerpts "
+                                "attach automatically on startup errors)."
+                            ),
+                        },
+                        "section_name": {
+                            "type": "string",
+                            "description": (
+                                "Optional Klipper section (e.g. 'probe') to "
+                                "focus the log excerpt on."
+                            ),
+                        },
+                        "error_text": {
+                            "type": "string",
+                            "description": (
+                                "Optional error text to match in klippy.log "
+                                "(e.g. the message from state_message)."
+                            ),
+                        },
+                    },
+                },
+            },
         ]
 
     # ── Tool Handlers ─────────────────────────────────────────────
@@ -1037,6 +1186,10 @@ class McpServer:
             "calculate_rotation_distance": self._handle_calculate_rotation_distance,
             "generate_macro_template": self._handle_generate_macro_template,
             "validate_macro": self._handle_validate_macro,
+            "validate_config_project": self._handle_validate_config_project,
+            "list_connected_devices": self._handle_list_connected_devices,
+            "get_section_schema": self._handle_get_section_schema,
+            "get_klippy_status": self._handle_get_klippy_status,
         }
 
         handler = handlers.get(name)
@@ -2538,6 +2691,343 @@ class McpServer:
         return "\n".join(parts)
 
     # ── Printer Memory ────────────────────────────────────────────
+
+    # ── Live context tools (validate / devices / schema / klippy) ──
+
+    def _handle_validate_config_project(self, args: dict[str, Any]) -> str:
+        """Validate the live config project with the full schema engine.
+
+        Mirrors what the app's save-gate sees: seeds come from the native
+        config path (or explicit filenames), expands through the shared
+        on-disk include closure, then runs validate_project_configs so
+        cross-file checks (duplicate singleton sections, TMC header refs)
+        and acknowledgement suppression apply exactly as in the UI.
+        """
+        from services.native_services import (
+            is_native_platform,
+            load_native_project,
+            list_config_files,
+        )
+        from parser.validator import validate_project_configs
+
+        if not is_native_platform():
+            return (
+                "validate_config_project is only available when KWC runs "
+                "natively on the printer host (Raspberry Pi/SBC)."
+            )
+
+        config_dir = _system_config_path()
+        if not config_dir.is_dir():
+            return (
+                f"No config directory found at {config_dir} — there are no "
+                "config files to validate."
+            )
+
+        files_raw = args.get("filenames")
+        seed: list[str] = []
+        if files_raw:
+            if isinstance(files_raw, str):
+                names = [
+                    s.strip().strip("[]").strip("\"'")
+                    for s in re.split(r"[,\n]", files_raw)
+                    if s.strip()
+                ]
+            else:
+                names = [str(s).strip() for s in files_raw if str(s).strip()]
+            # Resolve through the same fuzzy resolver read_user_config uses,
+            # so 'printer' finds printer.cfg the way models expect.
+            for name in names:
+                resolved = self._resolve_user_config_file(name)
+                seed.append(resolved.name if resolved is not None else name)
+        else:
+            seed = [f["name"] for f in list_config_files(str(config_dir))]
+
+        if not seed:
+            return "No config files found to validate."
+
+        try:
+            configs, _raw, skipped = load_native_project(config_dir, seed)
+        except ValueError as exc:
+            return f"Invalid config filename: {exc}"
+
+        if not configs:
+            return (
+                "None of the requested files exist under "
+                f"{config_dir}. Use list_user_configs to see available files."
+            )
+
+        validations = validate_project_configs(configs)
+
+        def _loc(finding: dict) -> str:
+            # Findings arrive as to_dict() dicts: keys mirror ValidationError.
+            loc = f"[{finding.get('section', '')}]"
+            if finding.get("param"):
+                loc += f" {finding['param']}"
+            if finding.get("line_number"):
+                loc += f" (line {finding['line_number']})"
+            return loc
+
+        error_files = 0
+        warn_files = 0
+        parts: list[str] = []
+        for filename in sorted(validations):
+            result = validations[filename].to_dict()
+            findings = result["errors"]
+            errs = [f for f in findings if f["severity"] == "error"]
+            warns = [f for f in findings if f["severity"] == "warning"]
+            infos = [f for f in findings if f["severity"] == "info"]
+            if errs:
+                error_files += 1
+            if warns:
+                warn_files += 1
+            parts.append(f"## {filename}")
+            if not findings:
+                parts.append("✅ No active errors, warnings, or info findings.")
+            for label, group in (("Errors", errs), ("Warnings", warns), ("Info", infos)):
+                if not group:
+                    continue
+                parts.append(f"### {label} ({len(group)})")
+                for f_item in group:
+                    parts.append(f"- {_loc(f_item)}: {f_item['message']}")
+            parts.append("")
+
+        parts.append(
+            f"Project summary: {len(validations)} file(s) validated, "
+            f"{error_files} with errors, {warn_files} with warnings."
+        )
+        if skipped:
+            parts.append(
+                "Include specs skipped (glob/escaping/missing on disk): "
+                + ", ".join(sorted(set(skipped)))
+            )
+        return "\n".join(parts)
+
+    def _handle_list_connected_devices(self, args: dict[str, Any]) -> str:
+        """Serial/CAN devices — the same data as the comm-line dropdowns."""
+        import services.native_services as ns
+
+        if not ns.is_native_platform():
+            return (
+                "Device detection is only available when KWC runs natively "
+                "on the printer host (Raspberry Pi/SBC)."
+            )
+
+        scan_uuids = bool(args.get("scan_can_uuids", True))
+        devices = ns.get_all_devices()
+
+        parts: list[str] = ["# Connected devices\n"]
+
+        usb = devices.get("usb_serial", [])
+        parts.append(f"## USB serial ({len(usb)})")
+        if usb:
+            for d in usb:
+                by_id = d.get("by_id") or d["path"]
+                parts.append(f"- {d['description']} → {by_id}")
+            parts.append(
+                "Use the /dev/serial/by-id/ path as the [mcu] serial: value."
+            )
+        else:
+            parts.append("- none detected")
+        parts.append("")
+
+        uart = devices.get("uart", [])
+        parts.append(f"## UART ({len(uart)})")
+        if uart:
+            for d in uart:
+                parts.append(f"- {d['path']} ({d['description']})")
+        else:
+            parts.append("- none detected")
+        parts.append("")
+
+        can = devices.get("can", [])
+        parts.append(f"## CAN interfaces ({len(can)})")
+        if not can:
+            parts.append("- none detected")
+        for iface in can:
+            bitrate = iface.get("bitrate")
+            extra = f", {bitrate} bps" if bitrate else ""
+            parts.append(f"- {iface['name']} ({iface.get('state', 'unknown')}{extra})")
+            if scan_uuids:
+                query = ns.query_canbus_uuids(iface["name"])
+                if query.get("error"):
+                    parts.append(f"  UUID scan: {query['error']}")
+                elif query.get("uuids"):
+                    for uuid in query["uuids"]:
+                        parts.append(f"  canbus_uuid: {uuid}")
+                else:
+                    parts.append("  UUID scan: no Klipper CAN nodes answered")
+        parts.append(
+            "\nFor a [mcu_canbus]-style device use canbus_uuid: <uuid> with "
+            "interface: <can0>."
+            if scan_uuids and can else
+            "\nSet scan_can_uuids=true (default) to probe interfaces for Klipper CAN UUIDs."
+        )
+        return "\n".join(parts)
+
+    def _handle_get_section_schema(self, args: dict[str, Any]) -> str:
+        """Typed parameter spec for one or more sections from config_schema."""
+        from parser.config_schema import get_all_section_types, get_section_def
+
+        raw_single = str(args.get("section") or args.get("section_name") or "").strip()
+        sections_raw = args.get("sections")
+        names: list[str] = []
+        if sections_raw:
+            if isinstance(sections_raw, str):
+                names = [
+                    s.strip().strip("[]").strip("\"'")
+                    for s in re.split(r"[,\n]", sections_raw)
+                    if s.strip()
+                ]
+            else:
+                names = [str(s).strip() for s in sections_raw if str(s).strip()]
+        if raw_single:
+            names.insert(0, raw_single.strip("[]"))
+        if not names:
+            return (
+                "Please provide a section (section='bed_mesh') or "
+                "sections=['bed_mesh', 'input_shaper']."
+            )
+
+        parts: list[str] = []
+        for raw in names:
+            key = raw.strip("[]").strip()
+            sec = get_section_def(key)
+            if sec is None:
+                import difflib
+
+                close = difflib.get_close_matches(key, get_all_section_types(), n=3)
+                hint = f" Close matches: {', '.join(close)}." if close else ""
+                parts.append(
+                    f"'{key}' is not a known section type.{hint} Use "
+                    "list_config_reference_sections for the full list.\n"
+                )
+                continue
+
+            header = f"## [{sec.section_type}] — {sec.display_name}"
+            meta_bits: list[str] = []
+            if sec.is_named:
+                ref = f" (a {sec.name_references})" if sec.name_references else ""
+                meta_bits.append(f"named section{ref}: write [{sec.section_type} your_name]")
+            if sec.max_instances == 1:
+                meta_bits.append("only ONE instance allowed across the config")
+            elif sec.max_instances > 1:
+                meta_bits.append(f"max {sec.max_instances} instances")
+            if sec.requires:
+                meta_bits.append("requires sections: " + ", ".join(f"[{r}]" for r in sec.requires))
+            if sec.description:
+                meta_bits.append(sec.description)
+
+            parts.append(header)
+            for bit in meta_bits:
+                parts.append(f"- {bit}")
+            if sec.params:
+                parts.append(f"\nParameters ({len(sec.params)}):")
+                for p in sec.params:
+                    bits = [p.param_type.value]
+                    if p.required:
+                        bits.append("required")
+                    if p.default not in (None, ""):
+                        bits.append(f"default: {p.default}")
+                    if p.enum_values:
+                        bits.append("one of: " + ", ".join(p.enum_values))
+                    bounds: list[str] = []
+                    if p.min_val is not None:
+                        bounds.append(f">= {p.min_val}")
+                    if p.max_val is not None:
+                        bounds.append(f"<= {p.max_val}")
+                    if p.strict_above is not None:
+                        bounds.append(f"> {p.strict_above} (strict)")
+                    if p.strict_below is not None:
+                        bounds.append(f"< {p.strict_below} (strict)")
+                    if bounds:
+                        bits.append(" / ".join(bounds) + (f" {p.unit}" if p.unit else ""))
+                    if p.rel_above:
+                        bits.append(f"must be > {p.rel_above}")
+                    if p.rel_below:
+                        bits.append(f"must be < {p.rel_below}")
+                    if p.rel_between:
+                        bits.append(f"between {p.rel_between[0]} and {p.rel_between[1]}")
+                    if p.rel_min:
+                        bits.append(f">= {p.rel_min}")
+                    if p.rel_max:
+                        bits.append(f"<= {p.rel_max}")
+                    line = f"- {p.name} ({'; '.join(bits)})"
+                    if p.description:
+                        line += f" — {p.description}"
+                    parts.append(line)
+            else:
+                parts.append("- (no parameters)")
+            parts.append("")
+
+        return "\n".join(parts)
+
+    def _handle_get_klippy_status(self, args: dict[str, Any]) -> str:
+        """Live klippy state + print state; failure context auto-attaches."""
+        import services.native_services as ns
+
+        include_excerpt = bool(args.get("include_log_excerpt", False))
+        section_name = str(args.get("section_name") or "").strip() or None
+        error_text = str(args.get("error_text") or "").strip() or None
+
+        try:
+            status = ns.query_klipper_status()
+        except FileNotFoundError as exc:
+            # Klipper not reachable — still try the log; it survives crashes.
+            excerpt = ""
+            try:
+                log = ns.get_klippy_log_excerpt(
+                    section_name=section_name, error_text=error_text
+                )
+                excerpt = log.get("excerpt") or ""
+            except (RuntimeError, OSError):
+                pass
+            parts = [
+                f"Klipper is not responding: {exc}",
+                "Klipper may be stopped or failing at startup.",
+            ]
+            if excerpt:
+                parts.append(f"\n## klippy.log excerpt\n```\n{excerpt}\n```")
+            return "\n".join(parts)
+        except RuntimeError as exc:
+            return f"Klipper status query failed: {exc}"
+
+        state = status.get("state", "unknown")
+        parts = [f"Klipper state: {state}"]
+        if status.get("state_message"):
+            parts.append(f"State message: {status['state_message']}")
+
+        if status.get("is_printing"):
+            name = status.get("print_filename") or "a job"
+            parts.append(
+                f"⚠️ An ACTIVE print is running ({name}, "
+                f"state: {status.get('print_state')}). A FIRMWARE_RESTART or "
+                "config apply will interrupt it — warn the user first."
+            )
+
+        recent = status.get("recent_errors") or []
+        if recent:
+            parts.append(f"\n## Recent klippy errors ({len(recent)})")
+            for err in recent[:8]:
+                parts.append(f"- {err}")
+
+        want_excerpt = include_excerpt or (state != "ready")
+        if want_excerpt and not error_text and status.get("state_message"):
+            error_text = status["state_message"]
+        if want_excerpt:
+            try:
+                log = ns.get_klippy_log_excerpt(
+                    section_name=section_name, error_text=error_text
+                )
+                if log.get("excerpt"):
+                    matched = log.get("matched_on") or "recent"
+                    parts.append(
+                        f"\n## klippy.log excerpt (matched: {matched}, "
+                        f"from {log.get('log_path')})\n```\n{log['excerpt']}\n```"
+                    )
+            except (RuntimeError, OSError) as exc:
+                parts.append(f"\n(klippy.log excerpt unavailable: {exc})")
+
+        return "\n".join(parts)
 
     # ── JSON-RPC / MCP Protocol ─────────────────────────────────
 

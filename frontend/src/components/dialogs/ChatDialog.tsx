@@ -376,6 +376,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           temperature: parseTemperature(editTemperature),
           toolProtocol: editToolProtocol,
           fullRewriteGuard: FULL_REWRITE_GUARD_ENABLED,
+          // Server-side target resolution mirror (finding #5): the backend's
+          // merged-result validation resolves an edit's target file with the
+          // same activeFile the client's draft pipeline uses.
+          activeFile,
         };
 
         // Build context messages

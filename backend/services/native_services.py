@@ -238,6 +238,81 @@ def is_backup_config_file(name: str) -> bool:
     return bool(_BACKUP_CONFIG_RE.match(Path(name).name))
 
 
+def load_native_project(base: Path, seed_files: list[str]) -> tuple[dict, dict, list[str]]:
+    """Read seed config files from ``base`` and expand to the ON-DISK include
+    closure, mirroring Klipper's configfile.py _resolve_include.
+
+    Shared by the /api/native/config-files/read route and the MCP
+    validate_config_project tool so the V2.6.0 symlink-closure semantics
+    (third-party .cfg files symlinked INTO the config dir are followed even
+    though list_config_files hides them behind the traversal guard; include
+    specs resolve relative to the INCLUDING file; only ACTIVE includes are
+    followed; globs are skipped) can never fork between the two surfaces.
+
+    Returns ``(configs, raw_texts, skipped_includes)``:
+      - configs: filename -> parsed ConfigFile (keys are POSIX relative paths)
+      - raw_texts: filename -> file text
+      - skipped_includes: include specs skipped as glob/escaping/missing
+    Raises ValueError on a requested filename that escapes the config dir.
+    """
+    # Validate requested paths stay under base (don't resolve symlinks).
+    for fn in seed_files:
+        if '..' in fn or fn.startswith('/'):
+            raise ValueError(f"Invalid filename: {fn}")
+        candidate = base / fn
+        try:
+            candidate.relative_to(base)
+        except ValueError:
+            raise ValueError(f"Invalid filename: {fn}")
+
+    from parser.config_parser import parse_config
+
+    configs: dict = {}
+    raw_texts: dict[str, str] = {}
+    skipped: list[str] = []
+    for fn in seed_files:
+        file_path = base / fn
+        if not file_path.exists():
+            continue
+        text = read_config_file(str(file_path))
+        configs[fn] = parse_config(text, fn)
+        raw_texts[fn] = text
+
+    pending = list(configs)
+    while pending:
+        fn = pending.pop()
+        for include_spec in configs[fn].includes:
+            spec = include_spec.strip()
+            if not spec:
+                continue
+            inc_dir = os.path.dirname(fn.replace("\\", "/"))
+            rel = os.path.normpath(
+                os.path.join(inc_dir, spec) if inc_dir else spec
+            )
+            # The include ENTRY must stay lexically inside the config dir (the
+            # same boundary the requested-name check enforces); its symlink
+            # target may live anywhere, exactly like Klipper.
+            if os.path.isabs(rel) or Path(rel).parts[0] == "..":
+                skipped.append(spec)
+                continue
+            if rel in configs:
+                continue
+            if glob.has_magic(rel):
+                # Globs are never resolvable in-memory; legal when empty.
+                skipped.append(spec)
+                continue
+            file_path = base / rel
+            if not file_path.exists():  # follows symlinks
+                skipped.append(spec)
+                continue
+            text = read_config_file(str(file_path))
+            configs[rel] = parse_config(text, rel)
+            raw_texts[rel] = text
+            pending.append(rel)
+
+    return configs, raw_texts, skipped
+
+
 def list_config_files(config_dir: str) -> list[dict]:
     """List .cfg files in the given directory and its subdirectories.
 

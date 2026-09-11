@@ -751,6 +751,7 @@ def test_chat_proxy_local_openai_compatible_allows_missing_key(monkeypatch):
         'mcpToolNames': [],
         'toolCalls': [],
         'repromptCount': 0,
+        'serverRepair': None,
         'usage': {
             'completionTokens': 0,
             'reasoningTokens': 0,
@@ -861,6 +862,7 @@ def test_chat_proxy_returns_plain_content(monkeypatch):
         'mcpToolNames': [],
         'toolCalls': [],
         'repromptCount': 0,
+        'serverRepair': None,
         'usage': {
             'completionTokens': 0,
             'reasoningTokens': 0,

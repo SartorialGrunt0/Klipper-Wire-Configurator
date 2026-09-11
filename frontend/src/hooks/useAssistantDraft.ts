@@ -48,6 +48,8 @@ import { normalizeDiffText } from '../utils/configDiff';
 import { isMiniDiffBlock, applyMiniDiffBlock, stripMiniDiffMarkers } from '../utils/miniDiff';
 import { repairUnclosedJinjaInConfigText } from '../utils/jinjaBlockRepair';
 import type { ReplyValidator } from '../utils/replyValidation';
+import { serverRetryExemptWarning } from '../utils/replyValidation';
+import type { ServerRepairVerdict } from '../services/api';
 
 // Full-rewrite guard flag: when disabled (default), the model may return an
 // existing macro/Jinja section as a full block write and it is accepted;
@@ -85,6 +87,8 @@ interface AssistantReplyAttempt {
   assistantMessage: ChatMessage;
   conversationMessages: ChatMessage[];
   warningMessage: string | null;
+  /** Backend merged-result verdict for this reply (finding #4). */
+  serverRepair?: ServerRepairVerdict | null;
 }
 
 interface ChatRequestBase {
@@ -534,7 +538,12 @@ export function useAssistantDraft() {
         }
       }
 
-      return { assistantMessage, conversationMessages: conversationTrail, warningMessage };
+      return {
+        assistantMessage,
+        conversationMessages: conversationTrail,
+        warningMessage,
+        serverRepair: response.serverRepair ?? null,
+      };
     },
     [],
   );
@@ -703,8 +712,22 @@ export function useAssistantDraft() {
 
         // Duplicate-section / shared-pin issues the AI cannot resolve are
         // advisory only after one retry — keep the reply and warn instead.
-        const giveUp =
+        let giveUp =
           context.isRetry && hasOnlyRetryExemptAssistantValidationIssues(outcome.blockingIssues);
+
+        // Finding #4: when the server-side pass already classified this
+        // reply's remaining issues as retry-exempt, do NOT burn the client
+        // retry round discovering the same thing — give up immediately
+        // (warning carries the server's exact findings).
+        let warningOnGiveUp: string | null = null;
+        const issuesPresent = outcome.blockingIssues.some((g) => g.errors.length > 0);
+        if (issuesPresent && !giveUp) {
+          const serverWarning = serverRetryExemptWarning(context.serverRepair);
+          if (serverWarning) {
+            giveUp = true;
+            warningOnGiveUp = serverWarning;
+          }
+        }
 
         return {
           applicable: true,
@@ -720,12 +743,12 @@ export function useAssistantDraft() {
           failureReason: null,
           giveUp,
           repairCount: outcome.repairedSections.length,
-          warningOnGiveUp: giveUp
+          warningOnGiveUp: warningOnGiveUp ?? (giveUp
             ? [
                 `AI draft still has duplicate section or pin-conflict validation issues after ${context.attemptsUsed + 1} attempts. The assistant response was returned so it can explain the conflict.`,
                 formatAssistantDraftValidationIssues(outcome.blockingIssues, null),
               ].join('\n')
-            : null,
+            : null),
         };
       },
 

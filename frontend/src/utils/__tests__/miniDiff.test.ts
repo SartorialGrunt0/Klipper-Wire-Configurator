@@ -289,13 +289,22 @@ gcode:
     expect(result.text).toContain('      M117 homed');
   });
 
-  it('still fails when content differs despite indentation tolerance', () => {
+  it('stale param value still applies via key-tolerant match (HARNESS-03)', () => {
+    // Contract change 2026-09-09: a param-shaped removal whose KEY exists
+    // in the base section applies even when the value is stale. The old
+    // fail-closed behavior here was the HARNESS-03 corruption path: the
+    // aborted block fell back to strip+full-section-write, keeping both
+    // sides of every -/+ pair, and first-wins parsing selected the OLD
+    // value while dropping untouched params.
     const base = `[printer]\nmax_accel: 15500\n`;
     const result = applyMiniDiffBlock(
       '[printer]\n-    max_accel: 99999\n+    max_accel: 18000',
       base,
     );
-    expect(result.applied).toBe(false);
+    expect(result.applied).toBe(true);
+    expect(result.text).toContain('max_accel: 18000');
+    expect(result.text).not.toContain('15500');
+    expect(result.text).not.toContain('99999');
   });
 
   it('appends add-only lines at the end of a plain section', () => {
@@ -487,13 +496,20 @@ algorithm: bicubic
     expect(result.text).toContain('    M104 S0');
   });
 
-  it('does not use comment-tolerant matching on plain (non-gcode) sections', () => {
+  it('applies param removal with omitted trailing comment via key fallback', () => {
+    // Contract change 2026-09-09: this used to fail closed (comment-
+    // tolerant matching was gcode-body-only). The key-tolerant fallback
+    // now matches the `max_accel` key regardless of value/comment drift —
+    // the desired edit lands instead of aborting into the corrupting
+    // full-section-write fallback (HARNESS-03).
     const base = `[printer]\nmax_accel: 15500 #Ellis Tuned\n`;
     const result = applyMiniDiffBlock(
       '[printer]\n-max_accel: 15500\n+max_accel: 18000',
       base,
     );
-    expect(result.applied).toBe(false);
+    expect(result.applied).toBe(true);
+    expect(result.text).toContain('max_accel: 18000');
+    expect(result.text).not.toContain('15500');
   });
 
   it('fails the WHOLE block when one section cannot be applied (atomicity)', () => {
@@ -516,6 +532,83 @@ algorithm: bicubic
       base,
     );
     expect(result.applied).toBe(false);
+  });
+
+  // Stale-removal key-tolerant fallback (2026-09-09 HARNESS-03 finding;
+  // mirrored in tests/test_ai_draft_apply.py).
+  it('matches a stale param removal by key and keeps untouched params', () => {
+    const base = [
+      '[bed_mesh]',
+      'speed: 500',
+      'horizontal_move_z: 2',
+      'mesh_min: 5,5',
+      'zero_reference_position: 175, 175',
+      '',
+      'probe_count: 3,3',
+      'algorithm: bicubic',
+      '',
+      '[probe]',
+      'speed: 3',
+      '',
+    ].join('\n');
+    const result = applyMiniDiffBlock(
+      '[bed_mesh]\n-speed: 500\n+speed: 8\n-probe_count: 7,7\n+probe_count: 3,3',
+      base,
+    );
+    expect(result.applied).toBe(true);
+    expect(result.text).toContain('speed: 8');
+    expect(result.text).toContain('probe_count: 3,3');
+    expect(result.text).toContain('horizontal_move_z: 2');
+    expect(result.text).toContain('zero_reference_position: 175, 175');
+    expect(result.text).toContain('algorithm: bicubic');
+  });
+
+  it('key-tolerant delete-only removal removes the param line', () => {
+    const base = '[bed_mesh]\nspeed: 500\nprobe_count: 3,3\n';
+    // stale removal value: matches the `speed` key, not the value
+    const result = applyMiniDiffBlock('[bed_mesh]\n-speed: 999', base);
+    expect(result.applied).toBe(true);
+    expect(result.text).not.toContain('speed:');
+    expect(result.text).toContain('probe_count: 3,3');
+  });
+
+  it('key fallback does NOT invent params whose key is absent (atomic fail)', () => {
+    const base = '[bed_mesh]\nspeed: 500\n';
+    const result = applyMiniDiffBlock(
+      '[bed_mesh]\n-not_a_param: 7,7\n+not_a_param: 3,3',
+      base,
+    );
+    expect(result.applied).toBe(false);
+  });
+
+  it('key fallback never matches stale gcode command lines', () => {
+    const base = '[gcode_macro PARK]\ngcode:\n    G28 X\n    G1 Z5 F1500\n';
+    const result = applyMiniDiffBlock(
+      '[gcode_macro PARK]\n-G1 Z9 F1500\n+G1 Z10 F1500',
+      base,
+    );
+    expect(result.applied).toBe(false);
+  });
+
+  it('duplicate same-key lines stay ambiguous: stale removal fails closed (#12)', () => {
+    const base = '[mcu mcu]\nserial: /dev/ttyUSB0\nserial: /dev/ttyAMA0\nbaud: 250000\n';
+    const result = applyMiniDiffBlock(
+      '[mcu mcu]\n-serial: /dev/ttyS999\n+serial: /dev/ttyUSB5',
+      base,
+    );
+    expect(result.applied).toBe(false);
+  });
+
+  it('duplicate same-key exact-value removal still applies (#12)', () => {
+    const base = '[mcu mcu]\nserial: /dev/ttyUSB0\nserial: /dev/ttyAMA0\nbaud: 250000\n';
+    const result = applyMiniDiffBlock(
+      '[mcu mcu]\n-serial: /dev/ttyAMA0\n+serial: /dev/ttyAMA1',
+      base,
+    );
+    expect(result.applied).toBe(true);
+    expect(result.text).toContain('serial: /dev/ttyUSB0');
+    expect(result.text).toContain('serial: /dev/ttyAMA1');
+    expect(result.text).not.toContain('serial: /dev/ttyAMA0');
   });
 });
 

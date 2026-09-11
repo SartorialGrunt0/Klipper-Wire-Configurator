@@ -12,7 +12,7 @@ import httpx
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from api.printer_memory_routes import (
+from api.printer_memory_routes import (  # noqa: E402
     load_printer_memory,
     printer_memory_to_context,
     is_printer_memory_blank,
@@ -54,7 +54,12 @@ _mcp_server = McpServer()
 # Match fenced code blocks tagged ```tool ... ```
 # Captures the JSON payload which we parse with json.loads
 MCP_TOOL_BLOCK_RE = re.compile(
-    r"```tool\s*\n(.+?)\n```",
+    # The closing fence may sit on the SAME line as the JSON
+    # (`{"name": ...}```) — qwen3.5-4b does this constantly (observed live
+    # 2026-09-09 accuracy bank, LIVE-06/07). Requiring a newline before the
+    # closer made such calls undetectable AND un-strippable: raw markup
+    # reached the chat bubble. Consumers strip() the group themselves.
+    r"```tool\s*\n(.+?)```",
     re.DOTALL,
 )
 # A fenced ```printer-memory block signals a complete structured proposal —
@@ -322,6 +327,11 @@ class ChatRequest(BaseModel):
     # server-side only — it is NOT injected into the first prompt; the
     # fallback uses it when the model answers without calling any tool.
     contextFiles: dict[str, dict[str, str]] = {}
+    # The editor's active file, mirroring the frontend draft pipeline's
+    # activeFile input to buildAssistantDraftTargetConfigs (finding #5).
+    # Used ONLY for server-side merged-result target resolution when the
+    # reply carries no explicit '# file:' hint; never injected into prompts.
+    activeFile: str = ''
     # Tool-calling protocol override (harness A/B runs). "auto" keeps the
     # provider-based split (local http -> text ```tool protocol, cloud
     # https -> native function calling); "native" forces OpenAI native
@@ -349,6 +359,12 @@ class ChatRequest(BaseModel):
     # a flip changes acceptance AND prompt together. The harness sends this
     # via --full-rewrite-guard for A/B runs.
     fullRewriteGuard: bool = False
+    # Server-side merged-result validation + ONE lean repair pass (#1).
+    # Server-side draft validation/audit are backend-only env switches
+    # (KWC_SERVER_DRAFT_VALIDATION / KWC_POST_APPLY_AUDIT) — deliberately
+    # NOT request fields: per-request control would let a compromised UI
+    # toggle the harness off. (Review finding #3: the old
+    # serverDraftValidation field here was never read and never sent.)
 
 
 class ChatStopRequest(BaseModel):
@@ -550,11 +566,14 @@ _MCP_TOOL_SNIPPETS: dict[str, str] = {
         "get_config_reference_section(section_name=...)"
     ),
     "get_config_reference_section": (
-        "VERIFY a config section's valid name and parameters in "
-        "Config_Reference (section_name='firmware_retraction'); use BEFORE "
-        "adding or editing a section — never invent section names or params "
-        "from memory. list_sections=true returns ONLY the section headers "
-        "to pick from; sections=['a','b'] fetches several in one call"
+        "READ the Config_Reference PROSE for a section — what the parameters "
+        "do, setup examples, detailed semantics (section_name="
+        "'firmware_retraction'). Use when designing a section you don't "
+        "fully understand yet. For a quick check of allowed param names, "
+        "defaults, enums, and bounds, call get_section_schema instead — "
+        "never invent section names or params from memory either way. "
+        "list_sections=true returns ONLY the section headers to pick from; "
+        "sections=['a','b'] fetches several in one call"
     ),
     "read_user_config": (
         "Read a user config file (filename='printer.cfg' required): "
@@ -582,11 +601,48 @@ _MCP_TOOL_SNIPPETS: dict[str, str] = {
     "search_example_configs": "Search example configs by board or printer (query='voron', limit=N)",
     "read_example_config": "Read a full example config file (filename='generic-....cfg')",
     "validate_klipper_config": (
-        "Validate config section block against the klipper config rules "
-        "(config_text='...' required)"
+        "VERIFY config TEXT for errors (config_text='...' required) — "
+        "'check this for errors' / 'is this section correct' about ANY "
+        "config text you can see, pasted by the user or written by you: "
+        "required params, types, ranges. A schema or reference list CANNOT "
+        "check text — never approve config text from a listing alone. For "
+        "the user's saved files use validate_config_project"
     ),
     "validate_macro": (
         "Validate a gcode_macro against Klipper's Jinja rules (macro_text='...' required)"
+    ),
+    "validate_config_project": (
+        "Validate the user's CURRENT config project on this host (all files, "
+        "includes expanded) against the full schema — errors/warnings/infos "
+        "with file+line. Call this for 'validate/check/review my config', "
+        "'is my config OK?', 'what's wrong with my config' — instead of "
+        "reading config files and judging by eye. No args validates "
+        "everything; filenames=['printer.cfg'] for a subset. Use before "
+        "advising FIRMWARE_RESTART; validate_klipper_config is for drafts "
+        "you wrote"
+    ),
+    "list_connected_devices": (
+        "List USB serial (/dev/serial/by-id paths for [mcu] serial:), UART, "
+        "and CAN devices on this host, with CAN UUIDs from canbus_query "
+        "(scan_can_uuids=false skips the bus scan). Use for serial:/canbus_uuid "
+        "lines and 'which board is plugged in?'"
+    ),
+    "get_section_schema": (
+        "LIST a section's allowed parameters from the schema "
+        "(section='bed_mesh' or sections=['extruder','gcode_arcs']): types, "
+        "defaults, required flags, enum values, numeric bounds. Use to "
+        "learn WHICH params/values are legal BEFORE writing a new section; "
+        "it cannot check text — for 'is this config correct?' use "
+        "validate_klipper_config; get_config_reference_section only for "
+        "prose explanations and examples"
+    ),
+    "get_klippy_status": (
+        "Get Klipper's live state (ready / startup error / shutdown), the "
+        "active print job, and klippy.log error context (attached "
+        "automatically when not ready; include_log_excerpt=true with optional "
+        "section_name/error_text forces it while ready). Call BEFORE "
+        "recommending FIRMWARE_RESTART — it warns if a print would be "
+        "interrupted"
     ),
     "generate_macro_template": (
         "Generate a ready-to-use macro template (macro_name='PRINT_START'|'PRINT_END'|"
@@ -621,11 +677,14 @@ def _build_mcp_tool_context() -> str:
         "validate_macro for drafts. Do not guess when a tool can answer. "
         "read_user_config / list_user_config_sections show only what ALREADY "
         "exists in the user's files; list_config_reference_sections / "
-        "get_config_reference_section / search_klipper_docs show what Klipper "
-        "SUPPORTS. When the user asks to ADD or SETUP a section or parameter, "
-        "look it up with list_config_reference_sections (then "
-        "get_config_reference_section) or search_klipper_docs first — a valid "
-        "Klipper section may not be in the user's config yet.",
+        "get_config_reference_section / get_section_schema / "
+        "search_klipper_docs show what Klipper SUPPORTS. When the user asks "
+        "to ADD or SETUP a section or parameter, look it up first — a valid "
+        "Klipper section may not be in the user's config yet. To verify "
+        "which PARAMETERS and values a section accepts, call "
+        "get_section_schema (fast, exact types/defaults/enums/bounds); use "
+        "get_config_reference_section only when you need the prose "
+        "explanation or examples of what the section does.",
         "",
         "Text format (used by providers without native function calling): put a JSON ",
         "code block tagged `tool` in your reply:",
@@ -926,6 +985,33 @@ def _minimal_prompt_enabled() -> bool:
     return os.environ.get("KWC_MINIMAL_PROMPT", "0") != "0"
 
 
+def _server_draft_validation_enabled() -> bool:
+    """Server-side merged-result validation + ONE repair pass toggle.
+
+    DEFAULTS TO ENABLED (2026-09-09 A/B: both flags ON across the full 69-q
+    bank on gemma-4-12b + qwen3.5-4b with zero false-positive repairs, zero
+    latency complaints, and the harness at its best gemma scores; repair and
+    audit paths verified unit-level + live smoke). Set env
+    KWC_SERVER_DRAFT_VALIDATION=0 to revert to the frontend-only retry path.
+    """
+    return os.environ.get("KWC_SERVER_DRAFT_VALIDATION", "1") != "0"
+
+
+def _server_audit_enabled() -> bool:
+    """Deterministic post-apply audit footer toggle (#3).
+
+    DEFAULTS TO DISABLED (2026-09-10 design review): the stated-requirement
+    regex parses English prose, which fails Sir's standing bar — harness-tier
+    checks must parse structure (AST/config), not prose. Checks 2/3
+    (precondition table, LED inventory) are structural but ship together with
+    check 1; the whole module is scheduled for removal when tool-mediated
+    editing lands (see .hermes/plans/2026-09-10_tool-mediated-config-editing.md,
+    Phase 6). Set env KWC_POST_APPLY_AUDIT=1 to re-enable (harness probes
+    HARNESS-01..03 and dogfooding still work with it on).
+    """
+    return os.environ.get("KWC_POST_APPLY_AUDIT", "0") == "1"
+
+
 def _config_fallback_enabled() -> bool:
     """Config-grounding fallback toggle (env KWC_CONFIG_FALLBACK=1 re-enables it).
 
@@ -1007,8 +1093,20 @@ def _extract_tool_calls(text: str) -> list[dict]:
         try:
             parsed = json.loads(raw_json)
         except json.JSONDecodeError:
-            continue
+            parsed = None
         if not isinstance(parsed, dict):
+            # Broken JSON inside an explicit tool fence — attempt mechanical
+            # recovery (python-call form, smart/single quotes) before giving
+            # up. The fence is unambiguous tool intent, not prose.
+            recovered_call = _recover_fenced_tool_call(raw_json)
+            if recovered_call:
+                # Counted so the A/B can separate silent recoveries from
+                # re-prompt corrections (only the latter logs a WARNING).
+                logger.debug(
+                    "Recovered malformed tool fence | name=%s preview=%s",
+                    recovered_call["name"], raw_json[:100].replace("\n", " "),
+                )
+                calls.append(recovered_call)
             continue
         name = parsed.get("name", "")
         arguments = parsed.get("arguments", {})
@@ -1177,6 +1275,126 @@ def _parse_kwargs(args_text: str) -> dict:
     return arguments
 
 
+# Unterminated ```tool fence: the model opened a tool block and the stream
+# ended (or it forgot the closing fence). Such a fence is never legitimate
+# content. Bounded at the first BLANK line (review finding #11): fence
+# bodies never contain blank lines, but qwen-class models sometimes open a
+# broken fence and then recover with real prose — consuming to
+# end-of-content silently deleted that answer.
+UNTERMINATED_TOOL_FENCE_RE = re.compile(
+    r"```tool\b(?:[^\n]*\n)?(?:(?!```)[^\n]+\n)*(?:(?!```)[^\n]*$)?"
+)
+# Python-call form inside a ```tool fence: name(k=v, ...) / call name(...).
+_FENCED_PY_CALL_RE = re.compile(
+    r"^(?:call[\s:]?\s*)?(\w+)\s*\((.*)\)\s*$",
+    re.DOTALL,
+)
+# Brace-call form inside a ```tool fence: name{k=v, ...} / call name{...}.
+_FENCED_BRACE_CALL_RE = re.compile(
+    r"^(?:call[\s:]?\s*)?(\w+)\s*\{(.*)\}\s*$",
+    re.DOTALL,
+)
+
+
+def _recover_fenced_tool_call(raw_json: str) -> dict | None:
+    """Recover a tool call from a ```tool fence whose JSON failed to parse.
+
+    A ```tool fence is explicit tool-call intent, so repairs are scoped to
+    fence bodies ONLY (never guessed from prose, per the intent law). Small
+    models (qwen 4B class) produce three recurring breakage shapes here:
+    python-style ``name(k=v)``, single/smart-quoted pseudo-JSON, and
+    unescaped quotes inside values. All are mechanically recoverable.
+    """
+    # 1) Smart quotes → ASCII, then plain JSON retry.
+    normalized = (
+        raw_json.replace("\u201c", '"').replace("\u201d", '"')
+        .replace("\u2018", "'").replace("\u2019", "'")
+    )
+    if normalized != raw_json:
+        try:
+            parsed = json.loads(normalized)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            name = parsed.get("name", "")
+            arguments = parsed.get("arguments", {})
+            if isinstance(name, str) and name and isinstance(arguments, dict):
+                return {"name": name, "arguments": arguments}
+    # 2) Python call form: name(k=v, ...).
+    call_match = _FENCED_PY_CALL_RE.match(normalized.strip())
+    if call_match and call_match.group(1):
+        return {
+            "name": call_match.group(1),
+            "arguments": _parse_kwargs(call_match.group(2)),
+        }
+    # 3) Brace call form: name{k=v, ...}. The brace body may itself be
+    #    JSON (llama.cpp `call:tool{"name": ..., "arguments": {...}}`
+    #    decoration) — try that before treating it as bare kwargs.
+    brace_match = _FENCED_BRACE_CALL_RE.match(normalized.strip())
+    if brace_match and brace_match.group(1):
+        try:
+            parsed = json.loads("{" + brace_match.group(2) + "}")
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            name = parsed.get("name", "")
+            arguments = parsed.get("arguments", {})
+            if isinstance(name, str) and name and isinstance(arguments, dict):
+                return {"name": name, "arguments": arguments}
+        return {
+            "name": brace_match.group(1),
+            "arguments": _parse_kwargs(brace_match.group(2)),
+        }
+    # 4) Single-quoted pseudo-JSON (only when there are no double quotes to
+    #    protect): {"name": ...} with ' throughout.
+    if "'" in normalized and '"' not in normalized:
+        try:
+            parsed = json.loads(normalized.replace("'", '"'))
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            name = parsed.get("name", "")
+            arguments = parsed.get("arguments", {})
+            if isinstance(name, str) and name and isinstance(arguments, dict):
+                return {"name": name, "arguments": arguments}
+    return None
+
+
+def _malformed_tool_call_detected(text: str, calls: list[dict]) -> bool:
+    """True when the reply contains tool-call intent that failed to parse.
+
+    Deterministic post-hoc detection over explicit ```tool protocol fences
+    only: a fence body that mentions a name/call shape but yielded no call,
+    or an unterminated ```tool fence (truncated stream). Prose that merely
+    mentions tools never triggers this.
+    """
+    if calls:
+        return False
+    for fence in MCP_TOOL_BLOCK_RE.finditer(text):
+        body = fence.group(1)
+        if re.search(r"\bname\b|\bcall\b|\w+\s*[({]", body):
+            return True
+    return bool(UNTERMINATED_TOOL_FENCE_RE.search(text))
+
+
+# One protocol-correction re-prompt for a malformed tool call. The broken
+# call is NEVER quoted (REPAIR-01: models copy broken drafts verbatim) —
+# the model only gets the exact format and a clean path back.
+MALFORMED_TOOL_REPROMPT_LIMIT = 1
+MALFORMED_TOOL_FORMAT_FEEDBACK = (
+    "Your previous response contained a tool call that could not be parsed, "
+    "so it was not executed. Do not copy or repeat your previous response. "
+    'To call a tool, respond with exactly one fenced block in this format:\n\n'
+    "```tool\n"
+    '{"name": "<tool_name>", "arguments": {"key": "value"}}\n'
+    "```\n\n"
+    'Use double quotes around every name and string value, keep the JSON on '
+    'valid one-line or multi-line form, and always close the fence. If you '
+    "no longer need a tool, answer the user's question directly in text "
+    "instead."
+)
+
+
 def _strip_bracket_tool_calls(text: str) -> str:
     """Strip bracket-wrapped tool calls whose name is a REAL tool.
 
@@ -1230,7 +1448,13 @@ def _recover_tool_call(token: str, args_text: str) -> tuple[str, dict] | None:
 
 
 def _execute_tool_call(tool_call: dict) -> str:
-    """Execute a single MCP tool call and return the text result."""
+    """Execute a single MCP tool call and return the text result.
+
+    SYNC — some handlers (list_connected_devices, get_klippy_status) do
+    blocking host I/O for seconds. From the async chat loop call
+    _execute_tool_call_async instead; direct calls are for sync contexts
+    only (tests).
+    """
     name = tool_call.get("name", "")
     arguments = tool_call.get("arguments", {})
 
@@ -1259,6 +1483,17 @@ def _execute_tool_call(tool_call: dict) -> str:
         item["text"] for item in content if item.get("type") == "text"
     ]
     return "\n\n".join(text_parts) if text_parts else "Tool returned no content."
+
+
+async def _execute_tool_call_async(tool_call: dict) -> str:
+    """Off-thread wrapper for the chat loop (review finding #14).
+
+    list_connected_devices runs CAN/USB scans and get_klippy_status probes
+    host endpoints; both block for seconds. Running them inline froze the
+    event loop — every other request (health checks, saves, other chats)
+    stalled behind one tool call. asyncio.to_thread keeps the loop free.
+    """
+    return await asyncio.to_thread(_execute_tool_call, tool_call)
 
 
 # Client-facing tool-call detail records are capped so a huge tool output
@@ -1820,6 +2055,253 @@ async def list_models(req: ModelsRequest):
     return {"models": ids}
 
 
+# ── Server-side merged-result validation + ONE lean repair (#1) ───────
+#
+# When KWC_SERVER_DRAFT_VALIDATION=1, after the tool loop produces a final
+# reply the backend applies it to the loaded context files (ported merge
+# engine, services/ai_draft_apply), validates the MERGED result with the
+# project validator, and — when new errors appear (delta vs baseline, same
+# semantics as the frontend's collectNewValidationErrors) — issues exactly
+# ONE REPAIR-01-shaped repair query (lean: error + imperative fix, previous
+# reply never quoted). If the repair reply validates, it replaces the
+# original; otherwise the ORIGINAL reply stands and `serverRepair` reports
+# the failure so the frontend loop (or the user) can act. The reply is
+# never rejected outright — Apply & Review remains the user's gate.
+#
+# The deterministic audit (#3, services/ai_reply_audit) runs unconditionally
+# (flag-gated only) on every reply that changed config: stated-requirement
+# check, macro precondition table, LED inventory sweep. Notes attach as a
+# footer; they never change routing or acceptance.
+
+def _context_files_to_config_files(context_files: dict[str, dict[str, str]]) -> dict:
+    """Convert the frontend contextFiles payload to parseable ConfigFiles."""
+    from parser.config_parser import parse_config
+
+    configs = {}
+    for filename, meta in context_files.items():
+        content = (meta or {}).get("content", "")
+        if not content.strip():
+            continue
+        try:
+            configs[filename] = parse_config(content, filename)
+        except Exception:
+            logger.warning("Context file parse failed | file=%s", filename)
+    return configs
+
+
+async def _server_validate_and_repair(
+    client: httpx.AsyncClient,
+    req: ChatRequest,
+    headers: dict,
+    final_content: str,
+    current_messages: list[dict],
+    usage_events: list[dict],
+    stop_event: "asyncio.Event | None",
+) -> tuple[str, dict | None]:
+    """Apply → validate merged → ONE lean repair. Returns (content, info).
+
+    ``info`` is the ``serverRepair`` response field: ``None`` when nothing
+    needed repair / repair was not possible (no context files), else a dict
+    ``{attempted, repaired, issuesAfter}``.
+    """
+    from services.ai_draft_apply import (
+        MAX_ASSISTANT_HINT_USER_MESSAGES,
+        apply_reply_to_configs,
+    )
+    from services.ai_draft_validation import (
+        build_validation_feedback,
+        collect_new_validation_errors,
+        has_only_retry_exempt_issues,
+        suppress_errors_shadowed_by_full_rewrite,
+    )
+    from services.ai_reply_audit import build_audit_footer, run_post_apply_audit
+    from parser.validator import validate_project_configs
+
+    base_configs = _context_files_to_config_files(req.contextFiles)
+    if not base_configs:
+        return final_content, None
+
+    # Mirror useAssistantDraft.getAssistantMessageHintTexts: the reply plus
+    # up to 3 preceding user messages, so file targets named only by the
+    # user resolve to the same file the client's draft pipeline picks
+    # (finding #5).
+    user_hints = [
+        m.get("content", "")
+        for m in req.messages
+        if m.get("role") == "user" and m.get("content")
+    ][-MAX_ASSISTANT_HINT_USER_MESSAGES:]
+    hint_texts = [final_content, *user_hints]
+
+    apply_result = apply_reply_to_configs(
+        final_content, base_configs,
+        active_file=req.activeFile or None,
+        hint_texts=hint_texts,
+    )
+    merged_files = {
+        filename: entry["merged_config"]
+        for filename, entry in apply_result["files"].items()
+    }
+    if not merged_files:
+        # Prose-only reply or apply failure — nothing merged to validate.
+        return final_content, None
+
+    # Baseline = the untouched project; candidate = base with merged files.
+    project = dict(base_configs)
+    project.update(merged_files)
+    baseline_validations = {
+        filename: result.to_dict()
+        for filename, result in validate_project_configs(base_configs).items()
+    }
+    candidate_validations = {
+        filename: result.to_dict()
+        for filename, result in validate_project_configs(project).items()
+    }
+    blocking = suppress_errors_shadowed_by_full_rewrite(
+        collect_new_validation_errors(baseline_validations, candidate_validations)
+    )
+    if not blocking:
+        # Clean apply: run the deterministic audit (ONLY when its own flag
+        # is on — the outer gate lets us in for validation alone) and
+        # attach its footer.
+        notes = (
+            _run_audit_on_apply(req, apply_result, merged_files, project, run_post_apply_audit)
+            if _server_audit_enabled() else []
+        )
+        if notes:
+            final_content = final_content + build_audit_footer(notes)
+        return final_content, {"attempted": False, "repaired": False, "issuesAfter": []}
+
+    if not _server_draft_validation_enabled():
+        # Audit-only mode (KWC_POST_APPLY_AUDIT without validation): the
+        # deterministic notes still apply; repair stays off.
+        notes = (
+            _run_audit_on_apply(req, apply_result, merged_files, project, run_post_apply_audit)
+            if _server_audit_enabled() else []
+        )
+        if notes:
+            final_content = final_content + build_audit_footer(notes)
+        return final_content, None
+
+    if has_only_retry_exempt_issues(blocking):
+        # The model cannot fix duplicates/reused pins by regenerating —
+        # do not burn a repair query (retry-exempt semantics).
+        return final_content, {
+            "attempted": False,
+            "repaired": False,
+            "issuesAfter": blocking,
+            "reason": "retry-exempt",
+        }
+
+    # ── ONE lean repair (REPAIR-01 shape) ──
+    feedback = build_validation_feedback(blocking, None)
+    repair_messages = list(current_messages) + [
+        {"role": "user", "content": feedback},
+    ]
+    repair_max_tokens = req.maxTokens
+    if _is_local_provider(req.apiProvider, req.apiUrl):
+        repair_max_tokens = max(req.maxTokens, EMPTY_REPROMPT_MAX_TOKENS)
+    logger.info(
+        "Server repair | issuing ONE lean repair (issue_groups=%d)", len(blocking),
+    )
+    try:
+        repair_payload = _build_provider_payload(
+            req.apiProvider, repair_messages, req.model,
+            max_tokens=repair_max_tokens,
+            temperature=req.temperature,
+            tools=_resolve_native_tools(req.apiProvider, req.apiUrl, req.toolProtocol),
+            merge_system=req.mergeSystemMessages,
+        )
+        repair_content, repair_data = await _query_provider(
+            client, req.apiUrl, headers, repair_payload, req.apiProvider,
+            logger_context="server-repair-1",
+            stop_event=stop_event,
+        )
+        repair_usage = _extract_usage_info(repair_data)
+        if repair_usage:
+            repair_usage["context"] = "server-repair-1"
+            usage_events.append(repair_usage)
+    except ChatStoppedError:
+        raise
+    except (ValueError, httpx.HTTPError) as exc:
+        logger.warning("Server repair query failed | %s", exc)
+        return final_content, {"attempted": True, "repaired": False, "issuesAfter": blocking}
+
+    repaired_content = repair_content
+    for pattern in (
+        MCP_TOOL_BLOCK_RE, ALT_TOOL_CALL_CONTENT_RE, CALL_SYNTAX_CLEANUP_RE,
+        FUNC_CALL_CLEANUP_RE, DSML_CLEANUP_RE, XML_TOOL_CALLS_CLEANUP_RE,
+    ):
+        repaired_content = pattern.sub("", repaired_content).strip()
+    repaired_content = _strip_bracket_tool_calls(repaired_content).strip()
+
+    if repaired_content:
+        repair_apply = apply_reply_to_configs(
+            repaired_content, base_configs,
+            active_file=req.activeFile or None,
+            hint_texts=[repaired_content, *user_hints],
+        )
+        repair_merged = {
+            filename: entry["merged_config"]
+            for filename, entry in repair_apply["files"].items()
+        }
+        if repair_merged:
+            repair_project = dict(base_configs)
+            repair_project.update(repair_merged)
+            repair_candidate = {
+                filename: result.to_dict()
+                for filename, result in validate_project_configs(repair_project).items()
+            }
+            repair_blocking = suppress_errors_shadowed_by_full_rewrite(
+                collect_new_validation_errors(baseline_validations, repair_candidate)
+            )
+            if not repair_blocking:
+                notes = (
+                    _run_audit_on_apply(req, repair_apply, repair_merged, repair_project, run_post_apply_audit)
+                    if _server_audit_enabled() else []
+                )
+                if notes:
+                    repaired_content = repaired_content + build_audit_footer(notes)
+                logger.info("Server repair | repaired=1")
+                return repaired_content, {
+                    "attempted": True, "repaired": True, "issuesAfter": [],
+                }
+            # Repair still dirty: keep the ORIGINAL reply (never show a
+            # worse one) but report the exact remaining issues.
+            return final_content, {
+                "attempted": True, "repaired": False, "issuesAfter": repair_blocking,
+            }
+
+    return final_content, {"attempted": True, "repaired": False, "issuesAfter": blocking}
+
+
+def _run_audit_on_apply(req, apply_result, merged_files, project, audit_fn) -> list[str]:
+    """Collect the audit inputs from an apply result and run all checks."""
+    changed_headers: list[str] = []
+    changed_gcode: list[tuple[str, str]] = []
+    for entry in apply_result["files"].values():
+        for change in entry["changes"]:
+            header = change.get("fullHeader", "")
+            if header and header not in changed_headers:
+                changed_headers.append(header)
+        merged_cfg = entry["merged_config"]
+        for section in merged_cfg.sections:
+            # Any section with a gcode param: gcode_macro/delayed_gcode AND
+            # idle_timeout/force_move etc. — the idle_timeout LED class
+            # (#TRIDENT-15) lives on [idle_timeout], not a macro.
+            body = (section.get_value("gcode", "")
+                    if section.full_header in changed_headers else "")
+            if body:
+                changed_gcode.append((section.full_header, body))
+    if not changed_headers:
+        return []
+    return audit_fn(
+        _latest_user_message_text(req.messages),
+        project,
+        changed_gcode,
+        changed_headers,
+    )
+
+
 @router.post("/ai/chat")
 async def chat_proxy(req: ChatRequest):
     """Proxy chat messages to the user's configured API provider."""
@@ -1893,6 +2375,9 @@ async def chat_proxy(req: ChatRequest):
             current_messages = list(messages)
             executed_tool_names: list[str] = []
             executed_tool_calls: list[dict] = []
+            # Re-prompts issued to correct a malformed ```tool fence (see the
+            # malformed tool-call guard in the loop below).
+            malformed_reprompts = 0
 
             # ── Config-grounding fallback (Phase 4) ──
             # If the model didn't call any tools on the first pass, inject the
@@ -2011,6 +2496,46 @@ async def chat_proxy(req: ChatRequest):
                 native_calls = _extract_native_tool_calls(req.apiProvider, current_data)
                 tool_calls = native_calls or _extract_tool_calls(current_content)
                 if not tool_calls:
+                    # ── Malformed tool-call guard ──
+                    # A ```tool fence that failed to parse (or an unterminated
+                    # fence) is unambiguous tool intent — without this, the
+                    # loop sees "no tool calls, non-empty text", stops, and
+                    # the raw broken markup leaks into the chat bubble. Issue
+                    # ONE format-correction re-prompt (never quoting the
+                    # broken call — REPAIR-01) instead of terminating.
+                    if (
+                        malformed_reprompts < MALFORMED_TOOL_REPROMPT_LIMIT
+                        and _malformed_tool_call_detected(current_content, tool_calls)
+                    ):
+                        malformed_reprompts += 1
+                        tool_turns += 1
+                        logger.warning(
+                            "Malformed tool call | re-prompting with format "
+                            "correction (%d/%d) preview=%s",
+                            malformed_reprompts, MALFORMED_TOOL_REPROMPT_LIMIT,
+                            current_content[:120].replace("\n", " "),
+                        )
+                        current_messages.append({
+                            "role": "user",
+                            "content": MALFORMED_TOOL_FORMAT_FEEDBACK,
+                        })
+                        malformed_payload = _build_provider_payload(
+                            req.apiProvider, current_messages, req.model,
+                            max_tokens=req.maxTokens,
+                            temperature=req.temperature,
+                            tools=native_tools,
+                            merge_system=req.mergeSystemMessages,
+                        )
+                        current_content, current_data = await _query_provider(
+                            client, req.apiUrl, headers, malformed_payload, req.apiProvider,
+                            logger_context=f"malformed-reprompt-{malformed_reprompts}",
+                            stop_event=stop_event,
+                        )
+                        malformed_usage = _extract_usage_info(current_data)
+                        if malformed_usage:
+                            malformed_usage["context"] = f"malformed-reprompt-{malformed_reprompts}"
+                            usage_events.append(malformed_usage)
+                        continue
                     if tool_turns > 0:
                         logger.info("Tool call loop done | turns=%d final_chars=%d", tool_turns, len(current_content))
                     break
@@ -2043,7 +2568,7 @@ async def chat_proxy(req: ChatRequest):
                 # follow-up messages in the format the provider expects.
                 results = []
                 for tool_call in tool_calls[:MAX_MCP_TOOL_TURNS]:
-                    result_text = _execute_tool_call(tool_call)
+                    result_text = await _execute_tool_call_async(tool_call)
                     logger.info(
                         "Tool executed | name=%s result_chars=%d",
                         tool_call["name"], len(result_text),
@@ -2112,6 +2637,7 @@ async def chat_proxy(req: ChatRequest):
                 or FUNC_CALL_CLEANUP_RE.search(current_content)
                 or DSML_CLEANUP_RE.search(current_content)
                 or XML_TOOL_CALLS_CLEANUP_RE.search(current_content)
+                or UNTERMINATED_TOOL_FENCE_RE.search(current_content)
             )
             final_content = MCP_TOOL_BLOCK_RE.sub("", current_content).strip()
             final_content = ALT_TOOL_CALL_CONTENT_RE.sub("", final_content).strip()
@@ -2119,6 +2645,10 @@ async def chat_proxy(req: ChatRequest):
             final_content = FUNC_CALL_CLEANUP_RE.sub("", final_content).strip()
             final_content = _strip_bracket_tool_calls(final_content).strip()
             final_content = DSML_CLEANUP_RE.sub("", final_content).strip()
+            # An unterminated ```tool fence (truncated broken call) would
+            # otherwise leak raw markup into the bubble — it always extends
+            # to end of content, so a tail-strip is safe.
+            final_content = UNTERMINATED_TOOL_FENCE_RE.sub("", final_content).strip()
             # If the cleanup left nothing but the original was a tool call,
             # don't restore the raw tool call text — return empty instead.
             if not final_content and not had_tool_blocks:
@@ -2201,9 +2731,13 @@ async def chat_proxy(req: ChatRequest):
                     clean_assistant = XML_TOOL_CALLS_CLEANUP_RE.sub("", clean_assistant).strip()
                     if clean_assistant:
                         current_messages.append({"role": "assistant", "content": clean_assistant})
+                    reprompt_results = [
+                        await _execute_tool_call_async(c)
+                        for c in reprompt_calls[:MAX_MCP_TOOL_TURNS]
+                    ]
                     for reprompt_call, result_text in zip(
                         reprompt_calls[:MAX_MCP_TOOL_TURNS],
-                        [_execute_tool_call(c) for c in reprompt_calls[:MAX_MCP_TOOL_TURNS]],
+                        reprompt_results,
                     ):
                         executed_tool_names.append(reprompt_call["name"])
                         executed_tool_calls.append(
@@ -2230,6 +2764,31 @@ async def chat_proxy(req: ChatRequest):
             if not mcp_tool_names and executed_tool_names:
                 mcp_tool_names = list(dict.fromkeys(executed_tool_names))
 
+            # ── Server-side merged-result validation + ONE lean repair (#1) ──
+            # Flag-gated (KWC_SERVER_DRAFT_VALIDATION=1). Needs the loaded
+            # config content (contextFiles); replies that merge cleanly get
+            # the deterministic audit footer (#3) when KWC_POST_APPLY_AUDIT=1.
+            # The frontend fenced-cfg path is untouched: worst case the reply
+            # stands as-is and `serverRepair` reports what happened.
+            server_repair_info = None
+            server_audit_enabled = _server_audit_enabled()
+            if (
+                final_content
+                and (
+                    _server_draft_validation_enabled()
+                    or server_audit_enabled
+                )
+            ):
+                try:
+                    final_content, server_repair_info = await _server_validate_and_repair(
+                        client, req, headers, final_content,
+                        current_messages, usage_events, stop_event,
+                    )
+                except ChatStoppedError:
+                    raise
+                except Exception:
+                    logger.exception("Server draft validation failed | replying unchanged")
+
             logger.info(
                 "Returning response | final_chars=%d tool_turns=%d tools=%s empty=%s",
                 len(final_content), tool_turns,
@@ -2255,6 +2814,11 @@ async def chat_proxy(req: ChatRequest):
                 "mcpToolNames": mcp_tool_names,
                 "toolCalls": executed_tool_calls,
                 "repromptCount": empty_reprompts,
+                # Set when KWC_SERVER_DRAFT_VALIDATION ran ({attempted,
+                # repaired, issuesAfter[, reason]}); null otherwise. The
+                # frontend may use it to skip its own retry loop when the
+                # server already repaired the reply.
+                "serverRepair": server_repair_info,
                 "usage": {
                     "completionTokens": sum(
                         (e.get("completionTokens") or 0) for e in usage_events
