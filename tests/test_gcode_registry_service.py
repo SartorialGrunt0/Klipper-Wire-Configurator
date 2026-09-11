@@ -252,13 +252,31 @@ def test_scan_body_unguarded_e_gcode_macro_valid():
     assert list(scan_gcode_body(body, ctx)) == []
 
 
-def test_scan_body_egcode_macro_undefined_still_flags():
+def test_scan_body_egcode_macro_undefined_still_suppressed():
+    # {% if printer['gcode_macro NOPE'] %} IS the runtime existence check:
+    # whether or not NOPE is defined, the guarded call never errors. The
+    # klicky STATUS_* idiom depends on this (guard + call, def elsewhere).
     body = ("{% if printer['gcode_macro NOPE'] %}\n"
             "NOPE\n"
             "{% endif %}\n")
     ctx = _ctx()
-    found = list(scan_gcode_body(body, ctx))
-    assert len(found) == 1          # undefined macro: real problem
+    assert list(scan_gcode_body(body, ctx)) == []
+
+
+def test_scan_body_multiline_jinja_klicky_style():
+    # klicky wraps {% for %} across lines after a command; continuation
+    # lines (or the 'endfor' tail) must not surface as commands.
+    body = (
+        "_BED_MESH_CALIBRATE {% for p in params\n"
+        "       %}{'%s=%s ' % (p, params[p])}{%\n"
+        "      endfor %}\n"
+        "    {% if printer['gcode_move'].position.y > 5\n"
+        "          or printer['gcode_move'].position.y < -5 %}\n"
+        "      { action_raise_error(\"off bed\") }\n"
+        "    {% endif %}\n"
+    )
+    ctx = _ctx(macros=["_BED_MESH_CALIBRATE"])
+    assert list(scan_gcode_body(body, ctx)) == []
 
 
 # ── real Trident fixture ────────────────────────────────────────────────

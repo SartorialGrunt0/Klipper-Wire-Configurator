@@ -1,14 +1,13 @@
 {
   "schema_version": 1,
   "source_rev": "2d7717e3b62ea2fe3401b27f54f8681f80451c69",
-  "generated_at": "2026-09-11T06:32:38+00:00",
+  "generated_at": "2026-09-11T14:28:34+00:00",
   "commands": {
     "ABORT": {
       "extra": "bed_screws",
       "requires_sections": [
         "bed_screws",
         "load_cell",
-        "manual_probe",
         "temperature_probe"
       ],
       "requires_mode": "any",
@@ -81,7 +80,6 @@
       "requires_sections": [
         "bed_screws",
         "load_cell",
-        "manual_probe",
         "temperature_probe"
       ],
       "requires_mode": "any",
@@ -1083,9 +1081,7 @@
     },
     "NEXT": {
       "extra": "manual_probe",
-      "requires_sections": [
-        "manual_probe"
-      ],
+      "requires_sections": [],
       "requires_mode": "any",
       "mux_key": null,
       "simulated": false,
@@ -1946,9 +1942,7 @@
     },
     "TESTZ": {
       "extra": "manual_probe",
-      "requires_sections": [
-        "manual_probe"
-      ],
+      "requires_sections": [],
       "requires_mode": "any",
       "mux_key": null,
       "simulated": false,

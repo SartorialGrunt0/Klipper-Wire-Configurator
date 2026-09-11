@@ -238,7 +238,47 @@ def _strip_jinja_inline(line: str) -> str:
 _JINJA_IF_RE = re.compile(r"^\s*\{%-?\s*(?:el)?if\b(.*?)%}", re.S)
 _JINJA_ELIF_RE = re.compile(r"^\s*\{%-?\s*elif\b")
 _JINJA_ENDIF_RE = re.compile(r"^\s*\{%-?\s*endif\b.*%}")
-_PRINTER_REF_RE = re.compile(r"printer(?:\.configfile\.settings)?\.([a-z_][a-z0-9_]*)")
+_JINJA_ENDFOR_RE = re.compile(r"^\s*\{%-?\s*end(for|while)\b.*%}")
+_PRINTER_REF_RE = re.compile(
+    r"""printer\[['"]gcode_macro\s+([A-Za-z0-9_]+)['"]\]"""   # macro guard
+    r"|printer(?:\.configfile\.settings)?\.([a-z_][a-z0-9_]*)"
+)
+
+
+def _guard_refs(condition: str) -> set[str]:
+    """Section names + 'macro:<NAME>' tokens a Jinja condition guards on."""
+    refs: set[str] = set()
+    for macro, section in _PRINTER_REF_RE.findall(condition):
+        if macro:
+            refs.add(f"macro:{macro.upper()}")
+        else:
+            refs.add(section.lower())
+    return refs
+
+
+def _logical_lines(text: str):
+    """Yield (line_no, joined_line) with multi-line Jinja tags joined.
+
+    klicky-style configs wrap `{% if ... %}` / `{% for ... %}` tags across
+    physical lines (and inline them after a command, e.g.
+    `_BED_MESH_CALIBRATE {% for p in params\\n %}{...}{%\\n endfor %}`).
+    Line-wise scanning mistakes continuation lines (`or printer[...]`, the
+    `endfor` tail) for commands. Accumulate lines until the {%/%} tags
+    balance (numbered at the span's first line); the joined line then scans
+    normally — _strip_jinja_inline removes the complete tag spans.
+    """
+    raw = text.splitlines()
+    i = 0
+    while i < len(raw):
+        start = i + 1
+        parts = [raw[i].strip()]
+        opens = raw[i].count("{%") - raw[i].count("%}")
+        i += 1
+        while opens > 0 and i < len(raw):
+            parts.append(raw[i].strip())
+            opens += raw[i].count("{%") - raw[i].count("%}")
+            i += 1
+        yield start, " ".join(p for p in parts if p)
 
 
 def iter_gcode_command_tokens(text: str):
@@ -284,13 +324,12 @@ def scan_gcode_body(text: str, context: ProjectGcodeContext | None = None):
     author already handled the absence.
     """
     guard_stack: list[set[str]] = []
-    for i, raw in enumerate(text.splitlines(), start=1):
+    for i, raw in _logical_lines(text):
         stripped_raw = raw.strip()
         if_line = _JINJA_IF_RE.match(stripped_raw)
         if if_line or _JINJA_ENDIF_RE.match(stripped_raw):
             if if_line:
-                refs = {m.lower()
-                        for m in _PRINTER_REF_RE.findall(if_line.group(1))}
+                refs = _guard_refs(if_line.group(1))
                 if _JINJA_ELIF_RE.match(stripped_raw) and guard_stack:
                     # elif continues the existing block: widen its guard
                     # set instead of pushing (endif pops a single frame).
@@ -320,6 +359,14 @@ def scan_gcode_body(text: str, context: ProjectGcodeContext | None = None):
                 guarded |= entry
             if guarded.intersection(s.lower()
                                     for s in verdict.required_sections):
+                continue
+        if verdict.status == STATUS_UNKNOWN:
+            # eGCode macro-exists guard: {% if printer['gcode_macro NAME'] %}
+            # calling NAME — the guard IS the existence check.
+            guarded_macro = {g for g in
+                             (r for e in guard_stack for r in e)
+                             if g.startswith("macro:")}
+            if f"macro:{verdict.name}" in guarded_macro:
                 continue
         if verdict.is_problem:
             yield i, verdict

@@ -176,16 +176,16 @@ SIMULATED: list[str] = [
 ]
 
 # Interactive helper commands that Klipper registers *transiently* (only while
-# an assistant flow like MANUAL_PROBE or BED_SCREWS_ADJUST is active). They
-# are real registered names (ACCEPT/ABORT/NEXT/TESTZ/ADJUSTED) but gating
-# them on the driving section keeps suggestions honest; we gate on the
-# driving section union.
+# an assistant flow is active). manual_probe has NO config section of its own
+# (load_object from probe_calibrate), so gating NEXT/TESTZ on it could never
+# be satisfied — they stay ungated. Commands whose flows are section-driven
+# gate on those sections.
 TRANSIENT_GATES: dict[str, list[str]] = {
-    "ACCEPT": ["bed_screws", "manual_probe", "temperature_probe", "load_cell"],
+    "ACCEPT": ["bed_screws", "temperature_probe", "load_cell"],
     "ADJUSTED": ["bed_screws"],
-    "ABORT": ["bed_screws", "manual_probe", "temperature_probe", "load_cell"],
-    "NEXT": ["manual_probe"],
-    "TESTZ": ["manual_probe"],
+    "ABORT": ["bed_screws", "temperature_probe", "load_cell"],
+    "NEXT": [],
+    "TESTZ": [],
     "CALIBRATE": ["load_cell"],
     "TARE": ["load_cell"],
     "TEMPERATURE_PROBE_NEXT": ["temperature_probe"],
