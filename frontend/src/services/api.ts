@@ -854,6 +854,12 @@ export interface AiChatRequest {
    * frontend acceptance behavior.
    */
   fullRewriteGuard?: boolean;
+  /**
+   * The editor's active file. Backend-only use: server-side merged-result
+   * validation resolves an edit's target file with the same activeFile the
+   * client draft pipeline uses (never injected into prompts).
+   */
+  activeFile?: string;
 }
 
 export interface AiToolCallDetail {
@@ -881,12 +887,15 @@ export interface AiChatResponse {
    * `repaired: true` means the returned content already passed merged
    * validation — the client retry loop can trust it.
    */
-  serverRepair?: {
-    attempted: boolean;
-    repaired: boolean;
-    issuesAfter: Array<{ filename: string; errors: unknown[] }>;
-    reason?: string;
-  } | null;
+  serverRepair?: ServerRepairVerdict | null;
+}
+
+/** Wire shape of the backend `serverRepair` response field (finding #4). */
+export interface ServerRepairVerdict {
+  attempted: boolean;
+  repaired: boolean;
+  issuesAfter: Array<{ filename: string; errors: unknown[] }>;
+  reason?: string;
 }
 
 /**

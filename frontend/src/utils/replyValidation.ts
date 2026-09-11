@@ -12,7 +12,7 @@
  * domain-specific validation and feedback logic.
  */
 import type { ChatMessage } from '../stores/aiStore';
-import type { AiChatRole } from '../services/api';
+import type { AiChatRole, ServerRepairVerdict } from '../services/api';
 import {
   MAX_PRINTER_MEMORY_VALIDATION_ATTEMPTS,
   buildPrinterMemoryValidationFeedback,
@@ -63,6 +63,14 @@ export interface ReplyValidationContext {
   attemptsUsed: number;
   /** From the previous feedback: AI may explain instead of producing output. */
   allowExplanationOnly: boolean;
+  /**
+   * Server-side merged-result validation verdict for THIS attempt
+   * (backend KWC_SERVER_DRAFT_VALIDATION). The validator may trust a
+   * decisive verdict instead of re-deriving the same delta checks
+   * (finding #4): `repaired: true` = the returned content already passed;
+   * `reason: 'retry-exempt'` = only issues regeneration cannot fix.
+   */
+  serverRepair?: ServerRepairVerdict | null;
 }
 
 export interface ReplyValidator {
@@ -83,6 +91,31 @@ export interface ReplyRequestAttempt {
   assistantMessage: ChatMessage;
   conversationMessages: ChatMessage[];
   warningMessage: string | null;
+  /** Backend verdict for this attempt's reply, when the server pass ran. */
+  serverRepair?: ServerRepairVerdict | null;
+}
+
+/**
+ * Trust the backend's retry-exempt verdict (finding #4): when the server
+ * already classified the reply's only remaining issues as ones the model
+ * cannot fix by regenerating (duplicate sections / shared pins), the
+ * client must not burn a retry round discovering the same thing. Returns
+ * the giveUp warning text, or null when the verdict says nothing decisive
+ * (no verdict, clean, or a repairable failure — those stay on the normal
+ * client path).
+ */
+export function serverRetryExemptWarning(verdict?: ServerRepairVerdict | null): string | null {
+  if (!verdict || verdict.reason !== 'retry-exempt') return null;
+  const lines = (verdict.issuesAfter || []).flatMap((group) =>
+    (group.errors as Array<{ section?: string; param?: string; message?: string }>).map((error) => {
+      const location = error.param ? `[${error.section}] ${error.param}` : `[${error.section}]`;
+      return `- ${group.filename}: ${location}: ${error.message ?? 'retry-exempt validation issue'}`;
+    }),
+  );
+  return [
+    'The server-side merged-config validation found only issues the assistant cannot fix by regenerating (duplicate sections or pin conflicts). The response was kept as-is.',
+    ...lines,
+  ].join('\n');
 }
 
 export type ReplyRequestFn = (
@@ -141,6 +174,7 @@ export async function runReplyValidationPipeline(
         isRetry: attemptsUsed > 0,
         attemptsUsed,
         allowExplanationOnly,
+        serverRepair: currentAttempt.serverRepair ?? null,
       };
 
       const result = await validator.validate(currentAttempt.assistantMessage.content, context);

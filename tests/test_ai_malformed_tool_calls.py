@@ -235,3 +235,43 @@ def test_unterminated_fence_never_reaches_the_bubble(monkeypatch):
     assert response.status_code == 200
     body = response.json()
     assert '```tool' not in body.get('content', '')
+
+
+def test_unterminated_fence_preserves_answer_text_after_blank_line(monkeypatch):
+    """Review finding #11: the strip regex consumed to end-of-content, so a
+    model that opened a broken ```tool fence and then RECOVERED with real
+    prose lost the answer. Fence bodies never contain blank lines, so the
+    strip is bounded at the first blank line and trailing prose survives.
+    Every provider turn stays malformed so the recovery-prose cleanup path
+    (not the successful re-prompt path) produces the final bubble."""
+    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
+    monkeypatch.setattr(ai_routes, '_auto_search_context', lambda query: None)
+
+    broken = (
+        'Sure:\n\n```tool\n{"name": "search_klipper\n\n'
+        'The docs say horizontal_move_z is the Z hop between probed points.'
+    )
+
+    def fake_post(url, headers, payload):
+        return DummyResponse(
+            {'choices': [{'message': {'content': broken}}]}, url=url,
+        )
+
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda *a, **k: FakeAsyncClient(post_handler=fake_post))
+
+    response = client.post(
+        '/ai/chat',
+        json={
+            'messages': [{'role': 'user', 'content': 'horizontal_move_z?'}],
+            'apiKey': 'openai-token',
+            'model': 'qwen3.5-4b',
+            'apiUrl': 'http://localhost:1234/v1/chat/completions',
+            'apiProvider': 'chatgpt',
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert '```tool' not in body.get('content', '')
+    # The recovery prose that followed the fence must NOT be silently eaten.
+    assert 'Z hop between probed points' in body.get('content', '')

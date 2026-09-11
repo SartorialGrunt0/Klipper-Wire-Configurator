@@ -314,9 +314,15 @@ def test_no_context_files_short_circuits(monkeypatch):
 
 
 def test_retry_exempt_does_not_burn_query(monkeypatch):
+    """Shared-pin errors (code=shared_pin) are retry-exempt: regeneration
+    cannot fix a pin collision, so the harness must return with
+    reason='retry-exempt' and NEVER issue a repair query. (Rewritten per
+    review finding #6: the old dup-[printer] reply merged to a clean no-op
+    and silently exercised the clean-apply branch instead.)"""
     monkeypatch.setenv("KWC_SERVER_DRAFT_VALIDATION", "1")
-    # A duplicate [printer] section is project_duplicate → retry-exempt.
-    dup_reply = "```cfg\n# file: printer.cfg\n[printer]\nkinematics: corexy\nmax_velocity: 300\nmax_accel: 3000\n```"
+    # [fan] pin: PB3 collides with the base's [neopixel CASE] pin: PB3
+    # → NEW blocking error, code=shared_pin → retry-exempt.
+    shared_pin_reply = "```cfg\n# file: printer.cfg\n[fan]\npin: PB3\n```"
     req = _chat_request(_ctx())
 
     def boom(*a, **k):
@@ -326,13 +332,23 @@ def test_retry_exempt_does_not_burn_query(monkeypatch):
     ai_routes._query_provider = boom
     try:
         content, info = asyncio.run(ai_routes._server_validate_and_repair(
-            None, req, {}, dup_reply, list(req.messages), [], None,
+            None, req, {}, shared_pin_reply, list(req.messages), [], None,
         ))
     finally:
         ai_routes._query_provider = original
-    # Same-section restate may merge identically (no new errors) OR surface
-    # project_duplicate; either way, no query was issued (boom unused).
-    assert content == dup_reply
+    assert content == shared_pin_reply  # original reply stands
+    # The retry-exempt branch must be the one that returned (finding #6:
+    # assert the reason, not just the absence of a query).
+    assert info is not None
+    assert info["reason"] == "retry-exempt"
+    assert info["attempted"] is False
+    assert info["repaired"] is False
+    codes = {
+        e["code"]
+        for group in info["issuesAfter"]
+        for e in group["errors"]
+    }
+    assert codes == {"shared_pin"}
 
 
 def test_audit_footer_on_clean_apply(monkeypatch):

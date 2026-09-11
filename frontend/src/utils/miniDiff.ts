@@ -357,13 +357,19 @@ function applyOpsToSection(
       // BOTH sides of every -/+ pair, and first-wins parsing silently
       // selects the OLD value while dropping untouched section params
       // (2026-09-09 HARNESS-03 finding; mirrored in
-      // backend/services/ai_draft_apply.py). G-code lines are not
-      // param-shaped and never key-match — stale gcode still falls back.
+      // backend/services/ai_draft_apply.py). Duplicate same-key lines
+      // (e.g. multiple `serial:` in [mcu]) stay AMBIGUOUS and fail the
+      // block instead of silently editing the wrong line (2026-09-10
+      // review finding #12). G-code lines are not param-shaped and never
+      // key-match — stale gcode still falls back.
       const removalKey = paramKey(strippedRemoval);
       if (removalKey) {
-        matchIndex = base.findIndex(
-          (line, index) => !used.has(index) && paramKey(line.trimStart()) === removalKey,
-        );
+        const candidates = base
+          .map((line, index) => ({ line, index }))
+          .filter(({ line, index }) => !used.has(index) && paramKey(line.trimStart()) === removalKey);
+        if (candidates.length === 1) {
+          matchIndex = candidates[0].index;
+        }
       }
     }
     if (matchIndex === -1 && sectionHasGcodeBody(sectionLines) && strippedRemoval.trim() !== '') {

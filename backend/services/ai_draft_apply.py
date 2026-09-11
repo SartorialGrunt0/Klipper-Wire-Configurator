@@ -54,6 +54,10 @@ CONFIG_CODE_LANGUAGES = frozenset(
 )
 ASSISTANT_FILE_HINT_RE = re.compile(r'^[#;]\s*file\s*:\s*(.+?)\s*$', re.IGNORECASE)
 
+# Mirror of MAX_ASSISTANT_HINT_USER_MESSAGES in draftValidation.ts: how many
+# preceding user messages contribute file-target hints.
+MAX_ASSISTANT_HINT_USER_MESSAGES = 3
+
 # A fenced ```code block: open fence, optional non-empty/backtick language,
 # then the block body until the closing ```.  Mirrors /```([^\n`]*)\n([\s\S]*?)```/g.
 RE_CODE_BLOCK = re.compile(r'```([^\n`]*)\n([\s\S]*?)```')
@@ -805,21 +809,27 @@ def _apply_ops_to_section(
             # Key-tolerant fallback for PARAM-SHAPED removals: models
             # routinely emit a stale old value (e.g. `-probe_count: 7,7`
             # against a section that already reads `3,3`). When the removed
-            # line is `key: value`/`key= value` shaped and the KEY exists in
-            # the base section, the intent is unambiguous — trust the key
-            # over the value. Without this the whole block aborts, the
-            # strip+full-section-write fallback keeps BOTH sides of every
-            # -/+ pair, and first-wins parsing silently selects the OLD
-            # value while dropping untouched section params (2026-09-09
-            # HARNESS-03 finding; the stated-requirement audit caught the
-            # corruption it caused). G-code lines are not param-shaped and
-            # never key-match — stale gcode content still falls back.
+            # line is `key: value`/`key= value` shaped and the KEY exists
+            # exactly ONCE among the section's unused lines, the intent is
+            # unambiguous — trust the key over the value. Without this the
+            # whole block aborts, the strip+full-section-write fallback
+            # keeps BOTH sides of every -/+ pair, and first-wins parsing
+            # silently selects the OLD value while dropping untouched
+            # section params (2026-09-09 HARNESS-03 finding; mirrored in
+            # frontend/src/utils/miniDiff.ts). Duplicate same-key lines
+            # (e.g. multiple `serial:` in [mcu]) stay AMBIGUOUS and fail
+            # the block instead of silently editing the wrong line
+            # (2026-09-10 review finding #12). G-code lines are not
+            # param-shaped and never key-match — stale gcode still falls
+            # back.
             removal_key = _param_key(stripped_removal)
-            if removal_key is not None:
-                match_index = _find_base_index(
-                    base, used,
-                    lambda line: _param_key(line.lstrip()) == removal_key,
-                )
+            if removal_key:
+                candidates = [
+                    index for index, line in enumerate(base)
+                    if index not in used and _param_key(line.lstrip()) == removal_key
+                ]
+                if len(candidates) == 1:
+                    match_index = candidates[0]
         if match_index == -1 and _section_has_gcode_body(section_lines) \
                 and stripped_removal.strip() != '':
             no_comment_removal = stripped_removal.split('#')[0].rstrip()
@@ -1162,7 +1172,10 @@ def _clone_config_with_raw_text(config: ConfigFile, raw_text: str) -> ConfigFile
 # ── Top-level apply pipeline ────────────────────────────────────────────
 
 def apply_reply_to_configs(
-    reply_content: str, base_configs: dict[str, ConfigFile]
+    reply_content: str,
+    base_configs: dict[str, ConfigFile],
+    active_file: str | None = None,
+    hint_texts: list[str] | None = None,
 ) -> dict:
     """Build merged configs from an assistant reply, mirroring the frontend.
 
@@ -1174,6 +1187,14 @@ def apply_reply_to_configs(
     'merged_text': str, 'changes': list[dict]}``.  ``errors`` holds
     human-readable strings for the conditions under which the TS frontend
     throws (no config block, no target file, no change, no sections).
+
+    ``active_file`` and ``hint_texts`` mirror the TS inputs: the editor's
+    active file, and the reply plus up to MAX_ASSISTANT_HINT_USER_MESSAGES
+    preceding user messages (useAssistantDraft.getAssistantMessageHintTexts).
+    Server callers with conversation context pass both; the defaults (first
+    loaded file, reply-only hints) exist for context-free callers and
+    resolve targets less accurately than the frontend would (2026-09-10
+    review finding #5).
     """
     errors: list[str] = []
 
@@ -1189,12 +1210,18 @@ def apply_reply_to_configs(
         }
 
     loaded_config_filenames = list(base_configs.keys())
-    # activeFile is not a parameter of the backend API; default to the first
-    # loaded config file so target resolution and mini-diff base lookups behave
-    # sensibly instead of binding to an empty filename.
-    active_file = loaded_config_filenames[0] if loaded_config_filenames else ''
+    # Target resolution inputs mirror the TS hook (finding #5). When the
+    # caller supplies active_file, prefer it when loaded; otherwise fall
+    # back to the first loaded config file.
+    if active_file and active_file in base_configs:
+        resolved_active_file = active_file
+    else:
+        resolved_active_file = loaded_config_filenames[0] if loaded_config_filenames else ''
 
-    hint_texts = [reply_content]
+    if hint_texts is None:
+        hint_texts = [reply_content]
+    elif reply_content not in hint_texts:
+        hint_texts = [reply_content, *hint_texts]
     mentioned_filenames = extract_mentioned_config_filenames(
         hint_texts, loaded_config_filenames
     )
@@ -1213,7 +1240,7 @@ def apply_reply_to_configs(
         assistant_parse_filename = (
             file_hint
             or (mentioned_filenames[0] if mentioned_filenames else None)
-            or active_file
+            or resolved_active_file
             or (loaded_config_filenames[0] if loaded_config_filenames else None)
             or 'printer.cfg'
         )
@@ -1252,7 +1279,7 @@ def apply_reply_to_configs(
         target_file = resolve_assistant_target_file(
             assistant_result,
             base_configs,
-            active_file,
+            resolved_active_file,
             [file_hint] if file_hint else mentioned_filenames,
         )
         if not target_file:

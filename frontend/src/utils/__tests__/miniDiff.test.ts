@@ -589,6 +589,27 @@ algorithm: bicubic
     );
     expect(result.applied).toBe(false);
   });
+
+  it('duplicate same-key lines stay ambiguous: stale removal fails closed (#12)', () => {
+    const base = '[mcu mcu]\nserial: /dev/ttyUSB0\nserial: /dev/ttyAMA0\nbaud: 250000\n';
+    const result = applyMiniDiffBlock(
+      '[mcu mcu]\n-serial: /dev/ttyS999\n+serial: /dev/ttyUSB5',
+      base,
+    );
+    expect(result.applied).toBe(false);
+  });
+
+  it('duplicate same-key exact-value removal still applies (#12)', () => {
+    const base = '[mcu mcu]\nserial: /dev/ttyUSB0\nserial: /dev/ttyAMA0\nbaud: 250000\n';
+    const result = applyMiniDiffBlock(
+      '[mcu mcu]\n-serial: /dev/ttyAMA0\n+serial: /dev/ttyAMA1',
+      base,
+    );
+    expect(result.applied).toBe(true);
+    expect(result.text).toContain('serial: /dev/ttyUSB0');
+    expect(result.text).toContain('serial: /dev/ttyAMA1');
+    expect(result.text).not.toContain('serial: /dev/ttyAMA0');
+  });
 });
 
 describe('stripMiniDiffMarkers', () => {

@@ -327,6 +327,11 @@ class ChatRequest(BaseModel):
     # server-side only — it is NOT injected into the first prompt; the
     # fallback uses it when the model answers without calling any tool.
     contextFiles: dict[str, dict[str, str]] = {}
+    # The editor's active file, mirroring the frontend draft pipeline's
+    # activeFile input to buildAssistantDraftTargetConfigs (finding #5).
+    # Used ONLY for server-side merged-result target resolution when the
+    # reply carries no explicit '# file:' hint; never injected into prompts.
+    activeFile: str = ''
     # Tool-calling protocol override (harness A/B runs). "auto" keeps the
     # provider-based split (local http -> text ```tool protocol, cloud
     # https -> native function calling); "native" forces OpenAI native
@@ -355,13 +360,11 @@ class ChatRequest(BaseModel):
     # via --full-rewrite-guard for A/B runs.
     fullRewriteGuard: bool = False
     # Server-side merged-result validation + ONE lean repair pass (#1).
-    # Backend-only switch (env KWC_SERVER_DRAFT_VALIDATION=1): the frontend
-    # never sends this. When enabled, the backend applies the final reply to
-    # contextFiles, validates the MERGED result with the project validator,
-    # and — if new errors appeared — issues exactly one REPAIR-01-shaped
-    # lean repair query instead of relying on the frontend 3-attempt loop.
-    # Disabled (default) keeps the fenced-cfg path byte-identical.
-    serverDraftValidation: bool = False
+    # Server-side draft validation/audit are backend-only env switches
+    # (KWC_SERVER_DRAFT_VALIDATION / KWC_POST_APPLY_AUDIT) — deliberately
+    # NOT request fields: per-request control would let a compromised UI
+    # toggle the harness off. (Review finding #3: the old
+    # serverDraftValidation field here was never read and never sent.)
 
 
 class ChatStopRequest(BaseModel):
@@ -1274,9 +1277,12 @@ def _parse_kwargs(args_text: str) -> dict:
 
 # Unterminated ```tool fence: the model opened a tool block and the stream
 # ended (or it forgot the closing fence). Such a fence is never legitimate
-# content — everything after it is part of the broken call.
+# content. Bounded at the first BLANK line (review finding #11): fence
+# bodies never contain blank lines, but qwen-class models sometimes open a
+# broken fence and then recover with real prose — consuming to
+# end-of-content silently deleted that answer.
 UNTERMINATED_TOOL_FENCE_RE = re.compile(
-    r"```tool\b(?:(?!```)[\s\S])*$"
+    r"```tool\b(?:[^\n]*\n)?(?:(?!```)[^\n]+\n)*(?:(?!```)[^\n]*$)?"
 )
 # Python-call form inside a ```tool fence: name(k=v, ...) / call name(...).
 _FENCED_PY_CALL_RE = re.compile(
@@ -1442,7 +1448,13 @@ def _recover_tool_call(token: str, args_text: str) -> tuple[str, dict] | None:
 
 
 def _execute_tool_call(tool_call: dict) -> str:
-    """Execute a single MCP tool call and return the text result."""
+    """Execute a single MCP tool call and return the text result.
+
+    SYNC — some handlers (list_connected_devices, get_klippy_status) do
+    blocking host I/O for seconds. From the async chat loop call
+    _execute_tool_call_async instead; direct calls are for sync contexts
+    only (tests).
+    """
     name = tool_call.get("name", "")
     arguments = tool_call.get("arguments", {})
 
@@ -1471,6 +1483,17 @@ def _execute_tool_call(tool_call: dict) -> str:
         item["text"] for item in content if item.get("type") == "text"
     ]
     return "\n\n".join(text_parts) if text_parts else "Tool returned no content."
+
+
+async def _execute_tool_call_async(tool_call: dict) -> str:
+    """Off-thread wrapper for the chat loop (review finding #14).
+
+    list_connected_devices runs CAN/USB scans and get_klippy_status probes
+    host endpoints; both block for seconds. Running them inline froze the
+    event loop — every other request (health checks, saves, other chats)
+    stalled behind one tool call. asyncio.to_thread keeps the loop free.
+    """
+    return await asyncio.to_thread(_execute_tool_call, tool_call)
 
 
 # Client-facing tool-call detail records are capped so a huge tool output
@@ -2081,7 +2104,10 @@ async def _server_validate_and_repair(
     needed repair / repair was not possible (no context files), else a dict
     ``{attempted, repaired, issuesAfter}``.
     """
-    from services.ai_draft_apply import apply_reply_to_configs
+    from services.ai_draft_apply import (
+        MAX_ASSISTANT_HINT_USER_MESSAGES,
+        apply_reply_to_configs,
+    )
     from services.ai_draft_validation import (
         build_validation_feedback,
         collect_new_validation_errors,
@@ -2095,7 +2121,22 @@ async def _server_validate_and_repair(
     if not base_configs:
         return final_content, None
 
-    apply_result = apply_reply_to_configs(final_content, base_configs)
+    # Mirror useAssistantDraft.getAssistantMessageHintTexts: the reply plus
+    # up to 3 preceding user messages, so file targets named only by the
+    # user resolve to the same file the client's draft pipeline picks
+    # (finding #5).
+    user_hints = [
+        m.get("content", "")
+        for m in req.messages
+        if m.get("role") == "user" and m.get("content")
+    ][-MAX_ASSISTANT_HINT_USER_MESSAGES:]
+    hint_texts = [final_content, *user_hints]
+
+    apply_result = apply_reply_to_configs(
+        final_content, base_configs,
+        active_file=req.activeFile or None,
+        hint_texts=hint_texts,
+    )
     merged_files = {
         filename: entry["merged_config"]
         for filename, entry in apply_result["files"].items()
@@ -2185,7 +2226,6 @@ async def _server_validate_and_repair(
         logger.warning("Server repair query failed | %s", exc)
         return final_content, {"attempted": True, "repaired": False, "issuesAfter": blocking}
 
-    repair_clean = final_content  # fallback keeps original
     repaired_content = repair_content
     for pattern in (
         MCP_TOOL_BLOCK_RE, ALT_TOOL_CALL_CONTENT_RE, CALL_SYNTAX_CLEANUP_RE,
@@ -2195,7 +2235,11 @@ async def _server_validate_and_repair(
     repaired_content = _strip_bracket_tool_calls(repaired_content).strip()
 
     if repaired_content:
-        repair_apply = apply_reply_to_configs(repaired_content, base_configs)
+        repair_apply = apply_reply_to_configs(
+            repaired_content, base_configs,
+            active_file=req.activeFile or None,
+            hint_texts=[repaired_content, *user_hints],
+        )
         repair_merged = {
             filename: entry["merged_config"]
             for filename, entry in repair_apply["files"].items()
@@ -2223,7 +2267,7 @@ async def _server_validate_and_repair(
                 }
             # Repair still dirty: keep the ORIGINAL reply (never show a
             # worse one) but report the exact remaining issues.
-            return repair_clean, {
+            return final_content, {
                 "attempted": True, "repaired": False, "issuesAfter": repair_blocking,
             }
 
@@ -2524,7 +2568,7 @@ async def chat_proxy(req: ChatRequest):
                 # follow-up messages in the format the provider expects.
                 results = []
                 for tool_call in tool_calls[:MAX_MCP_TOOL_TURNS]:
-                    result_text = _execute_tool_call(tool_call)
+                    result_text = await _execute_tool_call_async(tool_call)
                     logger.info(
                         "Tool executed | name=%s result_chars=%d",
                         tool_call["name"], len(result_text),
@@ -2687,9 +2731,13 @@ async def chat_proxy(req: ChatRequest):
                     clean_assistant = XML_TOOL_CALLS_CLEANUP_RE.sub("", clean_assistant).strip()
                     if clean_assistant:
                         current_messages.append({"role": "assistant", "content": clean_assistant})
+                    reprompt_results = [
+                        await _execute_tool_call_async(c)
+                        for c in reprompt_calls[:MAX_MCP_TOOL_TURNS]
+                    ]
                     for reprompt_call, result_text in zip(
                         reprompt_calls[:MAX_MCP_TOOL_TURNS],
-                        [_execute_tool_call(c) for c in reprompt_calls[:MAX_MCP_TOOL_TURNS]],
+                        reprompt_results,
                     ):
                         executed_tool_names.append(reprompt_call["name"])
                         executed_tool_calls.append(

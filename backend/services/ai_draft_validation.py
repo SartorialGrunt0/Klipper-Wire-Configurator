@@ -23,10 +23,6 @@ import re
 # Mirror of RETRY_EXEMPT_CODES in draftValidation.ts.
 RETRY_EXEMPT_CODES = frozenset({"project_duplicate", "shared_pin"})
 
-# Mirror of MAX_ASSISTANT_DRAFT_VALIDATION_ATTEMPTS (frontend keeps 3 for
-# its own loop; the server harness does ONE repair, per the design doc).
-SERVER_REPAIR_LIMIT = 1
-
 _JINJA_INNERMOST_BLOCK_RE = re.compile(
     r"The innermost block that needs to be closed is '([a-z_]+)'", re.IGNORECASE
 )
