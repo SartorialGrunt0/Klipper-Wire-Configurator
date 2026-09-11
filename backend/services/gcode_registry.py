@@ -236,6 +236,7 @@ def _strip_jinja_inline(line: str) -> str:
 # that gates it (mainsail's `{% if printer.configfile.settings.quad_gantry_level
 # %} QUAD_GANTRY_LEVEL {% endif %}` idiom) — conditional_out must not warn.
 _JINJA_IF_RE = re.compile(r"^\s*\{%-?\s*(?:el)?if\b(.*?)%}", re.S)
+_JINJA_ELIF_RE = re.compile(r"^\s*\{%-?\s*elif\b")
 _JINJA_ENDIF_RE = re.compile(r"^\s*\{%-?\s*endif\b.*%}")
 _PRINTER_REF_RE = re.compile(r"printer(?:\.configfile\.settings)?\.([a-z_][a-z0-9_]*)")
 
@@ -290,7 +291,12 @@ def scan_gcode_body(text: str, context: ProjectGcodeContext | None = None):
             if if_line:
                 refs = {m.lower()
                         for m in _PRINTER_REF_RE.findall(if_line.group(1))}
-                guard_stack.append(refs)
+                if _JINJA_ELIF_RE.match(stripped_raw) and guard_stack:
+                    # elif continues the existing block: widen its guard
+                    # set instead of pushing (endif pops a single frame).
+                    guard_stack[-1] = guard_stack[-1] | refs
+                else:
+                    guard_stack.append(refs)
             elif guard_stack:
                 guard_stack.pop()
             continue

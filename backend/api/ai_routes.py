@@ -2150,11 +2150,11 @@ async def _server_validate_and_repair(
     project.update(merged_files)
     baseline_validations = {
         filename: result.to_dict()
-        for filename, result in validate_project_configs(base_configs).items()
+        for filename, result in validate_project_configs(base_configs, gcode_registry=False).items()
     }
     candidate_validations = {
         filename: result.to_dict()
-        for filename, result in validate_project_configs(project).items()
+        for filename, result in validate_project_configs(project, gcode_registry=False).items()
     }
     blocking = suppress_errors_shadowed_by_full_rewrite(
         collect_new_validation_errors(baseline_validations, candidate_validations)
@@ -2249,7 +2249,7 @@ async def _server_validate_and_repair(
             repair_project.update(repair_merged)
             repair_candidate = {
                 filename: result.to_dict()
-                for filename, result in validate_project_configs(repair_project).items()
+                for filename, result in validate_project_configs(repair_project, gcode_registry=False).items()
             }
             repair_blocking = suppress_errors_shadowed_by_full_rewrite(
                 collect_new_validation_errors(baseline_validations, repair_candidate)

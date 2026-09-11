@@ -107,19 +107,33 @@ export async function parseConfigText(
 
 /* ── Validate ────────────────────────────────────────── */
 
-export async function validateConfig(config: ConfigFile): Promise<ValidationResult> {
+export async function validateConfig(
+  config: ConfigFile,
+  options?: { gcodeRegistry?: boolean },
+): Promise<ValidationResult> {
   return request('/validate', {
     method: 'POST',
-    body: JSON.stringify(config),
+    body: JSON.stringify(
+      options?.gcodeRegistry === false
+        ? { ...config, gcode_registry: false }
+        : config,
+    ),
   });
 }
 
 export async function validateProject(
   configFiles: Record<string, ConfigFile>,
+  options?: { gcodeRegistry?: boolean },
 ): Promise<Record<string, ValidationResult>> {
   const result = await request<{ files: Record<string, ValidationResult> }>('/validate-project', {
     method: 'POST',
-    body: JSON.stringify({ config_files: Object.values(configFiles) }),
+    body: JSON.stringify({
+      config_files: Object.values(configFiles),
+      // gcode command registry scan: ON for the editor UI; the AI-draft
+      // pipeline passes false so command-name findings stay out of the
+      // chat retry loop (they would join the blocking issue set).
+      ...(options?.gcodeRegistry === false ? { gcode_registry: false } : {}),
+    }),
   });
   return result.files;
 }

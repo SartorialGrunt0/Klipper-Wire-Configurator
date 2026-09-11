@@ -224,7 +224,7 @@ async def parse_config_text(data: dict):
 async def validate_config_api(data: ConfigUpdate):
     """Validate a configuration."""
     config = _config_update_to_config_file(data)
-    validation = validate_config(config)
+    validation = validate_config(config, gcode_registry=data.gcode_registry)
     return validation.to_dict()
 
 
@@ -238,7 +238,8 @@ async def validate_project_api(data: ProjectValidationRequest):
             config.raw_text = config_data.raw_text
         configs[config_data.filename] = config
 
-    validations = validate_project_configs(configs)
+    validations = validate_project_configs(
+        configs, gcode_registry=data.gcode_registry)
     return {
         "files": {
             filename: validation.to_dict()

@@ -1427,7 +1427,9 @@ class McpServer:
             from parser.validator import validate_config
 
             parsed = parse_config(config_text, filename)
-            validation = validate_config(parsed)
+            # AI-loop surface: the gcode command registry scan stays OFF
+            # here until the edit-tools branch wires it deliberately.
+            validation = validate_config(parsed, gcode_registry=False)
 
             lines: list[str] = [f"Validation result for: {filename}\n"]
 
@@ -1993,7 +1995,8 @@ class McpServer:
             from parser.validator import validate_config
 
             parsed = parse_config(content, candidate.name)
-            validation = validate_config(parsed)
+            # AI-loop surface (see _handle_validate): registry scan OFF.
+            validation = validate_config(parsed, gcode_registry=False)
 
             if hasattr(validation, 'errors') and validation.errors:
                 wanted = section.strip().strip("[]").lower() if section else None
@@ -2756,7 +2759,8 @@ class McpServer:
                 f"{config_dir}. Use list_user_configs to see available files."
             )
 
-        validations = validate_project_configs(configs)
+        # AI-loop surface: registry scan OFF until the edit-tools branch.
+        validations = validate_project_configs(configs, gcode_registry=False)
 
         def _loc(finding: dict) -> str:
             # Findings arrive as to_dict() dicts: keys mirror ValidationError.
