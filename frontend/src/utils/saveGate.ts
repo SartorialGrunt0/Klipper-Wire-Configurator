@@ -20,6 +20,7 @@ export interface SaveGateFinding {
   param: string;
   message: string;
   line_number: number;
+  extra?: string;
 }
 
 export interface SaveGateIssues {
@@ -38,8 +39,9 @@ export interface BulkAckIdentity {
   code: string;
   section: string;
   param: string;
-  /** Client sends '' — the backend derives the discriminator
-   *  server-side (finding_identity) so suppression always matches. */
+  /** Code-specific discriminator. For gcode registry findings this is the
+   *  command name, round-tripped verbatim from the finding's `extra` so the
+   *  server-identity matches. '' for every other code. */
   extra: string;
 }
 
@@ -50,7 +52,7 @@ export function warningToBulkAck(finding: SaveGateFinding): BulkAckIdentity {
     code: finding.code ?? '',
     section: finding.section,
     param: finding.param,
-    extra: '',
+    extra: finding.extra ?? '',
   };
 }
 
@@ -78,6 +80,7 @@ export function selectSaveGateIssues(
         param: e.param,
         message: e.message,
         line_number: e.line_number,
+        extra: e.extra,
       };
       if (e.severity === 'error') errors.push(finding);
       else warnings.push(finding);

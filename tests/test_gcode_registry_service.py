@@ -279,6 +279,56 @@ def test_scan_body_multiline_jinja_klicky_style():
     assert list(scan_gcode_body(body, ctx)) == []
 
 
+def test_scan_body_variable_mediated_guard_suppressed():
+    # mainsail.cfg idiom: existence check bound through a {% set %} var,
+    # guarded on the var name. firmware_retraction absent -> without alias
+    # tracking G10/G11 would warn on every Mainsail install.
+    body = (
+        "{% set use_fw_retract = (client.use_fw_retract|default(false)"
+        "|lower == 'true') and (printer.firmware_retraction is defined) %}\n"
+        "{% if use_fw_retract %}\n"
+        "  G10\n"
+        "{% else %}\n"
+        "  M83\n"
+        "{% endif %}\n"
+    )
+    ctx = _ctx(section_types=["extruder"])  # NO firmware_retraction
+    assert list(scan_gcode_body(body, ctx)) == []
+
+
+def test_scan_body_value_derived_var_still_warns():
+    # {% set %} with NO printer.<section> ref registers no alias: a var
+    # whose value comes from params/config CONTENT is not an existence
+    # check, and the guarded call can genuinely error (klicky
+    # enable_dock_servo / SET_SERVO class).
+    body = (
+        "{% set dock = printer['gcode_macro _CLIENT_VARIABLE']"
+        ".enable_dock_servo|default(false) %}\n"
+        "{% if dock %}\n"
+        "  SET_SERVO SERVO=clip ANGLE=30\n"
+        "{% endif %}\n"
+    )
+    ctx = _ctx(section_types=["extruder"])  # NO servo section
+    found = list(scan_gcode_body(body, ctx))
+    assert len(found) == 1
+    assert found[0][1].name == "SET_SERVO"
+
+
+def test_scan_body_alias_rebind_drops_stale_refs():
+    # var reused without an existence ref: the old alias must not keep
+    # suppressing after the rebind.
+    body = (
+        "{% set ok = printer.firmware_retraction is defined %}\n"
+        "{% set ok = 1 > 0 %}\n"
+        "{% if ok %}\n"
+        "  G10\n"
+        "{% endif %}\n"
+    )
+    ctx = _ctx(section_types=["extruder"])
+    found = list(scan_gcode_body(body, ctx))
+    assert len(found) == 1 and found[0][1].name == "G10"
+
+
 # ── real Trident fixture ────────────────────────────────────────────────
 
 

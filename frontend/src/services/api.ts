@@ -153,8 +153,8 @@ export async function acknowledgeDuplicateWarning(section: ConfigSection): Promi
 }
 
 /** Bulk-acknowledge warning findings by stable identity (Phase 4 save gate).
- *  The backend derives the `extra` discriminator server-side, so the client
- *  sends `''` — what must match is file|code|section|param. */
+ *  Send each finding's `extra` back verbatim (gcode registry findings carry
+ *  the command name; everything else ''). The backend normalizes per code. */
 export async function acknowledgeWarningsBulk(identities: Array<{
   file: string;
   code: string;

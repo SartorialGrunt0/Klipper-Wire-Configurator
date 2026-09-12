@@ -43,13 +43,10 @@ from services.gcode_registry import (
 # command-name validity against the G-code command registry).
 _GCODE_SCAN_SECTION_TYPES = {"gcode_macro", "delayed_gcode"}
 
-# Finding codes produced by the registry scan. Project validation strips
-# the file-local versions and re-derives them with cross-file context
-# (a macro in A.cfg calling a macro defined in B.cfg is legal).
-GCODE_FINDING_CODES = frozenset({
-    "unknown_gcode_command",
-    "gcode_command_section_missing",
-})
+# Finding codes produced by the registry scan (defined in
+# services.warning_acknowledgments so identity derivation needs no import
+# back into the validator; re-exported here for validator consumers).
+from services.warning_acknowledgments import GCODE_FINDING_CODES  # noqa: F401
 
 
 @dataclass
@@ -64,6 +61,11 @@ class ValidationError:
     # Empty string when no consumer needs a code. `message` stays human-facing
     # and may be reworded freely without breaking those branches.
     code: str = ""
+    # Code-specific discriminator for ack identities, set at the emit site
+    # (gcode findings carry the command name, so one ack silences one
+    # command in a macro, not the whole macro body). Round-tripped to the
+    # client and echoed back on bulk-ack.
+    extra: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -73,6 +75,7 @@ class ValidationError:
             "message": self.message,
             "line_number": self.line_number,
             "code": self.code,
+            "extra": self.extra,
         }
 
 
@@ -729,7 +732,8 @@ def _suppress_acknowledged_warning_identities(
         if not (
             e.severity == "warning"
             and e.code
-            and finding_identity(filename, e.code, e.section, e.param) in acked
+            and finding_identity(filename, e.code, e.section, e.param,
+                                 e.extra) in acked
         )
     ]
 
@@ -1088,6 +1092,8 @@ def _scan_file_gcode_commands(
                 message=message,
                 line_number=base + rel_line,
                 code=code,
+                # ack granularity: one ack per command, not per macro body
+                extra=verdict.name,
             ))
     return findings
 

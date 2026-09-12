@@ -91,6 +91,31 @@ def test_commented_macro_body_not_flagged():
     assert _codes(result) == []
 
 
+def test_ack_granularity_one_command_one_ack(monkeypatch, tmp_path):
+    """Acking one unknown command must NOT silence a second unknown command
+    in the same macro body: same file|code|section|param, so the command
+    name (finding.extra) is the only discriminator."""
+    monkeypatch.setenv("KWC_LAYOUT_DIR", str(tmp_path))
+    from services.warning_acknowledgments import (
+        acknowledge_warning_identities, finding_identity,
+    )
+    cfg = parse_config(
+        "[gcode_macro TWO_BAD]\n"
+        "gcode:\n"
+        "  SET_NEOPIXEL_COLOR RED=1\n"
+        "  SET_RAINBOW_EFFECT\n")
+    res = validate_config(cfg)
+    assert [e.extra for e in res.errors] == [
+        "SET_NEOPIXEL_COLOR", "SET_RAINBOW_EFFECT"]
+
+    acknowledge_warning_identities([
+        finding_identity("printer.cfg", "unknown_gcode_command",
+                         "gcode_macro TWO_BAD", "gcode",
+                         "SET_NEOPIXEL_COLOR")])
+    after = validate_config(cfg)
+    assert [e.extra for e in after.errors] == ["SET_RAINBOW_EFFECT"]
+
+
 def test_jinja_guards_and_params_no_noise():
     cfg = parse_config(
         "[gcode_macro SMART]\n"

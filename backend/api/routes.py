@@ -297,18 +297,19 @@ async def acknowledge_bulk_warnings_api(
     """Bulk-acknowledge warning findings by stable identity (Phase 4 save gate).
 
     Each identity is ``file|code|section|param|extra`` — ``extra`` is
-    DERIVED SERVER-SIDE (the include spec for missing includes; empty
-    otherwise) so suppression and the ack store always agree. Client
-    ``extra`` is accepted for API symmetry but ignored. Warnings only: the
-    validator never suppresses errors or info from this store. Idempotent;
-    the frontend revalidates the project afterwards so the warning state
-    clears.
+    DERIVED SERVER-SIDE (the include spec for missing includes; the command
+    name for gcode registry findings, round-tripped from the finding's
+    ``extra`` field; empty otherwise) so suppression and the ack store
+    always agree. Warnings only: the validator never suppresses errors or
+    info from this store. Idempotent; the frontend revalidates the project
+    afterwards so the warning state clears.
     """
     if not data.identities:
         raise HTTPException(
             status_code=422, detail="No warning identities to acknowledge")
     identities = [
-        finding_identity(item.file, item.code, item.section, item.param)
+        finding_identity(item.file, item.code, item.section, item.param,
+                         item.extra)
         for item in data.identities
     ]
     file_path = acknowledge_warning_identities(identities)

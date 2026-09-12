@@ -154,6 +154,14 @@ def acknowledge_duplicate_section_type(section_type: str) -> str:
 
 # ── 3. Bulk finding identities (Phase 4 save gate) ─────────────────────────
 
+# Finding codes produced by the gcode command registry scan. Their ack
+# discriminator is the COMMAND NAME (emit-site `extra`), so one ack silences
+# one command in a macro body — not every current/future warning there.
+GCODE_FINDING_CODES = frozenset({
+    "unknown_gcode_command",
+    "gcode_command_section_missing",
+})
+
 
 def _acknowledged_warning_identities_file() -> Path:
     app_state_dir = _app_state_dir()
@@ -183,6 +191,7 @@ def warning_identity(
 
 def finding_identity(
     filename: str, code: str, section: str, param: str,
+    extra: str = "",
 ) -> str:
     """Identity for a validator finding, with ``extra`` derived here.
 
@@ -190,9 +199,17 @@ def finding_identity(
     ``/warning-acknowledgements/bulk`` endpoint both use this, so an ack
     written by one is always recognized by the other. Client-supplied
     ``extra`` is deliberately not trusted (a client bug would otherwise
-    create identities that suppression never matches).
+    create identities that suppression never matches) — EXCEPT for the
+    gcode registry codes, where the discriminator is the COMMAND NAME
+    emitted server-side on the finding and round-tripped verbatim:
+    section+param cannot separate two unknown commands in one macro
+    body, and without it a single ack would silently suppress every
+    current AND future registry warning in that body.
     """
-    extra = ""
+    if code in GCODE_FINDING_CODES:
+        extra = extra.strip().upper()
+    else:
+        extra = ""
     if code == "missing_include":
         # section is "include <spec>"; the spec discriminates multiple
         # missing includes in one file.

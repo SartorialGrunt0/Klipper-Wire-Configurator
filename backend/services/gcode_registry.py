@@ -239,6 +239,14 @@ _JINJA_IF_RE = re.compile(r"^\s*\{%-?\s*(?:el)?if\b(.*?)%}", re.S)
 _JINJA_ELIF_RE = re.compile(r"^\s*\{%-?\s*elif\b")
 _JINJA_ENDIF_RE = re.compile(r"^\s*\{%-?\s*endif\b.*%}")
 _JINJA_ENDFOR_RE = re.compile(r"^\s*\{%-?\s*end(for|while)\b.*%}")
+# {% set NAME = ... %} — alias tracking for the mainsail idiom
+#   {% set use_fw_retract = ... and (printer.firmware_retraction is defined) %}
+#   {% if use_fw_retract %} G10 {% endif %}
+# Only set-expressions containing printer.<section> refs register an alias;
+# value-derived vars ({% set x = params.A|default(0) %}) register nothing,
+# so value-dependent guards keep warning.
+_JINJA_SET_RE = re.compile(
+    r"^\s*\{%-?\s*set\s+([A-Za-z_]\w*)\s*=\s*(.*)%}", re.S)
 _PRINTER_REF_RE = re.compile(
     r"""printer\[['"]gcode_macro\s+([A-Za-z0-9_]+)['"]\]"""   # macro guard
     r"|printer(?:\.configfile\.settings)?\.([a-z_][a-z0-9_]*)"
@@ -324,12 +332,31 @@ def scan_gcode_body(text: str, context: ProjectGcodeContext | None = None):
     author already handled the absence.
     """
     guard_stack: list[set[str]] = []
+    # Jinja var name -> guard refs from its {% set %} expression (mainsail
+    # `{% set use_fw_retract = ... and printer.firmware_retraction is
+    # defined %}` / `{% if use_fw_retract %}` idiom). Body-local; last
+    # assignment wins (Jinja rebind semantics).
+    aliases: dict[str, set[str]] = {}
     for i, raw in _logical_lines(text):
         stripped_raw = raw.strip()
+        set_line = _JINJA_SET_RE.match(stripped_raw)
+        if set_line:
+            refs = _guard_refs(set_line.group(2))
+            if refs:
+                aliases[set_line.group(1)] = refs
+            else:
+                # value-derived rebinding: stale refs must not linger on
+                # an alias name reused later in the body
+                aliases.pop(set_line.group(1), None)
+            continue
         if_line = _JINJA_IF_RE.match(stripped_raw)
         if if_line or _JINJA_ENDIF_RE.match(stripped_raw):
             if if_line:
-                refs = _guard_refs(if_line.group(1))
+                condition = if_line.group(1)
+                refs = _guard_refs(condition)
+                for alias, a_refs in aliases.items():
+                    if re.search(rf"\b{re.escape(alias)}\b", condition):
+                        refs |= a_refs
                 if _JINJA_ELIF_RE.match(stripped_raw) and guard_stack:
                     # elif continues the existing block: widen its guard
                     # set instead of pushing (endif pops a single frame).
