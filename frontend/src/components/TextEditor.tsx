@@ -26,7 +26,12 @@ interface TextIssue {
   section?: string;
   param?: string;
   acknowledgeSection?: ConfigSection;
-  acknowledgeKind?: 'unknown' | 'duplicate';
+  acknowledgeKind?: 'unknown' | 'duplicate' | 'registry';
+  /** Registry acks need the finding identity (code + command name), not
+   *  the section: one ack per command, mirroring the server's identity
+   *  granularity. */
+  acknowledgeCode?: string;
+  acknowledgeExtra?: string;
 }
 
 interface ConfigParamEntry {
@@ -273,17 +278,32 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
           severity: err.severity,
           section: err.section,
           param: err.param,
-          acknowledgeSection: ack
+          acknowledgeSection: ack && ack.kind !== 'registry'
             ? activeSections.find((section) => section.full_header === err.section)
             : undefined,
           acknowledgeKind: ack ? ack.kind : undefined,
+          acknowledgeCode: ack ? err.code : undefined,
+          acknowledgeExtra: ack ? err.extra : undefined,
         });
       }
     }
     return issues;
   }, [validation, validationText, activeFile, editText, configFiles]);
 
-  const handleAcknowledgeWarning = useCallback(async (section: ConfigSection, kind: 'unknown' | 'duplicate' = 'unknown') => {
+  const handleAcknowledgeWarning = useCallback(async (
+    section: ConfigSection | undefined,
+    kind: 'unknown' | 'duplicate' | 'registry' = 'unknown',
+    identity?: { file: string; code: string; section: string; param: string; extra?: string },
+  ) => {
+    if (kind === 'registry') {
+      // Per-command ack via the bulk identity endpoint — same identity the
+      // save gate's "Acknowledge all" sends, so both paths agree.
+      if (!identity) return;
+      await api.acknowledgeWarningsBulk([identity]);
+      void revalidateFile(activeFile);
+      return;
+    }
+    if (!section) return;
     if (kind === 'duplicate') {
       await api.acknowledgeDuplicateWarning(section);
       // Duplicates are cross-file (or same-file) section-type warnings, so the
@@ -1122,16 +1142,30 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
                   >
                     <span>{ISSUE_MARKER[issue.severity].marker}</span>
                     <span className="min-w-0 flex-1 truncate">Line {issue.line}: {issue.text}</span>
-                    {issue.acknowledgeSection && (
+                    {issue.acknowledgeKind && (
                       <button
                         onClick={(event) => {
                           event.stopPropagation();
-                          void handleAcknowledgeWarning(issue.acknowledgeSection!, issue.acknowledgeKind ?? 'unknown');
+                          void handleAcknowledgeWarning(
+                            issue.acknowledgeSection,
+                            issue.acknowledgeKind ?? 'unknown',
+                            issue.acknowledgeCode
+                              ? {
+                                  file: activeFile,
+                                  code: issue.acknowledgeCode,
+                                  section: issue.section ?? '',
+                                  param: issue.param ?? '',
+                                  extra: issue.acknowledgeExtra ?? '',
+                                }
+                              : undefined,
+                          );
                         }}
                         className="shrink-0 rounded border border-[var(--color-warning)] px-2 py-0.5 text-[10px] font-medium text-[var(--color-warning)] hover:bg-[var(--color-warning)] hover:text-[var(--color-bg-primary)] transition-colors"
                         title={issue.acknowledgeKind === 'duplicate'
                           ? 'Acknowledge this duplicate section warning and stop flagging the save button'
-                          : 'Acknowledge this unknown section and hide its warning in future validations'}
+                          : issue.acknowledgeKind === 'registry'
+                            ? 'Acknowledge this command warning and hide it in future validations'
+                            : 'Acknowledge this unknown section and hide its warning in future validations'}
                       >
                         Acknowledge
                       </button>

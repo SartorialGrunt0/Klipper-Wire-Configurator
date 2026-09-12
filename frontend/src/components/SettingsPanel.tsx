@@ -11,8 +11,8 @@ import { resolveSection } from '../utils/sectionResolver';
 import { hasFeatureSectionType as hasFeatureSectionTypeInFiles } from '../utils/featureSections';
 import { toggleSectionSuppressed } from '../utils/sectionSuppress';
 import { applyMcuRenameToFiles, planPrimarySwap, applyNodeUpdates, applyGroupChildRenames, mcuHeaderFor } from '../utils/mcuPrimary';
-import { ackKindForSection } from '../utils/warningAcknowledgment';
-import { acknowledgeWarning, acknowledgeDuplicateWarning } from '../services/api';
+import { ackKindForSection, GCODE_REGISTRY_CODES } from '../utils/warningAcknowledgment';
+import { acknowledgeWarning, acknowledgeDuplicateWarning, acknowledgeWarningsBulk } from '../services/api';
 import WarningBadge from './nodes/WarningBadge';
 import McuNameDialog from './dialogs/McuNameDialog';
 
@@ -210,8 +210,8 @@ export default function SettingsPanel() {
 
   // Get validation issues for this section
   const sectionIssues = useMemo(() => {
-    if (!sectionHeader) return [] as Array<{ severity: 'error' | 'warning' | 'info'; message: string; code?: string }>;
-    const issues: Array<{ severity: 'error' | 'warning' | 'info'; message: string; code?: string }> = [];
+    if (!sectionHeader) return [] as Array<{ severity: 'error' | 'warning' | 'info'; message: string; code?: string; extra?: string; param?: string; file?: string; section?: string }>;
+    const issues: Array<{ severity: 'error' | 'warning' | 'info'; message: string; code?: string; extra?: string; param?: string; file?: string; section?: string }> = [];
     const validationFiles = sectionConfigFile
       ? [sectionConfigFile]
       : nodeConfigFile
@@ -226,7 +226,7 @@ export default function SettingsPanel() {
         // they are visible when the card is selected — but never get an
         // Acknowledge button: the ack gate only recognizes warning issues.
         if (issue.severity === 'error' || issue.severity === 'warning' || issue.severity === 'info') {
-          issues.push({ severity: issue.severity, message: issue.message, code: issue.code });
+          issues.push({ severity: issue.severity, message: issue.message, code: issue.code, extra: issue.extra, param: issue.param, file: filename, section: issue.section });
         }
       }
     }
@@ -766,6 +766,23 @@ export default function SettingsPanel() {
   }, [sectionEditText, activeFile, sectionHeader, sectionConfigFile, configFiles, effectiveSectionLineNumber, updateConfigFile, selectedNodeId, selectedNode, selectedSection, schemas, updateNodeData, setSelectedSection, revalidateFile]);
 
   const handleAcknowledgeWarning = useCallback(async () => {
+    const registryIssues = sectionIssues.filter(
+      (i) => i.severity === 'warning' && i.code
+        && GCODE_REGISTRY_CODES.has(i.code));
+    if (sectionAckKind === 'registry' && registryIssues.length > 0) {
+      // Per-command acks via the bulk identity endpoint — same identities the
+      // save gate sends, so both paths agree. Ack everything in this section.
+      await acknowledgeWarningsBulk(registryIssues.map((i) => ({
+        file: i.file ?? sectionConfigFile ?? '',
+        code: i.code ?? '',
+        section: i.section ?? sectionHeader ?? '',
+        param: i.param ?? 'gcode',
+        extra: i.extra ?? '',
+      })));
+      const files = new Set(registryIssues.map((i) => i.file ?? sectionConfigFile).filter(Boolean) as string[]);
+      for (const f of files) void revalidateFile(f);
+      return;
+    }
     if (!section || !sectionConfigFile) return;
     if (sectionAckKind === 'duplicate') {
       await acknowledgeDuplicateWarning(section);
@@ -775,7 +792,7 @@ export default function SettingsPanel() {
     // Duplicates (and cross-file warnings generally) live on other files too,
     // so revalidate the whole project — not just this file.
     void revalidateFile(sectionConfigFile);
-  }, [section, sectionConfigFile, sectionAckKind, revalidateFile]);
+  }, [section, sectionConfigFile, sectionAckKind, sectionIssues, sectionHeader, revalidateFile]);
 
   // MCU name dialog overlay (rendered above all other content)
   const mcuNameDialog = mcuNamePrompt ? (
@@ -1256,7 +1273,9 @@ export default function SettingsPanel() {
               className="text-xs px-2 py-1 rounded bg-[var(--color-bg-tertiary)] hover:bg-[var(--color-warning)] hover:text-[var(--color-bg-primary)] transition-colors"
               title={sectionAckKind === 'duplicate'
                 ? 'Acknowledge this duplicate section and stop flagging the save button'
-                : 'Acknowledge this unknown section and hide its warning in future validations'}
+                : sectionAckKind === 'registry'
+                  ? 'Acknowledge these gcode command warnings and hide them in future validations'
+                  : 'Acknowledge this unknown section and hide its warning in future validations'}
             >
               Acknowledge Warning
             </button>
