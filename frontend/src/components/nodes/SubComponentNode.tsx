@@ -3,6 +3,8 @@ import { type NodeProps } from '@xyflow/react';
 import type { SubComponentNodeData } from '../../types/graph';
 import NodeActions from './NodeActions';
 import WarningBadge from './WarningBadge';
+import { validationDotsVisible } from '../../utils/validationVisibility';
+import { useVisibility } from '../../stores/validationSettingsStore';
 import type { ValidationStatus } from '../../types/graph';
 import { SUBCOMPONENT_COLORS } from '../../constants/graphColors';
 
@@ -15,6 +17,9 @@ function SubComponentNode({ data, selected, id }: NodeProps) {
   const isOrphan = !isEmbedded && !isStandalone;
   const validationStatus = (nodeData.validationStatus || 'valid') as ValidationStatus;
   const effectiveValidationStatus = isOrphan ? 'error' : validationStatus;
+  // Settings > Validation: dot visibility toggle (orphans keep their red
+  // border via CSS — only the finding dot is affected).
+  const dotsVisible = validationDotsVisible(useVisibility());
   const hasErrors = nodeData.hasErrors || isOrphan;
 
   return (
@@ -39,7 +44,7 @@ function SubComponentNode({ data, selected, id }: NodeProps) {
         className="kwc-tile-header"
         style={{ backgroundColor: `${color}22`, borderLeft: `3px solid ${color}` }}
       >
-        <WarningBadge status={effectiveValidationStatus} />
+        {dotsVisible && <WarningBadge status={effectiveValidationStatus} />}
         <span className="text-xs font-semibold truncate" style={{ color }}>
           {nodeData.label}
         </span>

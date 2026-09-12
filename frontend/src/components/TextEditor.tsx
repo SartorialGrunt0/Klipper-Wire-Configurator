@@ -2,6 +2,7 @@ import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { useConfigStore } from '../stores/configStore';
 import { useGraphStore } from '../stores/graphStore';
 import { useNativeStore } from '../stores/nativeStore';
+import { useVisibility } from '../stores/validationSettingsStore';
 import * as api from '../services/api';
 import ConfigReferenceDialog from './dialogs/ConfigReferenceDialog';
 import { buildProjectGraph } from '../utils/graphBuilder';
@@ -9,6 +10,7 @@ import { restoreLayoutAfterRebuild } from '../utils/layoutPersistence';
 import { acknowledgeableWarning } from '../utils/warningAcknowledgment';
 import { resolveIssueLine } from '../utils/issueLine';
 import { ISSUE_MARKER } from '../utils/issueMarker';
+import { filterFindings, filterValidationMap } from '../utils/validationVisibility';
 import type { ExampleConfig, ConfigFile, ConfigSection, ValidationError } from '../types/config';
 
 interface SearchResult {
@@ -67,6 +69,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   const isDirty = useConfigStore((s) => s.isDirty);
   const parseError = useConfigStore((s) => s.textParseErrors[activeFile]);
   const validationText = useConfigStore((s) => s.validationText);
+  const visibility = useVisibility();
 
   const config = configFiles[activeFile];
   const filenames = Object.keys(configFiles);
@@ -256,7 +259,10 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   // validation was computed against, re-resolve each line from the current
   // text (or hide the finding) until the fresh result lands.
   const inlineIssues = useMemo((): TextIssue[] => {
-    const errors = validation[activeFile]?.errors ?? [];
+    const allErrors = validation[activeFile]?.errors ?? [];
+    // Settings > Validation: hide findings of disabled severities (master
+    // off hides everything). Gutter + issue list both derive from this memo.
+    const errors = filterFindings(allErrors, visibility);
     if (!errors || errors.length === 0) return [];
     const issues: TextIssue[] = [];
     const lines = editText.split('\n');
@@ -288,7 +294,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
       }
     }
     return issues;
-  }, [validation, validationText, activeFile, editText, configFiles]);
+  }, [validation, validationText, activeFile, editText, configFiles, visibility]);
 
   const handleAcknowledgeWarning = useCallback(async (
     section: ConfigSection | undefined,
@@ -730,8 +736,9 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
         <div className="flex-1 overflow-y-auto py-1">
           {filenames.map((fn) => {
             const v = getFileValidation(fn);
-            const fileErrors = v?.errors.filter((e) => e.severity === 'error') ?? [];
-            const fileWarnings = v?.errors.filter((e) => e.severity === 'warning') ?? [];
+            const visibleFindings = filterFindings(v?.errors ?? [], visibility);
+            const fileErrors = visibleFindings.filter((e) => e.severity === 'error');
+            const fileWarnings = visibleFindings.filter((e) => e.severity === 'warning');
             return (
               <button
                 key={fn}

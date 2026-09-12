@@ -5,6 +5,8 @@ import { useGraphStore } from '../../stores/graphStore';
 import { useConfigStore } from '../../stores/configStore';
 import NodeActions from './NodeActions';
 import WarningBadge from './WarningBadge';
+import { validationDotsVisible } from '../../utils/validationVisibility';
+import { useVisibility } from '../../stores/validationSettingsStore';
 import type { ValidationStatus } from '../../types/graph';
 import { getValidationStatusColor } from '../../utils/validationStatus';
 import { GROUP_NODE_COLORS } from '../../constants/graphColors';
@@ -19,6 +21,9 @@ function GroupNode({ data, selected, id }: NodeProps) {
   const isOrphan = !isEmbedded && !isStandalone;
   const validationStatus = (nodeData.validationStatus || 'valid') as ValidationStatus;
   const effectiveValidationStatus = isOrphan ? 'error' : validationStatus;
+  // Settings > Validation: dot visibility toggle (orphans keep their red
+  // border via CSS — only the finding dot is affected).
+  const dotsVisible = validationDotsVisible(useVisibility());
   const hasErrors = nodeData.hasErrors || isOrphan;
 
   const { setSelectedNode, removeFromGroup } = useGraphStore();
@@ -58,7 +63,7 @@ function GroupNode({ data, selected, id }: NodeProps) {
         className="kwc-tile-header"
         style={{ backgroundColor: `${color}22`, borderLeft: `3px solid ${color}` }}
       >
-        <WarningBadge status={effectiveValidationStatus} />
+        {dotsVisible && <WarningBadge status={effectiveValidationStatus} />}
         <span className="text-xs font-semibold truncate" style={{ color }}>
           {nodeData.label}
         </span>
@@ -83,10 +88,12 @@ function GroupNode({ data, selected, id }: NodeProps) {
               key={`${child.configFile || 'cfg'}::${child.sectionHeader}::${idx}`}
               className="flex items-center gap-1 group/child"
             >
-              <span
-                className="w-1.5 h-1.5 rounded-full shrink-0"
-                style={{ backgroundColor: getValidationStatusColor(child.validationStatus || 'valid') }}
-              />
+              {dotsVisible && (
+                <span
+                  className="w-1.5 h-1.5 rounded-full shrink-0"
+                  style={{ backgroundColor: getValidationStatusColor(child.validationStatus || 'valid') }}
+                />
+              )}
               <div
                 className="text-[10px] truncate px-1 py-0.5 rounded cursor-pointer hover:bg-[var(--color-bg-primary)] flex-1 min-w-0"
                 style={{ color: child.isSuppressed ? 'var(--color-text-secondary)' : undefined, opacity: child.isSuppressed ? 0.5 : 1 }}

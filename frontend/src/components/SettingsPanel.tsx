@@ -7,6 +7,8 @@ import type { HardwareNodeData, SubComponentNodeData, FeatureNodeData, GroupChil
 import { applyBoardTypeMarkerToMcuSections } from '../utils/boardTypeMarker';
 import { buildUniqueSectionDraft } from '../utils/sectionNaming';
 import { getValidationStatusColor } from '../utils/validationStatus';
+import { filterFindings, validationDotsVisible } from '../utils/validationVisibility';
+import { useVisibility } from '../stores/validationSettingsStore';
 import { resolveSection } from '../utils/sectionResolver';
 import { hasFeatureSectionType as hasFeatureSectionTypeInFiles } from '../utils/featureSections';
 import { toggleSectionSuppressed } from '../utils/sectionSuppress';
@@ -111,6 +113,10 @@ export default function SettingsPanel() {
     addSection,
     revalidateFile,
   } = useConfigStore();
+  const visibility = useVisibility();
+  // Colored status dots exist to surface error/warning findings; with the
+  // tiers hidden (or validation off) they are removed entirely.
+  const dotsVisible = validationDotsVisible(visibility);
   const { selectedNodeId, nodes, addSubComponentNode, addFeatureNode, updateNodeData, selectedEdgeId, edges, updateEdgeData, setSelectedNode, setSelectedEdge } = useGraphStore();
 
   const [showHidden, setShowHidden] = useState(false);
@@ -220,7 +226,9 @@ export default function SettingsPanel() {
     for (const filename of validationFiles) {
       const result = validation[filename];
       if (!result) continue;
-      for (const issue of result.errors) {
+      // Settings > Validation: severities the user disabled are hidden here
+      // too (and their Acknowledge buttons go with them).
+      for (const issue of filterFindings(result.errors, visibility)) {
         if (issue.section !== sectionHeader) continue;
         // Info findings show like warnings here (same rows, muted grey) so
         // they are visible when the card is selected — but never get an
@@ -231,7 +239,7 @@ export default function SettingsPanel() {
       }
     }
     return issues;
-  }, [nodeConfigFile, sectionConfigFile, sectionHeader, validation]);
+  }, [nodeConfigFile, sectionConfigFile, sectionHeader, validation, visibility]);
 
   const sectionAckKind = useMemo(
     () => ackKindForSection(sectionIssues),
@@ -1149,10 +1157,12 @@ export default function SettingsPanel() {
                 className="flex items-center justify-between w-full px-2 py-1.5 rounded-lg text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors group"
               >
                 <span className="flex items-center gap-2 min-w-0">
-                  <span
-                    className="w-2 h-2 rounded-full shrink-0"
-                    style={{ backgroundColor: getValidationStatusColor(child.validationStatus || 'valid') }}
-                  />
+                  {dotsVisible && (
+                    <span
+                      className="w-2 h-2 rounded-full shrink-0"
+                      style={{ backgroundColor: getValidationStatusColor(child.validationStatus || 'valid') }}
+                    />
+                  )}
                   <span className="text-[var(--color-text-primary)] font-mono truncate">{child.label}</span>
                 </span>
                 <span className="text-[10px] text-[var(--color-text-secondary)] opacity-0 group-hover:opacity-100 shrink-0 ml-2">Edit →</span>
@@ -1774,6 +1784,9 @@ function ChildNodesList({
   title?: string;
 }) {
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
+  // Settings > Validation: status dots render only when error/warning
+  // findings are visible.
+  const dotsVisible = validationDotsVisible(useVisibility());
 
   // Group child nodes by componentGroup
   const groups = useMemo(() => {
@@ -1812,7 +1825,9 @@ function ChildNodesList({
                   }}
                   className="flex items-center gap-2 w-full px-2 py-1.5 rounded-lg text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors"
                 >
-                  <span className="w-2 h-2 rounded-full" style={{ backgroundColor: getValidationStatusColor(nodeStatus) }} />
+                  {dotsVisible && (
+                    <span className="w-2 h-2 rounded-full" style={{ backgroundColor: getValidationStatusColor(nodeStatus) }} />
+                  )}
                   <span className="text-[var(--color-text-primary)]">{d.label as string}</span>
                 </button>
               );
@@ -1836,7 +1851,9 @@ function ChildNodesList({
                 }}
                 className="flex items-center gap-2 w-full px-2 py-1.5 rounded-lg text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors"
               >
-                <span className="w-2 h-2 rounded-full" style={{ backgroundColor: getValidationStatusColor(nodeStatus) }} />
+                {dotsVisible && (
+                  <span className="w-2 h-2 rounded-full" style={{ backgroundColor: getValidationStatusColor(nodeStatus) }} />
+                )}
                 <span className="text-[var(--color-text-primary)]">{d.label as string}</span>
                 <span className="text-[10px] text-[var(--color-text-secondary)] ml-auto">{n.type}</span>
               </button>
@@ -1863,7 +1880,9 @@ function ChildNodesList({
                 >
                   <path d="M3 1l4 4-4 4" stroke="currentColor" strokeWidth="1.5" />
                 </svg>
-                <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: getValidationStatusColor(groupStatus) }} />
+                {dotsVisible && (
+                  <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: getValidationStatusColor(groupStatus) }} />
+                )}
                 <span className="text-[var(--color-text-primary)] font-medium">{groupLabel}</span>
                 <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] ml-auto">
                   {nodes.length}
@@ -1882,7 +1901,9 @@ function ChildNodesList({
                             onClick={() => onSelectNode(n.id)}
                             className="flex items-center gap-2 w-full px-2 py-1 rounded text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors"
                           >
-                            <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: getValidationStatusColor(nodeStatus) }} />
+                            {dotsVisible && (
+                              <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: getValidationStatusColor(nodeStatus) }} />
+                            )}
                             <span className="text-[var(--color-text-primary)] truncate font-medium">{d.label as string}</span>
                             <span className="text-[10px] text-[var(--color-text-secondary)] ml-auto">open</span>
                           </button>
@@ -1893,7 +1914,9 @@ function ChildNodesList({
                                 onClick={() => onSelectSection(child.sectionHeader, child.configFile ?? null, child.sectionLineNumber ?? null)}
                                 className="flex items-center gap-2 w-full px-2 py-1 rounded text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors"
                               >
-                                <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: getValidationStatusColor(child.validationStatus || 'valid') }} />
+                                {dotsVisible && (
+                                  <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: getValidationStatusColor(child.validationStatus || 'valid') }} />
+                                )}
                                 <span className="text-[var(--color-text-primary)] truncate">{child.label}</span>
                               </button>
                             ))}
@@ -1909,7 +1932,9 @@ function ChildNodesList({
                         }}
                         className="flex items-center gap-2 w-full px-2 py-1 rounded text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors"
                       >
-                        <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: getValidationStatusColor(nodeStatus) }} />
+                        {dotsVisible && (
+                          <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: getValidationStatusColor(nodeStatus) }} />
+                        )}
                         <span className="text-[var(--color-text-primary)] truncate">{d.label as string}</span>
                       </button>
                     );

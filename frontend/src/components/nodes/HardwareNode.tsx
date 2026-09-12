@@ -13,6 +13,8 @@ import {
 import { HARDWARE_COLORS, HARDWARE_SHAPES } from '../../constants/graphColors';
 import NodeActions from './NodeActions';
 import WarningBadge from './WarningBadge';
+import { validationDotsVisible } from '../../utils/validationVisibility';
+import { useVisibility } from '../../stores/validationSettingsStore';
 import type { ValidationStatus } from '../../types/graph';
 
 const PREVIEW_WIDTH = CONTAINER_WIDTH;
@@ -30,6 +32,9 @@ function HardwareNode({ data, selected, id }: NodeProps) {
   const isMcu = !!(nodeData as Record<string, unknown>).isMcu;
   const collapsed = !!nodeData.collapsed;
   const validationStatus = (nodeData.validationStatus || 'valid') as ValidationStatus;
+  // Settings > Validation: dots disappear when error+warning tiers are
+  // hidden (or validation is off).
+  const dotsVisible = validationDotsVisible(useVisibility());
 
   // Hide the label when it duplicates the type badge:
   // - SBC not enabled as MCU (label is always "SBC")
@@ -217,7 +222,7 @@ function HardwareNode({ data, selected, id }: NodeProps) {
         style={{ backgroundColor: `${color}22`, borderBottom: `1px solid ${color}44` }}
       >
         <div className="flex items-start gap-2 min-w-0 flex-1">
-          <WarningBadge status={validationStatus} />
+          {dotsVisible && <WarningBadge status={validationStatus} />}
           {nodeData.customImage ? (
             <img src={nodeData.customImage} alt="" className="w-5 h-5 object-contain shrink-0" />
           ) : (

@@ -168,6 +168,39 @@ export async function acknowledgeWarningsBulk(identities: Array<{
   });
 }
 
+/** Every stored acknowledgement across the three ack stores (Settings >
+ *  Acknowledgements manager). Keys are verbatim store entries. */
+export interface AcknowledgementList {
+  sections: string[];
+  duplicate_section_types: string[];
+  identities: string[];
+}
+
+export async function listAcknowledgements(): Promise<AcknowledgementList> {
+  return request<AcknowledgementList>('/warning-acknowledgements');
+}
+
+export type AcknowledgementKind = 'section' | 'duplicate' | 'identity';
+
+export async function removeAcknowledgement(
+  kind: AcknowledgementKind,
+  key: string,
+): Promise<{ status: string; kind: string; removed: number }> {
+  return request('/warning-acknowledgements', {
+    method: 'DELETE',
+    body: JSON.stringify({ kind, key }),
+  });
+}
+
+export async function clearAllAcknowledgements(): Promise<{
+  status: string;
+  sections: number;
+  duplicate_section_types: number;
+  identities: number;
+}> {
+  return request('/warning-acknowledgements/all', { method: 'DELETE' });
+}
+
 /* ── Export ───────────────────────────────────────────── */
 
 export async function exportConfig(config: ConfigFile): Promise<string> {

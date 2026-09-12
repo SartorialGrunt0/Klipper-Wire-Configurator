@@ -1,5 +1,13 @@
 import { create } from 'zustand';
 import type { ConfigFile, ConfigSection, ConfigParam, ValidationResult, SectionSchema } from '../types/config';
+import { useValidationSettingsStore } from './validationSettingsStore';
+
+/** Master validation switch (Settings menu). Read lazily so toggling takes
+ *  effect immediately without store subscriptions; the validationSettings
+ *  store only imports this module dynamically, so no load-time cycle. */
+function isValidationEnabled(): boolean {
+  return useValidationSettingsStore.getState().enabled;
+}
 
 /** Debounced revalidation timer — shared across all mutation methods. */
 let _revalidateTimer: ReturnType<typeof setTimeout> | null = null;
@@ -17,6 +25,7 @@ async function _revalidateFile(
 ) {
   const cf = get().configFiles[filename];
   if (!cf) return;
+  if (!isValidationEnabled()) return; // master switch off — skip the API call
   const api = await import('../services/api');
   try {
     const result = await api.validateConfig(cf);
@@ -35,6 +44,7 @@ async function _revalidateAll(get: () => ConfigState, set: (partial: Partial<Con
   const { configFiles } = get();
   const filenames = Object.keys(configFiles);
   if (filenames.length === 0) return;
+  if (!isValidationEnabled()) return; // master switch off — skip the API call
 
   if (filenames.length === 1) {
     await _revalidateFile(filenames[0], get, set);
@@ -158,6 +168,10 @@ interface ConfigState {
   getSection: (filename: string, fullHeader: string, lineNumber?: number) => ConfigSection | undefined;
   getSectionErrors: (fullHeader: string) => string[];
   revalidateFile: (filename: string) => Promise<void>;
+  /** Full-project revalidation (no-op while the master toggle is off). */
+  revalidateAll: () => Promise<void>;
+  /** Drop cached findings + snapshots (master toggle off). */
+  clearValidationState: () => void;
 }
 
 export const useConfigStore = create<ConfigState>((set, get) => ({
@@ -224,10 +238,19 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   consumeLineJump: () => set({ pendingLineJump: null }),
 
   setValidation: (filename, result) =>
-    set((s) => ({
-      validation: { ...s.validation, [filename]: result },
-      validationText: { ...s.validationText, [filename]: s.configFiles[filename]?.raw_text ?? '' },
-    })),
+    set((s) => {
+      // Master validation switch off: the UI shows no findings, so don't
+      // let load paths (import / revert / open-from-Pi parse results)
+      // reseed the map behind the toggle.
+      if (!isValidationEnabled()) {
+        if (Object.keys(s.validation).length === 0) return s;
+        return { validation: {}, validationText: {} };
+      }
+      return {
+        validation: { ...s.validation, [filename]: result },
+        validationText: { ...s.validationText, [filename]: s.configFiles[filename]?.raw_text ?? '' },
+      };
+    }),
 
   setSchemas: (schemas) => set({ schemas }),
 
@@ -644,10 +667,28 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   },
 
   revalidateFile: async (filename) => {
+    if (!isValidationEnabled()) return;
     if (Object.keys(get().configFiles).length > 1) {
       await _revalidateAll(get, set);
       return;
     }
     await _revalidateFile(filename, get, set);
+  },
+
+  /** Revalidate every open file (used when the master toggle flips on). */
+  revalidateAll: async () => {
+    if (!isValidationEnabled()) return;
+    await _revalidateAll(get, set);
+  },
+
+  /** Drop all cached validation findings + text snapshots (used when the
+   *  master toggle flips off). Parse-failure state is NOT touched — it's a
+   *  data-loss guard, not a validation finding. */
+  clearValidationState: () => {
+    if (_revalidateTimer) {
+      clearTimeout(_revalidateTimer);
+      _revalidateTimer = null;
+    }
+    set({ validation: {}, validationText: {} });
   },
 }));

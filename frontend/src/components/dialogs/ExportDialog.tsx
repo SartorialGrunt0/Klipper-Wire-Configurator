@@ -2,7 +2,9 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { createTwoFilesPatch } from 'diff';
 import JSZip from 'jszip';
 import { useConfigStore } from '../../stores/configStore';
+import { useVisibility } from '../../stores/validationSettingsStore';
 import { selectSaveGateIssues, type SaveGateFinding } from '../../utils/saveGate';
+import { filterValidationMap } from '../../utils/validationVisibility';
 import * as api from '../../services/api';
 import type { ConfigFile } from '../../types/config';
 
@@ -199,6 +201,7 @@ export default function ExportDialog({ onClose, onShowTextView }: ExportDialogPr
   // findings lists, badges, and export never show stale severities.
   const validation = useConfigStore((s) => s.validation);
   const textParseErrors = useConfigStore((s) => s.textParseErrors);
+  const visibility = useVisibility();
 
   const filenames = useMemo(
     () => Object.keys(configFiles),
@@ -260,8 +263,9 @@ export default function ExportDialog({ onClose, onShowTextView }: ExportDialogPr
      here they just surface as findings since export writes nothing). */
   const gateIssues = useMemo(() => {
     const selected = Array.from(selectedFiles);
-    return selectSaveGateIssues(validation, selected, textParseErrors);
-  }, [validation, selectedFiles, textParseErrors]);
+    // Findings narrowed to the severities enabled in Settings > Validation.
+    return selectSaveGateIssues(filterValidationMap(validation, visibility), selected, textParseErrors);
+  }, [validation, selectedFiles, textParseErrors, visibility]);
 
   const fileFindings = useMemo(() => {
     const map: Record<string, (SaveGateFinding & { kind: 'error' | 'warning' })[]> = {};
@@ -337,7 +341,7 @@ export default function ExportDialog({ onClose, onShowTextView }: ExportDialogPr
     }
   }, [selectedFiles, configFiles, currentTexts, exportFormat, onClose]);
 
-  const hasErrors = Object.entries(validation).some(
+  const hasErrors = Object.entries(filterValidationMap(validation, visibility)).some(
     ([fn, v]) => selectedFiles.has(fn) && v.has_errors,
   );
   const exportableCount = filenames.filter((fn) => fn in configFiles).length;

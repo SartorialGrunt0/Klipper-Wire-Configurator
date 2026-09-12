@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import { useConfigStore } from '../stores/configStore';
 import { useNativeStore } from '../stores/nativeStore';
 import { useAiStore } from '../stores/aiStore';
+import { useValidationSettingsStore, useVisibility } from '../stores/validationSettingsStore';
 import { getSaveButtonClass } from '../utils/saveButtonClass';
+import { filterValidationMap } from '../utils/validationVisibility';
 import type { PendingAiChatRequest } from '../types/ai';
 import ImportDialog from './dialogs/ImportDialog';
 import ExportDialog from './dialogs/ExportDialog';
@@ -12,6 +14,7 @@ import ApplyDialog from './dialogs/ApplyDialog';
 import RevertDialog from './dialogs/RevertDialog';
 import ChatDialog from './dialogs/ChatDialog';
 import FirmwareDialog from './dialogs/FirmwareDialog';
+import AcknowledgementsDialog from './dialogs/AcknowledgementsDialog';
 
 interface ToolbarProps {
   showTextView: boolean;
@@ -112,6 +115,9 @@ export default function Toolbar({
   const [hiddenItems, setHiddenItems] = useState<ToolbarHiddenState>(() => loadHiddenItems());
   const [showVisibilityMenu, setShowVisibilityMenu] = useState(false);
   const [visibilityMenuPosition, setVisibilityMenuPosition] = useState({ top: 0, left: 0 });
+  const [showAcknowledgements, setShowAcknowledgements] = useState(false);
+  const validationSettings = useValidationSettingsStore();
+  const visibility = useVisibility();
   const aiConfigured = useAiStore((s) => s.isConfigured());
   const chatStatus = useAiStore((s) => s.chatStatus);
   const [showFlash, setShowFlash] = useState(false);
@@ -239,8 +245,10 @@ export default function Toolbar({
 
   // Compute Save button color based on dirty state, validation, and whether
   // any file's text currently fails to parse (shared with the Apply/Save
-  // dialog so both always agree)
-  const saveButtonClass = getSaveButtonClass(isConfigDirty, validation, hasTextParseError);
+  // dialog so both always agree). Findings the user hid via Settings >
+  // Validation don't color the button either (parse-fail still does —
+  // data-loss guard, not a finding).
+  const saveButtonClass = getSaveButtonClass(isConfigDirty, filterValidationMap(validation, visibility), hasTextParseError);
   return (
     <div className="flex items-center gap-2 min-w-max">
       {/* Import */}
@@ -502,6 +510,80 @@ export default function Toolbar({
             })}
           </div>
 
+          {/* Validation display settings */}
+          <div className="border-t border-[var(--color-bg-tertiary)] p-2 space-y-1">
+            <p className="px-2 pt-1 text-[11px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wide">
+              Validation
+            </p>
+            <label className="flex items-center justify-between gap-3 px-2 py-1.5 rounded-lg cursor-pointer hover:bg-[var(--color-bg-primary)] transition-colors">
+              <span className="text-xs text-[var(--color-text-primary)]">Config validation</span>
+              <span
+                className={`flex h-4 w-4 items-center justify-center rounded border transition-colors ${
+                  validationSettings.enabled
+                    ? 'border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-bg-primary)]'
+                    : 'border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] text-transparent'
+                }`}
+              >
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                  <path d="M2 5.25L4.1 7.35 8 3.45" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </span>
+              <input
+                type="checkbox"
+                className="sr-only"
+                checked={validationSettings.enabled}
+                onChange={(e) => validationSettings.setEnabled(e.target.checked)}
+              />
+            </label>
+            {validationSettings.enabled && (
+              <>
+                {([
+                  { label: 'Info', value: validationSettings.showInfo, set: validationSettings.setShowInfo },
+                  { label: 'Warnings', value: validationSettings.showWarning, set: validationSettings.setShowWarning },
+                  { label: 'Errors', value: validationSettings.showError, set: validationSettings.setShowError },
+                ] as Array<{ label: string; value: boolean; set: (v: boolean) => void }>).map((item) => (
+                  <label
+                    key={item.label}
+                    className="flex items-center justify-between gap-3 px-2 py-1.5 rounded-lg cursor-pointer hover:bg-[var(--color-bg-primary)] transition-colors"
+                  >
+                    <span className="text-xs text-[var(--color-text-primary)]">{item.label}</span>
+                    <span
+                      className={`flex h-4 w-4 items-center justify-center rounded border transition-colors ${
+                        item.value
+                          ? 'border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-bg-primary)]'
+                          : 'border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] text-transparent'
+                      }`}
+                    >
+                      <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                        <path d="M2 5.25L4.1 7.35 8 3.45" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    </span>
+                    <input
+                      type="checkbox"
+                      className="sr-only"
+                      checked={item.value}
+                      onChange={(e) => item.set(e.target.checked)}
+                    />
+                  </label>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowVisibilityMenu(false);
+                    setShowAcknowledgements(true);
+                  }}
+                  className="mt-1 w-full flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-xs font-medium bg-[var(--color-warning)] text-[var(--color-bg-primary)] hover:opacity-90 transition-opacity"
+                >
+                  <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+                    <path d="M8 1.5L15 14H1L8 1.5z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+                    <path d="M8 6.5v3.5M8 12v.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                  </svg>
+                  Acknowledgements
+                </button>
+              </>
+            )}
+          </div>
+
           <div className="px-3 py-2 border-t border-[var(--color-bg-tertiary)] text-[11px] text-[var(--color-text-secondary)]">
             Text view and the settings button stay visible so this menu is always reachable.
           </div>
@@ -523,6 +605,7 @@ export default function Toolbar({
       )}
       {showFlash && <FirmwareDialog onClose={() => setShowFlash(false)} />}
       {showRevert && <RevertDialog onClose={() => setShowRevert(false)} />}
+      {showAcknowledgements && <AcknowledgementsDialog onClose={() => setShowAcknowledgements(false)} />}
       {/* ChatDialog stays mounted when closed so an in-flight request keeps
           running; `open` hides/shows the overlay. */}
       <ChatDialog
