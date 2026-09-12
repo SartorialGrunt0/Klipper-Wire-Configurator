@@ -236,6 +236,100 @@ def load_acknowledged_warning_identities() -> set[str]:
     }
 
 
+def _rewrite_lines(path: Path, keep) -> int:
+    """Rewrite a line-based store file keeping entries ``keep()`` accepts.
+
+    Returns the number of entries removed. Blank/comment lines are dropped
+    on rewrite (the loaders skip them anyway; writers never add them).
+    """
+    if not path.exists():
+        return 0
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    entries = [
+        line.strip() for line in content.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    kept = [entry for entry in entries if keep(entry)]
+    removed = len(entries) - len(kept)
+    if removed:
+        path.write_text(
+            "".join(f"{entry}\n" for entry in kept), encoding="utf-8")
+    return removed
+
+
+def remove_acknowledged_warning_section(snippet: str) -> int:
+    """Remove one unknown-section snippet ack (exact canonical match).
+
+    The store is a cfg file of appended canonical snippets; rewriting the
+    surviving snippets in canonical form is lossless for machine-written
+    content (no comments are ever stored).
+    """
+    snippet = snippet.strip()
+    path = _acknowledged_warnings_file()
+    if not path.exists() or not snippet:
+        return 0
+    try:
+        config = parse_config(path.read_text(encoding="utf-8"), path.name)
+    except OSError:
+        return 0
+    kept = []
+    removed = 0
+    for section in config.sections:
+        if section.section_type == "include" or section.is_commented_out:
+            continue
+        if canonicalize_section(section) == snippet:
+            removed += 1
+        else:
+            kept.append(canonicalize_section(section))
+    if removed:
+        path.write_text(
+            "\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+    return removed
+
+
+def remove_acknowledged_duplicate_section_type(section_type: str) -> int:
+    """Remove one duplicate-section-type ack (exact match)."""
+    section_type = section_type.strip()
+    if not section_type:
+        return 0
+    return _rewrite_lines(
+        _acknowledged_duplicate_sections_file(),
+        lambda entry: entry != section_type,
+    )
+
+
+def remove_acknowledged_warning_identity(identity: str) -> int:
+    """Remove one bulk finding-identity ack (exact match)."""
+    identity = identity.strip()
+    if not identity:
+        return 0
+    return _rewrite_lines(
+        _acknowledged_warning_identities_file(),
+        lambda entry: entry != identity,
+    )
+
+
+def clear_all_acknowledgements() -> dict:
+    """Remove every ack from all three stores. Returns per-kind counts."""
+    counts = {
+        "sections": len(load_acknowledged_warning_sections()),
+        "duplicate_section_types": len(
+            load_acknowledged_duplicate_section_types()),
+        "identities": len(load_acknowledged_warning_identities()),
+    }
+    for path in (
+        _acknowledged_warnings_file(),
+        _acknowledged_duplicate_sections_file(),
+        _acknowledged_warning_identities_file(),
+    ):
+        if path.exists():
+            path.write_text("", encoding="utf-8")
+    return counts
+
+
 def acknowledge_warning_identities(identities: list[str]) -> str:
     """Append finding identities to the bulk-ack store (idempotent)."""
     path = _acknowledged_warning_identities_file()

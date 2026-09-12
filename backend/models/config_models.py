@@ -58,6 +58,18 @@ class BulkWarningAcknowledgementRequest(BaseModel):
     identities: List[BulkWarningIdentity]
 
 
+class AcknowledgementRemovalRequest(BaseModel):
+    """Remove one acknowledgement entry (Settings > Acknowledgements list).
+
+    ``kind`` selects the store: ``section`` (unknown-section canonical
+    snippet), ``duplicate`` (section type), or ``identity`` (bulk
+    finding identity ``file|code|section|param|extra``). ``key`` must match
+    the stored entry exactly as returned by the list endpoint.
+    """
+    kind: str
+    key: str
+
+
 class ProjectFile(BaseModel):
     filename: str
     content: str

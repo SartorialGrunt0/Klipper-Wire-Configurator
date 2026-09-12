@@ -9,6 +9,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import PlainTextResponse
 
 from models.config_models import (
+    AcknowledgementRemovalRequest,
     BulkWarningAcknowledgementRequest,
     ConfigUpdate,
     ExportRequest,
@@ -45,7 +46,14 @@ from services.warning_acknowledgments import (
     acknowledge_duplicate_section_type,
     acknowledge_warning_for_section,
     acknowledge_warning_identities,
+    clear_all_acknowledgements,
     finding_identity,
+    load_acknowledged_duplicate_section_types,
+    load_acknowledged_warning_identities,
+    load_acknowledged_warning_sections,
+    remove_acknowledged_duplicate_section_type,
+    remove_acknowledged_warning_identity,
+    remove_acknowledged_warning_section,
 )
 
 router = APIRouter()
@@ -318,6 +326,57 @@ async def acknowledge_bulk_warnings_api(
         "file": file_path,
         "count": len(identities),
     }
+
+
+@router.get("/warning-acknowledgements")
+async def list_warning_acknowledgements_api():
+    """List every stored acknowledgement across the three ack stores.
+
+    Feeds the Settings-menu Acknowledgements manager. Keys are returned
+    verbatim so the DELETE endpoint can match them exactly: ``sections``
+    are canonical snippets, ``duplicate_section_types`` are section types,
+    ``identities`` are bulk finding identities (``file|code|section|param|
+    extra``).
+    """
+    return {
+        "sections": sorted(load_acknowledged_warning_sections()),
+        "duplicate_section_types": sorted(
+            load_acknowledged_duplicate_section_types()),
+        "identities": sorted(load_acknowledged_warning_identities()),
+    }
+
+
+@router.delete("/warning-acknowledgements")
+async def remove_warning_acknowledgement_api(
+    data: AcknowledgementRemovalRequest,
+):
+    """Remove a single acknowledgement entry (exact key match per store).
+
+    ``kind``: ``section`` | ``duplicate`` | ``identity``. 404 when no entry
+    matches — the caller's view is stale and should refresh the list.
+    """
+    removers = {
+        "section": remove_acknowledged_warning_section,
+        "duplicate": remove_acknowledged_duplicate_section_type,
+        "identity": remove_acknowledged_warning_identity,
+    }
+    remover = removers.get(data.kind)
+    if remover is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown acknowledgement kind '{data.kind}'")
+    removed = remover(data.key)
+    if not removed:
+        raise HTTPException(
+            status_code=404, detail="Acknowledgement not found")
+    return {"status": "deleted", "kind": data.kind, "removed": removed}
+
+
+@router.delete("/warning-acknowledgements/all")
+async def clear_all_warning_acknowledgements_api():
+    """Clear every acknowledgement from all three stores (Clear all)."""
+    counts = clear_all_acknowledgements()
+    return {"status": "cleared", **counts}
 
 
 # ── Export ──────────────────────────────────────────────────────
