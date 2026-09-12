@@ -1932,7 +1932,7 @@ function ChildNodesList({
                         }}
                         className="flex items-center gap-2 w-full px-2 py-1 rounded text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors"
                       >
-                        {dotsVisible && (
+                        {dotsVisible && hasValidationDot(nodeStatus) && (
                           <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: getValidationStatusColor(nodeStatus) }} />
                         )}
                         <span className="text-[var(--color-text-primary)] truncate">{d.label as string}</span>

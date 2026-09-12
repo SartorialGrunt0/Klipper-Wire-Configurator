@@ -8,7 +8,7 @@ import WarningBadge from './WarningBadge';
 import { validationDotsVisible } from '../../utils/validationVisibility';
 import { useVisibility } from '../../stores/validationSettingsStore';
 import type { ValidationStatus } from '../../types/graph';
-import { getValidationStatusColor } from '../../utils/validationStatus';
+import { getValidationStatusColor, hasValidationDot } from '../../utils/validationStatus';
 import { GROUP_NODE_COLORS } from '../../constants/graphColors';
 
 function GroupNode({ data, selected, id }: NodeProps) {
@@ -88,7 +88,7 @@ function GroupNode({ data, selected, id }: NodeProps) {
               key={`${child.configFile || 'cfg'}::${child.sectionHeader}::${idx}`}
               className="flex items-center gap-1 group/child"
             >
-              {dotsVisible && (
+              {dotsVisible && hasValidationDot(child.validationStatus || 'valid') && (
                 <span
                   className="w-1.5 h-1.5 rounded-full shrink-0"
                   style={{ backgroundColor: getValidationStatusColor(child.validationStatus || 'valid') }}
