@@ -24,6 +24,7 @@ Three acknowledgment flavors:
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 
 from parser.config_parser import ConfigSection, parse_config
@@ -154,6 +155,14 @@ def acknowledge_duplicate_section_type(section_type: str) -> str:
 
 # ── 3. Bulk finding identities (Phase 4 save gate) ─────────────────────────
 
+# Finding codes produced by the gcode command registry scan. Their ack
+# discriminator is the COMMAND NAME (emit-site `extra`), so one ack silences
+# one command in a macro body — not every current/future warning there.
+GCODE_FINDING_CODES = frozenset({
+    "unknown_gcode_command",
+    "gcode_command_section_missing",
+})
+
 
 def _acknowledged_warning_identities_file() -> Path:
     app_state_dir = _app_state_dir()
@@ -183,6 +192,7 @@ def warning_identity(
 
 def finding_identity(
     filename: str, code: str, section: str, param: str,
+    extra: str = "",
 ) -> str:
     """Identity for a validator finding, with ``extra`` derived here.
 
@@ -190,9 +200,17 @@ def finding_identity(
     ``/warning-acknowledgements/bulk`` endpoint both use this, so an ack
     written by one is always recognized by the other. Client-supplied
     ``extra`` is deliberately not trusted (a client bug would otherwise
-    create identities that suppression never matches).
+    create identities that suppression never matches) — EXCEPT for the
+    gcode registry codes, where the discriminator is the COMMAND NAME
+    emitted server-side on the finding and round-tripped verbatim:
+    section+param cannot separate two unknown commands in one macro
+    body, and without it a single ack would silently suppress every
+    current AND future registry warning in that body.
     """
-    extra = ""
+    if code in GCODE_FINDING_CODES:
+        extra = extra.strip().upper()
+    else:
+        extra = ""
     if code == "missing_include":
         # section is "include <spec>"; the spec discriminates multiple
         # missing includes in one file.
@@ -217,6 +235,119 @@ def load_acknowledged_warning_identities() -> set[str]:
         for line in content.splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     }
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    """Write via temp-file + os.replace: readers never see a torn file."""
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=path.parent,
+        prefix=path.name + ".", suffix=".tmp", delete=False)
+    try:
+        try:
+            if path.exists():
+                os.chmod(tmp.name, path.stat().st_mode & 0o7777)
+            tmp.write(content)
+        finally:
+            tmp.close()
+        os.replace(tmp.name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+        raise
+
+
+def _rewrite_lines(path: Path, keep) -> int:
+    """Rewrite a line-based store file keeping entries ``keep()`` accepts.
+
+    Returns the number of entries removed. Blank/comment lines are dropped
+    on rewrite (the loaders skip them anyway; writers never add them).
+    """
+    if not path.exists():
+        return 0
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    entries = [
+        line.strip() for line in content.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    kept = [entry for entry in entries if keep(entry)]
+    removed = len(entries) - len(kept)
+    if removed:
+        _atomic_write(path, "".join(f"{entry}\n" for entry in kept))
+    return removed
+
+
+def remove_acknowledged_warning_section(snippet: str) -> int:
+    """Remove one unknown-section snippet ack (exact canonical match).
+
+    The store is a cfg file of appended canonical snippets; rewriting the
+    surviving snippets in canonical form is lossless for machine-written
+    content (no comments are ever stored).
+    """
+    snippet = snippet.strip()
+    path = _acknowledged_warnings_file()
+    if not path.exists() or not snippet:
+        return 0
+    try:
+        config = parse_config(path.read_text(encoding="utf-8"), path.name)
+    except OSError:
+        return 0
+    kept = []
+    removed = 0
+    for section in config.sections:
+        if section.section_type == "include" or section.is_commented_out:
+            continue
+        if canonicalize_section(section) == snippet:
+            removed += 1
+        else:
+            kept.append(canonicalize_section(section))
+    if removed:
+        _atomic_write(path, "\n".join(kept) + ("\n" if kept else ""))
+    return removed
+
+
+def remove_acknowledged_duplicate_section_type(section_type: str) -> int:
+    """Remove one duplicate-section-type ack (exact match)."""
+    section_type = section_type.strip()
+    if not section_type:
+        return 0
+    return _rewrite_lines(
+        _acknowledged_duplicate_sections_file(),
+        lambda entry: entry != section_type,
+    )
+
+
+def remove_acknowledged_warning_identity(identity: str) -> int:
+    """Remove one bulk finding-identity ack (exact match)."""
+    identity = identity.strip()
+    if not identity:
+        return 0
+    return _rewrite_lines(
+        _acknowledged_warning_identities_file(),
+        lambda entry: entry != identity,
+    )
+
+
+def clear_all_acknowledgements() -> dict:
+    """Remove every ack from all three stores. Returns per-kind counts."""
+    counts = {
+        "sections": len(load_acknowledged_warning_sections()),
+        "duplicate_section_types": len(
+            load_acknowledged_duplicate_section_types()),
+        "identities": len(load_acknowledged_warning_identities()),
+    }
+    for path in (
+        _acknowledged_warnings_file(),
+        _acknowledged_duplicate_sections_file(),
+        _acknowledged_warning_identities_file(),
+    ):
+        if path.exists():
+            _atomic_write(path, "")
+    return counts
 
 
 def acknowledge_warning_identities(identities: list[str]) -> str:

@@ -2,6 +2,7 @@ import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { useConfigStore } from '../stores/configStore';
 import { useGraphStore } from '../stores/graphStore';
 import { useNativeStore } from '../stores/nativeStore';
+import { useVisibility } from '../stores/validationSettingsStore';
 import * as api from '../services/api';
 import ConfigReferenceDialog from './dialogs/ConfigReferenceDialog';
 import { buildProjectGraph } from '../utils/graphBuilder';
@@ -9,6 +10,7 @@ import { restoreLayoutAfterRebuild } from '../utils/layoutPersistence';
 import { acknowledgeableWarning } from '../utils/warningAcknowledgment';
 import { resolveIssueLine } from '../utils/issueLine';
 import { ISSUE_MARKER } from '../utils/issueMarker';
+import { filterFindings, filterValidationMap } from '../utils/validationVisibility';
 import type { ExampleConfig, ConfigFile, ConfigSection, ValidationError } from '../types/config';
 
 interface SearchResult {
@@ -26,7 +28,12 @@ interface TextIssue {
   section?: string;
   param?: string;
   acknowledgeSection?: ConfigSection;
-  acknowledgeKind?: 'unknown' | 'duplicate';
+  acknowledgeKind?: 'unknown' | 'duplicate' | 'registry';
+  /** Registry acks need the finding identity (code + command name), not
+   *  the section: one ack per command, mirroring the server's identity
+   *  granularity. */
+  acknowledgeCode?: string;
+  acknowledgeExtra?: string;
 }
 
 interface ConfigParamEntry {
@@ -62,6 +69,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   const isDirty = useConfigStore((s) => s.isDirty);
   const parseError = useConfigStore((s) => s.textParseErrors[activeFile]);
   const validationText = useConfigStore((s) => s.validationText);
+  const visibility = useVisibility();
 
   const config = configFiles[activeFile];
   const filenames = Object.keys(configFiles);
@@ -251,7 +259,10 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   // validation was computed against, re-resolve each line from the current
   // text (or hide the finding) until the fresh result lands.
   const inlineIssues = useMemo((): TextIssue[] => {
-    const errors = validation[activeFile]?.errors ?? [];
+    const allErrors = validation[activeFile]?.errors ?? [];
+    // Settings > Validation: hide findings of disabled severities (master
+    // off hides everything). Gutter + issue list both derive from this memo.
+    const errors = filterFindings(allErrors, visibility);
     if (!errors || errors.length === 0) return [];
     const issues: TextIssue[] = [];
     const lines = editText.split('\n');
@@ -273,17 +284,32 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
           severity: err.severity,
           section: err.section,
           param: err.param,
-          acknowledgeSection: ack
+          acknowledgeSection: ack && ack.kind !== 'registry'
             ? activeSections.find((section) => section.full_header === err.section)
             : undefined,
           acknowledgeKind: ack ? ack.kind : undefined,
+          acknowledgeCode: ack ? err.code : undefined,
+          acknowledgeExtra: ack ? err.extra : undefined,
         });
       }
     }
     return issues;
-  }, [validation, validationText, activeFile, editText, configFiles]);
+  }, [validation, validationText, activeFile, editText, configFiles, visibility]);
 
-  const handleAcknowledgeWarning = useCallback(async (section: ConfigSection, kind: 'unknown' | 'duplicate' = 'unknown') => {
+  const handleAcknowledgeWarning = useCallback(async (
+    section: ConfigSection | undefined,
+    kind: 'unknown' | 'duplicate' | 'registry' = 'unknown',
+    identity?: { file: string; code: string; section: string; param: string; extra?: string },
+  ) => {
+    if (kind === 'registry') {
+      // Per-command ack via the bulk identity endpoint — same identity the
+      // save gate's "Acknowledge all" sends, so both paths agree.
+      if (!identity) return;
+      await api.acknowledgeWarningsBulk([identity]);
+      void revalidateFile(activeFile);
+      return;
+    }
+    if (!section) return;
     if (kind === 'duplicate') {
       await api.acknowledgeDuplicateWarning(section);
       // Duplicates are cross-file (or same-file) section-type warnings, so the
@@ -710,8 +736,9 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
         <div className="flex-1 overflow-y-auto py-1">
           {filenames.map((fn) => {
             const v = getFileValidation(fn);
-            const fileErrors = v?.errors.filter((e) => e.severity === 'error') ?? [];
-            const fileWarnings = v?.errors.filter((e) => e.severity === 'warning') ?? [];
+            const visibleFindings = filterFindings(v?.errors ?? [], visibility);
+            const fileErrors = visibleFindings.filter((e) => e.severity === 'error');
+            const fileWarnings = visibleFindings.filter((e) => e.severity === 'warning');
             return (
               <button
                 key={fn}
@@ -1122,16 +1149,30 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
                   >
                     <span>{ISSUE_MARKER[issue.severity].marker}</span>
                     <span className="min-w-0 flex-1 truncate">Line {issue.line}: {issue.text}</span>
-                    {issue.acknowledgeSection && (
+                    {issue.acknowledgeKind && (
                       <button
                         onClick={(event) => {
                           event.stopPropagation();
-                          void handleAcknowledgeWarning(issue.acknowledgeSection!, issue.acknowledgeKind ?? 'unknown');
+                          void handleAcknowledgeWarning(
+                            issue.acknowledgeSection,
+                            issue.acknowledgeKind ?? 'unknown',
+                            issue.acknowledgeCode
+                              ? {
+                                  file: activeFile,
+                                  code: issue.acknowledgeCode,
+                                  section: issue.section ?? '',
+                                  param: issue.param ?? '',
+                                  extra: issue.acknowledgeExtra ?? '',
+                                }
+                              : undefined,
+                          );
                         }}
                         className="shrink-0 rounded border border-[var(--color-warning)] px-2 py-0.5 text-[10px] font-medium text-[var(--color-warning)] hover:bg-[var(--color-warning)] hover:text-[var(--color-bg-primary)] transition-colors"
                         title={issue.acknowledgeKind === 'duplicate'
                           ? 'Acknowledge this duplicate section warning and stop flagging the save button'
-                          : 'Acknowledge this unknown section and hide its warning in future validations'}
+                          : issue.acknowledgeKind === 'registry'
+                            ? 'Acknowledge this command warning and hide it in future validations'
+                            : 'Acknowledge this unknown section and hide its warning in future validations'}
                       >
                         Acknowledge
                       </button>
@@ -1172,7 +1213,9 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
               const isExpanded = !!expandedSections[entry.id];
               const hasParams = entry.params.length > 0;
               const activeValidation = getFileValidation(activeFile);
-              const sectionIssues = (activeValidation?.errors ?? []).filter((e) => e.section === entry.title);
+              // Same severity filter as the gutter/file list — a hidden
+              // finding must not keep a dot in this sidebar either.
+              const sectionIssues = filterFindings(activeValidation?.errors ?? [], visibility).filter((e) => e.section === entry.title);
               const hasSecError = sectionIssues.some((e) => e.severity === 'error');
               const hasSecWarning = !hasSecError && sectionIssues.some((e) => e.severity === 'warning');
               const hasSecInfo = !hasSecError && !hasSecWarning && sectionIssues.some((e) => e.severity === 'info');

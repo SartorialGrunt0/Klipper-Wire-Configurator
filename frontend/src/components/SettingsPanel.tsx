@@ -6,13 +6,15 @@ import type { ParamSchema, ConfigParam, ConfigSection, HardwareType, SectionSche
 import type { HardwareNodeData, SubComponentNodeData, FeatureNodeData, GroupChildItem, AppNode, AppEdge, ValidationStatus } from '../types/graph';
 import { applyBoardTypeMarkerToMcuSections } from '../utils/boardTypeMarker';
 import { buildUniqueSectionDraft } from '../utils/sectionNaming';
-import { getValidationStatusColor } from '../utils/validationStatus';
+import { getValidationStatusColor, hasValidationDot } from '../utils/validationStatus';
+import { filterFindings, validationDotsVisible } from '../utils/validationVisibility';
+import { useVisibility } from '../stores/validationSettingsStore';
 import { resolveSection } from '../utils/sectionResolver';
 import { hasFeatureSectionType as hasFeatureSectionTypeInFiles } from '../utils/featureSections';
 import { toggleSectionSuppressed } from '../utils/sectionSuppress';
 import { applyMcuRenameToFiles, planPrimarySwap, applyNodeUpdates, applyGroupChildRenames, mcuHeaderFor } from '../utils/mcuPrimary';
-import { ackKindForSection } from '../utils/warningAcknowledgment';
-import { acknowledgeWarning, acknowledgeDuplicateWarning } from '../services/api';
+import { ackKindForSection, GCODE_REGISTRY_CODES } from '../utils/warningAcknowledgment';
+import { acknowledgeWarning, acknowledgeDuplicateWarning, acknowledgeWarningsBulk } from '../services/api';
 import WarningBadge from './nodes/WarningBadge';
 import McuNameDialog from './dialogs/McuNameDialog';
 
@@ -111,6 +113,10 @@ export default function SettingsPanel() {
     addSection,
     revalidateFile,
   } = useConfigStore();
+  const visibility = useVisibility();
+  // Colored status dots exist to surface error/warning findings; with the
+  // tiers hidden (or validation off) they are removed entirely.
+  const dotsVisible = validationDotsVisible(visibility);
   const { selectedNodeId, nodes, addSubComponentNode, addFeatureNode, updateNodeData, selectedEdgeId, edges, updateEdgeData, setSelectedNode, setSelectedEdge } = useGraphStore();
 
   const [showHidden, setShowHidden] = useState(false);
@@ -210,8 +216,8 @@ export default function SettingsPanel() {
 
   // Get validation issues for this section
   const sectionIssues = useMemo(() => {
-    if (!sectionHeader) return [] as Array<{ severity: 'error' | 'warning' | 'info'; message: string; code?: string }>;
-    const issues: Array<{ severity: 'error' | 'warning' | 'info'; message: string; code?: string }> = [];
+    if (!sectionHeader) return [] as Array<{ severity: 'error' | 'warning' | 'info'; message: string; code?: string; extra?: string; param?: string; file?: string; section?: string }>;
+    const issues: Array<{ severity: 'error' | 'warning' | 'info'; message: string; code?: string; extra?: string; param?: string; file?: string; section?: string }> = [];
     const validationFiles = sectionConfigFile
       ? [sectionConfigFile]
       : nodeConfigFile
@@ -220,18 +226,20 @@ export default function SettingsPanel() {
     for (const filename of validationFiles) {
       const result = validation[filename];
       if (!result) continue;
-      for (const issue of result.errors) {
+      // Settings > Validation: severities the user disabled are hidden here
+      // too (and their Acknowledge buttons go with them).
+      for (const issue of filterFindings(result.errors, visibility)) {
         if (issue.section !== sectionHeader) continue;
         // Info findings show like warnings here (same rows, muted grey) so
         // they are visible when the card is selected — but never get an
         // Acknowledge button: the ack gate only recognizes warning issues.
         if (issue.severity === 'error' || issue.severity === 'warning' || issue.severity === 'info') {
-          issues.push({ severity: issue.severity, message: issue.message, code: issue.code });
+          issues.push({ severity: issue.severity, message: issue.message, code: issue.code, extra: issue.extra, param: issue.param, file: filename, section: issue.section });
         }
       }
     }
     return issues;
-  }, [nodeConfigFile, sectionConfigFile, sectionHeader, validation]);
+  }, [nodeConfigFile, sectionConfigFile, sectionHeader, validation, visibility]);
 
   const sectionAckKind = useMemo(
     () => ackKindForSection(sectionIssues),
@@ -766,6 +774,23 @@ export default function SettingsPanel() {
   }, [sectionEditText, activeFile, sectionHeader, sectionConfigFile, configFiles, effectiveSectionLineNumber, updateConfigFile, selectedNodeId, selectedNode, selectedSection, schemas, updateNodeData, setSelectedSection, revalidateFile]);
 
   const handleAcknowledgeWarning = useCallback(async () => {
+    const registryIssues = sectionIssues.filter(
+      (i) => i.severity === 'warning' && i.code
+        && GCODE_REGISTRY_CODES.has(i.code));
+    if (sectionAckKind === 'registry' && registryIssues.length > 0) {
+      // Per-command acks via the bulk identity endpoint — same identities the
+      // save gate sends, so both paths agree. Ack everything in this section.
+      await acknowledgeWarningsBulk(registryIssues.map((i) => ({
+        file: i.file ?? sectionConfigFile ?? '',
+        code: i.code ?? '',
+        section: i.section ?? sectionHeader ?? '',
+        param: i.param ?? 'gcode',
+        extra: i.extra ?? '',
+      })));
+      const files = new Set(registryIssues.map((i) => i.file ?? sectionConfigFile).filter(Boolean) as string[]);
+      for (const f of files) void revalidateFile(f);
+      return;
+    }
     if (!section || !sectionConfigFile) return;
     if (sectionAckKind === 'duplicate') {
       await acknowledgeDuplicateWarning(section);
@@ -775,7 +800,7 @@ export default function SettingsPanel() {
     // Duplicates (and cross-file warnings generally) live on other files too,
     // so revalidate the whole project — not just this file.
     void revalidateFile(sectionConfigFile);
-  }, [section, sectionConfigFile, sectionAckKind, revalidateFile]);
+  }, [section, sectionConfigFile, sectionAckKind, sectionIssues, sectionHeader, revalidateFile]);
 
   // MCU name dialog overlay (rendered above all other content)
   const mcuNameDialog = mcuNamePrompt ? (
@@ -1132,10 +1157,12 @@ export default function SettingsPanel() {
                 className="flex items-center justify-between w-full px-2 py-1.5 rounded-lg text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors group"
               >
                 <span className="flex items-center gap-2 min-w-0">
-                  <span
-                    className="w-2 h-2 rounded-full shrink-0"
-                    style={{ backgroundColor: getValidationStatusColor(child.validationStatus || 'valid') }}
-                  />
+                  {dotsVisible && hasValidationDot(child.validationStatus || 'valid') && (
+                    <span
+                      className="w-2 h-2 rounded-full shrink-0"
+                      style={{ backgroundColor: getValidationStatusColor(child.validationStatus || 'valid') }}
+                    />
+                  )}
                   <span className="text-[var(--color-text-primary)] font-mono truncate">{child.label}</span>
                 </span>
                 <span className="text-[10px] text-[var(--color-text-secondary)] opacity-0 group-hover:opacity-100 shrink-0 ml-2">Edit →</span>
@@ -1256,7 +1283,9 @@ export default function SettingsPanel() {
               className="text-xs px-2 py-1 rounded bg-[var(--color-bg-tertiary)] hover:bg-[var(--color-warning)] hover:text-[var(--color-bg-primary)] transition-colors"
               title={sectionAckKind === 'duplicate'
                 ? 'Acknowledge this duplicate section and stop flagging the save button'
-                : 'Acknowledge this unknown section and hide its warning in future validations'}
+                : sectionAckKind === 'registry'
+                  ? 'Acknowledge these gcode command warnings and hide them in future validations'
+                  : 'Acknowledge this unknown section and hide its warning in future validations'}
             >
               Acknowledge Warning
             </button>
@@ -1755,6 +1784,9 @@ function ChildNodesList({
   title?: string;
 }) {
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
+  // Settings > Validation: status dots render only when error/warning
+  // findings are visible.
+  const dotsVisible = validationDotsVisible(useVisibility());
 
   // Group child nodes by componentGroup
   const groups = useMemo(() => {
@@ -1793,7 +1825,9 @@ function ChildNodesList({
                   }}
                   className="flex items-center gap-2 w-full px-2 py-1.5 rounded-lg text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors"
                 >
-                  <span className="w-2 h-2 rounded-full" style={{ backgroundColor: getValidationStatusColor(nodeStatus) }} />
+                  {dotsVisible && hasValidationDot(nodeStatus) && (
+                    <span className="w-2 h-2 rounded-full" style={{ backgroundColor: getValidationStatusColor(nodeStatus) }} />
+                  )}
                   <span className="text-[var(--color-text-primary)]">{d.label as string}</span>
                 </button>
               );
@@ -1817,7 +1851,9 @@ function ChildNodesList({
                 }}
                 className="flex items-center gap-2 w-full px-2 py-1.5 rounded-lg text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors"
               >
-                <span className="w-2 h-2 rounded-full" style={{ backgroundColor: getValidationStatusColor(nodeStatus) }} />
+                {dotsVisible && hasValidationDot(nodeStatus) && (
+                  <span className="w-2 h-2 rounded-full" style={{ backgroundColor: getValidationStatusColor(nodeStatus) }} />
+                )}
                 <span className="text-[var(--color-text-primary)]">{d.label as string}</span>
                 <span className="text-[10px] text-[var(--color-text-secondary)] ml-auto">{n.type}</span>
               </button>
@@ -1844,7 +1880,9 @@ function ChildNodesList({
                 >
                   <path d="M3 1l4 4-4 4" stroke="currentColor" strokeWidth="1.5" />
                 </svg>
-                <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: getValidationStatusColor(groupStatus) }} />
+                {dotsVisible && hasValidationDot(groupStatus) && (
+                  <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: getValidationStatusColor(groupStatus) }} />
+                )}
                 <span className="text-[var(--color-text-primary)] font-medium">{groupLabel}</span>
                 <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] ml-auto">
                   {nodes.length}
@@ -1863,7 +1901,9 @@ function ChildNodesList({
                             onClick={() => onSelectNode(n.id)}
                             className="flex items-center gap-2 w-full px-2 py-1 rounded text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors"
                           >
-                            <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: getValidationStatusColor(nodeStatus) }} />
+                            {dotsVisible && hasValidationDot(nodeStatus) && (
+                              <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: getValidationStatusColor(nodeStatus) }} />
+                            )}
                             <span className="text-[var(--color-text-primary)] truncate font-medium">{d.label as string}</span>
                             <span className="text-[10px] text-[var(--color-text-secondary)] ml-auto">open</span>
                           </button>
@@ -1874,7 +1914,9 @@ function ChildNodesList({
                                 onClick={() => onSelectSection(child.sectionHeader, child.configFile ?? null, child.sectionLineNumber ?? null)}
                                 className="flex items-center gap-2 w-full px-2 py-1 rounded text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors"
                               >
-                                <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: getValidationStatusColor(child.validationStatus || 'valid') }} />
+                                {dotsVisible && hasValidationDot(child.validationStatus || 'valid') && (
+                                  <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: getValidationStatusColor(child.validationStatus || 'valid') }} />
+                                )}
                                 <span className="text-[var(--color-text-primary)] truncate">{child.label}</span>
                               </button>
                             ))}
@@ -1890,7 +1932,9 @@ function ChildNodesList({
                         }}
                         className="flex items-center gap-2 w-full px-2 py-1 rounded text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors"
                       >
-                        <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: getValidationStatusColor(nodeStatus) }} />
+                        {dotsVisible && hasValidationDot(nodeStatus) && (
+                          <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: getValidationStatusColor(nodeStatus) }} />
+                        )}
                         <span className="text-[var(--color-text-primary)] truncate">{d.label as string}</span>
                       </button>
                     );
@@ -1943,6 +1987,9 @@ function HardwareOverviewPanel({
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(hwData.label);
   const validationStatus = (hwData.validationStatus || 'valid') as ValidationStatus;
+  // Settings > Validation: the header badge renders only when error/warning
+  // findings are visible (a green "all clear" dot over hidden findings lies).
+  const overviewDotsVisible = validationDotsVisible(useVisibility());
 
   const { configFiles: allConfigFiles } = useConfigStore();
 
@@ -1982,7 +2029,7 @@ function HardwareOverviewPanel({
       {/* Header */}
       <div className="p-3 border-b border-[var(--color-bg-tertiary)] shrink-0">
         <div className="flex items-center gap-2">
-          <WarningBadge status={validationStatus} size={10} />
+          {overviewDotsVisible && <WarningBadge status={validationStatus} size={10} />}
           {renaming ? (
             <input
               autoFocus

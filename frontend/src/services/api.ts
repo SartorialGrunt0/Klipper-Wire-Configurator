@@ -107,19 +107,33 @@ export async function parseConfigText(
 
 /* ── Validate ────────────────────────────────────────── */
 
-export async function validateConfig(config: ConfigFile): Promise<ValidationResult> {
+export async function validateConfig(
+  config: ConfigFile,
+  options?: { gcodeRegistry?: boolean },
+): Promise<ValidationResult> {
   return request('/validate', {
     method: 'POST',
-    body: JSON.stringify(config),
+    body: JSON.stringify(
+      options?.gcodeRegistry === false
+        ? { ...config, gcode_registry: false }
+        : config,
+    ),
   });
 }
 
 export async function validateProject(
   configFiles: Record<string, ConfigFile>,
+  options?: { gcodeRegistry?: boolean },
 ): Promise<Record<string, ValidationResult>> {
   const result = await request<{ files: Record<string, ValidationResult> }>('/validate-project', {
     method: 'POST',
-    body: JSON.stringify({ config_files: Object.values(configFiles) }),
+    body: JSON.stringify({
+      config_files: Object.values(configFiles),
+      // gcode command registry scan: ON for the editor UI; the AI-draft
+      // pipeline passes false so command-name findings stay out of the
+      // chat retry loop (they would join the blocking issue set).
+      ...(options?.gcodeRegistry === false ? { gcode_registry: false } : {}),
+    }),
   });
   return result.files;
 }
@@ -139,8 +153,8 @@ export async function acknowledgeDuplicateWarning(section: ConfigSection): Promi
 }
 
 /** Bulk-acknowledge warning findings by stable identity (Phase 4 save gate).
- *  The backend derives the `extra` discriminator server-side, so the client
- *  sends `''` — what must match is file|code|section|param. */
+ *  Send each finding's `extra` back verbatim (gcode registry findings carry
+ *  the command name; everything else ''). The backend normalizes per code. */
 export async function acknowledgeWarningsBulk(identities: Array<{
   file: string;
   code: string;
@@ -152,6 +166,39 @@ export async function acknowledgeWarningsBulk(identities: Array<{
     method: 'POST',
     body: JSON.stringify({ identities }),
   });
+}
+
+/** Every stored acknowledgement across the three ack stores (Settings >
+ *  Acknowledgements manager). Keys are verbatim store entries. */
+export interface AcknowledgementList {
+  sections: string[];
+  duplicate_section_types: string[];
+  identities: string[];
+}
+
+export async function listAcknowledgements(): Promise<AcknowledgementList> {
+  return request<AcknowledgementList>('/warning-acknowledgements');
+}
+
+export type AcknowledgementKind = 'section' | 'duplicate' | 'identity';
+
+export async function removeAcknowledgement(
+  kind: AcknowledgementKind,
+  key: string,
+): Promise<{ status: string; kind: string; removed: number }> {
+  return request('/warning-acknowledgements', {
+    method: 'DELETE',
+    body: JSON.stringify({ kind, key }),
+  });
+}
+
+export async function clearAllAcknowledgements(): Promise<{
+  status: string;
+  sections: number;
+  duplicate_section_types: number;
+  identities: number;
+}> {
+  return request('/warning-acknowledgements/all', { method: 'DELETE' });
 }
 
 /* ── Export ───────────────────────────────────────────── */

@@ -4,6 +4,8 @@ import type { CustomGroupNodeData } from '../../types/graph';
 import { useGraphStore } from '../../stores/graphStore';
 import NodeActions from './NodeActions';
 import WarningBadge from './WarningBadge';
+import { validationDotsVisible } from '../../utils/validationVisibility';
+import { useVisibility } from '../../stores/validationSettingsStore';
 
 const selectNodes = (s: { nodes: ReturnType<typeof useGraphStore.getState>['nodes'] }) => s.nodes;
 const selectToggle = (s: ReturnType<typeof useGraphStore.getState>) => s.toggleHardwareCollapse;
@@ -28,6 +30,8 @@ function CustomGroupNode({ data, selected, id }: NodeProps) {
   const isSelected = selectedNodeId === id;
 
   const [isHovered, setIsHovered] = useState(false);
+  // Settings > Validation: error dots disappear when the tiers are hidden.
+  const dotsVisible = validationDotsVisible(useVisibility());
   const { inProgress: isConnecting } = useConnection();
   const showHandles = isHovered || isConnecting;
 
@@ -74,7 +78,7 @@ function CustomGroupNode({ data, selected, id }: NodeProps) {
         className="kwc-node-header"
         style={{ backgroundColor: `${color}22`, borderBottom: `1px solid ${color}44` }}
       >
-        {nodeData.hasErrors && <WarningBadge />}
+        {nodeData.hasErrors && dotsVisible && <WarningBadge />}
         <span className="text-xs font-semibold" style={{ color }}>
           {nodeData.label}
         </span>

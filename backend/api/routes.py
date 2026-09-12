@@ -9,6 +9,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import PlainTextResponse
 
 from models.config_models import (
+    AcknowledgementRemovalRequest,
     BulkWarningAcknowledgementRequest,
     ConfigUpdate,
     ExportRequest,
@@ -45,7 +46,14 @@ from services.warning_acknowledgments import (
     acknowledge_duplicate_section_type,
     acknowledge_warning_for_section,
     acknowledge_warning_identities,
+    clear_all_acknowledgements,
     finding_identity,
+    load_acknowledged_duplicate_section_types,
+    load_acknowledged_warning_identities,
+    load_acknowledged_warning_sections,
+    remove_acknowledged_duplicate_section_type,
+    remove_acknowledged_warning_identity,
+    remove_acknowledged_warning_section,
 )
 
 router = APIRouter()
@@ -224,7 +232,7 @@ async def parse_config_text(data: dict):
 async def validate_config_api(data: ConfigUpdate):
     """Validate a configuration."""
     config = _config_update_to_config_file(data)
-    validation = validate_config(config)
+    validation = validate_config(config, gcode_registry=data.gcode_registry)
     return validation.to_dict()
 
 
@@ -238,7 +246,8 @@ async def validate_project_api(data: ProjectValidationRequest):
             config.raw_text = config_data.raw_text
         configs[config_data.filename] = config
 
-    validations = validate_project_configs(configs)
+    validations = validate_project_configs(
+        configs, gcode_registry=data.gcode_registry)
     return {
         "files": {
             filename: validation.to_dict()
@@ -296,18 +305,19 @@ async def acknowledge_bulk_warnings_api(
     """Bulk-acknowledge warning findings by stable identity (Phase 4 save gate).
 
     Each identity is ``file|code|section|param|extra`` — ``extra`` is
-    DERIVED SERVER-SIDE (the include spec for missing includes; empty
-    otherwise) so suppression and the ack store always agree. Client
-    ``extra`` is accepted for API symmetry but ignored. Warnings only: the
-    validator never suppresses errors or info from this store. Idempotent;
-    the frontend revalidates the project afterwards so the warning state
-    clears.
+    DERIVED SERVER-SIDE (the include spec for missing includes; the command
+    name for gcode registry findings, round-tripped from the finding's
+    ``extra`` field; empty otherwise) so suppression and the ack store
+    always agree. Warnings only: the validator never suppresses errors or
+    info from this store. Idempotent; the frontend revalidates the project
+    afterwards so the warning state clears.
     """
     if not data.identities:
         raise HTTPException(
             status_code=422, detail="No warning identities to acknowledge")
     identities = [
-        finding_identity(item.file, item.code, item.section, item.param)
+        finding_identity(item.file, item.code, item.section, item.param,
+                         item.extra)
         for item in data.identities
     ]
     file_path = acknowledge_warning_identities(identities)
@@ -316,6 +326,57 @@ async def acknowledge_bulk_warnings_api(
         "file": file_path,
         "count": len(identities),
     }
+
+
+@router.get("/warning-acknowledgements")
+async def list_warning_acknowledgements_api():
+    """List every stored acknowledgement across the three ack stores.
+
+    Feeds the Settings-menu Acknowledgements manager. Keys are returned
+    verbatim so the DELETE endpoint can match them exactly: ``sections``
+    are canonical snippets, ``duplicate_section_types`` are section types,
+    ``identities`` are bulk finding identities (``file|code|section|param|
+    extra``).
+    """
+    return {
+        "sections": sorted(load_acknowledged_warning_sections()),
+        "duplicate_section_types": sorted(
+            load_acknowledged_duplicate_section_types()),
+        "identities": sorted(load_acknowledged_warning_identities()),
+    }
+
+
+@router.delete("/warning-acknowledgements")
+async def remove_warning_acknowledgement_api(
+    data: AcknowledgementRemovalRequest,
+):
+    """Remove a single acknowledgement entry (exact key match per store).
+
+    ``kind``: ``section`` | ``duplicate`` | ``identity``. 404 when no entry
+    matches — the caller's view is stale and should refresh the list.
+    """
+    removers = {
+        "section": remove_acknowledged_warning_section,
+        "duplicate": remove_acknowledged_duplicate_section_type,
+        "identity": remove_acknowledged_warning_identity,
+    }
+    remover = removers.get(data.kind)
+    if remover is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown acknowledgement kind '{data.kind}'")
+    removed = remover(data.key)
+    if not removed:
+        raise HTTPException(
+            status_code=404, detail="Acknowledgement not found")
+    return {"status": "deleted", "kind": data.kind, "removed": removed}
+
+
+@router.delete("/warning-acknowledgements/all")
+async def clear_all_warning_acknowledgements_api():
+    """Clear every acknowledgement from all three stores (Clear all)."""
+    counts = clear_all_acknowledgements()
+    return {"status": "cleared", **counts}
 
 
 # ── Export ──────────────────────────────────────────────────────

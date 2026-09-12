@@ -485,8 +485,10 @@ export function useAssistantDraft() {
       });
 
       const [baselineValidations, candidateValidations] = await Promise.all([
-        api.validateProject(baselineProjectConfigs),
-        api.validateProject(candidateProjectConfigs),
+        // gcode_registry:false — command-name findings must not join the
+        // blocking set fed back to the model; the editor UI keeps them.
+        api.validateProject(baselineProjectConfigs, { gcodeRegistry: false }),
+        api.validateProject(candidateProjectConfigs, { gcodeRegistry: false }),
       ]);
 
       return {

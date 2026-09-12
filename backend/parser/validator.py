@@ -12,6 +12,8 @@ Checks for:
 from __future__ import annotations
 
 import glob
+import json
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -33,6 +35,20 @@ from services.warning_acknowledgments import (
     load_acknowledged_warning_identities,
     load_acknowledged_warning_sections,
 )
+from services.gcode_registry import (
+    STATUS_CONDITIONAL_OUT,
+    build_project_context,
+    scan_gcode_body,
+)
+
+# Section types whose `gcode:` params are executed G-code (scanned for
+# command-name validity against the G-code command registry).
+_GCODE_SCAN_SECTION_TYPES = {"gcode_macro", "delayed_gcode"}
+
+# Finding codes produced by the registry scan (defined in
+# services.warning_acknowledgments so identity derivation needs no import
+# back into the validator; re-exported here for validator consumers).
+from services.warning_acknowledgments import GCODE_FINDING_CODES  # noqa: F401
 
 
 @dataclass
@@ -47,6 +63,11 @@ class ValidationError:
     # Empty string when no consumer needs a code. `message` stays human-facing
     # and may be reworded freely without breaking those branches.
     code: str = ""
+    # Code-specific discriminator for ack identities, set at the emit site
+    # (gcode findings carry the command name, so one ack silences one
+    # command in a macro, not the whole macro body). Round-tripped to the
+    # client and echoed back on bulk-ack.
+    extra: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -56,6 +77,7 @@ class ValidationError:
             "message": self.message,
             "line_number": self.line_number,
             "code": self.code,
+            "extra": self.extra,
         }
 
 
@@ -712,13 +734,19 @@ def _suppress_acknowledged_warning_identities(
         if not (
             e.severity == "warning"
             and e.code
-            and finding_identity(filename, e.code, e.section, e.param) in acked
+            and finding_identity(filename, e.code, e.section, e.param,
+                                 e.extra) in acked
         )
     ]
 
 
-def validate_config(config: ConfigFile) -> ValidationResult:
-    """Validate a full configuration file."""
+def validate_config(config: ConfigFile, *, gcode_registry: bool = True) -> ValidationResult:
+    """Validate a full configuration file.
+
+    gcode_registry=False suppresses the command-name scan (AI-loop
+    consumers: MCP tools, chat draft validation). The scan stays OFF there
+    until the edit-tools branch wires it deliberately.
+    """
     result = ValidationResult()
     acknowledged_sections = load_acknowledged_warning_sections()
     acknowledged_duplicate_types = load_acknowledged_duplicate_section_types()
@@ -980,6 +1008,12 @@ def validate_config(config: ConfigFile) -> ValidationResult:
         {config.filename: config}, {config.filename: result}, {config.filename},
     )
 
+    # G-code command registry scan (file-local context; project validation
+    # re-derives these findings cross-file). Warning tier only.
+    result.errors.extend(_scan_file_gcode_commands(
+        config, build_project_context({config.filename: config}),
+        enabled=gcode_registry))
+
     # Bulk-ack suppression (Phase 4 save gate): drop warnings whose stable
     # identity is in the identity store. Warnings ONLY — errors are never
     # acknowledged (the save-gate override is per-save by design), and info
@@ -990,7 +1024,97 @@ def validate_config(config: ConfigFile) -> ValidationResult:
     return result
 
 
-def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, ValidationResult]:
+def _scan_file_gcode_commands(
+    config: ConfigFile, context, *, enabled: bool = True,
+) -> list[ValidationError]:
+    """Registry findings for one file's executed-gcode bodies.
+
+    Warning tier ONLY (never error): an unknown name may be a third-party
+    plugin extra the stock extractor can't see; false-ERRORs that block
+    saves violate the validator's trust contract. Acks flow through the
+    standard identity store like any other warning.
+
+    `context` is a ProjectGcodeContext: file-local when validating a single
+    file, whole-project when called from validate_project_configs (cross-
+    file macro calls are legal — Klipper loads includes into one namespace).
+
+    `enabled=False` (AI-loop consumers) returns nothing: command-name
+    findings stay out of the chat retry loop until the edit-tools branch
+    wires them deliberately.
+    """
+    findings: list[ValidationError] = []
+    if not enabled:
+        return findings
+    bodies = [
+        (section, section.get_param("gcode"))
+        for section in config.sections
+        if section.section_type in _GCODE_SCAN_SECTION_TYPES
+        and not section.is_commented_out
+    ]
+    if not bodies:
+        return findings
+    try:
+        # Registry artifact missing/corrupt must never crash validation —
+        # the scan silently no-ops (run scripts/generate-gcode-registry.py).
+        scanned = [
+            (section, base, list(scan_gcode_body(gp.value, context)))
+            for section, gp in bodies
+            if gp is not None and not gp.is_commented_out and gp.value.strip()
+            for base in (gp.line_number - 1,)
+        ]
+    except (FileNotFoundError, json.JSONDecodeError):
+        # Expected, benign case: the generated artifact is missing or
+        # corrupt. Quiet by design (a per-file traceback per validation run
+        # on artifact-less machines is noise); fix is running
+        # scripts/generate-gcode-registry.py.
+        return findings
+    except Exception:  # pragma: no cover - defensive
+        # Swallowed (a broken registry must never take validation down) but
+        # LOGGED with traceback: silently losing the feature is bad, but
+        # silently losing it for a reason nobody can diagnose is worse.
+        logging.getLogger(__name__).warning(
+            "gcode registry scan failed; findings for this file skipped",
+            exc_info=True)
+        return findings
+    for section, base, problems in scanned:
+        for rel_line, verdict in problems:
+            if verdict.status == STATUS_CONDITIONAL_OUT:
+                wanted = ", ".join(f"[{s}]" for s in verdict.required_sections)
+                message = (
+                    f"'{verdict.name}' needs a {wanted} section in the "
+                    "configuration — it will error at runtime without one."
+                )
+                code = "gcode_command_section_missing"
+            else:
+                if verdict.suggestions:
+                    hint = ", ".join(verdict.suggestions)
+                    message = (
+                        f"'{verdict.name}' is not a Klipper command. "
+                        f"Did you mean: {hint}?"
+                    )
+                else:
+                    message = (
+                        f"'{verdict.name}' is not a Klipper command "
+                        "(not defined by any stock module or by a "
+                        "[gcode_macro] in this configuration)."
+                    )
+                code = "unknown_gcode_command"
+            findings.append(ValidationError(
+                severity="warning",
+                section=section.full_header,
+                param="gcode",
+                message=message,
+                line_number=base + rel_line,
+                code=code,
+                # ack granularity: one ack per command, not per macro body
+                extra=verdict.name,
+            ))
+    return findings
+
+
+def validate_project_configs(configs: dict[str, ConfigFile], *,
+                             gcode_registry: bool = True,
+                             ) -> dict[str, ValidationResult]:
     """Validate a set of config files as one Klipper project.
 
     Single-file validation remains file-local. For multi-file projects, this
@@ -998,11 +1122,28 @@ def validate_project_configs(configs: dict[str, ConfigFile]) -> dict[str, Valida
     effective configuration, such as [printer], [stepper_x], or [stepper_z].
     Duplicates are info findings (Klipper merges them, later file wins —
     legal, no action required); an acknowledged section type suppresses them.
+
+    gcode_registry=False suppresses the command-name scan for AI-loop
+    consumers (chat draft validation, MCP tools).
     """
     results = {
-        filename: validate_config(config)
+        filename: validate_config(config, gcode_registry=gcode_registry)
         for filename, config in configs.items()
     }
+
+    # G-code registry findings are context-dependent: a macro in A.cfg
+    # calling a macro defined in B.cfg is legal (one namespace at load).
+    # Drop the file-local scan results and re-derive with project context.
+    if len(configs) > 1 and gcode_registry:
+        project_gcode_ctx = build_project_context(configs)
+        for filename, result in results.items():
+            result.errors = [
+                e for e in result.errors if e.code not in GCODE_FINDING_CODES
+            ]
+            result.errors.extend(_scan_file_gcode_commands(
+                configs[filename], project_gcode_ctx))
+            # re-derived warnings bypassed the per-file ack pass above
+            _suppress_acknowledged_warning_identities(filename, result)
 
     # Cross-section references (F25): a TMC driver's header references the
     # stepper section it drives; Klipper resolves it at config load

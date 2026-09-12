@@ -30,10 +30,15 @@ class ConfigUpdate(BaseModel):
     includes: list[str] = []
     header_comments: list[str] = []
     raw_text: Optional[str] = None
+    # G-code command registry scan (unknown/conditional command warnings in
+    # macro bodies). ON for the editor/validation UI; the AI-draft pipeline
+    # sends False so command-name findings stay out of the chat retry loop.
+    gcode_registry: bool = True
 
 
 class ProjectValidationRequest(BaseModel):
     config_files: list[ConfigUpdate]
+    gcode_registry: bool = True
 
 
 class WarningAcknowledgementRequest(BaseModel):
@@ -51,6 +56,18 @@ class BulkWarningIdentity(BaseModel):
 
 class BulkWarningAcknowledgementRequest(BaseModel):
     identities: List[BulkWarningIdentity]
+
+
+class AcknowledgementRemovalRequest(BaseModel):
+    """Remove one acknowledgement entry (Settings > Acknowledgements list).
+
+    ``kind`` selects the store: ``section`` (unknown-section canonical
+    snippet), ``duplicate`` (section type), or ``identity`` (bulk
+    finding identity ``file|code|section|param|extra``). ``key`` must match
+    the stored entry exactly as returned by the list endpoint.
+    """
+    kind: str
+    key: str
 
 
 class ProjectFile(BaseModel):

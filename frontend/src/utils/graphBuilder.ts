@@ -10,6 +10,8 @@
 import type { ConfigFile, ConfigSection, ConfigParam, SectionSchema, ValidationResult } from '../types/config';
 import type { HardwareType, CommunicationType } from '../types/config';
 import { getBoardTypeMarker } from './boardTypeMarker';
+import { filterValidationMap } from './validationVisibility';
+import { useValidationSettingsStore } from '../stores/validationSettingsStore';
 
 const STEPPER_SECTION_RE = /^stepper_[a-z]+(\d+)?$/;
 const EXTRUDER_SECTION_RE = /^extruder(\d+)?$/;
@@ -271,10 +273,16 @@ export function buildProjectGraph(
   const activeConfigs = Object.keys(recognizedConfigs).length > 0 ? recognizedConfigs : configs;
   const activeFilenames = Object.keys(activeConfigs);
 
-  // Build a set of section headers that have validation errors
+  // Build a set of section headers that have validation errors.
+  // Settings > Validation: hidden severities must not seed the initial
+  // error flags (the App.tsx status effect keeps this consistent when the
+  // settings change afterwards).
   const sectionsWithErrors = new Set<string>();
-  if (validations) {
-    for (const v of Object.values(validations)) {
+  const visibleValidations = validations
+    ? filterValidationMap(validations, useValidationSettingsStore.getState())
+    : undefined;
+  if (visibleValidations) {
+    for (const v of Object.values(visibleValidations)) {
       for (const err of v.errors) {
         if (err.severity === 'error' && err.section) {
           sectionsWithErrors.add(err.section);

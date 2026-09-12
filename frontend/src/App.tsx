@@ -42,6 +42,8 @@ import type { AppEdge, AppNode, ValidationStatus } from './types/graph';
 import type { ConfigFile, ValidationResult } from './types/config';
 import type { MacroDesignerPersistedState } from './types/macroDesigner';
 import { combineValidationStatuses } from './utils/validationStatus';
+import { filterValidationMap } from './utils/validationVisibility';
+import { useVisibility } from './stores/validationSettingsStore';
 import { isBackupConfigFilename } from './utils/backupFiles';
 import {
   LAYOUT_STORAGE_KEY,
@@ -249,6 +251,7 @@ export default function App() {
   } = useGraphStore();
 
   const { selectedSection, setSelectedSection, validation } = useConfigStore();
+  const visibility = useVisibility();
   const macroDesignerDrafts = useMacroDesignerStore((state) => state.drafts);
   const macroDesignerNoGoZones = useMacroDesignerStore((state) => state.noGoZones);
   const macroDesignerDockPosition = useMacroDesignerStore((state) => state.dockPosition);
@@ -455,7 +458,10 @@ export default function App() {
 
   useEffect(() => {
     const sectionStatuses = new Map<string, ValidationStatus>();
-    for (const [filename, result] of Object.entries(validation)) {
+    // Settings > Validation: hidden findings (master off included) must not
+    // color graph dots — statuses derive from the FILTERED findings map.
+    const visibleValidation = filterValidationMap(validation, visibility);
+    for (const [filename, result] of Object.entries(visibleValidation)) {
       for (const issue of result.errors) {
         if (!issue.section) continue;
         const sectionKey = getSectionValidationKey(filename, issue.section);
@@ -557,7 +563,7 @@ export default function App() {
     if (changed) {
       setNodes(nextNodes);
     }
-  }, [nodes, setNodes, validation]);
+  }, [nodes, setNodes, validation, visibility]);
 
   // Keyboard shortcuts for undo/redo (graph only — let textarea handle its own undo)
   useEffect(() => {

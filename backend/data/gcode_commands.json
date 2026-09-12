@@ -1,0 +1,2032 @@
+{
+  "schema_version": 1,
+  "source_rev": "2d7717e3b62ea2fe3401b27f54f8681f80451c69",
+  "generated_at": "2026-09-11T14:28:34+00:00",
+  "commands": {
+    "ABORT": {
+      "extra": "bed_screws",
+      "requires_sections": [
+        "bed_screws",
+        "load_cell",
+        "temperature_probe"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 68
+    },
+    "ACCELEROMETER_DEBUG_READ": {
+      "extra": "adxl345",
+      "requires_sections": [
+        "adxl345"
+      ],
+      "requires_mode": "any",
+      "params": {
+        "CHIP": {
+          "required": true
+        }
+      },
+      "mux_key": "CHIP",
+      "simulated": false,
+      "source_line": 140
+    },
+    "ACCELEROMETER_DEBUG_WRITE": {
+      "extra": "adxl345",
+      "requires_sections": [
+        "adxl345"
+      ],
+      "requires_mode": "any",
+      "params": {
+        "CHIP": {
+          "required": true
+        }
+      },
+      "mux_key": "CHIP",
+      "simulated": false,
+      "source_line": 143
+    },
+    "ACCELEROMETER_MEASURE": {
+      "extra": "adxl345",
+      "requires_sections": [
+        "adxl345"
+      ],
+      "requires_mode": "any",
+      "params": {
+        "CHIP": {
+          "required": true
+        }
+      },
+      "mux_key": "CHIP",
+      "simulated": false,
+      "source_line": 134
+    },
+    "ACCELEROMETER_QUERY": {
+      "extra": "adxl345",
+      "requires_sections": [
+        "adxl345"
+      ],
+      "requires_mode": "any",
+      "params": {
+        "CHIP": {
+          "required": true
+        }
+      },
+      "mux_key": "CHIP",
+      "simulated": false,
+      "source_line": 137
+    },
+    "ACCEPT": {
+      "extra": "bed_screws",
+      "requires_sections": [
+        "bed_screws",
+        "load_cell",
+        "temperature_probe"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 64
+    },
+    "ACTIVATE_EXTRUDER": {
+      "extra": "extruder",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "params": {
+        "EXTRUDER": {
+          "required": true
+        }
+      },
+      "mux_key": "EXTRUDER",
+      "simulated": true,
+      "source_line": 189
+    },
+    "ADJUSTED": {
+      "extra": "bed_screws",
+      "requires_sections": [
+        "bed_screws"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 66
+    },
+    "ANGLE_CALIBRATE": {
+      "extra": "angle",
+      "requires_sections": [
+        "angle"
+      ],
+      "requires_mode": "any",
+      "params": {
+        "CHIP": {
+          "required": true
+        }
+      },
+      "mux_key": "CHIP",
+      "simulated": false,
+      "source_line": 49
+    },
+    "ANGLE_CHIP_CALIBRATE": {
+      "extra": "angle",
+      "requires_sections": [
+        "angle"
+      ],
+      "requires_mode": "any",
+      "params": {
+        "CHIP": {
+          "required": true
+        }
+      },
+      "mux_key": "CHIP",
+      "simulated": false,
+      "source_line": 478
+    },
+    "ANGLE_DEBUG_READ": {
+      "extra": "angle",
+      "requires_sections": [
+        "angle"
+      ],
+      "requires_mode": "any",
+      "params": {
+        "CHIP": {
+          "required": true
+        }
+      },
+      "mux_key": "CHIP",
+      "simulated": false,
+      "source_line": 311
+    },
+    "ANGLE_DEBUG_WRITE": {
+      "extra": "angle",
+      "requires_sections": [
+        "angle"
+      ],
+      "requires_mode": "any",
+      "params": {
+        "CHIP": {
+          "required": true
+        }
+      },
+      "mux_key": "CHIP",
+      "simulated": false,
+      "source_line": 314
+    },
+    "AXIS_TWIST_COMPENSATION_CALIBRATE": {
+      "extra": "axis_twist_compensation",
+      "requires_sections": [
+        "axis_twist_compensation"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 147
+    },
+    "BED_MESH_CALIBRATE": {
+      "extra": "bed_mesh",
+      "requires_sections": [
+        "bed_mesh"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 347
+    },
+    "BED_MESH_CLEAR": {
+      "extra": "bed_mesh",
+      "requires_sections": [
+        "bed_mesh"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 118
+    },
+    "BED_MESH_MAP": {
+      "extra": "bed_mesh",
+      "requires_sections": [
+        "bed_mesh"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 115
+    },
+    "BED_MESH_OFFSET": {
+      "extra": "bed_mesh",
+      "requires_sections": [
+        "bed_mesh"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 121
+    },
+    "BED_MESH_OUTPUT": {
+      "extra": "bed_mesh",
+      "requires_sections": [
+        "bed_mesh"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 112
+    },
+    "BED_MESH_PROFILE": {
+      "extra": "bed_mesh",
+      "requires_sections": [
+        "bed_mesh"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 1662
+    },
+    "BED_SCREWS_ADJUST": {
+      "extra": "bed_screws",
+      "requires_sections": [
+        "bed_screws"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 37
+    },
+    "BED_TILT_CALIBRATE": {
+      "extra": "bed_tilt",
+      "requires_sections": [
+        "bed_tilt"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 55
+    },
+    "BLTOUCH_DEBUG": {
+      "extra": "bltouch",
+      "requires_sections": [
+        "bltouch"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 68
+    },
+    "BLTOUCH_STORE": {
+      "extra": "bltouch",
+      "requires_sections": [
+        "bltouch"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 70
+    },
+    "CALC_MEASURED_SKEW": {
+      "extra": "skew_correction",
+      "requires_sections": [
+        "skew_correction"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 36
+    },
+    "CALIBRATE": {
+      "extra": "load_cell",
+      "requires_sections": [
+        "load_cell"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 178
+    },
+    "CANCEL_PRINT": {
+      "extra": "pause_resume",
+      "requires_sections": [
+        "pause_resume"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 24
+    },
+    "CLEAR_PAUSE": {
+      "extra": "pause_resume",
+      "requires_sections": [
+        "pause_resume"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 22
+    },
+    "DELTA_ANALYZE": {
+      "extra": "delta_calibrate",
+      "requires_sections": [
+        "delta_calibrate"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 125
+    },
+    "DELTA_CALIBRATE": {
+      "extra": "delta_calibrate",
+      "requires_sections": [
+        "delta_calibrate"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 123
+    },
+    "DISABLE_FILAMENT_WIDTH_LOG": {
+      "extra": "hall_filament_width_sensor",
+      "requires_sections": [
+        "hall_filament_width_sensor"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 96
+    },
+    "DISABLE_FILAMENT_WIDTH_SENSOR": {
+      "extra": "hall_filament_width_sensor",
+      "requires_sections": [
+        "hall_filament_width_sensor",
+        "tsl1401cl_filament_width_sensor"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 84
+    },
+    "DUMP_TMC": {
+      "extra": "tmc",
+      "requires_sections": [
+        "tmc2130",
+        "tmc2208",
+        "tmc2209",
+        "tmc2225",
+        "tmc2240",
+        "tmc2660",
+        "tmc5160",
+        "tmc5161",
+        "tmc_internal"
+      ],
+      "requires_mode": "any",
+      "params": {
+        "STEPPER": {
+          "required": true
+        }
+      },
+      "mux_key": "STEPPER",
+      "simulated": false,
+      "source_line": 523
+    },
+    "ECHO": {
+      "extra": "gcode",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 124
+    },
+    "ENABLE_FILAMENT_WIDTH_LOG": {
+      "extra": "hall_filament_width_sensor",
+      "requires_sections": [
+        "hall_filament_width_sensor"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 93
+    },
+    "ENABLE_FILAMENT_WIDTH_SENSOR": {
+      "extra": "hall_filament_width_sensor",
+      "requires_sections": [
+        "hall_filament_width_sensor",
+        "tsl1401cl_filament_width_sensor"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 87
+    },
+    "ENDSTOP_PHASE_CALIBRATE": {
+      "extra": "endstop_phase",
+      "requires_sections": [
+        "stepper_endstop"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 138
+    },
+    "EXCLUDE_OBJECT": {
+      "extra": "exclude_object",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 31
+    },
+    "EXCLUDE_OBJECT_DEFINE": {
+      "extra": "exclude_object",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 34
+    },
+    "EXCLUDE_OBJECT_END": {
+      "extra": "exclude_object",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 28
+    },
+    "EXCLUDE_OBJECT_START": {
+      "extra": "exclude_object",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 25
+    },
+    "FIRMWARE_RESTART": {
+      "extra": "gcode",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 124
+    },
+    "FORCE_MOVE": {
+      "extra": "force_move",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "params": {
+        "STEPPER": {
+          "required": true
+        }
+      },
+      "mux_key": "STEPPER",
+      "simulated": true,
+      "source_line": 57
+    },
+    "G0": {
+      "extra": "gcode_move",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 23
+    },
+    "G1": {
+      "extra": "gcode_move",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 22
+    },
+    "G10": {
+      "extra": "firmware_retraction",
+      "requires_sections": [
+        "firmware_retraction"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 23
+    },
+    "G11": {
+      "extra": "firmware_retraction",
+      "requires_sections": [
+        "firmware_retraction"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 24
+    },
+    "G17": {
+      "extra": "gcode_arcs",
+      "requires_sections": [
+        "gcode_arcs"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 38
+    },
+    "G18": {
+      "extra": "gcode_arcs",
+      "requires_sections": [
+        "gcode_arcs"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 39
+    },
+    "G19": {
+      "extra": "gcode_arcs",
+      "requires_sections": [
+        "gcode_arcs"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 40
+    },
+    "G2": {
+      "extra": "gcode_arcs",
+      "requires_sections": [
+        "gcode_arcs"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 35
+    },
+    "G20": {
+      "extra": "gcode_move",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 22
+    },
+    "G21": {
+      "extra": "gcode_move",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 22
+    },
+    "G28": {
+      "extra": "homing",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 306
+    },
+    "G3": {
+      "extra": "gcode_arcs",
+      "requires_sections": [
+        "gcode_arcs"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 36
+    },
+    "G4": {
+      "extra": "toolhead",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 559
+    },
+    "G90": {
+      "extra": "gcode_move",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 22
+    },
+    "G91": {
+      "extra": "gcode_move",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 22
+    },
+    "G92": {
+      "extra": "gcode_move",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 22
+    },
+    "GET_CURRENT_SKEW": {
+      "extra": "skew_correction",
+      "requires_sections": [
+        "skew_correction"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 34
+    },
+    "GET_POSITION": {
+      "extra": "gcode_move",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 25
+    },
+    "GET_RETRACTION": {
+      "extra": "firmware_retraction",
+      "requires_sections": [
+        "firmware_retraction"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 21
+    },
+    "HELP": {
+      "extra": "gcode",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 124
+    },
+    "INIT_TMC": {
+      "extra": "tmc",
+      "requires_sections": [
+        "tmc2130",
+        "tmc2208",
+        "tmc2209",
+        "tmc2225",
+        "tmc2240",
+        "tmc2660",
+        "tmc5160",
+        "tmc5161",
+        "tmc_internal"
+      ],
+      "requires_mode": "any",
+      "params": {
+        "STEPPER": {
+          "required": true
+        }
+      },
+      "mux_key": "STEPPER",
+      "simulated": false,
+      "source_line": 354
+    },
+    "LDC_CALIBRATE_DRIVE_CURRENT": {
+      "extra": "ldc1612",
+      "requires_sections": [
+        "ldc1612"
+      ],
+      "requires_mode": "any",
+      "params": {
+        "CHIP": {
+          "required": true
+        }
+      },
+      "mux_key": "CHIP",
+      "simulated": false,
+      "source_line": 43
+    },
+    "LOAD_CELL_CALIBRATE": {
+      "extra": "load_cell",
+      "requires_sections": [
+        "load_cell"
+      ],
+      "requires_mode": "any",
+      "params": {
+        "LOAD_CELL": {
+          "required": true
+        }
+      },
+      "mux_key": "LOAD_CELL",
+      "simulated": false,
+      "source_line": 74
+    },
+    "LOAD_CELL_DIAGNOSTIC": {
+      "extra": "load_cell",
+      "requires_sections": [
+        "load_cell"
+      ],
+      "requires_mode": "any",
+      "params": {
+        "LOAD_CELL": {
+          "required": true
+        }
+      },
+      "mux_key": "LOAD_CELL",
+      "simulated": false,
+      "source_line": 80
+    },
+    "LOAD_CELL_READ": {
+      "extra": "load_cell",
+      "requires_sections": [
+        "load_cell"
+      ],
+      "requires_mode": "any",
+      "params": {
+        "LOAD_CELL": {
+          "required": true
+        }
+      },
+      "mux_key": "LOAD_CELL",
+      "simulated": false,
+      "source_line": 77
+    },
+    "LOAD_CELL_TARE": {
+      "extra": "load_cell",
+      "requires_sections": [
+        "load_cell"
+      ],
+      "requires_mode": "any",
+      "params": {
+        "LOAD_CELL": {
+          "required": true
+        }
+      },
+      "mux_key": "LOAD_CELL",
+      "simulated": false,
+      "source_line": 71
+    },
+    "LOAD_CELL_TEST_TAP": {
+      "extra": "load_cell_probe",
+      "requires_sections": [
+        "load_cell_probe"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 631
+    },
+    "M104": {
+      "extra": "extruder",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 187
+    },
+    "M105": {
+      "extra": "heaters",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 259
+    },
+    "M106": {
+      "extra": "fan",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 109
+    },
+    "M107": {
+      "extra": "fan",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 110
+    },
+    "M109": {
+      "extra": "extruder",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 188
+    },
+    "M110": {
+      "extra": "gcode",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 124
+    },
+    "M112": {
+      "extra": "gcode",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 124
+    },
+    "M114": {
+      "extra": "gcode_move",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 24
+    },
+    "M115": {
+      "extra": "gcode",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 124
+    },
+    "M117": {
+      "extra": "display_status",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 18
+    },
+    "M118": {
+      "extra": "respond",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 25
+    },
+    "M119": {
+      "extra": "query_endstops",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 19
+    },
+    "M140": {
+      "extra": "heater_bed",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 16
+    },
+    "M18": {
+      "extra": "stepper_enable",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 82
+    },
+    "M190": {
+      "extra": "heater_bed",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 17
+    },
+    "M20": {
+      "extra": "virtual_sdcard",
+      "requires_sections": [
+        "virtual_sdcard"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 40
+    },
+    "M204": {
+      "extra": "toolhead",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 564
+    },
+    "M21": {
+      "extra": "virtual_sdcard",
+      "requires_sections": [
+        "virtual_sdcard"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 40
+    },
+    "M220": {
+      "extra": "gcode_move",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 22
+    },
+    "M221": {
+      "extra": "gcode_move",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 22
+    },
+    "M23": {
+      "extra": "virtual_sdcard",
+      "requires_sections": [
+        "virtual_sdcard"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 40
+    },
+    "M24": {
+      "extra": "virtual_sdcard",
+      "requires_sections": [
+        "virtual_sdcard"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 40
+    },
+    "M25": {
+      "extra": "virtual_sdcard",
+      "requires_sections": [
+        "virtual_sdcard"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 40
+    },
+    "M26": {
+      "extra": "virtual_sdcard",
+      "requires_sections": [
+        "virtual_sdcard"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 40
+    },
+    "M27": {
+      "extra": "virtual_sdcard",
+      "requires_sections": [
+        "virtual_sdcard"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 40
+    },
+    "M28": {
+      "extra": "virtual_sdcard",
+      "requires_sections": [
+        "virtual_sdcard"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 42
+    },
+    "M29": {
+      "extra": "virtual_sdcard",
+      "requires_sections": [
+        "virtual_sdcard"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 42
+    },
+    "M30": {
+      "extra": "virtual_sdcard",
+      "requires_sections": [
+        "virtual_sdcard"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 42
+    },
+    "M400": {
+      "extra": "toolhead",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 560
+    },
+    "M73": {
+      "extra": "display_status",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 17
+    },
+    "M82": {
+      "extra": "gcode_move",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 22
+    },
+    "M83": {
+      "extra": "gcode_move",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 22
+    },
+    "M84": {
+      "extra": "stepper_enable",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 83
+    },
+    "MANUAL_PROBE": {
+      "extra": "manual_probe",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 41
+    },
+    "MANUAL_STEPPER": {
+      "extra": "manual_stepper",
+      "requires_sections": [
+        "manual_stepper"
+      ],
+      "requires_mode": "any",
+      "params": {
+        "STEPPER": {
+          "required": true
+        }
+      },
+      "mux_key": "STEPPER",
+      "simulated": false,
+      "source_line": 42
+    },
+    "MEASURE_AXES_NOISE": {
+      "extra": "resonance_tester",
+      "requires_sections": [
+        "resonance_tester"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 289
+    },
+    "NEXT": {
+      "extra": "manual_probe",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 178
+    },
+    "PALETTE_CLEAR": {
+      "extra": "palette2",
+      "requires_sections": [
+        "palette2"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 69
+    },
+    "PALETTE_CONNECT": {
+      "extra": "palette2",
+      "requires_sections": [
+        "palette2"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 63
+    },
+    "PALETTE_CUT": {
+      "extra": "palette2",
+      "requires_sections": [
+        "palette2"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 71
+    },
+    "PALETTE_DISCONNECT": {
+      "extra": "palette2",
+      "requires_sections": [
+        "palette2"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 65
+    },
+    "PALETTE_SMART_LOAD": {
+      "extra": "palette2",
+      "requires_sections": [
+        "palette2"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 73
+    },
+    "PAUSE": {
+      "extra": "pause_resume",
+      "requires_sections": [
+        "pause_resume"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 18
+    },
+    "PID_CALIBRATE": {
+      "extra": "pid_calibrate",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 13
+    },
+    "PROBE": {
+      "extra": "probe",
+      "requires_sections": [
+        "probe"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 54
+    },
+    "PROBE_ACCURACY": {
+      "extra": "probe",
+      "requires_sections": [
+        "probe"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 62
+    },
+    "PROBE_CALIBRATE": {
+      "extra": "probe",
+      "requires_sections": [
+        "probe"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 59
+    },
+    "PROBE_EDDY_CURRENT_CALIBRATE": {
+      "extra": "probe_eddy_current",
+      "requires_sections": [
+        "probe_eddy_current"
+      ],
+      "requires_mode": "any",
+      "params": {
+        "CHIP": {
+          "required": true
+        }
+      },
+      "mux_key": "CHIP",
+      "simulated": false,
+      "source_line": 112
+    },
+    "PROBE_EDDY_CURRENT_TAP_CALIBRATE": {
+      "extra": "probe_eddy_current",
+      "requires_sections": [
+        "probe_eddy_current"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 340
+    },
+    "QUAD_GANTRY_LEVEL": {
+      "extra": "quad_gantry_level",
+      "requires_sections": [
+        "quad_gantry_level"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": true,
+      "source_line": 45
+    },
+    "QUERY_ADC": {
+      "extra": "query_adc",
+      "requires_sections": [
+        "adc_temperature"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 12
+    },
+    "QUERY_BUTTON": {
+      "extra": "gcode_button",
+      "requires_sections": [
+        "gcode_button"
+      ],
+      "requires_mode": "any",
+      "params": {
+        "BUTTON": {
+          "required": true
+        }
+      },
+      "mux_key": "BUTTON",
+      "simulated": false,
+      "source_line": 29
+    },
+    "QUERY_ENDSTOPS": {
+      "extra": "query_endstops",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 17
+    },
+    "QUERY_FILAMENT_SENSOR": {
+      "extra": "filament_switch_sensor",
+      "requires_sections": [
+        "filament_motion_sensor",
+        "filament_switch_sensor"
+      ],
+      "requires_mode": "any",
+      "params": {
+        "SENSOR": {
+          "required": true
+        }
+      },
+      "mux_key": "SENSOR",
+      "simulated": false,
+      "source_line": 35
+    },
+    "QUERY_FILAMENT_WIDTH": {
+      "extra": "hall_filament_width_sensor",
+      "requires_sections": [
+        "hall_filament_width_sensor",
+        "tsl1401cl_filament_width_sensor"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 78
+    },
+    "QUERY_PROBE": {
+      "extra": "probe",
+      "requires_sections": [
+        "probe"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 49
+    },
+    "QUERY_RAW_FILAMENT_WIDTH": {
+      "extra": "hall_filament_width_sensor",
+      "requires_sections": [
+        "hall_filament_width_sensor"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 90
+    },
+    "RESET_FILAMENT_WIDTH_SENSOR": {
+      "extra": "hall_filament_width_sensor",
+      "requires_sections": [
+        "hall_filament_width_sensor",
+        "tsl1401cl_filament_width_sensor"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 81
+    },
+    "RESET_SMART_EFFECTOR": {
+      "extra": "smart_effector",
+      "requires_sections": [
+        "smart_effector"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 67
+    },
+    "RESPOND": {
+      "extra": "respond",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 26
+    },
+    "RESTART": {
+      "extra": "gcode",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 124
+    },
+    "RESTORE_DUAL_CARRIAGE_STATE": {
+      "extra": "idex_modes",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 56
+    },
+    "RESTORE_GCODE_STATE": {
+      "extra": "gcode_move",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 22
+    },
+    "RESUME": {
+      "extra": "pause_resume",
+      "requires_sections": [
+        "pause_resume"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 20
+    },
+    "SAVE_CONFIG": {
+      "extra": "configfile",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 246
+    },
+    "SAVE_DUAL_CARRIAGE_STATE": {
+      "extra": "idex_modes",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 52
+    },
+    "SAVE_GCODE_STATE": {
+      "extra": "gcode_move",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 22
+    },
+    "SAVE_VARIABLE": {
+      "extra": "save_variables",
+      "requires_sections": [
+        "save_variables"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 23
+    },
+    "SCREWS_TILT_CALCULATE": {
+      "extra": "screws_tilt_adjust",
+      "requires_sections": [
+        "screws_tilt_adjust"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 41
+    },
+    "SDCARD_LOOP_BEGIN": {
+      "extra": "sdcard_loop",
+      "requires_sections": [
+        "sdcard_loop"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 14
+    },
+    "SDCARD_LOOP_DESIST": {
+      "extra": "sdcard_loop",
+      "requires_sections": [
+        "sdcard_loop"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 20
+    },
+    "SDCARD_LOOP_END": {
+      "extra": "sdcard_loop",
+      "requires_sections": [
+        "sdcard_loop"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 17
+    },
+    "SDCARD_PRINT_FILE": {
+      "extra": "virtual_sdcard",
+      "requires_sections": [
+        "virtual_sdcard"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 46
+    },
+    "SDCARD_RESET_FILE": {
+      "extra": "virtual_sdcard",
+      "requires_sections": [
+        "virtual_sdcard"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 43
+    },
+    "SET_DIGIPOT": {
+      "extra": "mcp4018",
+      "requires_sections": [
+        "mcp4018"
+      ],
+      "requires_mode": "any",
+      "params": {
+        "DIGIPOT": {
+          "required": true
+        }
+      },
+      "mux_key": "DIGIPOT",
+      "simulated": false,
+      "source_line": 20
+    },
+    "SET_DISPLAY_TEXT": {
+      "extra": "display_status",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 19
+    },
+    "SET_DUAL_CARRIAGE": {
+      "extra": "idex_modes",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 49
+    },
+    "SET_EXTRUDER_ROTATION_DISTANCE": {
+      "extra": "extruder",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "params": {
+        "EXTRUDER": {
+          "required": true
+        }
+      },
+      "mux_key": "EXTRUDER",
+      "simulated": false,
+      "source_line": 35
+    },
+    "SET_FAN_SPEED": {
+      "extra": "fan_generic",
+      "requires_sections": [
+        "fan_generic"
+      ],
+      "requires_mode": "any",
+      "params": {
+        "FAN": {
+          "required": true
+        }
+      },
+      "mux_key": "FAN",
+      "simulated": false,
+      "source_line": 20
+    },
+    "SET_FILAMENT_SENSOR": {
+      "extra": "filament_switch_sensor",
+      "requires_sections": [
+        "filament_motion_sensor",
+        "filament_switch_sensor"
+      ],
+      "requires_mode": "any",
+      "params": {
+        "SENSOR": {
+          "required": true
+        }
+      },
+      "mux_key": "SENSOR",
+      "simulated": false,
+      "source_line": 39
+    },
+    "SET_GCODE_OFFSET": {
+      "extra": "gcode_move",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 22
+    },
+    "SET_GCODE_VARIABLE": {
+      "extra": "gcode_macro",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "params": {
+        "MACRO": {
+          "required": true
+        }
+      },
+      "mux_key": "MACRO",
+      "simulated": false,
+      "source_line": 148
+    },
+    "SET_HEATER_TEMPERATURE": {
+      "extra": "heaters",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "params": {
+        "HEATER": {
+          "required": true
+        }
+      },
+      "mux_key": "HEATER",
+      "simulated": false,
+      "source_line": 67
+    },
+    "SET_IDLE_TIMEOUT": {
+      "extra": "idle_timeout",
+      "requires_sections": [
+        "idle_timeout"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 29
+    },
+    "SET_INPUT_SHAPER": {
+      "extra": "input_shaper",
+      "requires_sections": [
+        "input_shaper"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 119
+    },
+    "SET_KINEMATIC_POSITION": {
+      "extra": "force_move",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 45
+    },
+    "SET_LED": {
+      "extra": "led",
+      "requires_sections": [
+        "dotstar",
+        "led",
+        "neopixel",
+        "pca9533"
+      ],
+      "requires_mode": "any",
+      "params": {
+        "LED": {
+          "required": true
+        }
+      },
+      "mux_key": "LED",
+      "simulated": false,
+      "source_line": 31
+    },
+    "SET_LED_TEMPLATE": {
+      "extra": "led",
+      "requires_sections": [
+        "dotstar",
+        "led",
+        "neopixel",
+        "pca9533"
+      ],
+      "requires_mode": "any",
+      "params": {
+        "LED": {
+          "required": true
+        }
+      },
+      "mux_key": "LED",
+      "simulated": false,
+      "source_line": 33
+    },
+    "SET_PIN": {
+      "extra": "output_pin",
+      "requires_sections": [
+        "output_pin",
+        "pwm_cycle_time",
+        "pwm_tool"
+      ],
+      "requires_mode": "any",
+      "params": {
+        "PIN": {
+          "required": true
+        }
+      },
+      "mux_key": "PIN",
+      "simulated": false,
+      "source_line": 232
+    },
+    "SET_PRESSURE_ADVANCE": {
+      "extra": "extruder",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "params": {
+        "EXTRUDER": {
+          "required": true
+        }
+      },
+      "mux_key": "EXTRUDER",
+      "simulated": false,
+      "source_line": 29
+    },
+    "SET_PRINT_STATS_INFO": {
+      "extra": "print_stats",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 15
+    },
+    "SET_RETRACTION": {
+      "extra": "firmware_retraction",
+      "requires_sections": [
+        "firmware_retraction"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 19
+    },
+    "SET_SERVO": {
+      "extra": "servo",
+      "requires_sections": [
+        "servo"
+      ],
+      "requires_mode": "any",
+      "params": {
+        "SERVO": {
+          "required": true
+        }
+      },
+      "mux_key": "SERVO",
+      "simulated": false,
+      "source_line": 43
+    },
+    "SET_SKEW": {
+      "extra": "skew_correction",
+      "requires_sections": [
+        "skew_correction"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 39
+    },
+    "SET_SMART_EFFECTOR": {
+      "extra": "smart_effector",
+      "requires_sections": [
+        "smart_effector"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 72
+    },
+    "SET_STEPPER_CARRIAGES": {
+      "extra": "generic_cartesian",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 170
+    },
+    "SET_STEPPER_ENABLE": {
+      "extra": "stepper_enable",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "params": {
+        "STEPPER": {
+          "required": true
+        }
+      },
+      "mux_key": "STEPPER",
+      "simulated": false,
+      "source_line": 87
+    },
+    "SET_TEMPERATURE_FAN_TARGET": {
+      "extra": "temperature_fan",
+      "requires_sections": [
+        "temperature_fan"
+      ],
+      "requires_mode": "any",
+      "params": {
+        "TEMPERATURE_FAN": {
+          "required": true
+        }
+      },
+      "mux_key": "TEMPERATURE_FAN",
+      "simulated": false,
+      "source_line": 44
+    },
+    "SET_TMC_CURRENT": {
+      "extra": "tmc",
+      "requires_sections": [
+        "tmc2130",
+        "tmc2208",
+        "tmc2209",
+        "tmc2225",
+        "tmc2240",
+        "tmc2660",
+        "tmc5160",
+        "tmc5161",
+        "tmc_internal"
+      ],
+      "requires_mode": "any",
+      "params": {
+        "STEPPER": {
+          "required": true
+        }
+      },
+      "mux_key": "STEPPER",
+      "simulated": false,
+      "source_line": 357
+    },
+    "SET_TMC_FIELD": {
+      "extra": "tmc",
+      "requires_sections": [
+        "tmc2130",
+        "tmc2208",
+        "tmc2209",
+        "tmc2225",
+        "tmc2240",
+        "tmc2660",
+        "tmc5160",
+        "tmc5161",
+        "tmc_internal"
+      ],
+      "requires_mode": "any",
+      "params": {
+        "STEPPER": {
+          "required": true
+        }
+      },
+      "mux_key": "STEPPER",
+      "simulated": false,
+      "source_line": 351
+    },
+    "SET_VELOCITY_LIMIT": {
+      "extra": "toolhead",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 561
+    },
+    "SET_Z_THERMAL_ADJUST": {
+      "extra": "z_thermal_adjust",
+      "requires_sections": [
+        "z_thermal_adjust"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 58
+    },
+    "SHAPER_CALIBRATE": {
+      "extra": "resonance_tester",
+      "requires_sections": [
+        "resonance_tester"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 295
+    },
+    "SKEW_PROFILE": {
+      "extra": "skew_correction",
+      "requires_sections": [
+        "skew_correction"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 41
+    },
+    "STATUS": {
+      "extra": "gcode",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 124
+    },
+    "STEPPER_BUZZ": {
+      "extra": "force_move",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "params": {
+        "STEPPER": {
+          "required": true
+        }
+      },
+      "mux_key": "STEPPER",
+      "simulated": false,
+      "source_line": 53
+    },
+    "SYNC_EXTRUDER_MOTION": {
+      "extra": "extruder",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "params": {
+        "EXTRUDER": {
+          "required": true
+        }
+      },
+      "mux_key": "EXTRUDER",
+      "simulated": false,
+      "source_line": 38
+    },
+    "TARE": {
+      "extra": "load_cell",
+      "requires_sections": [
+        "load_cell"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 166
+    },
+    "TEMPERATURE_PROBE_CALIBRATE": {
+      "extra": "temperature_probe",
+      "requires_sections": [
+        "temperature_probe"
+      ],
+      "requires_mode": "any",
+      "params": {
+        "PROBE": {
+          "required": true
+        }
+      },
+      "mux_key": "PROBE",
+      "simulated": false,
+      "source_line": 112
+    },
+    "TEMPERATURE_PROBE_COMPLETE": {
+      "extra": "temperature_probe",
+      "requires_sections": [
+        "temperature_probe"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 375
+    },
+    "TEMPERATURE_PROBE_ENABLE": {
+      "extra": "temperature_probe",
+      "requires_sections": [
+        "temperature_probe"
+      ],
+      "requires_mode": "any",
+      "params": {
+        "PROBE": {
+          "required": true
+        }
+      },
+      "mux_key": "PROBE",
+      "simulated": false,
+      "source_line": 118
+    },
+    "TEMPERATURE_PROBE_NEXT": {
+      "extra": "temperature_probe",
+      "requires_sections": [
+        "temperature_probe"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 371
+    },
+    "TEMPERATURE_WAIT": {
+      "extra": "heaters",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "params": {
+        "SENSOR": {
+          "required": true
+        }
+      },
+      "mux_key": "SENSOR",
+      "simulated": false,
+      "source_line": 305
+    },
+    "TESTZ": {
+      "extra": "manual_probe",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 181
+    },
+    "TEST_RESONANCES": {
+      "extra": "resonance_tester",
+      "requires_sections": [
+        "resonance_tester"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 292
+    },
+    "TUNING_TOWER": {
+      "extra": "tuning_tower",
+      "requires_sections": [
+        "tuning_tower"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 21
+    },
+    "TURN_OFF_HEATERS": {
+      "extra": "heaters",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 257
+    },
+    "UPDATE_DELAYED_GCODE": {
+      "extra": "delayed_gcode",
+      "requires_sections": [
+        "delayed_gcode"
+      ],
+      "requires_mode": "any",
+      "params": {
+        "ID": {
+          "required": true
+        }
+      },
+      "mux_key": "ID",
+      "simulated": false,
+      "source_line": 21
+    },
+    "Z_ENDSTOP_CALIBRATE": {
+      "extra": "manual_probe",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 67
+    },
+    "Z_OFFSET_APPLY_ENDSTOP": {
+      "extra": "manual_probe",
+      "requires_sections": [],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 70
+    },
+    "Z_OFFSET_APPLY_PROBE": {
+      "extra": "probe",
+      "requires_sections": [
+        "probe",
+        "probe_eddy_current"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 65
+    },
+    "Z_TILT_ADJUST": {
+      "extra": "z_tilt",
+      "requires_sections": [
+        "z_tilt"
+      ],
+      "requires_mode": "any",
+      "mux_key": null,
+      "simulated": false,
+      "source_line": 139
+    }
+  }
+}

@@ -3,8 +3,10 @@ import JSZip from 'jszip';
 import { useConfigStore } from '../../stores/configStore';
 import { useGraphStore } from '../../stores/graphStore';
 import { useNativeStore } from '../../stores/nativeStore';
+import { useValidationSettingsStore } from '../../stores/validationSettingsStore';
 import * as api from '../../services/api';
 import { buildProjectGraph } from '../../utils/graphBuilder';
+import { filterFindings } from '../../utils/validationVisibility';
 import { restoreLayoutAfterRebuild } from '../../utils/layoutPersistence';
 import { buildInitialSelection, findOverlappingFiles } from '../../utils/importSelection';
 import { countChangedLines, createConfigPatch } from '../../utils/configDiff';
@@ -98,14 +100,17 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
           .filter((m) => m.file === filename)
           .map((m) => m.name || '(primary)');
 
-        const fileErrors = fileResult.validation.errors.filter((e) => e.severity === 'error');
-        const fileWarnings = fileResult.validation.errors.filter((e) => e.severity === 'warning');
+        // Settings > Validation: only count/show severities the user enabled.
+        const importVisibility = useValidationSettingsStore.getState();
+        const visibleFindings = filterFindings(fileResult.validation.errors, importVisibility);
+        const fileErrors = visibleFindings.filter((e) => e.severity === 'error');
+        const fileWarnings = visibleFindings.filter((e) => e.severity === 'warning');
         importResults.push({
           filename,
           sections: fileResult.config.sections.length,
           errors: fileErrors.length,
           warnings: fileWarnings.length,
-          errorDetails: fileResult.validation.errors.map((e) => ({
+          errorDetails: visibleFindings.map((e) => ({
             severity: e.severity,
             section: e.section,
             param: e.param,

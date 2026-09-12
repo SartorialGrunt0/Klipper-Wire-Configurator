@@ -2,8 +2,10 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { createTwoFilesPatch } from 'diff';
 import { useConfigStore } from '../../stores/configStore';
 import { useNativeStore } from '../../stores/nativeStore';
+import { useVisibility } from '../../stores/validationSettingsStore';
 import { getSaveButtonClass } from '../../utils/saveButtonClass';
 import { selectSaveGateIssues, warningToBulkAck, type SaveGateFinding } from '../../utils/saveGate';
+import { filterValidationMap } from '../../utils/validationVisibility';
 import * as api from '../../services/api';
 import type { ConfigFile } from '../../types/config';
 import type { NativeStatus } from '../../services/api';
@@ -218,10 +220,18 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
      can't be fixed by acknowledging). Computed from the LIVE store state —
      not the mount snapshot — so the gate reflects current validation. */
   const textParseErrors = useConfigStore((s) => s.textParseErrors);
+  const visibility = useVisibility();
+  // Findings map narrowed to the severities the user enabled (Settings >
+  // Validation). The gate, badges, and Save color all derive from this so
+  // they can never disagree with what's rendered.
+  const visibleValidation = useMemo(
+    () => filterValidationMap(validation, visibility),
+    [validation, visibility],
+  );
   const gateIssues = useMemo(() => {
     const selected = Array.from(selectedFiles);
-    return selectSaveGateIssues(validation, selected, textParseErrors);
-  }, [validation, selectedFiles, textParseErrors]);
+    return selectSaveGateIssues(visibleValidation, selected, textParseErrors);
+  }, [visibleValidation, selectedFiles, textParseErrors]);
   const hasGateErrors = gateIssues.hasErrors;
   const hasGateWarnings = gateIssues.hasWarnings;
   // The dialog's Save button is red only when a SELECTED file's text can't
@@ -229,7 +239,7 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
   // toolbar button stays project-wide red so a deselected broken file's issue
   // remains visible there; the dialog must not claim a save is blocked that
   // would actually proceed.
-  const saveButtonClass = getSaveButtonClass(isDirty, validation, gateIssues.blocked.length > 0);
+  const saveButtonClass = getSaveButtonClass(isDirty, visibleValidation, gateIssues.blocked.length > 0);
 
   // Confirmation flow: clicking Save with gate findings opens a single
   // overlay (errors OR warnings, never both stacked — errors dominate).

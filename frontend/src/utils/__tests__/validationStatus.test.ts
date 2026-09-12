@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   combineValidationStatuses,
   getValidationStatusColor,
+  hasValidationDot,
   getValidationStatusLabel,
   sectionValidationStatus,
 } from '@/utils/validationStatus';
@@ -99,5 +100,13 @@ describe('getValidationStatusLabel', () => {
     expect(getValidationStatusLabel('error')).toBe('Validation errors');
     expect(getValidationStatusLabel('warning')).toBe('Validation warnings');
     expect(getValidationStatusLabel('valid')).toBe('No validation issues');
+  });
+});
+
+describe('hasValidationDot', () => {
+  it('shows a dot only when there is something to see', () => {
+    expect(hasValidationDot('error')).toBe(true);
+    expect(hasValidationDot('warning')).toBe(true);
+    expect(hasValidationDot('valid')).toBe(false);
   });
 });

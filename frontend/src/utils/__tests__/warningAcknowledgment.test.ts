@@ -25,6 +25,10 @@ describe('acknowledgeableWarning', () => {
     expect(acknowledgeableWarning({ code: 'macro_full_rewrite' })).toBeNull();
     expect(acknowledgeableWarning({})).toBeNull();
   });
+  it('maps gcode registry codes to the registry kind', () => {
+    expect(acknowledgeableWarning({ code: 'unknown_gcode_command' })).toEqual({ kind: 'registry' });
+    expect(acknowledgeableWarning({ code: 'gcode_command_section_missing' })).toEqual({ kind: 'registry' });
+  });
 });
 
 describe('ackKindForSection', () => {
@@ -39,6 +43,17 @@ describe('ackKindForSection', () => {
 
   it('returns duplicate for a duplicate warning', () => {
     expect(ackKindForSection([issue('warning', 'project_duplicate', 'Section [x] can only be defined once.')])).toBe('duplicate');
+  });
+
+  it('returns registry for a gcode registry warning', () => {
+    expect(ackKindForSection([issue('warning', 'unknown_gcode_command', "'FOO' is not a Klipper command.")])).toBe('registry');
+  });
+
+  it('prefers unknown over registry (unknown changes section semantics)', () => {
+    expect(ackKindForSection([
+      issue('warning', 'unknown_gcode_command', 'x'),
+      issue('warning', 'unknown_section', 'y'),
+    ])).toBe('unknown');
   });
 
   it('prefers duplicate when a section has both (duplicate wins, is unambiguous)', () => {

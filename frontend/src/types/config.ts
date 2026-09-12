@@ -49,6 +49,12 @@ export interface ValidationError {
    * text; use this instead so backend rewording can't silently break it.
    */
   code?: string;
+  /**
+   * Code-specific ack discriminator set by the backend at the emit site
+   * (gcode registry findings carry the command name). Echo back verbatim on
+   * bulk-ack; meaningless elsewhere.
+   */
+  extra?: string;
 }
 
 export interface ValidationResult {
