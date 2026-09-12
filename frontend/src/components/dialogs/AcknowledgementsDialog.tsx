@@ -89,7 +89,15 @@ export default function AcknowledgementsDialog({ onClose }: AcknowledgementsDial
     }
   }, [refresh, revalidateAfterChange]);
 
+  // Destructive + irreversible: require a second click to actually clear.
+  const [confirmClear, setConfirmClear] = useState(false);
   const handleClearAll = useCallback(async () => {
+    if (!confirmClear) {
+      setConfirmClear(true);
+      window.setTimeout(() => setConfirmClear(false), 4000);
+      return;
+    }
+    setConfirmClear(false);
     try {
       await api.clearAllAcknowledgements();
       setRows([]);
@@ -97,7 +105,7 @@ export default function AcknowledgementsDialog({ onClose }: AcknowledgementsDial
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not clear acknowledgements');
     }
-  }, [revalidateAfterChange]);
+  }, [confirmClear, revalidateAfterChange]);
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
@@ -128,9 +136,13 @@ export default function AcknowledgementsDialog({ onClose }: AcknowledgementsDial
           <button
             onClick={handleClearAll}
             disabled={loading || rows.length === 0}
-            className="text-[11px] px-2.5 py-1 rounded bg-red-500/15 text-red-400 hover:bg-red-500/25 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            className={`text-[11px] px-2.5 py-1 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+              confirmClear
+                ? 'bg-red-500 text-white hover:bg-red-600'
+                : 'bg-red-500/15 text-red-400 hover:bg-red-500/25'
+            }`}
           >
-            Clear all
+            {confirmClear ? 'Really clear all?' : 'Clear all'}
           </button>
         </div>
 

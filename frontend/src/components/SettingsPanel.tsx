@@ -1987,6 +1987,9 @@ function HardwareOverviewPanel({
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(hwData.label);
   const validationStatus = (hwData.validationStatus || 'valid') as ValidationStatus;
+  // Settings > Validation: the header badge renders only when error/warning
+  // findings are visible (a green "all clear" dot over hidden findings lies).
+  const overviewDotsVisible = validationDotsVisible(useVisibility());
 
   const { configFiles: allConfigFiles } = useConfigStore();
 
@@ -2026,7 +2029,7 @@ function HardwareOverviewPanel({
       {/* Header */}
       <div className="p-3 border-b border-[var(--color-bg-tertiary)] shrink-0">
         <div className="flex items-center gap-2">
-          <WarningBadge status={validationStatus} size={10} />
+          {overviewDotsVisible && <WarningBadge status={validationStatus} size={10} />}
           {renaming ? (
             <input
               autoFocus

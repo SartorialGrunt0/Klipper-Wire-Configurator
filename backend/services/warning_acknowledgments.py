@@ -236,6 +236,13 @@ def load_acknowledged_warning_identities() -> set[str]:
     }
 
 
+def _atomic_write(path: Path, content: str) -> None:
+    """Write via temp-file + os.replace: readers never see a torn file."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(content, encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def _rewrite_lines(path: Path, keep) -> int:
     """Rewrite a line-based store file keeping entries ``keep()`` accepts.
 
@@ -255,8 +262,7 @@ def _rewrite_lines(path: Path, keep) -> int:
     kept = [entry for entry in entries if keep(entry)]
     removed = len(entries) - len(kept)
     if removed:
-        path.write_text(
-            "".join(f"{entry}\n" for entry in kept), encoding="utf-8")
+        _atomic_write(path, "".join(f"{entry}\n" for entry in kept))
     return removed
 
 
@@ -285,8 +291,7 @@ def remove_acknowledged_warning_section(snippet: str) -> int:
         else:
             kept.append(canonicalize_section(section))
     if removed:
-        path.write_text(
-            "\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+        _atomic_write(path, "\n".join(kept) + ("\n" if kept else ""))
     return removed
 
 
@@ -326,7 +331,7 @@ def clear_all_acknowledgements() -> dict:
         _acknowledged_warning_identities_file(),
     ):
         if path.exists():
-            path.write_text("", encoding="utf-8")
+            _atomic_write(path, "")
     return counts
 
 

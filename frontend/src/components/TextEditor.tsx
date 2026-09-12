@@ -1213,7 +1213,9 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
               const isExpanded = !!expandedSections[entry.id];
               const hasParams = entry.params.length > 0;
               const activeValidation = getFileValidation(activeFile);
-              const sectionIssues = (activeValidation?.errors ?? []).filter((e) => e.section === entry.title);
+              // Same severity filter as the gutter/file list — a hidden
+              // finding must not keep a dot in this sidebar either.
+              const sectionIssues = filterFindings(activeValidation?.errors ?? [], visibility).filter((e) => e.section === entry.title);
               const hasSecError = sectionIssues.some((e) => e.severity === 'error');
               const hasSecWarning = !hasSecError && sectionIssues.some((e) => e.severity === 'warning');
               const hasSecInfo = !hasSecError && !hasSecWarning && sectionIssues.some((e) => e.severity === 'info');

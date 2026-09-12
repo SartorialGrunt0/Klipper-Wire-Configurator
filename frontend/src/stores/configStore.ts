@@ -29,8 +29,10 @@ async function _revalidateFile(
   const api = await import('../services/api');
   try {
     const result = await api.validateConfig(cf);
-    // Track the text this result was computed against so the editor can
-    // tell a stale line_number (user typed ahead) from an authoritative one.
+    // Deadline check: the master toggle may have flipped OFF while the
+    // request was in flight (setEnabled clears the maps); a late response
+    // must not resurrect findings the user just hid.
+    if (!isValidationEnabled()) return;
     set((state) => ({
       validation: { ...state.validation, [filename]: result },
       validationText: { ...state.validationText, [filename]: cf.raw_text ?? '' },
@@ -54,6 +56,7 @@ async function _revalidateAll(get: () => ConfigState, set: (partial: Partial<Con
   const api = await import('../services/api');
   try {
     const results = await api.validateProject(configFiles);
+    if (!isValidationEnabled()) return; // master flipped OFF mid-flight — discard
     set((state) => ({
       validation: { ...state.validation, ...results },
       validationText: {

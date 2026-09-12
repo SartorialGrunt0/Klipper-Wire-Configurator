@@ -82,3 +82,47 @@ describe('master validation toggle — store gating', () => {
     expect(s.textParseErrors['printer.cfg']).toBe('unparseable');
   });
 });
+
+describe('master toggle off mid-flight (deadline race)', () => {
+  it('a validate response that lands AFTER toggle-off must not repopulate the map', async () => {
+    let release!: (v: ValidationResult) => void;
+    validateConfigMock.mockImplementationOnce(
+      () => new Promise<ValidationResult>((res) => { release = res; }),
+    );
+    useConfigStore.setState({ validation: {}, validationText: {} });
+    const inFlight = useConfigStore.getState().revalidateFile('printer.cfg');
+    await new Promise((r) => setTimeout(r, 0)); // let the mock's Promise start
+    // Toggle master OFF while the request is in flight (this is what
+    // setEnabled does: persist + clear the maps).
+    useValidationSettingsStore.setState({ enabled: false });
+    useConfigStore.getState().clearValidationState();
+    // The stale response now lands.
+    release(result);
+    await inFlight;
+    const s = useConfigStore.getState();
+    expect(s.validation).toEqual({});
+    expect(s.validationText).toEqual({});
+  });
+
+  it('project validate results landing after toggle-off are discarded too', async () => {
+    useConfigStore.setState({
+      configFiles: {
+        'a.cfg': { filename: 'a.cfg', sections: [], includes: [] } as unknown as ConfigFile,
+        'b.cfg': { filename: 'b.cfg', sections: [], includes: [] } as unknown as ConfigFile,
+      },
+      validation: {},
+      validationText: {},
+    });
+    let release!: (v: Record<string, ValidationResult>) => void;
+    validateProjectMock.mockImplementationOnce(
+      () => new Promise<Record<string, ValidationResult>>((res) => { release = res; }),
+    );
+    const inFlight = useConfigStore.getState().revalidateAll();
+    await new Promise((r) => setTimeout(r, 0)); // let the mock's Promise start
+    useValidationSettingsStore.setState({ enabled: false });
+    useConfigStore.getState().clearValidationState();
+    release({ 'a.cfg': result, 'b.cfg': result });
+    await inFlight;
+    expect(useConfigStore.getState().validation).toEqual({});
+  });
+});

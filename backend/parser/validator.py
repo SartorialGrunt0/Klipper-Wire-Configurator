@@ -12,6 +12,7 @@ Checks for:
 from __future__ import annotations
 
 import glob
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -1061,6 +1062,13 @@ def _scan_file_gcode_commands(
             for base in (gp.line_number - 1,)
         ]
     except Exception:  # pragma: no cover - defensive
+        # Swallowed by design (a broken registry must never take validation
+        # down) but LOGGED: silently losing the whole feature is
+        # undiagnosable. Artifact-missing/corrupt lands here too — that is
+        # the expected, benign case.
+        logging.getLogger(__name__).warning(
+            "gcode registry scan failed; findings for this file skipped",
+            exc_info=True)
         return findings
     for section, base, problems in scanned:
         for rel_line, verdict in problems:
