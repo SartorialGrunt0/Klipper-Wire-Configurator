@@ -517,16 +517,22 @@ export default function Toolbar({
             </p>
             <label className="flex items-center justify-between gap-3 px-2 py-1.5 rounded-lg cursor-pointer hover:bg-[var(--color-bg-primary)] transition-colors">
               <span className="text-xs text-[var(--color-text-primary)]">Config validation</span>
+              {/* Enable toggle (slider) — distinct from the severity checkboxes */}
               <span
-                className={`flex h-4 w-4 items-center justify-center rounded border transition-colors ${
+                role="switch"
+                aria-checked={validationSettings.enabled}
+                className={`relative inline-flex h-4.5 w-8 shrink-0 items-center rounded-full border transition-colors ${
                   validationSettings.enabled
-                    ? 'border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-bg-primary)]'
-                    : 'border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] text-transparent'
+                    ? 'border-[var(--color-accent)] bg-[var(--color-accent)]'
+                    : 'border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)]'
                 }`}
               >
-                <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-                  <path d="M2 5.25L4.1 7.35 8 3.45" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
+                <span
+                  className={`inline-block h-3 w-3 transform rounded-full shadow transition-transform ${
+                    validationSettings.enabled ? 'translate-x-4' : 'translate-x-0.5'
+                  }`}
+                  style={{ backgroundColor: validationSettings.enabled ? 'var(--color-bg-primary)' : 'var(--color-text-secondary)' }}
+                />
               </span>
               <input
                 type="checkbox"
