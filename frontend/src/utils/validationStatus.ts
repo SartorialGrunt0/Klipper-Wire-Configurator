@@ -22,6 +22,16 @@ export function sectionValidationStatus(
   return status;
 }
 
+/**
+ * Dot model for graph nodes and list rows: a dot means "there is something
+ * to see". A clean (or not-yet-validated) node renders NO dot at all —
+ * green used to conflate "valid" with "never checked", and the visibility
+ * filter already hides dots rather than turning them green.
+ */
+export function hasValidationDot(status: ValidationStatus): boolean {
+  return status !== 'valid';
+}
+
 export function getValidationStatusColor(status: ValidationStatus): string {
   if (status === 'error') return 'var(--color-error)';
   if (status === 'warning') return 'var(--color-warning)';

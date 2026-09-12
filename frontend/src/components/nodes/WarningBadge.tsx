@@ -1,5 +1,5 @@
 import type { ValidationStatus } from '../../types/graph';
-import { getValidationStatusColor, getValidationStatusLabel } from '../../utils/validationStatus';
+import { getValidationStatusColor, getValidationStatusLabel, hasValidationDot } from '../../utils/validationStatus';
 
 export default function WarningBadge({
   status = 'error',
@@ -8,6 +8,9 @@ export default function WarningBadge({
   status?: ValidationStatus;
   size?: number;
 }) {
+  // No findings = no dot. Absence is the "all clear" signal; a green dot
+  // could not distinguish clean from never-validated.
+  if (!hasValidationDot(status)) return null;
   return (
     <span
       className="kwc-warning-badge"

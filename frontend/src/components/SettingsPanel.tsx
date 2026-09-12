@@ -6,7 +6,7 @@ import type { ParamSchema, ConfigParam, ConfigSection, HardwareType, SectionSche
 import type { HardwareNodeData, SubComponentNodeData, FeatureNodeData, GroupChildItem, AppNode, AppEdge, ValidationStatus } from '../types/graph';
 import { applyBoardTypeMarkerToMcuSections } from '../utils/boardTypeMarker';
 import { buildUniqueSectionDraft } from '../utils/sectionNaming';
-import { getValidationStatusColor } from '../utils/validationStatus';
+import { getValidationStatusColor, hasValidationDot } from '../utils/validationStatus';
 import { filterFindings, validationDotsVisible } from '../utils/validationVisibility';
 import { useVisibility } from '../stores/validationSettingsStore';
 import { resolveSection } from '../utils/sectionResolver';
@@ -1157,7 +1157,7 @@ export default function SettingsPanel() {
                 className="flex items-center justify-between w-full px-2 py-1.5 rounded-lg text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors group"
               >
                 <span className="flex items-center gap-2 min-w-0">
-                  {dotsVisible && (
+                  {dotsVisible && hasValidationDot(child.validationStatus || 'valid') && (
                     <span
                       className="w-2 h-2 rounded-full shrink-0"
                       style={{ backgroundColor: getValidationStatusColor(child.validationStatus || 'valid') }}
@@ -1825,7 +1825,7 @@ function ChildNodesList({
                   }}
                   className="flex items-center gap-2 w-full px-2 py-1.5 rounded-lg text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors"
                 >
-                  {dotsVisible && (
+                  {dotsVisible && hasValidationDot(nodeStatus) && (
                     <span className="w-2 h-2 rounded-full" style={{ backgroundColor: getValidationStatusColor(nodeStatus) }} />
                   )}
                   <span className="text-[var(--color-text-primary)]">{d.label as string}</span>
@@ -1851,7 +1851,7 @@ function ChildNodesList({
                 }}
                 className="flex items-center gap-2 w-full px-2 py-1.5 rounded-lg text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors"
               >
-                {dotsVisible && (
+                {dotsVisible && hasValidationDot(nodeStatus) && (
                   <span className="w-2 h-2 rounded-full" style={{ backgroundColor: getValidationStatusColor(nodeStatus) }} />
                 )}
                 <span className="text-[var(--color-text-primary)]">{d.label as string}</span>
@@ -1880,7 +1880,7 @@ function ChildNodesList({
                 >
                   <path d="M3 1l4 4-4 4" stroke="currentColor" strokeWidth="1.5" />
                 </svg>
-                {dotsVisible && (
+                {dotsVisible && hasValidationDot(groupStatus) && (
                   <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: getValidationStatusColor(groupStatus) }} />
                 )}
                 <span className="text-[var(--color-text-primary)] font-medium">{groupLabel}</span>
@@ -1901,7 +1901,7 @@ function ChildNodesList({
                             onClick={() => onSelectNode(n.id)}
                             className="flex items-center gap-2 w-full px-2 py-1 rounded text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors"
                           >
-                            {dotsVisible && (
+                            {dotsVisible && hasValidationDot(nodeStatus) && (
                               <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: getValidationStatusColor(nodeStatus) }} />
                             )}
                             <span className="text-[var(--color-text-primary)] truncate font-medium">{d.label as string}</span>
@@ -1914,7 +1914,7 @@ function ChildNodesList({
                                 onClick={() => onSelectSection(child.sectionHeader, child.configFile ?? null, child.sectionLineNumber ?? null)}
                                 className="flex items-center gap-2 w-full px-2 py-1 rounded text-xs text-left hover:bg-[var(--color-bg-primary)] transition-colors"
                               >
-                                {dotsVisible && (
+                                {dotsVisible && hasValidationDot(child.validationStatus || 'valid') && (
                                   <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: getValidationStatusColor(child.validationStatus || 'valid') }} />
                                 )}
                                 <span className="text-[var(--color-text-primary)] truncate">{child.label}</span>
