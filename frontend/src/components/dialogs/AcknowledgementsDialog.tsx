@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import * as api from '../../services/api';
 import type { AcknowledgementKind, AcknowledgementList } from '../../services/api';
 import { useConfigStore } from '../../stores/configStore';
@@ -78,7 +78,22 @@ export default function AcknowledgementsDialog({ onClose }: AcknowledgementsDial
     void useConfigStore.getState().revalidateAll();
   }, []);
 
+  // Destructive + irreversible: require a second click to actually clear.
+  const [confirmClear, setConfirmClear] = useState(false);
+  const disarmTimer = useRef<number | null>(null);
+  const disarm = useCallback(() => {
+    if (disarmTimer.current !== null) {
+      window.clearTimeout(disarmTimer.current);
+      disarmTimer.current = null;
+    }
+    setConfirmClear(false);
+  }, []);
+  useEffect(() => disarm, [disarm]); // unmount cleanup
+
   const handleRemove = useCallback(async (row: Row) => {
+    // The row set changes — a stale armed "Really clear all?" must not
+    // survive into a different list.
+    disarm();
     try {
       await api.removeAcknowledgement(row.kind, row.key);
       setRows((state) => state.filter((r) => !(r.kind === row.kind && r.key === row.key)));
@@ -87,17 +102,18 @@ export default function AcknowledgementsDialog({ onClose }: AcknowledgementsDial
       setError(err instanceof Error ? err.message : 'Could not remove acknowledgement');
       void refresh();
     }
-  }, [refresh, revalidateAfterChange]);
-
-  // Destructive + irreversible: require a second click to actually clear.
-  const [confirmClear, setConfirmClear] = useState(false);
+  }, [disarm, refresh, revalidateAfterChange]);
   const handleClearAll = useCallback(async () => {
     if (!confirmClear) {
       setConfirmClear(true);
-      window.setTimeout(() => setConfirmClear(false), 4000);
+      if (disarmTimer.current !== null) window.clearTimeout(disarmTimer.current);
+      disarmTimer.current = window.setTimeout(() => {
+        disarmTimer.current = null;
+        setConfirmClear(false);
+      }, 4000);
       return;
     }
-    setConfirmClear(false);
+    disarm();
     try {
       await api.clearAllAcknowledgements();
       setRows([]);
@@ -105,7 +121,7 @@ export default function AcknowledgementsDialog({ onClose }: AcknowledgementsDial
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not clear acknowledgements');
     }
-  }, [confirmClear, revalidateAfterChange]);
+  }, [confirmClear, disarm, revalidateAfterChange]);
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>

@@ -24,6 +24,7 @@ Three acknowledgment flavors:
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 
 from parser.config_parser import ConfigSection, parse_config
@@ -238,9 +239,23 @@ def load_acknowledged_warning_identities() -> set[str]:
 
 def _atomic_write(path: Path, content: str) -> None:
     """Write via temp-file + os.replace: readers never see a torn file."""
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(content, encoding="utf-8")
-    os.replace(tmp, path)
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=path.parent,
+        prefix=path.name + ".", suffix=".tmp", delete=False)
+    try:
+        try:
+            if path.exists():
+                os.chmod(tmp.name, path.stat().st_mode & 0o7777)
+            tmp.write(content)
+        finally:
+            tmp.close()
+        os.replace(tmp.name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+        raise
 
 
 def _rewrite_lines(path: Path, keep) -> int:

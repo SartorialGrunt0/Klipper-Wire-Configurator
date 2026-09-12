@@ -12,6 +12,7 @@ Checks for:
 from __future__ import annotations
 
 import glob
+import json
 import logging
 import os
 import re
@@ -1061,11 +1062,16 @@ def _scan_file_gcode_commands(
             if gp is not None and not gp.is_commented_out and gp.value.strip()
             for base in (gp.line_number - 1,)
         ]
+    except (FileNotFoundError, json.JSONDecodeError):
+        # Expected, benign case: the generated artifact is missing or
+        # corrupt. Quiet by design (a per-file traceback per validation run
+        # on artifact-less machines is noise); fix is running
+        # scripts/generate-gcode-registry.py.
+        return findings
     except Exception:  # pragma: no cover - defensive
-        # Swallowed by design (a broken registry must never take validation
-        # down) but LOGGED: silently losing the whole feature is
-        # undiagnosable. Artifact-missing/corrupt lands here too — that is
-        # the expected, benign case.
+        # Swallowed (a broken registry must never take validation down) but
+        # LOGGED with traceback: silently losing the feature is bad, but
+        # silently losing it for a reason nobody can diagnose is worse.
         logging.getLogger(__name__).warning(
             "gcode registry scan failed; findings for this file skipped",
             exc_info=True)
