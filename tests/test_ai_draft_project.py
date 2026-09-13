@@ -476,3 +476,22 @@ def test_patch_gcode_commenting_out_param_also_guarded():
     })
     assert r['status'] == 'error'
     assert r.get('commentedParams') == ['step_pin']
+
+
+def test_add_include_refuses_self_include():
+    """Self-include is a Klipper circular-load error the validator does
+    not flag (live 9b r2 finding: add_include file=printer.cfg
+    target_file=printer.cfg was accepted and staged as a success)."""
+    st = ProjectState.from_context_files({'printer.cfg': {'content':
+        '[mcu]\nserial: /tmp/x\n'
+    }})
+    base = st.validate()
+    _, r = st.apply(base, {'op': 'add_include', 'file': 'printer.cfg',
+                           'target_file': 'printer.cfg'})
+    assert r['status'] == 'error'
+    assert 'cannot include itself' in r['error']
+    # the corrected call succeeds
+    st2, r2 = st.apply(base, {'op': 'add_include', 'file': 'printer.cfg',
+                              'target_file': 'park.cfg'})
+    assert r2['status'] in ('applied', 'applied_with_advisory'), r2
+    assert '[include park.cfg]' in st2.files['printer.cfg']

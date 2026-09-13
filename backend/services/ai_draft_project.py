@@ -629,6 +629,16 @@ class ProjectState:
         if not target:
             return _state_error('Missing required argument: target_file')
         in_file = self._require_file(op.get('file') or 'printer.cfg')
+        if target == in_file:
+            # Klipper resolves includes into one namespace; a file
+            # including itself is a circular load error the validator
+            # does NOT flag (live 9b r2 finding: model passed
+            # target_file=printer.cfg and the op accepted it).
+            return _state_error(
+                f"A file cannot include itself ({in_file}). Include the NEW "
+                f"file's name (e.g. target_file='park_macros.cfg'), not the "
+                f"file the include line is written into."
+            )
         lines = _split_lines(self.files[in_file])
         header = f"include {target}"
         for line in lines:
@@ -644,6 +654,10 @@ class ProjectState:
         if not target:
             return _state_error('Missing required argument: target_file')
         in_file = self._require_file(op.get('file') or 'printer.cfg')
+        if target == in_file:
+            return _state_error(
+                f"A file cannot include (or un-include) itself ({in_file}). "
+                f"Pass the INCLUDED file's name in target_file.")
         lines = _split_lines(self.files[in_file])
         header = f"include {target}"
         found = _find_section(lines, header)
