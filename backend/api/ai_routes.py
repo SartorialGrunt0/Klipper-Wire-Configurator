@@ -2668,8 +2668,15 @@ async def chat_proxy(req: ChatRequest):
                             and (
                                 edit_session.last_write_outcome
                                 in (None, 'correctable')
-                                or bool(extract_config_code_blocks(
-                                    current_content))
+                                or (bool(extract_config_code_blocks(
+                                        current_content))
+                                    # r8: an honest user-gated refusal often
+                                    # still illustrates with a ```cfg block;
+                                    # nudging THAT pressure-cooks the model
+                                    # into self-granting allow_comment_change
+                                    # (fabricated stage). Refusal wins.
+                                    and edit_session.last_write_outcome
+                                    != 'user_gated')
                             )
                             and edit_nudges < 3):
                         edit_nudges += 1

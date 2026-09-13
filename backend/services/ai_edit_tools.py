@@ -28,12 +28,18 @@ from services.ai_draft_project import ProjectState
 # block, gets told "use the tool", and re-reads again. The nudge
 # therefore answers the question it is implicitly asking (what exactly
 # do the arguments look like?) instead of only scolding.
-EDIT_NUDGE_TEXT = """You described changes but did not call config_edit or config_write. Config blocks written in prose are display-only and are NEVER applied. Call the tool NOW with the arguments below (do not read files again first -- the section text you need is already in this conversation), or -- if the change is not safe or not possible -- explain why to the user and ask.
-Exact call shapes:
-config_edit (set a parameter): {"file": "printer.cfg", "op": "set_param", "section": "printer", "key": "max_accel", "value": "12000"}
-config_edit (edit a macro body): {"file": "printer.cfg", "op": "patch_gcode", "section": "gcode_macro NAME", "old_text": "<line copied verbatim>", "new_text": "<replacement>"}
-config_edit (include a file): {"file": "printer.cfg", "op": "add_include", "target_file": "new.cfg"}
-config_write (create a NEW file only): {"file": "new.cfg", "content": "<full file text>"}"""
+EDIT_NUDGE_TEXT = """Call the tool NOW (do not read files again first -- the section text you
+need is already in this conversation), or -- if the change is not safe or
+not possible -- explain why to the user and ask.
+Reply with EXACTLY this fence format (a fenced json block is NOT a tool
+call and will be ignored):
+```tool
+{"name": "config_edit", "arguments": {"file": "printer.cfg", "op": "set_param", "section": "printer", "key": "max_accel", "value": "12000"}}
+```
+Other argument shapes:
+patch a macro body: {"name": "config_edit", "arguments": {"file": "printer.cfg", "op": "patch_gcode", "section": "gcode_macro NAME", "old_text": "<line copied verbatim>", "new_text": "<replacement>"}}
+include a file: {"name": "config_edit", "arguments": {"file": "printer.cfg", "op": "add_include", "target_file": "new.cfg"}}
+create a NEW file only: {"name": "config_write", "arguments": {"file": "new.cfg", "content": "<full file text>"}}"""
 
 EDIT_TOOL_NAMES = frozenset({"config_edit", "config_write"})
 
@@ -243,7 +249,7 @@ class EditSession:
                 "content": str(args.get("content", "")),
             }
         elif name == "config_edit":
-            op = {"op": str(args.get("op", ""))}
+            op: dict = {"op": str(args.get("op", ""))}
             for arg_key in ("file", "section", "key", "text",
                             "old_text", "new_text", "target_file"):
                 if arg_key in args and args[arg_key] is not None:
