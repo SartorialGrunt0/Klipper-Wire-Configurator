@@ -18,6 +18,7 @@ from api.printer_memory_routes import (  # noqa: E402
     is_printer_memory_blank,
 )
 from mcp_server import McpServer, get_index
+from services.ai_draft_apply import extract_config_code_blocks
 from services.ai_edit_tools import (
     EDIT_PROTOCOL_PROMPT,
     EDIT_TOOL_NAMES,
@@ -2649,15 +2650,26 @@ async def chat_proxy(req: ChatRequest):
                     # malformed guard. Pure Q&A never matches this gate.
                     if (edit_session is not None
                             and _is_edit_request(req.messages)
-                            # Nudge when the write-tool trace ENDED on
+                            # Nudge when (a) the write-tool trace ENDED on
                             # nothing staged (never engaged: read-then-
                             # prose, r6b) or on a CORRECTABLE kickback
                             # (r4 give-up; r5 multi-part give-up hiding
-                            # behind a staged first half). Never after a
-                            # success (summary turn) or a user-gated
-                            # refusal (explain-and-ask is finished).
-                            and edit_session.last_write_outcome
-                            in (None, 'correctable')
+                            # behind a staged first half), OR (b) the
+                            # final answer CONTAINS a fenced cfg block on
+                            # an edit request — that is mechanically the
+                            # inert-draft shape (r6: create succeeded,
+                            # include re-drafted as prose cfg after the
+                            # tool-side include failed). A staged change
+                            # never proves the whole intent is covered;
+                            # a cfg block in prose always proves inert
+                            # drafting. user_gated refusals are still
+                            # protected when no cfg block is present.
+                            and (
+                                edit_session.last_write_outcome
+                                in (None, 'correctable')
+                                or bool(extract_config_code_blocks(
+                                    current_content))
+                            )
                             and edit_nudges < 2):
                         edit_nudges += 1
                         logger.info(
