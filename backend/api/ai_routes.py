@@ -2649,15 +2649,15 @@ async def chat_proxy(req: ChatRequest):
                     # malformed guard. Pure Q&A never matches this gate.
                     if (edit_session is not None
                             and _is_edit_request(req.messages)
-                            # Fire when the model never engaged the write
-                            # tools at all (read-then-prose, r6b) OR gave
-                            # up after a CORRECTABLE kickback without
-                            # retrying (r4 9b EDIT-01). Never fire after a
-                            # user-gated refusal (commented param: honest
-                            # explain-and-ask is the finished move).
-                            and not edit_session.pending_edits
-                            and (edit_session.edit_attempts == 0
-                                 or not edit_session.last_refusal_user_gated)
+                            # Nudge when the write-tool trace ENDED on
+                            # nothing staged (never engaged: read-then-
+                            # prose, r6b) or on a CORRECTABLE kickback
+                            # (r4 give-up; r5 multi-part give-up hiding
+                            # behind a staged first half). Never after a
+                            # success (summary turn) or a user-gated
+                            # refusal (explain-and-ask is finished).
+                            and edit_session.last_write_outcome
+                            in (None, 'correctable')
                             and edit_nudges < 2):
                         edit_nudges += 1
                         logger.info(

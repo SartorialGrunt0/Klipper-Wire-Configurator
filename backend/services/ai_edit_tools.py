@@ -195,13 +195,18 @@ class EditSession:
         self.baseline = self.state.validate()
         self.pending_edits: list[dict] = []
         self.edit_attempts = 0
-        # True when the most recent refusal was USER-GATED (commented
-        # param: the right move is explain-and-ask, and a nudge would
-        # push the model to force the change). False for correctable
-        # kickbacks (anchor miss, bad args) — giving up on those must
-        # not stand (r4 9b EDIT-01: replace_section kickback, model
-        # explained and stopped without retrying set_param).
-        self.last_refusal_user_gated = False
+        # Classification of the most recent write-tool outcome:
+        #   None         — no write call yet this request
+        #   'success'    — staged (partial success counts; see 'correctable')
+        #   'user_gated' — commented-param refusal: explain-and-ask IS the
+        #                  finished move; a nudge would force the change
+        #   'correctable'— anchor miss / bad args / op misuse: the model
+        #                  must retry with corrected arguments; giving up
+        #                  on those must not stand (r4 EDIT-01) — and a
+        #                  give-up on the SECOND half of a multi-part
+        #                  change must not hide behind the staged first
+        #                  half either (r5 EDIT-04).
+        self.last_write_outcome: str | None = None
         self._last_file: str | None = None
 
     def has_files(self) -> bool:
@@ -240,17 +245,16 @@ class EditSession:
         new_state, result = self.state.apply(self.baseline, op)
         if result["status"] == "error":
             # ONLY the set_param commented-param refusal is user-gated:
-            # there is no alternate op that satisfies the request without
-            # the user's OK. Boundary/dormant/anchor refusals are
-            # CORRECTABLE (right tool, wrong op/args) — giving up after
-            # one must still get nudged (r4 9b EDIT-01: replace_section
-            # kickback, model explained and stopped instead of set_param).
-            self.last_refusal_user_gated = (
-                "exists but is commented out"
-                in str(result.get("error", "")))
+            # no alternate op satisfies the request without the user's OK.
+            # Boundary/dormant/anchor refusals are CORRECTABLE (right
+            # tool, wrong op/args) — a give-up after one gets nudged.
+            self.last_write_outcome = (
+                "user_gated" if "exists but is commented out"
+                in str(result.get("error", "")) else "correctable")
             return _lean_error_content(name, result), None
 
         self.state = new_state
+        self.last_write_outcome = "success"
         file_name = result.get("file", "")
         details = {
             "file": file_name,
