@@ -28,7 +28,7 @@ from services.ai_draft_project import ProjectState
 # block, gets told "use the tool", and re-reads again. The nudge
 # therefore answers the question it is implicitly asking (what exactly
 # do the arguments look like?) instead of only scolding.
-_EDIT_NUDGE_TEXT = """You described changes but did not call config_edit or config_write. Config blocks written in prose are display-only and are NEVER applied. Call the tool NOW with the arguments below (do not read files again first -- the section text you need is already in this conversation), or -- if the change is not safe or not possible -- explain why to the user and ask.
+EDIT_NUDGE_TEXT = """You described changes but did not call config_edit or config_write. Config blocks written in prose are display-only and are NEVER applied. Call the tool NOW with the arguments below (do not read files again first -- the section text you need is already in this conversation), or -- if the change is not safe or not possible -- explain why to the user and ask.
 Exact call shapes:
 config_edit (set a parameter): {"file": "printer.cfg", "op": "set_param", "section": "printer", "key": "max_accel", "value": "12000"}
 config_edit (edit a macro body): {"file": "printer.cfg", "op": "patch_gcode", "section": "gcode_macro NAME", "old_text": "<line copied verbatim>", "new_text": "<replacement>"}

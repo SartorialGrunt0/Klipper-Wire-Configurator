@@ -20,7 +20,7 @@ from api.printer_memory_routes import (  # noqa: E402
 from mcp_server import McpServer, get_index
 from services.ai_draft_apply import extract_config_code_blocks
 from services.ai_edit_tools import (
-    _EDIT_NUDGE_TEXT,
+    EDIT_NUDGE_TEXT,
     EDIT_PROTOCOL_PROMPT,
     EDIT_TOOL_NAMES,
     EDIT_TOOL_SPECS,
@@ -2684,7 +2684,7 @@ async def chat_proxy(req: ChatRequest):
                                     {"role": "assistant", "content": clean_prior})
                         current_messages.append({
                             "role": "user",
-                            "content": _EDIT_NUDGE_TEXT,
+                            "content": EDIT_NUDGE_TEXT,
                         })
                         nudge_payload = _build_provider_payload(
                             req.apiProvider, current_messages, req.model,
