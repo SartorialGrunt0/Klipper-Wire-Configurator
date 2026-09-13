@@ -102,16 +102,59 @@ class _OpError(Exception):
         return result
 
 
+def _comment_boundary_crossings(old_text: str, new_text: str) -> dict:
+    """Params whose comment status changes between an old/new patch text.
+
+    Returns ``{'enabled': [...], 'disabled': [...]}``: names that are
+    commented in old_text but active in new_text, and vice versa. Pure
+    comment-to-comment or active-to-active edits of the same param are
+    NOT crossings (normal macro/param editing stays unaffected).
+    """
+    def _status_by_param(text: str) -> dict[str, str]:
+        status: dict[str, str] = {}
+        for line in text.split('\n'):
+            if RE_SECTION_HEADER.match(line.strip()):
+                continue  # section headers are not params
+            cmatch = RE_COMMENTED_PARAM_LINE.match(line)
+            if cmatch:
+                status.setdefault(cmatch.group(2), 'commented')
+                continue
+            pmatch = RE_PARAM_LINE.match(line)
+            if pmatch:
+                status.setdefault(pmatch.group(2), 'active')
+        return status
+
+    old_status = _status_by_param(old_text)
+    new_status = _status_by_param(new_text)
+    enabled = sorted(name for name, st in new_status.items()
+                     if st == 'active' and old_status.get(name) == 'commented')
+    disabled = sorted(name for name, st in new_status.items()
+                      if st == 'commented' and old_status.get(name) == 'active')
+    return {'enabled': enabled, 'disabled': disabled}
+
+
 def _state_error(message: str, **extra) -> dict:
     result = {'status': 'error', 'error': message}
     result.update(extra)
     return result
 
 
+def _finding_dedupe_key(filename: str, error: dict) -> tuple:
+    """Identity of one finding for delta/control cancellation.
+
+    Message is included deliberately here (unlike _error_key's
+    message-free identity): control cancellation compares the SAME
+    validator run's output shape, and message text is stable within a
+    single candidate-vs-control comparison.
+    """
+    return (filename, error.get('severity', ''), error.get('section', ''),
+            error.get('param', ''), error.get('code', ''),
+            error.get('message', ''))
+
+
 @dataclass
 class ProjectState:
     """Disposable text-level working copy of the user's project."""
-
     files: dict[str, str] = field(default_factory=dict)
 
     # ── seeding / validation ────────────────────────────────────────────
@@ -151,7 +194,38 @@ class ProjectState:
 
     # ── delta gate ───────────────────────────────────────────────────────
 
-    def _delta_findings(self, baseline: dict[str, dict]) -> dict:
+    def control_state_for(self, op: dict) -> "ProjectState":
+        """Pre-op state projected to the CANDIDATE's file set.
+
+        Validation is mode-dependent: the validator runs project-wide
+        include checks only when the file count is >1, so CREATING a file
+        in a partial context conjures 'include not found' errors in files
+        the op never touched (a 1-file context suddenly reports 12 errors
+        when a second file appears — EDIT-04 live run, 2026-09-13).
+        Comparing candidate vs the plain baseline blames all of them on
+        the op: unfixable kickbacks → oscillation.
+
+        For create ops the control adds a placeholder for the new file so
+        file-set-dependent checks fire identically in control and
+        candidate and cancel out of the delta; only findings actually
+        caused by the new file's CONTENT survive. Delete ops keep the
+        plain pre-op control: breaking an include by deleting the
+        included file IS a real, fixable error and must kick back.
+        """
+        control = self.copy()
+        op_file = op.get('file', '')
+        kind = op.get('op', '')
+        if kind in ('new_file', 'write_file') and op_file and op_file not in self.files:
+            # Comment-only content: _parse_all keeps it (non-blank) so the
+            # file COUNTS toward the >1 project-mode threshold — the
+            # include scan fires in control exactly as in candidate and
+            # cancels out of the delta — while producing zero findings of
+            # its own that could skew the comparison.
+            control.files[op_file] = '# control placeholder\n'
+        return control
+
+    def _delta_findings(self, baseline: dict[str, dict],
+                        control: "ProjectState | None" = None) -> dict:
         """Run the delta gate against a baseline validation.
 
         Returns ``{'new_errors': [...], 'advisories': [...]}`` where
@@ -159,9 +233,20 @@ class ProjectState:
         re-attempt, and ``advisories`` are new warnings + new instances of
         retry-exempt codes (visible to the model, non-blocking — can't be
         regenerated away, don't loop).
+
+        ``control`` (see :meth:`control_state_for`) validates a pre-op
+        state projected to the candidate's file set; its findings are
+        subtracted alongside the baseline so file-set-mode artifacts never
+        reach the model.
         """
         candidate = self.validate()
         issues = collect_new_validation_errors(baseline, candidate)
+        control_keys: set[tuple] = set()
+        if control is not None:
+            control_validation = control.validate()
+            for group in collect_new_validation_errors(baseline, control_validation):
+                for error in group['errors']:
+                    control_keys.add(_finding_dedupe_key(group['filename'], error))
         new_errors: list[dict] = []
         advisories: list[dict] = []
         seen_keys: set[tuple] = set()
@@ -178,10 +263,8 @@ class ProjectState:
                 # Dedupe: the validator re-derives some cross-file checks
                 # per file count, so 1-file -> 2-file deltas can repeat an
                 # identical finding. The model sees it once.
-                dedupe_key = (finding['filename'], finding['severity'],
-                              finding['section'], finding['param'],
-                              finding['code'], finding['message'])
-                if dedupe_key in seen_keys:
+                dedupe_key = _finding_dedupe_key(group['filename'], error)
+                if dedupe_key in seen_keys or dedupe_key in control_keys:
                     continue
                 seen_keys.add(dedupe_key)
                 if error.get('severity') == 'warning' or is_retry_exempt(error):
@@ -205,7 +288,8 @@ class ProjectState:
         outcome = new_state._apply_raw(op)
         if outcome['status'] == 'error':
             return self.copy(), outcome
-        findings = new_state._delta_findings(baseline_validations)
+        findings = new_state._delta_findings(baseline_validations,
+                                             control=self.control_state_for(op))
         base_text = self.files.get(outcome['file'], '')
         after_text = new_state.files.get(outcome['file'], '')
         result = {
@@ -401,6 +485,23 @@ class ProjectState:
                     f"(found foreign header '[{match.group(1).strip()}]')."
                 )
         new_body = body_stripped.split('\n') if body_stripped else []
+        if not op.get('allow_comment_change'):
+            # Same comment-boundary guard as patch_gcode: a full-body
+            # replacement must not silently flip parameter '#' status.
+            current_body = '\n'.join(lines[header_index + 1:inner_end])
+            crossed = _comment_boundary_crossings(current_body, body_stripped)
+            if crossed['enabled'] or crossed['disabled']:
+                return _state_error(
+                    "This replacement would change whether parameters are "
+                    f"commented out (newly active: "
+                    f"{', '.join(sorted(crossed['enabled'])) or 'none'}; newly "
+                    f"commented: {', '.join(sorted(crossed['disabled'])) or 'none'}). "
+                    "Re-run with allow_comment_change=true only when the "
+                    "user explicitly asked to uncomment or disable them; "
+                    "otherwise explain and ask.",
+                    commentedParams=sorted(
+                        crossed['enabled'] + crossed['disabled']),
+                )
         lines[header_index + 1:inner_end] = new_body
         self.files[filename] = '\n'.join(lines)
         return {'status': 'ok', 'file': filename, 'summary': f"replaced body of [{header}] in {filename}"}
@@ -443,6 +544,29 @@ class ProjectState:
         section_text = '\n'.join(section_lines)
 
         occurrences = _count_substring_occurrences(section_text, old_text)
+        if not op.get('allow_comment_change'):
+            # Comment-boundary guard: patch_gcode must not silently enable
+            # or disable a config parameter by flipping its '#' —
+            # set_param refuses commented params, and without this check
+            # patch_gcode is the escape hatch around that rule (EDIT-06
+            # live run, 2026-09-13). Legitimate uncomment/disable requests
+            # re-run with allow_comment_change=true, which doubles as the
+            # explicit user-confirmation signal.
+            crossed = _comment_boundary_crossings(old_text, new_text)
+            if crossed['enabled'] or crossed['disabled']:
+                gained = ', '.join(sorted(crossed['enabled'])) or 'none'
+                lost = ', '.join(sorted(crossed['disabled'])) or 'none'
+                return _state_error(
+                    "This patch would change whether parameters are commented "
+                    f"out (newly active: {gained}; newly commented: {lost}). "
+                    "Commented parameters are NOT active config — touching "
+                    "them requires the user's explicit knowledge. If the "
+                    "user clearly asked to uncomment or disable these, "
+                    "re-run the same op with allow_comment_change=true; "
+                    "otherwise explain the commented-out situation and ask.",
+                    commentedParams=sorted(
+                        crossed['enabled'] + crossed['disabled']),
+                )
         if occurrences == 1:
             patched = section_text.replace(old_text, new_text, 1)
         elif occurrences > 1:

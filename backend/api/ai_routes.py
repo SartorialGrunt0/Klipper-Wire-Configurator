@@ -345,6 +345,11 @@ class ChatRequest(BaseModel):
     # "text" forces the text protocol everywhere. The frontend never sends
     # this; scripts/ai_chat_accuracy_test.py uses it for comparisons.
     toolProtocol: str = "auto"
+    # Tool-mediated editing override (harness A/B runs ONLY; the frontend
+    # never sends it). None = env KWC_EDIT_TOOLS decides; True/False forces
+    # the write tools on/off for this request. Mirrors the toolProtocol
+    # precedent so A/B runs don't need backend restarts.
+    editTools: bool | None = None
     # Merge every system message into a single leading system message.
     # Default off: most OpenAI-compatible servers accept multiple system
     # messages and the trailing task anchor is positionally meaningful
@@ -674,7 +679,9 @@ _EDIT_TOOL_SNIPPETS: dict[str, str] = {
         "|'remove_include', section='bed_mesh', key='speed', value='50', "
         "text='body for add/replace_section', old_text='exact lines to "
         "replace', new_text='replacement lines', target_file='x.cfg' for "
-        "include ops). One op per call; changes are validated and staged "
+        "include ops, allow_comment_change=true only when the user asked to "
+        "uncomment/comment out params). One op per call; changes are "
+        "validated and staged "
         "for user review"
     ),
     "config_write": (
@@ -2380,8 +2387,9 @@ async def chat_proxy(req: ChatRequest):
     # live working state), stacked edits returned as pendingEdits. No
     # per-conversation draft store by design. Without live files there is
     # nothing to edit — tools stay unadvertised.
+    edit_enabled = req.editTools if req.editTools is not None else _edit_tools_enabled()
     edit_session: EditSession | None = None
-    if _edit_tools_enabled() and req.contextFiles:
+    if edit_enabled and req.contextFiles:
         try:
             edit_session = EditSession(req.contextFiles)
             if not edit_session.has_files():

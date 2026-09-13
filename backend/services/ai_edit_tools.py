@@ -80,6 +80,14 @@ CONFIG_EDIT_SPEC = {
                 "type": "string",
                 "description": "Replacement lines (patch_gcode); empty string deletes the matched lines",
             },
+            "allow_comment_change": {
+                "type": "boolean",
+                "description": (
+                    "patch_gcode only: set true ONLY when the user explicitly "
+                    "asked to uncomment or comment out the named parameter(s); "
+                    "the tool refuses comment-status changes without it"
+                ),
+            },
             "target_file": {
                 "type": "string",
                 "description": "File to include/un-include (add_include / remove_include)",
@@ -211,6 +219,8 @@ class EditSession:
                     op[arg_key] = str(args[arg_key])
             if "value" in args and args["value"] is not None:
                 op["value"] = str(args["value"])
+            if args.get("allow_comment_change"):
+                op["allow_comment_change"] = True
         else:
             return f"Unknown write tool: {name}", None
 

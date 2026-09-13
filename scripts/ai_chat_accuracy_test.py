@@ -61,7 +61,10 @@ draft-block protocol; the files are attached as read-only context and never
 modified), MINIDIFF-01..04 (the mini-diff edit protocol), AMBI-01..08
 (ambiguity cases: new-file drafts, hypothetical edits, batch section reads,
 multi-topic explain-and-edit turns, content search), and MEMORY-01..03
-(printer-memory auto-fill, requires --include-memory).
+(printer-memory auto-fill, requires --include-memory), and EDIT-01..06
+(tool-mediated editing: criteria read the server-staged pendingEdits —
+these questions force ChatRequest.editTools=True; run the MINIDIFF-*/
+TRIDENT-* families with --edit-tools off for the prose-path A/B arm).
 
 Stdlib only — no third-party dependencies.
 """
@@ -129,6 +132,11 @@ PROVIDER_ORDER = ["chatgpt", "google", "anthropic", "github", "openai-compatible
 # Each question: a fresh chat dialog (messages=[user text]), the MCP tools
 # the model should reach for (expected_tools), and checkable success
 # criteria. Criterion kinds:
+#   staged_param  "<filename>::<substring>" — the server-staged pendingEdits
+#                 entry for <filename> contains <substring> (tool-mediated
+#                 edit criteria: what WAS applied, not what prose says)
+#   staged_count  "<n>" — exactly n files staged in pendingEdits
+#   not_staged    "<filename>" — that file has no staged entry
 #   contains      -> value appears in the answer (case-insensitive)
 #   not_contains  -> value must NOT appear (case-insensitive)
 #   regex         -> value is a regex searched case-insensitively over the answer
@@ -146,6 +154,11 @@ class TestQuestion:
     # rather than inventing config. Files are never modified — the chat
     # endpoint only returns draft text.
     context_files: tuple[tuple[str, str, str], ...] = ()
+    # Tool-mediated editing A/B (EDIT-* family): True/False forces the
+    # write tools on/off for this request (ChatRequest.editTools); None
+    # follows the server env. The prose criteria families run with the
+    # flag forced OFF so both paths score in one harness config.
+    edit_tools: bool | None = None
 
 
 # Shared config snippets used by several questions.
@@ -1151,6 +1164,117 @@ def build_trident_questions() -> list[TestQuestion]:
     ]
 
 
+def _printer_cfg_with_commented_enable() -> str:
+    """Trident printer.cfg with [stepper_x] enable_pin commented out.
+
+    Planted on the reference copy (the live enable_pin is active) so the
+    commented-param refusal path is testable; on-disk files untouched.
+    """
+    text = _load_trident_config("printer.cfg")
+    # Comment the FIRST enable_pin (stepper_x is the first stepper section).
+    return text.replace("enable_pin: !PE9", "#enable_pin: !PE9", 1)
+
+
+def build_edit_tool_questions() -> list[TestQuestion]:
+    """Tool-mediated editing (EDIT-* family): success = the staged
+    pendingEdits themselves (server-validated mechanical apply), not prose
+    shape. Runs with the write tools forced ON per request (editTools=True);
+    the MINIDIFF-*/TRIDENT-* families score the prose path for the A/B.
+    Criteria kind 'staged_param' reads the response's staged newText.
+    """
+    printer_cfg = _cfg_context("printer.cfg")
+    printer_and_aux = _cfg_context("printer.cfg", "aux_fan.cfg")
+    return [
+        TestQuestion(
+            qid="EDIT-01",
+            title="Edit tools: [printer] max_accel via config_edit",
+            text="In printer.cfg change the [printer] max_accel to 12000.",
+            context_files=printer_cfg,
+            edit_tools=True,
+            expected_tools=("config_edit",),
+            require_tool=True,
+            criteria=(
+                ("staged_param", "printer.cfg::max_accel: 12000"),
+            ),
+        ),
+        TestQuestion(
+            qid="EDIT-02",
+            title="Edit tools: level_bed adaptive (anchor into gcode body)",
+            text=("Modify my level_bed macro in printer.cfg to call "
+                  "BED_MESH_CALIBRATE in adaptive mode."),
+            context_files=printer_cfg,
+            edit_tools=True,
+            expected_tools=("config_edit",),
+            require_tool=True,
+            criteria=(
+                ("staged_param", "printer.cfg::ADAPTIVE=1"),
+                # The staged file is the FULL file post-apply: unrelated
+                # sections must still be intact (byte-stable guarantee).
+                ("staged_param", "printer.cfg::[stepper_x]"),
+            ),
+        ),
+        TestQuestion(
+            qid="EDIT-03",
+            title="Edit tools: cross-file pin edit (aux_fan.cfg)",
+            text=("In aux_fan.cfg change the [fan_generic Aux_Fan] section's "
+                  "pin to PB9."),
+            context_files=printer_and_aux,
+            edit_tools=True,
+            expected_tools=("config_edit",),
+            require_tool=True,
+            criteria=(
+                ("staged_param", "aux_fan.cfg::pin: PB9"),
+                # printer.cfg must NOT be rewritten as a side effect.
+                ("not_staged", "printer.cfg"),
+            ),
+        ),
+        TestQuestion(
+            qid="EDIT-04",
+            title="Edit tools: new macro file + include",
+            text=("Create a new file park_macros.cfg containing a gcode_macro "
+                  "PARK_Z that lifts Z by 5mm relative, and include it from "
+                  "printer.cfg."),
+            context_files=printer_cfg,
+            edit_tools=True,
+            expected_tools=("config_write", "config_edit"),
+            require_tool=False,
+            criteria=(
+                ("staged_param", "park_macros.cfg::[gcode_macro PARK_Z]"),
+                ("staged_param", "printer.cfg::[include park_macros.cfg]"),
+            ),
+        ),
+        TestQuestion(
+            qid="EDIT-05",
+            title="Edit tools: pure Q&A must stage NOTHING",
+            text=("What does pressure_advance do in the [extruder] section, "
+                  "and what value is typical for a direct drive?"),
+            context_files=printer_cfg,
+            edit_tools=True,
+            require_tool=False,
+            criteria=(
+                ("not_staged", "printer.cfg"),
+                ("regex", r"pressure|advance"),
+            ),
+        ),
+        TestQuestion(
+            qid="EDIT-06",
+            title="Edit tools: commented-param refusal (honest surface, no fake stage)",
+            text=("Set enable_pin to PF16 on my [stepper_x] in printer.cfg."),
+            # Planted fixture (Trident's real enable_pin is ACTIVE): the
+            # target param is commented out, so the write tool refuses it
+            # with the ask-the-user rule. Success = NO staged change and
+            # the reply honestly mentions the commented-out situation.
+            context_files=_context_with(_printer_cfg_with_commented_enable()),
+            edit_tools=True,
+            require_tool=False,
+            criteria=(
+                ("not_staged", "printer.cfg"),
+                ("regex", r"comment|ask|confirm|caution|note|uncomment"),
+            ),
+        ),
+    ]
+
+
 def build_ambiguity_questions() -> list[TestQuestion]:
     """Ambiguity probes: prompts that intentionally do NOT name a file or
     mix edit/question phrasing, to see whether the model can resolve intent
@@ -1674,6 +1798,11 @@ ALL_TOOLS = (
     "list_user_configs",
     "list_user_config_sections",
     "read_user_config",
+    # Write tools (tool-mediated editing, Phase 1). Loop-routed, not
+    # MCP-server-routed, but real all the same (EDIT-* false alarm,
+    # 2026-09-13 — same class as the LIVE-01 one below).
+    "config_edit",
+    "config_write",
     # Live-context tools (feature/config-mcp-tools, 2026-09). When adding
     # an MCP tool, update this tuple too or the summary lists real calls
     # under "Unknown tool attempts" (LIVE-01 false alarm, 2026-09-08).
@@ -1721,7 +1850,20 @@ def extract_printer_memory(content: str) -> tuple[str, dict | None]:
 def criterion_ok(kind: str, value: str, content: str,
                  memory: tuple[str, dict | None] | None = None,
                  tool_calls: list[dict] | None = None,
-                 server_repair: dict | None = None) -> bool:
+                 server_repair: dict | None = None,
+                 pending_edits: list | None = None) -> bool:
+    if kind == "staged_param":
+        # "<filename>::<substring>" — substring must appear in the staged
+        # newText for that file. Staged = server-validated mechanical apply.
+        filename, _, needle = value.partition("::")
+        for edit in pending_edits or []:
+            if edit.get("file") == filename and needle in (edit.get("newText") or ""):
+                return True
+        return False
+    if kind == "staged_count":
+        return len(pending_edits or []) == int(value)
+    if kind == "not_staged":
+        return all(e.get("file") != value for e in pending_edits or [])
     if kind == "contains":
         return value.lower() in content.lower()
     if kind == "not_contains":
@@ -1838,6 +1980,10 @@ class QuestionResult:
     # issuesAfter} or None when the pipeline was skipped (no config block or
     # no contextFiles). Tallied across runs to measure the harness itself.
     server_repair: dict | None = None
+    # Tool-mediated editing (EDIT-* family): staged write-tool changes +
+    # per-call attempt count from the response; None when not applicable.
+    pending_edits: list | None = None
+    edit_attempts: int | None = None
 
 
 # ── HTTP helpers (stdlib only) ─────────────────────────────────────────
@@ -1927,6 +2073,12 @@ def chat_request(base_url: str, question: TestQuestion, settings: dict,
         "mergeSystemMessages": settings.get("merge_system_messages", False),
         "fullRewriteGuard": settings.get("full_rewrite_guard", False),
     }
+    # Tool-mediated editing A/B: request-level override only when the
+    # question declares one (older backends ignore unknown fields).
+    if question.edit_tools is not None:
+        payload["editTools"] = question.edit_tools
+    elif settings.get("edit_tools") is not None:
+        payload["editTools"] = settings["edit_tools"]
     url = base_url.rstrip("/") + "/ai/chat"
     try:
         return http_post_json(url, payload, timeout), ""
@@ -2019,6 +2171,11 @@ def run_one_question(
         result.tool_calls = list(response.get("toolCalls", []) or [])
         result.usage = response.get("usage")
         result.server_repair = response.get("serverRepair")
+        result.pending_edits = response.get("pendingEdits")
+        result.edit_attempts = response.get("editAttempts")
+        log.write(f"Edit tools: pendingEdits="
+                  f"{[e.get('file') + ':' + e.get('op', '') for e in (result.pending_edits or [])] or 'none'} "
+                  f"editAttempts={result.edit_attempts}")
 
         log.write(f"Response mcpToolTurns={result.tool_turns} "
                   f"mcpToolNames={result.tool_names}")
@@ -2054,7 +2211,8 @@ def run_one_question(
             for kind, value in q.criteria:
                 ok = criterion_ok(kind, value, result.response, memory=memory,
                                   tool_calls=result.tool_calls,
-                                  server_repair=result.server_repair)
+                                  server_repair=result.server_repair,
+                                  pending_edits=result.pending_edits)
                 result.checks.append((kind, value, ok))
             result.answer_ok = all(ok for _, _, ok in result.checks)
             if result.answer_ok and result.tool_ok:
@@ -2175,8 +2333,17 @@ def resolve_settings(args: argparse.Namespace) -> dict:
         "tool_protocol": args.tool_protocol or "auto",
         "merge_system_messages": args.merge_system_messages,
         "full_rewrite_guard": args.full_rewrite_guard,
+        "edit_tools": edit_tools_setting(args),
         "base_url": base_url,
     }
+
+
+def edit_tools_setting(args: argparse.Namespace) -> bool | None:
+    """--edit-tools on/off/auto: default None (per-server env). EDIT-*
+    questions override per-request anyway; this flag exists so a whole run
+    can force the prose path (off) for A/B baselines."""
+    value = getattr(args, "edit_tools", "auto")
+    return {"on": True, "off": False}.get(value, None)
 
 
 # ── Question selection ─────────────────────────────────────────────────
@@ -2246,6 +2413,11 @@ def main() -> int:
                              "uses the STRICT mini-diff edit-protocol wording. "
                              "Default off — full writes accepted, softer "
                              "wording. Use to A/B the guard + prompt pair.")
+    parser.add_argument("--edit-tools", default="auto", choices=["auto", "on", "off"],
+                        help="Tool-mediated editing for questions without a "
+                             "per-question override: 'auto' follows the server "
+                             "env (KWC_EDIT_TOOLS), 'on'/'off' force it for the "
+                             "run (A/B the write-tool path vs prose)")
     parser.add_argument("--questions", default="", help="Subset, e.g. '1-5,8' (1-based)")
     parser.add_argument("--start", default=0, type=int,
                         help="Start at question N (1-based), running N..end. "
@@ -2272,7 +2444,7 @@ def main() -> int:
                              "printer memory, blank it, run MEMORY-01..03, then restore it")
     args = parser.parse_args()
 
-    questions = build_questions() + build_macro_questions() + build_trident_questions() + build_ambiguity_questions() + build_setup_questions() + build_live_context_questions()
+    questions = build_questions() + build_macro_questions() + build_trident_questions() + build_ambiguity_questions() + build_setup_questions() + build_live_context_questions() + build_edit_tool_questions()
     if args.include_memory:
         questions += build_memory_questions()
     if args.list_questions:

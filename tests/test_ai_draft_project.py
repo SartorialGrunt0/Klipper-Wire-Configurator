@@ -381,3 +381,98 @@ def test_upsert_creating_dependency_error_is_kicked_back():
     assert r['status'] == 'error'
     assert any('mesh_radius' in e['message'] for e in r['newErrors'])
     assert st1.files == st.files
+
+
+# ── control-state cancellation (EDIT-04 live finding, 2026-09-13) ────────
+
+def test_new_file_in_partial_context_does_not_conjure_include_errors():
+    """1-file context whose includes are absent on 'disk': creating ANY
+    file flips the validator into project mode and would blame all the
+    latent 'include not found' errors on the new file (unfixable
+    kickback). The control-state projection cancels them out."""
+    st = ProjectState.from_context_files({
+        'printer.cfg': {'content':
+            '[mcu]\nserial: /tmp/x\n\n'
+            '[include nothere1.cfg]\n[include nothere2.cfg]\n'
+        },
+    })
+    base = st.validate()
+    assert sum(len(v['errors']) for v in base.values()) == 0  # file-local mode
+    st2, r = st.apply(base, {
+        'op': 'new_file', 'file': 'macros.cfg',
+        'content': '[gcode_macro PARK]\ngcode:\n    G91\n',
+    })
+    assert r['status'] in ('applied', 'applied_with_advisory'), r
+    assert not r['newErrors']
+
+
+def test_new_file_real_content_errors_still_kick_back():
+    """Cancellation must NOT hide genuine errors from the new file's
+    content: an invalid param in the NEW file is a real, fixable error."""
+    st = ProjectState.from_context_files({
+        'printer.cfg': {'content':
+            '[mcu]\nserial: /tmp/x\n\n[include nothere1.cfg]\n'
+        },
+    })
+    base = st.validate()
+    st2, r = st.apply(base, {
+        'op': 'new_file', 'file': 'bad.cfg',
+        'content': '[stepper_x]\nstep_pin: PB0\nbogus_param_xyz: 1\n',
+    })
+    assert r['status'] == 'error'  # incomplete stepper section kicks back
+    messages = [e.get('message', '') for e in r.get('newErrors', [])]
+    assert any('rotation_distance' in msg for msg in messages)
+    ghost = [msg for msg in messages if 'nothere1' in msg]
+    assert not ghost, f"include ghost leaked into kickback: {ghost}"
+
+
+# ── comment-boundary guard on patch_gcode (EDIT-06, 2026-09-13) ─────────
+
+_X_PRINTER = ("[stepper_x]\nstep_pin: PB0\n#enable_pin: !PE9\n"
+              "rotation_distance: 40\nmicrosteps:Sixteen\ndir_pin: PB1\n")
+
+
+def _guard_state():
+    st = ProjectState.from_context_files({'printer.cfg': {'content': _X_PRINTER}})
+    return st, st.validate()
+
+
+def test_patch_gcode_cannot_silently_uncomment_param():
+    st, base = _guard_state()
+    _, r = st.apply(base, {
+        'op': 'patch_gcode', 'file': 'printer.cfg', 'section': 'stepper_x',
+        'old_text': '#enable_pin: !PE9', 'new_text': 'enable_pin: PF16',
+    })
+    assert r['status'] == 'error'
+    assert 'commented' in r['error'].lower()
+    assert r.get('commentedParams') == ['enable_pin']
+
+
+def test_patch_gcode_allow_comment_change_escapes_guard():
+    st, base = _guard_state()
+    st2, r = st.apply(base, {
+        'op': 'patch_gcode', 'file': 'printer.cfg', 'section': 'stepper_x',
+        'old_text': '#enable_pin: !PE9', 'new_text': 'enable_pin: PF16',
+        'allow_comment_change': True,
+    })
+    assert r['status'] in ('applied', 'applied_with_advisory'), r
+    assert 'enable_pin: PF16' in st2.files['printer.cfg']
+
+
+def test_patch_gcode_comment_to_comment_edit_not_blocked():
+    st, base = _guard_state()
+    st2, r = st.apply(base, {
+        'op': 'patch_gcode', 'file': 'printer.cfg', 'section': 'stepper_x',
+        'old_text': '#enable_pin: !PE9', 'new_text': '#enable_pin: !PF16',
+    })
+    assert r['status'] in ('applied', 'applied_with_advisory'), r
+
+
+def test_patch_gcode_commenting_out_param_also_guarded():
+    st, base = _guard_state()
+    _, r = st.apply(base, {
+        'op': 'patch_gcode', 'file': 'printer.cfg', 'section': 'stepper_x',
+        'old_text': 'step_pin: PB0', 'new_text': '#step_pin: PB0',
+    })
+    assert r['status'] == 'error'
+    assert r.get('commentedParams') == ['step_pin']
