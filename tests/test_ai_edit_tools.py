@@ -432,3 +432,94 @@ def test_qa_response_not_nudged(monkeypatch):
     assert response.status_code == 200
     assert len(calls) == 1  # no nudge re-query for Q&A
     assert response.json().get('pendingEdits') in (None, [])
+
+
+def test_read_then_prose_still_nudged(monkeypatch):
+    """r6b qwen3.5-9b EDIT-01 pattern: legitimate read_user_config turn,
+    THEN a ```cfg prose draft. The in-loop nudge must catch prose at any
+    turn and drive the model to stage the change."""
+    monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
+    scripted = [
+        # turn 1: legit read call
+        'Let me read the section first.\n```tool\n{"name": "read_user_config", '
+        '"arguments": {"filename": "printer.cfg", "section": "printer"}}\n```',
+        # turn 2: prose draft instead of the write tool (the r6b failure)
+        '```cfg\n# file: printer.cfg\n[printer]\n-max_accel: 15500\n+max_accel: 12000\n```',
+        # turn 3 (after nudge): the actual write tool call
+        '```tool\n{"name": "config_edit", "arguments": {"file": "printer.cfg", '
+        '"op": "set_param", "section": "printer", "key": "max_accel", "value": "12000"}}\n```',
+        # turn 4: final answer
+        'Staged the max_accel change.',
+    ]
+    seen = []
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+        def raise_for_status(self):
+            return None
+        def json(self):
+            return self._payload
+
+    async def fake_post(url, json=None, headers=None, **kwargs):
+        seen.append(json)
+        content = scripted[min(len(seen) - 1, len(scripted) - 1)]
+        return _Resp({'choices': [{'message': {'content': content},
+                                   'finish_reason': 'stop'}]})
+
+    monkeypatch.setattr(ai_routes.httpx.AsyncClient, 'post',
+                        lambda self, url, **kw: fake_post(url, **kw))
+
+    response = client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'change [printer] max_accel to 12000'}]))
+    assert response.status_code == 200
+    body = response.json()
+    assert body.get('pendingEdits'), f"expected staged edit after read+prose nudge, got {body}"
+    assert 'max_accel: 12000' in body['pendingEdits'][0]['newText']
+
+
+def test_honest_refusal_not_nudged(monkeypatch):
+    """An edit request where the model already TRIED a write tool (rejected
+    commented param) and honestly explained: the nudge must NOT poke it
+    into forcing the change (edit_attempts>0 gate)."""
+    monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
+    calls = []
+    scripted = [
+        # write tool attempt -> rejected (commented param via real session)
+        '```tool\n{"name": "config_edit", "arguments": {"file": "printer.cfg", '
+        '"op": "set_param", "section": "stepper_x", "key": "enable_pin", "value": "PF16"}}\n```',
+        # honest explanation referencing the refusal -> must NOT be nudged
+        ('The enable_pin in [stepper_x] is commented out in your config. '
+         'Would you like me to uncomment it?'),
+    ]
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+        def raise_for_status(self):
+            return None
+        def json(self):
+            return self._payload
+
+    async def fake_post(url, json=None, headers=None, **kwargs):
+        calls.append(json)
+        content = scripted[min(len(calls) - 1, len(scripted) - 1)]
+        return _Resp({'choices': [{'message': {'content': content},
+                                   'finish_reason': 'stop'}]})
+
+    monkeypatch.setattr(ai_routes.httpx.AsyncClient, 'post',
+                        lambda self, url, **kw: fake_post(url, **kw))
+
+    # Refusal premise: enable_pin exists ONLY commented-out, so the real
+    # session refuses the set_param (shared fixture lacks it — own context).
+    cfg_with_commented = PRINTER_CFG.replace(
+        '[stepper_x]\nstep_pin: PF13',
+        '[stepper_x]\nstep_pin: PF13\n#enable_pin: !PE9', 1)
+    response = client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'set enable_pin to PF16 on [stepper_x]'}],
+        contextFiles={'printer.cfg': {'content': cfg_with_commented}}))
+    assert response.status_code == 200
+    body = response.json()
+    # exactly the initial call + one tool-round re-query; no nudge call
+    assert len(calls) == 2, f"nudge fired on honest refusal: {len(calls)} provider calls"
+    assert body.get('pendingEdits') in (None, [])
