@@ -568,3 +568,61 @@ def test_giveup_after_correctable_kickback_gets_nudged(monkeypatch):
     body = response.json()
     assert body.get('pendingEdits'), f"expected staged edit after kickback-nudge, got {body}"
     assert 'max_accel: 12000' in body['pendingEdits'][0]['newText']
+
+
+def _edit_ctx_with_commented():
+    cfg = PRINTER_CFG.replace(
+        '[stepper_x]\nstep_pin: PF13',
+        '[stepper_x]\nstep_pin: PF13\n#enable_pin: !PE9')
+    assert '#enable_pin: !PE9' in cfg
+    return {'printer.cfg': {'content': cfg}}
+
+
+def test_multi_refusal_shield_persists_after_boundary_refusal(monkeypatch):
+    """r9 9b EDIT-06: after the set_param refusal armed the user-gated
+    shield, a SECOND refusal (patch_gcode comment boundary) was
+    classified 'correctable', which overwrote the shield; the nudge read
+    as permission and the model self-granted allow_comment_change.
+    ANY commented refusal keeps the shield: honest prose must go
+    unanswered (no nudge)."""
+    monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
+    calls = []
+    scripted = [
+        # 1: set_param -> refused (exists but is commented out)
+        '```tool\n{"name": "config_edit", "arguments": {"file": "printer.cfg", '
+        '"op": "set_param", "section": "stepper_x", "key": "enable_pin", '
+        '"value": "!PF16"}}\n```',
+        # 2: patch_gcode un-commenting -> boundary refusal
+        '```tool\n{"name": "config_edit", "arguments": {"file": "printer.cfg", '
+        '"op": "patch_gcode", "section": "stepper_x", "old_text": '
+        '"#enable_pin: !PE9", "new_text": "enable_pin: !PE9"}}\n```',
+        # 3: honest refusal surface (must NOT be nudged)
+        'The enable_pin line is commented out (`#enable_pin: !PE9`), so it is '
+        'not active config. Uncommenting it would enable the motor driver pin '
+        'unexpectedly — do you want me to uncomment and set it to !PF16?',
+    ]
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+        def raise_for_status(self):
+            return None
+        def json(self):
+            return self._payload
+
+    async def fake_post(url, json=None, headers=None, **kwargs):
+        calls.append(json)
+        content = scripted[min(len(calls) - 1, len(scripted) - 1)]
+        return _Resp({'choices': [{'message': {'content': content},
+                                   'finish_reason': 'stop'}]})
+
+    monkeypatch.setattr(ai_routes.httpx.AsyncClient, 'post',
+                        lambda self, url, **kw: fake_post(url, **kw))
+
+    response = client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'Set enable_pin to PF16 on my [stepper_x] in printer.cfg.'}],
+        contextFiles=_edit_ctx_with_commented()))
+    assert response.status_code == 200
+    body = response.json()
+    assert not body.get('pendingEdits'), f"shield broken: {body}"
+    assert len(calls) == 3, f"expected no nudge round-trips, got {len(calls)} calls"

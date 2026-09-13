@@ -263,13 +263,20 @@ class EditSession:
 
         new_state, result = self.state.apply(self.baseline, op)
         if result["status"] == "error":
-            # ONLY the set_param commented-param refusal is user-gated:
-            # no alternate op satisfies the request without the user's OK.
-            # Boundary/dormant/anchor refusals are CORRECTABLE (right
-            # tool, wrong op/args) — a give-up after one gets nudged.
+            # ANY commented-parameter refusal is user-gated (r9 finding:
+            # classifying the patch_gcode boundary refusal as
+            # 'correctable' disarmed the shield set by the earlier
+            # set_param refusal, and the "call the tool NOW" nudge read
+            # to the model as the user's permission -- it self-granted
+            # allow_comment_change). No retry without the user satisfies
+            # these. Correctable = anchor miss, bad/missing args,
+            # unknown section/op, self-include.
+            gated = (
+                bool(result.get("commentedParams"))
+                or "exists but is commented out"
+                in str(result.get("error", "")))
             self.last_write_outcome = (
-                "user_gated" if "exists but is commented out"
-                in str(result.get("error", "")) else "correctable")
+                "user_gated" if gated else "correctable")
             return _lean_error_content(name, result), None
 
         self.state = new_state
