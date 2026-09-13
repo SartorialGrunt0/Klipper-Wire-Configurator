@@ -18,6 +18,12 @@ from api.printer_memory_routes import (  # noqa: E402
     is_printer_memory_blank,
 )
 from mcp_server import McpServer, get_index
+from services.ai_edit_tools import (
+    EDIT_PROTOCOL_PROMPT,
+    EDIT_TOOL_NAMES,
+    EDIT_TOOL_SPECS,
+    EditSession,
+)
 
 router = APIRouter()
 
@@ -442,7 +448,8 @@ def _get_openai_compatible_default_url(provider: str) -> str:
     return defaults.get(provider, "")
 
 
-def _prepare_messages(messages: list[dict], full_rewrite_guard: bool = False) -> list[dict]:
+def _prepare_messages(messages: list[dict], full_rewrite_guard: bool = False,
+                      edit_capable: bool = False) -> list[dict]:
     """Build a clean system prompt with MCP tool descriptions, printer memory,
     and user messages.
     """
@@ -466,8 +473,12 @@ def _prepare_messages(messages: list[dict], full_rewrite_guard: bool = False) ->
     else:
         # All tools are advertised unconditionally (native/text parity);
         # detect_board and other niche helpers live under "Specialized tools".
-        tool_context = _build_mcp_tool_context()
+        tool_context = _build_mcp_tool_context(edit_capable=edit_capable)
         system_parts = [system_prompt, tool_context, memory_context]
+        if edit_capable:
+            # Edit law only when the write tools are advertised (lazy
+            # context; replaced by load_skill gating in Phase 3).
+            system_parts.append(EDIT_PROTOCOL_PROMPT)
 
         # If printer memory is completely blank and there are user messages
         # to work with, add an auto-fill instruction asking the AI to
@@ -651,7 +662,29 @@ _MCP_TOOL_SNIPPETS: dict[str, str] = {
 }
 
 
-def _build_mcp_tool_context() -> str:
+# Snippets for the chat-loop write tools (advertised only when
+# KWC_EDIT_TOOLS is on; they are NOT registered MCP server tools — the
+# chat proxy routes them request-scoped. Parity with the native surface
+# is enforced by tests/test_ai_edit_tools.py.
+_EDIT_TOOL_SNIPPETS: dict[str, str] = {
+    "config_edit": (
+        "Apply one mechanical edit to the user's config "
+        "(file='printer.cfg', op='set_param'|'add_section'|'replace_section'"
+        "|'delete_section'|'patch_gcode'|'delete_file'|'add_include'"
+        "|'remove_include', section='bed_mesh', key='speed', value='50', "
+        "text='body for add/replace_section', old_text='exact lines to "
+        "replace', new_text='replacement lines', target_file='x.cfg' for "
+        "include ops). One op per call; changes are validated and staged "
+        "for user review"
+    ),
+    "config_write": (
+        "Create a NEW config file (file='new.cfg', content='full file "
+        "content') — new files only; edit existing files with config_edit"
+    ),
+}
+
+
+def _build_mcp_tool_context(edit_capable: bool = False) -> str:
     """Build the 'Available Tools' section for the system prompt.
 
     Every registered tool is advertised so text-protocol and native providers
@@ -703,6 +736,11 @@ def _build_mcp_tool_context() -> str:
     parts.append("Specialized tools (use only for specific problems):")
     for name, snippet in _SPECIALIZED_TOOL_SNIPPETS.items():
         parts.append(f"- {name}: {snippet}")
+    if edit_capable:
+        parts.append("")
+        parts.append("Config edit tools (changes are staged for user review, never saved directly):")
+        for name, snippet in _EDIT_TOOL_SNIPPETS.items():
+            parts.append(f"- {name}: {snippet}")
     parts.append("")
     parts.append(
         "Klipper G-code commands and macro names (e.g. G28, M104, BED_MESH_CALIBRATE, "
@@ -1010,6 +1048,22 @@ def _server_audit_enabled() -> bool:
     HARNESS-01..03 and dogfooding still work with it on).
     """
     return os.environ.get("KWC_POST_APPLY_AUDIT", "0") == "1"
+
+
+def _edit_tools_enabled() -> bool:
+    """Tool-mediated config editing (config_edit/config_write write tools).
+
+    DEFAULTS TO DISABLED during Phases 1-3 (plan
+    .hermes/plans/2026-09-10_tool-mediated-config-editing.md): the prose
+    draft path stays the shipped behavior until the per-model A/B at
+    Gate 1 passes. When enabled, the write tools are advertised (native +
+    text protocol parity), routed request-scoped through
+    services.ai_edit_tools.EditSession (seeded from contextFiles; no
+    per-conversation draft store), and the loop cap rises to
+    MAX_MCP_TOOL_TURNS_EDIT. Requires a non-empty contextFiles payload —
+    with no live state to edit, the tools are not advertised at all.
+    """
+    return os.environ.get("KWC_EDIT_TOOLS", "0") == "1"
 
 
 def _config_fallback_enabled() -> bool:
@@ -1541,6 +1595,9 @@ def _build_tool_result_message(tool_call: dict, result_text: str) -> str:
 
 
 MAX_MCP_TOOL_TURNS = 10
+# With the write tools on, multi-edit requests chain read->edit->retry
+# round-trips; 10 exhausted too early (plan Phase 1).
+MAX_MCP_TOOL_TURNS_EDIT = 20
 # When a model ends its turn with only a tool call and no visible text
 # (tool-loop exhaustion, an unparseable call format, or a final tool-only
 # response), re-prompt it without tools to force a direct text answer.
@@ -1568,26 +1625,39 @@ def _collect_tool_names(messages: list[dict]) -> list[str]:
     return names
 
 
-def _build_native_tools() -> list[dict]:
+def _native_tool_object(tool: dict) -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": tool["name"],
+            "description": tool.get("description", "").replace("\n", " "),
+            "parameters": tool.get("inputSchema", {"type": "object", "properties": {}}),
+        },
+    }
+
+
+def _build_native_tools(edit_capable: bool = False) -> list[dict]:
     """Build native function-calling tool definitions from the MCP server.
 
     Returns OpenAI-style tool objects:
         {"type": "function", "function": {"name", "description", "parameters"}}
+
+    With edit_capable, the request-scoped write tools (config_edit/
+    config_write, defined in services.ai_edit_tools, not registered on the
+    MCP server) join the advertisement — kept in lock-step with the text
+    protocol surface (test_edit_tool_native_text_parity).
     """
     native: list[dict] = []
     for tool in _mcp_server._list_tools():
-        native.append({
-            "type": "function",
-            "function": {
-                "name": tool["name"],
-                "description": tool.get("description", "").replace("\n", " "),
-                "parameters": tool.get("inputSchema", {"type": "object", "properties": {}}),
-            },
-        })
+        native.append(_native_tool_object(tool))
+    if edit_capable:
+        for tool in EDIT_TOOL_SPECS:
+            native.append(_native_tool_object(tool))
     return native
 
 
-def _resolve_native_tools(provider: str, api_url: str, tool_protocol: str) -> list[dict] | None:
+def _resolve_native_tools(provider: str, api_url: str, tool_protocol: str,
+                          edit_capable: bool = False) -> list[dict] | None:
     """Decide whether to pass native function-calling tools to the provider.
 
     tool_protocol values (harness A/B runs via ChatRequest.toolProtocol):
@@ -1600,10 +1670,10 @@ def _resolve_native_tools(provider: str, api_url: str, tool_protocol: str) -> li
       - "text"   force the text protocol even for cloud providers.
     """
     if tool_protocol == "native":
-        return _build_native_tools()
+        return _build_native_tools(edit_capable=edit_capable)
     if tool_protocol == "text":
         return None
-    return None if _is_local_provider(provider, api_url) else _build_native_tools()
+    return None if _is_local_provider(provider, api_url) else _build_native_tools(edit_capable=edit_capable)
 
 
 def _extract_native_tool_calls(provider: str, data: dict) -> list[dict] | None:
@@ -2305,7 +2375,24 @@ def _run_audit_on_apply(req, apply_result, merged_files, project, audit_fn) -> l
 @router.post("/ai/chat")
 async def chat_proxy(req: ChatRequest):
     """Proxy chat messages to the user's configured API provider."""
-    messages = _prepare_messages(req.messages, full_rewrite_guard=req.fullRewriteGuard)
+    # ── Tool-mediated config editing session (Phase 1, KWC_EDIT_TOOLS) ──
+    # Request-scoped: seeded from this request's contextFiles (the app's
+    # live working state), stacked edits returned as pendingEdits. No
+    # per-conversation draft store by design. Without live files there is
+    # nothing to edit — tools stay unadvertised.
+    edit_session: EditSession | None = None
+    if _edit_tools_enabled() and req.contextFiles:
+        try:
+            edit_session = EditSession(req.contextFiles)
+            if not edit_session.has_files():
+                edit_session = None
+        except Exception:
+            logger.exception("Edit session seed failed | edit tools disabled for request")
+            edit_session = None
+    edit_capable = edit_session is not None
+
+    messages = _prepare_messages(req.messages, full_rewrite_guard=req.fullRewriteGuard,
+                                 edit_capable=edit_capable)
 
     # ── Log request summary ──
     msg_count = len(messages)
@@ -2336,7 +2423,8 @@ async def chat_proxy(req: ChatRequest):
     # Native function calling for cloud providers only; local providers keep
     # the text-based ```tool protocol since local tool support varies.
     # ChatRequest.toolProtocol overrides the split for harness A/B runs.
-    native_tools = _resolve_native_tools(req.apiProvider, req.apiUrl, req.toolProtocol)
+    native_tools = _resolve_native_tools(req.apiProvider, req.apiUrl, req.toolProtocol,
+                                         edit_capable=edit_capable)
 
     # ── Stop-event registration ──
     stop_event = None
@@ -2486,7 +2574,9 @@ async def chat_proxy(req: ChatRequest):
                             search_usage["context"] = "auto-search"
                             usage_events.append(search_usage)
 
-            while tool_turns < MAX_MCP_TOOL_TURNS:
+            turn_cap = (MAX_MCP_TOOL_TURNS_EDIT if edit_capable
+                        else MAX_MCP_TOOL_TURNS)
+            while tool_turns < turn_cap:
                 if stop_event is not None and stop_event.is_set():
                     raise ChatStoppedError()
 
@@ -2547,6 +2637,8 @@ async def chat_proxy(req: ChatRequest):
                 # instead of feeding "Unknown tool" errors back — that derails
                 # models into explaining the error instead of answering.
                 known_tool_names = {t["name"] for t in _mcp_server._list_tools()}
+                if edit_capable:
+                    known_tool_names |= EDIT_TOOL_NAMES
                 if tool_calls and current_content.strip() and all(
                     c.get("name") not in known_tool_names for c in tool_calls
                 ):
@@ -2568,7 +2660,16 @@ async def chat_proxy(req: ChatRequest):
                 # follow-up messages in the format the provider expects.
                 results = []
                 for tool_call in tool_calls[:MAX_MCP_TOOL_TURNS]:
-                    result_text = await _execute_tool_call_async(tool_call)
+                    if edit_session is not None and tool_call.get("name") in EDIT_TOOL_NAMES:
+                        # Request-scoped write path (never the MCP server).
+                        result_text, edit_details = edit_session.execute(tool_call)
+                        logger.info(
+                            "Edit tool executed | name=%s attempts=%d ok=%s",
+                            tool_call["name"], edit_session.edit_attempts,
+                            edit_details is not None,
+                        )
+                    else:
+                        result_text = await _execute_tool_call_async(tool_call)
                     logger.info(
                         "Tool executed | name=%s result_chars=%d",
                         tool_call["name"], len(result_text),
@@ -2732,7 +2833,9 @@ async def chat_proxy(req: ChatRequest):
                     if clean_assistant:
                         current_messages.append({"role": "assistant", "content": clean_assistant})
                     reprompt_results = [
-                        await _execute_tool_call_async(c)
+                        (edit_session.execute(c)[0]
+                         if edit_session is not None and c.get("name") in EDIT_TOOL_NAMES
+                         else await _execute_tool_call_async(c))
                         for c in reprompt_calls[:MAX_MCP_TOOL_TURNS]
                     ]
                     for reprompt_call, result_text in zip(
@@ -2814,6 +2917,21 @@ async def chat_proxy(req: ChatRequest):
                 "mcpToolNames": mcp_tool_names,
                 "toolCalls": executed_tool_calls,
                 "repromptCount": empty_reprompts,
+                # Tool-mediated editing (Phase 1): staged changes from
+                # config_edit/config_write calls (file/op/summary/newText/
+                # advisories), null when the feature is off or nothing was
+                # staged. The frontend feeds these to the current draft
+                # flow (approval cards arrive in Phase 2).
+                "pendingEdits": (
+                    edit_session.pending_edits_payload()
+                    if edit_session is not None and edit_session.pending_edits
+                    else None
+                ),
+                # Per-call write-attempt accounting (Gate 1 oscillation
+                # analysis); null when the session never ran.
+                "editAttempts": (
+                    edit_session.edit_attempts if edit_session is not None else None
+                ),
                 # Set when KWC_SERVER_DRAFT_VALIDATION ran ({attempted,
                 # repaired, issuesAfter[, reason]}); null otherwise. The
                 # frontend may use it to skip its own retry loop when the

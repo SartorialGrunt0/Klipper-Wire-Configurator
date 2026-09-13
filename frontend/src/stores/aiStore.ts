@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { loadAiState, saveAiState, type AiToolCallDetail } from '../services/api';
+import { loadAiState, saveAiState, type AiToolCallDetail, type PendingConfigEdit } from '../services/api';
 
 const STORAGE_KEY = 'klipper-wire-ai-state';
 const LEGACY_SETTINGS_KEY = 'klipper-wire-ai-settings';
@@ -21,6 +21,8 @@ export interface ChatMessage {
   retryCount?: number;
   /** Number of backend empty-response re-prompts for this reply. */
   repromptCount?: number;
+  /** Changes staged by the config_edit/config_write write tools (server-validated). */
+  pendingEdits?: PendingConfigEdit[];
 }
 
 export interface AiSettings {

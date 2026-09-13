@@ -19,7 +19,7 @@ import { useAiStore } from '../stores/aiStore';
 import { useConfigStore } from '../stores/configStore';
 import type { AiProvider } from '../stores/aiStore';
 import type { ConfigFile, ConfigSection, ValidationResult } from '../types/config';
-import type { AiChatRole } from '../services/api';
+import type { AiChatRole, PendingConfigEdit } from '../services/api';
 import * as api from '../services/api';
 import {
   extractConfigCodeBlocks,
@@ -71,6 +71,10 @@ interface AssistantDraftFilePreview {
   mergedText: string;
   changes: AssistantDraftChange[];
   mergedValidation?: ValidationResult;
+  /** Tool-edit preview: accepting removes the file from the project. */
+  deletesFile?: boolean;
+  /** Tool-edit preview: accepting creates a file that doesn't exist yet. */
+  createsFile?: boolean;
 }
 
 export interface AssistantDraftPreview {
@@ -81,6 +85,8 @@ export interface AssistantDraftPreview {
   repairedSections: string[];
   /** Sections the assistant returned as full rewrites (full-rewrite guard). */
   fullRewriteSections: Array<{ filename: string; fullHeader: string }>;
+  /** Preview built from server-validated write-tool edits (no prose parse). */
+  fromToolEdits?: boolean;
 }
 
 interface AssistantReplyAttempt {
@@ -89,6 +95,8 @@ interface AssistantReplyAttempt {
   warningMessage: string | null;
   /** Backend merged-result verdict for this reply (finding #4). */
   serverRepair?: ServerRepairVerdict | null;
+  /** Server-validated staged write-tool changes (KWC_EDIT_TOOLS). */
+  pendingEdits?: PendingConfigEdit[] | null;
 }
 
 interface ChatRequestBase {
@@ -124,6 +132,7 @@ export function useAssistantDraft() {
     validation,
     setConfigFile,
     setValidation,
+    removeConfigFile,
     markDirty,
   } = useConfigStore();
   const loadedConfigFilenames = Object.keys(configFiles);
@@ -297,8 +306,104 @@ export function useAssistantDraft() {
     [activeFile, configFiles, getAssistantMessageHintTexts, getConfigText, loadedConfigFilenames],
   );
 
+  const prepareToolEditPreview = useCallback(
+    async (pendingEdits: PendingConfigEdit[]): Promise<AssistantDraftPreview> => {
+      const filePreviews: AssistantDraftFilePreview[] = [];
+      for (const edit of pendingEdits) {
+        const baseText = await getConfigText(edit.file);
+        if (edit.op === 'delete_file') {
+          if (!baseText) continue;
+          const baseResult = await api.parseConfigText(baseText, edit.file);
+          const baseConfig = { ...baseResult.config, raw_text: baseText };
+          filePreviews.push({
+            filename: edit.file,
+            originalText: baseText,
+            baseConfig,
+            assistantConfig: { ...baseConfig, sections: [], includes: [] },
+            mergedConfig: { ...baseConfig, sections: [], includes: [] },
+            mergedText: '',
+            changes: baseConfig.sections.map((section, index) => ({
+              id: `${edit.file}:delete:${index}:${section.full_header}`,
+              filename: edit.file,
+              fullHeader: section.full_header,
+              mode: 'delete' as const,
+            })),
+            deletesFile: true,
+          });
+          continue;
+        }
+        if (!baseText) {
+          // New file created by config_write: every section is an addition.
+          const parsed = await api.parseConfigText(edit.newText, edit.file);
+          const assistantConfig = { ...parsed.config, raw_text: edit.newText };
+          const emptyBase: ConfigFile = {
+            filename: edit.file, includes: [], header_comments: [],
+            sections: [], raw_text: '',
+          };
+          filePreviews.push({
+            filename: edit.file,
+            originalText: '',
+            baseConfig: emptyBase,
+            assistantConfig,
+            mergedConfig: assistantConfig,
+            mergedText: edit.newText,
+            changes: assistantConfig.sections.map((section, index) => ({
+              id: `${edit.file}:new:${index}:${section.full_header}`,
+              filename: edit.file,
+              fullHeader: section.full_header,
+              mode: 'add' as const,
+            })),
+            createsFile: true,
+          });
+          continue;
+        }
+        const [baseResult, mergedResult] = await Promise.all([
+          api.parseConfigText(baseText, edit.file),
+          api.parseConfigText(edit.newText, edit.file),
+        ]);
+        const baseConfig = { ...baseResult.config, raw_text: baseText };
+        const mergedConfig = { ...mergedResult.config, raw_text: edit.newText };
+        filePreviews.push({
+          filename: edit.file,
+          originalText: baseText,
+          baseConfig,
+          assistantConfig: mergedConfig,
+          mergedConfig,
+          mergedText: edit.newText,
+          changes: [{
+            id: `${edit.file}:edit:${edit.op}`,
+            filename: edit.file,
+            fullHeader: edit.summary,
+            mode: 'update' as const,
+          }],
+        });
+      }
+      if (filePreviews.length === 0) {
+        throw new Error('The staged changes do not differ from the current draft.');
+      }
+      return {
+        filePreviews,
+        selectedChangeIds: flattenAssistantDraftChanges(filePreviews).map((change) => change.id),
+        previewUpdating: false,
+        repairedSections: [],
+        fullRewriteSections: [],
+        fromToolEdits: true,
+      };
+    },
+    [flattenAssistantDraftChanges, getConfigText],
+  );
+
   const prepareAssistantDraftPreview = useCallback(
     async (content: string, messageIndex?: number, messageHistory: ChatMessage[] = messages): Promise<AssistantDraftPreview> => {
+      // Tool-mediated edits (KWC_EDIT_TOOLS): when the reply carries
+      // server-validated staged changes, they ARE the draft — no prose
+      // parsing, no merge engine, no rewrite guard. The server applied
+      // mechanical ops to the live state it received and validated the
+      // delta; mergedText is the exact text that was validated.
+      const trailMessage = (messageHistory ?? messages)[messageIndex ?? -1];
+      if (trailMessage?.pendingEdits && trailMessage.pendingEdits.length > 0) {
+        return await prepareToolEditPreview(trailMessage.pendingEdits);
+      }
       const { configs: assistantConfigs, repairedSections, fullRewriteSections } = await buildAssistantDraftTargetConfigs(content, messageIndex, messageHistory);
       const filePreviews: AssistantDraftFilePreview[] = [];
 
@@ -377,6 +482,10 @@ export function useAssistantDraft() {
 
   const canAssistantMessageAffectDraft = useCallback(
     async (content: string, messageIndex?: number, messageHistory: ChatMessage[] = messages): Promise<boolean> => {
+      const trailMessage = (messageHistory ?? messages)[messageIndex ?? -1];
+      if (trailMessage?.pendingEdits && trailMessage.pendingEdits.length > 0) {
+        return true; // staged write-tool changes are always applicable
+      }
       try {
         await prepareAssistantDraftPreview(content, messageIndex, messageHistory);
         return true;
@@ -524,8 +633,12 @@ export function useAssistantDraft() {
         mcpToolNames: response.mcpToolNames,
         toolCalls: response.toolCalls,
         repromptCount: response.repromptCount,
+        pendingEdits: response.pendingEdits ?? undefined,
       };
-      let conversationTrail: ChatMessage[] = [{ role: 'assistant', content: assistantMessage.content }];
+      // Clone the assistant message (not just content) so pendingEdits
+      // survive into the validation trail — prepareAssistantDraftPreview
+      // resolves them by messageIndex.
+      let conversationTrail: ChatMessage[] = [{ ...assistantMessage }];
       let warningMessage: string | null = null;
 
       // Normalise cfg separators (`key = value` → `key: value`) as local
@@ -545,6 +658,7 @@ export function useAssistantDraft() {
         conversationMessages: conversationTrail,
         warningMessage,
         serverRepair: response.serverRepair ?? null,
+        pendingEdits: response.pendingEdits ?? null,
       };
     },
     [],
@@ -614,6 +728,7 @@ export function useAssistantDraft() {
       const updatedConfigs = { ...configFiles };
       const updatedValidation = { ...validation };
       const touchedFiles: string[] = [];
+      const deletedFiles: string[] = [];
 
       for (const fp of currentPreview.filePreviews) {
         const hasSelectedChanges = fp.changes.some((change) => selectedChangeIds.has(change.id));
@@ -624,6 +739,13 @@ export function useAssistantDraft() {
           continue;
         }
 
+        if (fp.deletesFile) {
+          // Tool-edit delete_file: removal applies on accept (store delete
+          // marks dirty itself; recorded for the post-loop sweep).
+          deletedFiles.push(fp.filename);
+          touchedFiles.push(fp.filename);
+          continue;
+        }
         // Use the cached merged config directly instead of re-parsing
         updatedConfigs[fp.filename] = fp.mergedConfig;
         // Validate — lighter than parse since we already have the parsed config
@@ -643,9 +765,11 @@ export function useAssistantDraft() {
       console.debug('[AIDraft] Accepting', touchedFiles.length, 'files:', touchedFiles);
 
       touchedFiles.forEach((filename) => {
+        if (deletedFiles.includes(filename)) return;
         setConfigFile(filename, updatedConfigs[filename]);
         setValidation(filename, updatedValidation[filename]);
       });
+      deletedFiles.forEach((filename) => removeConfigFile(filename));
       markDirty();
 
       setAssistantDraftPreview(null);
@@ -660,7 +784,12 @@ export function useAssistantDraft() {
     async (messagesToCheck: ChatMessage[]) => {
       const assistantMessages = messagesToCheck
         .map((msg, index) => ({ msg, index }))
-        .filter(({ msg }) => msg.role === 'assistant' && extractConfigCodeBlocks(msg.content).length > 0);
+        .filter(({ msg }) => msg.role === 'assistant' && (
+          // Server-staged write-tool changes are ALWAYS applicable (no
+          // prose parsing involved); prose drafts need a cfg code block.
+          (msg.pendingEdits && msg.pendingEdits.length > 0)
+          || extractConfigCodeBlocks(msg.content).length > 0
+        ));
 
       if (assistantMessages.length === 0) {
         setAssistantDraftApplicableMessages({});

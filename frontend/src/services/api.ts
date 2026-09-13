@@ -935,6 +935,33 @@ export interface AiChatResponse {
    * validation — the client retry loop can trust it.
    */
   serverRepair?: ServerRepairVerdict | null;
+  /**
+   * Tool-mediated editing (KWC_EDIT_TOOLS): changes staged by the
+   * config_edit/config_write write tools. Server-validated (delta vs the
+   * sent live state); the draft preview consumes these INSTEAD of parsing
+   * prose cfg blocks. Null when the feature is off or nothing was staged.
+   */
+  pendingEdits?: PendingConfigEdit[] | null;
+  /** Write-tool call count for this reply (Gate 1 oscillation telemetry). */
+  editAttempts?: number | null;
+}
+
+/** One staged write-tool change (backend services/ai_edit_tools.py). */
+export interface PendingConfigEdit {
+  file: string;
+  op: string;
+  summary: string;
+  /** Full post-op content of the file ('' when op === 'delete_file'). */
+  newText: string;
+  /** New warnings the server attached (non-blocking). */
+  advisories?: Array<{
+    filename: string;
+    severity: string;
+    section: string;
+    param: string;
+    message: string;
+    code?: string;
+  }>;
 }
 
 /** Wire shape of the backend `serverRepair` response field (finding #4). */
