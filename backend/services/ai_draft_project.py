@@ -124,13 +124,35 @@ def _comment_boundary_crossings(old_text: str, new_text: str) -> dict:
                 status.setdefault(pmatch.group(2), 'active')
         return status
 
+    def _commented_content(text: str) -> dict[str, str]:
+        content: dict[str, str] = {}
+        for line in text.split('\n'):
+            cmatch = RE_COMMENTED_PARAM_LINE.match(line)
+            if cmatch:
+                content.setdefault(
+                    cmatch.group(2), cmatch.group(4).strip())
+        return content
+
     old_status = _status_by_param(old_text)
     new_status = _status_by_param(new_text)
     enabled = sorted(name for name, st in new_status.items()
                      if st == 'active' and old_status.get(name) == 'commented')
     disabled = sorted(name for name, st in new_status.items()
                       if st == 'commented' and old_status.get(name) == 'active')
-    return {'enabled': enabled, 'disabled': disabled}
+    # Dormant-content tampering (r3 9b finding): the model anchored a
+    # patch on '#enable_pin: !PE9' and rewrote it to '#enable_pin: !PF16'
+    # -- no status flip, but the op faked the user's activation request
+    # while leaving the parameter INACTIVE. Editing or deleting commented
+    # param content requires the same user-confirmation flag as flipping
+    # the '#'.
+    old_c = _commented_content(old_text)
+    new_c = _commented_content(new_text)
+    changed = sorted(
+        name for name, content in old_c.items()
+        if (name in new_c and new_c[name] != content)     # dormant rewrite
+        or (name not in new_c and name not in new_status)  # dormant deleted
+    )
+    return {'enabled': enabled, 'disabled': disabled, 'changed': changed}
 
 
 def _state_error(message: str, **extra) -> dict:
@@ -490,17 +512,20 @@ class ProjectState:
             # replacement must not silently flip parameter '#' status.
             current_body = '\n'.join(lines[header_index + 1:inner_end])
             crossed = _comment_boundary_crossings(current_body, body_stripped)
-            if crossed['enabled'] or crossed['disabled']:
+            if crossed['enabled'] or crossed['disabled'] or crossed['changed']:
                 return _state_error(
-                    "This replacement would change whether parameters are "
-                    f"commented out (newly active: "
+                    "This replacement touches commented-out parameters "
+                    f"(newly active: "
                     f"{', '.join(sorted(crossed['enabled'])) or 'none'}; newly "
-                    f"commented: {', '.join(sorted(crossed['disabled'])) or 'none'}). "
+                    f"commented: {', '.join(sorted(crossed['disabled'])) or 'none'}; "
+                    f"dormant text edited/deleted: "
+                    f"{', '.join(sorted(crossed['changed'])) or 'none'}). "
                     "Do NOT set allow_comment_change=true on your own "
                     "judgment — explain and ask; re-run with it true only "
                     "after the USER confirms.",
                     commentedParams=sorted(
-                        crossed['enabled'] + crossed['disabled']),
+                        crossed['enabled'] + crossed['disabled']
+                        + crossed['changed']),
                 )
         lines[header_index + 1:inner_end] = new_body
         self.files[filename] = '\n'.join(lines)
@@ -553,21 +578,26 @@ class ProjectState:
             # re-run with allow_comment_change=true, which doubles as the
             # explicit user-confirmation signal.
             crossed = _comment_boundary_crossings(old_text, new_text)
-            if crossed['enabled'] or crossed['disabled']:
+            if crossed['enabled'] or crossed['disabled'] or crossed['changed']:
                 gained = ', '.join(sorted(crossed['enabled'])) or 'none'
                 lost = ', '.join(sorted(crossed['disabled'])) or 'none'
+                changed = ', '.join(sorted(crossed['changed'])) or 'none'
                 return _state_error(
-                    "This patch would change whether parameters are commented "
-                    f"out (newly active: {gained}; newly commented: {lost}). "
-                    "Commented parameters are NOT active config — touching "
-                    "them requires the user's explicit knowledge. Do NOT "
-                    "set allow_comment_change=true on your own judgment — "
+                    "This patch touches COMMENTED-OUT parameters (newly "
+                    f"active: {gained}; newly commented: {lost}; dormant "
+                    f"text edited/deleted: {changed}). Commented parameters "
+                    "are NOT active config — editing them does NOT change "
+                    "printer behavior, so never report such an edit as "
+                    "enabling/updating the parameter. Commented parameters "
+                    "require the user's explicit knowledge. Do NOT set "
+                    "allow_comment_change=true on your own judgment — "
                     "explain the commented-out situation to the user and "
                     "ask. Only after the USER replies confirming they want "
-                    "the parameter uncommented/commented may you re-run "
-                    "this op with allow_comment_change=true.",
+                    "the parameter uncommented/commented/dormant-updated "
+                    "may you re-run this op with allow_comment_change=true.",
                     commentedParams=sorted(
-                        crossed['enabled'] + crossed['disabled']),
+                        crossed['enabled'] + crossed['disabled']
+                        + crossed['changed']),
                 )
         if occurrences == 1:
             patched = section_text.replace(old_text, new_text, 1)

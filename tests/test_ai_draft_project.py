@@ -459,11 +459,39 @@ def test_patch_gcode_allow_comment_change_escapes_guard():
     assert 'enable_pin: PF16' in st2.files['printer.cfg']
 
 
-def test_patch_gcode_comment_to_comment_edit_not_blocked():
+def test_patch_gcode_comment_to_comment_edit_requires_flag():
+    """Comment-to-comment param edits are dormant-content edits: guarded
+    by default (a model editing '#foo' silently is still touching dead
+    config), allowed with the explicit user-confirmation flag."""
     st, base = _guard_state()
-    st2, r = st.apply(base, {
+    _, r = st.apply(base, {
         'op': 'patch_gcode', 'file': 'printer.cfg', 'section': 'stepper_x',
         'old_text': '#enable_pin: !PE9', 'new_text': '#enable_pin: !PF16',
+    })
+    assert r['status'] == 'error'
+    st2, r2 = st.apply(base, {
+        'op': 'patch_gcode', 'file': 'printer.cfg', 'section': 'stepper_x',
+        'old_text': '#enable_pin: !PE9', 'new_text': '#enable_pin: !PF16',
+        'allow_comment_change': True,
+    })
+    assert r2['status'] in ('applied', 'applied_with_advisory'), r2
+    assert '#enable_pin: !PF16' in st2.files['printer.cfg']
+
+
+def test_patch_gcode_gcode_body_edits_never_guarded():
+    """Macro-body patches (the bread-and-butter patch_gcode use) must be
+    untouched by the comment guard: comments inside gcode bodies are
+    prose, not params."""
+    printer = ("[gcode_macro PARK]\n"
+               "# park up\n"
+               "gcode:\n"
+               "    # lift\n"
+               "    G91\n")
+    st = ProjectState.from_context_files({'printer.cfg': {'content': printer}})
+    base = st.validate()
+    st2, r = st.apply(base, {
+        'op': 'patch_gcode', 'file': 'printer.cfg', 'section': 'gcode_macro PARK',
+        'old_text': '    # lift\n    G91', 'new_text': '    G91',
     })
     assert r['status'] in ('applied', 'applied_with_advisory'), r
 
@@ -495,3 +523,17 @@ def test_add_include_refuses_self_include():
                               'target_file': 'park.cfg'})
     assert r2['status'] in ('applied', 'applied_with_advisory'), r2
     assert '[include park.cfg]' in st2.files['printer.cfg']
+
+
+def test_patch_gcode_cannot_fakely_update_dormant_param():
+    """r3 9b finding: model anchored '#enable_pin: !PE9' and rewrote it to
+    '#enable_pin: !PF16' -- no '#' flip, but it reported the pin as
+    updated while the param stayed INACTIVE. Dormant-content edits are
+    guarded the same as status flips."""
+    st, base = _guard_state()
+    _, r = st.apply(base, {
+        'op': 'patch_gcode', 'file': 'printer.cfg', 'section': 'stepper_x',
+        'old_text': '#enable_pin: !PE9', 'new_text': '#enable_pin: !PF16',
+    })
+    assert r['status'] == 'error'
+    assert r.get('commentedParams') == ['enable_pin']
