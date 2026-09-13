@@ -142,6 +142,10 @@ Rules:
   quote lines exactly as they appear there.
 - Warnings returned as advisories do not block the change; mention them
   to the user when relevant.
+- Commented-out parameters are NOT active config. If an op is refused for
+  touching one, explain the situation and ASK; never set
+  allow_comment_change=true on your own judgment — only after the user's
+  own reply confirms they want it uncommented (or commented).
 - Applied changes are STAGED for the user's review, not saved. Never tell
   the user a change is saved or active until they approve and save it."""
 

@@ -496,9 +496,9 @@ class ProjectState:
                     f"commented out (newly active: "
                     f"{', '.join(sorted(crossed['enabled'])) or 'none'}; newly "
                     f"commented: {', '.join(sorted(crossed['disabled'])) or 'none'}). "
-                    "Re-run with allow_comment_change=true only when the "
-                    "user explicitly asked to uncomment or disable them; "
-                    "otherwise explain and ask.",
+                    "Do NOT set allow_comment_change=true on your own "
+                    "judgment — explain and ask; re-run with it true only "
+                    "after the USER confirms.",
                     commentedParams=sorted(
                         crossed['enabled'] + crossed['disabled']),
                 )
@@ -560,10 +560,12 @@ class ProjectState:
                     "This patch would change whether parameters are commented "
                     f"out (newly active: {gained}; newly commented: {lost}). "
                     "Commented parameters are NOT active config — touching "
-                    "them requires the user's explicit knowledge. If the "
-                    "user clearly asked to uncomment or disable these, "
-                    "re-run the same op with allow_comment_change=true; "
-                    "otherwise explain the commented-out situation and ask.",
+                    "them requires the user's explicit knowledge. Do NOT "
+                    "set allow_comment_change=true on your own judgment — "
+                    "explain the commented-out situation to the user and "
+                    "ask. Only after the USER replies confirming they want "
+                    "the parameter uncommented/commented may you re-run "
+                    "this op with allow_comment_change=true.",
                     commentedParams=sorted(
                         crossed['enabled'] + crossed['disabled']),
                 )
