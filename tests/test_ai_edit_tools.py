@@ -523,3 +523,48 @@ def test_honest_refusal_not_nudged(monkeypatch):
     # exactly the initial call + one tool-round re-query; no nudge call
     assert len(calls) == 2, f"nudge fired on honest refusal: {len(calls)} provider calls"
     assert body.get('pendingEdits') in (None, [])
+
+
+def test_giveup_after_correctable_kickback_gets_nudged(monkeypatch):
+    """r4 9b EDIT-01 pattern: write tool refuses with a CORRECTABLE error
+    (replace_section fed old_text; missing text), model explains and stops
+    without retrying. Giving up on a fixable kickback must be nudged
+    (unlike a user-gated commented-param refusal)."""
+    monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
+    calls = []
+    scripted = [
+        # replace_section with wrong args (text missing) -> correctable error
+        '```tool\n{"name": "config_edit", "arguments": {"file": "printer.cfg", '
+        '"op": "replace_section", "section": "printer", "old_text": "max_accel: 1000", '
+        '"new_text": "max_accel: 12000"}}\n```',
+        # give-up prose (the r4 failure) -> nudge fires
+        'I could not apply that change to your config.',
+        # after the nudge: the corrected call
+        '```tool\n{"name": "config_edit", "arguments": {"file": "printer.cfg", '
+        '"op": "set_param", "section": "printer", "key": "max_accel", "value": "12000"}}\n```',
+        'Staged the change.',
+    ]
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+        def raise_for_status(self):
+            return None
+        def json(self):
+            return self._payload
+
+    async def fake_post(url, json=None, headers=None, **kwargs):
+        calls.append(json)
+        content = scripted[min(len(calls) - 1, len(scripted) - 1)]
+        return _Resp({'choices': [{'message': {'content': content},
+                                   'finish_reason': 'stop'}]})
+
+    monkeypatch.setattr(ai_routes.httpx.AsyncClient, 'post',
+                        lambda self, url, **kw: fake_post(url, **kw))
+
+    response = client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'change [printer] max_accel to 12000'}]))
+    assert response.status_code == 200
+    body = response.json()
+    assert body.get('pendingEdits'), f"expected staged edit after kickback-nudge, got {body}"
+    assert 'max_accel: 12000' in body['pendingEdits'][0]['newText']
