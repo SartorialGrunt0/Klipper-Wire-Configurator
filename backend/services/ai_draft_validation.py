@@ -40,13 +40,22 @@ _JINJA_CLOSER_BY_OPENER = {
 
 
 def _error_key(filename: str, error: dict) -> str:
+    # Message-free identity (Phase 0 fix, tool-mediated-editing plan):
+    # an edit that changes a pre-existing error's MESSAGE text (same
+    # file/severity/section/param/code — e.g. the offending value quoted
+    # in the message) must stay subtracted in the delta. Message text is
+    # display-only here. `code` distinguishes same-location error classes;
+    # `extra` is the ack discriminator (command name on gcode findings),
+    # included so removing one unknown command from a macro does not read
+    # as "new" for the remaining ones and vice versa.
     return "::".join(
         [
             filename,
             error.get("severity", ""),
             error.get("section", ""),
             error.get("param", ""),
-            error.get("message", ""),
+            error.get("code", ""),
+            error.get("extra", ""),
         ]
     )
 
