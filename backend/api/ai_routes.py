@@ -20,6 +20,7 @@ from api.printer_memory_routes import (  # noqa: E402
 from mcp_server import McpServer, get_index
 from services.ai_draft_apply import extract_config_code_blocks
 from services.ai_edit_tools import (
+    _EDIT_NUDGE_TEXT,
     EDIT_PROTOCOL_PROMPT,
     EDIT_TOOL_NAMES,
     EDIT_TOOL_SPECS,
@@ -2670,7 +2671,7 @@ async def chat_proxy(req: ChatRequest):
                                 or bool(extract_config_code_blocks(
                                     current_content))
                             )
-                            and edit_nudges < 2):
+                            and edit_nudges < 3):
                         edit_nudges += 1
                         logger.info(
                             "Edit prose response nudged | attempt=%d turn=%d content_chars=%d",
@@ -2683,15 +2684,7 @@ async def chat_proxy(req: ChatRequest):
                                     {"role": "assistant", "content": clean_prior})
                         current_messages.append({
                             "role": "user",
-                            "content": (
-                                "You described changes but did not call "
-                                "config_edit or config_write. Config blocks "
-                                "written in prose are display-only and are "
-                                "NEVER applied. Make the change now with the "
-                                "write tools (read the file first if needed), "
-                                "or — if the change is not safe or not "
-                                "possible — explain why to the user and ask."
-                            ),
+                            "content": _EDIT_NUDGE_TEXT,
                         })
                         nudge_payload = _build_provider_payload(
                             req.apiProvider, current_messages, req.model,
