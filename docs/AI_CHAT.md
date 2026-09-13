@@ -31,6 +31,32 @@ The assistant sees your printer memory (mainboard, toolhead, expander boards, ki
 
 ## How the assistant targets config edits
 
+> **Tool-mediated editing (`KWC_EDIT_TOOLS=1`).** When the environment flag
+> is on (currently an improvement-branch preview), edit requests work
+> differently: instead of writing `cfg` blocks in prose, the model calls
+> `config_edit` / `config_write` tools and the **server** applies each
+> change mechanically to a working copy of your project. Each op is
+> validated against the live project the moment it is requested — the
+> model cannot fabricate a change, silently rewrite a whole file, or edit
+> commented-out ("dormant") parameters without your explicit confirmation
+> in its next message. Staged changes flow into the same reviewable draft
+> and mini-diff view as before. Config code blocks in prose are strictly
+> display-only under this mode; the loop nudges the model (with exact call
+> shapes) if it answers an edit request without staging it. The tools:
+>
+> - `config_edit` — one anchored operation per call on an **existing**
+>   file: `set_param`, `add_section`, `replace_section`, `delete_section`,
+>   `patch_gcode` (quote `old_text` exactly as `read_user_config`
+>   returned it), `delete_file`, `add_include`, `remove_include`.
+> - `config_write` — creates **new files only** (wholesale rewrites of
+>   existing files are refused; whole-file regeneration is where models
+>   drop comments and mangle Jinja).
+> - Refusals carry exact reasons; commented-out parameters are never
+>   touched behind your back, and "enable this pin" style requests come
+>   back as an explicit question instead of a staged surprise.
+
+Without the flag, the classic `cfg`-block protocol below applies.
+
 The assistant communicates file changes as `cfg` code blocks using a simple protocol the app understands:
 
 - `# file: filename.cfg` — the first line of a block names the file the sections belong to; use one block per file.
@@ -66,9 +92,17 @@ How it works:
 | Trident Configs (TRIDENT-01..14) | Real Trident configs from `reference/Trident_backup` and backend user configs (read, edit, delete, manage). Includes `printer.cfg`, `aux_fan.cfg`, and `PIS.cfg`. Files are read-only context. |
 | Mini-Diff Edit (MINIDIFF-01..04) | Covers mini-diff protocol: `level_bed` adaptive mode, `[printer] max_accel`, pin edits (`aux_fan.cfg`), and tool-required `pressure_advance` edit. |
 | Ambiguity Cases (AMBI-01..08) | Handles new-file drafts without names, hypothetical "what if" questions, batch section reads, multi-topic explain-and-edit turns, and content search for bare pin values. |
+| Edit Tools (EDIT-01..06) | Tool-mediated editing under `KWC_EDIT_TOOLS=1` (text protocol): param edit via `config_edit`, gcode-body anchor edit, cross-file pin edit, new-file + `add_include` staging, pure Q&A must stage nothing, and commented-param refusal (honest surface, no fabricated stage). |
 | Optional Memory Check (MEMORY-01..03) | Adds printer-memory auto-fill checks when the `--include-memory` flag is used. |
 
 ### Results on local models (55-question bank)
+
+> Historical frozen-baseline table (prose `cfg`-block pipeline). The bank
+> has since grown (Edit Tools family, expanded ambiguity cases). For the
+> tool-mediated pipeline (`KWC_EDIT_TOOLS=1`), the Edit Tools family runs
+> **6/6 on qwen3.5-9b and 6/6 on gemma-4-12b** (text protocol,
+> `--temperature 0.7`); full-bank A/B under the flag is tracked in
+> `reports/ai-chat-accuracy/`.
 
 Tested on the local llama.cpp with the same settings as day-to-day use (`--max-tokens 4096 --temperature 0.7 --tool-protocol native`):
 
