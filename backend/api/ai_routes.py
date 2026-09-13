@@ -2475,6 +2475,58 @@ async def chat_proxy(req: ChatRequest):
             # malformed tool-call guard in the loop below).
             malformed_reprompts = 0
 
+            # ── Edit-prose nudge (Phase 1, KWC_EDIT_TOOLS) ──
+            # An edit request answered in PROSE (no tool calls) means the
+            # model drafted changes instead of staging them — the old
+            # draft-text pipeline accepted that silently; with write tools
+            # prose edits are inert and must not stand. Nudge with an
+            # explicit correction (max 2), same escalation style as the
+            # malformed-tool re-prompt. Pure Q&A is excluded via
+            # _is_edit_request so answers never get poked.
+            edit_nudges = 0
+            while (edit_session is not None
+                   and _is_edit_request(req.messages)
+                   and not (_extract_native_tool_calls(req.apiProvider, current_data)
+                            or _extract_tool_calls(current_content))
+                   and edit_nudges < 2):
+                edit_nudges += 1
+                logger.info(
+                    "Edit prose response nudged | attempt=%d content_chars=%d",
+                    edit_nudges, len(current_content),
+                )
+                if current_content.strip():
+                    clean_prior = MCP_TOOL_BLOCK_RE.sub("", current_content).strip()
+                    if clean_prior:
+                        current_messages.append(
+                            {"role": "assistant", "content": clean_prior})
+                current_messages.append({
+                    "role": "user",
+                    "content": (
+                        "You described changes but did not call config_edit "
+                        "or config_write. Config blocks written in prose are "
+                        "display-only and are NEVER applied. Make the change "
+                        "now with the write tools (read the file first if "
+                        "needed), or — if the change is not safe or not "
+                        "possible — explain why to the user and ask."
+                    ),
+                })
+                nudge_payload = _build_provider_payload(
+                    req.apiProvider, current_messages, req.model,
+                    max_tokens=req.maxTokens,
+                    temperature=req.temperature,
+                    tools=native_tools,
+                    merge_system=req.mergeSystemMessages,
+                )
+                current_content, current_data = await _query_provider(
+                    client, req.apiUrl, headers, nudge_payload, req.apiProvider,
+                    logger_context=f"edit-nudge-{edit_nudges}",
+                    stop_event=stop_event,
+                )
+                nudge_usage = _extract_usage_info(current_data)
+                if nudge_usage:
+                    nudge_usage["context"] = f"edit-nudge-{edit_nudges}"
+                    usage_events.append(nudge_usage)
+
             # ── Config-grounding fallback (Phase 4) ──
             # If the model didn't call any tools on the first pass, inject the
             # user-config content the question needs (section-targeted when

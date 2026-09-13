@@ -129,7 +129,8 @@ EDIT_PROTOCOL_PROMPT = """# Editing the User's Config
 
 To change the user's config files you MUST call config_edit or
 config_write. Config code blocks in your prose are display-only and are
-never applied.
+never applied — for an edit request, do NOT answer with a ```cfg block or a
+description of the change; make the tool call instead.
 
 Rules:
 - Read before you edit: read_user_config the file or section first so

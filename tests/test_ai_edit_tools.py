@@ -360,3 +360,75 @@ def test_flag_off_system_prompt_lean(edit_flag, monkeypatch):
     system_msg = scripted.payloads[0]['messages'][0]['content']
     assert '- config_edit:' not in system_msg
     assert 'display-only' not in system_msg
+
+
+def test_prose_edit_response_gets_nudged_into_tool_call(monkeypatch):
+    """Edit request answered with a ```cfg block and no tool call: the
+    loop must nudge (max 2) and then execute the tool the model emits."""
+    monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
+    scripted = [
+        # 1st: prose draft, zero tool calls (the old silent path)
+        '```cfg\n# file: printer.cfg\n[printer]\n-max_accel: 9000\n+max_accel: 12000\n```\n'
+        'I updated max_accel for you.',
+        # 2nd (after nudge): the actual tool call
+        '```tool\n{"name": "config_edit", "arguments": {"file": "printer.cfg", '
+        '"op": "set_param", "section": "printer", "key": "max_accel", "value": "12000"}}\n```',
+        # 3rd: final prose after execution
+        'Staged the max_accel change for your review.',
+    ]
+    seen_queries = []
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+        def raise_for_status(self):
+            return None
+        def json(self):
+            return self._payload
+
+    async def fake_post(url, json=None, headers=None, **kwargs):
+        seen_queries.append(json)
+        content = scripted[min(len(seen_queries) - 1, len(scripted) - 1)]
+        return _Resp({'choices': [{'message': {'content': content},
+                                   'finish_reason': 'stop'}]})
+
+    monkeypatch.setattr(ai_routes.httpx.AsyncClient, 'post',
+                        lambda self, url, **kw: fake_post(url, **kw))
+
+    response = client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'set max_accel to 12000 in [printer]'}]))
+    assert response.status_code == 200
+    body = response.json()
+    assert body.get('pendingEdits'), f"expected staged edit, got {body}"
+    assert body['pendingEdits'][0]['file'] == 'printer.cfg'
+    assert 'max_accel: 12000' in body['pendingEdits'][0]['newText']
+    assert len(seen_queries) >= 2  # the nudge re-query happened
+
+
+def test_qa_response_not_nudged(monkeypatch):
+    """Pure Q&A (no edit verb+target) must NOT be prodded by the nudge."""
+    monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
+    calls = []
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+        def raise_for_status(self):
+            return None
+        def json(self):
+            return self._payload
+
+    async def fake_post(url, json=None, headers=None, **kwargs):
+        calls.append(json)
+        return _Resp({'choices': [{'message': {
+            'content': 'pressure_advance compensates for extruder lag...'},
+            'finish_reason': 'stop'}]})
+
+    monkeypatch.setattr(ai_routes.httpx.AsyncClient, 'post',
+                        lambda self, url, **kw: fake_post(url, **kw))
+
+    response = client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'what is pressure advance?'}]))
+    assert response.status_code == 200
+    assert len(calls) == 1  # no nudge re-query for Q&A
+    assert response.json().get('pendingEdits') in (None, [])
