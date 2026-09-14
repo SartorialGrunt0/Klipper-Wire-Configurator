@@ -1031,7 +1031,7 @@ def build_trident_questions() -> list[TestQuestion]:
                 ("contains", "hotkey_leds"),
             ),
         ),
-        # ── HARNESS-01..03: probes for the server-side apply/validate/
+        # ── HARNESS-01/03: probes for the server-side apply/validate/
         # repair (#1) and post-apply audit (#3) machinery. These judge
         # the HARNESS, not the model: each is engineered so the pipeline
         # has a deterministic observable, captured via the serverRepair
@@ -1055,34 +1055,13 @@ def build_trident_questions() -> list[TestQuestion]:
                 ("not_contains", "max_acceleration: 9000"),
             ),
         ),
-        TestQuestion(
-            qid="HARNESS-02",
-            title="Audit-probe: partial LED edit must surface the inventory footer",
-            text=("Add SET_LED commands for Chamber_LEDs only to my "
-                  "idle_timeout gcode in printer.cfg, and set the timeout to "
-                  "300 seconds. Do exactly that — no other changes."),
-            # Deterministic partial edit: the user (deliberately) asks for
-            # only ONE strip while all three LED sections (SB_LEDs,
-            # Chamber_LEDs, hotkey_leds) are visible in the project. The
-            # model SHOULD comply — and the deterministic LED inventory
-            # MUST append the 'Harness checks' footer naming the two
-            # untouched strips, because the edit touches an LED via
-            # SET_LED. This is the user-protection path: a real user who
-            # didn't think to say "all LEDs" gets the observation.
-            # (2026-09-09 finding behind this design: when asked for "all
-            # LEDs" with all files attached, gemma turns off ALL three —
-            # TRIDENT-15's historic failure was context visibility, not
-            # capability. So the audit's live-firing probe needs the
-            # partial request, not the complete one.)
-            context_files=_load_trident_led_context(),
-            require_tool=False,
-            criteria=(
-                ("regex", r"timeout\s*:\s*300\b"),
-                ("regex", r"Harness checks"),
-                ("regex", r"SB_LEDs"),
-                ("regex", r"hotkey_leds"),
-            ),
-        ),
+        # HARNESS-02 RETIRED 2026-09-13: it probed the deterministic LED
+        # inventory footer ('Harness checks') from KWC_POST_APPLY_AUDIT,
+        # which is default-OFF since e351669 (audit design review) and on
+        # the Phase-6 deletion path of the tool-mediated-editing plan —
+        # under default config the probe can never pass. The inventory
+        # behavior returns only if the audit is revived; restore the
+        # question here (git history: pre-2026-09-13) if that happens.
         TestQuestion(
             qid="HARNESS-03",
             title="Audit false-positive probe: pre-satisfied requirement = silent footer",
@@ -1298,13 +1277,18 @@ def build_ambiguity_questions() -> list[TestQuestion]:
             expected_tools=("search_example_configs", "read_example_config"),
             require_tool=False,
             criteria=(
-                ("regex", r"ender\s*3"),
                 # Its own docstring: a draft OR a clarifying question are both
                 # legitimate outcomes (2026-09-09: gemma AND qwen both asked
                 # which mainboard — the correct refusal when board hardware is
-                # unknowable). Accept either.
-                ("regex", r"#\s*file\s*:\s*printer\.cfg"
+                # unknowable). Criterion bug fixed 2026-09-13: the old first
+                # check unconditionally required an "ender 3" echo, which
+                # false-failed the accepted clarifier path when the model
+                # answered by naming candidate MAINBOARDS instead.
+                ("regex", r"ender\s*3"
                           r"|mainboard|board|MCU|provide|need to know"),
+                ("regex", r"#\s*file\s*:\s*printer\.cfg"
+                          r"|mainboard|board|MCU|provide|need to know"
+                          r"|\?"),
             ),
         ),
         TestQuestion(
