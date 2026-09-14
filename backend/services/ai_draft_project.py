@@ -459,7 +459,13 @@ class ProjectState:
     def _op_add_section(self, op: dict) -> dict:
         filename = self._require_file(op.get('file'))
         header = self._require_header(op)
-        body = op.get('text', '')
+        body = op.get('text')
+        if body is None:
+            return _state_error(
+                f"add_section needs the section body in 'text' "
+                f"(no empty sections -- [{header}] with no parameters does "
+                "nothing)."
+            )
         if not isinstance(body, str):
             return _state_error('Argument text must be a string')
         if _find_section(self.files[filename].split('\n'), header) is not None:
@@ -481,7 +487,20 @@ class ProjectState:
     def _op_replace_section(self, op: dict) -> dict:
         filename = self._require_file(op.get('file'))
         header = self._require_header(op)
-        body = op.get('text', '')
+        body = op.get('text')
+        if body is None:
+            # A missing 'text' used to default to '' -- a SILENT SECTION
+            # WIPE (fullbank edit-tools run 2026-09-14: gemma passed
+            # patch-style old_text/new_text with op=replace_section; the
+            # handler read only 'text', replaced the body with nothing,
+            # and an empty section validates clean, so the corruption
+            # reached staging). Emptying a section IS a legitimate
+            # move -- but only when the caller says so explicitly.
+            return _state_error(
+                f"replace_section needs the full new body of [{header}] in "
+                "'text' (pass text: \"\" to intentionally empty it). To edit "
+                "part of the body, use op=patch_gcode with old_text/new_text."
+            )
         if not isinstance(body, str):
             return _state_error('Argument text must be a string')
         lines = _split_lines(self.files[filename])

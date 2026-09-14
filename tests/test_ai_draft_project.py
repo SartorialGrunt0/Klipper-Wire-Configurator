@@ -253,6 +253,27 @@ def test_replace_section_and_foreign_header_refused():
     assert r2['status'] == 'error' and 'foreign header' in r2['error']
 
 
+def test_replace_section_missing_text_never_wipes():
+    """Fullbank edit-tools run 2026-09-14: gemma sent patch-style
+    old_text/new_text with op=replace_section and NO text; the handler
+    defaulted body to '' and silently deleted the section contents
+    (empty sections validate clean, so the corruption reached staging).
+    Missing 'text' is now a correctable kickback; emptying stays legal
+    only via an explicit empty string."""
+    st, base = _state()
+    _, r = st.apply(base, {'op': 'replace_section', 'file': 'printer.cfg',
+                           'section': 'bed_mesh',
+                           'old_text': 'speed: 50', 'new_text': 'speed: 80'})
+    assert r['status'] == 'error' and "'text'" in r['error']
+    assert 'patch_gcode' in r['error']
+    st2, r2 = st.apply(base, {'op': 'replace_section', 'file': 'printer.cfg',
+                              'section': 'bed_mesh', 'text': ''})
+    # Explicit empty string passes the argument guard; whether it then
+    # stages depends on validation (bed_mesh requires params, so here it
+    # correctly fails validation -- NOT the missing-text error).
+    assert "'text'" not in r2.get('error', '')
+
+
 def test_delete_section_clean_and_missing():
     st, base = _state()
     st1, r = st.apply(base, {'op': 'delete_section', 'file': 'printer.cfg',
