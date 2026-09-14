@@ -43,6 +43,8 @@ import ChatSettingsPanel from './ChatSettingsPanel';
 import ChatHistoryDialog from './ChatHistoryDialog';
 import PrinterMemoryDialog from './PrinterMemoryDialog';
 import ChatMessageList from './ChatMessageList';
+import ChatApprovalCard from './ChatApprovalCard';
+import type { ApprovalCard } from '../../services/api';
 import ChatInputBar from './ChatInputBar';
 import AiDraftPreviewDialog from './AiDraftPreviewDialog';
 import type { PendingAiChatRequest } from '../../types/ai';
@@ -150,6 +152,19 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   // when the browser reports the connection is back.
   const [connectionLost, setConnectionLost] = useState(false);
   const connectionLostRef = useRef(false);
+  // ── Approval gate (Phase 2) ──
+  // While a chat request is loading, poll for a pending approval card
+  // (validated tool-mediated writes suspend the backend loop). The
+  // backend timer auto-declines; this UI just displays and decides.
+  const [approvalCard, setApprovalCard] = useState<ApprovalCard | null>(null);
+  const [approvalReceivedAt, setApprovalReceivedAt] = useState(0);
+  const [approvalNow, setApprovalNow] = useState(0);
+  const [approvalBusy, setApprovalBusy] = useState(false);
+  const [approvalInvalidation, setApprovalInvalidation] = useState<string | null>(null);
+  const approvalCardRef = useRef<ApprovalCard | null>(null);
+  // In-flight chat request id as STATE so the approval poll effect can
+  // key on it (stopRequestIdRef alone never re-renders).
+  const [stopRequestId, setStopRequestId] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   // EXPERIMENT (auto-attach off): don't auto-select the active file.
   // Context only includes files the user explicitly checks in "Include Files".
@@ -342,6 +357,13 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         : `chat-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       stopControllerRef.current = stopController;
       stopRequestIdRef.current = stopRequestId;
+      setStopRequestId(stopRequestId);
+      // Reset the approval card state for the new request; the poll
+      // effect below picks up any card this request suspends on.
+      setApprovalCard(null);
+      approvalCardRef.current = null;
+      setApprovalInvalidation(null);
+      setApprovalBusy(false);
 
       const userMsg = { role: 'user' as const, content: trimmedMessage, hiddenFromUser: options?.hiddenFromUser === true };
       const previousMessages = options?.hiddenFromUser ? [] : messages;
@@ -604,6 +626,106 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       void api.stopChat(requestId);
     }
   }, []);
+
+  // ── Approval card polling (Phase 2) ────────────────────────────
+  // While a chat request is loading AND no decision is in flight, poll
+  // for a suspended approval. Appears when the backend loop suspends on
+  // a validated write; disappears once resolved (approved/declined/
+  // timeout/stop — the next poll returns pending:false).
+  useEffect(() => {
+    if (!loading || !stopRequestId) return undefined;
+    let cancelled = false;
+    const tick = async () => {
+      const poll = await api.pollChatApproval(stopRequestId);
+      if (cancelled) return;
+      if (poll.pending) {
+        const existing = approvalCardRef.current;
+        if (!existing || existing.approvalId !== poll.approvalId) {
+          approvalCardRef.current = poll;
+          setApprovalCard(poll);
+          setApprovalReceivedAt(Date.now());
+          setApprovalNow(Date.now());
+          setApprovalInvalidation(null);
+        } else {
+          // Same card: refresh remaining-time + advisories only when
+          // unchanged fields don't matter; keep decision-in-flight view.
+          setApprovalCard((prev) => (prev && prev.approvalId === poll.approvalId && !approvalBusy
+            ? { ...poll }
+            : prev));
+        }
+      } else if (approvalCardRef.current && !approvalBusy) {
+        // Card resolved/closed server-side (e.g. timeout auto-decline):
+        // drop it. A decision POST in flight keeps it visible until the
+        // main request completes and loading clears.
+        approvalCardRef.current = null;
+        setApprovalCard(null);
+      }
+    };
+    void tick();
+    const interval = window.setInterval(() => { void tick(); }, 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [loading, stopRequestId, approvalBusy]);
+
+  // Countdown tick while a card is visible (display only; the backend
+  // timer auto-declines authoritatively).
+  useEffect(() => {
+    if (!approvalCard) return undefined;
+    const interval = window.setInterval(() => setApprovalNow(Date.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, [approvalCard]);
+
+  const buildDecisionContext = useCallback(async (): Promise<Record<string, { content: string; label: string }>> => {
+    // Latest working content for re-validation: all loaded files (drafts
+    // win over saved), plus anything attached to this conversation.
+    const ctx: Record<string, { content: string; label: string }> = {};
+    for (const filename of Object.keys(configFiles)) {
+      const text = await getConfigText(filename);
+      if (text != null) ctx[filename] = { content: text, label: getConfigContextLabel(filename) };
+    }
+    for (const file of attachedConfigFiles) {
+      ctx[file.name] = { content: file.content, label: 'User-attached local Klipper config file' };
+    }
+    return ctx;
+  }, [configFiles, getConfigText, getConfigContextLabel, attachedConfigFiles]);
+
+  const handleApprovalDecision = useCallback(async (decision: 'approve' | 'decline') => {
+    const card = approvalCardRef.current;
+    if (!card || approvalBusy) return;
+    setApprovalBusy(true);
+    setApprovalInvalidation(null);
+    try {
+      const contextFiles = await buildDecisionContext();
+      const result = await api.decideChatApproval(card.approvalId, decision, contextFiles);
+      if (result.status === 'invalidated') {
+        setApprovalInvalidation(
+          `Config changed since this proposal — ${result.reason || 'the change no longer applies'}. `
+          + 'Decline this card or approve again after resolving the conflict.',
+        );
+        setApprovalBusy(false);
+        return;
+      }
+      if (result.status === 'ok') {
+        // Decision recorded; the suspended backend loop resumes and the
+        // main /ai/chat fetch completes through the normal pipeline.
+        approvalCardRef.current = null;
+        setApprovalCard(null);
+      } else {
+        setApprovalInvalidation(
+          result.status === 'already_decided'
+            ? 'Already decided (timeout or another tab).'
+            : 'Could not record the decision.',
+        );
+        approvalCardRef.current = null;
+        setApprovalCard(null);
+      }
+    } catch {
+      setApprovalInvalidation('Approval request failed — check the backend connection.');
+      setApprovalBusy(false);
+    }
+  }, [approvalBusy, buildDecisionContext]);
 
   // ── Handle Retry ────────────────────────────────────────────────
   // Re-submit the last user message after a failure (timeout, unloaded
@@ -933,6 +1055,17 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
             onEditMessage={handleEditMessage}
             messagesEndRef={messagesEndRef}
           />
+          {approvalCard && (
+            <ChatApprovalCard
+              card={approvalCard}
+              receivedAtMs={approvalReceivedAt}
+              nowMs={approvalNow}
+              busy={approvalBusy}
+              invalidation={approvalInvalidation}
+              onApprove={() => { void handleApprovalDecision('approve'); }}
+              onDecline={() => { void handleApprovalDecision('decline'); }}
+            />
+          )}
         </div>
 
         {/* File input (hidden) */}

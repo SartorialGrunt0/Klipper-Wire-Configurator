@@ -424,3 +424,76 @@ def test_no_auto_approve_default_in_gate():
     # The gate helper itself never consults an env default for approval.
     gate_src = inspect.getsource(ai_routes._run_approval_gate)
     assert 'environ' not in gate_src
+
+
+def test_duplicate_target_never_opens_second_card(edit_flag, monkeypatch):
+    """Live smoke evidence (2026-09-14): after the user APPROVED
+    set_param max_accel=3200, gemma copied the nudge example and re-sent
+    the SAME (file, section, key) with a hallucinated 12000 — opening
+    card #2, taxing the human another 90s. The guard blocks repeats of
+    an already-approved target with an honest kickback, no card."""
+    repeat = {'file': 'printer.cfg', 'op': 'set_param',
+              'section': 'printer', 'key': 'max_accel', 'value': '12000'}
+    _install(monkeypatch, [
+        _text_tool_call('config_edit', SET_ACCEL),
+        _text_tool_call('config_edit', repeat),
+        _final_reply('All set.'),
+    ])
+    payload = {
+        'messages': [{'role': 'user', 'content': 'set max_accel to 3200'}],
+        'apiKey': 'k', 'model': 'm',
+        'apiUrl': 'https://api.example.com/v1/chat/completions',
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(),
+        'requestId': 'gate-dupe-1', 'autoApproveEdits': False,
+    }
+    t, result = _post_chat_bg(payload)
+    card = _wait_card('gate-dupe-1')
+    client.post('/ai/chat/approval', json={
+        'approvalId': card['approvalId'], 'decision': 'approve',
+        'contextFiles': _ctx()})
+    # The repeat must NOT open a card (2s window — scripted provider is
+    # instant, so a would-be card appears well within it).
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        assert not client.get(
+            '/ai/chat/approval?requestId=gate-dupe-1').json().get('pending')
+        time.sleep(0.05)
+    t.join(timeout=10)
+    assert result['status'] == 200
+    body = result['body']
+    staged = json.dumps(body['pendingEdits'])
+    assert 'max_accel: 3000' in staged
+    assert '12000' not in staged
+    from services.ai_edit_tools import _pending_approvals
+    assert not [a for a in _pending_approvals.values()
+                if a.request_id == 'gate-dupe-1' and not a.resolved]
+
+
+def test_decline_shields_cfg_block_nudge(edit_flag, monkeypatch):
+    """After a DECLINE the answer is user-gated: a trailing ```cfg block
+    must not pull the model into a nudge retry of the same target (the
+    r6 inert-draft rule yields to an explicit user decision)."""
+    _install(monkeypatch, [
+        _text_tool_call('config_edit', SET_ACCEL),
+        _final_reply('Leaving it. For reference:\n\n'
+                     '```cfg\n[printer]\nmax_accel: 1000\n```\n'),
+    ])
+    payload = {
+        'messages': [{'role': 'user', 'content': 'set max_accel to 3000'}],
+        'apiKey': 'k', 'model': 'm',
+        'apiUrl': 'https://api.example.com/v1/chat/completions',
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(),
+        'requestId': 'gate-shield-1', 'autoApproveEdits': False,
+    }
+    t, result = _post_chat_bg(payload)
+    card = _wait_card('gate-shield-1')
+    client.post('/ai/chat/approval', json={
+        'approvalId': card['approvalId'], 'decision': 'decline',
+        'reason': 'keep stock'})
+    t.join(timeout=10)
+    assert result['status'] == 200
+    body = result['body']
+    # The declined-turn prose came back UN nudged: a fired nudge would
+    # have popped another scripted reply ('Done.') as the final content.
+    assert 'For reference' in body['content']
+    assert not body['pendingEdits']

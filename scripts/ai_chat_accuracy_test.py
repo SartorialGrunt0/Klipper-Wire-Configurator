@@ -2063,6 +2063,13 @@ def chat_request(base_url: str, question: TestQuestion, settings: dict,
         payload["editTools"] = question.edit_tools
     elif settings.get("edit_tools") is not None:
         payload["editTools"] = settings["edit_tools"]
+    # Phase 2 approval gate: the bank tests model behavior PAST the
+    # gate, so an edit-tools-enabled request auto-approves (bypasses
+    # ONLY the human wait, never re-validation). Without this every
+    # EDIT-* run would block 90s then auto-decline. Gate-mode E2E is
+    # covered by the pytest suite + the manual Gate-2 dogfood pass.
+    if payload.get("editTools"):
+        payload["autoApproveEdits"] = True
     url = base_url.rstrip("/") + "/ai/chat"
     try:
         return http_post_json(url, payload, timeout), ""

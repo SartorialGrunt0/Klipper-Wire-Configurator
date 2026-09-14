@@ -1676,9 +1676,17 @@ async def _run_approval_gate(
     finally:
         remove_approval(approval.approval_id)
     log.info(
-        "Approval resolved | approvalId=%s decision=%s",
+        "Approval resolved | approvalId=%s decision=%s waited=%.1fs",
         approval.approval_id, decision.get("decision"),
+        approval.loop.time() - approval.created_at,
     )
+    if decision.get("decision") != "approved":
+        # Decline / timeout / user-stop is USER-GATED: the prose nudge
+        # must not pressure the model to retry a decision the user just
+        # made (live smoke evidence: post-decline nudge looped into
+        # repeated cards for the same target). Only an approve leaves
+        # 'success'.
+        session.last_write_outcome = "user_gated"
     return format_approval_result(name, decision)
 
 

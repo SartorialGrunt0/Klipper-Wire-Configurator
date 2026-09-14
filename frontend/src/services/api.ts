@@ -1050,6 +1050,60 @@ export async function stopChat(requestId: string): Promise<void> {
   }
 }
 
+// ── Approval gate (tool-mediated edits, Phase 2) ─────────────────────
+
+export interface ApprovalCard {
+  approvalId: string;
+  file: string;
+  op: string;
+  summary: string;
+  diff: { file: string; before: string; after: string } | null;
+  advisories: Array<{ severity?: string; section?: string; param?: string; message?: string }>;
+  /** Seconds remaining before auto-decline (backend clock, per poll). */
+  timeoutSeconds: number;
+}
+
+export type ApprovalPoll = ({ pending: false } | ({ pending: true } & ApprovalCard));
+
+/** Poll the pending approval card for an in-flight /ai/chat request. */
+export async function pollChatApproval(requestId: string): Promise<ApprovalPoll> {
+  try {
+    const res = await fetch(`/ai/chat/approval?requestId=${encodeURIComponent(requestId)}`);
+    if (!res.ok) return { pending: false };
+    const data = (await res.json()) as ApprovalPoll;
+    return data && data.pending === true ? data : { pending: false };
+  } catch {
+    return { pending: false };
+  }
+}
+
+export interface ApprovalDecisionResult {
+  status: 'ok' | 'not_found' | 'already_decided' | 'invalid' | 'invalidated';
+  reason?: string;
+  newErrors?: Array<{ section?: string; param?: string; message?: string }>;
+}
+
+/**
+ * Decide a pending approval card. An approve carries the frontend's
+ * LATEST file contents so the server re-validates (manual edits during
+ * the pending window never clobber); 'invalidated' means the card is
+ * still open with a reason.
+ */
+export async function decideChatApproval(
+  approvalId: string,
+  decision: 'approve' | 'decline',
+  contextFiles: Record<string, { content: string; label: string }>,
+  reason = '',
+): Promise<ApprovalDecisionResult> {
+  const res = await fetch('/ai/chat/approval', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ approvalId, decision, reason, contextFiles }),
+  });
+  if (!res.ok) throw new Error(`Approval decision failed: ${res.statusText}`);
+  return (await res.json()) as ApprovalDecisionResult;
+}
+
 // ── AI state + chat history (local files, gitignored) ────────────────
 
 export interface AiStateFile {

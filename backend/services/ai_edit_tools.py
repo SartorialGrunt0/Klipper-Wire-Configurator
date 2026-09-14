@@ -34,11 +34,11 @@ not possible -- explain why to the user and ask.
 Reply with EXACTLY this fence format (a fenced json block is NOT a tool
 call and will be ignored):
 ```tool
-{"name": "config_edit", "arguments": {"file": "printer.cfg", "op": "set_param", "section": "printer", "key": "max_accel", "value": "12000"}}
+{"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "set_param", "section": "<section>", "key": "<param>", "value": "<new value>"}}
 ```
 Other argument shapes:
-patch a macro body: {"name": "config_edit", "arguments": {"file": "printer.cfg", "op": "patch_gcode", "section": "gcode_macro NAME", "old_text": "<line copied verbatim>", "new_text": "<replacement>"}}
-include a file: {"name": "config_edit", "arguments": {"file": "printer.cfg", "op": "add_include", "target_file": "new.cfg"}}
+patch a macro body: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "patch_gcode", "section": "gcode_macro NAME", "old_text": "<line copied verbatim>", "new_text": "<replacement>"}}
+include a file: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "add_include", "target_file": "new.cfg"}}
 create a NEW file only: {"name": "config_write", "arguments": {"file": "new.cfg", "content": "<full file text>"}}"""
 
 EDIT_TOOL_NAMES = frozenset({"config_edit", "config_write"})
@@ -260,6 +260,47 @@ class EditSession:
             return op
         return None
 
+    @staticmethod
+    def _op_target(op: dict) -> tuple | None:
+        """Identity of what an op OVERWRITES, for the same-request
+        duplicate guard. Only set_param qualifies: two legit patch_gcode
+        hunks in one macro body must stay possible, config_write on an
+        existing file already errors elsewhere. None = no guard."""
+        if op.get("op") == "set_param":
+            return ("set_param", op.get("file"), op.get("section"),
+                    op.get("key"))
+        return None
+
+    def _duplicate_of_committed(self, op: dict) -> dict | None:
+        """If this op re-overwrites a target already committed THIS
+        request, return the committed result; else None.
+
+        Gate-mode evidence (live smoke 2026-09-14): after the user
+        APPROVED set_param max_accel=3200, the cfg-block nudge's example
+        call (same key!) was copied by the model verbatim with a
+        hallucinated value — opening a second approval card for a target
+        the user had already decided. Each bogus card taxes the human 90s
+        (auto-decline window). A repeat on an identical target within one
+        request is mechanically detectable; block it with an honest
+        kickback instead of opening another card."""
+        target = self._op_target(op)
+        if target is None:
+            return None
+        for entry in reversed(self.committed_ops):
+            if self._op_target(entry.get("raw_op") or {}) == target:
+                return entry
+        return None
+
+    def _duplicate_kickback(self, dup: dict) -> str:
+        prev = dup.get("result", {})
+        return (
+            "DUPLICATE TARGET — this exact parameter was already applied "
+            f"and staged in this request ({prev.get('summary', 'previous change')}). "
+            "Do not re-edit the same parameter. If the user wants a "
+            "different value, tell them the current staged value and ask; "
+            "a NEW value requires a NEW user message."
+        )
+
     def execute(self, tool_call: dict) -> tuple[str, dict | None]:
         """Run one write tool call (auto-approve path). Returns
         (lean content, details-or-None).
@@ -275,6 +316,13 @@ class EditSession:
         op = self.tool_call_to_op(name, args)
         if op is None:
             return f"Unknown write tool: {name}", None
+
+        dup = self._duplicate_of_committed(op)
+        if dup is not None:
+            # user_gated: unlocking requires a NEW user message, never a
+            # nudge-prompted retry (see _duplicate_of_committed evidence).
+            self.last_write_outcome = "user_gated"
+            return self._duplicate_kickback(dup), None
 
         new_state, result = self.state.apply(self.baseline, op)
         if result["status"] == "error":
@@ -316,6 +364,13 @@ class EditSession:
         op = self.tool_call_to_op(name, args)
         if op is None:
             return f"Unknown write tool: {name}", None, None
+
+        dup = self._duplicate_of_committed(op)
+        if dup is not None:
+            # Same guard as execute(); a DUPLICATE TARGET never becomes
+            # an approval card — the user already decided this target.
+            self.last_write_outcome = "user_gated"
+            return self._duplicate_kickback(dup), None, None
 
         new_state, result = self.state.apply(self.baseline, op)
         if result["status"] == "error":
@@ -495,13 +550,17 @@ class ApprovalRequest:
         # wakes the waiter.
         self.loop = asyncio.get_running_loop()
         self.future: asyncio.Future = self.loop.create_future()
+        self.created_at = asyncio.get_running_loop().time()
 
     def _settle(self, payload: dict) -> None:
         if not self.future.done():
             self.future.set_result(payload)
 
     def card_payload(self) -> dict:
-        """What the frontend polls and renders as the approval card."""
+        """What the frontend polls and renders as the approval card.
+        ``timeoutSeconds`` is SECONDS REMAINING (backend clock is the
+        single source of truth; the frontend countdown just displays it)."""
+        elapsed = self.loop.time() - self.created_at
         return {
             "approvalId": self.approval_id,
             "file": self.result.get("file", ""),
@@ -509,7 +568,7 @@ class ApprovalRequest:
             "summary": self.result.get("summary", ""),
             "diff": self.result.get("diff"),
             "advisories": self.result.get("advisories", []),
-            "timeoutSeconds": APPROVAL_TIMEOUT_SECONDS,
+            "timeoutSeconds": max(0.0, round(APPROVAL_TIMEOUT_SECONDS - elapsed, 1)),
         }
 
     def decide(self, decision: str, reason: str = "",
