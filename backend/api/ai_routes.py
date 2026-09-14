@@ -20,11 +20,17 @@ from api.printer_memory_routes import (  # noqa: E402
 from mcp_server import McpServer, get_index
 from services.ai_draft_apply import extract_config_code_blocks
 from services.ai_edit_tools import (
+    APPROVAL_TIMEOUT_SECONDS,
     EDIT_NUDGE_TEXT,
     EDIT_PROTOCOL_PROMPT,
     EDIT_TOOL_NAMES,
     EDIT_TOOL_SPECS,
     EditSession,
+    create_approval,
+    find_approval_for_request,
+    format_approval_result,
+    get_approval,
+    remove_approval,
 )
 
 router = APIRouter()
@@ -365,6 +371,13 @@ class ChatRequest(BaseModel):
     # the write tools on/off for this request. Mirrors the toolProtocol
     # precedent so A/B runs don't need backend restarts.
     editTools: bool | None = None
+    # Approval-gate override (harness A/B runs ONLY; the frontend never
+    # sends it). Production default is human-only approval: with the edit
+    # tools on, every validated write suspends for a card. The accuracy
+    # bank must see model behavior PAST the gate, so it sets this True —
+    # which bypasses ONLY the Future await, never re-validation (invalid
+    # ops still kick back identically).
+    autoApproveEdits: bool = False
     # Merge every system message into a single leading system message.
     # Default off: most OpenAI-compatible servers accept multiple system
     # messages and the trailing task anchor is positionally meaningful
@@ -391,6 +404,62 @@ class ChatRequest(BaseModel):
     # NOT request fields: per-request control would let a compromised UI
     # toggle the harness off. (Review finding #3: the old
     # serverDraftValidation field here was never read and never sent.)
+
+
+@router.get("/ai/chat/approval")
+async def chat_approval_poll(requestId: str = ""):
+    """Poll the pending approval card for an in-flight /ai/chat request.
+
+    The chat request itself stays open while the loop suspends on the
+    approval Future (plan §97); the frontend discovers the card through
+    this lightweight poll. ``{pending: false}`` when no card is open.
+    """
+    if not requestId:
+        return {"pending": False}
+    approval = find_approval_for_request(requestId)
+    if approval is None:
+        return {"pending": False}
+    return {"pending": True, **approval.card_payload()}
+
+
+class ApprovalDecisionRequest(BaseModel):
+    approvalId: str
+    decision: str  # "approve" | "decline"
+    reason: str = ""
+    # Frontend's latest working content at decision time ({file: {content,
+    # label}}). An approve re-applies the op against THIS state — a manual
+    # edit during the pending window can invalidate an anchor or create a
+    # new error (never clobber).
+    contextFiles: dict[str, dict[str, str]] = {}
+
+
+@router.post("/ai/chat/approval")
+async def chat_approval_decide(req: ApprovalDecisionRequest):
+    """Resolve a pending approval card.
+
+    approve  → op re-validated+committed against contextFiles (when
+               provided); decision accepted only if clean. On anchor
+               miss / new errors the decision is NOT accepted:
+               {status: 'invalidated', reason} and the card stays open
+               (user can decline or resolve the conflict and retry).
+    decline  → accepted immediately; the model loop resumes with an
+               honest declined tool result.
+    """
+    approval = get_approval(req.approvalId)
+    if approval is None:
+        return {"status": "not_found"}
+    if req.decision not in ("approve", "decline"):
+        return {"status": "invalid", "reason": "decision must be approve or decline"}
+    outcome = approval.decide(
+        req.decision,
+        reason=req.reason[:500],
+        context_files=req.contextFiles or None,
+    )
+    logger.info(
+        "Approval decision | approvalId=%s decision=%s outcome=%s",
+        req.approvalId, req.decision, outcome.get("status"),
+    )
+    return outcome
 
 
 class ChatStopRequest(BaseModel):
@@ -1570,6 +1639,47 @@ async def _execute_tool_call_async(tool_call: dict) -> str:
     stalled behind one tool call. asyncio.to_thread keeps the loop free.
     """
     return await asyncio.to_thread(_execute_tool_call, tool_call)
+
+
+async def _run_approval_gate(
+    session: EditSession,
+    tool_call: dict,
+    stop_event: asyncio.Event | None,
+    request_id: str | None,
+    log,
+) -> tuple[str, dict | None]:
+    """Approval-gated write (Phase 2). Returns (lean content, details-or-None)
+    with the same contract as EditSession.execute().
+
+    Invalid calls kick back immediately — the gate NEVER produces a card
+    for a call with new validation errors (plan law). A validated call
+    suspends IN-REQUEST: the frontend polls GET /ai/chat/approval for the
+    card, POST /ai/chat/approval resolves the Future (approve re-validates
+    against the latest frontend state before committing), and a 90s
+    non-response auto-declines with an honest reason. The model loop never
+    sees a fabricated user intent.
+    """
+    name = tool_call.get("name", "")
+    content, result, _preview_state = session.prepare(tool_call)
+    if result is None:
+        return content, None  # kickback; no card, no wait
+
+    op = EditSession.tool_call_to_op(name, tool_call.get("arguments", {}) or {})
+    approval = create_approval(name, op or {}, result, session, request_id)
+    log.info(
+        "Approval card opened | approvalId=%s name=%s file=%s timeout=%ds",
+        approval.approval_id, name, result.get("file", ""),
+        int(APPROVAL_TIMEOUT_SECONDS),
+    )
+    try:
+        decision = await approval.wait_or_stop(APPROVAL_TIMEOUT_SECONDS, stop_event)
+    finally:
+        remove_approval(approval.approval_id)
+    log.info(
+        "Approval resolved | approvalId=%s decision=%s",
+        approval.approval_id, decision.get("decision"),
+    )
+    return format_approval_result(name, decision)
 
 
 # Client-facing tool-call detail records are capped so a huge tool output
@@ -2760,7 +2870,15 @@ async def chat_proxy(req: ChatRequest):
                 for tool_call in tool_calls[:MAX_MCP_TOOL_TURNS]:
                     if edit_session is not None and tool_call.get("name") in EDIT_TOOL_NAMES:
                         # Request-scoped write path (never the MCP server).
-                        result_text, edit_details = edit_session.execute(tool_call)
+                        if req.autoApproveEdits:
+                            # Harness override: skip ONLY the human wait;
+                            # validation (execute's apply+delta gate) is
+                            # unchanged.
+                            result_text, edit_details = edit_session.execute(tool_call)
+                        else:
+                            result_text, edit_details = await _run_approval_gate(
+                                edit_session, tool_call, stop_event,
+                                req.requestId, logger)
                         logger.info(
                             "Edit tool executed | name=%s attempts=%d ok=%s",
                             tool_call["name"], edit_session.edit_attempts,

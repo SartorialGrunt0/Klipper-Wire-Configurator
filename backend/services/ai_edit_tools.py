@@ -213,6 +213,9 @@ class EditSession:
         self.state = ProjectState.from_context_files(context_files)
         self.baseline = self.state.validate()
         self.pending_edits: list[dict] = []
+        # Ops approved+committed during THIS request (in order), replayed
+        # over a refreshed context on later approve re-validations.
+        self.committed_ops: list[dict] = []
         self.edit_attempts = 0
         # Classification of the most recent write-tool outcome:
         #   None         — no write call yet this request
@@ -231,24 +234,20 @@ class EditSession:
     def has_files(self) -> bool:
         return bool(self.state.files)
 
-    def execute(self, tool_call: dict) -> tuple[str, dict | None]:
-        """Run one write tool call. Returns (lean content, details-or-None).
+    @staticmethod
+    def tool_call_to_op(name: str, args: dict) -> dict | None:
+        """Map a model-facing tool call to the internal ProjectState op.
 
-        ``details`` (UI payload, never sent to the model) is set on
-        success: ``{file, op, summary, newText, diff}`` shaped for the
-        current draft UI + future approval card.
+        Shared by execute() (auto-approve path) and prepare() (approval
+        path) so the two can never drift.
         """
-        name = tool_call.get("name", "")
-        args = tool_call.get("arguments", {}) or {}
-        self.edit_attempts += 1
-
         if name == "config_write":
-            op = {
+            return {
                 "op": "new_file",
                 "file": str(args.get("file", "")),
                 "content": str(args.get("content", "")),
             }
-        elif name == "config_edit":
+        if name == "config_edit":
             op: dict = {"op": str(args.get("op", ""))}
             for arg_key in ("file", "section", "key", "text",
                             "old_text", "new_text", "target_file"):
@@ -258,7 +257,23 @@ class EditSession:
                 op["value"] = str(args["value"])
             if args.get("allow_comment_change"):
                 op["allow_comment_change"] = True
-        else:
+            return op
+        return None
+
+    def execute(self, tool_call: dict) -> tuple[str, dict | None]:
+        """Run one write tool call (auto-approve path). Returns
+        (lean content, details-or-None).
+
+        ``details`` (UI payload, never sent to the model) is set on
+        success: ``{file, op, summary, newText, diff}`` shaped for the
+        current draft UI + the approval card.
+        """
+        name = tool_call.get("name", "")
+        args = tool_call.get("arguments", {}) or {}
+        self.edit_attempts += 1
+
+        op = self.tool_call_to_op(name, args)
+        if op is None:
             return f"Unknown write tool: {name}", None
 
         new_state, result = self.state.apply(self.baseline, op)
@@ -279,17 +294,50 @@ class EditSession:
                 "user_gated" if gated else "correctable")
             return _lean_error_content(name, result), None
 
+        self.commit(new_state, name, result, raw_op=op)
+        return _lean_success_content(name, result), self._details_for(name, result)
+
+    def prepare(
+        self, tool_call: dict,
+    ) -> tuple[str, dict, "ProjectState"] | tuple[str, None, None]:
+        """Validate one write call WITHOUT staging it (approval path).
+
+        Returns ``(lean_error, None, None)`` when the call is invalid —
+        identical kickback to execute()'s error branch (plan law: a call
+        with new validation errors never produces a card). On valid,
+        returns ``(success_content, result, preview_state)`` where the
+        caller creates an ApprovalRequest over ``result`` and only calls
+        ``commit()`` after the user approves.
+        """
+        name = tool_call.get("name", "")
+        args = tool_call.get("arguments", {}) or {}
+        self.edit_attempts += 1
+
+        op = self.tool_call_to_op(name, args)
+        if op is None:
+            return f"Unknown write tool: {name}", None, None
+
+        new_state, result = self.state.apply(self.baseline, op)
+        if result["status"] == "error":
+            gated = (
+                bool(result.get("commentedParams"))
+                or "exists but is commented out"
+                in str(result.get("error", "")))
+            self.last_write_outcome = (
+                "user_gated" if gated else "correctable")
+            return _lean_error_content(name, result), None, None
+
+        return _lean_success_content(name, result), result, new_state
+
+    def commit(self, new_state: "ProjectState", name: str, result: dict,
+               raw_op: dict | None = None) -> None:
+        """Stage a prepared/validated op into the session (single recorder
+        of committed_ops — used by the auto-approve path AND the decision
+        endpoint's approve path; nothing else mutates session state)."""
         self.state = new_state
         self.last_write_outcome = "success"
         file_name = result.get("file", "")
-        details = {
-            "file": file_name,
-            "op": result.get("op", name),
-            "summary": result.get("summary", ""),
-            "newText": self.state.files.get(file_name, ""),
-            "advisories": result.get("advisories", []),
-            "diff": result.get("diff"),
-        }
+        details = self._details_for(name, result)
         # Stacked edits to the same file replace its staged entry so the
         # draft UI shows the cumulative result, not intermediate states.
         self.pending_edits = [
@@ -297,7 +345,98 @@ class EditSession:
         ]
         self.pending_edits.append(details)
         self._last_file = file_name
-        return _lean_success_content(name, result), details
+        self.committed_ops.append(
+            {"name": name, "op": result.get("op", name),
+             "raw_op": dict(raw_op) if raw_op else {},
+             "result": result})
+
+    def revalidate_and_commit(
+        self, op: dict, context_files: dict | None,
+    ) -> dict:
+        """Approve-path re-validation (plan: a manual edit during the
+        pending window can invalidate an anchor or create a new error).
+
+        With fresh ``context_files``, rebuild the working state from the
+        frontend's latest content, REPLAY this request's previously
+        approved ops (they are staged server-side, not yet in the
+        editor), then re-apply ``op`` through the full delta gate. Any
+        replay or re-application failure returns an error result and
+        changes nothing — the decision endpoint reports it as
+        ``invalidated`` so the card re-renders honestly.
+        """
+        name = "config_write" if op.get("op") == "new_file" else "config_edit"
+        if not context_files:
+            # No refresh info: validate against the current session state.
+            new_state, result = self.state.apply(self.baseline, op)
+            if result["status"] == "error":
+                return result
+            self.commit(new_state, name, result, raw_op=op)
+            result["details"] = self._details_for(name, result)
+            return result
+
+        try:
+            replay = ProjectState.from_context_files(context_files)
+        except Exception as exc:  # malformed refresh payload
+            return {"status": "error", "error": f"Invalid context refresh: {exc}"}
+        replay_baseline = replay.validate()
+        for prior in self.committed_ops:
+            replay, prior_result = replay.apply(replay_baseline, prior["raw_op"])
+            if prior_result["status"] == "error":
+                return {
+                    "status": "error",
+                    "error": (
+                        "config changed since this proposal — an earlier "
+                        "approved edit no longer applies "
+                        f"({prior_result.get('error', 'anchor lost')})"
+                    ),
+                    "newErrors": prior_result.get("newErrors", []),
+                }
+        new_state, result = replay.apply(replay_baseline, op)
+        if result["status"] == "error":
+            result.setdefault("error", "config changed since this proposal")
+            return result
+        # Success: adopt the refreshed baseline and rebuild the staged set
+        # from the FULL committed chain (prior ops replayed above + this
+        # one). In gate mode nothing else stages edits, so pending_edits
+        # derives purely from committed ops — last edit per file wins,
+        # mirroring commit()'s stacking rule.
+        chain = self.committed_ops + [{"name": name, "raw_op": dict(op),
+                                       "op": result.get("op", name)}]
+        self.state = replay
+        self.baseline = replay_baseline
+        staged: dict[str, dict] = {}
+        cur = self.state
+        for entry in chain:
+            nxt, res = cur.apply_no_gate(entry["raw_op"])
+            if res["status"] == "error":  # defensive; replayed above
+                continue
+            cur = nxt
+            staged[res.get("file", "")] = {
+                "file": res.get("file", ""),
+                "op": res.get("op", entry["op"]),
+                "summary": res.get("summary", ""),
+                "newText": cur.files.get(res.get("file", ""), ""),
+                "advisories": res.get("advisories", []),
+                "diff": res.get("diff"),
+            }
+        self.state = cur
+        self.committed_ops = chain
+        self.pending_edits = list(staged.values())
+        self._last_file = result.get("file", "")
+        self.last_write_outcome = "success"
+        result["details"] = staged.get(result.get("file", ""),
+                                       self._details_for(name, result))
+        return result
+
+    def _details_for(self, name: str, result: dict) -> dict:
+        return {
+            "file": result.get("file", ""),
+            "op": result.get("op", name),
+            "summary": result.get("summary", ""),
+            "newText": self.state.files.get(result.get("file", ""), ""),
+            "advisories": result.get("advisories", []),
+            "diff": result.get("diff"),
+        }
 
     def pending_edits_payload(self) -> list[dict]:
         """Client-facing staged edits (the UI consumes these; diffs stay
@@ -306,6 +445,193 @@ class EditSession:
             {k: e.get(k) for k in ("file", "op", "summary", "newText", "advisories")}
             for e in self.pending_edits
         ]
+
+
+# ── Approval gate (Phase 2) ────────────────────────────────────────────
+#
+# Plan law: the gate NEVER approves-routes on failure — a call with new
+# validation errors kicks back immediately (Phase 1 behavior), no card
+# exists. Only a validated write suspends. Implementation is in-request
+# (plan §97): the chat request stays open, the decision POST resolves an
+# asyncio.Future, timeout auto-declines with an honest reason. No parked
+# state, no serialized replay.
+
+import asyncio
+import os as _os
+import uuid as _uuid
+
+APPROVAL_TIMEOUT_SECONDS = float(_os.environ.get("KWC_EDIT_APPROVAL_TIMEOUT", "90"))
+
+# approvalId -> ApprovalRequest. One pending approval per chat request at
+# a time is enforced by the CALLER (chat_proxy serializes cards), not here
+# — the registry is a dumb mailbox so the decision endpoint can stay
+# stateless w.r.t. sessions.
+_pending_approvals: dict[str, "ApprovalRequest"] = {}
+
+
+class ApprovalRequest:
+    """One suspended validated write awaiting the user's decision.
+
+    Lives for the lifetime of the chat request that created it (in-request
+    suspension, plan §97): the loop awaits :meth:`wait_or_stop`; the
+    decision endpoint calls :meth:`decide`, which re-validates an approve
+    against the frontend's latest files BEFORE committing and resolving
+    the future. A declined/invalidated op is never committed.
+    """
+
+    def __init__(self, name: str, op: dict, result: dict,
+                 session: "EditSession", request_id: str | None) -> None:
+        self.approval_id = _uuid.uuid4().hex
+        self.name = name
+        self.op = op
+        self.result = result        # prepared result (validated at prepare)
+        self.session = session
+        self.request_id = request_id
+        self.resolved = False       # guards double-decision (double-click)
+        # The loop running the chat request that owns this suspension.
+        # Decisions may arrive on a DIFFERENT loop (TestClient per-request
+        # portals; anything multi-loop), so set_result must be scheduled
+        # threadsafe onto the owning loop — a cross-loop set_result never
+        # wakes the waiter.
+        self.loop = asyncio.get_running_loop()
+        self.future: asyncio.Future = self.loop.create_future()
+
+    def _settle(self, payload: dict) -> None:
+        if not self.future.done():
+            self.future.set_result(payload)
+
+    def card_payload(self) -> dict:
+        """What the frontend polls and renders as the approval card."""
+        return {
+            "approvalId": self.approval_id,
+            "file": self.result.get("file", ""),
+            "op": self.result.get("op", self.name),
+            "summary": self.result.get("summary", ""),
+            "diff": self.result.get("diff"),
+            "advisories": self.result.get("advisories", []),
+            "timeoutSeconds": APPROVAL_TIMEOUT_SECONDS,
+        }
+
+    def decide(self, decision: str, reason: str = "",
+               context_files: dict | None = None) -> dict:
+        """Resolve from the decision endpoint.
+
+        Returns an endpoint-facing dict: ``{'status': 'ok'}`` when the
+        decision was recorded (and, for approve, committed), or
+        ``{'status': 'already_decided'|'not_found'}``, or
+        ``{'status': 'invalidated', ...}`` when an approve could not be
+        re-applied cleanly to the latest state — the card re-renders and
+        the user can still decline.
+        """
+        if self.resolved:
+            return {"status": "already_decided"}
+        if decision == "approve":
+            outcome = self.session.revalidate_and_commit(self.op, context_files)
+            if outcome["status"] != "applied":
+                # Decision NOT accepted (plan): config moved under the
+                # card. Loop keeps waiting; the card shows the reason.
+                return {
+                    "status": "invalidated",
+                    "reason": outcome.get("error", "config changed since this proposal"),
+                    "newErrors": outcome.get("newErrors", []),
+                }
+            self.resolved = True
+            payload = {"decision": "approved",
+                       "summary": outcome.get("summary", self.result.get("summary", "")),
+                       "details": outcome["details"], "reason": ""}
+        else:
+            self.resolved = True
+            payload = {"decision": "declined", "reason": reason}
+        try:
+            self.loop.call_soon_threadsafe(self._settle, payload)
+        except RuntimeError:
+            # Owning loop already gone (chat request aborted/closed):
+            # nothing left to wake; the suspension dies with the request.
+            pass
+        return {"status": "ok"}
+
+    async def wait_or_stop(self, timeout: float,
+                           stop_event: "asyncio.Event | None") -> dict:
+        """Await the decision; auto-decline honestly on timeout, and wake
+        promptly when the user aborts the chat request.
+
+        Poll-based by deliberate choice: ``asyncio.wait`` over a shielded
+        future + stop task was proven NOT to resume in the real request
+        context (TestClient anyio-portal repro, 2026-09-14) while plain
+        polling on the owning loop resumed correctly. A 50ms tick over a
+        <=90s window is negligible load and immune to shield/wait quirks.
+        """
+        import time as _time
+
+        end = _time.monotonic() + timeout
+        while True:
+            if self.future.done():
+                return self.future.result()
+            if stop_event is not None and stop_event.is_set():
+                return {"decision": "declined",
+                        "reason": "user cancelled the request"}
+            remaining = end - _time.monotonic()
+            if remaining <= 0:
+                # Final re-check: a decision landing between the last
+                # poll and timeout expiry already COMMITTED — it must
+                # win, or the commit orphans (loop says 'timeout',
+                # state says 'approved').
+                if self.future.done():
+                    return self.future.result()
+                return {"decision": "timeout", "reason": ""}
+            await asyncio.sleep(min(0.05, remaining))
+
+
+def create_approval(name: str, op: dict, result: dict,
+                    session: "EditSession",
+                    request_id: str | None = None) -> ApprovalRequest:
+    req = ApprovalRequest(name, op, result, session, request_id)
+    _pending_approvals[req.approval_id] = req
+    return req
+
+
+def get_approval(approval_id: str) -> ApprovalRequest | None:
+    return _pending_approvals.get(approval_id)
+
+
+def find_approval_for_request(request_id: str) -> ApprovalRequest | None:
+    for ar in _pending_approvals.values():
+        if ar.request_id == request_id and not ar.resolved:
+            return ar
+    return None
+
+
+def remove_approval(approval_id: str) -> None:
+    _pending_approvals.pop(approval_id, None)
+
+
+def format_approval_result(name: str, decision: dict) -> tuple[str, dict | None]:
+    """Lean model-facing tool result for a resolved approval.
+
+    Returns (content, edit_details-or-None). edit_details is set ONLY on
+    approval (the staged-edit stack must not carry an unapproved change).
+    """
+    kind = decision.get("decision")
+    if kind == "approved":
+        return (
+            f"{name} applied — {decision.get('summary', '')}\n"
+            "The user APPROVED this change. It is staged for their review "
+            "(not saved until they use the save menu).",
+            decision.get("details"),
+        )
+    if kind == "timeout":
+        return (
+            f"{name} DECLINED — the user did not respond within "
+            f"{int(APPROVAL_TIMEOUT_SECONDS)} seconds. Do not silently "
+            "retry the same change; ask the user what they would like.",
+            None,
+        )
+    reason = decision.get("reason") or "no reason given"
+    return (
+        f"{name} DECLINED by the user ({reason}). Do not silently retry "
+        "the same change. Ask the user how they would like to proceed.",
+        None,
+    )
 
 
 def edit_tool_details_from_content(result_text: str) -> bool:

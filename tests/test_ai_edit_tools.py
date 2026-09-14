@@ -74,6 +74,11 @@ def _chat_payload(messages, **over):
         'apiUrl': 'https://api.example.com/v1/chat/completions',
         'apiProvider': 'chatgpt',
         'contextFiles': _ctx(),
+        # Phase 2: validated writes now suspend for a human card. These
+        # tests exercise the tool LOOP, not the gate; the gate has its own
+        # suite (test_ai_approval_gate.py). Tests that want the real gate
+        # pass autoApproveEdits=False explicitly.
+        'autoApproveEdits': True,
     }
     payload.update(over)
     return payload
