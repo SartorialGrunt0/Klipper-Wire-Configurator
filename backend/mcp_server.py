@@ -1686,6 +1686,22 @@ class McpServer:
                     if match_pos >= 0:
                         section = self._enclosing_user_config_section(text, match_pos)
 
+                    # Enumeration support: when the query matches section
+                    # NAMES, list EVERY such header in the file. The
+                    # enclosing-section label alone hides class members
+                    # (e.g. search 'neopixel' labeled Hotkey.cfg at the
+                    # first hit's macro section, hiding [neopixel
+                    # hotkey_leds] further down — "all my LEDs" edits then
+                    # silently miss it).
+                    matched_headers: list[str] = []
+                    for hm in CONFIG_ALIAS_RE.finditer(text):
+                        header_name = hm.group(1).strip()
+                        if header_name.lower().startswith("include "):
+                            continue
+                        if any(term in header_name.lower() for term in query_terms):
+                            if header_name not in matched_headers:
+                                matched_headers.append(header_name)
+
                     content_lines = [
                         l.strip() for l in text.split("\n")
                         if l.strip() and not l.strip().startswith("#")
@@ -1698,6 +1714,7 @@ class McpServer:
                         "snippet": snippet,
                         "match_pos": match_pos,
                         "section": section,
+                        "matched_headers": matched_headers,
                     })
             except OSError:
                 continue
@@ -1720,6 +1737,12 @@ class McpServer:
                 # header comments, or other preamble.
                 label = f"{r['filename']} (top of file)"
             lines.append(f"## {label}")
+            extra = [h for h in r.get("matched_headers") or [] if h != r.get("section")]
+            if extra:
+                lines.append(
+                    "matching sections here: "
+                    + ", ".join(f"[{h}]" for h in extra)
+                )
             if r["snippet"]:
                 lines.append(f"> {r['snippet']}\n")
         lines.append(f"\n{len(results)} match(es) total. Use read_user_config to read the full file.")
