@@ -977,6 +977,12 @@ def build_trident_questions() -> list[TestQuestion]:
                 ("regex", r"#\s*file\s*:\s*aux_fan\.cfg"),
                 ("regex", r"max_power\s*:\s*0\.8"),
             ),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_section_regex", r"printer\.cfg::printer::max_accel\s*:\s*12000"),
+                ("staged_section_regex", r"aux_fan\.cfg::fan_generic Aux_Fan::max_power\s*:\s*0\.8"),
+            ),
         ),
         TestQuestion(
             qid="TRIDENT-12",
