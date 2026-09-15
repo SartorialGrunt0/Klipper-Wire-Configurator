@@ -760,10 +760,11 @@ _EDIT_TOOL_SNIPPETS: dict[str, str] = {
         "Apply one mechanical edit to the user's config "
         "(file='printer.cfg', op='set_param'|'add_section'|'replace_section'"
         "|'delete_section'|'patch_gcode'|'delete_file'|'add_include'"
-        "|'remove_include', section='bed_mesh', key='speed', value='50', "
+        "|'remove_include'|'comment_include', section='bed_mesh', key='speed', value='50', "
         "text='body for add/replace_section', old_text='exact lines to "
         "replace', new_text='replacement lines', target_file='x.cfg' for "
-        "include ops, allow_comment_change=true only when the user asked to "
+        "include ops (comment_include disables an include as '#[include x.cfg]' "
+        "instead of deleting it), allow_comment_change=true only when the user asked to "
         "uncomment/comment out params). One op per call; changes are "
         "validated and staged "
         "for user review"
@@ -851,7 +852,7 @@ AUTO_SEARCH_FALLBACK_MAX_CHARS = 4000
 # load — verified 2026-08 on gemma-4-12b/qwen3.5-9b).
 _EDIT_VERB_RE = re.compile(
     r"\b(?:change|update|modify|edit|add|remove|delete|fix|create|set|rename|"
-    r"enable|disable|tweak|adjust|comment\s*out|calibrat\w*)\b",
+    r"enable|disable|tweak|adjust|comment\s*out|calibrat\w*|move)\b",
     re.IGNORECASE,
 )
 _EDIT_TARGET_RE = re.compile(

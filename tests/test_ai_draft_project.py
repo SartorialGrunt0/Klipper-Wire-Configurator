@@ -253,6 +253,46 @@ def test_replace_section_and_foreign_header_refused():
     assert r2['status'] == 'error' and 'foreign header' in r2['error']
 
 
+def test_replace_section_header_prefixed_body_is_stripped():
+    """r2 TRIDENT-15 (2026-09-14): models habitually start the text with
+    the section's own header. Kept verbatim it duplicated '[header]' and
+    the first (empty) duplicate swallowed the section at validate time -
+    silent content loss. One leading own-header line is now stripped."""
+    st, base = _state()
+    st1, r = st.apply(base, {'op': 'replace_section', 'file': 'printer.cfg',
+                             'section': 'bed_mesh',
+                             'text': '[bed_mesh]\nspeed: 80\n'
+                                     'mesh_min: 10, 10\nmesh_max: 190, 190'})
+    assert r['status'] == 'applied'
+    text = st1.files['printer.cfg']
+    assert text.count('[bed_mesh]') == 1
+    assert 'speed: 80' in text
+
+
+def test_comment_include_op():
+    """TRIDENT-04 (2026-09-14): 'comment out the include' had no op; the
+    model honestly reported the gap. comment_include disables the line as
+    '#[include x.cfg]' without destroying it."""
+    st0, base = _state()
+    seeded = ProjectState.from_context_files({'printer.cfg': {'content':
+        st0.files['printer.cfg'].rstrip('\n') + '\n\n[include sensorless.cfg]\n'}})
+    st1, r = seeded.apply(seeded.validate(), {'op': 'comment_include',
+                                              'file': 'printer.cfg',
+                             'target_file': 'sensorless.cfg'})
+    assert r['status'] == 'applied'
+    assert '#[include sensorless.cfg]' in st1.files['printer.cfg']
+    # Idempotent: already commented -> honest error, not a double '#'.
+    _, r2 = st1.apply(st1.validate(), {'op': 'comment_include',
+                                       'file': 'printer.cfg',
+                                       'target_file': 'sensorless.cfg'})
+    assert r2['status'] == 'error' and 'already commented' in r2['error']
+    # Missing include -> honest error.
+    _, r3 = seeded.apply(seeded.validate(), {'op': 'comment_include',
+                                             'file': 'printer.cfg',
+                                             'target_file': 'nope.cfg'})
+    assert r3['status'] == 'error' and 'not present' in r3['error']
+
+
 def test_replace_section_missing_text_never_wipes():
     """Fullbank edit-tools run 2026-09-14: gemma sent patch-style
     old_text/new_text with op=replace_section and NO text; the handler

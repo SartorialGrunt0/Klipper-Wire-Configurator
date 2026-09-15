@@ -54,7 +54,10 @@ CONFIG_EDIT_SPEC = {
         "text body), replace_section (rewrite a section's body), "
         "delete_section, patch_gcode (replace old_text with new_text "
         "inside a section — quote lines exactly as read returned them), "
-        "delete_file, add_include, remove_include. Existing files CANNOT be "
+        "delete_file, add_include, remove_include, comment_include "
+        "(disable an include line as '#[include ...]' -- use this instead of "
+        "remove_include when the user wants the file to stop loading but the "
+        "line kept for later re-enable). Existing files CANNOT be "
         "rewritten wholesale — use the targeted ops; config_write creates "
         "new files. Never call this for questions — only to change the "
         "user's config."
@@ -71,7 +74,7 @@ CONFIG_EDIT_SPEC = {
                 "enum": [
                     "set_param", "add_section", "replace_section",
                     "delete_section", "patch_gcode", "delete_file",
-                    "add_include", "remove_include",
+                    "add_include", "remove_include", "comment_include",
                 ],
                 "description": "The operation to apply",
             },
@@ -109,7 +112,8 @@ CONFIG_EDIT_SPEC = {
             },
             "target_file": {
                 "type": "string",
-                "description": "File to include/un-include (add_include / remove_include)",
+                "description": ("File to include/un-include/comment-out "
+                                "(add_include / remove_include / comment_include)"),
             },
         },
         "required": ["file", "op"],

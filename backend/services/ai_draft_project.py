@@ -359,6 +359,7 @@ class ProjectState:
             'delete_file': self._op_delete_file,
             'add_include': self._op_add_include,
             'remove_include': self._op_remove_include,
+            'comment_include': self._op_comment_include,
         }.get(kind)
         if handler is None:
             return _state_error(f"Unknown op '{kind}'.")
@@ -525,6 +526,18 @@ class ProjectState:
                     f"Argument text must contain only the body of [{header}] "
                     f"(found foreign header '[{match.group(1).strip()}]')."
                 )
+        # A text that OPENS with the section's own header (models habitually
+        # include it) is the body-plus-header shape, not body-only. Strip
+        # one leading header line -- without this, keeping the header in the
+        # body duplicates '[header]' in the file, and the FIRST duplicate
+        # swallows the section at validate time, so the real content
+        # silently disappears (r2 TRIDENT-15: staged [idle_timeout] read
+        # back empty and validation stayed silent).
+        if new_body_pre := body_stripped:
+            first = RE_SECTION_HEADER.match(new_body_pre.split('\n')[0])
+            if first and first.group(1).strip() == header:
+                rest_lines = new_body_pre.split('\n')[1:]
+                body_stripped = '\n'.join(rest_lines).strip('\n')
         new_body = body_stripped.split('\n') if body_stripped else []
         if not op.get('allow_comment_change'):
             # Same comment-boundary guard as patch_gcode: a full-body
@@ -697,6 +710,36 @@ class ProjectState:
         text = self.files[in_file].rstrip('\n')
         self.files[in_file] = f"{text}\n\n[{header}]\n" if text else f"[{header}]\n"
         return {'status': 'ok', 'file': in_file, 'summary': f"added [include {target}] to {in_file}"}
+
+    def _op_comment_include(self, op: dict) -> dict:
+        """Disable an include WITHOUT deleting it: [include x.cfg] ->
+        #[include x.cfg]. The comment-out idiom Klipper users ask for
+        ('stop loading sensorless.cfg') -- delete would destroy the line
+        and its re-enable hint (fullbank ON run 2026-09-14 TRIDENT-04:
+        with no op for this the model honestly reported the gap)."""
+        target = (op.get('target_file') or '').strip()
+        if not target:
+            return _state_error('Missing required argument: target_file')
+        in_file = self._require_file(op.get('file') or 'printer.cfg')
+        if target == in_file:
+            return _state_error(
+                f"A file cannot include (or comment) itself ({in_file}). "
+                f"Pass the INCLUDED file's name in target_file.")
+        lines = _split_lines(self.files[in_file])
+        header = f"include {target}"
+        for idx, line in enumerate(lines):
+            match = RE_SECTION_HEADER.match(line)
+            if match and match.group(1).strip() == header:
+                lines[idx] = '#' + line.lstrip()
+                self.files[in_file] = '\n'.join(lines)
+                return {'status': 'ok', 'file': in_file,
+                        'summary': f"commented out [include {target}] in {in_file}"}
+            stripped = line.strip()
+            if stripped == f"#[{header}]":
+                return _state_error(
+                    f"[include {target}] is already commented out in {in_file}.")
+        return _state_error(
+            f"[include {target}] not present in {in_file}. Read the file first.")
 
     def _op_remove_include(self, op: dict) -> dict:
         target = (op.get('target_file') or '').strip()
