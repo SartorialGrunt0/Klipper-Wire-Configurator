@@ -159,6 +159,17 @@ class TestQuestion:
     # follows the server env. The prose criteria families run with the
     # flag forced OFF so both paths score in one harness config.
     edit_tools: bool | None = None
+    # Artifact criteria for the edit-tools-ON arm (design approved
+    # 2026-09-14). When the EFFECTIVE editTools for this request is True
+    # and this tuple is non-empty, it REPLACES `criteria` for scoring:
+    # the deliverable is the server-staged pendingEdits (validated
+    # mechanical apply), so prose-shape criteria (# file: hints, fences,
+    # mini-diff protocol) are moot and go false-negative on correct
+    # terse tool runs (fullbank ON run 2026-09-14: ~12 such misses).
+    # Kinds: staged_file / staged_any_param / staged_regex /
+    # staged_not_regex / staged_section_regex / staged_section_absent
+    # (plus the existing staged_param / staged_count / not_staged).
+    edit_criteria: tuple[tuple[str, str], ...] = ()
 
 
 # Shared config snippets used by several questions.
@@ -775,6 +786,11 @@ def build_trident_questions() -> list[TestQuestion]:
                 ("regex", r"\[printer\]"),
                 ("regex", r"max_accel\s*:\s*12000"),
             ),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_regex", r"printer\.cfg::max_accel\s*:\s*12000"),
+            ),
         ),
         TestQuestion(
             qid="TRIDENT-03",
@@ -791,6 +807,11 @@ def build_trident_questions() -> list[TestQuestion]:
                 ("regex", r"#\s*file\s*:\s*printer\.cfg"),
                 ("regex", r"\*\s*\[gcode_macro\s+RESET_ACCEL\]"),
             ),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_section_absent", "printer.cfg::gcode_macro RESET_ACCEL"),
+            ),
         ),
         TestQuestion(
             qid="TRIDENT-04",
@@ -804,6 +825,11 @@ def build_trident_questions() -> list[TestQuestion]:
             criteria=(
                 ("regex", r"#\s*file\s*:\s*printer\.cfg"),
                 ("regex", r"#\s*\[include\s+sensorless\.cfg\]"),
+            ),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_regex", r"printer\.cfg::#\s*\[include\s+sensorless\.cfg\]"),
             ),
         ),
         TestQuestion(
@@ -820,6 +846,11 @@ def build_trident_questions() -> list[TestQuestion]:
                 ("regex", r"#\s*file\s*:\s*aux_fan\.cfg"),
                 ("regex", r"\[fan_generic\s+Aux_Fan\]"),
                 ("regex", r"max_power\s*:\s*0\.8"),
+            ),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_regex", r"aux_fan\.cfg::max_power\s*:\s*0\.8"),
             ),
         ),
         TestQuestion(
@@ -839,6 +870,13 @@ def build_trident_questions() -> list[TestQuestion]:
                 ("regex", r"\[gcode_macro\s+PARK_HEAD"),
                 ("regex", r"#\s*file\s*:\s*printer\.cfg"),
                 ("regex", r"\[include\s+park_head\.cfg\]"),
+            ),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_new_file", ""),
+                ("staged_regex", r"park_head\.cfg::\[gcode_macro\s+PARK_HEAD"),
+                ("staged_regex", r"printer\.cfg::\[include\s+park_head\.cfg\]"),
             ),
         ),
         TestQuestion(
@@ -876,6 +914,12 @@ def build_trident_questions() -> list[TestQuestion]:
                 ("regex", r"probe_count\s*:\s*5,\s*5"),
                 ("regex", r"mesh_pps\s*:\s*5,\s*5"),
             ),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_section_regex", r"printer\.cfg::bed_mesh::probe_count\s*:\s*5,\s*5"),
+                ("staged_section_regex", r"printer\.cfg::bed_mesh::mesh_pps\s*:\s*5,\s*5"),
+            ),
         ),
         TestQuestion(
             qid="TRIDENT-09",
@@ -909,6 +953,12 @@ def build_trident_questions() -> list[TestQuestion]:
                 ("regex", r"#\s*file\s*:\s*printer\.cfg"),
                 ("regex", r"\[gcode_macro\s+M109\]"),
                 ("contains", "{% endif %}"),
+            ),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_file", "printer.cfg"),
+                ("staged_regex", r"printer\.cfg::\{%\s*endif\s*%\}"),
             ),
         ),
         TestQuestion(
@@ -945,6 +995,12 @@ def build_trident_questions() -> list[TestQuestion]:
                 ("regex", r"#\s*file\s*:\s*PIS\.cfg"),
                 ("regex", r"accel_per_hz\s*:\s*50"),
             ),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_regex", r"aux_fan\.cfg::max_power\s*:\s*0\.8"),
+                ("staged_regex", r"PIS\.cfg::accel_per_hz\s*:\s*50"),
+            ),
         ),
         TestQuestion(
             qid="TRIDENT-13",
@@ -968,6 +1024,16 @@ def build_trident_questions() -> list[TestQuestion]:
                 # stepper section content (i.e. it did not dump/re-edit
                 # unrelated sections).
                 ("not_contains", "[stepper_x]\nstep_pin"),
+            ),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_section_regex", r"printer\.cfg::gcode_macro PARK_HEAD::gcode"),
+                ("staged_section_regex", r"printer\.cfg::bed_mesh::probe_count\s*:\s*5,\s*5"),
+                ("staged_section_absent", "printer.cfg::gcode_macro RESET_ACCEL"),
+                # Byte-stability: unrelated sections survive in the
+                # staged full file.
+                ("staged_regex", r"printer\.cfg::\[stepper_x\]"),
             ),
         ),
         TestQuestion(
@@ -1010,6 +1076,14 @@ def build_trident_questions() -> list[TestQuestion]:
                 ("contains", "Chamber_LEDs"),
                 ("contains", "hotkey_leds"),
             ),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_section_regex", r"printer\.cfg::idle_timeout::timeout\s*:\s*300\b"),
+                ("staged_section_regex", r"printer\.cfg::idle_timeout::SB_LEDs"),
+                ("staged_section_regex", r"printer\.cfg::idle_timeout::Chamber_LEDs"),
+                ("staged_section_regex", r"printer\.cfg::idle_timeout::hotkey_leds"),
+            ),
         ),
         TestQuestion(
             qid="TRIDENT-16",
@@ -1029,6 +1103,14 @@ def build_trident_questions() -> list[TestQuestion]:
                 ("contains", "SB_LEDs"),
                 ("contains", "Chamber_LEDs"),
                 ("contains", "hotkey_leds"),
+            ),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_section_regex", r"printer\.cfg::idle_timeout::timeout\s*:\s*300\b"),
+                ("staged_section_regex", r"printer\.cfg::idle_timeout::SB_LEDs"),
+                ("staged_section_regex", r"printer\.cfg::idle_timeout::Chamber_LEDs"),
+                ("staged_section_regex", r"printer\.cfg::idle_timeout::hotkey_leds"),
             ),
         ),
         # ── HARNESS-01/03: probes for the server-side apply/validate/
@@ -1053,6 +1135,12 @@ def build_trident_questions() -> list[TestQuestion]:
             criteria=(
                 ("regex", r"max_accel(?!eration)\s*:\s*9000"),
                 ("not_contains", "max_acceleration: 9000"),
+            ),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_regex", r"printer\.cfg::max_accel(?!eration)\s*:\s*9000"),
+                ("staged_not_regex", r"printer\.cfg::max_acceleration\s*:\s*9000"),
             ),
         ),
         # HARNESS-02 RETIRED 2026-09-13: it probed the deterministic LED
@@ -1079,6 +1167,12 @@ def build_trident_questions() -> list[TestQuestion]:
                 ("regex", r"speed\s*:\s*8"),
                 ("not_contains", "Harness checks"),
             ),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_section_regex", r"printer\.cfg::bed_mesh::speed\s*:\s*8\b"),
+                ("staged_section_regex", r"printer\.cfg::bed_mesh::probe_count\s*:\s*3,\s*3"),
+            ),
         ),
         TestQuestion(
             qid="MINIDIFF-01",
@@ -1090,6 +1184,11 @@ def build_trident_questions() -> list[TestQuestion]:
             criteria=(
                 ("mini_diff", "[gcode_macro Level_Bed]"),
                 ("contains", "ADAPTIVE=1"),
+            ),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_regex", r"printer\.cfg::ADAPTIVE=1"),
             ),
         ),
         TestQuestion(
@@ -1104,6 +1203,11 @@ def build_trident_questions() -> list[TestQuestion]:
                 ("mini_diff", "[printer]"),
                 ("contains", "12000"),
             ),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_regex", r"printer\.cfg::max_accel\s*:\s*12000"),
+            ),
         ),
         TestQuestion(
             qid="MINIDIFF-03",
@@ -1115,6 +1219,11 @@ def build_trident_questions() -> list[TestQuestion]:
             criteria=(
                 ("mini_diff", "[fan_generic Aux_Fan]"),
                 ("contains", "PB9"),
+            ),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_regex", r"aux_fan\.cfg::pin:\s*!?PB9\b"),
             ),
         ),
         TestQuestion(
@@ -1304,6 +1413,11 @@ def build_ambiguity_questions() -> list[TestQuestion]:
                 ("regex", r"(?m)^\s*#\s*file\s*:\s*(?!printer\.cfg)[^\s#]+\.cfg"),
                 ("contains", "[gcode_macro"),
             ),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_new_file", ""),
+            ),
         ),
         TestQuestion(
             qid="AMBI-03",
@@ -1316,6 +1430,11 @@ def build_ambiguity_questions() -> list[TestQuestion]:
                 ("regex", r"adaptive_margin\s*:\s*5\b"),
                 # It must target printer.cfg even though the user never named it.
                 ("regex", r"#\s*file\s*:\s*printer\.cfg"),
+            ),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_section_regex", r"printer\.cfg::bed_mesh::adaptive_margin\s*:\s*5\b"),
             ),
         ),
         TestQuestion(
@@ -1343,6 +1462,11 @@ def build_ambiguity_questions() -> list[TestQuestion]:
             criteria=(
                 ("contains", "pressure_advance"),
                 ("regex", r"\b0\.\d{2,3}\b"),
+            ),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_count", "0"),
             ),
         ),
         TestQuestion(
@@ -1830,6 +1954,19 @@ def extract_printer_memory(content: str) -> tuple[str, dict | None]:
     return block, data
 
 
+def _staged_section_body(text: str, section: str) -> str | None:
+    """Body of [section] in full-file text, up to the next [header] or EOF.
+    Section name matched case-insensitively; brackets optional in `section`."""
+    name = section.strip().strip("[]")
+    m = re.search(r"^\[\s*" + re.escape(name) + r"\s*\][^\n]*\n",
+                  text, re.IGNORECASE | re.MULTILINE)
+    if not m:
+        return None
+    rest = text[m.end():]
+    nxt = re.search(r"^\[", rest, re.MULTILINE)
+    return rest[:nxt.start()] if nxt else rest
+
+
 # ── Evaluation ─────────────────────────────────────────────────────────
 def criterion_ok(kind: str, value: str, content: str,
                  memory: tuple[str, dict | None] | None = None,
@@ -1843,6 +1980,50 @@ def criterion_ok(kind: str, value: str, content: str,
         for edit in pending_edits or []:
             if edit.get("file") == filename and needle in (edit.get("newText") or ""):
                 return True
+        return False
+    if kind == "staged_file":
+        return any(e.get("file") == value for e in pending_edits or [])
+    if kind == "staged_new_file":
+        return any(e.get("op") == "new_file" for e in pending_edits or [])
+    if kind == "staged_any_param":
+        return any(value in (e.get("newText") or "") for e in pending_edits or [])
+    if kind == "staged_regex":
+        filename, _, pattern = value.partition("::")
+        filename = filename.replace("\\.", ".")  # data-escaped dots
+        for e in pending_edits or []:
+            if e.get("file") == filename and re.search(pattern, e.get("newText") or "",
+                                                        re.IGNORECASE | re.DOTALL):
+                return True
+        return False
+    if kind == "staged_not_regex":
+        filename, _, pattern = value.partition("::")
+        filename = filename.replace("\\.", ".")  # data-escaped dots
+        for e in pending_edits or []:
+            if e.get("file") == filename:
+                return not re.search(pattern, e.get("newText") or "",
+                                     re.IGNORECASE | re.DOTALL)
+        return False
+    if kind == "staged_section_regex":
+        # "<file>::<section>::<regex>" — regex searched WITHIN the named
+        # section body of the staged newText (section-aware so a stray
+        # mention elsewhere in the file cannot satisfy it).
+        parts = value.split("::")
+        if len(parts) != 3:
+            return False
+        filename, section, pattern = parts
+        filename = filename.replace("\\.", ".")  # data-escaped dots
+        for e in pending_edits or []:
+            if e.get("file") != filename:
+                continue
+            body = _staged_section_body(e.get("newText") or "", section)
+            if body is not None and re.search(pattern, body, re.IGNORECASE | re.DOTALL):
+                return True
+        return False
+    if kind == "staged_section_absent":
+        filename, _, section = value.partition("::")
+        for e in pending_edits or []:
+            if e.get("file") == filename:
+                return _staged_section_body(e.get("newText") or "", section) is None
         return False
     if kind == "staged_count":
         return len(pending_edits or []) == int(value)
@@ -2199,7 +2380,14 @@ def run_one_question(
 
             # Answer check (memory criteria get the parsed printer-memory block)
             memory = extract_printer_memory(result.response)
-            for kind, value in q.criteria:
+            # Edit-tools-ON arm: artifact criteria replace prose criteria
+            # when declared (the staged pendingEdits ARE the deliverable).
+            eff_edit = (q.edit_tools if q.edit_tools is not None
+                        else settings.get("edit_tools"))
+            active_criteria = (q.edit_criteria
+                               if (eff_edit and q.edit_criteria)
+                               else q.criteria)
+            for kind, value in active_criteria:
                 ok = criterion_ok(kind, value, result.response, memory=memory,
                                   tool_calls=result.tool_calls,
                                   server_repair=result.server_repair,
