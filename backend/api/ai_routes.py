@@ -3557,6 +3557,35 @@ async def chat_proxy(req: ChatRequest):
                 except Exception:
                     logger.exception("Server draft validation failed | replying unchanged")
 
+            # ── Confabulated-completion guard (TRIDENT-15) ──
+            # The write path was ATTEMPTED (>=1 config_edit/config_write
+            # call) and the request ENDED with NOTHING staged: every op
+            # was a correctable kickback, a user decline, or a 90s
+            # approval timeout. Replies in this state habitually claim
+            # the change "has been staged/applied" (r2: "the tool call
+            # has already been executed and the changes are staged").
+            # We do NOT parse the prose to judge the claim (intent law):
+            # the trace is ground truth, so a note stating it is appended
+            # whenever trace and expectation disagree. Fail-safe — a
+            # wrong note is a useless observation; silence is the status
+            # quo. Never fires when anything IS staged (coarse on
+            # partial success, which the cards show honestly).
+            if (edit_session is not None
+                    and edit_session.edit_attempts
+                    and not edit_session.pending_edits):
+                logger.warning(
+                    "Confab guard | write attempts=%d outcome=%s staged=0"
+                    " | appending trace-truth note",
+                    edit_session.edit_attempts,
+                    edit_session.last_write_outcome,
+                )
+                final_content = (
+                    final_content.rstrip()
+                    + "\n\n---\n*Note: no changes from this reply are"
+                    " staged for saving — every edit attempt failed"
+                    " validation, was declined, or timed out.*"
+                )
+
             logger.info(
                 "Returning response | final_chars=%d tool_turns=%d tools=%s empty=%s",
                 len(final_content), tool_turns,

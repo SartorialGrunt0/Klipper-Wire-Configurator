@@ -677,3 +677,58 @@ def test_multi_refusal_shield_persists_after_boundary_refusal(monkeypatch):
     body = response.json()
     assert not body.get('pendingEdits'), f"shield broken: {body}"
     assert len(calls) == 3, f"expected no nudge round-trips, got {len(calls)} calls"
+
+
+# ── Confabulated-completion guard (TRIDENT-15) ──────────────────────
+
+def test_confab_note_appended_when_writes_all_failed(monkeypatch):
+    # Every config_edit got a correctable kickback (unknown section) and
+    # the model still claimed the change was staged. The trace is ground
+    # truth: the reply must carry the trace-truth note, and pendingEdits
+    # stays null.
+    monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
+    scripted = _install(monkeypatch, [
+        _text_tool_call('config_edit', {'file': 'printer.cfg', 'op': 'set_param',
+                                        'section': 'ghost_section', 'key': 'k',
+                                        'value': '1'}),
+        _final_reply('The change has been staged and is ready for review.'),
+        _final_reply('The change has been staged and is ready for review.'),
+        _final_reply('The change has been staged and is ready for review.'),
+        _final_reply('The change has been staged and is ready for review.'),
+    ])
+    payload = _chat_payload([{'role': 'user',
+                              'content': 'set max_accel 3200 in printer.cfg'}])
+    response = client.post('/ai/chat', json=payload)
+    assert response.status_code == 200
+    body = response.json()
+    assert body['pendingEdits'] is None
+    assert body['editAttempts'] and body['editAttempts'] >= 1
+    assert 'no changes from this reply are staged' in body['content']
+
+
+def test_confab_note_absent_when_edit_staged(monkeypatch):
+    # A staged edit means the cards show the truth — no note.
+    monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
+    _install(monkeypatch, [
+        _text_tool_call('config_edit', {'file': 'printer.cfg', 'op': 'set_param',
+                                        'section': 'printer', 'key': 'max_accel',
+                                        'value': '3200'}),
+        _final_reply('max_accel staged at 3200.'),
+    ])
+    payload = _chat_payload([{'role': 'user',
+                              'content': 'set max_accel 3200 in printer.cfg'}])
+    response = client.post('/ai/chat', json=payload)
+    body = response.json()
+    assert body['pendingEdits']
+    assert 'no changes from this reply are staged' not in body['content']
+
+
+def test_confab_note_absent_for_pure_qa(monkeypatch):
+    # No write attempts at all: guard must not touch Q&A replies.
+    monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
+    _install(monkeypatch, [_final_reply('max_accel is in the [printer] section.')])
+    payload = _chat_payload([{'role': 'user',
+                              'content': 'where is max_accel configured?'}])
+    response = client.post('/ai/chat', json=payload)
+    body = response.json()
+    assert body['content'] == 'max_accel is in the [printer] section.'
