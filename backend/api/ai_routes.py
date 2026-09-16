@@ -1573,10 +1573,90 @@ def _extract_tool_calls(text: str) -> list[dict]:
         arguments = _parse_kwargs(bracket_match.group(2).strip())
         calls.append({"name": name, "arguments": arguments})
 
+    calls = _unwrap_generic_tool_calls(calls)
     if calls:
         names = [c["name"] for c in calls]
         logger.debug("Extracted %d tool call(s): %s", len(calls), names)
     return calls
+
+
+# Generic wrapper names a template can emit around the REAL call:
+#   call:tool{name: "search_klipper_docs", arguments: {...}}
+# No real KWC/MCP tool uses any of these names, so seeing one with a
+# `name` argument that resolves to a known tool is a literal-shape
+# unwrap, not intent inference.
+GENERIC_TOOL_WRAPPERS = frozenset({
+    "tool", "tool_call", "function", "functions", "call", "invoke",
+})
+
+
+def _balanced_json_object(s: str) -> str | None:
+    """Return the first balanced {...} object in s (quote-aware), else None."""
+    start = s.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(s)):
+        ch = s[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return s[start:i + 1]
+    return None
+
+
+def _unwrap_generic_tool_calls(calls: list[dict]) -> list[dict]:
+    """Unwrap call:tool{name: X, arguments: {...}} to name=X.
+
+    Observed live 2026-09-15 (TRIDENT-16, gemma-4-12b via llama.cpp): the
+    served template rendered `call:tool{name: "search_klipper_docs",
+    arguments: {...}}`; the line-bounded extractor took `tool` as the
+    function name and stringified the inner arguments, so the hallucination
+    guard skipped a LEGITIMATE call and the answer degraded to ungrounded
+    prose. Only unwraps when the wrapper name is generic AND the inner
+    name is a known tool (literal-shape inspection only).
+    """
+    known = {t["name"] for t in _mcp_server._list_tools()} | set(EDIT_TOOL_NAMES)
+    out: list[dict] = []
+    for call in calls:
+        name = call.get("name", "")
+        args = call.get("arguments")
+        inner_name = args.get("name") if isinstance(args, dict) else None
+        if (
+            name in GENERIC_TOOL_WRAPPERS
+            and isinstance(inner_name, str)
+            and inner_name.strip() in known
+        ):
+            inner = args.get("arguments", {})
+            if isinstance(inner, str):
+                obj_text = _balanced_json_object(inner)
+                parsed = None
+                if obj_text:
+                    try:
+                        parsed = json.loads(obj_text)
+                    except json.JSONDecodeError:
+                        parsed = None
+                inner = parsed if isinstance(parsed, dict) else _parse_kwargs(inner)
+            if not isinstance(inner, dict):
+                inner = {}
+            call = {"name": inner_name.strip(), "arguments": inner}
+        if call not in out:
+            out.append(call)
+    return out
 
 
 def _parse_kwargs(args_text: str) -> dict:
@@ -2791,6 +2871,61 @@ def _run_audit_on_apply(req, apply_result, merged_files, project, audit_fn) -> l
     )
 
 
+# Mirror-seed caps (Pi 3B+ memory): per-file and total content limits so a
+# misconfigured scan root can never load gigabytes into an edit session.
+_MIRROR_MAX_FILE_BYTES = 512 * 1024
+_MIRROR_MAX_TOTAL_BYTES = 4 * 1024 * 1024
+
+
+def _mirror_user_config_files() -> dict[str, dict]:
+    """Read the backend's user-config mirror as a contextFiles-shaped dict.
+
+    Same source and precedence as the read_user_config/list_user_configs
+    MCP tools (system config path first, then the imported local dir;
+    first occurrence of a relative path wins; SAVE_CONFIG backups
+    skipped). Used to ARM the edit session when a client requests
+    editTools but sends no contextFiles (TRIDENT-16: an un-armed session
+    has no write tools, so the model correctly falls back to prose and
+    the whole tool path silently disappears). The mirror is the disk
+    truth; approval still re-validates against the client's latest
+    contextFiles, so a stale mirror can never clobber unsaved edits.
+    """
+    from mcp_server import LOCAL_CONFIGS_DIR, _system_config_path
+    from services.native_services import is_backup_config_file
+
+    files: dict[str, str] = {}
+    total = 0
+    scan_paths: list[Path] = []
+    system_path = _system_config_path()
+    if system_path.is_dir():
+        scan_paths.append(system_path)
+    if LOCAL_CONFIGS_DIR.is_dir():
+        scan_paths.append(LOCAL_CONFIGS_DIR)
+    for scan_dir in scan_paths:
+        try:
+            for cfg_file in sorted(scan_dir.rglob("*.cfg")):
+                if is_backup_config_file(cfg_file.name):
+                    continue
+                try:
+                    rel = cfg_file.relative_to(scan_dir).as_posix()
+                except ValueError:
+                    continue
+                if rel in files:
+                    continue
+                try:
+                    size = cfg_file.stat().st_size
+                    if size > _MIRROR_MAX_FILE_BYTES or total + size > _MIRROR_MAX_TOTAL_BYTES:
+                        continue
+                    content = cfg_file.read_bytes().decode("utf-8", errors="replace")
+                except OSError:
+                    continue
+                files[rel] = {"content": content}
+                total += size
+        except OSError:
+            continue
+    return files
+
+
 @router.post("/ai/chat")
 async def chat_proxy(req: ChatRequest):
     """Proxy chat messages to the user's configured API provider."""
@@ -2809,6 +2944,30 @@ async def chat_proxy(req: ChatRequest):
         except Exception:
             logger.exception("Edit session seed failed | edit tools disabled for request")
             edit_session = None
+    if edit_enabled and edit_session is None:
+        # TRIDENT-16: editTools requested without contextFiles (harness,
+        # API clients, degraded UI state) used to leave the session
+        # un-armed — no write tools advertised, so prose fallback was the
+        # model's only option and every edit silently went inert. Seed
+        # from the backend's user-config mirror instead.
+        try:
+            mirror = _mirror_user_config_files()
+        except Exception:
+            logger.exception("Mirror seed failed | edit tools disabled for request")
+            mirror = {}
+        if mirror:
+            try:
+                edit_session = EditSession(mirror)
+                if not edit_session.has_files():
+                    edit_session = None
+                else:
+                    logger.info(
+                        "Edit session seeded from user-config mirror | files=%d",
+                        len(mirror),
+                    )
+            except Exception:
+                logger.exception("Mirror edit session failed | edit tools disabled")
+                edit_session = None
     edit_capable = edit_session is not None
 
     messages = _prepare_messages(req.messages, full_rewrite_guard=req.fullRewriteGuard,

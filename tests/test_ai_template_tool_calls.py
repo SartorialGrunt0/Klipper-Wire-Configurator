@@ -132,3 +132,44 @@ def test_nonsentinel_template_head_still_extracts_and_strips():
     assert calls == [{"name": "get_config_reference_section",
                       "arguments": {"section_name": "bed_mesh"}}]
     assert ai_routes._strip_template_pythonic_calls(text).strip() == ""
+
+
+def test_extract_unwraps_generic_call_tool_wrapper():
+    # Live TRIDENT-16 2026-09-15: gemma-4-12b via llama.cpp rendered
+    #   <|tool_call>call:tool{name: "search_klipper_docs", arguments: {...}}
+    # The line-bounded path took `tool` as the function name and stringified
+    # the inner args -> hallucination guard skipped a LEGITIMATE call and the
+    # answer degraded to ungrounded prose. Literal-shape unwrap.
+    text = (
+        '<|tool_call>call:tool{name: "search_klipper_docs",'
+        ' arguments: {"query": "neopixel command", "limit": 3}}<tool_call|>'
+    )
+    calls = ai_routes._extract_tool_calls(text)
+    assert calls == [{
+        "name": "search_klipper_docs",
+        "arguments": {"query": "neopixel command", "limit": 3},
+    }]
+
+
+def test_extract_wrapper_with_unknown_inner_name_stays_wrapped():
+    # Unwrap requires the INNER name to be a known tool; an unknown inner
+    # name must keep failing closed to the hallucination guard.
+    text = '<|tool_call>call:tool{name: "not_a_tool", arguments: {}}<tool_call|>'
+    calls = ai_routes._extract_tool_calls(text)
+    assert all(c["name"] != "not_a_tool" for c in calls)
+
+
+def test_extract_wrapper_edit_tool_inner_name():
+    # The wrapper also guards the WRITE tools: an edit wrapped in call:tool{}
+    # must reach the edit session, not the prose fallback.
+    text = (
+        '<tool_call>call:tool{name: "config_edit",'
+        ' arguments: {"file": "printer.cfg", "op": "set_param",'
+        ' "section": "printer", "key": "max_accel", "value": "3200"}}'
+    )
+    calls = ai_routes._extract_tool_calls(text)
+    assert calls == [{
+        "name": "config_edit",
+        "arguments": {"file": "printer.cfg", "op": "set_param",
+                      "section": "printer", "key": "max_accel", "value": "3200"},
+    }]

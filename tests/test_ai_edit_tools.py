@@ -331,8 +331,11 @@ def test_flag_on_kickback_loop_converges_in_two(edit_flag, monkeypatch):
     assert kickbacks and 'hologate' in str(kickbacks[0]['content'])
 
 
-def test_flag_on_without_context_files_no_session(monkeypatch):
+def test_flag_on_without_context_files_and_empty_mirror_no_session(monkeypatch):
+    # No contextFiles AND no mirror content (nothing on disk to seed
+    # from): session stays unarmed, edit tools stay unadvertised.
     monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
+    monkeypatch.setattr(ai_routes, '_mirror_user_config_files', lambda: {})
     scripted = _install(monkeypatch, [
         _final_reply('no files loaded'),
     ])
@@ -343,6 +346,49 @@ def test_flag_on_without_context_files_no_session(monkeypatch):
     body = response.json()
     assert body['pendingEdits'] is None and body['editAttempts'] is None
     # Edit tools were NOT advertised on the native surface (chatgpt = native).
+    assert 'config_edit' not in json.dumps(scripted.payloads[0])
+
+
+def test_flag_on_without_context_files_seeds_from_mirror(monkeypatch):
+    # TRIDENT-16: editTools requested with no contextFiles must still arm
+    # the session from the backend user-config mirror — an un-armed
+    # request silently loses the whole write path (model correctly falls
+    # back to prose when it has no tools).
+    monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
+    mirror = {'printer.cfg': {'content': '[printer]\nmax_accel: 3000\n'}}
+    monkeypatch.setattr(ai_routes, '_mirror_user_config_files', lambda: mirror)
+    scripted = _install(monkeypatch, [
+        _text_tool_call('config_edit', {'file': 'printer.cfg', 'op': 'set_param',
+                                        'section': 'printer', 'key': 'max_accel',
+                                        'value': '3200'}),
+        _final_reply('max_accel staged at 3200.'),
+    ])
+    payload = _chat_payload([{'role': 'user', 'content': 'set max_accel 3200'}])
+    payload['contextFiles'] = {}
+    response = client.post('/ai/chat', json=payload)
+    assert response.status_code == 200
+    body = response.json()
+    # Write tools armed from the mirror: the edit stages normally.
+    assert body['pendingEdits'] and body['pendingEdits'][0]['summary'].startswith(
+        'set [printer] max_accel')
+    assert 'config_edit' in json.dumps(scripted.payloads[0])
+
+
+def test_flag_on_mirror_failure_disables_edit_tools(monkeypatch):
+    # A raising mirror must not 500 the chat: edit tools disable for the
+    # request and the plain chat path answers.
+    monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
+
+    def boom():
+        raise RuntimeError('disk on fire')
+
+    monkeypatch.setattr(ai_routes, '_mirror_user_config_files', boom)
+    scripted = _install(monkeypatch, [_final_reply('ok plain answer')])
+    payload = _chat_payload([{'role': 'user', 'content': 'hi'}])
+    payload['contextFiles'] = {}
+    response = client.post('/ai/chat', json=payload)
+    assert response.status_code == 200
+    assert response.json()['content'] == 'ok plain answer'
     assert 'config_edit' not in json.dumps(scripted.payloads[0])
 
 
