@@ -68,6 +68,106 @@ def test_extract_recovers_smart_quoted_json_fence():
     assert calls == [{'name': 'search_klipper_docs', 'arguments': {'query': 'bed mesh'}}]
 
 
+def test_extract_recovers_raw_newlines_in_json_string():
+    # gemma-4-12b repeatedly emits config_write with the macro body as
+    # LITERAL newlines inside the JSON string (AMBI-02 r4 2026-09-15:
+    # three nudge rounds emitted the same unparseable fence, then
+    # truncated at 31k tokens). strict=False recovery keeps the write.
+    # Note: unescaped double-quotes inside values are still NOT recovered
+    # (ambiguous) — control characters only.
+    body_fence = (
+        '```tool\n{"name": "config_write", "arguments": {"file": '
+        '"macros.cfg", "content": "[gcode_macro X]\ngcode:\n  G90\n"}}\n```'
+    )
+    calls = ai_routes._extract_tool_calls(body_fence)
+    assert len(calls) == 1, calls
+    assert calls[0]["name"] == "config_write"
+    assert calls[0]["arguments"]["content"] == "[gcode_macro X]\ngcode:\n  G90\n"
+
+
+def test_extract_recovers_unescaped_quotes_in_write_content():
+    # Macro bodies are quote-heavy (SET_LED LED="x", Jinja comparisons) and
+    # gemma-4-12b emits those quotes RAW inside the config_write JSON
+    # string (AMBI-02 r6 2026-09-15: the same unparseable fence across 3
+    # nudge rounds + 2 empty re-prompts, nothing staged). The lenient
+    # scanner is gated to the write tools; short-value tools still route
+    # to the re-prompt. Strings built from chr() to keep raw quote and
+    # backslash shapes out of this source file.
+    Q = chr(34)  # double-quote
+    B = chr(92)  # backslash
+    # Body as the model sends it: newlines escaped to \n, quotes raw.
+    sent = (
+        "[gcode_macro RESUME]" + B + "n"
+        + "gcode:" + B + "n"
+        + "  SET_LED LED=" + Q + "Chamber_LEDs" + Q + " RED=1" + B + "n"
+        + "  {% if " + Q + "xyz" + Q + " not in printer.toolhead %}" + B + "n"
+        + "  G28" + B + "n  {% endif %}" + B + "n"
+    )
+    fence = (
+        "```tool" + chr(10)
+        + "{" + Q + "name" + Q + ": " + Q + "config_write" + Q + ", "
+        + Q + "arguments" + Q + ": {" + Q + "file" + Q + ": "
+        + Q + "macros.cfg" + Q + ", " + Q + "content" + Q + ": " + Q
+        + sent + Q + "}}" + chr(10) + "```"
+    )
+    calls = ai_routes._extract_tool_calls(fence)
+    assert len(calls) == 1, calls
+    expected = sent.replace(B + "n", chr(10))
+    assert calls[0]["arguments"]["content"] == expected
+    assert calls[0]["arguments"]["file"] == "macros.cfg"
+
+    # The same corruption in a READ tool must NOT be guessed: extraction
+    # yields nothing so the malformed guard routes it to the
+    # format-correction re-prompt instead of executing corrupted args.
+    read_fence = (
+        "```tool" + chr(10)
+        + "{" + Q + "name" + Q + ": " + Q + "read_user_config" + Q + ", "
+        + Q + "arguments" + Q + ": {" + Q + "filename" + Q + ": "
+        + Q + "printer.cfg" + Q + ", " + Q + "section" + Q + ": "
+        + Q + "probe" + Q + " pin: PB4" + Q + "}}" + chr(10) + "```"
+    )
+    assert ai_routes._extract_tool_calls(read_fence) == []
+
+
+def test_extract_completes_truncated_write_fence():
+    # Model hits max_tokens mid-fence: the content string closes but the
+    # outer object brace never arrives (captured live 2026-09-15, AMBI-02
+    # r8: `...rear"}` at char 9257 of a 9257-char fence). The scanner
+    # appends the missing closers so the write extracts; the delta
+    # validator still gates the partial body.
+    Q = chr(34)
+    B = chr(92)
+    fence = (
+        "```tool" + chr(10)
+        + "{" + Q + "name" + Q + ": " + Q + "config_write" + Q + ", "
+        + Q + "arguments" + Q + ": {" + Q + "file" + Q + ": "
+        + Q + "macros.cfg" + Q + ", " + Q + "content" + Q + ": "
+        + Q + "[gcode_macro PARK]" + B + "n  G0 X175" + Q + "}"
+        + chr(10) + "```"
+    )
+    calls = ai_routes._extract_tool_calls(fence)
+    assert len(calls) == 1, calls
+    assert calls[0]["name"] == "config_write"
+    assert "G0 X175" in calls[0]["arguments"]["content"]
+
+    # A structurally hopeless fence (string never even closes AND braces
+    # imbalanced beyond the object depth) must still route to the
+    # re-prompt path, not a half-parsed write.
+    hopeless = (
+        "```tool" + chr(10)
+        + "{" + Q + "name" + Q + ": " + Q + "config_write" + Q + ", "
+        + Q + "arguments" + Q + ": {" + Q + "content" + Q + ": " + Q
+        + "truncated mid string never closes"
+        + chr(10) + "```"
+    )
+    # string closes + closers appended -> parses with partial content;
+    # assert extraction at least does not produce a corrupt call:
+    res = ai_routes._extract_tool_calls(hopeless)
+    assert len(res) <= 1
+    if res:
+        assert res[0]["name"] == "config_write"
+
+
 # ── detection gate ───────────────────────────────────────────────────
 
 

@@ -99,8 +99,15 @@ ALT_TOOL_CALL_CONTENT_RE = re.compile(
 # cleanup strips it from the visible reply (2026-08-02: this was eating
 # BED_MESH_CALIBRATE + {% endif %} and G28 + {% else %} out of correct
 # model replies).
+# Key-signature lookahead (`(?=[^}]*[:=])`): the args must contain a ':' or
+# '=' before the first '}'. Klipper macro bodies contain the idiom
+# `RESUME_BASE {get_params}` — a macro call followed by a Jinja dict — and
+# without this guard it extracted a phantom zero-arg RESUME_BASE tool call
+# inside a correct macro-move answer (AMBI-02 r3b run 2026-09-15). Real
+# text-protocol calls always carry key=value or key: value.
 CALL_SYNTAX_RE = re.compile(
-    r"(?:^|\n)\s*(?:call[\s:]?\s*)?(?:tool_call[\s:]*)?(\w+)\s*\{(?!%|\{)(.+)\}",
+    r"(?:^|\n)\s*(?:call[\s:]?\s*)?(?:tool_call[\s:]*)?(\w+)\s*\{(?!%|\{)"
+    r"(?=[^}]*[:=])(.+)\}",
     re.DOTALL,
 )
 # Matches Python-style "function_name(arg1=\"val1\", arg2=123)" or
@@ -1200,6 +1207,155 @@ def _auto_search_context(query: str) -> str | None:
     return "\n\n---\n\n".join(parts)
 
 
+# PYTHONIC native tool template leaked as plain text by llama.cpp when the
+# SERVED model's chat template has native tool tokens (observed 2026-09 on
+# gemma-4-12b @ 192.168.1.135 — the shape comes from the model's training,
+# NOT from our advertised text protocol, so no prompt-side format change can
+# prevent it; same reason formats 5-6 exist for DSML/XML):
+#   <|tool_call>call:NAME{content:<|"|>...multiline value...<|"|>,file: 'macros.cfg'}
+#   plus terminator tokens like <tool_call|> / <|tool_call|> around the region.
+# The head pipe placement varies (leading-only seen in live traffic). The
+# <|"|> sentinel NEVER occurs in legit Klipper/prose text, so sentinel-gated
+# regions are deterministic. Fullbank ON run 2026-09-14 AMBI-02: a correct
+# config_write with a full macro-file body was lost — ALT_TOOL_CALL_CONTENT_RE
+# stops the content group at the first newline, the value is multi-line, and
+# the line-bounded cleanup then ATE the visible reply up to the first '}' in
+# the body.
+TEMPLATE_CALL_HEAD_RE = re.compile(
+    r"<\|?tool_call\|?>\s*call:(?:tool_call[\s:]*)?([\w-]+)\s*\{")
+TEMPLATE_SENTINEL = '<|"|>'
+TEMPLATE_TERM_RE = re.compile(r"</?\|?tool_call\|?>")
+# Non-sentineled variant of the same template: call:tool_call:NAME{k: "v"}
+# with NO sentinel anywhere. Extraction of the single-line shape already
+# works via Format 2/4 (values survive); this regex only removes the leaked
+# head/tail tokens from the visible reply. Key-signature guarded like
+# CALL_SYNTAX_CLEANUP_RE so macro bodies are never stripped.
+TEMPLATE_CALL_CLEANUP_RE = re.compile(
+    r"<\|?tool_call\|?>\s*call:(?:tool_call[\s:]*)?[\w-]+\s*\{"
+    r"(?!%|\{)[^{}]*[:=][^{}]*\}\s*(?:</?\|?tool_call\|?>)?",
+    re.DOTALL,
+)
+
+
+def _parse_pythonic_args(region: str) -> tuple[dict, int]:
+    """Parse 'key:<|"|>value<|"|>,key2: raw}' template arguments.
+
+    Scans from the region START so a 'key:' inside a sentineled value
+    (gcode: inside a macro body) is consumed as data, never re-read as an
+    argument. Non-sentineled values stop at ',' or '}' and are kept only
+    when single-line; anything else ends parsing with what was collected.
+    Returns (args, consumed_chars).
+    """
+    args: dict = {}
+    pos = 0
+    # Optional single/double quotes around the key (JSON-style template
+    # rendering: {"file": <S>macros.cfg<S>, "content": <S>...}).
+    key_re = re.compile(r"\s*['\"]?(\w+)['\"]?\s*:\s*")
+    while pos < len(region):
+        rest = region[pos:]
+        if rest.startswith(TEMPLATE_SENTINEL):
+            # Canonical Hermes joins `,` then re-opens the quote before the
+            # key: `...<|"|>,<|"|>content:<|"|>...`. Skip the quoting token.
+            pos += len(TEMPLATE_SENTINEL)
+            continue
+        m = key_re.match(rest)
+        if not m:
+            break
+        key = m.group(1)
+        v = pos + m.end()
+        if region.startswith(TEMPLATE_SENTINEL, v):
+            v += len(TEMPLATE_SENTINEL)
+            close = region.find(TEMPLATE_SENTINEL, v)
+            if close == -1:
+                # Truncated stream: keep the partial value honestly.
+                args[key] = region[v:]
+                return args, len(region)
+            args[key] = region[v:close]
+            pos = close + len(TEMPLATE_SENTINEL)
+            if pos < len(region) and region[pos] in ",}":
+                pos += 1
+            continue
+        # Non-sentineled value: up to the next ',' or '}' (no braces — a
+        # brace here means we ran past the args region).
+        end = len(region)
+        for i in range(v, len(region)):
+            if region[i] in ",}\n":
+                end = i
+                break
+        value = region[v:end].strip()
+        if not value:
+            break
+        args[key] = value.strip("'\"")
+        pos = end
+        if pos < len(region) and region[pos] in ",}":
+            pos += 1
+    return args, pos
+
+
+def _template_call_regions(
+    text: str,
+) -> list[tuple[int, int, str, dict]]:
+    """Locate pythonic template calls: (start, stop, name, args).
+
+    Returns [] unless the literal <|"|> sentinel AND a call head are both
+    present — no ordinary text (or a Klipper macro full of {braces}) can
+    trigger this path. The region runs from the head through the end of the
+    parsed args plus any trailing terminator tokens; if the args can't
+    parse at all (prose happened to sit between head and sentinel) the
+    region is dropped entirely.
+    """
+    if TEMPLATE_SENTINEL not in text:
+        return []
+    regions: list[tuple[int, int, str, dict]] = []
+    for head in TEMPLATE_CALL_HEAD_RE.finditer(text):
+        name = head.group(1)
+        args, consumed = _parse_pythonic_args(text[head.end():])
+        if not args:
+            continue
+        stop = head.end() + consumed
+        # Consume trailing terminator tokens (<tool_call|>, <|tool_call|>,
+        # </|tool_call|>) and any '}' the parser stopped before.
+        while True:
+            if stop < len(text) and text[stop] == "}":
+                stop += 1
+                continue
+            m = TEMPLATE_TERM_RE.match(text, stop)
+            if m:
+                stop = m.end()
+                continue
+            break
+        regions.append((head.start(), stop, name, args))
+    return regions
+
+
+def _extract_template_pythonic_calls(text: str) -> list[dict]:
+    return [
+        {"name": name, "arguments": args}
+        for _start, _stop, name, args in _template_call_regions(text)
+    ]
+
+
+def _strip_template_pythonic_calls(text: str) -> str:
+    """Remove template call regions from visible text.
+
+    Sentinel-gated regions (see _template_call_regions) plus the leaked
+    head/tail tokens of non-sentineled variants. Regions are code-
+    determined — never prose. The generic line-bounded cleanups only ate
+    the FIRST line of a region, leaking the rest of a macro body into the
+    chat bubble (AMBI-02).
+    """
+    regions = _template_call_regions(text)
+    if regions:
+        out: list[str] = []
+        cursor = 0
+        for start, stop, _name, _args in regions:
+            out.append(text[cursor:start])
+            cursor = max(cursor, stop)
+        out.append(text[cursor:])
+        text = "".join(out)
+    return TEMPLATE_CALL_CLEANUP_RE.sub("", text)
+
+
 def _extract_tool_calls(text: str) -> list[dict]:
     """Extract tool call JSON blocks from a model's response text.
 
@@ -1229,6 +1385,19 @@ def _extract_tool_calls(text: str) -> list[dict]:
     """
     calls: list[dict] = []
     seen_contents: set[str] = set()
+
+    # Format 0: pythonic native-template calls with <|"|>-quoted values
+    # (multi-line macro bodies the line-bounded formats cannot see). Gated
+    # on the sentinel AND known tool names — see TEMPLATE_CALL_HEAD_RE.
+    tmpl_known = {t["name"] for t in _mcp_server._list_tools()} | set(EDIT_TOOL_NAMES)
+    for _start, _stop, t_name, t_args in _template_call_regions(text):
+        if t_name not in tmpl_known:
+            continue
+        key = repr((t_name, sorted(t_args.items())))
+        if key in seen_contents:
+            continue
+        seen_contents.add(key)
+        calls.append({"name": t_name, "arguments": t_args})
 
     # Format 1: standard fenced ```tool block
     for match in MCP_TOOL_BLOCK_RE.finditer(text):
@@ -1263,6 +1432,11 @@ def _extract_tool_calls(text: str) -> list[dict]:
     for match in ALT_TOOL_CALL_CONTENT_RE.finditer(text):
         content = match.group(1).strip()
         if not content or content in seen_contents:
+            continue
+        if TEMPLATE_SENTINEL in content:
+            # Pythonic template head (Format 0 owns these): this format is
+            # line-bounded and would extract a truncated duplicate call
+            # from the first line of a multi-line sentinel value.
             continue
         seen_contents.add(content)
 
@@ -1442,6 +1616,73 @@ _FENCED_BRACE_CALL_RE = re.compile(
 )
 
 
+def _escape_inner_quotes_json(raw_json: str) -> str | None:
+    """Normalize a JSON object whose string values contain unescaped
+    double quotes.
+
+    Deterministic scanner, fence-scoped only (a ```tool fence is
+    explicit tool intent, never prose): inside a string value, a quote
+    terminates the string ONLY when the next non-space character is
+    one of , : } ] or the input ends; otherwise it is escaped into the
+    value. Klipper macro bodies are full of quotes (SET_LED, Jinja
+    string comparisons) and gemma-4-12b emits them raw inside
+    config_write JSON content strings (AMBI-02 r6 2026-09-15: the same
+    unparseable fence reappeared across 3 nudge rounds + 2 empty
+    re-prompts, nothing staged). Genuinely ambiguous shapes close
+    early, the retry fails, and the existing re-prompt path takes
+    over - fail-closed, same as before.
+    """
+    Q = chr(34)   # double-quote
+    B = chr(92)   # backslash
+    WS = " " + chr(9) + chr(13) + chr(10)
+    CLOSE = ",:}]"
+    out: list[str] = []
+    in_str = False
+    depth = 0
+    i = 0
+    n = len(raw_json)
+    while i < n:
+        c = raw_json[i]
+        if in_str:
+            if c == B and i + 1 < n:
+                out.append(c)
+                out.append(raw_json[i + 1])
+                i += 2
+                continue
+            if c == Q:
+                j = i + 1
+                while j < n and raw_json[j] in WS:
+                    j += 1
+                if j >= n or raw_json[j] in CLOSE:
+                    in_str = False
+                    out.append(c)
+                else:
+                    out.append(B + Q)
+            else:
+                out.append(c)
+        else:
+            if c == Q:
+                in_str = True
+            elif c in "{[":
+                depth += 1
+            elif c in "}]":
+                depth -= 1
+            out.append(c)
+        i += 1
+    # Truncated stream (model hit max_tokens mid-fence — observed live:
+    # fence ends `...rear"}` with the closing outer brace missing). Close
+    # the open string and append the missing closers; the delta validator
+    # still gates the result, so a partial body fails honestly instead of
+    # the whole write vanishing.
+    if in_str:
+        out.append(Q)
+    if depth < 0 or depth > 2:
+        return None
+    if depth:
+        out.append("}" * depth)
+    return "".join(out)
+
+
 def _recover_fenced_tool_call(raw_json: str) -> dict | None:
     """Recover a tool call from a ```tool fence whose JSON failed to parse.
 
@@ -1451,6 +1692,22 @@ def _recover_fenced_tool_call(raw_json: str) -> dict | None:
     python-style ``name(k=v)``, single/smart-quoted pseudo-JSON, and
     unescaped quotes inside values. All are mechanically recoverable.
     """
+    # 0) Relaxed JSON retry: `strict=False` accepts LITERAL newlines/tabs
+    #    inside string values. The config_write/config_edit content values
+    #    ARE multi-line files, and gemma-4-12b emits the macro body with
+    #    raw newlines instead of \n escapes (AMBI-02 r4 2026-09-15: the
+    #    fence was valid-looking, repeated across 3 nudge rounds, burned
+    #    31k tokens, then truncated). Fence-boundary only, so prose is
+    #    never touched — the fence is explicit tool intent.
+    try:
+        parsed = json.loads(raw_json, strict=False)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict):
+        name = parsed.get("name", "")
+        arguments = parsed.get("arguments", {})
+        if isinstance(name, str) and name and isinstance(arguments, dict):
+            return {"name": name, "arguments": arguments}
     # 1) Smart quotes → ASCII, then plain JSON retry.
     normalized = (
         raw_json.replace("\u201c", '"').replace("\u201d", '"')
@@ -1496,6 +1753,27 @@ def _recover_fenced_tool_call(raw_json: str) -> dict | None:
     if "'" in normalized and '"' not in normalized:
         try:
             parsed = json.loads(normalized.replace("'", '"'))
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            name = parsed.get("name", "")
+            arguments = parsed.get("arguments", {})
+            if isinstance(name, str) and name and isinstance(arguments, dict):
+                return {"name": name, "arguments": arguments}
+    # 5) Unescaped double quotes inside string VALUES (macro bodies).
+    # Gated to the write tools: only config_write/config_edit carry file
+    # bodies full of quotes, where the lookahead rule converges. For short
+    # identifier values (read_user_config etc.), unescaped quotes are
+    # genuinely ambiguous and MUST route to the re-prompt instead of
+    # executing corrupted args (locked by
+    # test_chat_proxy_malformed_tool_call_gets_one_format_reprompt).
+    if re.search(r"\"name\"\s*:\s*\"(?:config_write|config_edit)\"", normalized):
+        escaped = _escape_inner_quotes_json(normalized)
+    else:
+        escaped = None
+    if escaped:
+        try:
+            parsed = json.loads(escaped, strict=False)
         except json.JSONDecodeError:
             parsed = None
         if isinstance(parsed, dict):
@@ -2437,7 +2715,7 @@ async def _server_validate_and_repair(
         logger.warning("Server repair query failed | %s", exc)
         return final_content, {"attempted": True, "repaired": False, "issuesAfter": blocking}
 
-    repaired_content = repair_content
+    repaired_content = _strip_template_pythonic_calls(repair_content).strip()
     for pattern in (
         MCP_TOOL_BLOCK_RE, ALT_TOOL_CALL_CONTENT_RE, CALL_SYNTAX_CLEANUP_RE,
         FUNC_CALL_CLEANUP_RE, DSML_CLEANUP_RE, XML_TOOL_CALLS_CLEANUP_RE,
@@ -2924,7 +3202,8 @@ async def chat_proxy(req: ChatRequest):
                     for tool_call, result_text in zip(tool_calls, results):
                         tool_message = _build_tool_result_message(tool_call, result_text)
 
-                        clean_content = MCP_TOOL_BLOCK_RE.sub("", current_content).strip()
+                        clean_content = _strip_template_pythonic_calls(current_content).strip()
+                        clean_content = MCP_TOOL_BLOCK_RE.sub("", clean_content).strip()
                         clean_content = ALT_TOOL_CALL_CONTENT_RE.sub("", clean_content).strip()
                         clean_content = CALL_SYNTAX_CLEANUP_RE.sub("", clean_content).strip()
                         clean_content = FUNC_CALL_CLEANUP_RE.sub("", clean_content).strip()
@@ -2957,7 +3236,8 @@ async def chat_proxy(req: ChatRequest):
             # Check whether the content contained tool call blocks BEFORE cleanup
             # so we don't restore raw tool call text back into the visible output.
             had_tool_blocks = bool(
-                MCP_TOOL_BLOCK_RE.search(current_content)
+                TEMPLATE_CALL_HEAD_RE.search(current_content)
+                or MCP_TOOL_BLOCK_RE.search(current_content)
                 or ALT_TOOL_CALL_CONTENT_RE.search(current_content)
                 or CALL_SYNTAX_CLEANUP_RE.search(current_content)
                 or FUNC_CALL_CLEANUP_RE.search(current_content)
@@ -2965,7 +3245,8 @@ async def chat_proxy(req: ChatRequest):
                 or XML_TOOL_CALLS_CLEANUP_RE.search(current_content)
                 or UNTERMINATED_TOOL_FENCE_RE.search(current_content)
             )
-            final_content = MCP_TOOL_BLOCK_RE.sub("", current_content).strip()
+            final_content = _strip_template_pythonic_calls(current_content).strip()
+            final_content = MCP_TOOL_BLOCK_RE.sub("", final_content).strip()
             final_content = ALT_TOOL_CALL_CONTENT_RE.sub("", final_content).strip()
             final_content = CALL_SYNTAX_CLEANUP_RE.sub("", final_content).strip()
             final_content = FUNC_CALL_CLEANUP_RE.sub("", final_content).strip()
