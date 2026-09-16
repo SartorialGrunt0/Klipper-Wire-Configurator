@@ -489,6 +489,16 @@ def build_macro_questions() -> list[TestQuestion]:
                 ("contains", "BED_MESH_CALIBRATE"),
                 ("regex", r"```(?:cfg|ini|conf|klipper)"),
             ),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            # M1[49]0: M190 S60 satisfies "heat bed to 60" equally (observed
+            # live 2026-09-15 — staged edit used M190).
+            edit_criteria=(
+                ("staged_section_regex",
+                 r"printer\.cfg::gcode_macro PRINT_START::M1[49]0[^\n]*S60"),
+                ("staged_section_regex",
+                 r"printer\.cfg::gcode_macro PRINT_START::BED_MESH_CALIBRATE"),
+            ),
         ),
         TestQuestion(
             qid="MACRO-03",
@@ -1254,6 +1264,15 @@ def build_trident_questions() -> list[TestQuestion]:
                 # (showing the edited [extruder] section for context is fine).
                 ("not_contains", "[stepper_x]"),
             ),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            # The mini-diff gates (+ADD line, no whole-file dump) are prose
+            # protocol; section-scoped staged check keeps the real intent:
+            # pressure_advance WITH A VALUE inside [extruder].
+            edit_criteria=(
+                ("staged_section_regex",
+                 r"printer\.cfg::extruder::pressure_advance\s*[:=]\s*\d+(?:\.\d+)?"),
+            ),
         ),
     ]
 
@@ -1576,6 +1595,12 @@ def build_setup_questions() -> list[TestQuestion]:
                 # default_min_extra_distance etc. are NOT Klipper params).
                 ("regex", r"retract_length\s*[:=]\s*\d+(?:\.\d+)?"),
             ),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_section_regex",
+                 r"printer\.cfg::firmware_retraction::retract_length\s*[:=]\s*\d+(?:\.\d+)?"),
+            ),
         ),
         TestQuestion(
             qid="SETUP-02",
@@ -1591,6 +1616,12 @@ def build_setup_questions() -> list[TestQuestion]:
                 # claim it does not exist or ask the user for a value.
                 ("contains", "[idle_timeout]"),
                 ("regex", r"timeout\s*[:=]\s*\d+"),
+            ),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_section_regex",
+                 r"printer\.cfg::idle_timeout::timeout\s*[:=]\s*\d+"),
             ),
         ),
         TestQuestion(
@@ -1612,6 +1643,14 @@ def build_setup_questions() -> list[TestQuestion]:
                 # hallucination (wrong section for the request).
                 ("not_contains", "pressure_advance"),
             ),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            # Section valid EMPTY, so only existence is required; the
+            # not_regex mirrors the wrong-section hallucination gate.
+            edit_criteria=(
+                ("staged_section_regex", r"printer\.cfg::gcode_arcs::.*"),
+                ("staged_not_regex", r"printer\.cfg::pressure_advance"),
+            ),
         ),
         TestQuestion(
             qid="SETUP-04",
@@ -1628,6 +1667,12 @@ def build_setup_questions() -> list[TestQuestion]:
                 # the documented default is ~/variables.cfg.
                 ("regex", r"filename\s*[:=]\s*\S+"),
             ),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_section_regex",
+                 r"printer\.cfg::save_variables::filename\s*[:=]\s*\S+"),
+            ),
         ),
         TestQuestion(
             qid="SETUP-05",
@@ -1642,6 +1687,12 @@ def build_setup_questions() -> list[TestQuestion]:
                 ("contains", "[respond]"),
                 # A REAL param of [respond] (default_type or default_prefix).
                 ("regex", r"default_(?:type|prefix)\s*[:=]\s*\S+"),
+            ),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_section_regex",
+                 r"printer\.cfg::respond::default_(?:type|prefix)\s*[:=]\s*\S+"),
             ),
         ),
     ]
