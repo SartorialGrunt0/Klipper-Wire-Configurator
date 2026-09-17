@@ -694,6 +694,11 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           setApprovalReceivedAt(Date.now());
           setApprovalNow(Date.now());
           setApprovalInvalidation(null);
+          // A NEW card is a fresh decision: busy is per-card, never
+          // inherited. Without this, approving op 1 strands approvalBusy
+          // (the ok path clears the card, not the flag) and op 2's card
+          // renders with disabled buttons until timeout.
+          setApprovalBusy(false);
         } else {
           // Same card: refresh remaining-time + advisories only when
           // unchanged fields don't matter; keep decision-in-flight view.
@@ -758,8 +763,12 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       if (result.status === 'ok') {
         // Decision recorded; the suspended backend loop resumes and the
         // main /ai/chat fetch completes through the normal pipeline.
+        // busy only guards the POST in flight — clear it or the NEXT
+        // card of a multi-op request inherits it (greyed buttons,
+        // chat stuck until timeout).
         approvalCardRef.current = null;
         setApprovalCard(null);
+        setApprovalBusy(false);
       } else {
         setApprovalInvalidation(
           result.status === 'already_decided'
