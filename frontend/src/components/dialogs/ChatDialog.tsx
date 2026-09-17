@@ -24,6 +24,7 @@ import {
   extractMentionedConfigFilenames,
 } from '../../utils/chatUtils';
 import { extractPrinterMemoryBlock } from '../../utils/printerMemory';
+import { planApprovedEditApply } from '../../utils/approvalApply';
 import {
   PROVIDER_DEFAULTS,
   isLocalProvider,
@@ -123,6 +124,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     schemas,
     setConfigFile,
     setValidation,
+    removeConfigFile,
     markDirty,
   } = useConfigStore();
 
@@ -343,6 +345,43 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     [activeFile],
   );
 
+  // ── Approved tool edits → editor draft ──────────────────────────
+  // The approval card gate (Phase 2) stages validated writes SERVER-side;
+  // once the user approves, the resuming backend loop returns the final
+  // assistant message carrying `pendingEdits` (full post-apply file text,
+  // backend truth — never model prose). Applying them here marks the
+  // editor dirty like any other edit: approved ≠ saved, the Save flow
+  // (and its validation gate) remains the only path to disk.
+  const applyApprovedToolEdits = useCallback(
+    async (edits: NonNullable<ChatMessage['pendingEdits']>): Promise<void> => {
+      const { upserts, deletes } = planApprovedEditApply(edits);
+      if (upserts.length === 0 && deletes.length === 0) return;
+      for (const { file, newText } of upserts) {
+        try {
+          const parsed = await api.parseConfigText(newText, file);
+          const config = { ...parsed.config, raw_text: newText };
+          setConfigFile(file, config);
+          try {
+            setValidation(file, await api.validateConfig(config));
+          } catch {
+            // Validation failure shouldn't block applying an approved edit.
+          }
+        } catch (err: unknown) {
+          // Should not happen: newText comes from the backend's own
+          // writer. Surface rather than silently drop the approved change.
+          console.error('[Approval] Failed to apply approved edit to', file, err);
+          setError(`Approved change to ${file} could not be applied to the editor — check the diff before saving.`);
+        }
+      }
+      deletes.forEach((file) => removeConfigFile(file));
+      if (upserts.length > 0 || deletes.length > 0) markDirty();
+      // Staged edits are now in the draft — drop any stale review preview
+      // so the "Apply and Review" affordance can't re-apply them.
+      setAssistantDraftPreview(null);
+    },
+    [setConfigFile, setValidation, removeConfigFile, markDirty, setAssistantDraftPreview],
+  );
+
   // ── Submit Message ──────────────────────────────────────────────
   const submitMessage = useCallback(
     async (messageText: string, options?: { hiddenFromUser?: boolean; retry?: boolean; editIndex?: number }) => {
@@ -556,6 +595,14 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
 
         if (pipelineResult.warnings) setError(pipelineResult.warnings);
         setMessages([...newMessages, pipelineResult.finalMessage]);
+        // Approved tool edits (Phase 2 gate): the resuming loop's final
+        // reply carries the staged writes — put them into the editor draft
+        // (dirty, save-gated). Declines/timeouts arrive with no staged
+        // edits, so plain Q&A and declined flows are untouched.
+        const stagedEdits = pipelineResult.finalMessage.pendingEdits;
+        if (stagedEdits && stagedEdits.length > 0) {
+          await applyApprovedToolEdits(stagedEdits);
+        }
         setAssistantDraftApplicableMessages({}); // Will be re-evaluated by the useEffect
         // Background completion signal: if the dialog is closed when the reply
         // lands, flag the toolbar button so the user knows it's ready.
@@ -593,6 +640,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     },
     [
       activeFile,
+      applyApprovedToolEdits,
       attachedConfigFiles,
       createDraftReplyValidator,
       draftRequestMessage,

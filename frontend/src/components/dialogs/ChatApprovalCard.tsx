@@ -104,14 +104,14 @@ export default function ChatApprovalCard({
         <button
           onClick={onApprove}
           disabled={busy}
-          className="px-3 py-1 rounded text-[11px] font-medium bg-green-500/20 text-green-400 hover:bg-green-500/30 transition-colors disabled:opacity-50"
+          className="px-3 py-1 rounded text-[11px] font-medium bg-green-600 text-white hover:bg-green-700 transition-colors disabled:opacity-50"
         >
           Approve
         </button>
         <button
           onClick={onDecline}
           disabled={busy}
-          className="px-3 py-1 rounded text-[11px] font-medium bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors disabled:opacity-50"
+          className="px-3 py-1 rounded text-[11px] font-medium bg-red-600 text-white hover:bg-red-700 transition-colors disabled:opacity-50"
         >
           Decline
         </button>
