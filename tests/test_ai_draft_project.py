@@ -226,6 +226,64 @@ def test_add_section_clean():
     assert '[verify_heater extruder]' in st1.files['printer.cfg']
 
 
+SAVE_CONFIG_TAIL = """
+#*# <---------------------- SAVE_CONFIG ---------------------->
+#*# DO NOT EDIT THIS BLOCK OR BELOW. The contents are auto-generated.
+#*#
+#*# [probe]
+#*# z_offset = -0.520
+#*#
+#*# [bed_mesh default]
+#*# points =
+#*#\t\t0.000000
+"""
+
+
+def _tail_state(text=BASE_CFG + SAVE_CONFIG_TAIL):
+    return _state(text)
+
+
+def test_add_section_lands_above_save_config_banner():
+    """Live dogfood 2026-09-17: add_section appended at EOF, which on a
+    SAVE_CONFIG'd printer.cfg drops the new section BELOW the
+    '#*# DO NOT EDIT THIS BLOCK OR BELOW' banner -- Klipper rewrites the
+    tail on the next SAVE_CONFIG (the section would be destroyed) and the
+    bare header breaks the #*# block parse. Insert above the banner; the
+    banner and everything below it stay byte-identical."""
+    st, base = _tail_state()
+    st1, r = st.apply(base, {'op': 'add_section', 'file': 'printer.cfg',
+                             'section': 'verify_heater extruder',
+                             'text': 'max_error: 120\nheating_gain: 2'})
+    assert r['status'] == 'applied'
+    out = st1.files['printer.cfg']
+    assert out.index('[verify_heater extruder]') < out.index('#*# <')
+    # tail preserved byte-for-byte (banner line -> EOF)
+    assert out[out.index('#*# <'):] == (BASE_CFG + SAVE_CONFIG_TAIL)[
+        (BASE_CFG + SAVE_CONFIG_TAIL).index('#*# <'):]
+
+
+def test_add_include_lands_above_save_config_banner():
+    st, base = _tail_state()
+    st1, r = st.apply(base, {'op': 'new_file', 'file': 'dock_macros.cfg',
+                             'content': '[gcode_macro DOCK_Z]\ngcode:\n    G1 Z5\n'})
+    assert r['status'] == 'applied'
+    st2, r = st1.apply(base, {'op': 'add_include', 'file': 'printer.cfg',
+                              'target_file': 'dock_macros.cfg'})
+    assert r['status'] == 'applied'
+    out = st2.files['printer.cfg']
+    assert out.index('[include dock_macros.cfg]') < out.index('#*# <')
+
+
+def test_add_section_no_tail_still_appends_at_eof():
+    """Flag-off parity: files WITHOUT a tail behave exactly as before."""
+    st, base = _state()
+    st1, r = st.apply(base, {'op': 'add_section', 'file': 'printer.cfg',
+                             'section': 'idle_timeout',
+                             'text': 'timeout: 600'})
+    assert r['status'] == 'applied'
+    assert st1.files['printer.cfg'].rstrip().endswith('timeout: 600')
+
+
 def test_add_section_duplicate_refused():
     st, base = _state()
     _, r = st.apply(base, {'op': 'add_section', 'file': 'printer.cfg',
@@ -238,6 +296,39 @@ def test_add_section_rejects_header_in_body():
     _, r = st.apply(base, {'op': 'add_section', 'file': 'printer.cfg',
                            'section': 'foo', 'text': '[foo]\nbar: 1'})
     assert r['status'] == 'error' and 'BODY only' in r['error']
+
+
+def test_replace_section_above_tail_preserves_banner():
+    """Same bug class as add_section-at-EOF (dogfood 2026-09-17): a
+    section's range ran to EOF because banner lines ('#*# [probe]') never
+    match RE_SECTION_HEADER — replacing the LAST real section therefore
+    rewrote the whole SAVE_CONFIG tail away. The banner must bound the
+    section range."""
+    st, base = _tail_state()
+    # last real section in BASE_CFG is [bed_mesh], directly above the tail
+    st1, r = st.apply(base, {'op': 'replace_section', 'file': 'printer.cfg',
+                             'section': 'bed_mesh',
+                             'text': 'speed: 60\nhorizontal_move_z: 5\n'
+                                     'mesh_min: 10, 10\nmesh_max: 190, 190\n'
+                                     'probe_count: 5, 5'})
+    assert r['status'] == 'applied'
+    out = st1.files['printer.cfg']
+    assert 'speed: 60' in out
+    tail = out[out.index('#*# <'):]
+    expected_tail = (BASE_CFG + SAVE_CONFIG_TAIL)
+    assert tail == expected_tail[expected_tail.index('#*# <'):]
+
+
+def test_delete_section_above_tail_preserves_banner():
+    st, base = _tail_state()
+    st1, r = st.apply(base, {'op': 'delete_section', 'file': 'printer.cfg',
+                             'section': 'bed_mesh'})
+    assert r['status'] == 'applied'
+    out = st1.files['printer.cfg']
+    assert '[bed_mesh]' not in out
+    tail = out[out.index('#*# <'):]
+    expected_tail = (BASE_CFG + SAVE_CONFIG_TAIL)
+    assert tail == expected_tail[expected_tail.index('#*# <'):]
 
 
 def test_replace_section_and_foreign_header_refused():

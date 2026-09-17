@@ -26,7 +26,7 @@ import re
 from copy import deepcopy
 from dataclasses import dataclass, field
 
-from parser.config_parser import parse_config
+from parser.config_parser import SAVE_CONFIG_BANNER_RE, parse_config
 from parser.validator import validate_project_configs
 
 from services.ai_draft_validation import (
@@ -47,10 +47,46 @@ def _split_lines(text: str) -> list[str]:
     return text.split('\n')
 
 
+def _save_config_start(lines: list[str]) -> int:
+    """Index of the SAVE_CONFIG banner line, else len(lines).
+
+    Mirrors config_parser._parse_save_config_sections (same regex, same
+    semantics): from the '#*# <...SAVE_CONFIG...>' banner on, the file
+    belongs to Klipper — it rewrites that block on every SAVE_CONFIG and
+    the banner literally says DO NOT EDIT THIS BLOCK OR BELOW. No real
+    section may own, span, or be inserted below this line.
+    """
+    for i, line in enumerate(lines):
+        if SAVE_CONFIG_BANNER_RE.match(line.strip()):
+            return i
+    return len(lines)
+
+
+def _insert_above_save_config(text: str, block_lines: list[str]) -> str:
+    """Insert a section block (header + body lines) above the SAVE_CONFIG
+    tail — at EOF when there is no tail. Every original line stays
+    byte-identical; only the insertion point moves. (Dogfood
+    2026-09-17: add_section/add_include appended at EOF, landing new
+    sections BELOW the banner on SAVE_CONFIG'd printer.cfgs, where the
+    next SAVE_CONFIG destroys them and the bare header breaks the
+    '#*#' block parse.)"""
+    if not text.strip():
+        return '\n'.join(block_lines) + '\n'
+    lines = _split_lines(text)
+    banner = _save_config_start(lines)
+    lines[banner:banner] = ['', *block_lines, '']
+    return '\n'.join(lines)
+
+
 def _find_section(lines: list[str], header: str) -> tuple[int, int] | None:
     """Return (header_index, body_end_index) for the first section whose
     header matches exactly, else None. body_end excludes the next header
-    but includes trailing comments/blank lines owned by the section."""
+    but includes trailing comments/blank lines owned by the section.
+
+    Bounded by the SAVE_CONFIG banner: '#*# [probe]' lines never match
+    RE_SECTION_HEADER, so an unbounded scan made the LAST real section
+    own the whole tail — replace_section/delete_section on it rewrote or
+    deleted the auto-generated block (same bug family as add-at-EOF)."""
     header_index = -1
     for i, line in enumerate(lines):
         match = RE_SECTION_HEADER.match(line)
@@ -59,8 +95,8 @@ def _find_section(lines: list[str], header: str) -> tuple[int, int] | None:
             break
     if header_index == -1:
         return None
-    end = len(lines)
-    for scan in range(header_index + 1, len(lines)):
+    end = _save_config_start(lines)
+    for scan in range(header_index + 1, end):
         if RE_SECTION_HEADER.match(lines[scan]):
             end = scan
             break
@@ -481,8 +517,11 @@ class ProjectState:
                 return _state_error(
                     f"Argument text must be the section BODY only (no '[{header}]' header line)."
                 )
-        text = self.files[filename].rstrip('\n')
-        self.files[filename] = f"{text}\n\n[{header}]\n{body.strip()}\n" if body.strip() else f"{text}\n\n[{header}]\n"
+        block = [f'[{header}]']
+        if body.strip():
+            block.extend(body.strip('\n').split('\n'))
+        self.files[filename] = _insert_above_save_config(
+            self.files[filename], block)
         return {'status': 'ok', 'file': filename, 'summary': f"added section [{header}] to {filename}"}
 
     def _op_replace_section(self, op: dict) -> dict:
@@ -707,8 +746,8 @@ class ProjectState:
             match = RE_SECTION_HEADER.match(line)
             if match and match.group(1).strip() == header:
                 return _state_error(f"[{header}] already present in {in_file}.")
-        text = self.files[in_file].rstrip('\n')
-        self.files[in_file] = f"{text}\n\n[{header}]\n" if text else f"[{header}]\n"
+        self.files[in_file] = _insert_above_save_config(
+            self.files[in_file], [f'[{header}]'])
         return {'status': 'ok', 'file': in_file, 'summary': f"added [include {target}] to {in_file}"}
 
     def _op_comment_include(self, op: dict) -> dict:
