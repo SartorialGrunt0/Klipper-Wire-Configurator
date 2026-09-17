@@ -189,6 +189,87 @@ def test_edit_protocol_prompt_only_when_capable(monkeypatch):
     assert 'display-only' in edit[0]['content']
 
 
+# ── Phase 3: model-triggered edit skill (KWC_EDIT_SKILL_GATE) ──────────
+
+_SKILL_RESULT_MSG = ('[Tool result: load_skill(name=config-editing)]\n\n'
+                     'ok\n\n[End tool result. Use this information to answer '
+                     'the user\u2019s latest (last) request above. Earlier '
+                     'messages are history and context. Do not repeat the tool call.]')
+
+
+def test_load_skill_active_predicate():
+    from api.ai_routes import _load_skill_active
+    assert not _load_skill_active([{'role': 'user', 'content': 'set max_accel'}])
+    assert not _load_skill_active([{'role': 'user', 'content': 'load_skill'}])
+    assert _load_skill_active([
+        {'role': 'user', 'content': 'hi'},
+        {'role': 'assistant', 'content': _SKILL_RESULT_MSG},
+    ])
+    assert _load_skill_active([{'role': 'user', 'content': _SKILL_RESULT_MSG}])
+    # native echo shape: assistant message with tool_calls list
+    assert _load_skill_active([{
+        'role': 'assistant', 'content': '',
+        'tool_calls': [{'function': {'name': 'load_skill', 'arguments': '{}'}}],
+    }])
+    # system prompt mentions the tool but must not count as activation
+    assert not _load_skill_active([
+        {'role': 'system', 'content': 'available_skills load_skill config-editing'}])
+
+
+def test_skill_gate_hides_write_tools_until_loaded():
+    ctx = ai_routes._build_mcp_tool_context(edit_capable=True, skill_gate=True,
+                                            skill_active=False)
+    assert '- config_edit:' not in ctx
+    assert '- config_write:' not in ctx
+    assert 'load_skill' in ctx and 'config-editing' in ctx
+    assert '<available_skills>' in ctx
+    on = ai_routes._build_mcp_tool_context(edit_capable=True, skill_gate=True,
+                                           skill_active=True)
+    assert '- config_edit:' in on and '- config_write:' in on
+
+
+def test_skill_gate_native_parity():
+    off = ai_routes._build_native_tools(edit_capable=True, skill_gate=True,
+                                        skill_active=False)
+    names = {t['function']['name'] for t in off}
+    assert 'load_skill' in names
+    assert EDIT_TOOL_NAMES.isdisjoint(names)
+    on = ai_routes._build_native_tools(edit_capable=True, skill_gate=True,
+                                       skill_active=True)
+    names_on = {t['function']['name'] for t in on}
+    assert EDIT_TOOL_NAMES <= names_on
+
+
+def test_edit_law_not_in_prompt_until_skill_loaded():
+    monkey = __import__('pytest').MonkeyPatch()
+    monkey.delenv('KWC_NO_SYSTEM', raising=False)
+    monkey.delenv('KWC_MINIMAL_PROMPT', raising=False)
+    msgs = [{'role': 'user', 'content': 'hi'}]
+    gated = ai_routes._prepare_messages(msgs, edit_capable=True,
+                                        skill_gate=True, skill_active=False)
+    sys_txt = gated[0]['content']
+    assert 'MUST call config_edit' not in sys_txt
+    assert 'config-editing' in sys_txt  # index block IS present
+    # Status quo (no gate): the law stays in the system prompt verbatim.
+    legacy = ai_routes._prepare_messages(msgs, edit_capable=True)
+    assert 'MUST call config_edit' in legacy[0]['content']
+    monkey.undo()
+
+
+def test_load_skill_returns_body_with_law_and_tools():
+    body = ai_routes._edit_skill_body()
+    assert 'config_edit' in body and 'MUST call' in body
+    assert 'STAGED' in body
+    # text-protocol models need the arg shapes (no schema is sent)
+    assert 'set_param' in body and 'patch_gcode' in body
+
+
+def test_gate_off_preserves_status_quo():
+    # No gate: write tools advertised immediately, no skill index.
+    ctx = ai_routes._build_mcp_tool_context(edit_capable=True)
+    assert '- config_edit:' in ctx and '<available_skills>' not in ctx
+
+
 # ── session semantics (unit) ────────────────────────────────────────────
 
 def test_session_edit_kickback_then_converge():
