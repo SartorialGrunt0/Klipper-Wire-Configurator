@@ -831,8 +831,9 @@ EDIT_SKILL_DESCRIPTION = (
     "Applies edits to the user's Klipper config files. Use when the request "
     "asks to change, add, remove, fix, or comment out a section, parameter, "
     "or macro, or the user approves a proposed edit. Do NOT use for "
-    "questions about settings, validating pasted config text, or drafting a "
-    "macro to discuss without saving."
+    "questions about settings, validating pasted config text, drafting or "
+    "showing config/macro text to read over or discuss without applying it, "
+    "or any request that says not to change the files."
 )
 
 LOAD_SKILL_SPEC = {
@@ -863,11 +864,20 @@ _LOAD_SKILL_SNIPPET = (
 # Nudge replacement while the skill gate is CLOSED: pointing at a locked
 # write tool (EDIT_NUDGE_TEXT) would be incoherent; the correction is the
 # load step itself. Placeholder-only law (no real keys/values).
+# CAPABILITY SHAPE, not imperative (SKILL-* eval r1/r2, 2026-09-17): the
+# old wording commanded "then apply the change with the edit tool" — on a
+# review-only request ("draft me a macro, DON'T add it") that command
+# manufactured a false-positive activation + staged write 3/3. The model
+# reads negation the verb-regex cannot; state the mechanical fact and the
+# opt-out, let the model decide which one the user asked for.
 _LOAD_SKILL_NUDGE_TEXT = (
-    "Your reply proposed config changes as text, which does nothing. "
-    "First call load_skill(name='config-editing') — it returns the edit "
-    "rules and unlocks the edit tools. Then apply the change with the "
-    "edit tool, one operation per tool call."
+    "A config block written in chat text changes nothing by itself. If the "
+    "user asked for their file to actually be changed, call "
+    "load_skill(name='config-editing') — it returns the edit rules and "
+    "unlocks the edit tools — then apply the change with the edit tool, "
+    "one operation per tool call. If the user only wanted text to read or "
+    "review (they said not to change their files), reply with the text and "
+    "do NOT load the skill or call any edit tool."
 )
 
 
@@ -1005,7 +1015,8 @@ AUTO_SEARCH_FALLBACK_MAX_CHARS = 4000
 # load — verified 2026-08 on gemma-4-12b/qwen3.5-9b).
 _EDIT_VERB_RE = re.compile(
     r"\b(?:change|update|modify|edit|add|remove|delete|fix|create|set|rename|"
-    r"enable|disable|tweak|adjust|comment\s*out|calibrat\w*|move)\b",
+    r"enable|disable|tweak|adjust|comment\s*out|calibrat\w*|move|"
+    r"raise|lower|increase|decrease)\b",
     re.IGNORECASE,
 )
 _EDIT_TARGET_RE = re.compile(
