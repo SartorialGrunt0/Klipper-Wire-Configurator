@@ -864,20 +864,18 @@ _LOAD_SKILL_SNIPPET = (
 # Nudge replacement while the skill gate is CLOSED: pointing at a locked
 # write tool (EDIT_NUDGE_TEXT) would be incoherent; the correction is the
 # load step itself. Placeholder-only law (no real keys/values).
-# CAPABILITY SHAPE, not imperative (SKILL-* eval r1/r2, 2026-09-17): the
-# old wording commanded "then apply the change with the edit tool" — on a
-# review-only request ("draft me a macro, DON'T add it") that command
-# manufactured a false-positive activation + staged write 3/3. The model
-# reads negation the verb-regex cannot; state the mechanical fact and the
-# opt-out, let the model decide which one the user asked for.
+# EXCEPTION-FIRST shape (SKILL-* eval r1-r4, 2026-09-17): pure
+# conditionals made gemma ACK the policy and stop (activation 4/5->2/5);
+# imperative with a TAIL exception made the exception invisible
+# (N04 FP returned). Leading the sentence with the exception ("Unless
+# the user explicitly said NOT...") puts the negation first — gemma
+# honors it on review-only requests — while the action clause stays the
+# only executable path, so edit requests cannot dissolve into an ack.
 _LOAD_SKILL_NUDGE_TEXT = (
-    "A config block written in chat text changes nothing by itself. If the "
-    "user asked for their file to actually be changed, call "
-    "load_skill(name='config-editing') — it returns the edit rules and "
-    "unlocks the edit tools — then apply the change with the edit tool, "
-    "one operation per tool call. If the user only wanted text to read or "
-    "review (they said not to change their files), reply with the text and "
-    "do NOT load the skill or call any edit tool."
+    "Unless the user explicitly said NOT to change their files, the block "
+    "you just wrote in chat text is inert and must be redone through the "
+    "tools: call load_skill(name='config-editing') now, then apply the "
+    "change with the edit tool, one operation per call."
 )
 
 
