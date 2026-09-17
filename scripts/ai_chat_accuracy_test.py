@@ -170,6 +170,16 @@ class TestQuestion:
     # staged_not_regex / staged_section_regex / staged_section_absent
     # (plus the existing staged_param / staged_count / not_staged).
     edit_criteria: tuple[tuple[str, str], ...] = ()
+    # Phase 3 skill-gate eval (SKILL-* family) — the should_trigger label.
+    # True: an edit request that MUST activate the skill (model calls
+    # load_skill, mechanically observed in the executed tool-call trace).
+    # False: a non-edit request that MUST NOT activate it (false-positive
+    # rate). None: not a skill-gate question.
+    skill_expected: bool | None = None
+    # Per-request ChatRequest.editSkill override: True forces the skill
+    # ACTIVE (gate bypass — write tools advertised immediately, measures
+    # edit quality with the law force-loaded). None follows the server env.
+    edit_skill: bool | None = None
 
 
 # Shared config snippets used by several questions.
@@ -1400,6 +1410,151 @@ def build_edit_tool_questions() -> list[TestQuestion]:
     ]
 
 
+def build_skill_gate_questions() -> list[TestQuestion]:
+    """Phase 3 skill-gate activation eval (SKILL-* family). Each question
+    carries a should_trigger label (`skill_expected`); the graded signal is
+    the executed tool-call trace (toolCalls), NOT prose:
+
+      skill_expected=True  -> load_skill must appear in the trace
+                              (activation rate; plan gate: >=90%)
+      skill_expected=False -> load_skill must NOT appear
+                              (false-positive rate; every FP costs an
+                              irrelevant edit-law load + latency)
+
+    Runs against a backend with KWC_EDIT_TOOLS=1 and the gate env left to
+    the run config (the questions force editTools=True so the gate is
+    engaged whenever the server flag is on; with the flag off the write
+    tools ship ungated and activation is trivially true — the summary
+    prints the mode). The `tool` criteria kind grades load_skill like any
+    other expected tool; a False-labelled question uses require_tool=False
+    plus the trace check below (criterion kind `skill_not_loaded`).
+    """
+    printer_cfg = _cfg_context("printer.cfg")
+    return [
+        # ── should_trigger = True (activation) ──
+        TestQuestion(
+            qid="SKILL-01",
+            title="Skill: direct param edit must load first",
+            text="In printer.cfg change the [printer] max_accel to 12000.",
+            context_files=printer_cfg,
+            edit_tools=True,
+            skill_expected=True,
+            expected_tools=("load_skill",),
+            require_tool=True,
+            criteria=(("staged_param", "printer.cfg::max_accel: 12000"),),
+        ),
+        TestQuestion(
+            qid="SKILL-02",
+            title="Skill: macro-body edit must load first",
+            text=("Modify my level_bed macro in printer.cfg to call "
+                  "BED_MESH_CALIBRATE in adaptive mode."),
+            context_files=printer_cfg,
+            edit_tools=True,
+            skill_expected=True,
+            expected_tools=("load_skill",),
+            require_tool=True,
+            criteria=(("staged_param", "printer.cfg::ADAPTIVE=1"),),
+        ),
+        TestQuestion(
+            qid="SKILL-03",
+            title="Skill: multi-part change must load first",
+            text=("Change max_velocity to 300 and max_accel to 4000 in "
+                  "printer.cfg."),
+            context_files=printer_cfg,
+            edit_tools=True,
+            skill_expected=True,
+            expected_tools=("load_skill",),
+            require_tool=True,
+            criteria=(
+                ("staged_param", "printer.cfg::max_velocity: 300"),
+                ("staged_param", "printer.cfg::max_accel: 4000"),
+            ),
+        ),
+        TestQuestion(
+            qid="SKILL-04",
+            title="Skill: new file + include must load first",
+            text=("Create a file dock_macros.cfg with a gcode_macro DOCK_Z "
+                  "that lifts Z 5mm, and include it from printer.cfg."),
+            context_files=printer_cfg,
+            edit_tools=True,
+            skill_expected=True,
+            expected_tools=("load_skill",),
+            require_tool=True,
+            criteria=(
+                ("staged_param", "dock_macros.cfg::[gcode_macro DOCK_Z]"),
+                ("staged_param", "printer.cfg::[include dock_macros.cfg]"),
+            ),
+        ),
+        TestQuestion(
+            qid="SKILL-05",
+            title="Skill: implicit edit ('my prints wobble') must load",
+            text=("My prints wobble at corners. Raise max_accel to 9000 in "
+                  "printer.cfg and see if that's sane."),
+            context_files=printer_cfg,
+            edit_tools=True,
+            skill_expected=True,
+            expected_tools=("load_skill",),
+            require_tool=True,
+            criteria=(("staged_param", "printer.cfg::max_accel: 9000"),),
+        ),
+        # ── should_trigger = False (false positives) ──
+        TestQuestion(
+            qid="SKILL-N01",
+            title="Skill: pure Q&A must NOT load",
+            text=("What does pressure_advance do in the [extruder] section, "
+                  "and what value is typical for a direct drive?"),
+            context_files=printer_cfg,
+            edit_tools=True,
+            skill_expected=False,
+            require_tool=False,
+            criteria=(
+                ("skill_not_loaded", ""),
+                ("not_staged", "printer.cfg"),
+                ("regex", r"pressure|advance"),
+            ),
+        ),
+        TestQuestion(
+            qid="SKILL-N02",
+            title="Skill: how-to question must NOT load",
+            text=("How do I enable input shaper on my printer? Just explain "
+                  "the steps, don't change my files yet."),
+            context_files=printer_cfg,
+            edit_tools=True,
+            skill_expected=False,
+            require_tool=False,
+            criteria=(
+                ("skill_not_loaded", ""),
+                ("not_staged", "printer.cfg"),
+            ),
+        ),
+        TestQuestion(
+            qid="SKILL-N03",
+            title="Skill: validate-pasted-text must NOT load",
+            text=("Is this section valid Klipper? [heater_fan hotend_fan]\n"
+                  "pin: PA0\nheater: extruder\nheater_temp: 50.0"),
+            context_files=printer_cfg,
+            edit_tools=True,
+            skill_expected=False,
+            require_tool=False,
+            criteria=(("skill_not_loaded", ""),),
+        ),
+        TestQuestion(
+            qid="SKILL-N04",
+            title="Skill: discuss-a-draft must NOT load",
+            text=("Draft me a PARK_X macro gcode body I can read over. "
+                  "Don't add it to my config — I just want to see it here."),
+            context_files=printer_cfg,
+            edit_tools=True,
+            skill_expected=False,
+            require_tool=False,
+            criteria=(
+                ("skill_not_loaded", ""),
+                ("not_staged", "printer.cfg"),
+            ),
+        ),
+    ]
+
+
 def build_ambiguity_questions() -> list[TestQuestion]:
     """Ambiguity probes: prompts that intentionally do NOT name a file or
     mix edit/question phrasing, to see whether the model can resolve intent
@@ -1991,6 +2146,8 @@ ALL_TOOLS = (
     "calculate_rotation_distance",
     "generate_macro_template",
     "validate_macro",
+    # Skill-gate loader (Phase 3): loop-routed like the write tools.
+    "load_skill",
 )
 
 # ── Printer memory (REQ-AI-08) ────────────────────────────────────────
@@ -2052,6 +2209,15 @@ def criterion_ok(kind: str, value: str, content: str,
         return False
     if kind == "staged_file":
         return any(e.get("file") == value for e in pending_edits or [])
+    if kind == "skill_loaded":
+        # Phase 3 trace criterion: load_skill executed (arguments ignored).
+        # Activation is ALSO covered by expected_tools for True-labelled
+        # questions; this kind exists for paired assertions.
+        return any(c.get("name") == "load_skill" for c in tool_calls or [])
+    if kind == "skill_not_loaded":
+        # Negative control: a non-edit request must not pay for an
+        # irrelevant edit-law load (false-positive rate denominator).
+        return not any(c.get("name") == "load_skill" for c in tool_calls or [])
     if kind == "staged_new_file":
         return any(e.get("op") == "new_file" for e in pending_edits or [])
     if kind == "staged_any_param":
@@ -2218,6 +2384,12 @@ class QuestionResult:
     # per-call attempt count from the response; None when not applicable.
     pending_edits: list | None = None
     edit_attempts: int | None = None
+    # Phase 3 skill-gate eval (SKILL-* family): the should_trigger label
+    # and the observed activation (load_skill anywhere in the executed
+    # trace — includes post-nudge activation; the nudge count is in the
+    # backend log slice). None when not a skill question.
+    skill_expected: bool | None = None
+    skill_activated: bool | None = None
 
 
 # ── HTTP helpers (stdlib only) ─────────────────────────────────────────
@@ -2320,6 +2492,12 @@ def chat_request(base_url: str, question: TestQuestion, settings: dict,
     # covered by the pytest suite + the manual Gate-2 dogfood pass.
     if payload.get("editTools"):
         payload["autoApproveEdits"] = True
+    # Skill-gate A/B arm: force the skill ACTIVE (write tools advertised
+    # immediately, edit law force-loaded) to compare edit QUALITY with vs
+    # without model-triggered loading. Server accepts editSkill only as a
+    # harness field (ChatRequest.editSkill).
+    if settings.get("force_skill_active") and payload.get("editTools"):
+        payload["editSkill"] = True
     url = base_url.rstrip("/") + "/ai/chat"
     try:
         return http_post_json(url, payload, timeout), ""
@@ -2420,6 +2598,16 @@ def run_one_question(
 
         log.write(f"Response mcpToolTurns={result.tool_turns} "
                   f"mcpToolNames={result.tool_names}")
+        # Phase 3 skill-gate eval: activation is OBSERVED in the executed
+        # trace (load_skill anywhere, incl. post-nudge — the nudge count
+        # rides in the backend log slice above).
+        if q.skill_expected is not None:
+            result.skill_expected = q.skill_expected
+            result.skill_activated = any(
+                c.get("name") == "load_skill" for c in result.tool_calls)
+            log.write(f"Skill gate: expected={q.skill_expected} "
+                      f"activated={result.skill_activated} "
+                      f"(trace={[c.get('name') for c in result.tool_calls]})")
         if result.usage:
             log.write(
                 "Usage: completion_tokens=%s reasoning_tokens=%s truncated=%s "
@@ -2582,6 +2770,7 @@ def resolve_settings(args: argparse.Namespace) -> dict:
         "merge_system_messages": args.merge_system_messages,
         "full_rewrite_guard": args.full_rewrite_guard,
         "edit_tools": edit_tools_setting(args),
+        "force_skill_active": bool(getattr(args, "force_skill_active", False)),
         "base_url": base_url,
     }
 
@@ -2666,6 +2855,13 @@ def main() -> int:
                              "per-question override: 'auto' follows the server "
                              "env (KWC_EDIT_TOOLS), 'on'/'off' force it for the "
                              "run (A/B the write-tool path vs prose)")
+    parser.add_argument("--force-skill-active", action="store_true",
+                        help="Skill-gate A/B arm: send editSkill=true so the "
+                             "write tools are advertised immediately (edit law "
+                             "force-loaded) instead of waiting for the model "
+                             "to call load_skill. Pairs with a backend that "
+                             "has KWC_EDIT_SKILL_GATE=1 (SKILL-* evals run "
+                             "with this OFF to measure activation)")
     parser.add_argument("--questions", default="", help="Subset, e.g. '1-5,8' (1-based)")
     parser.add_argument("--start", default=0, type=int,
                         help="Start at question N (1-based), running N..end. "
@@ -2692,7 +2888,7 @@ def main() -> int:
                              "printer memory, blank it, run MEMORY-01..03, then restore it")
     args = parser.parse_args()
 
-    questions = build_questions() + build_macro_questions() + build_trident_questions() + build_ambiguity_questions() + build_setup_questions() + build_live_context_questions() + build_edit_tool_questions()
+    questions = build_questions() + build_macro_questions() + build_trident_questions() + build_ambiguity_questions() + build_setup_questions() + build_live_context_questions() + build_edit_tool_questions() + build_skill_gate_questions()
     if args.include_memory:
         questions += build_memory_questions()
     if args.list_questions:
@@ -2851,6 +3047,25 @@ def main() -> int:
                   f"{len(wrong_tool)} correct-but-wrong-tool")
     log.write(f"Answer accuracy: {len([r for r in results if r.answer_ok])}/{len(results)}")
     log.write(f"Tool-usage accuracy: {len([r for r in results if r.tool_ok])}/{len(results)}")
+    # Phase 3 skill-gate eval: activation rate on should-trigger labels and
+    # false-positive rate on should-not-trigger labels. Plan gate: <90%
+    # activation => iterate the skill DESCRIPTION (never a regex
+    # auto-activation fallback — intent law).
+    skill_pos = [r for r in results if getattr(r, "skill_expected", None) is True]
+    skill_neg = [r for r in results if getattr(r, "skill_expected", None) is False]
+    pos_act = [r for r in skill_pos if r.skill_activated]
+    neg_fp = [r for r in skill_neg if r.skill_activated]
+    if skill_pos or skill_neg:
+        log.write("")
+        log.write(f"Skill activation: {len(pos_act)}/{len(skill_pos)}"
+                  + (f" ({100 * len(pos_act) / len(skill_pos):.0f}%)" if skill_pos else "")
+                  + f"   False positives: {len(neg_fp)}/{len(skill_neg)}"
+                  + (f" ({100 * len(neg_fp) / len(skill_neg):.0f}%)" if skill_neg else ""))
+        if skill_pos and len(pos_act) / len(skill_pos) < 0.9:
+            log.write("  GATE: activation <90% — iterate the skill description")
+        for r in skill_pos + skill_neg:
+            log.write(f"  {r.qid} expected={r.skill_expected} "
+                      f"activated={r.skill_activated} status={r.status}")
     truncated_results = [r for r in results if (r.usage or {}).get("truncated")]
     token_values: list[int] = []
     for r in results:
@@ -2951,6 +3166,9 @@ def main() -> int:
           + (f", {len(conditional)} conditional" if conditional else "") + ")")
     print(f"Answer accuracy: {len([r for r in results if r.answer_ok])}/{len(results)}")
     print(f"Tool-usage accuracy: {len([r for r in results if r.tool_ok])}/{len(results)}")
+    if skill_pos or skill_neg:
+        print(f"Skill activation: {len(pos_act)}/{len(skill_pos)} | "
+              f"false positives: {len(neg_fp)}/{len(skill_neg)}")
     if truncated_results:
         print(f"Truncated (hit max_tokens): {len(truncated_results)} "
               f"-> {', '.join(r.qid for r in truncated_results)}")
