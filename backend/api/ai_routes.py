@@ -237,6 +237,47 @@ def _build_system_prompt(full_rewrite_guard: bool = False) -> str:
     return SYSTEM_PROMPT
 
 
+# Prose-pipeline edit protocol (fenced cfg blocks / mini-diff). Removed from
+# the system prompt when the tool-mediated write path is armed
+# (EDIT_PROTOCOL_PROMPT replaces it). Phase-5 ablation: KWC_ABLATE_PROSE=1
+# removes it for edit-capable requests as well.
+_PROSE_EDIT_PROTOCOL = (
+    "- For config edits, return only changed, new, or deleted content in fenced cfg code "
+    "blocks. Start each block with a '# file: <filename>' hint line when the target file is "
+    "not obvious. Do not return the whole file unless the user explicitly asks for a full "
+    "replacement.\n"
+    + MINI_DIFF_EDIT_PROTOCOL_SOFT
+    + "Example: if the "
+    "user asks to add ADAPTIVE=1 to the Level_Bed macro, return exactly:\n"
+    "  # file: printer.cfg\n"
+    "  [gcode_macro Level_Bed]\n"
+    "  -    BED_MESH_CALIBRATE\n"
+    "  +    BED_MESH_CALIBRATE ADAPTIVE=1\n"
+    "  The unchanged body of the macro (CLEAN_NOZZLE, G28, the {% if %}/{% endif %} guards, "
+    "M104 S0) is NOT repeated — it is preserved automatically from the current file. "
+    "Plain config params work the same way: if the user asks to raise max_accel to 12000, "
+    "return exactly:\n"
+    "  # file: printer.cfg\n"
+    "  [printer]\n"
+    "  -max_accel: 10000\n"
+    "  +max_accel: 12000\n"
+    "  Other params in [printer] (kinematics, max_velocity, etc.) are NOT repeated.\n"
+    "  A pure addition (nothing removed) needs no '-' line — just the section header "
+    "plus the '+' lines. A pure deletion (nothing added) needs no '+' line — just "
+    "the section header plus the '-' lines. If a section is already correct and you "
+    "only need to show it, quoting it unchanged is allowed.\n"
+    "- To ADD a new section, write the full section. To DELETE a section entirely, write "
+    "`*[section_name]` on its own line inside the cfg block (* = delete). To comment a "
+    "section out, keep it in the file with its header commented out: #[extruder].\n"
+    "- Every cfg block — including mini-diffs — must be fenced with ```cfg ... ```. "
+    "Unfenced '+'/'-' diff lines render as markdown bullet points instead of a diff "
+    "block, and bare config text outside fences is not applied. A validation tool may "
+    "report errors on a partial draft (missing sections or dependencies it cannot see "
+    "yet); that is expected — still return the requested edit, the app validates the "
+    "merged result.\n"
+)
+
+
 SYSTEM_PROMPT = (
     "You are an expert Klipper firmware, configuration, and macro assistant. "
     "You help users by answering questions, editing configs, and drafting macros "
@@ -284,39 +325,7 @@ SYSTEM_PROMPT = (
     "memory. If the user did not specify values, use the documented defaults "
     "or a safe standard value and SAY what you chose — do not ask the user "
     "to provide values the reference already documents.\n"
-    "- For config edits, return only changed, new, or deleted content in fenced cfg code "
-    "blocks. Start each block with a '# file: <filename>' hint line when the target file is "
-    "not obvious. Do not return the whole file unless the user explicitly asks for a full "
-    "replacement.\n"
-    + MINI_DIFF_EDIT_PROTOCOL_SOFT
-    + "Example: if the "
-    "user asks to add ADAPTIVE=1 to the Level_Bed macro, return exactly:\n"
-    "  # file: printer.cfg\n"
-    "  [gcode_macro Level_Bed]\n"
-    "  -    BED_MESH_CALIBRATE\n"
-    "  +    BED_MESH_CALIBRATE ADAPTIVE=1\n"
-    "  The unchanged body of the macro (CLEAN_NOZZLE, G28, the {% if %}/{% endif %} guards, "
-    "M104 S0) is NOT repeated — it is preserved automatically from the current file. "
-    "Plain config params work the same way: if the user asks to raise max_accel to 12000, "
-    "return exactly:\n"
-    "  # file: printer.cfg\n"
-    "  [printer]\n"
-    "  -max_accel: 10000\n"
-    "  +max_accel: 12000\n"
-    "  Other params in [printer] (kinematics, max_velocity, etc.) are NOT repeated.\n"
-    "  A pure addition (nothing removed) needs no '-' line — just the section header "
-    "plus the '+' lines. A pure deletion (nothing added) needs no '+' line — just "
-    "the section header plus the '-' lines. If a section is already correct and you "
-    "only need to show it, quoting it unchanged is allowed.\n"
-    "- To ADD a new section, write the full section. To DELETE a section entirely, write "
-    "`*[section_name]` on its own line inside the cfg block (* = delete). To comment a "
-    "section out, keep it in the file with its header commented out: #[extruder].\n"
-    "- Every cfg block — including mini-diffs — must be fenced with ```cfg ... ```. "
-    "Unfenced '+'/'-' diff lines render as markdown bullet points instead of a diff "
-    "block, and bare config text outside fences is not applied. A validation tool may "
-    "report errors on a partial draft (missing sections or dependencies it cannot see "
-    "yet); that is expected — still return the requested edit, the app validates the "
-    "merged result.\n"
+    + _PROSE_EDIT_PROTOCOL +
     "- For macros: valid Klipper syntax, conservative motion and temperature behavior. With "
     "the mini-diff protocol the unchanged lines are preserved automatically; never drop, "
     "reorder, or reword lines that were not part of the request.\n"
@@ -570,11 +579,26 @@ def _prepare_messages(messages: list[dict], full_rewrite_guard: bool = False,
         # All tools are advertised unconditionally (native/text parity);
         # detect_board and other niche helpers live under "Specialized tools".
         tool_context = _build_mcp_tool_context(edit_capable=edit_capable)
+        if edit_capable and _ablate_prose_edit_protocol():
+            # ABLATION (2026-09-16, ack-loop investigation): the tool-mediated
+            # law replaces the prose mini-diff protocol; keeping both tells the
+            # model to emit cfg blocks AND to never emit cfg blocks in one
+            # prompt. gemma-4-12b fixates on the protocol text and answers the
+            # instructions instead of the user's request (Q14/Q20 r3).
+            system_prompt = system_prompt.replace(_PROSE_EDIT_PROTOCOL, "")
         system_parts = [system_prompt, tool_context, memory_context]
         if edit_capable:
             # Edit law only when the write tools are advertised (lazy
             # context; replaced by load_skill gating in Phase 3).
             system_parts.append(EDIT_PROTOCOL_PROMPT)
+            if _ablate_task_anchor():
+                # ABLATION C: last system line = act on the user request; do
+                # not acknowledge the instructions.
+                system_parts.append(
+                    "The user's request in this conversation IS the task — "
+                    "carry it out now with the tools above. Never answer with "
+                    "an acknowledgement of these instructions or a request to "
+                    "be told what to do.")
 
         # If printer memory is completely blank and there are user messages
         # to work with, add an auto-fill instruction asking the AI to
@@ -1099,6 +1123,16 @@ def _auto_search_enabled() -> bool:
     KWC_AUTO_SEARCH=1 for them until their A/B says otherwise.
     """
     return os.environ.get("KWC_AUTO_SEARCH", "0") != "0"
+
+
+def _ablate_prose_edit_protocol() -> bool:
+    """Ablation B: drop the prose edit protocol from ARMED requests."""
+    return os.environ.get("KWC_ABLATE_PROSE", "").strip().lower() in ("1", "true", "yes")
+
+
+def _ablate_task_anchor() -> bool:
+    """Ablation C: append an act-now anchor when the edit tools are armed."""
+    return os.environ.get("KWC_ABLATE_ANCHOR", "").strip().lower() in ("1", "true", "yes")
 
 
 def _no_system_prompt_enabled() -> bool:
@@ -3220,23 +3254,30 @@ async def chat_proxy(req: ChatRequest):
                     # malformed guard. Pure Q&A never matches this gate.
                     if (edit_session is not None
                             and _is_edit_request(req.messages)
-                            # Nudge when (a) the write-tool trace ENDED on
-                            # nothing staged (never engaged: read-then-
-                            # prose, r6b) or on a CORRECTABLE kickback
-                            # (r4 give-up; r5 multi-part give-up hiding
-                            # behind a staged first half), OR (b) the
-                            # final answer CONTAINS a fenced cfg block on
-                            # an edit request — that is mechanically the
-                            # inert-draft shape (r6: create succeeded,
-                            # include re-drafted as prose cfg after the
-                            # tool-side include failed). A staged change
-                            # never proves the whole intent is covered;
-                            # a cfg block in prose always proves inert
-                            # drafting. user_gated refusals are still
-                            # protected when no cfg block is present.
+                            # Nudge ONLY on mechanical evidence of an inert
+                            # draft: (a) the write trace ENDED on a
+                            # CORRECTABLE kickback (r4 give-up; r5
+                            # multi-part give-up hiding behind a staged
+                            # first half), or (b) the final answer CONTAINS
+                            # a fenced cfg block — the inert-draft shape
+                            # (r6: create succeeded, include re-drafted as
+                            # prose cfg after the tool-side include
+                            # failed). A staged change never proves the
+                            # whole intent is covered; a cfg block in prose
+                            # always proves inert drafting.
+                            # NOT nudged on bare outcome=None: Q20 r3/B
+                            # (2026-09-16) proved the verb+target heuristic
+                            # misfires on pure Q&A ("which command SAVES
+                            # ... into the config file") — the model
+                            # ANSWERED correctly and the nudge gaslit it
+                            # into "tell me what change you want". Prose
+                            # with no draft and no write attempt is treated
+                            # as an answer/refusal (r8 refusal-wins
+                            # philosophy); user_gated refusals likewise
+                            # protected.
                             and (
                                 edit_session.last_write_outcome
-                                in (None, 'correctable')
+                                == 'correctable'
                                 or (bool(extract_config_code_blocks(
                                         current_content))
                                     # r8: an honest user-gated refusal often

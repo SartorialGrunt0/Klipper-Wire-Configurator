@@ -361,6 +361,12 @@ def build_questions() -> list[TestQuestion]:
                 ("regex", r"\[gcode_macro"),
                 ("contains", "BED_MESH_CALIBRATE"),
             ),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_section_regex",
+                 r"printer\.cfg::gcode_macro PRINT_START::BED_MESH_CALIBRATE"),
+            ),
         ),
         TestQuestion(
             qid="Q15",
@@ -407,6 +413,12 @@ def build_questions() -> list[TestQuestion]:
                 ("regex", r"```(?:cfg|ini|conf|klipper)"),
                 ("contains", "[bed_mesh]"),
                 ("regex", r"probe_count.{0,20}?5"),
+            ),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_section_regex",
+                 r"printer\.cfg::bed_mesh::probe_count\s*[:=]\s*5\s*[,\s]\s*5"),
             ),
         ),
         TestQuestion(
