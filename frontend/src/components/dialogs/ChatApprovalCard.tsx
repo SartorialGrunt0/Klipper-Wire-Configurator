@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 import type { ApprovalCard } from '../../services/api';
-import { buildApprovalDiffLines, remainingApprovalSeconds } from '../../utils/approvalDiff';
+import { buildApprovalDiffLines, remainingApprovalSeconds, summarizeAdvisorySeverities } from '../../utils/approvalDiff';
 
 interface Props {
   card: ApprovalCard;
@@ -15,6 +15,8 @@ interface Props {
   invalidation: string | null;
   onApprove: () => void;
   onDecline: () => void;
+  /** Open the full-file diff preview (shared configDiff pipeline). */
+  onShowFullDiff: () => void;
 }
 
 /**
@@ -26,7 +28,7 @@ interface Props {
  * is the authority).
  */
 export default function ChatApprovalCard({
-  card, receivedAtMs, nowMs, busy, invalidation, onApprove, onDecline,
+  card, receivedAtMs, nowMs, busy, invalidation, onApprove, onDecline, onShowFullDiff,
 }: Props) {
   const diffLines = useMemo(
     () => (card.diff
@@ -36,6 +38,10 @@ export default function ChatApprovalCard({
   );
   const seconds = remainingApprovalSeconds(card.timeoutSeconds, receivedAtMs, nowMs);
   const expiringSoon = seconds <= 10;
+  const severities = useMemo(
+    () => summarizeAdvisorySeverities(card.advisories),
+    [card.advisories],
+  );
 
   return (
     <div className="rounded-lg border border-[var(--color-accent)]/40 bg-[var(--color-bg-secondary)] px-3 py-2.5 mb-2">
@@ -46,6 +52,30 @@ export default function ChatApprovalCard({
         <span className="text-[10px] text-[var(--color-text-secondary)] truncate">
           {card.file} · {card.op}
         </span>
+        {severities.warning > 0 && (
+          <span
+            className="shrink-0 text-[9px] font-semibold px-1.5 py-px rounded bg-[var(--color-warning)]/15 text-[var(--color-warning)]"
+            title={`${severities.warning} new validation warning(s)`}
+          >
+            ⚠ {severities.warning}
+          </span>
+        )}
+        {severities.error > 0 && (
+          <span
+            className="shrink-0 text-[9px] font-semibold px-1.5 py-px rounded bg-[var(--color-error)]/15 text-[var(--color-error)]"
+            title={`${severities.error} non-blocking error-severity finding(s)`}
+          >
+            ✕ {severities.error}
+          </span>
+        )}
+        {severities.other > 0 && (
+          <span
+            className="shrink-0 text-[9px] font-semibold px-1.5 py-px rounded bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]"
+            title={`${severities.other} informational finding(s)`}
+          >
+            ℹ {severities.other}
+          </span>
+        )}
         <span
           className={`ml-auto shrink-0 text-[10px] font-mono tabular-nums ${
             expiringSoon ? 'text-[var(--color-error)]' : 'text-[var(--color-text-secondary)]'
@@ -91,6 +121,12 @@ export default function ChatApprovalCard({
               </div>
             ))}
           </pre>
+          <button
+            onClick={onShowFullDiff}
+            className="w-full text-left text-[10px] px-2 py-1 border-t border-[var(--color-bg-tertiary)] text-[var(--color-accent)] hover:bg-[var(--color-bg-primary)]/50 transition-colors"
+          >
+            Show full file diff
+          </button>
         </div>
       )}
 

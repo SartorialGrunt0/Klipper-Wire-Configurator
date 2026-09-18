@@ -37,3 +37,25 @@ export function remainingApprovalSeconds(
   const elapsed = Math.max(0, (nowMs - receivedAtMs) / 1000);
   return Math.max(0, Math.ceil(serverRemaining - elapsed));
 }
+
+/** Per-severity counts over the delta-validation findings attached to an
+ *  approval card. The card's severity badges render from this — purely
+ *  mechanical (counts over server findings), never from model prose. */
+export interface AdvisorySeverityCounts {
+  error: number;
+  warning: number;
+  other: number;
+}
+
+export function summarizeAdvisorySeverities(
+  advisories: Array<{ severity?: string }>,
+): AdvisorySeverityCounts {
+  const counts: AdvisorySeverityCounts = { error: 0, warning: 0, other: 0 };
+  for (const adv of advisories ?? []) {
+    const sev = (adv?.severity || '').toLowerCase();
+    if (sev === 'error') counts.error += 1;
+    else if (sev === 'warning') counts.warning += 1;
+    else counts.other += 1;
+  }
+  return counts;
+}

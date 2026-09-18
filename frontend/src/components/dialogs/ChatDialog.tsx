@@ -45,6 +45,7 @@ import ChatHistoryDialog from './ChatHistoryDialog';
 import PrinterMemoryDialog from './PrinterMemoryDialog';
 import ChatMessageList from './ChatMessageList';
 import ChatApprovalCard from './ChatApprovalCard';
+import ApprovalDiffPreview from './ApprovalDiffPreview';
 import type { ApprovalCard } from '../../services/api';
 import ChatInputBar from './ChatInputBar';
 import AiDraftPreviewDialog from './AiDraftPreviewDialog';
@@ -163,6 +164,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   const [approvalNow, setApprovalNow] = useState(0);
   const [approvalBusy, setApprovalBusy] = useState(false);
   const [approvalInvalidation, setApprovalInvalidation] = useState<string | null>(null);
+  // Full-file diff preview opened from the approval card ("show full
+  // file"). Snapshot on open: the live card clears the moment the
+  // decision lands, the preview stays readable while it's open.
+  const [approvalDiffPreview, setApprovalDiffPreview] = useState<ApprovalCard | null>(null);
   const approvalCardRef = useRef<ApprovalCard | null>(null);
   // In-flight chat request id as STATE so the approval poll effect can
   // key on it (stopRequestIdRef alone never re-renders).
@@ -1121,6 +1126,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
               invalidation={approvalInvalidation}
               onApprove={() => { void handleApprovalDecision('approve'); }}
               onDecline={() => { void handleApprovalDecision('decline'); }}
+              onShowFullDiff={() => { if (approvalCard) setApprovalDiffPreview(approvalCard); }}
             />
           )}
         </div>
@@ -1189,6 +1195,14 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           onClose={() => { setShowPrinterMemory(false); setProposedMemory(null); }}
           proposedMemory={proposedMemory}
           onAcceptProposal={handleAcceptPrinterMemoryProposal}
+        />
+      )}
+
+      {/* Full-file diff preview for a pending approval card */}
+      {approvalDiffPreview && (
+        <ApprovalDiffPreview
+          card={approvalDiffPreview}
+          onClose={() => setApprovalDiffPreview(null)}
         />
       )}
 
