@@ -336,7 +336,8 @@ SYSTEM_PROMPT = (
     "- After config or macro code, briefly explain what changed, why, and cite the exact "
     "documentation section header and parameter or command names you relied on.\n"
     "- Klipper G-code commands and macro names (G28, M104, BED_MESH_CALIBRATE, "
-    "SET_FAN_SPEED, PRINT_START, etc.) are NOT tools — never wrap them in ```tool blocks.\n"
+    "SET_FAN_SPEED, PRINT_START, etc.) are NOT tools — never invoke them as "
+    "tool calls.\n"
 )
 
 
@@ -375,12 +376,14 @@ class ChatRequest(BaseModel):
     # Used ONLY for server-side merged-result target resolution when the
     # reply carries no explicit '# file:' hint; never injected into prompts.
     activeFile: str = ''
-    # Tool-calling protocol override (harness A/B runs). "auto" keeps the
-    # provider-based split (local http -> text ```tool protocol, cloud
-    # https -> native function calling); "native" forces OpenAI native
-    # tool_calls even for local llama.cpp servers (gpt-oss needs this);
-    # "text" forces the text protocol everywhere. The frontend never sends
-    # this; scripts/ai_chat_accuracy_test.py uses it for comparisons.
+    # Tool-calling protocol override (frontend setting / harness runs).
+    # "auto" (default) uses NATIVE function calling for every provider,
+    # local llama.cpp included — the machine channel keeps protocol text out
+    # of prompts and results out of user-role messages (verified b456
+    # --jinja 2026-09); the loop still regex-extracts text calls as a
+    # fallback. "text" forces the ```tool protocol (escape hatch for
+    # servers that advertise tools but emit template garbage); "native"
+    # pins native explicitly. scripts/ai_chat_accuracy_test.py A/Bs these.
     toolProtocol: str = "auto"
     # Tool-mediated editing override (harness A/B runs ONLY; the frontend
     # never sends it). None = env KWC_EDIT_TOOLS decides; True/False forces
@@ -562,7 +565,8 @@ def _get_openai_compatible_default_url(provider: str) -> str:
 def _prepare_messages(messages: list[dict], full_rewrite_guard: bool = False,
                       edit_capable: bool = False, *,
                       skill_gate: bool = False,
-                      skill_active: bool = False) -> list[dict]:
+                      skill_active: bool = False,
+                      native_mode: bool = False) -> list[dict]:
     """Build a clean system prompt with MCP tool descriptions, printer memory,
     and user messages.
     """
@@ -588,7 +592,8 @@ def _prepare_messages(messages: list[dict], full_rewrite_guard: bool = False,
         # detect_board and other niche helpers live under "Specialized tools".
         tool_context = _build_mcp_tool_context(edit_capable=edit_capable,
                                                skill_gate=skill_gate,
-                                               skill_active=skill_active)
+                                               skill_active=skill_active,
+                                               native_mode=native_mode)
         if edit_capable and _ablate_prose_edit_protocol():
             # ABLATION (2026-09-16, ack-loop investigation): the tool-mediated
             # law replaces the prose mini-diff protocol; keeping both tells the
@@ -928,7 +933,8 @@ def _load_skill_active(messages: list[dict]) -> bool:
 
 def _build_mcp_tool_context(edit_capable: bool = False, *,
                             skill_gate: bool = False,
-                            skill_active: bool = False) -> str:
+                            skill_active: bool = False,
+                            native_mode: bool = False) -> str:
     """Build the 'Available Tools' section for the system prompt.
 
     Every registered tool is advertised so text-protocol and native providers
@@ -963,14 +969,24 @@ def _build_mcp_tool_context(edit_capable: bool = False, *,
         "get_config_reference_section only when you need the prose "
         "explanation or examples of what the section does.",
         "",
-        "Text format (used by providers without native function calling): put a JSON ",
-        "code block tagged `tool` in your reply:",
-        "",
-        "```tool",
-        """{"name": "tool_name", "arguments": {"key": "value"}}""",
-        "```",
-        "",
-        "The tool runs and the result is returned as a follow-up message — use it to answer.",
+        # Format law is protocol-specific. Advertising the ```tool block to
+        # a native server is what teaches small models to narrate the
+        # protocol back at the user ("I see you've shared the tool-call
+        # instructions..."), so native turns get the short machine-channel
+        # statement instead. The ```tool block stays for tool_protocol=text.
+        *([
+            "Use your tools by calling them directly — the tool results come",
+            "back to you automatically; never write tool calls as text.",
+        ] if native_mode else [
+            "Text format (used by providers without native function calling): put a JSON ",
+            "code block tagged `tool` in your reply:",
+            "",
+            "```tool",
+            """{"name": "tool_name", "arguments": {"key": "value"}}""",
+            "```",
+            "",
+            "The tool runs and the result is returned as a follow-up message — use it to answer.",
+        ]),
         "",
         "Tools:",
     ]
@@ -2340,23 +2356,26 @@ def _resolve_native_tools(provider: str, api_url: str, tool_protocol: str,
                           skill_active: bool = False) -> list[dict] | None:
     """Decide whether to pass native function-calling tools to the provider.
 
-    tool_protocol values (harness A/B runs via ChatRequest.toolProtocol):
-      - "auto"   keep the provider-based split: local plain-http servers get
-                 the text ```tool protocol (None), cloud https endpoints get
-                 native function calling (OpenAI tools array).
-      - "native" force native tools for ANY provider — unlocks local
-                 llama.cpp servers running --jinja for models like gpt-oss
-                 that cannot handle the text protocol.
-      - "text"   force the text protocol even for cloud providers.
+    tool_protocol values (frontend setting / harness via ChatRequest):
+      - "auto" (default) NATIVE FIRST for every provider, local llama.cpp
+        included. Modern llama.cpp (b456+ --jinja) handles tool templates
+        cleanly (verified 2026-09: finish_reason=tool_calls, empty content,
+        valid JSON args on gemma-4-12b), and the native machine channel is
+        what stops models from reading protocol text back at the user —
+        results travel as role=tool turns instead of user-role
+        "[Tool result: ...]" lookalikes. Servers that ignore the tools
+        array still work: the loop keeps regex text extraction as a
+        fallback (native_calls or _extract_tool_calls).
+      - "text"   force the text ```tool protocol (escape hatch for a
+                 server that advertises tools but emits template garbage).
+      - "native" explicit native (identical to auto today; kept as the
+                 selector value the UI can pin).
     """
-    if tool_protocol == "native":
-        return _build_native_tools(edit_capable=edit_capable,
-                                   skill_gate=skill_gate,
-                                   skill_active=skill_active)
     if tool_protocol == "text":
         return None
-    return None if _is_local_provider(provider, api_url) else _build_native_tools(
-        edit_capable=edit_capable, skill_gate=skill_gate, skill_active=skill_active)
+    return _build_native_tools(edit_capable=edit_capable,
+                               skill_gate=skill_gate,
+                               skill_active=skill_active)
 
 
 def _extract_native_tool_calls(provider: str, data: dict) -> list[dict] | None:
@@ -3173,7 +3192,12 @@ async def chat_proxy(req: ChatRequest):
     messages = _prepare_messages(req.messages, full_rewrite_guard=req.fullRewriteGuard,
                                  edit_capable=edit_capable,
                                  skill_gate=skill_gate,
-                                 skill_active=_skill_state['active'])
+                                 skill_active=_skill_state['active'],
+                                 native_mode=_resolve_native_tools(
+                                     req.apiProvider, req.apiUrl, req.toolProtocol,
+                                     edit_capable=edit_capable,
+                                     skill_gate=skill_gate,
+                                     skill_active=_skill_state['active']) is not None)
 
     # ── Log request summary ──
     msg_count = len(messages)
@@ -3201,9 +3225,10 @@ async def chat_proxy(req: ChatRequest):
         req.apiKey,
     )
 
-    # Native function calling for cloud providers only; local providers keep
-    # the text-based ```tool protocol since local tool support varies.
-    # ChatRequest.toolProtocol overrides the split for harness A/B runs.
+    # Tool protocol: native function calling is the DEFAULT for every
+    # provider (see _resolve_native_tools). toolProtocol="text" forces the
+    # ```tool fallback; the loop still regex-extracts text calls when a
+    # native server ignores the tools array, so degradation is graceful.
     native_tools = _resolve_native_tools(req.apiProvider, req.apiUrl, req.toolProtocol,
                                          edit_capable=edit_capable,
                                          skill_gate=skill_gate,

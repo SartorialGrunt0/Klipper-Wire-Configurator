@@ -96,7 +96,7 @@ def test_system_prompt_full_rewrite_guard_strict_wording():
 
 def test_system_prompt_mentions_tools_are_not_gcode_commands():
     assert 'G28' in ai_routes.SYSTEM_PROMPT
-    assert 'never wrap them in ```tool blocks' in ai_routes.SYSTEM_PROMPT
+    assert 'never invoke them as tool calls' in ai_routes.SYSTEM_PROMPT
 
 
 # ── _prepare_messages ───────────────────────────────────────────────────
@@ -635,17 +635,18 @@ def test_list_models_route_graceful_error(monkeypatch):
     assert 'Failed to list models' in body['error']
 
 
-def test_resolve_native_tools_auto_split():
-    # "auto" keeps the provider-based split: local http -> text protocol,
-    # cloud https -> native function calling.
-    assert ai_routes._resolve_native_tools(
-        'openai-compatible', 'http://192.168.1.133:8080/v1/chat/completions', 'auto',
-    ) is None
-    tools = ai_routes._resolve_native_tools(
-        'openai-compatible', 'https://api.deepseek.com/v1/chat/completions', 'auto',
-    )
-    assert tools is not None
-    assert {t['function']['name'] for t in tools} >= {'search_klipper_docs'}
+def test_resolve_native_tools_auto_is_native_first():
+    # "auto" is NATIVE-FIRST for every provider (2026-09-17 decision):
+    # local llama.cpp included — the machine channel is what stops models
+    # from narrating protocol text back at the user. Only toolProtocol=
+    # "text" downgrades to the ```tool fallback.
+    for url in ('http://192.168.1.133:8080/v1/chat/completions',
+                'https://api.deepseek.com/v1/chat/completions'):
+        tools = ai_routes._resolve_native_tools(
+            'openai-compatible', url, 'auto',
+        )
+        assert tools is not None, url
+        assert {t['function']['name'] for t in tools} >= {'search_klipper_docs'}
 
 
 def test_resolve_native_tools_force_native_for_local():
@@ -662,6 +663,20 @@ def test_resolve_native_tools_force_text_for_cloud():
     assert ai_routes._resolve_native_tools(
         'openai-compatible', 'https://api.deepseek.com/v1/chat/completions', 'text',
     ) is None
+
+
+def test_tool_context_format_law_matches_protocol():
+    # The ```tool format law is fuel for "I see you've shared the tool-call
+    # instructions" ack bubbles — it must only appear when the text
+    # protocol is actually in force. Native context states the machine
+    # channel instead; the tool list itself is identical either way.
+    native = ai_routes._build_mcp_tool_context(native_mode=True)
+    text = ai_routes._build_mcp_tool_context(native_mode=False)
+    assert '```tool' not in native
+    assert 'never write tool calls as text' in native
+    assert '```tool' in text  # fallback law intact for tool_protocol=text
+    for name in ai_routes._MCP_TOOL_SNIPPETS:
+        assert f"- {name}:" in native and f"- {name}:" in text
 
 
 def test_extract_provider_content():
@@ -802,9 +817,11 @@ def test_chat_proxy_local_native_tool_protocol_sends_tools(monkeypatch):
     assert {t['function']['name'] for t in tools} >= {'search_klipper_docs'}
 
 
-def test_chat_proxy_local_default_tool_protocol_sends_no_tools(monkeypatch):
-    # Default ("auto") keeps the text protocol for local providers: no tools
-    # array in the outgoing payload.
+def test_chat_proxy_local_default_tool_protocol_sends_tools(monkeypatch):
+    # Default ("auto") is NATIVE-FIRST for local providers too (2026-09-17):
+    # the outgoing payload carries the tools array, and the system prompt
+    # drops the ```tool format law (ack-bubble fuel) in favor of the
+    # machine-channel statement.
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
     monkeypatch.setattr(ai_routes, '_auto_search_context', lambda query: None)
 
@@ -831,7 +848,12 @@ def test_chat_proxy_local_default_tool_protocol_sends_no_tools(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert 'tools' not in captured['payload']
+    payload = captured['payload']
+    assert 'tools' in payload
+    assert {t['function']['name'] for t in payload['tools']} >= {'search_klipper_docs'}
+    sys_txt = '\n'.join(str(m.get('content', '')) for m in payload.get('messages', [])
+                        if m.get('role') == 'system')
+    assert '```tool' not in sys_txt
 
 
 def test_chat_proxy_returns_plain_content(monkeypatch):
