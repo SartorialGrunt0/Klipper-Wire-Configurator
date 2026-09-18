@@ -813,3 +813,95 @@ def test_confab_note_absent_for_pure_qa(monkeypatch):
     response = client.post('/ai/chat', json=payload)
     body = response.json()
     assert body['content'] == 'max_accel is in the [printer] section.'
+
+
+def test_native_mode_nudge_drops_fence_law(monkeypatch):
+    """Native-first flip 2026-09-17: the fence format law in
+    EDIT_NUDGE_TEXT is text-protocol only. Under native function calling
+    it breaks template-trained models (live gemma-4-12b traces: 'I cannot
+    use that specific fence format... my instructions require me to use
+    the internal tool calling system'). The native nudge keeps the
+    argument shapes but never mentions the ```tool fence."""
+    monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
+    monkeypatch.setattr(ai_routes, '_mirror_user_config_files', lambda: {})
+    seen = []
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+        def raise_for_status(self):
+            return None
+        def json(self):
+            return self._payload
+
+    scripted = [
+        # inert draft (value NOT in the project -> echo guard does not
+        # suppress; this is the nudge-worthy shape)
+        '```cfg\n[printer]\nmax_accel: 4321\n```\nI set it for you.',
+        'Staged now.',
+    ]
+
+    async def fake_post(url, json=None, headers=None, **kwargs):
+        seen.append(json)
+        content = scripted[min(len(seen) - 1, len(scripted) - 1)]
+        return _Resp({'choices': [{'message': {'content': content},
+                                   'finish_reason': 'stop'}]})
+
+    monkeypatch.setattr(ai_routes.httpx.AsyncClient, 'post',
+                        lambda self, url, **kw: fake_post(url, **kw))
+
+    # chatgpt provider over https -> native tools resolved
+    response = client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'set max_accel to 4321'}]))
+    assert response.status_code == 200
+    assert len(seen) >= 2, 'nudge did not fire'
+    nudge_payload = seen[1]
+    nudges = [m for m in nudge_payload['messages']
+              if 'Call the tool NOW' in str(m.get('content', ''))]
+    assert nudges, 'nudge text not in provider payload'
+    text = str(nudges[0]['content'])
+    assert '```tool' not in text, f'fence law leaked into native nudge: {text}'
+    assert 'tool-calling interface' in text
+    # and the native tools array is actually present in that payload
+    assert nudge_payload.get('tools')
+
+
+def test_text_mode_nudge_keeps_fence_law(monkeypatch):
+    """toolProtocol='text' escape hatch keeps the fence-format nudge —
+    text-mode models have no other way to learn the call envelope."""
+    monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
+    seen = []
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+        def raise_for_status(self):
+            return None
+        def json(self):
+            return self._payload
+
+    scripted = [
+        '```cfg\n[printer]\nmax_accel: 4321\n```\nI set it for you.',
+        '```tool\n{"name": "config_edit", "arguments": {"file": "printer.cfg", '
+        '"op": "set_param", "section": "printer", "key": "max_accel", '
+        '"value": "4321"}}\n```',
+        'Staged now.',
+    ]
+
+    async def fake_post(url, json=None, headers=None, **kwargs):
+        seen.append(json)
+        content = scripted[min(len(seen) - 1, len(scripted) - 1)]
+        return _Resp({'choices': [{'message': {'content': content},
+                                   'finish_reason': 'stop'}]})
+
+    monkeypatch.setattr(ai_routes.httpx.AsyncClient, 'post',
+                        lambda self, url, **kw: fake_post(url, **kw))
+
+    response = client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'set max_accel to 4321'}],
+        toolProtocol='text'))
+    assert response.status_code == 200
+    nudges = [m for m in seen[1]['messages']
+              if 'Call the tool NOW' in str(m.get('content', ''))]
+    assert nudges, 'nudge did not fire in text mode'
+    assert '```tool' in str(nudges[0]['content'])

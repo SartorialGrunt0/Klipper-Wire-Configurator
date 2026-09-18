@@ -22,6 +22,7 @@ from services.ai_draft_apply import extract_config_code_blocks
 from services.ai_edit_tools import (
     APPROVAL_TIMEOUT_SECONDS,
     EDIT_NUDGE_TEXT,
+    EDIT_NUDGE_TEXT_NATIVE,
     EDIT_PROTOCOL_PROMPT,
     EDIT_TOOL_NAMES,
     EDIT_TOOL_SPECS,
@@ -3481,7 +3482,20 @@ async def chat_proxy(req: ChatRequest):
                                     # into self-granting allow_comment_change
                                     # (fabricated stage). Refusal wins.
                                     and edit_session.last_write_outcome
-                                    != 'user_gated')
+                                    != 'user_gated'
+                                    # Echo guard (native-mode traces
+                                    # 2026-09-17): after an APPROVED write
+                                    # models re-quote the staged section in
+                                    # a ```cfg block to show it. Structural
+                                    # test — a block whose config lines all
+                                    # exist in the working state is a
+                                    # display echo; only content absent
+                                    # from the project is an inert draft.
+                                    # (outcome=='correctable' above still
+                                    # nudges unconditionally.)
+                                    and edit_session.has_inert_draft(
+                                        extract_config_code_blocks(
+                                            current_content)))
                             )
                             and edit_nudges < 3):
                         edit_nudges += 1
@@ -3496,8 +3510,19 @@ async def chat_proxy(req: ChatRequest):
                                     {"role": "assistant", "content": clean_prior})
                         current_messages.append({
                             "role": "user",
+                            # Protocol-aware nudge: the fence format law in
+                            # EDIT_NUDGE_TEXT is text-protocol only. Under
+                            # native function calling it actively breaks
+                            # template-trained models (live native traces
+                            # 2026-09-17: gemma-4-12b replied "I cannot use
+                            # that specific fence format... my instructions
+                            # require me to use the internal tool calling
+                            # system"). Native arm keeps the argument
+                            # shapes, drops the fence law.
                             "content": (_LOAD_SKILL_NUDGE_TEXT
                                         if _current_skill_gate()
+                                        else EDIT_NUDGE_TEXT_NATIVE
+                                        if native_tools is not None
                                         else EDIT_NUDGE_TEXT),
                         })
                         nudge_payload = _build_provider_payload(

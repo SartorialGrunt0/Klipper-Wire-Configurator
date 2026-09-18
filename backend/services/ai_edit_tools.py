@@ -41,6 +41,16 @@ patch a macro body: {"name": "config_edit", "arguments": {"file": "<file.cfg>", 
 include a file: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "add_include", "target_file": "new.cfg"}}
 create a NEW file only: {"name": "config_write", "arguments": {"file": "new.cfg", "content": "<full file text>"}}"""
 
+EDIT_NUDGE_TEXT_NATIVE = """Call the tool NOW using your tool-calling interface (do not read \
+files again first -- the section text you need is already in this \
+conversation), or -- if the change is not safe or not possible -- explain \
+why to the user and ask.
+Argument shapes for the edit tools:
+set_param: {"file": "<file.cfg>", "op": "set_param", "section": "<section>", "key": "<param>", "value": "<new value>"}
+patch a macro body: {"file": "<file.cfg>", "op": "patch_gcode", "section": "gcode_macro NAME", "old_text": "<line copied verbatim>", "new_text": "<replacement>"}
+include a file: {"file": "<file.cfg>", "op": "add_include", "target_file": "<new.cfg>"}
+create a NEW file only: {"file": "<new.cfg>", "content": "<full file text>"}"""
+
 EDIT_TOOL_NAMES = frozenset({"config_edit", "config_write"})
 
 CONFIG_EDIT_SPEC = {
@@ -504,6 +514,54 @@ class EditSession:
             {k: e.get(k) for k in ("file", "op", "summary", "newText", "advisories")}
             for e in self.pending_edits
         ]
+
+    def has_inert_draft(self, blocks: list[str]) -> bool:
+        """True when a ```cfg block contains config substance that is NOT
+        yet in the working state — the inert-draft shape the prose nudge
+        exists to correct.
+
+        Purely structural (intent law): every non-comment line of the
+        block is matched against the stripped lines of ALL project files,
+        including changes committed THIS request (execute/commit advance
+        self.state). After an approved write, models habitually re-quote
+        the staged section in a ```cfg block to SHOW it (live native-mode
+        traces 2026-09-17: post-approve nudge gaslit gemma into "which
+        parameter would you like to change?" right after it staged the
+        only parameter). A block that only re-quotes current project text
+        is a display echo, not an inert draft. A block with even one line
+        absent from the project (new param, new value, mini-diff '+'
+        line) is still a draft and still gets nudged — the r5 multi-part
+        give-up protection is preserved. Comment lines ('#' — including
+        the '# file:' hint) carry no config substance and are ignored;
+        '*[section]' delete markers never match project text, so delete
+        drafts keep nudging.
+        """
+        project_lines: set[str] = set()
+        for text in self.state.files.values():
+            for line in text.splitlines():
+                stripped = line.strip()
+                if stripped:
+                    project_lines.add(stripped)
+        for block in blocks:
+            for raw in block.splitlines():
+                stripped = raw.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                if stripped.startswith("+"):
+                    # Mini-diff '+' line: the NEW value — echo iff the
+                    # post-'+' content is in the project (staged).
+                    if stripped[1:].strip() not in project_lines:
+                        return True
+                elif stripped.startswith("-"):
+                    # Mini-diff '-' line: the OLD value. Absent from the
+                    # project = display of an applied change (the old line
+                    # is gone) -> echo. Still present = deletion was never
+                    # applied -> inert draft.
+                    if stripped[1:].strip() in project_lines:
+                        return True
+                elif stripped not in project_lines:
+                    return True
+        return False
 
 
 # ── Approval gate (Phase 2) ────────────────────────────────────────────

@@ -497,3 +497,79 @@ def test_decline_shields_cfg_block_nudge(edit_flag, monkeypatch):
     # have popped another scripted reply ('Done.') as the final content.
     assert 'For reference' in body['content']
     assert not body['pendingEdits']
+
+
+def test_approve_then_cfg_echo_not_nudged(edit_flag, monkeypatch):
+    """Native-mode traces 2026-09-17: right after an APPROVED write,
+    gemma re-quotes the staged section in a ```cfg block to show it.
+    That is a display echo, not an inert draft — the prose nudge must
+    NOT fire (it gaslit the model into 'which parameter would you like
+    to change?' after it had staged the only parameter)."""
+    scripted = _install(monkeypatch, [
+        _text_tool_call('config_edit', SET_ACCEL),
+        # post-approve summary quoting the STAGED value (structural echo:
+        # every config line already exists in the working state)
+        _final_reply('I have added the change to your printer.cfg. I used:\n\n'
+                     '```cfg\n# file: printer.cfg\n[printer]\nmax_accel: 3000\n```\n'),
+    ])
+    payload = {
+        'messages': [{'role': 'user', 'content': 'set max_accel to 3000'}],
+        'apiKey': 'k', 'model': 'm',
+        'apiUrl': 'https://api.example.com/v1/chat/completions',
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(),
+        'requestId': 'gate-echo-1', 'autoApproveEdits': False,
+    }
+    t, result = _post_chat_bg(payload)
+    card = _wait_card('gate-echo-1')
+    client.post('/ai/chat/approval', json={
+        'approvalId': card['approvalId'], 'decision': 'approve'})
+    t.join(timeout=10)
+    assert result['status'] == 200
+    body = result['body']
+    # A fired nudge would have consumed another scripted reply and
+    # replaced this one; the echo must come back untouched.
+    assert 'I have added the change' in body['content']
+    assert body['pendingEdits']
+    # Branch-identity assert: NO nudge text entered any provider payload.
+    assert not any('Call the tool NOW' in str(p) for p in scripted.payloads)
+
+
+def test_multipart_giveup_after_staged_first_half_still_nudged(edit_flag, monkeypatch):
+    """Negative control for the echo guard: after a staged (approved)
+    first edit, a ```cfg block containing lines ABSENT from the project
+    is the r5 multi-part give-up shape — still inert, still nudged."""
+    ctx = {'printer.cfg': {'content': PRINTER_CFG + '\n[fan]\npin: PA0\ncycle_time: 0.01\n'}}
+    scripted = _install(monkeypatch, [
+        _text_tool_call('config_edit', SET_ACCEL),
+        # first half staged; second half drafted as prose with a NEW value
+        _final_reply('max_accel staged. And for the fan:\n\n'
+                     '```cfg\n[fan]\ncycle_time: 0.02\n```\n'),
+        # after nudge: the model stages the second half properly
+        _text_tool_call('config_edit', {'file': 'printer.cfg', 'op': 'set_param',
+                                        'section': 'fan', 'key': 'cycle_time',
+                                        'value': '0.02'}),
+        _final_reply('Both changes staged.'),
+    ])
+    payload = {
+        'messages': [{'role': 'user',
+                      'content': 'set max_accel to 3000 and fan cycle_time to 0.02'}],
+        'apiKey': 'k', 'model': 'm',
+        'apiUrl': 'https://api.example.com/v1/chat/completions',
+        'apiProvider': 'chatgpt', 'contextFiles': ctx,
+        'requestId': 'gate-echo-2', 'autoApproveEdits': False,
+    }
+    t, result = _post_chat_bg(payload)
+    card = _wait_card('gate-echo-2')
+    client.post('/ai/chat/approval', json={
+        'approvalId': card['approvalId'], 'decision': 'approve'})
+    # the nudge-driven second write opens its own card
+    card2 = _wait_card('gate-echo-2')
+    client.post('/ai/chat/approval', json={
+        'approvalId': card2['approvalId'], 'decision': 'approve'})
+    t.join(timeout=10)
+    assert result['status'] == 200
+    body = result['body']
+    assert body['pendingEdits']
+    assert any('cycle_time' in (e.get('newText') or '')
+               or e.get('summary', '').find('cycle_time') >= 0
+               for e in body['pendingEdits']), body['pendingEdits']
