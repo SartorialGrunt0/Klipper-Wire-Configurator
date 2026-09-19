@@ -2062,7 +2062,7 @@ def build_memory_questions() -> list[TestQuestion]:
     The backend only injects the auto-fill prompt when printer memory is
     blank, so these run after the harness blanks memory (backed up first,
     restored after the run). Success = a valid fenced `printer-memory` JSON
-    block with only the 7 allowed fields, plus correct field values.
+    block with only the 9 allowed fields, plus correct field values.
     """
     return [
         TestQuestion(
@@ -2159,6 +2159,8 @@ ALLOWED_MEMORY_FIELDS = (
     "printerName",
     "kinematics",
     "probe",
+    "buildVolume",
+    "extruderType",
     "additionalNotes",
 )
 

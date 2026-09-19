@@ -634,15 +634,27 @@ def _prepare_messages(messages: list[dict], full_rewrite_guard: bool = False,
                 "the user's config — e.g. a Voron 2.4 usually uses CoreXY kinematics.\n"
                 "3. For any field you cannot determine, ask the user to provide it.\n"
                 "4. Return your proposal in a fenced `printer-memory` code block containing ONLY valid "
-                "JSON — no surrounding explanation or markdown inside the block. Only these 7 fields "
+                "JSON — no surrounding explanation or markdown inside the block. Only these 9 fields "
                 "are allowed; unsupported fields will be rejected: mainboard, toolheadBoard, "
-                "expanderBoards, printerName, kinematics, probe, additionalNotes.\n"
+                "expanderBoards, printerName, kinematics, probe, buildVolume, extruderType, "
+                "additionalNotes. extruderType accepts ONLY 'direct' or 'bowden'. Omit fields you "
+                "cannot determine — never guess.\n"
                 "   ```printer-memory\n"
-                "   {\"mainboard\": \"BTT Octopus Pro v1.1\", \"kinematics\": \"CoreXY\"}\n"
+                "   {\"mainboard\": \"BTT Octopus Pro v1.1\", \"kinematics\": \"CoreXY\", "
+                "\"buildVolume\": \"250x250x210\", \"extruderType\": \"direct\"}\n"
                 "   ```\n"
                 "The user confirms in a review dialog before anything is saved — do NOT save printer "
                 "memory directly."
             )
+            if skill_gate:
+                # The full fact-finding playbook lives in the
+                # printer-memory skill; the prompt points there instead
+                # of duplicating it.
+                auto_fill_prompt += (
+                    "\nCall load_skill(name='printer-memory') first — it "
+                    "lists exactly where each field's evidence lives in "
+                    "the config."
+                )
             system_parts.append(auto_fill_prompt)
 
     prepared: list[dict] = []
@@ -833,6 +845,15 @@ _EDIT_TOOL_SNIPPETS: dict[str, str] = {
 # a-question failure this gating exists to kill (plan 2026-09-10, Q4).
 EDIT_SKILL_GATE_ENV = "KWC_EDIT_SKILL_GATE"
 EDIT_SKILL_NAME = "config-editing"
+MEMORY_SKILL_NAME = "printer-memory"
+MEMORY_SKILL_DESCRIPTION = (
+    "Fills in the user's printer memory with hardware facts (boards, "
+    "kinematics, build volume, extruder type, probe). Use when the printer "
+    "memory shows blank or missing fields, when the user asks to set up or "
+    "correct their printer profile, or when a needed hardware fact is "
+    "unknown and guessable-but-risky. Do NOT use when memory already "
+    "contains the fact you need."
+)
 EDIT_SKILL_DESCRIPTION = (
     "Applies edits to the user's Klipper config files. Use when the request "
     "asks to change, add, remove, fix, or comment out a section, parameter, "
@@ -846,15 +867,15 @@ LOAD_SKILL_SPEC = {
     "name": "load_skill",
     "description": (
         "Load the full instructions for a listed skill and unlock its "
-        "tools. Call this BEFORE attempting to use a skill; load at most "
-        "one skill per conversation."
+        "tools. Call this BEFORE attempting to use a skill; load each "
+        "skill at most once per conversation."
     ),
     "inputSchema": {
         "type": "object",
         "properties": {
             "name": {
                 "type": "string",
-                "enum": [EDIT_SKILL_NAME],
+                "enum": [EDIT_SKILL_NAME, MEMORY_SKILL_NAME],
                 "description": "Skill name from <available_skills>",
             },
         },
@@ -863,8 +884,9 @@ LOAD_SKILL_SPEC = {
 }
 
 _LOAD_SKILL_SNIPPET = (
-    "Load a skill's full instructions before using it "
-    "(name='config-editing'); loading it unlocks its listed tools"
+    "Load a skill's full instructions before using it — "
+    "name='config-editing' (unlocks the edit tools) or 'printer-memory' "
+    "(hardware fact-finding playbook)"
 )
 
 # Nudge replacement while the skill gate is CLOSED: pointing at a locked
@@ -908,11 +930,69 @@ def _edit_skill_body() -> str:
 _SKILL_INDEX_BLOCK = (
     "<available_skills>\n"
     f"- {EDIT_SKILL_NAME}: {EDIT_SKILL_DESCRIPTION}\n"
+    f"- {MEMORY_SKILL_NAME}: {MEMORY_SKILL_DESCRIPTION}\n"
     "</available_skills>\n"
     "If the user's request is about editing their config, call load_skill "
     "with the skill name FIRST — the edit tools are not available until "
-    "you do. Questions about Klipper or the config never need a skill."
+    "you do. If the printer memory has blank fields you need (or you are "
+    "about to guess a hardware fact), load_skill(name='printer-memory') "
+    "and follow its playbook instead of guessing. Questions about Klipper "
+    "that need neither never need a skill."
 )
+
+
+def _memory_skill_body() -> str:
+    """The skill body returned by load_skill(name='printer-memory'):
+    the hardware fact-finding playbook. No tools unlock — every tool it
+    uses (read_user_config, search_example_configs, ...) is already
+    advertised; what the body adds is WHERE to look for each field."""
+    return (
+        f"Skill '{MEMORY_SKILL_NAME}' loaded.\n\n"
+        "Goal: fill the printer memory fields with FACTS, never guesses.\n"
+        "For each field: (1) look for evidence in the user's config and "
+        "bundled example configs; (2) ask the user only what you cannot "
+        "determine; (3) never invent a value.\n\n"
+        "Where to look:\n"
+        "- mainboard / toolheadBoard / expanderBoards: the [mcu] sections "
+        "name MCUs; board models come from canbus_query-style notes, "
+        "# comments, or search_example_configs with the MCU chip + "
+        "pin-style clues, confirmed via read_example_config. If the exact "
+        "model stays unconfirmed, STILL record the certain part as a "
+        "factual description (e.g. 'STM32F446 board — model unconfirmed') "
+        "— stating what IS known is not a guess; leaving a known chip "
+        "out is worse than a hedged entry.\n"
+        "- printerName: user messages or config comments first (e.g. "
+        "'# Voron Trident 250'); never guess from kinematics alone.\n"
+        "- kinematics: the [printer] section's kinematics: key — read it, "
+        "do not infer.\n"
+        "- probe: the [probe] / [bltouch] / [load_cell] sections and "
+        "probe pin comments (Voron Tap = [probe] with no bltouch).\n"
+        "- buildVolume: from [printer] max_x/y/z_mm, e.g. "
+        "'max_x: 250, max_y: 250, max_z: 210' -> '250x250x210'.\n"
+        "- extruderType: 'direct' or 'bowden' ONLY. Evidence: bowden "
+        "tubes show up as long bowden_length / pressure_advance "
+        "discussion, Titan/BMG paired with a remote motor, or the user "
+        "saying so; typical modern Voron toolheads (AbbottCluster, "
+        "Afterwise, Orbiter-on-carriage) are direct drive. If the config "
+        "does not settle it, ASK — one short question, both options "
+        "named.\n\n"
+        "Return the proposal in a fenced `printer-memory` code block "
+        "with ONLY these 9 fields (omit the ones that stay unknown):\n"
+        "mainboard, toolheadBoard, expanderBoards, printerName, "
+        "kinematics, probe, buildVolume, extruderType, additionalNotes.\n"
+        "   ```printer-memory\n"
+        "   {\"kinematics\": \"CoreXY\", \"buildVolume\": \"250x250x210\", "
+        "\"extruderType\": \"direct\"}\n"
+        "   ```\n"
+        "The user confirms before anything is saved. Leave a field out "
+        "rather than guessing — an omitted field is honest; a wrong one "
+        "poisons every later answer.\n\n"
+        "ALWAYS return the block in the SAME reply, even when you are "
+        "also asking questions: emit every fact you have determined NOW "
+        "(a partial profile saves fine), then ask about the rest. Never "
+        "wait for answers before returning what you already know — your "
+        "facts are lost if the conversation moves on."
+    )
 
 
 def _load_skill_active(messages: list[dict]) -> bool:
@@ -923,11 +1003,24 @@ def _load_skill_active(messages: list[dict]) -> bool:
         if str(msg.get("role", "")) not in ("user", "assistant"):
             continue
         content = str(msg.get("content", ""))
-        if re.search(r"\[Tool result: load_skill\(", content):
+        # Name-anchored (r4b trap): a printer-memory skill load in the
+        # history must NOT count as the edit skill being active. The
+        # tool-result marker carries `name=config-editing` verbatim.
+        if re.search(r"\[Tool result: load_skill\(name=?['\"]?"
+                     + re.escape(EDIT_SKILL_NAME), content):
             return True
         for call in msg.get("tool_calls") or []:
             fn = call.get("function") if isinstance(call, dict) else None
-            if isinstance(fn, dict) and fn.get("name") == "load_skill":
+            if not isinstance(fn, dict) or fn.get("name") != "load_skill":
+                continue
+            args = fn.get("arguments")
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except (json.JSONDecodeError, ValueError):
+                    args = {}
+            name = str((args or {}).get("name", ""))
+            if not name or name == EDIT_SKILL_NAME:
                 return True
     return False
 
@@ -3579,32 +3672,39 @@ async def chat_proxy(req: ChatRequest):
                 # follow-up messages in the format the provider expects.
                 results = []
                 for tool_call in tool_calls[:MAX_MCP_TOOL_TURNS]:
-                    if (skill_gate and _skill_state['active']
-                            and tool_call.get('name') == 'load_skill'):
-                        # Idempotent re-load: the body is already in
-                        # history; serve it again rather than falling to
-                        # the MCP unknown-tool path.
-                        result_text = _edit_skill_body()
+                    if skill_gate and tool_call.get('name') == 'load_skill':
+                        # Dispatch by REQUESTED skill name — loading
+                        # printer-memory must never unlock the edit tools
+                        # (only the config-editing load flips the gate).
                         edit_details = None
-                    elif (skill_gate and not _skill_state['active']
-                            and tool_call.get('name') == 'load_skill'):
-                        # Model-triggered unlock (mechanical, observed).
-                        _skill_state['active'] = True
                         requested = str(
                             (tool_call.get('arguments') or {}).get('name', ''))
-                        if requested and requested != EDIT_SKILL_NAME:
-                            result_text = (
-                                f"Unknown skill '{requested}'. The only "
-                                f"available skill is '{EDIT_SKILL_NAME}'.")
-                        else:
-                            result_text = _edit_skill_body()
-                            native_tools = _resolve_native_tools(
-                                req.apiProvider, req.apiUrl, req.toolProtocol,
-                                edit_capable=edit_capable,
-                                skill_active=True)
+                        if requested == MEMORY_SKILL_NAME:
+                            result_text = _memory_skill_body()
                             logger.info(
-                                "Edit skill activated | write tools unlocked "
-                                "mid-request requestId=%s", req.requestId or 'none')
+                                "Printer-memory skill loaded "
+                                "| requestId=%s", req.requestId or 'none')
+                        elif requested in ('', EDIT_SKILL_NAME):
+                            # Idempotent re-load after activation: body is
+                            # already in history; serve it again. First
+                            # load: flip the gate and re-resolve tools.
+                            if not _skill_state['active']:
+                                _skill_state['active'] = True
+                                native_tools = _resolve_native_tools(
+                                    req.apiProvider, req.apiUrl,
+                                    req.toolProtocol,
+                                    edit_capable=edit_capable,
+                                    skill_active=True)
+                                logger.info(
+                                    "Edit skill activated | write tools "
+                                    "unlocked mid-request requestId=%s",
+                                    req.requestId or 'none')
+                            result_text = _edit_skill_body()
+                        else:
+                            result_text = (
+                                f"Unknown skill '{requested}'. Available "
+                                f"skills: '{EDIT_SKILL_NAME}', "
+                                f"'{MEMORY_SKILL_NAME}'.")
                     elif edit_session is not None and tool_call.get("name") in EDIT_TOOL_NAMES:
                         if _current_skill_gate():
                             # Write tool used WITHOUT loading the skill:

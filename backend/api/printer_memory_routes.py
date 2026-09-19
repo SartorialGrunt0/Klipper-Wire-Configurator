@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 logger = logging.getLogger("kwc.printer_memory")
 
@@ -24,7 +24,36 @@ class PrinterMemory(BaseModel):
     printerName: str = ""
     kinematics: str = ""
     probe: str = ""
+    buildVolume: str = ""
+    extruderType: str = ""
     additionalNotes: str = ""
+
+    @field_validator("extruderType")
+    @classmethod
+    def _closed_set_extruder_type(cls, v: str) -> str:
+        # Closed set: DIRECT DRIVE or BOWDEN are the ONLY options (Sir's
+        # spec). Blank = unknown stays valid; anything else is rejected
+        # at the API edge so a hallucinated "direct"/"bowden drive"
+        # variant can never persist. Accepted spellings canonicalize to
+        # the two stored values.
+        key = v.strip().lower()
+        accepted = {
+            "": "",
+            "direct": "direct",
+            "direct drive": "direct",
+            "direct-drive": "direct",
+            "directdrive": "direct",
+            "bowden": "bowden",
+            "bowden drive": "bowden",
+            "bowden-drive": "bowden",
+            "bowdendrive": "bowden",
+        }
+        try:
+            return accepted[key]
+        except KeyError:
+            raise ValueError(
+                "extruderType must be 'direct' or 'bowden' (got "
+                f"{v!r})") from None
 
 
 def _ensure_default() -> None:
@@ -84,6 +113,8 @@ def printer_memory_to_context(memory: PrinterMemory) -> str:
         ("printerName", "Printer Name"),
         ("kinematics", "Kinematics"),
         ("probe", "Probe"),
+        ("buildVolume", "Build Volume"),
+        ("extruderType", "Extruder Type"),
         ("additionalNotes", "Additional Notes"),
     ]:
         value = data.get(key, "")
@@ -104,15 +135,18 @@ def printer_memory_to_context(memory: PrinterMemory) -> str:
             "to confirm hardware details\n"
             "For any details you cannot determine, ask the user to provide them.\n"
             "\n"
-            "IMPORTANT: Only these 7 fields are allowed — do NOT add any extra fields:\n"
-            "mainboard, toolheadBoard, expanderBoards, printerName, kinematics, "
-            "probe, additionalNotes. Any unsupported fields will be rejected."
+            "IMPORTANT: Only these 9 fields are allowed — do NOT add any "
+            "extra fields:\n"
+            "mainboard, toolheadBoard, expanderBoards, printerName, "
+            "kinematics, probe, buildVolume, extruderType, "
+            "additionalNotes. Any unsupported fields will be rejected. "
+            "extruderType accepts ONLY 'direct' or 'bowden'.\n"
         )
 
     parts.append("")
     parts.append(
         "To update this printer memory, return the full updated JSON in a fenced `printer-memory` code block. "
-        "The block must contain ONLY the 7 fields listed above — no extras. "
+        "The block must contain ONLY the 9 fields listed above — no extras. "
         "The application will let the user review and confirm before saving. "
         "Use this information to avoid asking the user for the same details repeatedly."
     )

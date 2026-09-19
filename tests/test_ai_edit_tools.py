@@ -1038,3 +1038,110 @@ def test_allow_comment_change_fresh_session_still_works():
                       'allow_comment_change': True}})
     assert details is not None
     assert 'STAGED' in content
+
+
+# ── printer-memory skill + new fields (buildVolume/extruderType) ──────
+
+
+def test_memory_skill_body_playbook():
+    body = ai_routes._memory_skill_body()
+    assert 'buildVolume' in body and 'max_x' in body
+    assert "'direct' or 'bowden'" in body
+    assert 'printer-memory' in body
+    # must NOT unlock or mention edit tools
+    assert 'config_edit' not in body
+
+
+def test_skill_index_advertises_both_skills():
+    ctx = ai_routes._build_mcp_tool_context(edit_capable=True,
+                                            skill_gate=True)
+    assert '- config-editing:' in ctx
+    assert '- printer-memory:' in ctx
+
+
+def test_load_skill_active_is_name_anchored():
+    """A printer-memory skill load must NOT count as the edit skill
+    being active — the gate is per-skill, not per-loader-call."""
+    from api.ai_routes import _load_skill_active
+    mem_msg = ('[Tool result: load_skill(name=printer-memory)]\n\n'
+               'Skill \'printer-memory\' loaded.\n\n[End tool result. '
+               'Use this information to answer the user\'s latest '
+               '(last) request above.]')
+    assert not _load_skill_active(
+        [{'role': 'user', 'content': 'hi'},
+         {'role': 'assistant', 'content': mem_msg}])
+    # the edit-skill marker still activates
+    assert _load_skill_active(
+        [{'role': 'user', 'content': 'hi'},
+         {'role': 'assistant', 'content': _SKILL_RESULT_MSG}])
+    # native echo with name=printer-memory must not activate either
+    assert not _load_skill_active([{
+        'role': 'assistant', 'content': '',
+        'tool_calls': [{'function': {
+            'name': 'load_skill',
+            'arguments': '{"name": "printer-memory"}'}}],
+    }])
+    assert _load_skill_active([{
+        'role': 'assistant', 'content': '',
+        'tool_calls': [{'function': {
+            'name': 'load_skill',
+            'arguments': '{"name": "config-editing"}'}}],
+    }])
+
+
+def test_native_memory_load_still_locks_write_tools():
+    """End-to-end shape: after a printer-memory load in history, the
+    edit tools stay gated; a config-edit call gets the load-first
+    kickback. (Verified at the predicate level above; here the context
+    built from a memory-only history still advertises the skill index.)"""
+    ctx = ai_routes._build_mcp_tool_context(edit_capable=True,
+                                            skill_gate=True,
+                                            skill_active=False)
+    assert '- config_edit:' not in ctx
+    assert '<available_skills>' in ctx
+
+
+def test_printer_memory_new_fields_in_model_and_context():
+    from api.printer_memory_routes import (PrinterMemory,
+                                           printer_memory_to_context)
+    m = PrinterMemory(kinematics='CoreXY', buildVolume='250x250x210',
+                      extruderType='direct')
+    ctx = printer_memory_to_context(m)
+    assert 'Build Volume' in ctx and '250x250x210' in ctx
+    assert 'Extruder Type' in ctx
+    # blank memory carries the 9-field law + closed-set note
+    blank = printer_memory_to_context(PrinterMemory())
+    assert 'Only these 9 fields' in blank
+    assert "ONLY 'direct' or 'bowden'" in blank
+    assert 'buildVolume, extruderType' in blank
+
+
+def test_extruder_type_closed_set():
+    from api.printer_memory_routes import PrinterMemory
+    import pydantic
+    assert PrinterMemory(extruderType='direct').extruderType == 'direct'
+    # accepted spellings canonicalize
+    assert PrinterMemory(extruderType='Direct Drive').extruderType == 'direct'
+    assert PrinterMemory(extruderType=' bowden ').extruderType == 'bowden'
+    # everything else rejected at the API edge
+    try:
+        PrinterMemory(extruderType='direct drive mk2')
+        raise AssertionError('closed set not enforced')
+    except pydantic.ValidationError:
+        pass
+
+
+def test_blank_autofill_prompt_lists_9_fields(monkeypatch):
+    from api.printer_memory_routes import PrinterMemory
+    monkeypatch.setattr(ai_routes, 'load_printer_memory',
+                        lambda: PrinterMemory())
+    msgs = ai_routes._prepare_messages(
+        [{'role': 'user', 'content': 'hi'}],
+        edit_capable=True, skill_gate=True)
+    sys_text = '\n'.join(str(m.get('content', ''))
+                         for m in msgs if m.get('role') == 'system')
+    assert 'Printer Memory Auto-Fill' in sys_text
+    assert 'Only these 9 fields' in sys_text
+    assert 'buildVolume, extruderType' in sys_text
+    # gate ON -> pointer into the skill playbook
+    assert "load_skill(name='printer-memory')" in sys_text

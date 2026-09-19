@@ -7,6 +7,7 @@ import {
   hasPrinterMemoryBlock,
   stripPrinterMemoryExtraKeys,
   validatePrinterMemoryContent,
+  canonicalizeExtruderType,
 } from '@/utils/printerMemory';
 
 const block = (json: string) => `Explaining...\n\`\`\`printer-memory\n${json}\n\`\`\``;
@@ -123,5 +124,56 @@ describe('buildPrinterMemoryValidationFeedback', () => {
 describe('MAX_PRINTER_MEMORY_VALIDATION_ATTEMPTS', () => {
   it('is 3', () => {
     expect(MAX_PRINTER_MEMORY_VALIDATION_ATTEMPTS).toBe(3);
+  });
+});
+
+describe('buildVolume + extruderType (9-field expansion)', () => {
+  it('extracts new fields incl. display-key spellings', () => {
+    const parsed = extractPrinterMemoryBlock(
+      '```printer-memory\n{"Build Volume": "250x250x210", "Extruder Type": "direct"}\n```');
+    expect(parsed).toEqual({ buildVolume: '250x250x210', extruderType: 'direct' });
+  });
+
+  it('canonicalizes accepted extruderType spellings', () => {
+    expect(canonicalizeExtruderType('Direct Drive')).toBe('direct');
+    expect(canonicalizeExtruderType(' BOWDEN ')).toBe('bowden');
+    expect(canonicalizeExtruderType('')).toBe('');
+    expect(canonicalizeExtruderType('direct-drive mk2')).toBeNull();
+  });
+
+  it('extract canonicalizes "Direct Drive" to "direct"', () => {
+    const parsed = extractPrinterMemoryBlock(
+      '```printer-memory\n{"extruderType": "Direct Drive"}\n```');
+    expect(parsed).toEqual({ extruderType: 'direct' });
+  });
+
+  it('validatePrinterMemoryContent flags out-of-set extruderType', () => {
+    const res = validatePrinterMemoryContent(
+      '```printer-memory\n{"kinematics": "CoreXY", "extruderType": "worm drive"}\n```');
+    expect(res).not.toBeNull();
+    const bad = res!.issues.find((i) => i.type === 'bad_value');
+    expect(bad).toBeDefined();
+    expect(bad!.message).toContain('"direct" or "bowden"');
+  });
+
+  it('accepts direct/bowden/omitted extruderType', () => {
+    for (const v of ['direct', 'bowden']) {
+      const res = validatePrinterMemoryContent(
+        ` \`\`\`printer-memory\n{"extruderType": "${v}"}\n\`\`\``);
+      expect(res!.issues.filter((i) => i.type === 'bad_value')).toEqual([]);
+    }
+    const res = validatePrinterMemoryContent(
+      '```printer-memory\n{"kinematics": "CoreXY"}\n```');
+    expect(res!.issues).toEqual([]);
+  });
+
+  it('feedback lists all 9 fields with the closed-set note', () => {
+    const feedback = buildPrinterMemoryValidationFeedback([
+      { type: 'bad_value', message: 'extruderType must be exactly "direct" or "bowden"' },
+    ]);
+    expect(feedback).toContain('Only these 9 fields');
+    expect(feedback).toContain('buildVolume');
+    expect(feedback).toContain('extruderType (only "direct" or "bowden")');
+    expect(feedback).toContain('A field value is not allowed');
   });
 });

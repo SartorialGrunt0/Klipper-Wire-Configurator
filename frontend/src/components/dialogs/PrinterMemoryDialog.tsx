@@ -25,6 +25,8 @@ interface FieldConfig {
   key: keyof PrinterMemory;
   label: string;
   placeholder: string;
+  /** When set, the field renders as a closed-set select. */
+  options?: { value: string; label: string }[];
 }
 
 const FIELDS: FieldConfig[] = [
@@ -34,6 +36,17 @@ const FIELDS: FieldConfig[] = [
   { key: 'printerName', label: 'Printer Name', placeholder: 'e.g. Voron 2.4 350mm' },
   { key: 'kinematics', label: 'Kinematics', placeholder: 'e.g. CoreXY, Cartesian, Delta' },
   { key: 'probe', label: 'Probe', placeholder: 'e.g. BLTouch, Klicky, Omron' },
+  { key: 'buildVolume', label: 'Build Volume', placeholder: 'e.g. 250x250x210' },
+  {
+    key: 'extruderType',
+    label: 'Extruder Type',
+    placeholder: '',
+    options: [
+      { value: '', label: 'Unknown' },
+      { value: 'direct', label: 'Direct Drive' },
+      { value: 'bowden', label: 'Bowden' },
+    ],
+  },
   { key: 'additionalNotes', label: 'Additional Notes', placeholder: 'Any other printer details...' },
 ];
 
@@ -207,6 +220,18 @@ const PrinterMemoryDialog: React.FC<PrinterMemoryDialogProps> = ({
                     rows={3}
                     className={`w-full px-2.5 py-1.5 rounded text-xs bg-[var(--color-bg-primary)] border ${isChanged ? 'border-blue-500/40' : 'border-[var(--color-bg-tertiary)]'} text-[var(--color-text-primary)] placeholder-[var(--color-text-secondary)]/40 focus:outline-none focus:border-blue-500/50 resize-none`}
                   />
+                ) : field.options ? (
+                  <select
+                    value={currentVal}
+                    onChange={(e) => handleFieldChange(field.key, e.target.value)}
+                    className={`w-full px-2.5 py-1.5 rounded text-xs bg-[var(--color-bg-primary)] border ${isChanged ? 'border-blue-500/40' : 'border-[var(--color-bg-tertiary)]'} text-[var(--color-text-primary)] focus:outline-none focus:border-blue-500/50`}
+                  >
+                    {field.options.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
                 ) : (
                   <input
                     type="text"
