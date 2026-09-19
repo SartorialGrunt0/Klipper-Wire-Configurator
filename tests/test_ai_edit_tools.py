@@ -1045,7 +1045,7 @@ def test_allow_comment_change_fresh_session_still_works():
 
 def test_memory_skill_body_playbook():
     body = ai_routes._memory_skill_body()
-    assert 'buildVolume' in body and 'max_x' in body
+    assert 'buildVolume' in body and 'position_max' in body
     assert "'direct' or 'bowden'" in body
     assert 'printer-memory' in body
     # must NOT unlock or mention edit tools
@@ -1145,3 +1145,87 @@ def test_blank_autofill_prompt_lists_9_fields(monkeypatch):
     assert 'buildVolume, extruderType' in sys_text
     # gate ON -> pointer into the skill playbook
     assert "load_skill(name='printer-memory')" in sys_text
+
+
+# ── mechanical machine-fact derivation (Macro Designer parity) ────────
+
+
+def test_derive_machine_facts_cartesian_and_delta():
+    from api.printer_memory_routes import derive_machine_facts
+    corexy = (
+        '[printer]\nkinematics: corexy\nmax_velocity: 500\n'
+        '[stepper_x]\nposition_max: 250\n'
+        '[stepper_y]\nposition_max: 250\nposition_min: -5\n'
+        '[stepper_z]\nposition_max: 210\n')
+    assert derive_machine_facts([corexy]) == {
+        'kinematics': 'corexy', 'buildVolume': '250x255x210'}
+    delta = ('[printer]\nkinematics: delta\nprint_radius: 130\n'
+             '[stepper_a]\nposition_max: 420\n')
+    assert derive_machine_facts([delta]) == {
+        'kinematics': 'delta', 'buildVolume': 'round Ø260'}
+
+
+def test_derive_machine_facts_conservative():
+    from api.printer_memory_routes import derive_machine_facts
+    # no stepper data -> kinematics only, no invented volume
+    assert derive_machine_facts(
+        ['[printer]\nkinematics: corexy\n']) == {'kinematics': 'corexy'}
+    # partial steppers -> no volume
+    partial = ('[printer]\nkinematics: cartesian\n'
+               '[stepper_x]\nposition_max: 220\n'
+               '[stepper_y]\nposition_max: 220\n')
+    assert derive_machine_facts([partial]) == {'kinematics': 'cartesian'}
+    assert derive_machine_facts([]) == {}
+    assert derive_machine_facts(['']) == {}
+    # commented params don't count
+    commented = ('[printer]\n#kinematics: corexy\n'
+                 '[stepper_x]\n#position_max: 250\n')
+    assert derive_machine_facts([commented]) == {}
+
+
+def test_autofill_prompt_injects_derived_facts(monkeypatch):
+    from api.printer_memory_routes import PrinterMemory
+    monkeypatch.setattr(ai_routes, 'load_printer_memory',
+                        lambda: PrinterMemory())
+    ctx = {'printer.cfg': {'content': (
+        '[printer]\nkinematics: corexy\n'
+        '[stepper_x]\nposition_max: 250\n'
+        '[stepper_y]\nposition_max: 250\n'
+        '[stepper_z]\nposition_max: 210\n'), 'label': 'printer.cfg'}}
+    msgs = ai_routes._prepare_messages(
+        [{'role': 'user', 'content': 'hi'}],
+        edit_capable=True, skill_gate=True, context_files=ctx)
+    sys_text = '\n'.join(str(m.get('content', ''))
+                         for m in msgs if m.get('role') == 'system')
+    assert 'DERIVED MACHINE FACTS' in sys_text
+    assert 'kinematics=corexy' in sys_text
+    assert 'buildVolume=250x250x210' in sys_text
+    # no contextFiles -> no facts section (model derives via tools)
+    msgs2 = ai_routes._prepare_messages(
+        [{'role': 'user', 'content': 'hi'}],
+        edit_capable=True, skill_gate=True)
+    sys2 = '\n'.join(str(m.get('content', ''))
+                     for m in msgs2 if m.get('role') == 'system')
+    assert 'DERIVED MACHINE FACTS' not in sys2
+
+
+def test_memory_skill_body_documents_mechanical_derivation():
+    body = ai_routes._memory_skill_body()
+    assert 'MECHANICALLY DERIVABLE' in body
+    assert 'position_max' in body
+    assert 'print_radius' in body
+    # the old wrong claim must stay gone
+    assert 'max_x:' not in body
+
+
+def test_derive_machine_facts_mainboard_chip():
+    from api.printer_memory_routes import derive_machine_facts
+    serial = ('[mcu]\nserial: /dev/serial/by-id/usb-Klipper_'
+              'stm32f446xx_3D002B000E50505734393820-if00\n'
+              '[printer]\nkinematics: corexy\n')
+    facts = derive_machine_facts([serial])
+    assert facts['mainboard'] == 'STM32F446 board (model unconfirmed)'
+    # canbus uuid reveals no chip -> no mainboard claim
+    can = ('[mcu]\ncanbus_uuid: aabbccddee\n'
+           '[printer]\nkinematics: corexy\n')
+    assert 'mainboard' not in derive_machine_facts([can])

@@ -83,6 +83,13 @@ export function extractPrinterMemoryBlock(content: string): Record<string, strin
           const canon = canonicalizeExtruderType(normalized.extruderType);
           if (canon !== null) normalized.extruderType = canon;
         }
+        // Kinematics is stored lowercase (Klipper parses it case-
+        // insensitively; the dialog select options are lowercase).
+        // "CoreXY" from the model must not render as Unknown.
+        if ('kinematics' in normalized) {
+          normalized.kinematics = String(normalized.kinematics || '')
+            .trim().toLowerCase();
+        }
         // Strip any keys not in the allowed set (safety net against AI adding extra fields)
         return stripPrinterMemoryExtraKeys(normalized);
       }

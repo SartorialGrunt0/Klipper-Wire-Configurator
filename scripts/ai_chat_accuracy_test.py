@@ -2048,6 +2048,27 @@ dir_pin: PB9
 enable_pin: PC3
 microsteps: 16
 rotation_distance: 40
+position_endstop: 0
+position_max: 250
+
+[stepper_y]
+step_pin: PB8
+dir_pin: PB7
+enable_pin: PB6
+microsteps: 16
+rotation_distance: 40
+position_endstop: -8
+position_min: -8
+position_max: 235
+
+[stepper_z]
+step_pin: PA7
+dir_pin: PA6
+enable_pin: PC5
+microsteps: 16
+rotation_distance: 8
+position_endstop: 0
+position_max: 210
 
 [probe]
 pin: PA1
@@ -2070,6 +2091,7 @@ def build_memory_questions() -> list[TestQuestion]:
             title="Printer memory: derive from config",
             text=("Here is my printer config. Fill in the printer memory profile from it.\n\n"
                   + _MEMORY_CONFIG_SNIPPET),
+            context_files=(("printer.cfg", "printer.cfg", _MEMORY_CONFIG_SNIPPET),),
             expected_tools=("search_klipper_docs",
                             "get_config_reference_section", "search_example_configs",
                             "read_example_config"),

@@ -34,7 +34,29 @@ const FIELDS: FieldConfig[] = [
   { key: 'toolheadBoard', label: 'Toolhead Board', placeholder: 'e.g. BTT EBB36 v1.2' },
   { key: 'expanderBoards', label: 'Expander Boards', placeholder: 'e.g. BTT Manta M5P' },
   { key: 'printerName', label: 'Printer Name', placeholder: 'e.g. Voron 2.4 350mm' },
-  { key: 'kinematics', label: 'Kinematics', placeholder: 'e.g. CoreXY, Cartesian, Delta' },
+  {
+    key: 'kinematics',
+    label: 'Kinematics',
+    placeholder: '',
+    // Mirror of backend parser/config_schema KINEMATICS_TYPES (what
+    // Klipper itself accepts); the select prevents typo-drift like the
+    // free-text field allowed before.
+    options: [
+      { value: '', label: 'Unknown' },
+      { value: 'cartesian', label: 'Cartesian' },
+      { value: 'corexy', label: 'CoreXY' },
+      { value: 'corexz', label: 'CoreXZ' },
+      { value: 'hybrid_corexy', label: 'Hybrid CoreXY' },
+      { value: 'hybrid_corexz', label: 'Hybrid CoreXZ' },
+      { value: 'delta', label: 'Delta' },
+      { value: 'rotary_delta', label: 'Rotary Delta' },
+      { value: 'deltesian', label: 'Deltesian' },
+      { value: 'polar', label: 'Polar' },
+      { value: 'winch', label: 'Winch' },
+      { value: 'generic_cartesian', label: 'Generic Cartesian' },
+      { value: 'none', label: 'None' },
+    ],
+  },
   { key: 'probe', label: 'Probe', placeholder: 'e.g. BLTouch, Klicky, Omron' },
   { key: 'buildVolume', label: 'Build Volume', placeholder: 'e.g. 250x250x210' },
   {

@@ -177,3 +177,17 @@ describe('buildVolume + extruderType (9-field expansion)', () => {
     expect(feedback).toContain('A field value is not allowed');
   });
 });
+
+describe('kinematics canonicalization (select-backed field)', () => {
+  it('lowercases model output so the dialog select matches', () => {
+    const parsed = extractPrinterMemoryBlock(
+      '```printer-memory\n{"kinematics": "CoreXY"}\n```');
+    expect(parsed).toEqual({ kinematics: 'corexy' });
+  });
+
+  it('trims whitespace', () => {
+    const parsed = extractPrinterMemoryBlock(
+      '```printer-memory\n{"kinematics": "  Cartesian  "}\n```');
+    expect(parsed).toEqual({ kinematics: 'cartesian' });
+  });
+});

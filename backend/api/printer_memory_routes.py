@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -94,6 +95,123 @@ def is_printer_memory_blank(memory: PrinterMemory) -> bool:
         not getattr(memory, field, "")
         for field in PrinterMemory.model_fields.keys()
     )
+
+
+# ── Mechanical machine-fact derivation (Macro Designer parity) ────────
+#
+# Kinematics and build volume are NOT guesses — they are mechanically
+# derivable from any valid printer.cfg, exactly the way the frontend
+# Macro Designer does (macroDesigner.ts createMachineProfile):
+#   kinematics   <- [printer] kinematics:
+#   build volume <- [stepper_x/y/z] position_min/position_max
+#                  (Klipper requires position_max on all three;
+#                  position_min defaults to 0), or
+#   delta beds   <- [printer] print_radius / delta_radius -> "round ØN"
+# Exposed so the blank-memory auto-fill prompt can hand the model the
+# derived values verbatim instead of letting it re-derive (or ask).
+
+KINEMATICS_TYPES = [
+    "cartesian", "corexy", "corexz", "delta", "deltesian",
+    "polar", "rotary_delta", "winch", "hybrid_corexy", "hybrid_corexz",
+    "generic_cartesian", "none",
+]
+_ROUND_KINEMATICS = {"delta", "rotary_delta"}
+
+
+def _section_params(text: str, header: str) -> dict[str, str]:
+    """Params of the first [header] section in config text (key -> value,
+    inline comments stripped). {} when the section is absent."""
+    out: dict[str, str] = {}
+    in_section = False
+    target = header.lower()
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            if in_section:
+                break
+            name = stripped[1:].split("]", 1)[0].strip().lower()
+            in_section = name == target
+            continue
+        if not in_section or not stripped or stripped.startswith("#"):
+            continue
+        if ":" in stripped:
+            key, _, value = stripped.partition(":")
+            value = value.split("#", 1)[0].strip()
+            if value:
+                out.setdefault(key.strip().lower(), value)
+    return out
+
+
+def _num(value: str | None) -> float | None:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def derive_machine_facts(config_texts: list[str]) -> dict[str, str]:
+    """Extract certain machine facts from config file texts.
+
+    Returns a dict with ONLY the keys it could determine
+    (kinematics, buildVolume, mainboard). Deliberately conservative:
+    partial stepper data returns no buildVolume rather than a wrong one.
+    """
+    kinematics = ""
+    build_volume = ""
+    mainboard = ""
+    for text in config_texts:
+        if not text:
+            continue
+        printer = _section_params(text, "printer")
+        if not kinematics and printer.get("kinematics"):
+            kinematics = printer["kinematics"].strip().lower()
+        if not build_volume and kinematics:
+            if kinematics in _ROUND_KINEMATICS:
+                radius = _num(printer.get("print_radius")
+                              or printer.get("delta_radius"))
+                if radius:
+                    build_volume = f"round Ø{round(radius * 2)}"
+            elif kinematics != "none":
+                sx = _section_params(text, "stepper_x")
+                sy = _section_params(text, "stepper_y")
+                sz = _section_params(text, "stepper_z")
+                xmax, ymax, zmax = (
+                    _num(sx.get("position_max")),
+                    _num(sy.get("position_max")),
+                    _num(sz.get("position_max")),
+                )
+                if xmax is not None and ymax is not None and zmax is not None:
+                    xmin = _num(sx.get("position_min")) or 0.0
+                    ymin = _num(sy.get("position_min")) or 0.0
+                    zmin = _num(sz.get("position_min")) or 0.0
+                    w, d, h = (round(xmax - xmin), round(ymax - ymin),
+                               round(zmax - zmin))
+                    if w > 0 and d > 0 and h > 0:
+                        build_volume = f"{w}x{d}x{h}"
+        if not mainboard:
+            # Main MCU chip IS knowable from the [mcu] serial by-id path
+            # (e.g. usb-Klipper_stm32f446xx_<uid>-if00). The board MODEL
+            # is not, so the derived value is an honest hedge stating
+            # what IS known; naming the chip beats leaving mainboard
+            # blank or asking the user something the config answers.
+            mcu = _section_params(text, "mcu")
+            serial = mcu.get("serial", "")
+            m = re.search(
+                r"Klipper_([A-Za-z0-9]+?)_[0-9A-Fa-f]{6,}", serial)
+            if m:
+                chip = m.group(1).upper()
+                if chip.endswith("XX"):
+                    chip = chip[:-2]
+                if chip:
+                    mainboard = f"{chip} board (model unconfirmed)"
+    facts: dict[str, str] = {}
+    if kinematics:
+        facts["kinematics"] = kinematics
+    if build_volume:
+        facts["buildVolume"] = build_volume
+    if mainboard:
+        facts["mainboard"] = mainboard
+    return facts
 
 
 def printer_memory_to_context(memory: PrinterMemory) -> str:

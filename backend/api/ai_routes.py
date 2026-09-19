@@ -13,6 +13,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from api.printer_memory_routes import (  # noqa: E402
+    derive_machine_facts,
     load_printer_memory,
     printer_memory_to_context,
     is_printer_memory_blank,
@@ -567,7 +568,8 @@ def _prepare_messages(messages: list[dict], full_rewrite_guard: bool = False,
                       edit_capable: bool = False, *,
                       skill_gate: bool = False,
                       skill_active: bool = False,
-                      native_mode: bool = False) -> list[dict]:
+                      native_mode: bool = False,
+                      context_files: dict | None = None) -> list[dict]:
     """Build a clean system prompt with MCP tool descriptions, printer memory,
     and user messages.
     """
@@ -654,6 +656,28 @@ def _prepare_messages(messages: list[dict], full_rewrite_guard: bool = False,
                     "\nCall load_skill(name='printer-memory') first — it "
                     "lists exactly where each field's evidence lives in "
                     "the config."
+                )
+            # Mechanical head-start: kinematics and build volume are
+            # derivable from stepper limits (Macro Designer parity —
+            # derive_machine_facts), so the server derives them NOW and
+            # hands them over verbatim. The model must not re-derive
+            # them, and must not ASK for a value the server already
+            # computed.
+            try:
+                texts = [
+                    str((entry or {}).get("content", ""))
+                    for entry in (context_files or {}).values()
+                ]
+                facts = derive_machine_facts(texts)
+            except Exception:
+                facts = {}
+            if facts:
+                known = ", ".join(f"{k}={v}" for k, v in facts.items())
+                auto_fill_prompt += (
+                    "\n\nDERIVED MACHINE FACTS (computed from the user's "
+                    f"config by the app, treat as ground truth): {known}. "
+                    "Include these in your block verbatim — do NOT ask "
+                    "the user about them."
                 )
             system_parts.append(auto_fill_prompt)
 
@@ -967,8 +991,15 @@ def _memory_skill_body() -> str:
         "do not infer.\n"
         "- probe: the [probe] / [bltouch] / [load_cell] sections and "
         "probe pin comments (Voron Tap = [probe] with no bltouch).\n"
-        "- buildVolume: from [printer] max_x/y/z_mm, e.g. "
-        "'max_x: 250, max_y: 250, max_z: 210' -> '250x250x210'.\n"
+        "- buildVolume: MECHANICALLY DERIVABLE — do not ask for it if "
+        "the config is available. Cartesian/CoreXY: width/depth/height "
+        "from [stepper_x]/[stepper_y]/[stepper_z] position_max minus "
+        "position_min (position_min defaults to 0), e.g. 250x250x210. "
+        "Delta/rotary_delta: 'round Ø' twice the [printer] "
+        "print_radius (or delta_radius). The app's Macro Designer "
+        "derives it this same way programmatically. If the auto-fill "
+        "prompt already gives you derived machine facts, USE them "
+        "verbatim.\n"
         "- extruderType: 'direct' or 'bowden' ONLY. Evidence: bowden "
         "tubes show up as long bowden_length / pressure_advance "
         "discussion, Titan/BMG paired with a remote motor, or the user "
@@ -3287,6 +3318,7 @@ async def chat_proxy(req: ChatRequest):
                                  edit_capable=edit_capable,
                                  skill_gate=skill_gate,
                                  skill_active=_skill_state['active'],
+                                 context_files=req.contextFiles,
                                  native_mode=_resolve_native_tools(
                                      req.apiProvider, req.apiUrl, req.toolProtocol,
                                      edit_capable=edit_capable,
