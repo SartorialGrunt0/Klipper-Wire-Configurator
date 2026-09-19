@@ -39,7 +39,8 @@ call and will be ignored):
 Other argument shapes:
 patch a macro body: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "patch_gcode", "section": "gcode_macro NAME", "old_text": "<line copied verbatim>", "new_text": "<replacement>"}}
 include a file: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "add_include", "target_file": "new.cfg"}}
-create a NEW file only: {"name": "config_write", "arguments": {"file": "new.cfg", "content": "<full file text>"}}"""
+create a NEW file only: {"name": "config_write", "arguments": {"file": "new.cfg", "content": "<full file text>"}}
+set_param value must be ONE LINE — multi-line values (e.g. gcode:) are dropped by some tool-call channels and must go through replace_section or patch_gcode."""
 
 EDIT_NUDGE_TEXT_NATIVE = """Call the tool NOW using your tool-calling interface (do not read \
 files again first -- the section text you need is already in this \
@@ -47,6 +48,7 @@ conversation), or -- if the change is not safe or not possible -- explain \
 why to the user and ask.
 Argument shapes for the edit tools:
 set_param: {"file": "<file.cfg>", "op": "set_param", "section": "<section>", "key": "<param>", "value": "<new value>"}
+value must be ONE LINE; for multi-line params (gcode:) use replace_section
 patch a macro body: {"file": "<file.cfg>", "op": "patch_gcode", "section": "gcode_macro NAME", "old_text": "<line copied verbatim>", "new_text": "<replacement>"}
 include a file: {"file": "<file.cfg>", "op": "add_include", "target_file": "<new.cfg>"}
 create a NEW file only: {"file": "<new.cfg>", "content": "<full file text>"}"""
@@ -98,7 +100,12 @@ CONFIG_EDIT_SPEC = {
             },
             "value": {
                 "type": "string",
-                "description": "New parameter value (set_param only). Multi-line values use newlines with continuation indentation.",
+                "description": (
+                    "New parameter value (set_param only) — ONE LINE. "
+                    "Multi-line values (gcode:, a list) get DROPPED by "
+                    "some tool-call channels: write them with "
+                    "replace_section or patch_gcode instead"
+                ),
             },
             "text": {
                 "type": "string",
@@ -251,6 +258,14 @@ class EditSession:
         # flag set). Every later allow_comment_change op is refused as a
         # self-grant until the user speaks.
         self.comment_refused = False
+        # Identical FAILED call repeats (TRIDENT-15 r1 2026-09-19: gemma
+        # repeated one arg-channel-lost set_param 17x, burning the whole
+        # turn budget). The lean kickback says "correct your arguments"
+        # but a model stuck in a template loop re-sends the same bytes;
+        # the 2nd identical failure escalates to an unmistakable stop-
+        # and-change-strategy directive, and the 4th hard-stops (no
+        # apply attempt). Key: (name, canonical args) -> failure count.
+        self._identical_failures: dict[str, int] = {}
         self._last_file: str | None = None
 
     def has_files(self) -> bool:
@@ -313,6 +328,57 @@ class EditSession:
                 return entry
         return None
 
+    @staticmethod
+    def _call_key(name: str, args: dict) -> str:
+        try:
+            canon = json.dumps(args, sort_keys=True, ensure_ascii=False)
+        except (TypeError, ValueError):
+            canon = repr(sorted(str(a) for a in args.items()))
+        return f"{name}\u0000{canon}"
+
+    def _note_failure(self, name: str, args: dict) -> int:
+        """Count a FAILED call; returns how many times THIS exact call
+        has now failed (1 = first)."""
+        key = self._call_key(name, args)
+        self._identical_failures[key] = \
+            self._identical_failures.get(key, 0) + 1
+        return self._identical_failures[key]
+
+    def _repeat_directive(self, name: str, count: int) -> str:
+        if count == 1:
+            return ""
+        if count == 2:
+            return (
+                "\n\nThis is the SECOND IDENTICAL failed call — the exact "
+                "same tool and arguments. Whatever failed will fail "
+                "again: do NOT repeat it. Read the section with "
+                "read_user_config, then re-issue with genuinely "
+                "different arguments (correct op / section / key / "
+                "value). If an argument you meant to send is missing "
+                "from the call you just made, your argument channel "
+                "dropped it — re-send the full call."
+            )
+        return (
+            f"\n\nThis identical call has failed {count} times. It is "
+            "BLOCKED: stop retrying it and change strategy — use a "
+            "different op (e.g. replace_section instead of set_param), "
+            "or tell the user exactly what you could not apply and "
+            "why. Never tell the user a blocked change was staged."
+        )
+
+    def _repetition_blocked(self, name: str, args: dict) -> str | None:
+        """Hard-stop text once the SAME call has failed 3+ times (the
+        next repeat is refused WITHOUT touching state); None to allow."""
+        if self._identical_failures.get(
+                self._call_key(name, args), 0) >= 3:
+            return (
+                f"{name} BLOCKED — this identical call already failed 3 "
+                "times and was not changed. Stop retrying: try a "
+                "different op/shape, or explain to the user what could "
+                "not be applied. No change is staged."
+            )
+        return None
+
     def _duplicate_kickback(self, dup: dict) -> str:
         prev = dup.get("result", {})
         return (
@@ -351,6 +417,11 @@ class EditSession:
         if op is None:
             return f"Unknown write tool: {name}", None
 
+        blocked = self._repetition_blocked(name, args)
+        if blocked is not None:
+            self.last_write_outcome = "correctable"
+            return blocked, None
+
         dup = self._duplicate_of_committed(op)
         if dup is not None:
             # user_gated: unlocking requires a NEW user message, never a
@@ -380,7 +451,9 @@ class EditSession:
                 self.comment_refused = True
             self.last_write_outcome = (
                 "user_gated" if gated else "correctable")
-            return _lean_error_content(name, result), None
+            count = self._note_failure(name, args)
+            return (_lean_error_content(name, result)
+                    + self._repeat_directive(name, count)), None
 
         self.commit(new_state, name, result, raw_op=op)
         return _lean_success_content(name, result), self._details_for(name, result)
@@ -428,7 +501,9 @@ class EditSession:
                 self.comment_refused = True
             self.last_write_outcome = (
                 "user_gated" if gated else "correctable")
-            return _lean_error_content(name, result), None, None
+            count = self._note_failure(name, args)
+            return (_lean_error_content(name, result)
+                    + self._repeat_directive(name, count)), None, None
 
         return _lean_success_content(name, result), result, new_state
 

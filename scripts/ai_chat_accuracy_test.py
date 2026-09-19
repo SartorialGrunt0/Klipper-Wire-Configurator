@@ -1105,7 +1105,10 @@ def build_trident_questions() -> list[TestQuestion]:
             # via read_user_config (the backend user_configs mirror has all
             # three files).
             context_files=printer_cfg,
-            expected_tools=("read_user_config",),
+            # Class-first discovery: list_hardware(type='led') enumerates
+            # every LED section (working state + config mirror) in one
+            # structural call; read_user_config remains an accepted route.
+            expected_tools=("list_hardware", "read_user_config"),
             require_tool=True,
             criteria=(
                 ("regex", r"#\s*file\s*:\s*printer\.cfg"),
@@ -2165,6 +2168,9 @@ ALL_TOOLS = (
     # 2026-09-13 — same class as the LIVE-01 one below).
     "config_edit",
     "config_write",
+    # Class-first hardware discovery (chat-layer tool, 2026-09-19):
+    # loop-routed like the write tools, reading the working state.
+    "list_hardware",
     # Live-context tools (feature/config-mcp-tools, 2026-09). When adding
     # an MCP tool, update this tuple too or the summary lists real calls
     # under "Unknown tool attempts" (LIVE-01 false alarm, 2026-09-08).

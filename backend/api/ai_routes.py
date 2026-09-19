@@ -312,10 +312,13 @@ SYSTEM_PROMPT = (
     "members frequently live in OTHER files (toolhead/board configs), not "
     "just the attached ones. Seeing some members in the attached context is "
     "NOT proof the class is complete — sections in files you cannot see are "
-    "invisible to you. Use search_user_configs with the class keyword "
-    "(e.g. query='neopixel') — it searches EVERY user config file in one "
-    "call, lists all matching section headers, and annotates hits with "
-    "their section — then read_user_config each hit file. Edit every member "
+    "invisible to you. Call list_hardware(type='led'|'fan'|'stepper'|...) "
+    "FIRST — it enumerates EVERY member of the class in one call from "
+    "the working state, with full section text and file+line (text "
+    "search finds only sections whose name contains the keyword). "
+    "search_user_configs with the class keyword (e.g. query='neopixel') "
+    "remains a fallback for things list_hardware has no class for. "
+    "Edit every member "
     "found, and before finishing, check your edit lines against the "
     "enumerated list: every member must be covered. Never silently handle "
     "only the subset visible in your context; if some files cannot be "
@@ -872,7 +875,10 @@ _EDIT_TOOL_SNIPPETS: dict[str, str] = {
         "replace', new_text='replacement lines', target_file='x.cfg' for "
         "include ops (comment_include disables an include as '#[include x.cfg]' "
         "instead of deleting it), allow_comment_change=true only when the user asked to "
-        "uncomment/comment out params). One op per call; changes are "
+        "uncomment/comment out params). value must be ONE LINE — "
+        "multi-line values (gcode:) are dropped by some tool-call "
+        "channels, write those with replace_section/patch_gcode. "
+        "One op per call; changes are "
         "validated and staged "
         "for user review"
     ),
@@ -908,6 +914,35 @@ EDIT_SKILL_DESCRIPTION = (
     "showing config/macro text to read over or discuss without applying it, "
     "or any request that says not to change the files."
 )
+
+LIST_HARDWARE_SPEC = {
+    "name": "list_hardware",
+    "description": (
+        "List every section of a hardware class in the user's CURRENT "
+        "config project (working state, including approved unsaved "
+        "edits), each with its full text and file+line location. Use "
+        "this BEFORE editing or advising on a component CLASS so the "
+        "answer covers ALL of them — text search finds only sections "
+        "whose name contains the keyword and misses e.g. [dotstar] or "
+        "[output_pin casing_light]. type='led' (also lights/rgb), "
+        "'fan', 'stepper' (includes [tmc2240 stepper_x]), 'extruder', "
+        "'heater', 'probe', 'accelerometer', 'mcu'/'board', 'servo', "
+        "'display', 'filament_sensor', 'endstop', 'macro'; or any "
+        "literal section type ('bed_mesh', 'idle_timeout'). No type "
+        "returns a one-line-per-group summary of everything present."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "type": {
+                "type": "string",
+                "description": (
+                    "Hardware class ('led', 'fan', 'stepper', ...) or "
+                    "literal section type; empty for a summary"),
+            },
+        },
+    },
+}
 
 LOAD_SKILL_SPEC = {
     "name": "load_skill",
@@ -1147,6 +1182,16 @@ def _build_mcp_tool_context(edit_capable: bool = False, *,
     parts.append("Specialized tools (use only for specific problems):")
     for name, snippet in _SPECIALIZED_TOOL_SNIPPETS.items():
         parts.append(f"- {name}: {snippet}")
+    parts.append("")
+    parts.append(
+        "- list_hardware: List EVERY section of a hardware class "
+        "(type='led'|'fan'|'stepper'|'probe'|'mcu'|... or a literal "
+        "section type like 'bed_mesh') from the CURRENT working state, "
+        "each with full text + file+line — use before class-wide edits "
+        "or advice so nothing is missed (text search misses [dotstar] "
+        "or [output_pin led_strips]); no type = summary of everything "
+        "present"
+    )
     if edit_capable:
         if skill_gate and not skill_active:
             # Model-triggered skill: advertise the skill INDEX; write tools
@@ -1724,6 +1769,7 @@ def _extract_tool_calls(text: str) -> list[dict]:
     tmpl_known = {t["name"] for t in _mcp_server._list_tools()} | set(EDIT_TOOL_NAMES)
     if _edit_skill_gate_enabled():
         tmpl_known.add(LOAD_SKILL_SPEC["name"])
+    tmpl_known.add(LIST_HARDWARE_SPEC["name"])
     for _start, _stop, t_name, t_args in _template_call_regions(text):
         if t_name not in tmpl_known:
             continue
@@ -1896,6 +1942,7 @@ def _extract_tool_calls(text: str) -> list[dict]:
     # Gated on known tool names — config headers ([probe]) and prose with
     # parens must never extract as calls.
     known_tool_names = {t["name"] for t in _mcp_server._list_tools()}
+    known_tool_names.add(LIST_HARDWARE_SPEC["name"])
     for bracket_match in BRACKET_CALL_RE.finditer(text):
         content = bracket_match.group(0).strip()
         if not content or content in seen_contents:
@@ -1967,6 +2014,7 @@ def _unwrap_generic_tool_calls(calls: list[dict]) -> list[dict]:
     known = {t["name"] for t in _mcp_server._list_tools()} | set(EDIT_TOOL_NAMES)
     if _edit_skill_gate_enabled():
         known.add(LOAD_SKILL_SPEC["name"])
+    known.add(LIST_HARDWARE_SPEC["name"])
     out: list[dict] = []
     for call in calls:
         name = call.get("name", "")
@@ -2243,6 +2291,7 @@ def _strip_bracket_tool_calls(text: str) -> str:
     parens survive the cleanup chain.
     """
     known_tool_names = {t["name"] for t in _mcp_server._list_tools()}
+    known_tool_names.add(LIST_HARDWARE_SPEC["name"])
     return BRACKET_CALL_RE.sub(
         lambda m: "" if m.group(1).strip() in known_tool_names else m.group(0),
         text,
@@ -2489,6 +2538,9 @@ def _build_native_tools(edit_capable: bool = False, *,
     native: list[dict] = []
     for tool in _mcp_server._list_tools():
         native.append(_native_tool_object(tool))
+    # Chat-layer read tool (working-state backed, see dispatch):
+    # advertised on both protocols for parity.
+    native.append(_native_tool_object(LIST_HARDWARE_SPEC))
     if edit_capable:
         if skill_gate:
             native.append(_native_tool_object(LOAD_SKILL_SPEC))
@@ -3709,6 +3761,7 @@ async def chat_proxy(req: ChatRequest):
                     known_tool_names |= EDIT_TOOL_NAMES
                 if skill_gate:
                     known_tool_names.add(LOAD_SKILL_SPEC["name"])
+                known_tool_names.add(LIST_HARDWARE_SPEC["name"])
                 if tool_calls and current_content.strip() and all(
                     c.get("name") not in known_tool_names for c in tool_calls
                 ):
@@ -3792,6 +3845,51 @@ async def chat_proxy(req: ChatRequest):
                                 tool_call["name"], edit_session.edit_attempts,
                                 edit_details is not None,
                             )
+                    elif (tool_call.get("name") == "list_hardware"):
+                        # Chat-layer read tool (NOT the MCP server): the
+                        # MCP server sees only disk, while the approval
+                        # flow keeps the live project in the session's
+                        # working state — a disk read could hand back
+                        # stale section text and manufacture old_text
+                        # mismatch kickbacks one edit later.
+                        from services.hardware_lookup import (
+                            list_hardware as _list_hardware)
+                        # Working state first (approved unsaved edits win),
+                        # with the user-config mirror as a FLOOR: class
+                        # members live in files the frontend may not have
+                        # loaded (TRIDENT-15 design: SB_LEDs in EBB.cfg),
+                        # and the mirror is the same source
+                        # search_user_configs reads.
+                        hw_files = dict(edit_session.state.files) \
+                            if edit_session is not None else {}
+                        if not hw_files:
+                            hw_files = {
+                                name: str((meta or {}).get("content", ""))
+                                for name, meta in
+                                (req.contextFiles or {}).items()
+                            }
+                        try:
+                            for mname, mmeta in (
+                                    _mirror_user_config_files()).items():
+                                hw_files.setdefault(
+                                    mname,
+                                    str((mmeta or {}).get("content", "")))
+                        except Exception:
+                            logger.debug(
+                                "list_hardware mirror floor "
+                                "unavailable", exc_info=True)
+                        try:
+                            result_text = _list_hardware(
+                                hw_files,
+                                str(tool_call.get("arguments", {})
+                                    .get("type", "")))
+                        except Exception:
+                            logger.exception(
+                                "list_hardware failed | type=%s",
+                                tool_call.get("arguments", {}))
+                            result_text = ("list_hardware failed "
+                                           "unexpectedly — fall back "
+                                           "to search_user_configs.")
                     else:
                         result_text = await _execute_tool_call_async(tool_call)
                     logger.info(

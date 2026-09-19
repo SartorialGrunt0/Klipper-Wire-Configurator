@@ -1295,3 +1295,157 @@ def test_autofill_prompt_injects_board_roster(monkeypatch):
     assert 'DERIVED HARDWARE INVENTORY' in sys_text
     assert 'EBBCan' in sys_text and 'PIS' in sys_text
     assert 'toolhead board(s)' in sys_text
+
+
+# ── list_hardware: class-first discovery (chat layer) ─────────────────
+
+
+_HW_LEDS = (
+    '[neopixel caselight]\npin: PIS:GP17\n'
+    '[output_pin led_strips]\npin: PB5\npwm: True\n'
+    '[dotstar status_strip]\ndata_pin: PA1\n'
+    '#[neopixel removed_led]\n#pin: PB6\n')
+_HW_MAIN = (
+    '[mcu]\nserial: /dev/serial/by-id/usb-Klipper_stm32f446xx_'
+    'AABBCC-if00\n'
+    '[printer]\nkinematics: corexy\n'
+    '[stepper_x]\nstep_pin: PA0\n'
+    '[tmc2240 stepper_x]\ncs_pin: PG4\n'
+    '[idle_timeout]\ntimeout: 600\n')
+
+
+def test_list_hardware_led_class_is_structural():
+    from services.hardware_lookup import list_hardware
+    out = list_hardware({'printer.cfg': _HW_MAIN, 'leds.cfg': _HW_LEDS},
+                        'led')
+    # every LED-family type + the name-token output_pin hit
+    for header in ('neopixel caselight', 'output_pin led_strips',
+                   'dotstar status_strip'):
+        assert f"[{header}]" in out
+    # suppressed header never renders AS a section (it may survive as a
+    # verbatim comment line inside the previous section's body — patch
+    # old_text needs bodies verbatim)
+    assert '## [neopixel removed_led]' not in out
+    assert '3 matches' in out
+    # file+line location present for edits
+    assert 'leds.cfg (line 1)' in out
+    # completeness law rides the result
+    assert 'EVERY match above' in out
+
+
+def test_list_hardware_stepper_suffix_and_literal_type():
+    from services.hardware_lookup import list_hardware
+    files = {'printer.cfg': _HW_MAIN}
+    steppers = list_hardware(files, 'stepper')
+    assert '[stepper_x]' in steppers
+    # driver prefixed onto the class matches via the name suffix
+    assert '[tmc2240 stepper_x]' in steppers
+    literal = list_hardware(files, 'idle_timeout')
+    assert '[idle_timeout]' in literal
+    assert 'timeout: 600' in literal
+
+
+def test_list_hardware_unknown_type_and_summary():
+    from services.hardware_lookup import list_hardware
+    files = {'printer.cfg': _HW_MAIN}
+    bad = list_hardware(files, 'flux_capacitor')
+    assert 'No hardware class' in bad and 'led' in bad
+    summary = list_hardware(files, '')
+    assert 'mcu (' in summary and 'stepper (' in summary
+    assert 'gcode (' in summary  # idle_timeout is gcode group
+
+
+def test_list_hardware_working_state_not_disk():
+    # dispatch reads the EditSession's live files: an approved-unsaved
+    # edit must be visible to the next list_hardware call
+    from api import ai_routes as ar
+    import asyncio
+    es = ar.EditSession({'printer.cfg': {'content': _HW_LEDS}})
+    result_text, details = es.execute({
+        'name': 'config_write',
+        'arguments': {'file': 'extra.cfg',
+                      'content': '[neopixel new_bar]\npin: PC5\n'}})
+    assert details is not None
+    out = __import__('services.hardware_lookup',
+                     fromlist=['list_hardware']
+                     ).list_hardware(es.state.files, 'led')
+    assert 'new_bar' in out and 'extra.cfg' in out
+
+
+def test_list_hardware_advertised_on_both_protocols():
+    native = ai_routes._build_native_tools(edit_capable=False)
+    names = {t['function']['name'] for t in native}
+    assert 'list_hardware' in names
+    # text protocol parity: the same tool appears in the prompt surface
+    text_ctx = ai_routes._build_mcp_tool_context(native_mode=False)
+    assert 'list_hardware' in text_ctx
+    native_ctx = ai_routes._build_mcp_tool_context(native_mode=True)
+    assert 'list_hardware' in native_ctx
+
+
+def test_extract_text_call_recognises_list_hardware():
+    calls = ai_routes._extract_tool_calls(
+        '```tool\n{"name": "list_hardware", "arguments": '
+        '{"type": "led"}}\n```')
+    assert calls and calls[0]['name'] == 'list_hardware'
+
+
+# ── identical-failure repetition guard (TRIDENT-15 r1 loop) ───────────
+
+
+def _repetition_session():
+    from services.ai_edit_tools import EditSession
+    cfg = ('[idle_timeout]\ntimeout: 1800\n'
+           '[printer]\nkinematics: corexy\nmax_accel: 4000\n')
+    return EditSession({'printer.cfg': {'content': cfg}})
+
+
+def test_identical_failure_escalates_then_blocks():
+    es = _repetition_session()
+    # 'section' present but key missing => correctable failure, twice
+    bad = {'name': 'config_edit',
+           'arguments': {'file': 'printer.cfg', 'op': 'set_param',
+                         'section': 'idle_timeout'}}
+    c1, d1 = es.execute(bad)
+    assert d1 is None and 'SECOND' not in c1
+    c2, d2 = es.execute(bad)
+    assert d2 is None and 'SECOND IDENTICAL' in c2
+    c3, d3 = es.execute(bad)
+    assert d3 is None and 'failed 3 times' in c3
+    # 4th: hard-stopped BEFORE touching state
+    c4, d4 = es.execute(bad)
+    assert d4 is None and 'BLOCKED' in c4
+    assert es.pending_edits == []
+
+
+def test_changed_call_clears_repeat_pressure():
+    es = _repetition_session()
+    bad = {'name': 'config_edit',
+           'arguments': {'file': 'printer.cfg', 'op': 'set_param',
+                         'section': 'idle_timeout'}}
+    es.execute(bad)
+    es.execute(bad)
+    good = {'name': 'config_edit',
+            'arguments': {'file': 'printer.cfg', 'op': 'set_param',
+                          'section': 'idle_timeout',
+                          'key': 'timeout', 'value': '300'}}
+    content, details = es.execute(good)
+    assert details is not None
+    # the corrected call succeeding means a later IDENTICAL failure of
+    # the OLD call is not treated as a fresh 2nd strike loop
+    assert 'BLOCKED' not in content
+
+
+def test_repetition_guard_applies_to_approval_path():
+    es = _repetition_session()
+    bad = {'name': 'config_edit',
+           'arguments': {'file': 'printer.cfg', 'op': 'set_param',
+                         'section': 'nonexistent_zzz'}}
+    p1 = es.prepare(bad)
+    p2 = es.prepare(bad)
+    assert p1[1] is None and 'SECOND IDENTICAL' not in p1[0]
+    assert p2[1] is None and 'SECOND IDENTICAL' in p2[0]
+    p3 = es.prepare(bad)
+    assert p3[1] is None
+    p4 = es.prepare(bad)
+    assert p4[1] is None and 'BLOCKED' in p4[0]
