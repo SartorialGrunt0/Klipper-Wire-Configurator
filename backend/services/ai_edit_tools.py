@@ -292,6 +292,18 @@ class EditSession:
                     op[arg_key] = str(args[arg_key])
             if "value" in args and args["value"] is not None:
                 op["value"] = str(args["value"])
+            # Field-synonym normalization (live r3 TRIDENT-15 2026-09-19:
+            # gemma routes both intents through its preferred field name —
+            # set_param arrived with new_text='300' (no value), and
+            # replace_section with new_text='<full body>' (no text)).
+            # Mechanical field-equivalence between documented string
+            # params; explicit value/text always wins.
+            if op["op"] == "set_param" and "value" not in op \
+                    and "new_text" in op:
+                op["value"] = op["new_text"]
+            elif op["op"] in ("add_section", "replace_section") \
+                    and "text" not in op and "new_text" in op:
+                op["text"] = op["new_text"]
             if args.get("allow_comment_change"):
                 op["allow_comment_change"] = True
             return op

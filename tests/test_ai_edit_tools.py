@@ -1449,3 +1449,48 @@ def test_repetition_guard_applies_to_approval_path():
     assert p3[1] is None
     p4 = es.prepare(bad)
     assert p4[1] is None and 'BLOCKED' in p4[0]
+
+
+# ── field-synonym normalization (r3 TRIDENT-15: new_text for value) ───
+
+
+def test_set_param_new_text_synonym_stages():
+    from services.ai_edit_tools import EditSession
+    es = EditSession({'printer.cfg': {'content':
+        '[idle_timeout]\ntimeout: 1800\n'}})
+    content, details = es.execute({
+        'name': 'config_edit',
+        'arguments': {'file': 'printer.cfg', 'op': 'set_param',
+                      'section': 'idle_timeout', 'key': 'timeout',
+                      'new_text': '300'}})
+    assert details is not None, content
+    assert '300' in es.state.files['printer.cfg']
+
+
+def test_replace_section_new_text_synonym_stages():
+    from services.ai_edit_tools import EditSession
+    es = EditSession({'printer.cfg': {'content':
+        '[idle_timeout]\ntimeout: 1800\n'}})
+    content, details = es.execute({
+        'name': 'config_edit',
+        'arguments': {'file': 'printer.cfg', 'op': 'replace_section',
+                      'section': 'idle_timeout',
+                      'new_text': 'timeout: 300\ngcode:\n  STOP'}})
+    assert details is not None, content
+    assert 'STOP' in es.state.files['printer.cfg']
+
+
+def test_explicit_value_beats_new_text_synonym():
+    op = __import__('services.ai_edit_tools',
+                    fromlist=['EditSession']).EditSession.tool_call_to_op(
+        'config_edit', {'file': 'p.cfg', 'op': 'set_param',
+                        'section': 's', 'key': 'k',
+                        'value': 'good', 'new_text': 'bad'})
+    assert op['value'] == 'good'
+    # patch_gcode keeps new_text as new_text (no aliasing)
+    op2 = __import__('services.ai_edit_tools',
+                     fromlist=['EditSession']).EditSession.tool_call_to_op(
+        'config_edit', {'file': 'p.cfg', 'op': 'patch_gcode',
+                        'section': 's', 'old_text': 'a',
+                        'new_text': 'b'})
+    assert op2['new_text'] == 'b' and 'value' not in op2
