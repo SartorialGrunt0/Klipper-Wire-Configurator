@@ -1229,3 +1229,69 @@ def test_derive_machine_facts_mainboard_chip():
     can = ('[mcu]\ncanbus_uuid: aabbccddee\n'
            '[printer]\nkinematics: corexy\n')
     assert 'mainboard' not in derive_machine_facts([can])
+
+
+# ── derived hardware inventory (graph-parity board roster) ────────────
+
+
+_TRIDENT_MAIN = (
+    '[mcu]\n'
+    'serial: /dev/serial/by-id/usb-Klipper_stm32f446xx_'
+    '3D002B000E50505734393820-if00\n'
+    '[printer]\nkinematics: corexy\n'
+    '[probe]\npin: PIS:PB2\n')
+_TRIDENT_EBB = (
+    '[mcu EBBCan]\ncanbus_uuid: 42152a9d2f1e\n'
+    '[adxl345]\ncs_pin: EBBCan:PB12\nspi_bus: spi1\n'
+    '[resonance_tester]\naccel_chip: adxl345\n')
+_TRIDENT_EXP = (
+    '[mcu PIS]\ncanbus_uuid: 421c0f9d1a22\n'
+    '[mcu hotkey]\ncanbus_uuid: 442d2b1c9e0f\n')
+
+
+def test_derive_hardware_inventory_trident_roster():
+    from api.printer_memory_routes import (derive_hardware_inventory,
+                                           format_hardware_inventory)
+    inv = derive_hardware_inventory(
+        [_TRIDENT_MAIN, _TRIDENT_EBB, _TRIDENT_EXP])
+    boards = inv['boards']
+    assert boards['mainboard'][0]['chip'] == 'STM32F446'
+    assert [b['name'] for b in boards['toolhead']] == ['EBBCan']
+    assert [b['name'] for b in boards['expander']] == ['PIS', 'hotkey']
+    assert inv['probes'] == [{'kind': 'generic [probe]', 'mcu': 'PIS'}]
+    assert inv['accelerometers'] == [
+        {'kind': 'adxl345', 'mcu': 'EBBCan'}]
+    line = format_hardware_inventory(inv)
+    assert 'toolhead board(s): EBBCan' in line
+    assert 'expander board(s): PIS, hotkey' in line
+    assert 'adxl345 on EBBCan' in line
+    assert 'resonance_tester' in line
+
+
+def test_derive_hardware_inventory_sbc_and_empty():
+    from api.printer_memory_routes import derive_hardware_inventory
+    inv = derive_hardware_inventory(
+        ['[mcu host]\nserial: /tmp/klipper_host_mcu\n'
+         '[mcu]\nserial: /dev/tty0\n'])
+    assert [b['name'] for b in inv['boards']['sbc']] == ['host']
+    assert derive_hardware_inventory(['']) == {}
+    assert derive_hardware_inventory(['[extruder]\nheaters: 1\n']) == {}
+
+
+def test_autofill_prompt_injects_board_roster(monkeypatch):
+    from api.printer_memory_routes import PrinterMemory
+    monkeypatch.setattr(ai_routes, 'load_printer_memory',
+                        lambda: PrinterMemory())
+    ctx = {
+        'printer.cfg': {'content': _TRIDENT_MAIN, 'label': 'printer.cfg'},
+        'ebb.cfg': {'content': _TRIDENT_EBB, 'label': 'ebb.cfg'},
+        'exp.cfg': {'content': _TRIDENT_EXP, 'label': 'exp.cfg'},
+    }
+    msgs = ai_routes._prepare_messages(
+        [{'role': 'user', 'content': 'hi'}],
+        edit_capable=True, skill_gate=True, context_files=ctx)
+    sys_text = '\n'.join(str(m.get('content', ''))
+                         for m in msgs if m.get('role') == 'system')
+    assert 'DERIVED HARDWARE INVENTORY' in sys_text
+    assert 'EBBCan' in sys_text and 'PIS' in sys_text
+    assert 'toolhead board(s)' in sys_text

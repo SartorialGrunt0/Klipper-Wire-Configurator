@@ -2070,6 +2070,13 @@ rotation_distance: 8
 position_endstop: 0
 position_max: 210
 
+[mcu EBBCan]
+canbus_uuid: 42152a9d2f1e
+
+[adxl345]
+cs_pin: EBBCan:PB12
+spi_bus: spi1
+
 [probe]
 pin: PA1
 x_offset: 0
@@ -2101,6 +2108,7 @@ def build_memory_questions() -> list[TestQuestion]:
                 ("memory_valid", ""),
                 ("memory_has", "kinematics:corexy"),
                 ("memory_has", "mainboard:stm32|f446|octopus|mcu|board"),
+                ("memory_has", "toolheadBoard:ebb"),
             ),
         ),
         TestQuestion(

@@ -13,7 +13,9 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from api.printer_memory_routes import (  # noqa: E402
+    derive_hardware_inventory,
     derive_machine_facts,
+    format_hardware_inventory,
     load_printer_memory,
     printer_memory_to_context,
     is_printer_memory_blank,
@@ -663,11 +665,11 @@ def _prepare_messages(messages: list[dict], full_rewrite_guard: bool = False,
             # hands them over verbatim. The model must not re-derive
             # them, and must not ASK for a value the server already
             # computed.
+            texts = [
+                str((entry or {}).get("content", ""))
+                for entry in (context_files or {}).values()
+            ]
             try:
-                texts = [
-                    str((entry or {}).get("content", ""))
-                    for entry in (context_files or {}).values()
-                ]
                 facts = derive_machine_facts(texts)
             except Exception:
                 facts = {}
@@ -678,6 +680,26 @@ def _prepare_messages(messages: list[dict], full_rewrite_guard: bool = False,
                     f"config by the app, treat as ground truth): {known}. "
                     "Include these in your block verbatim — do NOT ask "
                     "the user about them."
+                )
+            # Board roster + major components: the graph view already
+            # draws every [mcu] card and probe/accel with this same
+            # classification, so the model gets the identical roster
+            # instead of struggling to spot boards by prose inference.
+            try:
+                inv = derive_hardware_inventory(texts)
+            except Exception:
+                inv = {}
+            inv_line = format_hardware_inventory(inv) if inv else ""
+            if inv_line:
+                auto_fill_prompt += (
+                    "\n\nDERIVED HARDWARE INVENTORY (parsed from the "
+                    f"config by the app — ground truth): {inv_line}. "
+                    "Use it to fill toolheadBoard, expanderBoards, and "
+                    "probe verbatim (board NAMES are facts even when the "
+                    "board model chip is unknown; a CAN uuid board is "
+                    "still that named board). Say 'model unconfirmed' "
+                    "only for the chip/model nuance, never drop a named "
+                    "board."
                 )
             system_parts.append(auto_fill_prompt)
 
@@ -977,8 +999,12 @@ def _memory_skill_body() -> str:
         "bundled example configs; (2) ask the user only what you cannot "
         "determine; (3) never invent a value.\n\n"
         "Where to look:\n"
-        "- mainboard / toolheadBoard / expanderBoards: the [mcu] sections "
-        "name MCUs; board models come from canbus_query-style notes, "
+        "- mainboard / toolheadBoard / expanderBoards: check the "
+        "DERIVED HARDWARE INVENTORY in this conversation FIRST \u2014 "
+        "the app parses every [mcu] section (names, roles, chips, "
+        "hosting) and it is ground truth; copy board names from it "
+        "verbatim. Without it: the [mcu] sections name MCUs; board "
+        "models come from canbus_query-style notes, "
         "# comments, or search_example_configs with the MCU chip + "
         "pin-style clues, confirmed via read_example_config. If the exact "
         "model stays unconfirmed, STILL record the certain part as a "

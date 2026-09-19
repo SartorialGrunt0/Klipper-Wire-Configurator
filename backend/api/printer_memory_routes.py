@@ -117,6 +117,175 @@ KINEMATICS_TYPES = [
 ]
 _ROUND_KINEMATICS = {"delta", "rotary_delta"}
 
+# MCU role classification mirrors graphBuilder.ts classifyMcuName (the
+# graph's orange TOOLHEAD / expander card labelling) so the AI and the
+# visual graph can never disagree about what EBBCan or PIS are.
+_SBC_NAME_TOKENS = ("host", "rpi", "cb1", "linux")
+_TOOLHEAD_NAME_TOKENS = ("ebb", "toolhead", "th")
+
+# Major component section types (parser/config_schema.py is the source
+# of truth; these are the probe + accelerometer families users actually
+# run, e.g. a Voron Tap lands in [probe], an ADXL in [adxl345]).
+PROBE_SECTIONS = {
+    "probe": "generic [probe]",
+    "bltouch": "BLTouch",
+    "smart_effector": "Smart Effector (Klicky-style)",
+    "load_cell": "load cell",
+    "load_cell_probe": "load cell probe",
+    "probe_eddy_current": "eddy current probe",
+}
+ACCEL_SECTIONS = ("adxl345", "lis2dw", "lis3dh", "bmi160", "mpu9250",
+                  "icm20948")
+
+
+def _chip_from_serial(serial: str) -> str:
+    """Chip token from a Klipper usb by-id serial path
+    (usb-Klipper_stm32f446xx_<uid>-if00 -> STM32F446). Empty for
+    canbus_uuid / raw paths, which reveal no chip."""
+    m = re.search(r"Klipper_([A-Za-z0-9]+?)_[0-9A-Fa-f]{6,}", serial)
+    if not m:
+        return ""
+    chip = m.group(1).upper()
+    if chip.endswith("XX"):
+        chip = chip[:-2]
+    return chip
+
+
+def _hosting_mcu(params: dict[str, str], mcu_names: list[str]) -> str:
+    """Which MCU a component section hangs off: explicit sensor_mcu/mcu
+    param first, then any 'NAME:' pin prefix (EBBCan:PB13). Empty when
+    the section sits on the primary MCU."""
+    for key in ("sensor_mcu", "mcu"):
+        val = params.get(key, "").strip()
+        for name in mcu_names:
+            if name and val == name:
+                return name
+    for value in params.values():
+        for name in mcu_names:
+            if name and f"{name}:" in value:
+                return name
+    return ""
+
+
+def derive_hardware_inventory(config_texts: list[str]) -> dict[str, Any]:
+    """Mechanically parse the project's board + major-component roster.
+
+    Mirrors what the graph view draws (cards + labelling): every [mcu]
+    section becomes a board with a role, and every probe/accelerometer
+    section a component with the board hosting it. Fully deterministic
+    — this is what gets injected into the blank-memory auto-fill so the
+    model never has to 'pick up' boards by guessing.
+
+    Returns {} when nothing is derivable. Suppressed (commented-out)
+    sections never parse (header lines starting with '#' are not
+    headers), matching the graph's suppression semantics.
+    """
+    boards: list[dict[str, str]] = []
+    mcu_names: list[str] = []
+    for text in config_texts:
+        if not text:
+            continue
+        in_mcu = False
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("["):
+                name = stripped[1:].split("]", 1)[0].strip()
+                lower = name.lower()
+                if lower == "mcu" or lower.startswith("mcu "):
+                    in_mcu = True
+                    boards.append({"name": name[3:].strip(), "serial": ""})
+                    mcu_names.append(name[3:].strip())
+                else:
+                    in_mcu = False
+                continue
+            if in_mcu and ":" in stripped and not stripped.startswith("#"):
+                key, _, value = stripped.partition(":")
+                if key.strip().lower() == "serial":
+                    boards[-1]["serial"] = value.split("#", 1)[0].strip()
+    roster: dict[str, Any] = {}
+    for b in boards:
+        name = b["name"]
+        role = _mcu_role(name)
+        chip = _chip_from_serial(b["serial"])
+        label = name or "primary"
+        entry = {"name": label, "role": role}
+        if chip:
+            entry["chip"] = chip
+        roster.setdefault(role, []).append(entry)
+
+    probes: list[dict[str, str]] = []
+    accels: list[dict[str, str]] = []
+    for text in config_texts:
+        if not text:
+            continue
+        for section, kind in PROBE_SECTIONS.items():
+            params = _section_params(text, section)
+            if params:
+                host = _hosting_mcu(params, mcu_names)
+                probes.append({"kind": kind,
+                               "mcu": host or "primary"})
+        for section in ACCEL_SECTIONS:
+            params = _section_params(text, section)
+            if params:
+                host = _hosting_mcu(params, mcu_names)
+                accels.append({"kind": section,
+                               "mcu": host or "primary"})
+        if _section_params(text, "resonance_tester"):
+            roster["resonance_tester"] = True
+
+    if not (roster or probes or accels):
+        return {}
+    out: dict[str, Any] = {}
+    if roster:
+        out["boards"] = roster
+    if probes:
+        out["probes"] = probes
+    if accels:
+        out["accelerometers"] = accels
+    return out
+
+
+def _mcu_role(name: str) -> str:
+    if not name:
+        return "mainboard"
+    lower = name.lower()
+    if any(t in lower for t in _SBC_NAME_TOKENS):
+        return "sbc"
+    if any(t in lower for t in _TOOLHEAD_NAME_TOKENS):
+        return "toolhead"
+    return "expander"
+
+
+def format_hardware_inventory(inv: dict[str, Any]) -> str:
+    """Compact prompt rendering of derive_hardware_inventory's roster."""
+    parts: list[str] = []
+    boards = inv.get("boards", {})
+    for role, field_label in (
+        ("toolhead", "toolhead board(s)"),
+        ("expander", "expander board(s)"),
+        ("sbc", "host/SBC mcu(s)"),
+        ("mainboard", "main mcu(s)"),
+    ):
+        entries = boards.get(role) or []
+        if entries:
+            def _fmt(e: dict[str, str]) -> str:
+                chip = e.get("chip")
+                return f"{e['name']} ({chip} chip)" if chip else e["name"]
+            parts.append(f"{field_label}: "
+                         + ", ".join(_fmt(e) for e in entries))
+    probes = inv.get("probes") or []
+    if probes:
+        parts.append("probes: " + ", ".join(
+            f"{p['kind']} on {p['mcu']}" for p in probes))
+    accels = inv.get("accelerometers") or []
+    if accels:
+        line = "accelerometers: " + ", ".join(
+            f"{a['kind']} on {a['mcu']}" for a in accels)
+        if boards.get("resonance_tester") or inv.get("resonance_tester"):
+            line += " (+ [resonance_tester] present)"
+        parts.append(line)
+    return "; ".join(parts)
+
 
 def _section_params(text: str, header: str) -> dict[str, str]:
     """Params of the first [header] section in config text (key -> value,
