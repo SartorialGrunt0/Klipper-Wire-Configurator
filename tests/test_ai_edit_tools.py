@@ -905,3 +905,136 @@ def test_text_mode_nudge_keeps_fence_law(monkeypatch):
               if 'Call the tool NOW' in str(m.get('content', ''))]
     assert nudges, 'nudge did not fire in text mode'
     assert '```tool' in str(nudges[0]['content'])
+
+
+# ── has_inert_draft: comment-line draft shape (r4b TRIDENT-04) ─────────
+
+
+def _draft_session():
+    from services.ai_edit_tools import EditSession
+    return EditSession({'printer.cfg': {'content': (
+        '[include mainsail.cfg]\n'
+        '[include sensorless.cfg]\n'
+        '[printer]\n'
+        'kinematics: cartesian\n'
+        'max_velocity: 200\n'
+        '#enable_pin: PF16\n'
+    )}})
+
+
+def test_has_inert_draft_comment_out_is_draft():
+    """r4b TRIDENT-04 regression: the 'comment this line out' draft shape
+    (line absent, comment-stripped body present) MUST be treated as an
+    inert draft. The 0170e82 skip-all-'#' rule called it an echo and
+    shipped the inert draft with no nudge."""
+    ses = _draft_session()
+    assert ses.has_inert_draft([
+        '# file: printer.cfg\n'
+        '[include mainsail.cfg]\n'
+        '#[include sensorless.cfg]\n'
+    ]) is True
+
+
+def test_has_inert_draft_echoes_stay_quiet():
+    ses = _draft_session()
+    # post-approve display echo incl. '# file:' hint + a genuine project
+    # comment (the '#' line exists verbatim in the file)
+    assert ses.has_inert_draft([
+        '# file: printer.cfg\n'
+        '#enable_pin: PF16\n'
+        '[printer]\n'
+        'kinematics: cartesian\n'
+        'max_velocity: 200\n'
+    ]) is False
+    # brand-new content still drafts
+    assert ses.has_inert_draft(['[fan]\ncycle_time: 0.02\n']) is True
+    # comment-out of a NONEXISTENT body (plain comment prose) stays quiet
+    assert ses.has_inert_draft(['# nothing config-like here\n']) is False
+
+
+# ── allow_comment_change self-grant lock (r4b EDIT-06) ─────────────────
+
+
+COMMENTED_CFG = (
+    '[stepper_x]\n'
+    'step_pin: PE11\n'
+    'dir_pin: PE10\n'
+    '#enable_pin: !PE9\n'
+    'rotation_distance: 40\n'
+)
+
+
+def _stepper_session():
+    from services.ai_edit_tools import EditSession
+    return EditSession({'printer.cfg': {'content': COMMENTED_CFG}})
+
+
+def test_allow_comment_change_after_refusal_is_self_grant_blocked():
+    """r4b EDIT-06 live trace: set_param refused (commented), the model
+    IMMEDIATELY retried with allow_comment_change=true. A user message
+    cannot exist between two tool calls in one request, so that flag is
+    provably self-granted. The second call must be blocked with an
+    honest SELF-GRANT kickback — nothing staged, outcome user_gated."""
+    ses = _stepper_session()
+    content, _ = ses.execute({
+        'name': 'config_edit',
+        'arguments': {'op': 'set_param', 'file': 'printer.cfg',
+                      'section': 'stepper_x', 'key': 'enable_pin',
+                      'value': 'PF16'}})
+    assert 'commented out' in content
+    assert ses.last_write_outcome == 'user_gated'
+
+    content2, details2 = ses.execute({
+        'name': 'config_edit',
+        'arguments': {'op': 'set_param', 'file': 'printer.cfg',
+                      'section': 'stepper_x', 'key': 'enable_pin',
+                      'value': 'PF16', 'allow_comment_change': True}})
+    assert 'SELF-GRANT' in content2
+    assert details2 is None
+    assert ses.pending_edits == []
+    assert ses.last_write_outcome == 'user_gated'
+    # and the patch_gcode flavor of the same self-grant (exact r4b shape)
+    content3, details3 = ses.execute({
+        'name': 'config_edit',
+        'arguments': {'op': 'patch_gcode', 'file': 'printer.cfg',
+                      'section': 'stepper_x',
+                      'old_text': 'enable_pin: !PE9',
+                      'new_text': 'enable_pin: PF16',
+                      'allow_comment_change': True}})
+    assert 'SELF-GRANT' in content3
+    assert details3 is None
+    assert ses.pending_edits == []
+
+
+def test_allow_comment_change_prepares_blocked_after_refusal():
+    """Approval path (prepare) carries the identical lock: a self-granted
+    flag never opens a card."""
+    ses = _stepper_session()
+    c1, r1, _ = ses.prepare({
+        'name': 'config_edit',
+        'arguments': {'op': 'set_param', 'file': 'printer.cfg',
+                      'section': 'stepper_x', 'key': 'enable_pin',
+                      'value': 'PF16'}})
+    assert r1 is None and 'commented out' in c1
+    c2, r2, _ = ses.prepare({
+        'name': 'config_edit',
+        'arguments': {'op': 'set_param', 'file': 'printer.cfg',
+                      'section': 'stepper_x', 'key': 'enable_pin',
+                      'value': 'PF16', 'allow_comment_change': True}})
+    assert r2 is None and 'SELF-GRANT' in c2
+
+
+def test_allow_comment_change_fresh_session_still_works():
+    """A NEW request (fresh EditSession) after the user confirmed is a
+    new session — the flag works there (the lock is per-request, not a
+    ban)."""
+    ses = _stepper_session()
+    content, details = ses.execute({
+        'name': 'config_edit',
+        'arguments': {'op': 'patch_gcode', 'file': 'printer.cfg',
+                      'section': 'stepper_x',
+                      'old_text': '#enable_pin: !PE9',
+                      'new_text': 'enable_pin: PF16',
+                      'allow_comment_change': True}})
+    assert details is not None
+    assert 'STAGED' in content

@@ -243,6 +243,14 @@ class EditSession:
         #                  change must not hide behind the staged first
         #                  half either (r5 EDIT-04).
         self.last_write_outcome: str | None = None
+        # True once a commented-parameter refusal fired THIS request.
+        # User confirmation can only arrive as a NEW user message (new
+        # EditSession), so an allow_comment_change=true arriving later in
+        # the SAME request is provably model-self-granted — the exact
+        # live r4b EDIT-06 shape (refusal -> immediate retry with the
+        # flag set). Every later allow_comment_change op is refused as a
+        # self-grant until the user speaks.
+        self.comment_refused = False
         self._last_file: str | None = None
 
     def has_files(self) -> bool:
@@ -315,6 +323,18 @@ class EditSession:
             "a NEW value requires a NEW user message."
         )
 
+    def _self_grant_kickback(self, name: str) -> str:
+        return (
+            f"{name} BLOCKED — SELF-GRANT. A commented-parameter refusal "
+            "already fired earlier in THIS request. The user cannot have "
+            "confirmed anything between two tool calls inside one request, "
+            "so allow_comment_change=true here is model self-granted, which "
+            "is never valid. Do NOT retry with the flag. Explain the "
+            "commented-out parameter to the user and ASK; only a NEW user "
+            "message confirming the change authorizes a later request to "
+            "run it with allow_comment_change=true."
+        )
+
     def execute(self, tool_call: dict) -> tuple[str, dict | None]:
         """Run one write tool call (auto-approve path). Returns
         (lean content, details-or-None).
@@ -338,6 +358,10 @@ class EditSession:
             self.last_write_outcome = "user_gated"
             return self._duplicate_kickback(dup), None
 
+        if op.get("allow_comment_change") and self.comment_refused:
+            self.last_write_outcome = "user_gated"
+            return self._self_grant_kickback(name), None
+
         new_state, result = self.state.apply(self.baseline, op)
         if result["status"] == "error":
             # ANY commented-parameter refusal is user-gated (r9 finding:
@@ -352,6 +376,8 @@ class EditSession:
                 bool(result.get("commentedParams"))
                 or "exists but is commented out"
                 in str(result.get("error", "")))
+            if gated:
+                self.comment_refused = True
             self.last_write_outcome = (
                 "user_gated" if gated else "correctable")
             return _lean_error_content(name, result), None
@@ -386,12 +412,20 @@ class EditSession:
             self.last_write_outcome = "user_gated"
             return self._duplicate_kickback(dup), None, None
 
+        if op.get("allow_comment_change") and self.comment_refused:
+            # Same self-grant lock as execute(): no card for a flag the
+            # model cannot legitimately have earned mid-request.
+            self.last_write_outcome = "user_gated"
+            return self._self_grant_kickback(name), None, None
+
         new_state, result = self.state.apply(self.baseline, op)
         if result["status"] == "error":
             gated = (
                 bool(result.get("commentedParams"))
                 or "exists but is commented out"
                 in str(result.get("error", "")))
+            if gated:
+                self.comment_refused = True
             self.last_write_outcome = (
                 "user_gated" if gated else "correctable")
             return _lean_error_content(name, result), None, None
@@ -545,7 +579,23 @@ class EditSession:
         for block in blocks:
             for raw in block.splitlines():
                 stripped = raw.strip()
-                if not stripped or stripped.startswith("#"):
+                if not stripped:
+                    continue
+                if stripped.startswith("#"):
+                    # A comment line is a draft in exactly one shape: it
+                    # is NOT in the project but its comment-stripped body
+                    # IS -- i.e. "comment this line out" rendered as
+                    # prose (live r4b TRIDENT-04: the model drafted
+                    # '#[include sensorless.cfg]' and the old skip-all-
+                    # '#' rule called it an echo, shipping an inert
+                    # draft with no nudge). A '# file:' hint or a genuine
+                    # project comment matches neither leg and stays
+                    # skipped.
+                    if stripped in project_lines:
+                        continue
+                    body = stripped.lstrip("#").strip()
+                    if body and body in project_lines:
+                        return True
                     continue
                 if stripped.startswith("+"):
                     # Mini-diff '+' line: the NEW value — echo iff the

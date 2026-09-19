@@ -640,6 +640,45 @@ class ProjectState:
         section_text = '\n'.join(section_lines)
 
         occurrences = _count_substring_occurrences(section_text, old_text)
+        # Context-aware comment check: an exact-substring occurrence
+        # starting on a COMMENTED-OUT param line, while old_text presents
+        # an ACTIVE line, lands INSIDE the comment (live r4b EDIT-06:
+        # old_text 'enable_pin: !PE9' matched inside '#enable_pin: !PE9'
+        # and staged '#enable_pin: PF16' — a no-op the model then
+        # reported as done). The text-level crossings check below cannot
+        # see this: both quoted texts are active-shape. Gcode-body
+        # sections are exempt (every line is body text; '#' there is a
+        # macro comment, not a dormant param), and a dormant-shape quote
+        # (old_text starting with '#') is left to the crossings check.
+        if (occurrences >= 1
+                and not op.get('allow_comment_change')
+                and not header.startswith('gcode_macro')
+                and not old_text.split('\n', 1)[0].lstrip().startswith('#')):
+            touched: list[str] = []
+            pos = section_text.find(old_text)
+            while pos != -1:
+                line_start = section_text.rfind('\n', 0, pos) + 1
+                line_end = section_text.find('\n', pos)
+                line = section_text[line_start:
+                                    line_end if line_end != -1
+                                    else len(section_text)]
+                if line.lstrip().startswith('#'):
+                    cmatch = RE_COMMENTED_PARAM_LINE.match(line)
+                    if cmatch:
+                        touched.append(cmatch.group(2))
+                pos = section_text.find(old_text, pos + 1)
+            if touched:
+                return _state_error(
+                    "This patch matches INSIDE commented-out parameter "
+                    f"line(s) ({', '.join(sorted(set(touched)))}) — the "
+                    "quoted text looks active but the file line is "
+                    "COMMENTED, so the patch would edit dormant text "
+                    "without changing printer behavior. Explain the "
+                    "commented-out situation and ASK; re-run with "
+                    "allow_comment_change=true only after the USER "
+                    "confirms.",
+                    commentedParams=sorted(set(touched)),
+                )
         if not op.get('allow_comment_change'):
             # Comment-boundary guard: patch_gcode must not silently enable
             # or disable a config parameter by flipping its '#' —
