@@ -244,7 +244,17 @@ class ProjectState:
         configs = self._parse_all()
         if not configs:
             return {}
-        results = validate_project_configs(configs, gcode_registry=False)
+        # gcode_registry=True: the deliberate wiring-in the validator
+        # docstring anticipated ("until the edit-tools branch wires them
+        # deliberately", 2026-09-19). Sir's live report: SET_LED_COLOR
+        # hallucinated into [idle_timeout] staged silently. Registry
+        # findings are warning-tier, and warnings route to ADVISORIES in
+        # the delta gate — visible to the model ('applied with N
+        # advisories' + Did-you-mean) and on the approval card, never
+        # blocking, so a plugin command the stock registry can't see
+        # can't wedge an edit. Pre-existing unknowns sit in the baseline
+        # too and cancel out of the delta.
+        results = validate_project_configs(configs, gcode_registry=True)
         return {name: result.to_dict() for name, result in results.items()}
 
     def copy(self) -> "ProjectState":

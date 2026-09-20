@@ -41,9 +41,30 @@ from services.gcode_registry import (
     scan_gcode_body,
 )
 
-# Section types whose `gcode:` params are executed G-code (scanned for
-# command-name validity against the G-code command registry).
-_GCODE_SCAN_SECTION_TYPES = {"gcode_macro", "delayed_gcode"}
+# Section types whose params are executed G-code (scanned for
+# command-name validity against the G-code command registry). DERIVED
+# from the schema registry instead of a hardcoded pair: any MULTI_LINE
+# param whose name ends in 'gcode' is executed body text (gcode,
+# runout_gcode, press_gcode, activate_gcode, on_error_gcode, ...) while
+# identifier-shaped STRING params (gcode_id) never match. Live gap this
+# closes (Sir 2026-09-19): hallucinated SET_LED_COLOR in [idle_timeout]
+# gcode sailed through because only gcode_macro/delayed_gcode bodies
+# were ever scanned. Seeded with the canonical macro types so the scan
+# survives any schema-registry gap there.
+def _derived_gcode_scan_params() -> dict[str, frozenset[str]]:
+    out: dict[str, set[str]] = {
+        'gcode_macro': {'gcode'},
+        'delayed_gcode': {'gcode'},
+    }
+    for stype, sdef in SECTION_DEFS.items():
+        for p in sdef.params:
+            if p.name.endswith('gcode') \
+                    and p.param_type == ParamType.MULTI_LINE:
+                out.setdefault(stype, set()).add(p.name)
+    return {k: frozenset(v) for k, v in out.items()}
+
+
+_GCODE_SCAN_PARAMS = _derived_gcode_scan_params()
 
 # Finding codes produced by the registry scan (defined in
 # services.warning_acknowledgments so identity derivation needs no import
@@ -1046,10 +1067,10 @@ def _scan_file_gcode_commands(
     if not enabled:
         return findings
     bodies = [
-        (section, section.get_param("gcode"))
+        (section, pname, section.get_param(pname))
         for section in config.sections
-        if section.section_type in _GCODE_SCAN_SECTION_TYPES
-        and not section.is_commented_out
+        if not section.is_commented_out
+        for pname in _GCODE_SCAN_PARAMS.get(section.section_type, ())
     ]
     if not bodies:
         return findings
@@ -1057,8 +1078,8 @@ def _scan_file_gcode_commands(
         # Registry artifact missing/corrupt must never crash validation —
         # the scan silently no-ops (run scripts/generate-gcode-registry.py).
         scanned = [
-            (section, base, list(scan_gcode_body(gp.value, context)))
-            for section, gp in bodies
+            (section, pname, base, list(scan_gcode_body(gp.value, context)))
+            for section, pname, gp in bodies
             if gp is not None and not gp.is_commented_out and gp.value.strip()
             for base in (gp.line_number - 1,)
         ]
@@ -1076,7 +1097,7 @@ def _scan_file_gcode_commands(
             "gcode registry scan failed; findings for this file skipped",
             exc_info=True)
         return findings
-    for section, base, problems in scanned:
+    for section, pname, base, problems in scanned:
         for rel_line, verdict in problems:
             if verdict.status == STATUS_CONDITIONAL_OUT:
                 wanted = ", ".join(f"[{s}]" for s in verdict.required_sections)
@@ -1102,7 +1123,7 @@ def _scan_file_gcode_commands(
             findings.append(ValidationError(
                 severity="warning",
                 section=section.full_header,
-                param="gcode",
+                param=pname,
                 message=message,
                 line_number=base + rel_line,
                 code=code,

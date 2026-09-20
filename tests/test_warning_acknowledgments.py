@@ -484,6 +484,7 @@ def test_generic_cartesian_sections_are_valid():
 
 def test_menu_section_is_valid():
     result = _validate(
+        '[output_pin tool]\npin: PA0\n\n'
         '[menu __main __control __toolspeed]\n'
         'type: input\n'
         'enable: {True}\n'
