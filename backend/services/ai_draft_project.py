@@ -510,21 +510,26 @@ class ProjectState:
 
     @staticmethod
     def _top_level_keys(body_lines: list[str]) -> set[str]:
-        """Param keys at column 0 of a section body (active lines only).
+        """Param keys at the body's BASE indent (active lines only).
 
-        Continuation lines (indented) belong to the param above them and
-        are not keys; comments/blank lines are ignored, so moving a param
-        into a comment counts as a drop and warns."""
-        keys: set[str] = set()
+        Key lines sit at the body's base indent — which varies by file
+        style ('timeout: 300' vs '    timeout: 300') — while multi-line
+        value continuations are always indented deeper, so the base is
+        the MINIMUM indent among param-looking lines. Comments/blank
+        lines are ignored, so moving a param into a comment counts as a
+        drop and warns. Best-effort heuristic for a warning path;
+        sloppy mixed-indent files may under-report, never over-block."""
+        matches = []
         for line in body_lines:
             if not line.strip() or line.lstrip().startswith('#'):
                 continue
-            if line[:1] in (' ', '\t'):
-                continue  # multi-line value continuation
             match = RE_PARAM_LINE.match(line)
             if match:
-                keys.add(match.group(2))
-        return keys
+                matches.append((len(match.group(1)), match.group(2)))
+        if not matches:
+            return set()
+        base = min(indent for indent, _ in matches)
+        return {key for indent, key in matches if indent == base}
 
     def _op_add_section(self, op: dict) -> dict:
         filename = self._require_file(op.get('file'))
@@ -671,6 +676,29 @@ class ProjectState:
 
     # -- patch_gcode -------------------------------------------------------
 
+    @staticmethod
+    def _drop_warning(old_body_lines: list[str],
+                      new_body_lines: list[str]) -> str:
+        """Suffix naming top-level params that a patch/replace removed.
+
+        Same hazard as the replace_section warning (tnf-s1 r2): models
+        ANCHOR patches on an existing param line (often the only body
+        line, e.g. 'timeout: 1800' in [idle_timeout]) and forget to
+        re-include it in new_text when their intent was to ADD lines —
+        the string replace then silently deletes the anchor. Applied-as-
+        told semantics stay; the success output makes the loss visible
+        so the next turn can fix it. (Sir's live diff report 2026-09-19:
+        approval gate showed patch_gcode dropping timeout: 1800.)"""
+        lost = sorted(ProjectState._top_level_keys(old_body_lines)
+                      - ProjectState._top_level_keys(new_body_lines))
+        if not lost:
+            return ''
+        return (
+            f" — WARNING: {[k for k in lost]} existed in the section "
+            f"before this edit and is GONE from the result. If you meant "
+            f"to ADD lines rather than delete them, include the quoted "
+            f"anchor lines inside new_text and resend.")
+
     def _op_patch_gcode(self, op: dict) -> dict:
         filename = self._require_file(op.get('file'))
         header = self._require_header(op)
@@ -784,13 +812,17 @@ class ProjectState:
             new_lines = _reindent_like(new_text, section_lines[start])
             lines[header_index + 1 + start:header_index + 1 + stop] = new_lines
             self.files[filename] = '\n'.join(lines)
+            found2 = _find_section(lines, header)
+            new_body = lines[found2[0] + 1:found2[1]] if found2 else []
             return {'status': 'ok', 'file': filename,
-                    'summary': f"patched [{header}] in {filename}"}
+                    'summary': f"patched [{header}] in {filename}"
+                    + self._drop_warning(section_lines, new_body)}
         patched_lines = patched.split('\n')
         lines[header_index + 1:end] = patched_lines
         self.files[filename] = '\n'.join(lines)
         return {'status': 'ok', 'file': filename,
-                'summary': f"patched [{header}] in {filename}"}
+                'summary': f"patched [{header}] in {filename}"
+                + self._drop_warning(section_lines, patched_lines)}
 
     # -- files & includes ---------------------------------------------------
 

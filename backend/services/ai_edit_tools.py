@@ -37,7 +37,7 @@ call and will be ignored):
 {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "set_param", "section": "<section>", "key": "<param>", "value": "<new value>"}}
 ```
 Other argument shapes:
-patch a macro body: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "patch_gcode", "section": "gcode_macro NAME", "old_text": "<line copied verbatim>", "new_text": "<replacement>"}}
+patch a macro body: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "patch_gcode", "section": "gcode_macro NAME", "old_text": "<line copied verbatim>", "new_text": "<replacement>"}} — new_text REPLACES old_text: repeat the anchor lines inside new_text when adding lines
 include a file: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "add_include", "target_file": "new.cfg"}}
 create a NEW file only: {"name": "config_write", "arguments": {"file": "new.cfg", "content": "<full file text>"}}
 set_param value must be ONE LINE — multi-line values (e.g. gcode:) are dropped by some tool-call channels and must go through replace_section or patch_gcode."""
@@ -49,7 +49,7 @@ why to the user and ask.
 Argument shapes for the edit tools:
 set_param: {"file": "<file.cfg>", "op": "set_param", "section": "<section>", "key": "<param>", "value": "<new value>"}
 value must be ONE LINE; for multi-line params (gcode:) use replace_section
-patch a macro body: {"file": "<file.cfg>", "op": "patch_gcode", "section": "gcode_macro NAME", "old_text": "<line copied verbatim>", "new_text": "<replacement>"}
+patch a macro body: {"file": "<file.cfg>", "op": "patch_gcode", "section": "gcode_macro NAME", "old_text": "<line copied verbatim>", "new_text": "<replacement>"} — new_text REPLACES old_text: repeat the anchor lines inside new_text when adding lines
 include a file: {"file": "<file.cfg>", "op": "add_include", "target_file": "<new.cfg>"}
 create a NEW file only: {"file": "<new.cfg>", "content": "<full file text>"}"""
 
@@ -122,7 +122,12 @@ CONFIG_EDIT_SPEC = {
             },
             "new_text": {
                 "type": "string",
-                "description": "Replacement lines (patch_gcode); empty string deletes the matched lines",
+                "description": (
+                    "Replacement lines (patch_gcode); empty string deletes "
+                    "the matched lines. new_text REPLACES old_text "
+                    "entirely: to ADD lines while keeping the quoted "
+                    "anchor, repeat the anchor lines inside new_text"
+                ),
             },
             "allow_comment_change": {
                 "type": "boolean",

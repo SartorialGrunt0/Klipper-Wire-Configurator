@@ -1538,3 +1538,62 @@ def test_replace_section_indented_lines_are_not_keys():
         'text': 'gcode:\n  M106\n  M107\ndescription: d'})
     assert res['status'] == 'ok'
     assert 'WARNING' not in res['summary']
+
+
+# ── patch_gcode anchor-drop warning (Sir's approval-gate diff report) ──
+
+
+def test_patch_gcode_warns_when_anchor_param_dropped():
+    from services.ai_edit_tools import EditSession
+    es = EditSession({'printer.cfg': {'content':
+        '[idle_timeout]\ntimeout: 1800\n'}})
+    content, details = es.execute({
+        'name': 'config_edit',
+        'arguments': {'file': 'printer.cfg', 'op': 'patch_gcode',
+                      'section': 'idle_timeout',
+                      'old_text': 'timeout: 1800',
+                      'new_text': 'gcode:\n  STOP_ALL'}})
+    assert details is not None  # applied as told
+    assert 'WARNING' in content and 'timeout' in content
+
+
+def test_patch_gcode_anchor_kept_no_warning():
+    from services.ai_edit_tools import EditSession
+    es = EditSession({'printer.cfg': {'content':
+        '[idle_timeout]\ntimeout: 1800\n'}})
+    content, details = es.execute({
+        'name': 'config_edit',
+        'arguments': {'file': 'printer.cfg', 'op': 'patch_gcode',
+                      'section': 'idle_timeout',
+                      'old_text': 'timeout: 1800',
+                      'new_text': 'timeout: 300\ngcode:\n  STOP_ALL'}})
+    assert details is not None
+    assert 'WARNING' not in content
+    assert 'timeout: 300' in es.state.files['printer.cfg']
+
+
+def test_patch_gcode_indent_tolerant_path_warns_too():
+    from services.ai_edit_tools import ProjectState
+    st = ProjectState({'printer.cfg': (
+        '[idle_timeout]\n    timeout: 1800\n')})
+    _, res = st.apply_no_gate({
+        'op': 'patch_gcode', 'file': 'printer.cfg',
+        'section': 'idle_timeout',
+        'old_text': 'timeout: 1800',
+        'new_text': 'gcode:\n  STOP_ALL'})
+    assert res['status'] == 'ok'
+    assert 'WARNING' in res['summary']
+
+
+def test_patch_gcode_intentional_deletion_warns_once_only():
+    # Deleting a param IS legal — the warning is informational,
+    # not an error; status stays ok.
+    from services.ai_edit_tools import ProjectState
+    st = ProjectState({'printer.cfg': (
+        '[idle_timeout]\ntimeout: 1800\nslow_to_down: true\n')})
+    _, res = st.apply_no_gate({
+        'op': 'patch_gcode', 'file': 'printer.cfg',
+        'section': 'idle_timeout',
+        'old_text': 'slow_to_down: true', 'new_text': ''})
+    assert res['status'] == 'ok'
+    assert 'slow_to_down' in res['summary']
