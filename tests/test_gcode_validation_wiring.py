@@ -209,22 +209,30 @@ def test_valid_command_in_idle_timeout_no_finding():
 
 
 def test_edit_session_surfaces_unknown_command_as_advisory():
-    # The chat edit gate validates with gcode_registry=True; warnings
-    # surface as ADVISORIES on the applied result (model sees the
-    # did-you-mean; never blocks the stage).
+    # The chat edit gate validates with gcode_registry=True. Since
+    # 2026-09-20 (Sir), a NEW unknown command kicks the write back
+    # UNSTAGED once — the model gets the did-you-mean and a correction
+    # round before any card. The second identical send is the model's
+    # plugin claim: it stages with the advisory riding along (card badge
+    # remains the user's safety net).
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
     from services.ai_edit_tools import EditSession
     es = EditSession({'printer.cfg': {'content': '[idle_timeout]\ntimeout: 1800\n'}})
-    content, details = es.execute({
+    call = {
         'name': 'config_edit',
         'arguments': {'file': 'printer.cfg', 'op': 'replace_section',
                       'section': 'idle_timeout',
                       'text': 'timeout: 300\ngcode:\n'
-                              '  SET_LED_COLOR LED=x RED=0'}})
-    assert details is not None          # applied (advisory, not block)
-    assert 'advisory' in content.lower()
+                              '  SET_LED_COLOR LED=x RED=0'}}
+    content, details = es.execute(call)
+    assert details is None              # first send: kicked back, not staged
     assert 'SET_LED_COLOR' in content
     assert 'SET_LED' in content         # did-you-mean reaches the model
+    content, details = es.execute(call)
+    assert details is not None          # resend: stages with advisory
+    assert 'advisory' in content.lower()
+    assert any(a['code'] == 'unknown_gcode_command'
+               for a in details['advisories'])
 
 
 def test_edit_session_baseline_unknowns_do_not_rewarn():

@@ -183,7 +183,10 @@ Rules:
   patch_gcode anchor miss the result includes the section's current text;
   quote lines exactly as they appear there.
 - Warnings returned as advisories do not block the change; mention them
-  to the user when relevant.
+  to the user when relevant. EXCEPTION: gcode the command registry flags
+  as unknown comes back UNSTAGED the first time — fix the command (the
+  finding names it and may suggest the right one), or re-send the call
+  unchanged only if you are sure it comes from a plugin or custom module.
 - Applied changes are STAGED for the user's review, not saved. Never tell
   the user a change is saved or active until they approve and save it."""
 
@@ -255,6 +258,17 @@ class EditSession:
         # and-change-strategy directive, and the 4th hard-stops (no
         # apply attempt). Key: (name, canonical args) -> failure count.
         self._identical_failures: dict[str, int] = {}
+        # Registry-kickback ledger (Sir 2026-09-20): a write whose NEW
+        # advisories include unknown_gcode_command is kicked back UNSTAGED
+        # ONCE so the model gets a correction round before the user ever
+        # sees a card (never route a known-invalid edit to the user).
+        # A SECOND identical send passes — that is the model's honest
+        # "this command is from a plugin the stock registry cannot see"
+        # claim, and the advisory then rides on the card for the user.
+        # Key: call key -> kick count. Deliberately NOT in
+        # _identical_failures: the kick is not a call failure, and the
+        # repetition BLOCK must never veto the plugin resend.
+        self._registry_kicks: dict[str, int] = {}
         self._last_file: str | None = None
 
     def has_files(self) -> bool:
@@ -388,6 +402,53 @@ class EditSession:
             "a NEW value requires a NEW user message."
         )
 
+    # Registry codes that earn a pre-staging kickback (Sir 2026-09-20):
+    # a hallucinated command name is INVALID at runtime — Klipper errors
+    # on it — so it must not reach the user's approval card without the
+    # model first getting one correction round. gcode_command_section_-
+    # missing stays pure advisory: fixing it means touching OTHER
+    # sections, which is a decision the model shouldn't be forced into.
+    _REGISTRY_KICK_CODES = frozenset({"unknown_gcode_command"})
+
+    def _registry_kickback(self, name: str, args: dict,
+                           result: dict) -> str | None:
+        """One-shot kickback for writes introducing unknown gcode commands.
+
+        Returns kickback text (change NOT staged) the FIRST time this
+        exact call trips the check; None to let it through afterwards.
+        The resend is the model's deliberate claim that the command is
+        legit (plugin/custom module the stock registry can't see); the
+        advisory then rides on the approval card as the user's safety
+        net, and a second kick could only loop.
+        """
+        findings = [
+            a for a in (result.get("advisories") or [])
+            if a.get("code") in self._REGISTRY_KICK_CODES
+        ]
+        if not findings:
+            return None
+        key = self._call_key(name, args)
+        count = self._registry_kicks.get(key, 0) + 1
+        self._registry_kicks[key] = count
+        if count > 1:
+            return None
+        lines = [
+            f"{name} NOT STAGED — the change introduces gcode the command "
+            "registry does not recognize:",
+        ]
+        for adv in findings[:4]:
+            where = f"[{adv.get('section', '')}] {adv.get('param', '')}".rstrip()
+            lines.append(f"- {where}: {adv.get('message', '')}")
+        lines.append(
+            "If this is a typo or hallucinated command, fix it and call "
+            "again (e.g. use the suggested command). If you are CONFIDENT "
+            "it comes from a plugin or custom module the stock registry "
+            "cannot see, re-send the call unchanged — it will then stage "
+            "with the warning shown to the user. Do not open an approval "
+            "request for a command you know to be wrong."
+        )
+        return "\n".join(lines)
+
     def execute(self, tool_call: dict) -> tuple[str, dict | None]:
         """Run one write tool call (auto-approve path). Returns
         (lean content, details-or-None).
@@ -429,6 +490,13 @@ class EditSession:
             return (_lean_error_content(name, result)
                     + self._repeat_directive(name, count)), None
 
+        kick = self._registry_kickback(name, args, result)
+        if kick is not None:
+            # Correctable: unknown gcode gets one pre-staging correction
+            # round before any card/stage (Sir 2026-09-20).
+            self.last_write_outcome = "correctable"
+            return kick, None
+
         self.commit(new_state, name, result, raw_op=op)
         return _lean_success_content(name, result), self._details_for(name, result)
 
@@ -467,6 +535,15 @@ class EditSession:
             count = self._note_failure(name, args)
             return (_lean_error_content(name, result)
                     + self._repeat_directive(name, count)), None, None
+
+        kick = self._registry_kickback(name, args, result)
+        if kick is not None:
+            # Gate mode gets the SAME one-shot unknown-gcode kickback as
+            # execute(): no card opens without the model's correction
+            # round first (Sir 2026-09-20). The resend passes and the
+            # advisory rides the card.
+            self.last_write_outcome = "correctable"
+            return kick, None, None
 
         return _lean_success_content(name, result), result, new_state
 

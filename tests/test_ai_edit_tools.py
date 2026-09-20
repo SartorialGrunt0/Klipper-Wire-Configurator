@@ -1453,9 +1453,9 @@ def test_replace_section_new_text_synonym_stages():
         'name': 'config_edit',
         'arguments': {'file': 'printer.cfg', 'op': 'replace_section',
                       'section': 'idle_timeout',
-                      'new_text': 'timeout: 300\ngcode:\n  STOP'}})
+                      'new_text': 'timeout: 300\ngcode:\n  M106'}})
     assert details is not None, content
-    assert 'STOP' in es.state.files['printer.cfg']
+    assert 'M106' in es.state.files['printer.cfg']
 
 
 def test_explicit_value_beats_new_text_synonym():
@@ -1485,7 +1485,7 @@ def test_replace_section_warns_on_dropped_param():
         'name': 'config_edit',
         'arguments': {'file': 'printer.cfg', 'op': 'replace_section',
                       'section': 'idle_timeout',
-                      'text': 'gcode:\n  STOP_ALL'}})
+                      'text': 'gcode:\n  M106'}})
     # applied as told, but the summary names the vanished key
     assert details is not None
     assert 'WARNING' in content and 'timeout' in content
@@ -1501,7 +1501,7 @@ def test_replace_section_no_warning_when_body_complete():
         'name': 'config_edit',
         'arguments': {'file': 'printer.cfg', 'op': 'replace_section',
                       'section': 'idle_timeout',
-                      'text': 'timeout: 300\ngcode:\n  STOP_ALL'}})
+                      'text': 'timeout: 300\ngcode:\n  M106'}})
     assert details is not None
     assert 'WARNING' not in content
 
@@ -1530,7 +1530,7 @@ def test_patch_gcode_warns_when_anchor_param_dropped():
         'arguments': {'file': 'printer.cfg', 'op': 'patch_gcode',
                       'section': 'idle_timeout',
                       'old_text': 'timeout: 1800',
-                      'new_text': 'gcode:\n  STOP_ALL'}})
+                      'new_text': 'gcode:\n  M106'}})
     assert details is not None  # applied as told
     assert 'WARNING' in content and 'timeout' in content
 
@@ -1544,7 +1544,7 @@ def test_patch_gcode_anchor_kept_no_warning():
         'arguments': {'file': 'printer.cfg', 'op': 'patch_gcode',
                       'section': 'idle_timeout',
                       'old_text': 'timeout: 1800',
-                      'new_text': 'timeout: 300\ngcode:\n  STOP_ALL'}})
+                      'new_text': 'timeout: 300\ngcode:\n  M106'}})
     assert details is not None
     assert 'WARNING' not in content
     assert 'timeout: 300' in es.state.files['printer.cfg']
@@ -1575,3 +1575,92 @@ def test_patch_gcode_intentional_deletion_warns_once_only():
         'old_text': 'slow_to_down: true', 'new_text': ''})
     assert res['status'] == 'ok'
     assert 'slow_to_down' in res['summary']
+
+
+# ── unknown-gcode one-shot kickback (Sir 2026-09-20) ──────────────────
+# A hallucinated command (SET_LED_COLOR) is invalid at runtime; the
+# model must get ONE correction round before any card/stage. The second
+# identical send is its honest plugin claim and passes, advisory riding
+# the card. NEVER a second kick (loop risk).
+
+
+def _led_cfg():
+    return {'printer.cfg': {'content': (
+        '[output_pin led_strip]\npin: PB0\n\n'
+        '[gcode_macro PARK]\ngcode:\n    G91\n')}}
+
+
+def _set_color_call(cmd='SET_LED_COLOR'):
+    return {'name': 'config_edit', 'arguments': {
+        'file': 'printer.cfg', 'op': 'patch_gcode',
+        'section': 'gcode_macro PARK',
+        'old_text': '    G91',
+        'new_text': f'    G91\n    {cmd} LED=led_strip RED=1 GREEN=0 BLUE=0'}}
+
+
+def test_unknown_gcode_kicked_back_once_not_staged():
+    from services.ai_edit_tools import EditSession
+    es = EditSession(_led_cfg())
+    content, details = es.execute(_set_color_call())
+    assert details is None                      # NOT staged
+    assert 'NOT STAGED' in content
+    assert 'SET_LED_COLOR' in content
+    assert 'SET_LED' in content                 # did-you-mean carried
+    assert 'SET_LED_COLOR' not in es.state.files['printer.cfg']
+    assert es.pending_edits == []
+    assert es.last_write_outcome == 'correctable'
+
+
+def test_identical_resend_passes_as_plugin_claim():
+    from services.ai_edit_tools import EditSession
+    es = EditSession(_led_cfg())
+    call = _set_color_call()
+    first, details = es.execute(call)
+    assert details is None
+    content, details = es.execute(call)
+    # Second send = deliberate plugin claim: stages, advisory rides along.
+    assert details is not None
+    assert 'applied' in content
+    assert any(a['code'] == 'unknown_gcode_command'
+               for a in details['advisories'])
+    assert 'SET_LED_COLOR' in es.state.files['printer.cfg']
+
+
+def test_corrected_command_needs_no_second_round():
+    from services.ai_edit_tools import EditSession
+    es = EditSession(_led_cfg())
+    _, details = es.execute(_set_color_call())
+    assert details is None
+    content, details = es.execute(_set_color_call(cmd='SET_PIN'))
+    assert details is not None
+    assert 'SET_LED_COLOR' not in es.state.files['printer.cfg']
+    assert 'SET_PIN' in es.state.files['printer.cfg']
+
+
+def test_prepare_unknown_gcode_no_card_first_round():
+    """Gate path: prepare() must return the kickback (result None) so
+    _run_approval_gate never opens a card without the correction round."""
+    from services.ai_edit_tools import EditSession
+    es = EditSession(_led_cfg())
+    call = _set_color_call()
+    content, result, preview = es.prepare(call)
+    assert result is None and preview is None
+    assert 'NOT STAGED' in content
+    content, result, preview = es.prepare(call)
+    assert result is not None                   # resend: card may open
+    assert any(a['code'] == 'unknown_gcode_command'
+               for a in result['advisories'])
+
+
+def test_preexisting_unknown_command_still_silent():
+    """Baseline cancellation: an unknown command already in the user's
+    config must not earn a kickback on an unrelated edit."""
+    from services.ai_edit_tools import EditSession
+    es = EditSession({'printer.cfg': {'content': (
+        '[idle_timeout]\ntimeout: 300\ngcode:\n    SET_LED_COLOR LED=x RED=1\n'
+    )}})
+    content, details = es.execute({'name': 'config_edit', 'arguments': {
+        'file': 'printer.cfg', 'op': 'set_param',
+        'section': 'idle_timeout', 'key': 'timeout', 'value': '600'}})
+    assert details is not None   # no NEW unknown -> no kick
+    assert 'NOT STAGED' not in content
