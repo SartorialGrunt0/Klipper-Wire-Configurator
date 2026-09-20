@@ -129,9 +129,7 @@ export function useAssistantDraft() {
   const {
     configFiles,
     activeFile,
-    validation,
     setConfigFile,
-    setValidation,
     removeConfigFile,
     markDirty,
   } = useConfigStore();
@@ -726,7 +724,6 @@ export function useAssistantDraft() {
     try {
       const selectedChangeIds = new Set(currentPreview.selectedChangeIds);
       const updatedConfigs = { ...configFiles };
-      const updatedValidation = { ...validation };
       const touchedFiles: string[] = [];
       const deletedFiles: string[] = [];
 
@@ -748,12 +745,6 @@ export function useAssistantDraft() {
         }
         // Use the cached merged config directly instead of re-parsing
         updatedConfigs[fp.filename] = fp.mergedConfig;
-        // Validate — lighter than parse since we already have the parsed config
-        try {
-          updatedValidation[fp.filename] = await api.validateConfig(fp.mergedConfig);
-        } catch {
-          // Validation failure shouldn't block the edit
-        }
         touchedFiles.push(fp.filename);
       }
 
@@ -766,17 +757,25 @@ export function useAssistantDraft() {
 
       touchedFiles.forEach((filename) => {
         if (deletedFiles.includes(filename)) return;
+        // Write the config only — findings come from revalidateAll() below,
+        // NOT a single-file validateConfig written via setValidation. A
+        // single-file result flags every included-file macro as
+        // unknown_gcode_command (include-graph-aware registry findings need
+        // the whole project; live report 2026-09-20).
         setConfigFile(filename, updatedConfigs[filename]);
-        setValidation(filename, updatedValidation[filename]);
       });
       deletedFiles.forEach((filename) => removeConfigFile(filename));
       markDirty();
+      // Refresh every file's findings against the merged draft as a PROJECT
+      // (same source of truth as updateConfigFile's revalidation). Awaiting
+      // it here so the caller's graph rebuild reads fresh validation.
+      await useConfigStore.getState().revalidateAll();
 
       setAssistantDraftPreview(null);
     } catch (err: unknown) {
       throw err; // Let caller handle the error
     }
-  }, [assistantDraftPreview, configFiles, validation, setConfigFile, setValidation, markDirty]);
+  }, [assistantDraftPreview, configFiles, setConfigFile, markDirty]);
 
   // ── Applicable Messages (for showing/hiding "Apply and Review Changes" buttons) ──
 

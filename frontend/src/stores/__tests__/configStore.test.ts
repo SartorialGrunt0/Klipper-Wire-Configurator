@@ -401,6 +401,35 @@ describe('configStore dirty / text parse error tracking', () => {
     expect(useConfigStore.getState().validation['printer.cfg']).toBeDefined();
   });
 
+  it('multi-file updateConfigFile revalidates as a PROJECT, not per file', async () => {
+    // Regression (2026-09-20): approving an AI edit wrote the edited file
+    // with setConfigFile + a SINGLE-file validateConfig, so include-graph-
+    // aware findings vanished and every macro defined in an included file
+    // (CLEAN_NOZZLE from clean.cfg, AUX_FAN_* from aux_fan.cfg) reappeared
+    // as unknown_gcode_command. Mutations must route through the project
+    // validation pass whenever more than one file is loaded.
+    vi.useRealTimers();
+    const api = await import('@/services/api');
+    vi.mocked(api.validateProject).mockClear();
+    vi.mocked(api.validateConfig).mockClear();
+
+    const store = useConfigStore.getState();
+    const printer = makeConfigFile();
+    printer.filename = 'printer.cfg';
+    const clean = makeConfigFile();
+    clean.filename = 'clean.cfg';
+    store.setConfigFile('printer.cfg', printer);
+    store.setConfigFile('clean.cfg', clean);
+
+    const edited = makeConfigFile();
+    edited.filename = 'printer.cfg';
+    useConfigStore.getState().updateConfigFile('printer.cfg', edited);
+    await new Promise((resolve) => setTimeout(resolve, 700));
+
+    expect(api.validateProject).toHaveBeenCalledTimes(1);
+    expect(api.validateConfig).not.toHaveBeenCalled();
+  });
+
   it('markClean clears the dirty flag', () => {
     const store = useConfigStore.getState();
     store.setConfigFile('printer.cfg', makeConfigFile());

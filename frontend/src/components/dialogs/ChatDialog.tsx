@@ -123,8 +123,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     activeFile,
     validation,
     schemas,
-    setConfigFile,
-    setValidation,
+    updateConfigFile,
     removeConfigFile,
     markDirty,
   } = useConfigStore();
@@ -365,12 +364,14 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         try {
           const parsed = await api.parseConfigText(newText, file);
           const config = { ...parsed.config, raw_text: newText };
-          setConfigFile(file, config);
-          try {
-            setValidation(file, await api.validateConfig(config));
-          } catch {
-            // Validation failure shouldn't block applying an approved edit.
-          }
+          // updateConfigFile (NOT setConfigFile + single-file validateConfig):
+          // the store's debounced revalidation validates the WHOLE project,
+          // so include-graph-aware findings (gcode registry macros defined in
+          // included files, cross-file dups/pins) re-derive correctly. A
+          // single-file result written here flags every included-file macro
+          // as unknown_gcode_command (live report 2026-09-20: CLEAN_NOZZLE,
+          // AUX_FAN_ON/OFF from clean.cfg / aux_fan.cfg).
+          updateConfigFile(file, config);
         } catch (err: unknown) {
           // Should not happen: newText comes from the backend's own
           // writer. Surface rather than silently drop the approved change.
@@ -380,11 +381,18 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       }
       deletes.forEach((file) => removeConfigFile(file));
       if (upserts.length > 0 || deletes.length > 0) markDirty();
+      if (deletes.length > 0) {
+        // Deletion alone schedules nothing (removeConfigFile only drops the
+        // file's own entry) — re-derive the OTHER files' findings (e.g. a
+        // dangling include) against the surviving project now. Upsert-only
+        // flows are already covered by updateConfigFile's debounced pass.
+        void useConfigStore.getState().revalidateAll();
+      }
       // Staged edits are now in the draft — drop any stale review preview
       // so the "Apply and Review" affordance can't re-apply them.
       setAssistantDraftPreview(null);
     },
-    [setConfigFile, setValidation, removeConfigFile, markDirty, setAssistantDraftPreview],
+    [updateConfigFile, removeConfigFile, markDirty, setAssistantDraftPreview],
   );
 
   // ── Submit Message ──────────────────────────────────────────────
@@ -956,9 +964,9 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       const graphStore = useGraphStore.getState();
       graphStore.clearGraph();
       // Read config files AND validation directly from the store so newly
-      // created files and fresh validation results (added by
-      // handleAcceptAssistantEdit via setConfigFile/setValidation) are
-      // included in the graph rebuild instead of stale closure values.
+      // created files and fresh PROJECT-level validation results (refreshed
+      // by handleAcceptAssistantEdit via revalidateAll) are included in the
+      // graph rebuild instead of stale closure values.
       const latestConfigFiles = useConfigStore.getState().configFiles;
       const latestValidation = useConfigStore.getState().validation;
       buildProjectGraph(latestConfigFiles, graphStore, schemas, latestValidation);

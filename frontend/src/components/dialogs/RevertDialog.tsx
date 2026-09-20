@@ -104,6 +104,12 @@ export default function RevertDialog({ onClose }: RevertDialogProps) {
           allValidations[filename] = result.validation;
         }
 
+        // Per-file parse validation is single-file scope: it flags macros
+        // defined in OTHER files as unknown_gcode_command (2026-09-20 class).
+        // Refresh findings as a PROJECT before the graph reads them.
+        await configStore.revalidateAll();
+        Object.assign(allValidations, useConfigStore.getState().validation);
+
         // Rebuild graph
         const graphStore = useGraphStore.getState();
         buildProjectGraph(allConfigs, graphStore, schemas, allValidations);
