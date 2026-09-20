@@ -109,7 +109,12 @@ CONFIG_EDIT_SPEC = {
             },
             "text": {
                 "type": "string",
-                "description": "Section body text (add_section / replace_section) — body only, no [header] line",
+                "description": (
+                    "Section body text (add_section / replace_section) — "
+                    "body only, no [header] line. For replace_section this "
+                    "REPLACES THE ENTIRE BODY: include every parameter you "
+                    "want to keep (the result warns if keys disappear)"
+                ),
             },
             "old_text": {
                 "type": "string",

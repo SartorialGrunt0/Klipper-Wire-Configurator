@@ -1494,3 +1494,47 @@ def test_explicit_value_beats_new_text_synonym():
                         'section': 's', 'old_text': 'a',
                         'new_text': 'b'})
     assert op2['new_text'] == 'b' and 'value' not in op2
+
+
+# ── replace_section dropped-parameter warning (tnf-s1 r2) ─────────────
+
+
+def test_replace_section_warns_on_dropped_param():
+    from services.ai_edit_tools import EditSession
+    es = EditSession({'printer.cfg': {'content':
+        '[idle_timeout]\ntimeout: 300\ngcode:\n  M18\n'}})
+    content, details = es.execute({
+        'name': 'config_edit',
+        'arguments': {'file': 'printer.cfg', 'op': 'replace_section',
+                      'section': 'idle_timeout',
+                      'text': 'gcode:\n  STOP_ALL'}})
+    # applied as told, but the summary names the vanished key
+    assert details is not None
+    assert 'WARNING' in content and 'timeout' in content
+    body = es.state.files['printer.cfg']
+    assert '\ntimeout:' not in body  # param gone; header name irrelevant
+
+
+def test_replace_section_no_warning_when_body_complete():
+    from services.ai_edit_tools import EditSession
+    es = EditSession({'printer.cfg': {'content':
+        '[idle_timeout]\ntimeout: 300\n'}})
+    content, details = es.execute({
+        'name': 'config_edit',
+        'arguments': {'file': 'printer.cfg', 'op': 'replace_section',
+                      'section': 'idle_timeout',
+                      'text': 'timeout: 300\ngcode:\n  STOP_ALL'}})
+    assert details is not None
+    assert 'WARNING' not in content
+
+
+def test_replace_section_indented_lines_are_not_keys():
+    from services.ai_edit_tools import ProjectState
+    st = ProjectState({'printer.cfg': (
+        '[gcode_macro X]\ngcode:\n  M104\n  M140\ndescription: d\n')})
+    _, res = st.apply_no_gate({
+        'op': 'replace_section', 'file': 'printer.cfg',
+        'section': 'gcode_macro X',
+        'text': 'gcode:\n  M106\n  M107\ndescription: d'})
+    assert res['status'] == 'ok'
+    assert 'WARNING' not in res['summary']

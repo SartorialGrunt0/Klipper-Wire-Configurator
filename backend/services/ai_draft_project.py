@@ -508,6 +508,24 @@ class ProjectState:
 
     # -- sections ----------------------------------------------------------
 
+    @staticmethod
+    def _top_level_keys(body_lines: list[str]) -> set[str]:
+        """Param keys at column 0 of a section body (active lines only).
+
+        Continuation lines (indented) belong to the param above them and
+        are not keys; comments/blank lines are ignored, so moving a param
+        into a comment counts as a drop and warns."""
+        keys: set[str] = set()
+        for line in body_lines:
+            if not line.strip() or line.lstrip().startswith('#'):
+                continue
+            if line[:1] in (' ', '\t'):
+                continue  # multi-line value continuation
+            match = RE_PARAM_LINE.match(line)
+            if match:
+                keys.add(match.group(2))
+        return keys
+
     def _op_add_section(self, op: dict) -> dict:
         filename = self._require_file(op.get('file'))
         header = self._require_header(op)
@@ -613,9 +631,28 @@ class ProjectState:
                         crossed['enabled'] + crossed['disabled']
                         + crossed['changed']),
                 )
+        old_body_lines = lines[header_index + 1:inner_end]
         lines[header_index + 1:inner_end] = new_body
         self.files[filename] = '\n'.join(lines)
-        return {'status': 'ok', 'file': filename, 'summary': f"replaced body of [{header}] in {filename}"}
+        summary = f"replaced body of [{header}] in {filename}"
+        # Dropped-parameter warning (tnf-s1 r2 2026-09-19): replace_section
+        # owns the ENTIRE body, so a model that writes a partial body (the
+        # gcode: block alone) silently wipes every other param it had
+        # staged or that existed — timeout: 300 vanished right after
+        # set_param had staged it, with zero feedback. Semantics stay
+        # as-told; the success output now names what disappeared so the
+        # model can resend a full body on the next turn (intentional
+        # deletions: the user just sees it in the diff anyway).
+        old_top = self._top_level_keys(old_body_lines)
+        new_top = self._top_level_keys(new_body)
+        lost = sorted(old_top - new_top)
+        if lost:
+            summary += (
+                f" — WARNING: {[k for k in lost]} existed in the previous "
+                f"body and is GONE from your replacement. If unintentional, "
+                f"resend replace_section with the FULL new body including "
+                f"them.")
+        return {'status': 'ok', 'file': filename, 'summary': summary}
 
     def _op_delete_section(self, op: dict) -> dict:
         filename = self._require_file(op.get('file'))
