@@ -329,7 +329,10 @@ SYSTEM_PROMPT = (
     "fetch the exact one with get_config_reference_section(section_name=...) "
     "(or search_klipper_docs). A section absent from the user's config may "
     "still be valid Klipper. Do not invent section names or parameters from "
-    "memory. If the user did not specify values, use the documented defaults "
+    "memory. Never claim a section 'does not support' a parameter or that "
+    "Klipper 'lacks' a feature from memory either — check "
+    "get_section_schema(section='...') first; if the schema lists it, use "
+    "it. If the user did not specify values, use the documented defaults "
     "or a safe standard value and SAY what you chose — do not ask the user "
     "to provide values the reference already documents.\n"
     + _PROSE_EDIT_PROTOCOL +
