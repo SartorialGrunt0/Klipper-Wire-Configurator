@@ -90,13 +90,20 @@ def test_set_param_upserts_new_param_into_section():
     assert 'fade_start: 1' in st1.files['printer.cfg']
 
 
-def test_set_param_refuses_commented_param():
+def test_set_param_uncomments_and_sets_commented_param():
+    """2026-09-20: the refusal was removed — set_param on a commented-only
+    param now uncomments the line IN PLACE and applies (the approval-card
+    diff is the user's confirmation; a separate active line must NOT be
+    inserted, which would leave a duplicate dormant key)."""
     st, base = _state()
     st1, r = st.apply(base, {'op': 'set_param', 'file': 'printer.cfg',
                              'section': 'stepper_x', 'key': 'enable_pin', 'value': 'PF16'})
-    assert r['status'] == 'error'
-    assert 'commented out' in r['error']
-    assert st1.files == st.files  # unchanged
+    assert r['status'] in ('applied', 'applied_with_advisory'), r
+    assert 'enable_pin: PF16' in st1.files['printer.cfg']
+    assert '#enable_pin' not in st1.files['printer.cfg']
+    # the value replaced the commented line; exactly one enable_pin exists
+    assert st1.files['printer.cfg'].count('enable_pin') == 1
+    assert 'uncommented' in r['summary']
 
 
 def test_set_param_new_error_kickback_leaves_state_untouched():
@@ -589,44 +596,32 @@ def _guard_state():
     return st, st.validate()
 
 
-def test_patch_gcode_cannot_silently_uncomment_param():
-    st, base = _guard_state()
-    _, r = st.apply(base, {
-        'op': 'patch_gcode', 'file': 'printer.cfg', 'section': 'stepper_x',
-        'old_text': '#enable_pin: !PE9', 'new_text': 'enable_pin: PF16',
-    })
-    assert r['status'] == 'error'
-    assert 'commented' in r['error'].lower()
-    assert r.get('commentedParams') == ['enable_pin']
-
-
-def test_patch_gcode_allow_comment_change_escapes_guard():
+def test_patch_gcode_uncomment_param_applies():
+    """2026-09-20: the comment-boundary guard was REMOVED. Comment flips
+    apply as-told — the approval-card diff (red commented line, green
+    uncommented line) is the user's confirmation. The old refusal pushed
+    models into prose ask-first flows that read as a broken edit tool."""
     st, base = _guard_state()
     st2, r = st.apply(base, {
         'op': 'patch_gcode', 'file': 'printer.cfg', 'section': 'stepper_x',
         'old_text': '#enable_pin: !PE9', 'new_text': 'enable_pin: PF16',
-        'allow_comment_change': True,
     })
     assert r['status'] in ('applied', 'applied_with_advisory'), r
     assert 'enable_pin: PF16' in st2.files['printer.cfg']
+    assert '#enable_pin' not in st2.files['printer.cfg']
 
 
-def test_patch_gcode_comment_to_comment_edit_requires_flag():
-    """Comment-to-comment param edits are dormant-content edits: guarded
-    by default (a model editing '#foo' silently is still touching dead
-    config), allowed with the explicit user-confirmation flag."""
+def test_patch_gcode_comment_to_comment_edit_applies():
+    """Dormant-content edits (comment-to-comment) apply as-told too: the
+    diff shows the edited commented line; the user approves or declines.
+    (r3's dormant-rewrite concern now surfaces honestly IN the diff —
+    the user sees the param stays commented.)"""
     st, base = _guard_state()
-    _, r = st.apply(base, {
+    st2, r = st.apply(base, {
         'op': 'patch_gcode', 'file': 'printer.cfg', 'section': 'stepper_x',
         'old_text': '#enable_pin: !PE9', 'new_text': '#enable_pin: !PF16',
     })
-    assert r['status'] == 'error'
-    st2, r2 = st.apply(base, {
-        'op': 'patch_gcode', 'file': 'printer.cfg', 'section': 'stepper_x',
-        'old_text': '#enable_pin: !PE9', 'new_text': '#enable_pin: !PF16',
-        'allow_comment_change': True,
-    })
-    assert r2['status'] in ('applied', 'applied_with_advisory'), r2
+    assert r['status'] in ('applied', 'applied_with_advisory'), r
     assert '#enable_pin: !PF16' in st2.files['printer.cfg']
 
 
@@ -648,14 +643,21 @@ def test_patch_gcode_gcode_body_edits_never_guarded():
     assert r['status'] in ('applied', 'applied_with_advisory'), r
 
 
-def test_patch_gcode_commenting_out_param_also_guarded():
-    st, base = _guard_state()
-    _, r = st.apply(base, {
-        'op': 'patch_gcode', 'file': 'printer.cfg', 'section': 'stepper_x',
-        'old_text': 'step_pin: PB0', 'new_text': '#step_pin: PB0',
+def test_patch_gcode_commenting_out_param_applies():
+    """2026-09-20: comment-OUT flips apply as-told (see
+    test_patch_gcode_uncomment_param_applies). Uses an OPTIONAL param —
+    commenting out a REQUIRED param (e.g. stepper step_pin) still kicks
+    back through the delta validator, which is correct and unrelated to
+    the removed comment guard."""
+    st = ProjectState.from_context_files({'printer.cfg': {'content':
+        '[output_pin case_light]\npin: PB7\ncycle_time: 0.01\n'}})
+    base = st.validate()
+    st2, r = st.apply(base, {
+        'op': 'patch_gcode', 'file': 'printer.cfg', 'section': 'output_pin case_light',
+        'old_text': 'cycle_time: 0.01', 'new_text': '#cycle_time: 0.01',
     })
-    assert r['status'] == 'error'
-    assert r.get('commentedParams') == ['step_pin']
+    assert r['status'] in ('applied', 'applied_with_advisory'), r
+    assert '#cycle_time: 0.01' in st2.files['printer.cfg']
 
 
 def test_add_include_refuses_self_include():
@@ -677,15 +679,19 @@ def test_add_include_refuses_self_include():
     assert '[include park.cfg]' in st2.files['printer.cfg']
 
 
-def test_patch_gcode_cannot_fakely_update_dormant_param():
+def test_patch_gcode_dormant_param_update_applies_visibly():
     """r3 9b finding: model anchored '#enable_pin: !PE9' and rewrote it to
-    '#enable_pin: !PF16' -- no '#' flip, but it reported the pin as
-    updated while the param stayed INACTIVE. Dormant-content edits are
-    guarded the same as status flips."""
+    '#enable_pin: !PF16' while the param stayed INACTIVE. 2026-09-20:
+    guard removed — the edit applies as-told, and the diff is honest:
+    the result line STILL starts with '#', so the user sees the param
+    remains commented before approving."""
     st, base = _guard_state()
-    _, r = st.apply(base, {
+    st2, r = st.apply(base, {
         'op': 'patch_gcode', 'file': 'printer.cfg', 'section': 'stepper_x',
         'old_text': '#enable_pin: !PE9', 'new_text': '#enable_pin: !PF16',
     })
-    assert r['status'] == 'error'
-    assert r.get('commentedParams') == ['enable_pin']
+    assert r['status'] in ('applied', 'applied_with_advisory'), r
+    assert '#enable_pin: !PF16' in st2.files['printer.cfg']
+    # the diff itself carries the truth for the approval card
+    assert '#enable_pin: !PE9' in r['diff']['before']
+    assert '#enable_pin: !PF16' in r['diff']['after']

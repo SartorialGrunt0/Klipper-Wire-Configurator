@@ -138,59 +138,6 @@ class _OpError(Exception):
         return result
 
 
-def _comment_boundary_crossings(old_text: str, new_text: str) -> dict:
-    """Params whose comment status changes between an old/new patch text.
-
-    Returns ``{'enabled': [...], 'disabled': [...]}``: names that are
-    commented in old_text but active in new_text, and vice versa. Pure
-    comment-to-comment or active-to-active edits of the same param are
-    NOT crossings (normal macro/param editing stays unaffected).
-    """
-    def _status_by_param(text: str) -> dict[str, str]:
-        status: dict[str, str] = {}
-        for line in text.split('\n'):
-            if RE_SECTION_HEADER.match(line.strip()):
-                continue  # section headers are not params
-            cmatch = RE_COMMENTED_PARAM_LINE.match(line)
-            if cmatch:
-                status.setdefault(cmatch.group(2), 'commented')
-                continue
-            pmatch = RE_PARAM_LINE.match(line)
-            if pmatch:
-                status.setdefault(pmatch.group(2), 'active')
-        return status
-
-    def _commented_content(text: str) -> dict[str, str]:
-        content: dict[str, str] = {}
-        for line in text.split('\n'):
-            cmatch = RE_COMMENTED_PARAM_LINE.match(line)
-            if cmatch:
-                content.setdefault(
-                    cmatch.group(2), cmatch.group(4).strip())
-        return content
-
-    old_status = _status_by_param(old_text)
-    new_status = _status_by_param(new_text)
-    enabled = sorted(name for name, st in new_status.items()
-                     if st == 'active' and old_status.get(name) == 'commented')
-    disabled = sorted(name for name, st in new_status.items()
-                      if st == 'commented' and old_status.get(name) == 'active')
-    # Dormant-content tampering (r3 9b finding): the model anchored a
-    # patch on '#enable_pin: !PE9' and rewrote it to '#enable_pin: !PF16'
-    # -- no status flip, but the op faked the user's activation request
-    # while leaving the parameter INACTIVE. Editing or deleting commented
-    # param content requires the same user-confirmation flag as flipping
-    # the '#'.
-    old_c = _commented_content(old_text)
-    new_c = _commented_content(new_text)
-    changed = sorted(
-        name for name, content in old_c.items()
-        if (name in new_c and new_c[name] != content)     # dormant rewrite
-        or (name not in new_c and name not in new_status)  # dormant deleted
-    )
-    return {'enabled': enabled, 'disabled': disabled, 'changed': changed}
-
-
 def _state_error(message: str, **extra) -> dict:
     result = {'status': 'error', 'error': message}
     result.update(extra)
@@ -495,10 +442,24 @@ class ProjectState:
                     'summary': f"set [{header}] {key} = {value_lines[0]}"}
 
         if commented_matches:
-            return _state_error(
-                f"Parameter '{key}' in [{header}] exists but is commented out. "
-                "Ask the user, or uncomment explicitly before setting it."
-            )
+            # A commented-only param is set by uncommenting the line IN
+            # PLACE (2026-09-20: the old refusal forced a prose ask-before-
+            # edit dance; the approval-card diff is the confirmation now —
+            # the user sees the red commented line turn green). Inserting
+            # a fresh active line instead would leave a duplicate dormant
+            # key behind, so rewrite the commented line itself.
+            scan, cmatch = commented_matches[0]
+            indent = cmatch.group(1)
+            value_lines = value.split('\n')
+            rendered = [f"{indent}{key}: {value_lines[0]}"]
+            for extra in value_lines[1:]:
+                rendered.append(f"{indent}    {extra}" if extra else '')
+            lines[scan:scan + 1] = rendered
+            self.files[filename] = '\n'.join(lines)
+            return {'status': 'ok', 'file': filename,
+                    'summary': f"set [{header}] {key} = {value_lines[0]} "
+                    "(this uncommented the parameter — it was commented "
+                    "out before)"}
 
         # Insert: after the last real param line of the section body,
         # before trailing comments/blanks.
@@ -626,26 +587,9 @@ class ProjectState:
                 rest_lines = new_body_pre.split('\n')[1:]
                 body_stripped = '\n'.join(rest_lines).strip('\n')
         new_body = body_stripped.split('\n') if body_stripped else []
-        if not op.get('allow_comment_change'):
-            # Same comment-boundary guard as patch_gcode: a full-body
-            # replacement must not silently flip parameter '#' status.
-            current_body = '\n'.join(lines[header_index + 1:inner_end])
-            crossed = _comment_boundary_crossings(current_body, body_stripped)
-            if crossed['enabled'] or crossed['disabled'] or crossed['changed']:
-                return _state_error(
-                    "This replacement touches commented-out parameters "
-                    f"(newly active: "
-                    f"{', '.join(sorted(crossed['enabled'])) or 'none'}; newly "
-                    f"commented: {', '.join(sorted(crossed['disabled'])) or 'none'}; "
-                    f"dormant text edited/deleted: "
-                    f"{', '.join(sorted(crossed['changed'])) or 'none'}). "
-                    "Do NOT set allow_comment_change=true on your own "
-                    "judgment — explain and ask; re-run with it true only "
-                    "after the USER confirms.",
-                    commentedParams=sorted(
-                        crossed['enabled'] + crossed['disabled']
-                        + crossed['changed']),
-                )
+        # (2026-09-20: the comment-boundary refusal was removed — comment
+        # status flips are applied as-told and surface in the approval-
+        # card diff, which is the user's confirmation.)
         old_body_lines = lines[header_index + 1:inner_end]
         lines[header_index + 1:inner_end] = new_body
         self.files[filename] = '\n'.join(lines)
@@ -728,77 +672,15 @@ class ProjectState:
         header_index, end = found
         section_lines = lines[header_index + 1:end]
         section_text = '\n'.join(section_lines)
-
+        # (2026-09-20: the comment-boundary refusals — anchoring inside a
+        # commented param line, and '#' status crossings between
+        # old_text/new_text — were removed. Comment flips and dormant-
+        # text edits are applied as-told; the approval-card diff shows
+        # the red commented line turning green, and the user's approval
+        # is the confirmation. The old two-step refusal pushed the model
+        # into prose asks with no tool call, which read as a broken
+        # edit flow.)
         occurrences = _count_substring_occurrences(section_text, old_text)
-        # Context-aware comment check: an exact-substring occurrence
-        # starting on a COMMENTED-OUT param line, while old_text presents
-        # an ACTIVE line, lands INSIDE the comment (live r4b EDIT-06:
-        # old_text 'enable_pin: !PE9' matched inside '#enable_pin: !PE9'
-        # and staged '#enable_pin: PF16' — a no-op the model then
-        # reported as done). The text-level crossings check below cannot
-        # see this: both quoted texts are active-shape. Gcode-body
-        # sections are exempt (every line is body text; '#' there is a
-        # macro comment, not a dormant param), and a dormant-shape quote
-        # (old_text starting with '#') is left to the crossings check.
-        if (occurrences >= 1
-                and not op.get('allow_comment_change')
-                and not header.startswith('gcode_macro')
-                and not old_text.split('\n', 1)[0].lstrip().startswith('#')):
-            touched: list[str] = []
-            pos = section_text.find(old_text)
-            while pos != -1:
-                line_start = section_text.rfind('\n', 0, pos) + 1
-                line_end = section_text.find('\n', pos)
-                line = section_text[line_start:
-                                    line_end if line_end != -1
-                                    else len(section_text)]
-                if line.lstrip().startswith('#'):
-                    cmatch = RE_COMMENTED_PARAM_LINE.match(line)
-                    if cmatch:
-                        touched.append(cmatch.group(2))
-                pos = section_text.find(old_text, pos + 1)
-            if touched:
-                return _state_error(
-                    "This patch matches INSIDE commented-out parameter "
-                    f"line(s) ({', '.join(sorted(set(touched)))}) — the "
-                    "quoted text looks active but the file line is "
-                    "COMMENTED, so the patch would edit dormant text "
-                    "without changing printer behavior. Explain the "
-                    "commented-out situation and ASK; re-run with "
-                    "allow_comment_change=true only after the USER "
-                    "confirms.",
-                    commentedParams=sorted(set(touched)),
-                )
-        if not op.get('allow_comment_change'):
-            # Comment-boundary guard: patch_gcode must not silently enable
-            # or disable a config parameter by flipping its '#' —
-            # set_param refuses commented params, and without this check
-            # patch_gcode is the escape hatch around that rule (EDIT-06
-            # live run, 2026-09-13). Legitimate uncomment/disable requests
-            # re-run with allow_comment_change=true, which doubles as the
-            # explicit user-confirmation signal.
-            crossed = _comment_boundary_crossings(old_text, new_text)
-            if crossed['enabled'] or crossed['disabled'] or crossed['changed']:
-                gained = ', '.join(sorted(crossed['enabled'])) or 'none'
-                lost = ', '.join(sorted(crossed['disabled'])) or 'none'
-                changed = ', '.join(sorted(crossed['changed'])) or 'none'
-                return _state_error(
-                    "This patch touches COMMENTED-OUT parameters (newly "
-                    f"active: {gained}; newly commented: {lost}; dormant "
-                    f"text edited/deleted: {changed}). Commented parameters "
-                    "are NOT active config — editing them does NOT change "
-                    "printer behavior, so never report such an edit as "
-                    "enabling/updating the parameter. Commented parameters "
-                    "require the user's explicit knowledge. Do NOT set "
-                    "allow_comment_change=true on your own judgment — "
-                    "explain the commented-out situation to the user and "
-                    "ask. Only after the USER replies confirming they want "
-                    "the parameter uncommented/commented/dormant-updated "
-                    "may you re-run this op with allow_comment_change=true.",
-                    commentedParams=sorted(
-                        crossed['enabled'] + crossed['disabled']
-                        + crossed['changed']),
-                )
         if occurrences == 1:
             patched = section_text.replace(old_text, new_text, 1)
         elif occurrences > 1:

@@ -129,14 +129,6 @@ CONFIG_EDIT_SPEC = {
                     "anchor, repeat the anchor lines inside new_text"
                 ),
             },
-            "allow_comment_change": {
-                "type": "boolean",
-                "description": (
-                    "patch_gcode only: set true ONLY when the user explicitly "
-                    "asked to uncomment or comment out the named parameter(s); "
-                    "the tool refuses comment-status changes without it"
-                ),
-            },
             "target_file": {
                 "type": "string",
                 "description": ("File to include/un-include/comment-out "
@@ -192,11 +184,6 @@ Rules:
   quote lines exactly as they appear there.
 - Warnings returned as advisories do not block the change; mention them
   to the user when relevant.
-- Commented-out parameters are NOT active config: editing or deleting
-  their text changes NOTHING and must never be reported as enabling or
-  updating the parameter. If an op is refused for touching one, explain
-  the situation and ASK; never set allow_comment_change=true on your own
-  judgment — only after the user's own reply confirms it.
 - Applied changes are STAGED for the user's review, not saved. Never tell
   the user a change is saved or active until they approve and save it."""
 
@@ -260,14 +247,6 @@ class EditSession:
         #                  change must not hide behind the staged first
         #                  half either (r5 EDIT-04).
         self.last_write_outcome: str | None = None
-        # True once a commented-parameter refusal fired THIS request.
-        # User confirmation can only arrive as a NEW user message (new
-        # EditSession), so an allow_comment_change=true arriving later in
-        # the SAME request is provably model-self-granted — the exact
-        # live r4b EDIT-06 shape (refusal -> immediate retry with the
-        # flag set). Every later allow_comment_change op is refused as a
-        # self-grant until the user speaks.
-        self.comment_refused = False
         # Identical FAILED call repeats (TRIDENT-15 r1 2026-09-19: gemma
         # repeated one arg-channel-lost set_param 17x, burning the whole
         # turn budget). The lean kickback says "correct your arguments"
@@ -314,8 +293,6 @@ class EditSession:
             elif op["op"] in ("add_section", "replace_section") \
                     and "text" not in op and "new_text" in op:
                 op["text"] = op["new_text"]
-            if args.get("allow_comment_change"):
-                op["allow_comment_change"] = True
             return op
         return None
 
@@ -411,18 +388,6 @@ class EditSession:
             "a NEW value requires a NEW user message."
         )
 
-    def _self_grant_kickback(self, name: str) -> str:
-        return (
-            f"{name} BLOCKED — SELF-GRANT. A commented-parameter refusal "
-            "already fired earlier in THIS request. The user cannot have "
-            "confirmed anything between two tool calls inside one request, "
-            "so allow_comment_change=true here is model self-granted, which "
-            "is never valid. Do NOT retry with the flag. Explain the "
-            "commented-out parameter to the user and ASK; only a NEW user "
-            "message confirming the change authorizes a later request to "
-            "run it with allow_comment_change=true."
-        )
-
     def execute(self, tool_call: dict) -> tuple[str, dict | None]:
         """Run one write tool call (auto-approve path). Returns
         (lean content, details-or-None).
@@ -451,28 +416,15 @@ class EditSession:
             self.last_write_outcome = "user_gated"
             return self._duplicate_kickback(dup), None
 
-        if op.get("allow_comment_change") and self.comment_refused:
-            self.last_write_outcome = "user_gated"
-            return self._self_grant_kickback(name), None
-
         new_state, result = self.state.apply(self.baseline, op)
         if result["status"] == "error":
-            # ANY commented-parameter refusal is user-gated (r9 finding:
-            # classifying the patch_gcode boundary refusal as
-            # 'correctable' disarmed the shield set by the earlier
-            # set_param refusal, and the "call the tool NOW" nudge read
-            # to the model as the user's permission -- it self-granted
-            # allow_comment_change). No retry without the user satisfies
-            # these. Correctable = anchor miss, bad/missing args,
-            # unknown section/op, self-include.
-            gated = (
-                bool(result.get("commentedParams"))
-                or "exists but is commented out"
-                in str(result.get("error", "")))
-            if gated:
-                self.comment_refused = True
-            self.last_write_outcome = (
-                "user_gated" if gated else "correctable")
+            # 2026-09-20: the commented-param refusals were removed, so
+            # every write error here is CORRECTABLE (anchor miss, bad/
+            # missing args, unknown section/op, self-include, new
+            # validation errors) — the nudge loop may push a corrected
+            # retry. user_gated now only comes from explicit user
+            # decisions (duplicate target, decline, timeout, stop).
+            self.last_write_outcome = "correctable"
             count = self._note_failure(name, args)
             return (_lean_error_content(name, result)
                     + self._repeat_directive(name, count)), None
@@ -507,22 +459,11 @@ class EditSession:
             self.last_write_outcome = "user_gated"
             return self._duplicate_kickback(dup), None, None
 
-        if op.get("allow_comment_change") and self.comment_refused:
-            # Same self-grant lock as execute(): no card for a flag the
-            # model cannot legitimately have earned mid-request.
-            self.last_write_outcome = "user_gated"
-            return self._self_grant_kickback(name), None, None
-
         new_state, result = self.state.apply(self.baseline, op)
         if result["status"] == "error":
-            gated = (
-                bool(result.get("commentedParams"))
-                or "exists but is commented out"
-                in str(result.get("error", "")))
-            if gated:
-                self.comment_refused = True
-            self.last_write_outcome = (
-                "user_gated" if gated else "correctable")
+            # Correctable kickback (see execute() — the commented-param
+            # refusals are gone, so no write error is user-gated).
+            self.last_write_outcome = "correctable"
             count = self._note_failure(name, args)
             return (_lean_error_content(name, result)
                     + self._repeat_directive(name, count)), None, None

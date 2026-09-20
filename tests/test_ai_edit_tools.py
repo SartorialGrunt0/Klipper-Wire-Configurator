@@ -610,19 +610,19 @@ def test_read_then_prose_still_nudged(monkeypatch):
     assert 'max_accel: 12000' in body['pendingEdits'][0]['newText']
 
 
-def test_honest_refusal_not_nudged(monkeypatch):
-    """An edit request where the model already TRIED a write tool (rejected
-    commented param) and honestly explained: the nudge must NOT poke it
-    into forcing the change (edit_attempts>0 gate)."""
+def test_commented_param_edit_stages_end_to_end(monkeypatch):
+    """2026-09-20: the commented-param guard was REMOVED. A set_param
+    targeting a commented-only param now applies directly (uncommenting
+    in place) and stages — the card/diff is the user's confirmation. The
+    old flow refused and produced a prose ask with no tool call, which
+    read to users as 'asked for permission but never fired the edit'."""
     monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
     calls = []
     scripted = [
-        # write tool attempt -> rejected (commented param via real session)
+        # write tool attempt on a commented param -> stages now
         '```tool\n{"name": "config_edit", "arguments": {"file": "printer.cfg", '
         '"op": "set_param", "section": "stepper_x", "key": "enable_pin", "value": "PF16"}}\n```',
-        # honest explanation referencing the refusal -> must NOT be nudged
-        ('The enable_pin in [stepper_x] is commented out in your config. '
-         'Would you like me to uncomment it?'),
+        'I set enable_pin to PF16 on [stepper_x], which uncommented it.',
     ]
 
     class _Resp:
@@ -642,8 +642,6 @@ def test_honest_refusal_not_nudged(monkeypatch):
     monkeypatch.setattr(ai_routes.httpx.AsyncClient, 'post',
                         lambda self, url, **kw: fake_post(url, **kw))
 
-    # Refusal premise: enable_pin exists ONLY commented-out, so the real
-    # session refuses the set_param (shared fixture lacks it — own context).
     cfg_with_commented = PRINTER_CFG.replace(
         '[stepper_x]\nstep_pin: PF13',
         '[stepper_x]\nstep_pin: PF13\n#enable_pin: !PE9', 1)
@@ -652,9 +650,10 @@ def test_honest_refusal_not_nudged(monkeypatch):
         contextFiles={'printer.cfg': {'content': cfg_with_commented}}))
     assert response.status_code == 200
     body = response.json()
-    # exactly the initial call + one tool-round re-query; no nudge call
-    assert len(calls) == 2, f"nudge fired on honest refusal: {len(calls)} provider calls"
-    assert body.get('pendingEdits') in (None, [])
+    assert body.get('pendingEdits'), f"edit did not stage: {body}"
+    new_text = body['pendingEdits'][0]['newText']
+    assert 'enable_pin: PF16' in new_text
+    assert '#enable_pin' not in new_text
 
 
 def test_giveup_after_correctable_kickback_gets_nudged(monkeypatch):
@@ -710,28 +709,25 @@ def _edit_ctx_with_commented():
     return {'printer.cfg': {'content': cfg}}
 
 
-def test_multi_refusal_shield_persists_after_boundary_refusal(monkeypatch):
-    """r9 9b EDIT-06: after the set_param refusal armed the user-gated
-    shield, a SECOND refusal (patch_gcode comment boundary) was
-    classified 'correctable', which overwrote the shield; the nudge read
-    as permission and the model self-granted allow_comment_change.
-    ANY commented refusal keeps the shield: honest prose must go
-    unanswered (no nudge)."""
+def test_duplicate_after_commented_param_stage_is_kicked_back(monkeypatch):
+    """2026-09-20: with the commented-param refusal gone, the first
+    set_param on '#enable_pin' STAGES. The model's old second move —
+    retrying the same target (with or without the removed
+    allow_comment_change flag) — is caught by the DUPLICATE TARGET
+    guard: the user must ask for a different value in a new message.
+    Locks the one remaining user_gated write path in the loop."""
     monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
     calls = []
     scripted = [
-        # 1: set_param -> refused (exists but is commented out)
+        # 1: set_param on the commented param -> stages
         '```tool\n{"name": "config_edit", "arguments": {"file": "printer.cfg", '
         '"op": "set_param", "section": "stepper_x", "key": "enable_pin", '
         '"value": "!PF16"}}\n```',
-        # 2: patch_gcode un-commenting -> boundary refusal
+        # 2: old r9 self-grant shape -> now a duplicate-target kickback
         '```tool\n{"name": "config_edit", "arguments": {"file": "printer.cfg", '
-        '"op": "patch_gcode", "section": "stepper_x", "old_text": '
-        '"#enable_pin: !PE9", "new_text": "enable_pin: !PE9"}}\n```',
-        # 3: honest refusal surface (must NOT be nudged)
-        'The enable_pin line is commented out (`#enable_pin: !PE9`), so it is '
-        'not active config. Uncommenting it would enable the motor driver pin '
-        'unexpectedly — do you want me to uncomment and set it to !PF16?',
+        '"op": "set_param", "section": "stepper_x", "key": "enable_pin", '
+        '"value": "!PF16", "allow_comment_change": true}}\n```',
+        'Set enable_pin to !PF16 on [stepper_x] (staged, uncommented).',
     ]
 
     class _Resp:
@@ -756,8 +752,12 @@ def test_multi_refusal_shield_persists_after_boundary_refusal(monkeypatch):
         contextFiles=_edit_ctx_with_commented()))
     assert response.status_code == 200
     body = response.json()
-    assert not body.get('pendingEdits'), f"shield broken: {body}"
-    assert len(calls) == 3, f"expected no nudge round-trips, got {len(calls)} calls"
+    assert body.get('pendingEdits'), f"first edit did not stage: {body}"
+    new_text = body['pendingEdits'][0]['newText']
+    assert 'enable_pin: !PF16' in new_text
+    assert '#enable_pin' not in new_text
+    # the duplicate retry must NOT have opened a second stage or nudged
+    assert len(calls) == 3, f"unexpected round-trips: {len(calls)}"
 
 
 # ── Confabulated-completion guard (TRIDENT-15) ──────────────────────
@@ -952,7 +952,7 @@ def test_has_inert_draft_echoes_stay_quiet():
     assert ses.has_inert_draft(['# nothing config-like here\n']) is False
 
 
-# ── allow_comment_change self-grant lock (r4b EDIT-06) ─────────────────
+# ── commented-param editing (guard REMOVED 2026-09-20) ────────────────
 
 
 COMMENTED_CFG = (
@@ -969,75 +969,53 @@ def _stepper_session():
     return EditSession({'printer.cfg': {'content': COMMENTED_CFG}})
 
 
-def test_allow_comment_change_after_refusal_is_self_grant_blocked():
-    """r4b EDIT-06 live trace: set_param refused (commented), the model
-    IMMEDIATELY retried with allow_comment_change=true. A user message
-    cannot exist between two tool calls in one request, so that flag is
-    provably self-granted. The second call must be blocked with an
-    honest SELF-GRANT kickback — nothing staged, outcome user_gated."""
+def test_set_param_on_commented_param_stages_directly():
+    """2026-09-20: the commented-param refusal + self-grant lock were
+    removed. set_param on a commented-only param uncomments it in place
+    and STAGES immediately — the approval card's diff (red '#enable_pin'
+    line, green 'enable_pin' line) is the user's confirmation. The old
+    refusal produced prose-ask replies with no tool call, which users
+    read as a broken edit flow."""
     ses = _stepper_session()
-    content, _ = ses.execute({
+    content, details = ses.execute({
         'name': 'config_edit',
         'arguments': {'op': 'set_param', 'file': 'printer.cfg',
                       'section': 'stepper_x', 'key': 'enable_pin',
                       'value': 'PF16'}})
-    assert 'commented out' in content
-    assert ses.last_write_outcome == 'user_gated'
-
-    content2, details2 = ses.execute({
-        'name': 'config_edit',
-        'arguments': {'op': 'set_param', 'file': 'printer.cfg',
-                      'section': 'stepper_x', 'key': 'enable_pin',
-                      'value': 'PF16', 'allow_comment_change': True}})
-    assert 'SELF-GRANT' in content2
-    assert details2 is None
-    assert ses.pending_edits == []
-    assert ses.last_write_outcome == 'user_gated'
-    # and the patch_gcode flavor of the same self-grant (exact r4b shape)
-    content3, details3 = ses.execute({
-        'name': 'config_edit',
-        'arguments': {'op': 'patch_gcode', 'file': 'printer.cfg',
-                      'section': 'stepper_x',
-                      'old_text': 'enable_pin: !PE9',
-                      'new_text': 'enable_pin: PF16',
-                      'allow_comment_change': True}})
-    assert 'SELF-GRANT' in content3
-    assert details3 is None
-    assert ses.pending_edits == []
+    assert details is not None, content
+    assert 'uncommented' in content
+    assert ses.last_write_outcome == 'success'
+    assert len(ses.pending_edits) == 1
+    assert 'enable_pin: PF16' in ses.pending_edits[0]['newText']
+    assert '#enable_pin' not in ses.pending_edits[0]['newText']
 
 
-def test_allow_comment_change_prepares_blocked_after_refusal():
-    """Approval path (prepare) carries the identical lock: a self-granted
-    flag never opens a card."""
-    ses = _stepper_session()
-    c1, r1, _ = ses.prepare({
-        'name': 'config_edit',
-        'arguments': {'op': 'set_param', 'file': 'printer.cfg',
-                      'section': 'stepper_x', 'key': 'enable_pin',
-                      'value': 'PF16'}})
-    assert r1 is None and 'commented out' in c1
-    c2, r2, _ = ses.prepare({
-        'name': 'config_edit',
-        'arguments': {'op': 'set_param', 'file': 'printer.cfg',
-                      'section': 'stepper_x', 'key': 'enable_pin',
-                      'value': 'PF16', 'allow_comment_change': True}})
-    assert r2 is None and 'SELF-GRANT' in c2
-
-
-def test_allow_comment_change_fresh_session_still_works():
-    """A NEW request (fresh EditSession) after the user confirmed is a
-    new session — the flag works there (the lock is per-request, not a
-    ban)."""
+def test_patch_gcode_uncomment_stages_directly():
+    """patch_gcode '#' flips stage too — same card-diff rationale."""
     ses = _stepper_session()
     content, details = ses.execute({
         'name': 'config_edit',
         'arguments': {'op': 'patch_gcode', 'file': 'printer.cfg',
                       'section': 'stepper_x',
                       'old_text': '#enable_pin: !PE9',
-                      'new_text': 'enable_pin: PF16',
-                      'allow_comment_change': True}})
-    assert details is not None
-    assert 'STAGED' in content
+                      'new_text': 'enable_pin: !PE9'}})
+    assert details is not None, content
+    assert ses.last_write_outcome == 'success'
+    assert 'enable_pin: !PE9\n' in ses.pending_edits[0]['newText']
+
+
+def test_commented_param_prepares_card_after_prior_edit():
+    """Approval path (prepare): a commented-param edit opens a card
+    exactly like any other write — no refusal, no self-grant lock."""
+    ses = _stepper_session()
+    c1, r1, _ = ses.prepare({
+        'name': 'config_edit',
+        'arguments': {'op': 'patch_gcode', 'file': 'printer.cfg',
+                      'section': 'stepper_x',
+                      'old_text': '#enable_pin: !PE9',
+                      'new_text': 'enable_pin: PF16'}})
+    assert r1 is not None, c1
+    assert r1['diff']['before'].count('#enable_pin') == 1
 
 
 # ── printer-memory skill + new fields (buildVolume/extruderType) ──────

@@ -1306,7 +1306,9 @@ def _printer_cfg_with_commented_enable() -> str:
     """Trident printer.cfg with [stepper_x] enable_pin commented out.
 
     Planted on the reference copy (the live enable_pin is active) so the
-    commented-param refusal path is testable; on-disk files untouched.
+    commented-param EDIT path is testable (guard removed 2026-09-20: the
+    write must uncomment-and-stage with the flip visible in the diff);
+    on-disk files untouched.
     """
     text = _load_trident_config("printer.cfg")
     # Comment the FIRST enable_pin (stepper_x is the first stepper section).
@@ -1396,18 +1398,19 @@ def build_edit_tool_questions() -> list[TestQuestion]:
         ),
         TestQuestion(
             qid="EDIT-06",
-            title="Edit tools: commented-param refusal (honest surface, no fake stage)",
+            title="Edit tools: commented-param edit stages with visible uncomment",
             text=("Set enable_pin to PF16 on my [stepper_x] in printer.cfg."),
             # Planted fixture (Trident's real enable_pin is ACTIVE): the
-            # target param is commented out, so the write tool refuses it
-            # with the ask-the-user rule. Success = NO staged change and
-            # the reply honestly mentions the commented-out situation.
+            # target param is commented out. 2026-09-20: the refuse-and-ask
+            # guard was removed — the write stages directly and the diff
+            # shows the uncomment. Success = staged enable_pin: PF16 with
+            # NO commented duplicate left behind.
             context_files=_context_with(_printer_cfg_with_commented_enable()),
             edit_tools=True,
             require_tool=False,
             criteria=(
-                ("not_staged", "printer.cfg"),
-                ("regex", r"comment|ask|confirm|caution|note|uncomment"),
+                ("staged_param", "printer.cfg::enable_pin: PF16"),
+                ("staged_not_regex", r"printer\.cfg::#enable_pin"),
             ),
         ),
     ]

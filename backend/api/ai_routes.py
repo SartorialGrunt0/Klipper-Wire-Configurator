@@ -880,8 +880,7 @@ _EDIT_TOOL_SNIPPETS: dict[str, str] = {
         "old_text; repeat the anchor lines inside new_text when adding', "
         "target_file='x.cfg' for "
         "include ops (comment_include disables an include as '#[include x.cfg]' "
-        "instead of deleting it), allow_comment_change=true only when the user asked to "
-        "uncomment/comment out params). value must be ONE LINE — "
+        "instead of deleting it). value must be ONE LINE — "
         "multi-line values (gcode:) are dropped by some tool-call "
         "channels, write those with replace_section/patch_gcode. "
         "One op per call; changes are "
@@ -3690,11 +3689,14 @@ async def chat_proxy(req: ChatRequest):
                                 == 'correctable'
                                 or (bool(extract_config_code_blocks(
                                         current_content))
-                                    # r8: an honest user-gated refusal often
+                                    # An honest user-gated outcome (decline,
+                                    # timeout, stop, duplicate target) often
                                     # still illustrates with a ```cfg block;
                                     # nudging THAT pressure-cooks the model
-                                    # into self-granting allow_comment_change
-                                    # (fabricated stage). Refusal wins.
+                                    # into re-attempting an explicit user
+                                    # decision. Refusal wins. (The commented-
+                                    # param refusals this clause originally
+                                    # guarded were removed 2026-09-20.)
                                     and edit_session.last_write_outcome
                                     != 'user_gated'
                                     # Echo guard (native-mode traces
