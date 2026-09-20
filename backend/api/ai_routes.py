@@ -924,12 +924,14 @@ LIST_HARDWARE_SPEC = {
         "this BEFORE editing or advising on a component CLASS so the "
         "answer covers ALL of them — text search finds only sections "
         "whose name contains the keyword and misses e.g. [dotstar] or "
-        "[output_pin casing_light]. type='led' (also lights/rgb), "
-        "'fan', 'stepper' (includes [tmc2240 stepper_x]), 'extruder', "
-        "'heater', 'probe', 'accelerometer', 'mcu'/'board', 'servo', "
-        "'display', 'filament_sensor', 'endstop', 'macro'; or any "
-        "literal section type ('bed_mesh', 'idle_timeout'). No type "
-        "returns a one-line-per-group summary of everything present."
+        "[output_pin casing_light]. type must be EXACTLY one of: 'led' "
+        "(also lights/rgb), 'fan', 'stepper' (includes [tmc2240 "
+        "stepper_x]), 'extruder', 'heater', 'probe', 'accelerometer', "
+        "'mcu'/'board', 'servo', 'display', 'filament_sensor', "
+        "'endstop', 'macro'; or any literal section type ('bed_mesh', "
+        "'idle_timeout'). Any other type fails and the result lists "
+        "the valid classes. No type returns a one-line-per-group "
+        "summary of everything present."
     ),
     "inputSchema": {
         "type": "object",
@@ -1185,8 +1187,11 @@ def _build_mcp_tool_context(edit_capable: bool = False, *,
     parts.append("")
     parts.append(
         "- list_hardware: List EVERY section of a hardware class "
-        "(type='led'|'fan'|'stepper'|'probe'|'mcu'|... or a literal "
-        "section type like 'bed_mesh') from the CURRENT working state, "
+        "(type='led'|'fan'|'stepper'|'extruder'|'heater'|'probe'|"
+        "'accelerometer'|'mcu'|'servo'|'display'|'filament_sensor'|"
+        "'endstop'|'macro' — exactly one of these, or a literal section "
+        "type like 'bed_mesh'; any other type fails and lists the "
+        "valid ones) from the CURRENT working state, "
         "each with full text + file+line — use before class-wide edits "
         "or advice so nothing is missed (text search misses [dotstar] "
         "or [output_pin led_strips]); no type = summary of everything "

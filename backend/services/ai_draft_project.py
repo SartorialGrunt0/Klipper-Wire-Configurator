@@ -398,7 +398,11 @@ class ProjectState:
             'comment_include': self._op_comment_include,
         }.get(kind)
         if handler is None:
-            return _state_error(f"Unknown op '{kind}'.")
+            return _state_error(
+                f"Unknown op '{kind}'. Valid ops: set_param, add_section, "
+                "replace_section, delete_section, patch_gcode, delete_file, "
+                "add_include, remove_include, comment_include — use "
+                "exactly one of these, one op per call.")
         try:
             return handler(op)
         except _OpError as exc:  # precondition failure — structured, no raise
@@ -408,7 +412,9 @@ class ProjectState:
 
     def _require_file(self, filename: str | None) -> str:
         if not filename:
-            raise _OpError('Missing required argument: file')
+            raise _OpError(
+                'Missing required argument: file (the project file to '
+                "edit, e.g. 'printer.cfg')")
         if filename not in self.files:
             known = ', '.join(sorted(self.files)) or '(none)'
             raise _OpError(f"File '{filename}' is not in the project. Known files: {known}.")
@@ -418,7 +424,9 @@ class ProjectState:
     def _require_header(op: dict) -> str:
         section = (op.get('section') or '').strip()
         if not section:
-            raise _OpError('Missing required argument: section')
+            raise _OpError(
+                'Missing required argument: section (section header '
+                "without brackets, e.g. 'idle_timeout')")
         return section.strip('[]').strip()
 
     # -- set_param ---------------------------------------------------------
@@ -428,9 +436,16 @@ class ProjectState:
         header = self._require_header(op)
         key = (op.get('key') or '').strip()
         if not key:
-            return _state_error('Missing required argument: key')
+            return _state_error(
+                'Missing required argument: key — set_param needs '
+                'file, op, section, key, value (value is ONE LINE; multi-line '
+                'bodies use replace_section)')
         if 'value' not in op:
-            return _state_error('Missing required argument: value')
+            return _state_error(
+                "Missing required argument: value — set_param needs "
+                "file, op, section, key, value (the new value goes in the "
+                "'value' field; if you put it in 'new_text' instead, resend "
+                "with value). Multi-line bodies use replace_section")
         value = str(op['value'])
 
         lines = _split_lines(self.files[filename])
