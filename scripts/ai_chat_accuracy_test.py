@@ -2153,6 +2153,213 @@ def build_memory_questions() -> list[TestQuestion]:
     ]
 
 
+def build_tool_coverage_questions() -> list[TestQuestion]:
+    """Tool-coverage family (TOOL-*): one question per tool that had ZERO
+    expected_tools coverage in the bank, plus strict-routing top-ups for
+    single-question tools that only ever appeared in any-overlap tuples.
+
+    Added 2026-09-21 after the coverage audit: list_config_reference_sections,
+    list_user_config_sections, detect_board, calculate_rotation_distance and
+    generate_macro_template were never an expected_tools target, and
+    config_write only appeared inside a (config_write, config_edit) OR-tuple.
+
+    Grading law (same bar as the LIVE family): expected_tools carries the
+    TARGET TOOL ALONE — a correct answer reached via another tool grades
+    PASS_WRONG_TOOL, which IS the routing measurement. Where the tool result
+    must be used CORRECTLY (not just called), the use-gate is a tool_args
+    criterion plus an answer criterion that only the right argument shape
+    can produce (e.g. TOOL-04 requires starts=8 to yield 16.0).
+
+    HOST GROUND TRUTH (verified against the MCP server 2026-09-21):
+    - list_config_reference_sections returns 104 sections incl.
+      [bed_mesh], [quad_gantry_level], [neopixel].
+    - list_user_config_sections(filename=printer.cfg) reads the SERVER'S
+      user_configs mirror (dev Pi = Trident backup): contains [stepper_x],
+      [z_tilt], [bed_mesh], [idle_timeout].
+    - detect_board on the f446 serial below -> mcu_chip STM32F446.
+    - calculate_rotation_distance(leadscrew, pitch=2, starts=8) -> 16.0.
+    - generate_macro_template(PRINT_START, include_bed_mesh=true) contains
+      G28, M104/M140 and BED_MESH_CALIBRATE; without the flag it has no
+      BED_MESH_CALIBRATE — that is the use-gate.
+    - TOOL-06 needs the write tools: run against a backend with
+      KWC_EDIT_TOOLS=1 (with KWC_EDIT_SKILL_GATE=1 also pass
+      --force-skill-active, or activation variance pollutes the signal).
+    """
+    return [
+        TestQuestion(
+            qid="TOOL-01",
+            title="Coverage: enumerate supported sections via the reference index",
+            text=("what config section names does Klipper support? list them "
+                  "from the config reference — section names only, no "
+                  "descriptions."),
+            context_files=(),
+            edit_tools=False,  # coverage probe: read-only
+            expected_tools=("list_config_reference_sections",),
+            require_tool=True,
+            criteria=(
+                # The index output is a verbatim section list — real members
+                # prove the result was relayed, not a memory dump.
+                ("contains", "bed_mesh"),
+                ("contains", "quad_gantry_level"),
+                ("contains", "neopixel"),
+            ),
+        ),
+        TestQuestion(
+            qid="TOOL-02",
+            title="Coverage: section index of my printer.cfg",
+            text=("what sections are currently defined in my printer.cfg? "
+                  "list the section headers that file contains."),
+            # No context_files on purpose: the ONLY way to see the real
+            # file's headers is the tool (reads the server's user_configs
+            # mirror). Ground truth: dev-Pi Trident backup.
+            context_files=(),
+            edit_tools=False,  # coverage probe: read-only
+            expected_tools=("list_user_config_sections",),
+            require_tool=True,
+            criteria=(
+                ("contains", "stepper_x"),
+                ("contains", "z_tilt"),
+                ("regex", r"idle_timeout|bed_mesh"),
+                # Proof the SECTION-INDEX tool was used with the right arg,
+                # not a whole-file read judged by eye.
+                ("tool_args", r"list_user_config_sections:filename:printer"),
+            ),
+        ),
+        TestQuestion(
+            qid="TOOL-03",
+            title="Coverage: identify the MCU chip from a pasted config",
+            text=("this config came from a second-hand printer and I don't "
+                  "know what board it was written for — can you figure out "
+                  "the MCU chip from it?\n\n"
+                  "[mcu]\n"
+                  "serial: /dev/serial/by-id/"
+                  "usb-Klipper_stm32f446xx_3D002B000E50505734393820-if00\n\n"
+                  "[stepper_x]\n"
+                  "step_pin: PE2\n"
+                  "dir_pin: PE1\n"
+                  "enable_pin: !PC10\n"
+                  "microsteps: 16\n"
+                  "rotation_distance: 40\n"),
+            context_files=(),
+            # Pure Q&A probe: write tools OFF so the read-before-edit law
+            # can't route this into the edit loop (toolcov-r1: TOOL-04's
+            # answer staged a config_edit against the mirror session).
+            edit_tools=False,
+            expected_tools=("detect_board",),
+            require_tool=True,
+            criteria=(
+                # Tool ground truth: mcu_chip STM32F446. The f446 token IS
+                # in the prompt, so the USE gate is the tool_args — the
+                # answer criterion only proves the chip was relayed.
+                ("contains", "f446"),
+                ("tool_args", "detect_board:config_text"),
+            ),
+        ),
+        TestQuestion(
+            qid="TOOL-04",
+            title="Coverage: leadscrew rotation_distance (starts=8 use-gate)",
+            text=("I'm swapping my Z axis to an 8-start leadscrew with 2mm "
+                  "pitch. what rotation_distance should I set in "
+                  "[stepper_z]?"),
+            context_files=(),
+            edit_tools=False,  # coverage probe: no write loop
+            expected_tools=("calculate_rotation_distance",),
+            require_tool=True,
+            criteria=(
+                # 2mm x 8 starts = 16.0. A model that calls the tool but
+                # forgets starts=8 gets 2.0 and FAILS answer_ok — this is
+                # the correct-USE gate, not just a call gate.
+                ("regex", r"\b16(\.0+)?\b"),
+                ("tool_args", r"calculate_rotation_distance:method:leadscrew"),
+                ("tool_args", r"calculate_rotation_distance:starts"),
+            ),
+        ),
+        TestQuestion(
+            qid="TOOL-05",
+            title="Coverage: PRINT_START template with bed mesh (flag use-gate)",
+            text=("I'm helping a friend set up a brand-new printer from "
+                  "scratch — don't use anything from my own config. Use the "
+                  "macro template generator to build a clean starter "
+                  "PRINT_START macro that homes, heats bed and nozzle, runs "
+                  "a bed mesh, and primes the nozzle."),
+            context_files=(),
+            edit_tools=False,  # coverage probe: template goes in the answer, no staging
+            # Explicit generator wording earned its keep: the first wording
+            # ("for my CoreXY") made models read the user's real PRINT_START
+            # and rewrite THAT — a defensible answer that never touches the
+            # template tool (toolcov-r2/r3: 2/3 FAIL_WRONG_TOOL).
+            expected_tools=("generate_macro_template",),
+            require_tool=True,
+            criteria=(
+                ("contains", "gcode_macro PRINT_START"),
+                ("regex", r"\bG28\b"),
+                # Only the include_bed_mesh=true flag puts BED_MESH_CALIBRATE
+                # in the template — a call without it is an incorrect use.
+                ("contains", "BED_MESH_CALIBRATE"),
+                ("tool_args", r"generate_macro_template:macro_name:PRINT_START"),
+            ),
+        ),
+        TestQuestion(
+            qid="TOOL-06",
+            title="Strict routing: new file MUST use config_write",
+            text=("Create a new file named macros_park.cfg containing a "
+                  "gcode_macro PARK_HEAD that moves the toolhead to X0 Y0, "
+                  "then include it from printer.cfg."),
+            context_files=_cfg_context("printer.cfg"),
+            edit_tools=True,
+            # STRICT: config_write alone. EDIT-04's OR-tuple meant
+            # config_write's create-only semantics were never actually
+            # measured; a model reaching for config_edit here grades
+            # PASS_WRONG_TOOL (the routing signal), not a silent pass.
+            expected_tools=("config_write",),
+            require_tool=True,
+            criteria=(),
+            edit_criteria=(
+                ("staged_new_file", ""),
+                ("staged_param", "macros_park.cfg::[gcode_macro PARK_HEAD]"),
+                ("staged_param", "printer.cfg::[include macros_park.cfg]"),
+            ),
+        ),
+        TestQuestion(
+            qid="TOOL-07",
+            title="Coverage: real serial devices for [mcu] serial (variant 2)",
+            text=("scan what's physically plugged into this machine right "
+                  "now — I need the exact serial: value for my [mcu] "
+                  "section, not a generic example path."),
+            context_files=(),
+            edit_tools=False,  # coverage probe: read-only
+            expected_tools=("list_connected_devices",),
+            require_tool=True,
+            criteria=(
+                # Dev Pi: one Klipper RP2040 under /dev/serial/by-id/.
+                # Zero-device relays are also a correct tool use, hence the
+                # honest-empty alternative.
+                ("regex", r"by.id|/dev/tty|ttyACM|ttyUSB|rp2040|"
+                          r"no (?:serial )?devices?|nothing (?:found|attached|"
+                          r"plugged)"),
+            ),
+        ),
+        TestQuestion(
+            qid="TOOL-08",
+            title="Coverage: live Klipper state before editing (variant 2)",
+            text=("before I change anything — what state is Klipper in right "
+                  "this second? give me its actual current state, don't "
+                  "guess."),
+            context_files=(),
+            edit_tools=False,  # coverage probe: read-only
+            expected_tools=("get_klippy_status",),
+            require_tool=True,
+            criteria=(
+                # Any correct verdict passes (state varies per host — dev Pi
+                # is startup error from KAMP includes; Trident is ready).
+                # The hard gate is the status tool call itself.
+                ("regex", r"ready|error|startup|shut ?down|not responding|"
+                          r"not running|standby|disconnected|cannot (?:be )?reach"),
+            ),
+        ),
+    ]
+
+
 ALL_TOOLS = (
     "search_klipper_docs",
     "read_klipper_doc",
@@ -2929,7 +3136,7 @@ def main() -> int:
                              "printer memory, blank it, run MEMORY-01..03, then restore it")
     args = parser.parse_args()
 
-    questions = build_questions() + build_macro_questions() + build_trident_questions() + build_ambiguity_questions() + build_setup_questions() + build_live_context_questions() + build_edit_tool_questions() + build_skill_gate_questions()
+    questions = build_questions() + build_macro_questions() + build_trident_questions() + build_ambiguity_questions() + build_setup_questions() + build_live_context_questions() + build_edit_tool_questions() + build_skill_gate_questions() + build_tool_coverage_questions()
     if args.include_memory:
         questions += build_memory_questions()
     if args.list_questions:
