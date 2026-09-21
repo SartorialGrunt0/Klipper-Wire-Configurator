@@ -105,6 +105,46 @@ describe('configStore file operations', () => {
     expect(useConfigStore.getState().activeFile).toBe('printer.cfg');
   });
 
+  it('removeConfigFile comments out include lines pointing at the deleted file', () => {
+    const store = useConfigStore.getState();
+    const printer = makeConfigFile([
+      makeSection({ section_type: 'include', section_name: './KAMP/old.cfg', full_header: 'include ./KAMP/old.cfg' }),
+      makeSection({ section_type: 'include', section_name: 'macros.cfg', full_header: 'include macros.cfg' }),
+    ]);
+    printer.includes = ['./KAMP/old.cfg', 'macros.cfg'];
+    store.setConfigFile('printer.cfg', printer);
+    store.setConfigFile('old.cfg', makeConfigFile());
+    store.setConfigFile('macros.cfg', makeConfigFile());
+
+    useConfigStore.getState().removeConfigFile('old.cfg');
+
+    const state = useConfigStore.getState();
+    expect(state.configFiles['old.cfg']).toBeUndefined();
+    const includes = state.configFiles['printer.cfg'].sections.filter(
+      (sec) => sec.section_type === 'include',
+    );
+    const deleted = includes.find((sec) => sec.section_name === './KAMP/old.cfg')!;
+    const survivor = includes.find((sec) => sec.section_name === 'macros.cfg')!;
+    expect(deleted.is_commented_out).toBe(true); // basename match on './KAMP/old.cfg'
+    expect(survivor.is_commented_out).toBe(false);
+    expect(state.configFiles['printer.cfg'].includes).toEqual(['macros.cfg']);
+  });
+
+  it('removeConfigFile leaves glob includes untouched', () => {
+    const store = useConfigStore.getState();
+    const printer = makeConfigFile([
+      makeSection({ section_type: 'include', section_name: 'KAMP/*.cfg', full_header: 'include KAMP/*.cfg' }),
+    ]);
+    printer.includes = ['KAMP/*.cfg'];
+    store.setConfigFile('printer.cfg', printer);
+    store.setConfigFile('macros.cfg', makeConfigFile());
+
+    useConfigStore.getState().removeConfigFile('macros.cfg');
+
+    const inc = useConfigStore.getState().configFiles['printer.cfg'].sections[0];
+    expect(inc.is_commented_out).toBe(false);
+  });
+
   it('renameConfigFile moves the file and rewrites includes in other files', () => {
     const store = useConfigStore.getState();
     const a = makeConfigFile();
