@@ -4152,12 +4152,24 @@ async def chat_proxy(req: ChatRequest):
                     edit_session.edit_attempts,
                     edit_session.last_write_outcome,
                 )
-                final_content = (
-                    final_content.rstrip()
-                    + "\n\n---\n*Note: no changes from this reply are"
-                    " staged for saving — every edit attempt failed"
-                    " validation, was declined, or timed out.*"
-                )
+                # The trace distinguishes a USER decision from technical
+                # failures — the note must not conflate them (a blanket
+                # "failed validation, was declined, or timed out" made
+                # models report a plain decline as "the system declined
+                # it").
+                if edit_session.last_write_outcome == "user_gated":
+                    note = (
+                        "\n\n---\n*Note: the user chose not to apply the "
+                        "proposed change(s); nothing is staged for "
+                        "saving.*"
+                    )
+                else:
+                    note = (
+                        "\n\n---\n*Note: no changes from this reply are"
+                        " staged for saving — every edit attempt failed"
+                        " validation, was declined, or timed out.*"
+                    )
+                final_content = final_content.rstrip() + note
 
             logger.info(
                 "Returning response | final_chars=%d tool_turns=%d tools=%s empty=%s",

@@ -573,3 +573,60 @@ def test_multipart_giveup_after_staged_first_half_still_nudged(edit_flag, monkey
     assert any('cycle_time' in (e.get('newText') or '')
                or e.get('summary', '').find('cycle_time') >= 0
                for e in body['pendingEdits']), body['pendingEdits']
+
+
+# ── Decline-result wording (dogfood 2026-09-20: passive "DECLINED by the
+# user (no reason given)" + blanket confab note made gemma report a plain
+# decline as "the system declined it" and ramble without asking) ──────
+
+def test_decline_result_wording_and_user_gated_note(edit_flag, monkeypatch):
+    """Decline tool result names the human as decider, states NOT
+    staged, forbids retry, and demands a direct closing question; the
+    trace-truth note for a user-gated turn says 'user chose not to
+    apply', never the validation-conflating blanket text."""
+    _install(monkeypatch, [
+        _text_tool_call('config_edit', SET_ACCEL),
+        _final_reply('ok then'),
+    ])
+    payload = {
+        'messages': [{'role': 'user', 'content': 'set max_accel to 3000'}],
+        'apiKey': 'k', 'model': 'm',
+        'apiUrl': 'https://api.example.com/v1/chat/completions',
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(),
+        'requestId': 'gate-wording-1', 'autoApproveEdits': False,
+    }
+    t, result = _post_chat_bg(payload)
+    card = _wait_card('gate-wording-1')
+    client.post('/ai/chat/approval', json={
+        'approvalId': card['approvalId'], 'decision': 'decline'})
+    t.join(timeout=10)
+    assert result['status'] == 200
+    body = result['body']
+    out = next(tc['output'] for tc in body['toolCalls']
+               if tc['name'] == 'config_edit')
+    assert 'NOT APPROVED' in out
+    assert 'the user reviewed the change and chose' in out
+    assert 'not an error on your' in out
+    assert 'END WITH A DIRECT QUESTION' in out
+    assert 'no reason given' not in out        # empty reason is silence, not noise
+    assert 'Reason given' not in out
+    # user-gated trace-truth note (blanket validation text must be gone)
+    assert 'the user chose not to apply' in body['content']
+    assert 'failed validation, was declined, or timed out' not in body['content']
+    assert not body['pendingEdits']
+
+
+def test_decline_reason_and_timeout_note_wording(edit_flag, monkeypatch):
+    """A supplied decline reason rides the result verbatim under a
+    neutral label; the timeout result keeps the honest 'did not respond'
+    phrasing."""
+    from services.ai_edit_tools import format_approval_result
+    content, details = format_approval_result('config_edit', {
+        'decision': 'declined', 'reason': 'too aggressive for my frame'})
+    assert details is None
+    assert 'Reason given: too aggressive for my frame.' in content
+    content, details = format_approval_result('config_edit',
+                                              {'decision': 'timeout'})
+    assert details is None
+    assert 'did not respond' in content
+    assert 'NOT APPROVED' in content

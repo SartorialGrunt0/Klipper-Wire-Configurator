@@ -907,15 +907,27 @@ def format_approval_result(name: str, decision: dict) -> tuple[str, dict | None]
         )
     if kind == "timeout":
         return (
-            f"{name} DECLINED — the user did not respond within "
-            f"{int(APPROVAL_TIMEOUT_SECONDS)} seconds. Do not silently "
-            "retry the same change; ask the user what they would like.",
+            f"{name} NOT APPROVED — the user did not respond within "
+            f"{int(APPROVAL_TIMEOUT_SECONDS)} seconds. The change is NOT "
+            "staged. Do not retry the same change on your own; in your "
+            "reply, briefly tell the user the change was not applied and "
+            "ask them directly what they would like to do.",
             None,
         )
-    reason = decision.get("reason") or "no reason given"
+    reason = decision.get("reason")
+    # The reason is user-supplied OR mechanical (request-cancel); a
+    # neutral label never misquotes the human.
+    reason_part = f" Reason given: {reason}." if reason else ""
     return (
-        f"{name} DECLINED by the user ({reason}). Do not silently retry "
-        "the same change. Ask the user how they would like to proceed.",
+        f"{name} NOT APPROVED — the user reviewed the change and chose "
+        "not to apply it. The change is NOT staged and nothing was "
+        "written. This is a decision by the human, not an error on your "
+        f"call and not a validation failure.{reason_part} In your reply, "
+        "tell the user plainly in one sentence that the change was not "
+        "applied, then END WITH A DIRECT QUESTION asking how they want to "
+        "proceed (different value, skip it, or something else). Do not "
+        "retry the same change on your own and do not restate your "
+        "earlier plan.",
         None,
     )
 
