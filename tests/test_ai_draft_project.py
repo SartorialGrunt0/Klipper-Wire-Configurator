@@ -447,6 +447,71 @@ def test_add_include_duplicate_guard_normalized():
     assert r['status'] == 'error' and 'already present' in r['error']
 
 
+KAMP_TRAILING_COMMENTS = (
+    '[include ./KAMP/Adaptive_Meshing.cfg]       # Include to enable '
+    'adaptive meshing configuration.\n'
+    '[include ./KAMP/Line_Purge.cfg]             # Include to enable '
+    'adaptive line purging configuration.\n')
+
+
+def test_include_ops_trailing_comment_shape():
+    """KAMP round 2 (live 2026-09-20): KAMP_Settings.cfg ships
+    '[include ./KAMP/x.cfg]       # Include to enable ...' — the header
+    regex anchors ']' to EOL, so RE_SECTION_HEADER never matched and
+    every include op reported 'has no include lines'; the model fell
+    back to patch_gcode with section='' and told the user it was
+    impossible."""
+    st = ProjectState.from_context_files({'KAMP_Settings.cfg': {'content':
+        KAMP_TRAILING_COMMENTS}})
+    st1, r = st.apply(st.validate(), {'op': 'comment_include',
+                                      'file': 'KAMP_Settings.cfg',
+                                      'target_file': 'Adaptive_Meshing.cfg'})
+    assert r['status'] == 'applied', r
+    first = st1.files['KAMP_Settings.cfg'].splitlines()[0]
+    assert first.startswith('#[include ./KAMP/Adaptive_Meshing.cfg]')
+    assert 'adaptive meshing' in first  # trailing comment preserved
+    st2, r2 = st1.apply(st1.validate(), {'op': 'remove_include',
+                                         'file': 'KAMP_Settings.cfg',
+                                         'target_file': './KAMP/Line_Purge.cfg'})
+    assert r2['status'] == 'applied', r2
+    assert 'Line_Purge' not in st2.files['KAMP_Settings.cfg']
+    # add_include dup guard sees the trailing-comment line too
+    _, r3 = st.apply(st.validate(), {'op': 'add_include',
+                                     'file': 'KAMP_Settings.cfg',
+                                     'target_file': './KAMP/Line_Purge.cfg'})
+    assert r3['status'] == 'error' and 'already present' in r3['error']
+
+
+def test_patch_gcode_include_misroute_names_right_op():
+    """Same trace: the model's fallback was patch_gcode with an empty
+    section quoting the include lines. The kickback must name
+    comment_include/remove_include, not the generic missing-section
+    error the model read as a capability gap."""
+    st = ProjectState.from_context_files({'KAMP_Settings.cfg': {'content':
+        KAMP_TRAILING_COMMENTS}})
+    _, r = st.apply(st.validate(), {
+        'op': 'patch_gcode', 'file': 'KAMP_Settings.cfg', 'section': '',
+        'old_text': '[include ./KAMP/Adaptive_Meshing.cfg]', 'new_text': ''})
+    assert r['status'] == 'error'
+    assert 'comment_include' in r['error'] and 'remove_include' in r['error']
+    # Scope guard: the kickback fires ONLY on the empty-section
+    # misroute. A real section whose text quotes '[include' stays
+    # patchable, and an empty-section call WITHOUT include text keeps
+    # the generic missing-argument error.
+    stg = ProjectState.from_context_files({'macros.cfg': {'content':
+        '[gcode_macro SHOW_INCLUDES]\ngcode:\n    M117 edit [include x] not valid here\n'}})
+    sg, rg = stg.apply(stg.validate(), {
+        'op': 'patch_gcode', 'file': 'macros.cfg',
+        'section': 'gcode_macro SHOW_INCLUDES',
+        'old_text': 'M117 edit [include x] not valid here',
+        'new_text': 'M117 includes listed elsewhere'})
+    assert rg['status'] == 'applied', rg
+    _, rg2 = stg.apply(stg.validate(), {
+        'op': 'patch_gcode', 'file': 'macros.cfg', 'section': '',
+        'old_text': 'no include here', 'new_text': ''})
+    assert rg2['status'] == 'error' and 'Missing required argument: section' in rg2['error']
+
+
 def test_replace_section_missing_text_never_wipes():
     """Fullbank edit-tools run 2026-09-14: gemma sent patch-style
     old_text/new_text with op=replace_section and NO text; the handler

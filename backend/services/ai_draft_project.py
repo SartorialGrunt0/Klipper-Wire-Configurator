@@ -42,6 +42,13 @@ RE_PARAM_LINE = re.compile(r'^(\s*)([A-Za-z_][A-Za-z0-9_.\-]*)\s*([:=])(.*)$')
 # Commented-out param: '#'-prefixed key line (parser records these as
 # is_commented_out params; the plain param regex never matches them).
 RE_COMMENTED_PARAM_LINE = re.compile(r'^(\s*)#+\s*([A-Za-z_][A-Za-z0-9_.\-]*)\s*([:=])(.*)$')
+# Include line, tolerating the trailing-comment shape KAMP writes:
+# '[include ./KAMP/x.cfg]   # Include to enable ...'. RE_SECTION_HEADER
+# anchors ']' to EOL, so with a trailing comment the line looked like
+# "no include lines" and every include op failed even with the exact
+# path (live KAMP trace 2026-09-20, round 2: model fell back to
+# patch_gcode with an empty section and reported it impossible).
+RE_INCLUDE_LINE = re.compile(r'^\s*\[include\s+([^\]]+)\]\s*(?:#.*)?$')
 
 
 def _split_lines(text: str) -> list[str]:
@@ -105,14 +112,13 @@ def _find_section(lines: list[str], header: str) -> tuple[int, int] | None:
 
 
 def _include_lines(lines: list[str]) -> list[tuple[int, str]]:
-    """(index, path) for every ACTIVE '[include <path>]' line in a file."""
+    """(index, path) for every ACTIVE '[include <path>]' line in a file,
+    including the trailing-comment shape KAMP writes."""
     out = []
     for idx, line in enumerate(lines):
-        match = RE_SECTION_HEADER.match(line)
+        match = RE_INCLUDE_LINE.match(line)
         if match:
-            header = match.group(1).strip()
-            if header.startswith('include '):
-                out.append((idx, header[len('include '):].strip()))
+            out.append((idx, match.group(1).strip()))
     return out
 
 
@@ -714,6 +720,24 @@ class ProjectState:
 
     def _op_patch_gcode(self, op: dict) -> dict:
         filename = self._require_file(op.get('file'))
+        # Include-line misroute (live KAMP trace 2026-09-20): models
+        # delete/comment top-of-file '[include ...]' lines by calling
+        # patch_gcode with an empty section — which has no named section
+        # to anchor on. A generic 'missing section' error reads as "the
+        # tools can't do this"; name the right op instead. Fires ONLY
+        # on an empty section: an old_text that merely contains
+        # '[include' inside a real named section stays patchable (macro
+        # text quoting that string is legal).
+        old_probe = op.get('old_text') or ''
+        if not (op.get('section') or '').strip() and isinstance(old_probe, str) \
+                and '[include' in old_probe:
+            return _state_error(
+                "patch_gcode edits inside a named section; '[include ...]' "
+                "lines live outside sections. To disable an include line "
+                "use op='comment_include' (keeps it as '#[include ...]'), "
+                "to delete it use op='remove_include' — both take "
+                "target_file=<path inside the include brackets>. One op "
+                "per include line.")
         header = self._require_header(op)
         old_text = op.get('old_text')
         new_text = op.get('new_text')
@@ -881,13 +905,14 @@ class ProjectState:
         if err is not None:
             return err
         assert idx is not None and path is not None
-        found = _find_section(lines, f'include {path}')
-        if found is None:  # resolver hit; defensive, unreachable
-            return _state_error(f"[include {target}] not present in {in_file}.")
-        header_index, end = found
-        while end > header_index + 1 and not lines[end - 1].strip():
-            end -= 1
-        del lines[header_index:end]
+        # Delete via the resolver index: _find_section uses the
+        # EOL-anchored header regex and misses the trailing-comment
+        # shape ('[include x] # ...'), so it could not locate a line the
+        # resolver just found. Drop the line plus its trailing blanks.
+        end = idx + 1
+        while end < len(lines) and not lines[end].strip():
+            end += 1
+        del lines[idx:end]
         self.files[in_file] = re.sub(r'\n{3,}', '\n\n', '\n'.join(lines))
         return {'status': 'ok', 'file': in_file,
                 'summary': f"removed [include {path}] from {in_file}"}
