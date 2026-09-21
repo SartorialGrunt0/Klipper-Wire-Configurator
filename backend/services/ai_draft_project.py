@@ -122,6 +122,21 @@ def _include_lines(lines: list[str]) -> list[tuple[int, str]]:
     return out
 
 
+def _missing_section_hint(files: dict[str, str], header: str,
+                          filename: str) -> str:
+    """Suffix for 'Section not found' errors: if the section exists in
+    ANOTHER project file, name it. Wrong-file calls are the common cause
+    in multi-file projects, and bare 'read the file first' sends models
+    re-reading the SAME file — a dead loop that ends in 'the tool
+    cannot do this' (live traces 2026-09-20). Exact-header match only."""
+    for other in sorted(files):
+        if other == filename:
+            continue
+        if _find_section(_split_lines(files[other]), header):
+            return f" It exists in {other} — pass file='{other}'."
+    return ''
+
+
 def _include_target_matches(target: str, path: str) -> bool:
     """True when target_file addresses include path `path`.
 
@@ -449,7 +464,19 @@ class ProjectState:
             raise _OpError(
                 'Missing required argument: section (section header '
                 "without brackets, e.g. 'idle_timeout')")
-        return section.strip('[]').strip()
+        header = section.strip('[]').strip()
+        # Include-shaped section (live KAMP trace family 2026-09-20):
+        # models pass section='include' or 'include ./x.cfg' to
+        # set_param/replace_section/delete_section as their second guess
+        # at editing an include line. The generic 'section not found'
+        # reads as a capability gap; name the include ops instead.
+        if header == 'include' or header.startswith('include '):
+            raise _OpError(
+                "'[include ...]' lines are not a section — to disable one "
+                "use op='comment_include' (keeps it as '#[include ...]'), "
+                "to delete it op='remove_include'; both take "
+                "target_file=<path inside the include brackets>.")
+        return header
 
     # -- set_param ---------------------------------------------------------
 
@@ -474,8 +501,9 @@ class ProjectState:
         found = _find_section(lines, header)
         if found is None:
             return _state_error(
-                f"Section '[{header}]' not found in {filename}. Read the file first "
-                "or use add_section for a new section."
+                f"Section '[{header}]' not found in {filename}."
+                + _missing_section_hint(self.files, header, filename)
+                + " Read the file first or use add_section for a new section."
             )
         header_index, end = found
         body_indent = _default_body_indent(lines, header_index, end)
@@ -621,7 +649,9 @@ class ProjectState:
         found = _find_section(lines, header)
         if found is None:
             return _state_error(
-                f"Section '[{header}]' not found in {filename}. Read the file first."
+                f"Section '[{header}]' not found in {filename}."
+                + _missing_section_hint(self.files, header, filename)
+                + " Read the file first."
             )
         header_index, end = found
         # Keep the section's trailing blank-line gutter before the next header.
@@ -684,7 +714,9 @@ class ProjectState:
         lines = _split_lines(self.files[filename])
         found = _find_section(lines, header)
         if found is None:
-            return _state_error(f"Section '[{header}]' not found in {filename}.")
+            return _state_error(
+                f"Section '[{header}]' not found in {filename}."
+                + _missing_section_hint(self.files, header, filename))
         header_index, end = found
         while end > header_index + 1 and not lines[end - 1].strip():
             end -= 1
@@ -750,7 +782,9 @@ class ProjectState:
         found = _find_section(lines, header)
         if found is None:
             return _state_error(
-                f"Section '[{header}]' not found in {filename}. Read the file first."
+                f"Section '[{header}]' not found in {filename}."
+                + _missing_section_hint(self.files, header, filename)
+                + " Read the file first."
             )
         header_index, end = found
         section_lines = lines[header_index + 1:end]
@@ -820,6 +854,23 @@ class ProjectState:
         filename = self._require_file(op.get('file'))
         if filename.lower() == 'printer.cfg':
             return _state_error("printer.cfg is the root config and cannot be deleted.")
+        # Dangling-include guard (audit 2026-09-20): deleting an included
+        # file left '[include <file>]' behind in the includer, and the
+        # validator does NOT flag dangling includes — the staged config
+        # would not even start Klipper, with nothing naming the cause.
+        # Match by basename: includes are relative paths and the project
+        # store keys files by name.
+        for other in sorted(self.files):
+            if other == filename:
+                continue
+            for _, path in _include_lines(_split_lines(self.files[other])):
+                if path == filename or PurePosixPath(path).name == filename:
+                    return _state_error(
+                        f"Cannot delete {filename}: it is still included "
+                        f"([include {path}] in {other}). Remove the "
+                        "include first: config_edit op='remove_include', "
+                        f"file='{other}', target_file='{path}' (or "
+                        "op='comment_include' to keep the line disabled).")
         del self.files[filename]
         return {'status': 'ok', 'file': filename, 'summary': f"deleted file {filename}"}
 

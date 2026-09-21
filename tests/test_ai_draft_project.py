@@ -512,6 +512,83 @@ def test_patch_gcode_include_misroute_names_right_op():
     assert rg2['status'] == 'error' and 'Missing required argument: section' in rg2['error']
 
 
+def test_missing_section_wrong_file_names_the_file():
+    """Audit 2026-09-20: a section op pointed at the wrong file said
+    only 'not found — read the file first', sending models to re-read
+    the SAME file (dead loop -> 'the tool can't do this'). The tool can
+    see the whole project, so the error now names the file that has it.
+    Applies to every section op; checked on two."""
+    st = ProjectState.from_context_files({
+        'printer.cfg': {'content': '[printer]\nkinematics: cartesian\n'},
+        'macros.cfg': {'content': '[gcode_macro HOME]\ngcode:\n    G28\n'}})
+    _, r = st.apply(st.validate(), {'op': 'set_param', 'file': 'printer.cfg',
+                                    'section': 'gcode_macro HOME',
+                                    'key': 'gcode', 'value': 'G28 X'})
+    assert r['status'] == 'error' and 'macros.cfg' in r['error']
+    _, r2 = st.apply(st.validate(), {'op': 'delete_section',
+                                     'file': 'printer.cfg',
+                                     'section': 'gcode_macro HOME'})
+    assert r2['status'] == 'error' and 'It exists in macros.cfg' in r2['error']
+    # Section genuinely absent everywhere: no misleading hint.
+    _, r3 = st.apply(st.validate(), {'op': 'delete_section',
+                                     'file': 'printer.cfg',
+                                     'section': 'bed_mesh'})
+    assert r3['status'] == 'error' and 'It exists in' not in r3['error']
+
+
+def test_section_ops_include_shaped_section_kickback():
+    """Same audit: section='include' / 'include ./x.cfg' is the model's
+    second guess at editing an include line. Every section op must name
+    comment_include/remove_include instead of 'section not found'."""
+    st = ProjectState.from_context_files({'printer.cfg': {'content':
+        '[include ./KAMP/Line_Purge.cfg]\n[printer]\nkinematics: cartesian\n'}})
+    for op in ('set_param', 'replace_section', 'delete_section',
+               'add_section', 'patch_gcode'):
+        args = {'op': op, 'file': 'printer.cfg',
+                'section': 'include ./KAMP/Line_Purge.cfg'}
+        if op == 'set_param':
+            args.update(key='x', value='')
+        elif op in ('replace_section', 'add_section'):
+            args['text'] = ''
+        elif op == 'patch_gcode':
+            args.update(old_text='y', new_text='')
+        _, r = st.apply_no_gate(args)
+        assert r['status'] == 'error', (op, r)
+        assert 'comment_include' in r['error'], (op, r)
+
+
+def test_delete_file_dangling_include_guard():
+    """Same audit: delete_file on an INCLUDED file succeeded and left
+    '[include x.cfg]' dangling; the validator doesn't flag dangling
+    includes, so a Klipper-unstartable config would have staged with no
+    warning. Deletion is now refused until the include is removed, and
+    the error gives the exact remove_include call."""
+    st = ProjectState.from_context_files({
+        'printer.cfg': {'content':
+            '[printer]\nkinematics: cartesian\nmax_velocity: 200\n'
+            'max_accel: 1000\nmax_z_velocity: 5\nmax_z_accel: 100\n'
+            '[include ./sub/old.cfg]\n'},
+        'old.cfg': {'content': '[idle_timeout]\nhoming_timeout: 60\n'}})
+    _, r = st.apply(st.validate(), {'op': 'delete_file', 'file': 'old.cfg'})
+    assert r['status'] == 'error' and 'still included' in r['error']
+    assert "op='remove_include'" in r['error'] and 'printer.cfg' in r['error']
+    assert 'old.cfg' in st.files  # nothing deleted
+    # remove-then-delete works in the guided order
+    st2, r2 = st.apply(st.validate(), {'op': 'remove_include',
+                                       'file': 'printer.cfg',
+                                       'target_file': './sub/old.cfg'})
+    assert r2['status'] == 'applied', r2
+    st3, r3 = st2.apply(st2.validate(), {'op': 'delete_file', 'file': 'old.cfg'})
+    assert r3['status'] == 'applied', r3
+    assert 'old.cfg' not in st3.files
+    # files nobody includes still delete freely
+    stx = ProjectState.from_context_files({
+        'printer.cfg': {'content': '[printer]\nkinematics: cartesian\n'},
+        'loose.cfg': {'content': '[idle_timeout]\nhoming_timeout: 60\n'}})
+    _, rx = stx.apply(stx.validate(), {'op': 'delete_file', 'file': 'loose.cfg'})
+    assert rx['status'] == 'applied', rx
+
+
 def test_replace_section_missing_text_never_wipes():
     """Fullbank edit-tools run 2026-09-14: gemma sent patch-style
     old_text/new_text with op=replace_section and NO text; the handler
