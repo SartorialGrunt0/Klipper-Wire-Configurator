@@ -39,6 +39,7 @@ call and will be ignored):
 Other argument shapes:
 patch a macro body: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "patch_gcode", "section": "gcode_macro NAME", "old_text": "<line copied verbatim>", "new_text": "<replacement>"}} — new_text REPLACES old_text: repeat the anchor lines inside new_text when adding lines
 include a file: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "add_include", "target_file": "new.cfg"}}
+remove or comment out an include: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "comment_include", "target_file": "<path as written in the include line>"}} — comment_include keeps the line as '#[include ...]', remove_include deletes it; these ops work on ANY include line, including ones at the top of a file outside any section
 create a NEW file only: {"name": "config_write", "arguments": {"file": "new.cfg", "content": "<full file text>"}}
 set_param value must be ONE LINE — multi-line values (e.g. gcode:) are dropped by some tool-call channels and must go through replace_section or patch_gcode."""
 
@@ -51,6 +52,7 @@ set_param: {"file": "<file.cfg>", "op": "set_param", "section": "<section>", "ke
 value must be ONE LINE; for multi-line params (gcode:) use replace_section
 patch a macro body: {"file": "<file.cfg>", "op": "patch_gcode", "section": "gcode_macro NAME", "old_text": "<line copied verbatim>", "new_text": "<replacement>"} — new_text REPLACES old_text: repeat the anchor lines inside new_text when adding lines
 include a file: {"file": "<file.cfg>", "op": "add_include", "target_file": "<new.cfg>"}
+remove or comment out an include: {"file": "<file.cfg>", "op": "comment_include", "target_file": "<path as written in the include line>"} — comment_include keeps the line as '#[include ...]', remove_include deletes it; these ops work on ANY include line, including ones at the top of a file outside any section
 create a NEW file only: {"file": "<new.cfg>", "content": "<full file text>"}"""
 
 EDIT_TOOL_NAMES = frozenset({"config_edit", "config_write"})

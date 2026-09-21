@@ -391,6 +391,62 @@ def test_comment_include_op():
     assert r3['status'] == 'error' and 'not present' in r3['error']
 
 
+def test_include_ops_path_shapes_kamp():
+    """Live trace 2026-09-20 (KAMP): includes written as
+    '[include ./KAMP/Adaptive_Meshing.cfg]'. Exact-match-only targeting
+    rejected every sensible basename call with 'not present', and the
+    model concluded comment_include couldn't touch top-of-file include
+    lines at all. Targeting now accepts exact, './'-normalized, and
+    unique-basename forms; failures list the file's actual includes."""
+    st = ProjectState.from_context_files({'KAMP_Settings.cfg': {'content':
+        '[include ./KAMP/Adaptive_Meshing.cfg]\n'
+        '[include ./KAMP/Line_Purge.cfg]\n'
+        '[include ./KAMP/Smart_Park.cfg]\n'}})
+    base = st.validate()
+    # Basename form addresses a './KAMP/...' line.
+    st1, r = st.apply(base, {'op': 'comment_include',
+                             'file': 'KAMP_Settings.cfg',
+                             'target_file': 'Adaptive_Meshing.cfg'})
+    assert r['status'] == 'applied', r
+    assert '#[include ./KAMP/Adaptive_Meshing.cfg]' in st1.files['KAMP_Settings.cfg']
+    # './'-normalized form.
+    st2, r2 = st1.apply(st1.validate(), {'op': 'comment_include',
+                                         'file': 'KAMP_Settings.cfg',
+                                         'target_file': './KAMP/Line_Purge.cfg'})
+    assert r2['status'] == 'applied', r2
+    # Ambiguous basename -> error listing candidates, never a coin flip.
+    st3 = ProjectState.from_context_files({'printer.cfg': {'content':
+        '[include a/macros.cfg]\n[include b/macros.cfg]\n'}})
+    _, r3 = st3.apply(st3.validate(), {'op': 'comment_include',
+                                       'file': 'printer.cfg',
+                                       'target_file': 'macros.cfg'})
+    assert r3['status'] == 'error' and 'ambiguous' in r3['error']
+    assert 'a/macros.cfg' in r3['error'] and 'b/macros.cfg' in r3['error']
+    # Not-present error lists what IS there so the model can re-quote.
+    _, r4 = st2.apply(st2.validate(), {'op': 'remove_include',
+                                       'file': 'KAMP_Settings.cfg',
+                                       'target_file': 'nope.cfg'})
+    assert r4['status'] == 'error' and 'not present' in r4['error']
+    assert '[include ./KAMP/Smart_Park.cfg]' in r4['error']
+    # remove_include accepts the same shapes.
+    st4, r5 = st2.apply(st2.validate(), {'op': 'remove_include',
+                                         'file': 'KAMP_Settings.cfg',
+                                         'target_file': 'Smart_Park.cfg'})
+    assert r5['status'] == 'applied', r5
+    assert 'Smart_Park' not in st4.files['KAMP_Settings.cfg']
+
+
+def test_add_include_duplicate_guard_normalized():
+    """'[include x]' and '[include ./x]' are the SAME include in Klipper;
+    the dup guard must see through the './' prefix."""
+    st = ProjectState.from_context_files({'printer.cfg': {'content':
+        '[include ./KAMP/Line_Purge.cfg]\n'}})
+    _, r = st.apply(st.validate(), {'op': 'add_include',
+                                    'file': 'printer.cfg',
+                                    'target_file': 'KAMP/Line_Purge.cfg'})
+    assert r['status'] == 'error' and 'already present' in r['error']
+
+
 def test_replace_section_missing_text_never_wipes():
     """Fullbank edit-tools run 2026-09-14: gemma sent patch-style
     old_text/new_text with op=replace_section and NO text; the handler

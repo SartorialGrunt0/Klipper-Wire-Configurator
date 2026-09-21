@@ -25,6 +25,7 @@ from __future__ import annotations
 import re
 from copy import deepcopy
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 
 from parser.config_parser import SAVE_CONFIG_BANNER_RE, parse_config
 from parser.validator import validate_project_configs
@@ -101,6 +102,64 @@ def _find_section(lines: list[str], header: str) -> tuple[int, int] | None:
             end = scan
             break
     return header_index, end
+
+
+def _include_lines(lines: list[str]) -> list[tuple[int, str]]:
+    """(index, path) for every ACTIVE '[include <path>]' line in a file."""
+    out = []
+    for idx, line in enumerate(lines):
+        match = RE_SECTION_HEADER.match(line)
+        if match:
+            header = match.group(1).strip()
+            if header.startswith('include '):
+                out.append((idx, header[len('include '):].strip()))
+    return out
+
+
+def _include_target_matches(target: str, path: str) -> bool:
+    """True when target_file addresses include path `path`.
+
+    Three-way match (live trace 2026-09-20, KAMP): the model habitually
+    addresses '[include ./KAMP/Adaptive_Meshing.cfg]' by basename or by
+    the path without './'; exact-match-only made every sensible call
+    fail 'not present' and the model confabulated that the edit tools
+    cannot touch include lines outside a named section at all.
+    Exact -> './'-normalized -> basename (callers enforce uniqueness).
+    """
+    t, p = target.strip(), path.strip()
+    if t == p:
+        return True
+    t_norm, p_norm = t.removeprefix('./'), p.removeprefix('./')
+    if t_norm == p_norm:
+        return True
+    return PurePosixPath(t_norm).name == PurePosixPath(p_norm).name
+
+
+def _find_include_target(lines: list[str], target: str,
+                         in_file: str) -> tuple[int | None, str | None, dict | None]:
+    """Resolve target_file to an include-line index.
+
+    Returns (index, quoted_path, None) on a unique match (quoted_path is
+    the path exactly as written in the file, for summaries), or
+    (None, None, error) for no match — the error lists the file's actual
+    include lines so the model can re-quote — or an ambiguous basename
+    (the error lists the candidates).
+    """
+    matches = [(idx, path) for idx, path in _include_lines(lines)
+               if _include_target_matches(target, path)]
+    if len(matches) == 1:
+        idx, path = matches[0]
+        return idx, path, None
+    if len(matches) > 1:
+        listed = ', '.join(f'[include {path}]' for _, path in matches)
+        return None, None, _state_error(
+            f"'{target}' is ambiguous in {in_file}: it matches multiple "
+            f"includes: {listed}. Pass the exact path as written.")
+    present = ', '.join(f'[include {path}]' for _, path in _include_lines(lines))
+    return None, None, _state_error(
+        f"[include {target}] not present in {in_file}."
+        + (f" Includes in {in_file}: {present}. Pass the exact path as "
+           "written." if present else f" {in_file} has no include lines."))
 
 
 def _section_body_text(lines: list[str], header_index: int, end: int) -> str:
@@ -757,10 +816,17 @@ class ProjectState:
             )
         lines = _split_lines(self.files[in_file])
         header = f"include {target}"
-        for line in lines:
-            match = RE_SECTION_HEADER.match(line)
-            if match and match.group(1).strip() == header:
-                return _state_error(f"[{header}] already present in {in_file}.")
+        # Duplicate guard: './x' and 'x' resolve to the SAME file in
+        # Klipper (includes are config-dir relative), so an exact-string
+        # check let a double-load slip past when the existing line was
+        # e.g. '[include ./KAMP/x.cfg]' (KAMP writes that shape).
+        # Basename is NOT folded here: same-named files in different
+        # dirs are genuinely distinct for an add.
+        target_norm = target.removeprefix('./')
+        for _, path in _include_lines(lines):
+            if path == target or path.removeprefix('./') == target_norm:
+                return _state_error(
+                    f"[include {path}] already present in {in_file}.")
         self.files[in_file] = _insert_above_save_config(
             self.files[in_file], [f'[{header}]'])
         return {'status': 'ok', 'file': in_file, 'summary': f"added [include {target}] to {in_file}"}
@@ -780,20 +846,26 @@ class ProjectState:
                 f"A file cannot include (or comment) itself ({in_file}). "
                 f"Pass the INCLUDED file's name in target_file.")
         lines = _split_lines(self.files[in_file])
-        header = f"include {target}"
-        for idx, line in enumerate(lines):
-            match = RE_SECTION_HEADER.match(line)
-            if match and match.group(1).strip() == header:
-                lines[idx] = '#' + line.lstrip()
-                self.files[in_file] = '\n'.join(lines)
-                return {'status': 'ok', 'file': in_file,
-                        'summary': f"commented out [include {target}] in {in_file}"}
-            stripped = line.strip()
-            if stripped == f"#[{header}]":
-                return _state_error(
-                    f"[include {target}] is already commented out in {in_file}.")
-        return _state_error(
-            f"[include {target}] not present in {in_file}. Read the file first.")
+        idx, path, err = _find_include_target(lines, target, in_file)
+        if err is not None:
+            # A commented-out '#[include x.cfg]' is invisible to the
+            # resolver (it scans active headers only) — report it as
+            # already commented rather than 'not present'.
+            for line in lines:
+                stripped = line.strip()
+                if stripped.startswith('#') and _include_target_matches(
+                        target, stripped.lstrip('#').strip()
+                        .removeprefix('[').removesuffix(']')
+                        .removeprefix('include ').strip()):
+                    return _state_error(
+                        f"[include {target}] is already commented out in "
+                        f"{in_file}.")
+            return err
+        assert idx is not None and path is not None
+        lines[idx] = '#' + lines[idx].lstrip()
+        self.files[in_file] = '\n'.join(lines)
+        return {'status': 'ok', 'file': in_file,
+                'summary': f"commented out [include {path}] in {in_file}"}
 
     def _op_remove_include(self, op: dict) -> dict:
         target = (op.get('target_file') or '').strip()
@@ -805,16 +877,20 @@ class ProjectState:
                 f"A file cannot include (or un-include) itself ({in_file}). "
                 f"Pass the INCLUDED file's name in target_file.")
         lines = _split_lines(self.files[in_file])
-        header = f"include {target}"
-        found = _find_section(lines, header)
-        if found is None:
-            return _state_error(f"[{header}] not present in {in_file}.")
+        idx, path, err = _find_include_target(lines, target, in_file)
+        if err is not None:
+            return err
+        assert idx is not None and path is not None
+        found = _find_section(lines, f'include {path}')
+        if found is None:  # resolver hit; defensive, unreachable
+            return _state_error(f"[include {target}] not present in {in_file}.")
         header_index, end = found
         while end > header_index + 1 and not lines[end - 1].strip():
             end -= 1
         del lines[header_index:end]
         self.files[in_file] = re.sub(r'\n{3,}', '\n\n', '\n'.join(lines))
-        return {'status': 'ok', 'file': in_file, 'summary': f"removed [include {target}] from {in_file}"}
+        return {'status': 'ok', 'file': in_file,
+                'summary': f"removed [include {path}] from {in_file}"}
 
 
 # ── helpers ─────────────────────────────────────────────────────────────
