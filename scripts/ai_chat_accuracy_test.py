@@ -41,7 +41,12 @@ or answer the interactive prompt (never echoed). Keys are redacted to '***'
 in logs and are never written to output files.
 
 Other useful flags:
-    --questions 1-5,8     run only a subset of questions
+    --questions SPEC      run only a subset. QID-based (stable across bank
+                          changes): 'TRIDENT-15', 'TRIDENT-15,AMBI-03',
+                          'TRIDENT' (whole family), 'AMBI-0*', 'EDIT-01..06'.
+                          Positional still works ('1-5,8') but drifts as the
+                          bank grows. Unknown tokens fail fast with the
+                          family list.
     --start N             start at question N (runs N..end); ignored when --questions is set
     --question TEXT       run ONE ad-hoc question of your own instead of the bank
                           (takes priority over --questions/--start); repeatable
@@ -72,6 +77,7 @@ Stdlib only — no third-party dependencies.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import getpass
 import json
 import re
@@ -2949,6 +2955,15 @@ def _prompt(label: str, default: str = "", secret: bool = False) -> str:
         suffix = f" [{default}]"
     else:
         suffix = ""
+    if not sys.stdin.isatty():
+        # Unattended run (piped/CI): never block on input. Use the default
+        # when there is one; fail loudly instead of hanging when there isn't.
+        if default:
+            return default
+        raise SystemExit(
+            f"error: no TTY and no value for '{label}' — pass the "
+            f"corresponding flag (see --help)"
+        )
     if secret:
         value = getpass.getpass(f"{label}{suffix}: ")
         return value or default
@@ -3032,22 +3047,86 @@ def edit_tools_setting(args: argparse.Namespace) -> bool | None:
 
 
 # ── Question selection ─────────────────────────────────────────────────
-def parse_question_filter(spec: str, count: int) -> list[int]:
-    """Parse '1-5,8' into zero-based indices."""
+def parse_question_filter(spec: str, questions: list[TestQuestion]) -> list[int]:
+    """Parse a selection spec into zero-based indices into ``questions``.
+
+    Tokens are comma-separated; each is one of:
+      87              1-based positional index (legacy)
+      1-5             1-based positional range (legacy)
+      TRIDENT-15      exact QID (case-insensitive)
+      TRIDENT         whole family (every QID starting with TRIDENT-)
+      AMBI-0* / AMB*  glob via fnmatch (case-insensitive)
+      EDIT-01..06     QID range within one family; the '..' end may be
+                      bare digits ('06') or a full QID ('EDIT-06').
+                      '..' is used (not '-') so QIDs' own dashes stay safe.
+
+    Retired questions make positional indexes drift as the bank grows, so
+    QID-based selection is the stable spelling. Unknown tokens and
+    out-of-range indexes raise ValueError (never a silent empty selection).
+    """
+    count = len(questions)
+    qids_upper = [q.qid.upper() for q in questions]
+
+    def alpha_prefix(qid: str) -> str:
+        """Family prefix of a QID: 'TRIDENT-15' -> 'TRIDENT', 'Q01' -> 'Q'."""
+        return re.sub(r"-?\d+$", "", qid)
+
+    families = sorted({alpha_prefix(qid) for qid in qids_upper})
     indices: set[int] = set()
+
+    def fail(msg: str) -> None:
+        raise ValueError(f"{msg} (families: {', '.join(families)}; "
+                         f"use --list-questions to see QIDs)")
+
     for part in spec.split(","):
         part = part.strip()
         if not part:
             continue
-        if "-" in part:
-            lo, _, hi = part.partition("-")
-            lo_i = int(lo) - 1
-            hi_i = int(hi) - 1
-            indices.update(range(max(0, lo_i), min(count, hi_i + 1)))
-        else:
-            idx = int(part) - 1
-            if 0 <= idx < count:
-                indices.add(idx)
+        up = part.upper()
+        if re.fullmatch(r"\d+(-\d+)?", part):
+            if "-" in part:
+                lo, _, hi = part.partition("-")
+                indices.update(range(max(0, int(lo) - 1), min(count, int(hi))))
+            else:
+                idx = int(part) - 1
+                if 0 <= idx < count:
+                    indices.add(idx)
+                else:
+                    fail(f"index {part} out of range 1..{count}")
+            continue
+        if ".." in up:
+            lo_tok, _, hi_tok = up.partition("..")
+            m_lo = re.fullmatch(r"(.*?)(\d+)", lo_tok)
+            if m_lo is None:
+                fail(f"bad QID range '{part}' (expected FAMILY-nn..mm)")
+                raise ValueError  # unreachable; narrows m_lo for type checkers
+            family, lo_num = (m_lo.group(1), int(m_lo.group(2)))
+            m_hi = re.search(r"(\d+)$", hi_tok)
+            hi_num = int(m_hi.group(1)) if m_hi else None
+            matched = []
+            for i, qid in enumerate(qids_upper):
+                m = re.fullmatch(rf"{re.escape(family)}(\d+)", qid)
+                if not m:
+                    continue
+                num = int(m.group(1))
+                if num >= lo_num and (hi_num is None or num <= hi_num):
+                    matched.append(i)
+            if not matched:
+                fail(f"QID range '{part}' matches no questions")
+            indices.update(matched)
+            continue
+        matched = [i for i, qid in enumerate(qids_upper) if qid == up]
+        if not matched and ("*" in up or "?" in up):
+            matched = [i for i, qid in enumerate(qids_upper)
+                       if fnmatch.fnmatch(qid, up)]
+        if not matched:
+            # Family token: every QID whose alpha prefix equals it
+            # ('TRIDENT' -> TRIDENT-01..16, 'Q' -> Q01..Q20).
+            matched = [i for i, qid in enumerate(qids_upper)
+                       if alpha_prefix(qid) == up]
+        if not matched:
+            fail(f"unknown question '{part}'")
+        indices.update(matched)
     return sorted(indices)
 
 
@@ -3110,7 +3189,10 @@ def main() -> int:
                              "to call load_skill. Pairs with a backend that "
                              "has KWC_EDIT_SKILL_GATE=1 (SKILL-* evals run "
                              "with this OFF to measure activation)")
-    parser.add_argument("--questions", default="", help="Subset, e.g. '1-5,8' (1-based)")
+    parser.add_argument("--questions", default="", metavar="SPEC",
+                        help="Subset by QID or index, e.g. 'TRIDENT-15',"
+                             " 'AMBI-0*', 'TOOL-01..06', 'TRIDENT,EDIT', '1-5,8'."
+                             " QIDs are stable across bank changes; indexes drift.")
     parser.add_argument("--start", default=0, type=int,
                         help="Start at question N (1-based), running N..end. "
                              "Ignored when --questions is set.")
@@ -3140,11 +3222,18 @@ def main() -> int:
     if args.include_memory:
         questions += build_memory_questions()
     if args.list_questions:
-        print(f"{'QID':<5} {'TOOLS':<45} TITLE")
-        print("-" * 100)
-        for q in questions:
+        families: dict[str, list[str]] = {}
+        print(f"{'IDX':>4}  {'QID':<12} {'TOOLS':<45} TITLE")
+        print("-" * 112)
+        for i, q in enumerate(questions, start=1):
             tools = ",".join(q.expected_tools) if q.expected_tools else "(any/none)"
-            print(f"{q.qid:<5} {tools:<45} {q.title}")
+            print(f"{i:>4}  {q.qid:<12} {tools:<45} {q.title}")
+            families.setdefault(re.sub(r"-?\d+$", "", q.qid), []).append(q.qid)
+        print()
+        print("Families (for --questions): "
+              + ",  ".join(f"{fam} ({len(m)})" for fam, m in families.items()))
+        print("e.g. --questions TOOL   or   --questions TOOL-01..06   or"
+              "   --questions TRIDENT-15,AMBI-03")
         return 0
 
     # Ad-hoc one-off questions (--question) are appended to the bank so they
@@ -3181,7 +3270,14 @@ def main() -> int:
     if adhoc:
         questions += adhoc
 
-    # Validate --start before any interactive prompts so bad values fail fast.
+    # Validate the selection BEFORE any interactive prompts so bad values
+    # fail fast with the family list instead of an empty run or a hang on
+    # the provider prompt.
+    if args.questions and not args.question:
+        try:
+            parse_question_filter(args.questions, questions)
+        except ValueError as exc:
+            parser.error(str(exc))
     if args.start and not args.questions and not args.question \
             and (args.start < 1 or args.start > len(questions)):
         parser.error(f"--start must be between 1 and {len(questions)}")
@@ -3227,7 +3323,7 @@ def main() -> int:
         # Ad-hoc questions only — the bank is listed in the log but not run.
         selected = list(range(len(questions) - len(adhoc), len(questions)))
     elif args.questions:
-        selected = parse_question_filter(args.questions, len(questions))
+        selected = parse_question_filter(args.questions, questions)
     elif args.start:
         selected = list(range(args.start - 1, len(questions)))
     else:
@@ -3236,6 +3332,12 @@ def main() -> int:
         print("No questions selected (check --questions syntax).", file=sys.stderr)
         log.close()
         return 1
+
+    # Echo the resolved selection as QIDs so the run log always records
+    # exactly which questions ran, independent of positional drift.
+    sel_qids = ", ".join(questions[i].qid for i in selected)
+    log.write(f"Selected {len(selected)}/{len(questions)}: {sel_qids}")
+    print(f"Selected {len(selected)}/{len(questions)}: {sel_qids}")
 
     log.section("Questions")
     for i, q in enumerate(questions):
