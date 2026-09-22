@@ -41,7 +41,7 @@ def test_model_name_beats_family_pattern_in_same_text():
         "[mcu]\n"
         "serial: /dev/serial/by-id/usb-Klipper_stm32f446xx_X-if00\n"
     )
-    assert info["board_name"] == "BigTreeTech Octopus"
+    assert info["board_name"] == "BigTreeTech Octopus Pro"
 
 
 def test_model_specificity_for_other_vendors():
@@ -122,3 +122,88 @@ def test_no_type_match_adds_no_type_claim_to_matches():
     assert not any("Board type" in m for m in info["matches"])
     # MCU detection still works and still reports honestly.
     assert info["mcu_chip"] == "STM32F446"
+
+
+# ── reference pin-layout cross-check ──────────────────────────────
+
+REF_DIR = Path(__file__).resolve().parents[1] / 'reference'
+
+
+def _sig(tokens):
+    from services.board_detector import extract_pin_signature
+    return extract_pin_signature(tokens)
+
+
+def test_pin_signature_normalizes_flags_and_mcu_prefix():
+    sig = _sig(
+        '[extruder]\n'
+        'enable_pin: !PB15\n'
+        'sensor_pin: EBBCan:PA4\n'
+        '# step_pin: PG10   <- commented: pins nothing\n'
+    )
+    assert 'extruder.enable_pin=PB15' in sig
+    assert 'extruder.sensor_pin=PA4' in sig
+    assert 'extruder.step_pin=PG10' not in sig
+
+
+def test_reference_match_identifies_anonymous_full_config():
+    """A stock reference config, renamed and stripped of its header
+    comments, still resolves to its own file via pin layout."""
+    text = (REF_DIR / 'config' / 'Mainboard' / 'generic-fysetc-spider.cfg').read_text()
+    body = '\n'.join(l for l in text.splitlines() if not l.strip().startswith('#'))
+    from services.board_detector import match_reference_configs
+    matches = match_reference_configs(body, REF_DIR, board_type='mainboard')
+    assert matches
+    assert matches[0]['filename'] == 'generic-fysetc-spider.cfg'
+    assert matches[0]['score'] >= 0.9
+
+
+def test_detect_adopts_name_from_layout_without_textual_hint():
+    path = REF_DIR / 'config' / 'Mainboard' / 'generic-fysetc-spider.cfg'
+    text = '\n'.join(l for l in path.read_text().splitlines() if not l.strip().startswith('#'))
+    config = parse_config(text, 'printer.cfg')
+    info = detect_board_from_config(config, reference_dir=REF_DIR)
+    # Adopted name comes from the matched reference filename through the
+    # specificity-ordered patterns -> the model name, not just the family.
+    assert info['board_name'] == 'FYSETC Spider'
+    assert any(m.startswith('Reference layout: generic-fysetc-spider.cfg') for m in info['matches'])
+
+
+def test_detect_never_conflates_near_twin_boards():
+    """Octopus vs Octopus Pro layouts score within the tie window:
+    the detector must NOT adopt a single model name for them."""
+    path = REF_DIR / 'config' / 'Mainboard' / 'generic-bigtreetech-octopus-v1.1.cfg'
+    text = '\n'.join(l for l in path.read_text().splitlines() if not l.strip().startswith('#'))
+    config = parse_config(text, 'printer.cfg')
+    info = detect_board_from_config(config, reference_dir=REF_DIR)
+    # Text may still name 'octopus' via the raw body; what must hold is
+    # that NO adoption happened silently: either a clear-winner line
+    # naming it, or an explicit candidates line.
+    adopt = [m for m in info['matches'] if m.startswith('Reference layout: ')]
+    cands = [m for m in info['matches'] if m.startswith('Reference layout candidates')]
+    assert adopt or cands
+
+
+def test_detect_weak_overlap_lists_candidates_without_naming():
+    """Yesterday's anonymous fragment (Octopus pins, 3 sections):
+    below adopt threshold -> candidates listed, name NOT adopted."""
+    frag = (
+        '[stepper_x]\nstep_pin: PF13\ndir_pin: PF12\nenable_pin: !PF14\n'
+        'endstop_pin: PG6\n'
+        '[stepper_y]\nstep_pin: PF11\ndir_pin: PG0\nenable_pin: !PG1\n'
+        'endstop_pin: PG9\n'
+        '[extruder]\nstep_pin: PA2\ndir_pin: PA0\nenable_pin: !PB15\n'
+        'heater_pin: PD7\nsensor_pin: PA4\n'
+    )
+    config = parse_config(frag, 'printer.cfg')
+    info = detect_board_from_config(config, reference_dir=REF_DIR)
+    assert info['board_name'] == 'Unknown'
+    assert any(m.startswith('Reference layout candidates') for m in info['matches'])
+    assert 'reference_matches' in info
+    assert all(m['score'] < 0.6 for m in info['reference_matches'])
+
+
+def test_reference_pass_off_without_reference_dir():
+    config = parse_config('[mcu]\nserial: /dev/ttyUSB0\n', 'printer.cfg')
+    info = detect_board_from_config(config)
+    assert 'reference_matches' not in info

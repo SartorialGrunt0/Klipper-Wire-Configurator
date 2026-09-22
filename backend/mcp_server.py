@@ -857,7 +857,10 @@ class McpServer:
                 "description": (
                     "Analyze a Klipper config snippet and detect the likely printer "
                     "board type and MCU family from common pin names, MCU definitions, "
-                    "and section patterns."
+                    "and section patterns. Also cross-references the pin layout "
+                    "against the bundled reference config library: a strong single "
+                    "match identifies the board even when the text never names it, "
+                    "and near-matches are listed as reference files worth reading."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -2117,13 +2120,22 @@ class McpServer:
             from services.board_detector import detect_board_from_config
 
             parsed = parse_config(config_text, "analysis.cfg")
-            board_info = detect_board_from_config(parsed)
+            board_info = detect_board_from_config(parsed, reference_dir=REFERENCE_DIR)
 
             lines: list[str] = ["## Board Detection Results\n"]
             if isinstance(board_info, dict):
+                ref_matches = board_info.pop("reference_matches", None)
                 for key, value in board_info.items():
                     if value:
                         lines.append(f"- **{key}**: {value}")
+                if ref_matches:
+                    lines.append("\n### Closest reference configs (pin-layout match)")
+                    for m in ref_matches:
+                        lines.append(
+                            f"- {m['filename']} — similarity {m['score']} "
+                            f"({m['subdir']}/). Read it with read_example_config "
+                            "to compare full pin maps."
+                        )
             else:
                 lines.append(str(board_info))
 
