@@ -2,11 +2,9 @@
  * Chat Message List
  *
  * Renders the conversation history with markdown support, LM Studio
- * status badges, auto-loaded docs indicators, tool usage badges, and
- * "Apply and Review Changes" buttons for applicable assistant messages.
+ * status badges, auto-loaded docs indicators, and tool usage badges.
  */
 import React, { useState, useRef, useEffect, type ComponentPropsWithoutRef } from 'react';
-import { extractConfigCodeBlocks } from '../../utils/chatUtils';
 import { copyText } from '../../utils/clipboard';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -14,8 +12,6 @@ import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import type { ChatMessage } from '../../stores/aiStore';
 import type { AiToolCallDetail } from '../../services/api';
-import type { AssistantDraftChange } from '../../utils/assistantDraftMerge';
-import { extractConfigCodeBlock } from '../../utils/chatUtils';
 import { hasPrinterMemoryBlock } from '../../utils/printerMemory';
 import { classifyMiniDiffLine, fenceUnfencedMiniDiffs, isMiniDiffBlock } from '../../utils/miniDiff';
 
@@ -121,9 +117,6 @@ export interface ChatMessageListProps {
   /** Re-submits the last failed user message with full context. */
   onRetry?: () => void;
   activeFile: string | null;
-  assistantDraftApplicableMessages: Record<number, boolean>;
-  assistantDraftPreviewLoading: string | null;
-  onApplyEdit: (content: string, messageIndex?: number) => void;
   onReviewPrinterMemory: (content: string) => void;
   /** Replace the user message at `index` with `newText` and regenerate. */
   onEditMessage?: (index: number, newText: string) => void;
@@ -230,9 +223,6 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
   error,
   onRetry,
   activeFile,
-  assistantDraftApplicableMessages,
-  assistantDraftPreviewLoading,
-  onApplyEdit,
   onReviewPrinterMemory,
   onEditMessage,
   messagesEndRef,
@@ -259,17 +249,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
       {messages.map((msg, i) => {
         if (msg.role === 'user' && msg.hiddenFromUser) return null;
 
-        const assistantConfigBlock = msg.role === 'assistant' ? extractConfigCodeBlock(msg.content) : null;
-        const hasApplicableAssistantDraft = assistantDraftApplicableMessages[i] === true;
         const hasPrinterMemBlock = msg.role === 'assistant' && hasPrinterMemoryBlock(msg.content);
-
-
-        // Log eligibility for the button on each render
-        if (msg.role === 'assistant') {
-          const blockCount = extractConfigCodeBlocks(msg.content).length;
-          const isApplicable = assistantDraftApplicableMessages[i] === true;
-          console.debug('[AIDraft] Message', i, '| blocks:', blockCount, '| applicable:', isApplicable, '| activeFile:', activeFile);
-        }
 
         return (
           <div key={i} className={`mb-2 ${msg.role === 'user' ? 'text-right' : 'text-left'}`}>
@@ -394,12 +374,10 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
 
               {/* Auto-repair / retry / re-prompt footer */}
               {editMessageIndex !== i && (() => {
-                const repairCount = msg.repairCount ?? 0;
                 const retryCount = msg.retryCount ?? 0;
                 const repromptCount = msg.repromptCount ?? 0;
-                if (msg.role !== 'assistant' || repairCount + retryCount + repromptCount === 0) return null;
+                if (msg.role !== 'assistant' || retryCount + repromptCount === 0) return null;
                 const parts: string[] = [];
-                if (repairCount > 0) parts.push(`Auto-repaired ${repairCount} section${repairCount === 1 ? '' : 's'}`);
                 if (retryCount > 0) parts.push(`Retried ${retryCount}×`);
                 if (repromptCount > 0) parts.push(`Re-prompted ${repromptCount}×`);
                 return (
@@ -472,18 +450,6 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                       </svg>
                     )}
                   </button>
-
-                  {/* Apply and Review Changes button */}
-                  {msg.role === 'assistant' && assistantConfigBlock && activeFile && hasApplicableAssistantDraft && (
-                    <button
-                      onClick={() => onApplyEdit(msg.content, i)}
-                      disabled={assistantDraftPreviewLoading === msg.content}
-                      className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-[10px] font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-60"
-                      title="Preview how the assistant sections would merge into the matching config file"
-                    >
-                      {assistantDraftPreviewLoading === msg.content ? 'Preparing Review...' : 'Apply and Review Changes'}
-                    </button>
-                  )}
 
                   {/* Review Printer Memory button */}
                   {msg.role === 'assistant' && hasPrinterMemBlock && (

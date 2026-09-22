@@ -197,89 +197,11 @@ XML_TOOL_CALLS_CLEANUP_RE = re.compile(
     re.DOTALL,
 )
 
-MINI_DIFF_EDIT_PROTOCOL_SOFT = (
-    "- To EDIT an existing section, prefer a mini-diff: the section header followed by only the "
-    "lines that change, prefixing removed lines with '-' and added lines with '+'. The '-'/'+' "
-    "marker must be the FIRST character of the line (column 0) — never indent the marker itself "
-    "to align with the body; only the content AFTER the marker keeps its original indentation. "
-    "The app applies these exact replacements to the current "
-    "file — do not reproduce unchanged lines. Outputting any unchanged line (Jinja tags "
-    "such as {% if %}/{% endif %}, G-codes, or comments) risks a full rewrite where those "
-    "lines could be dropped — prefer emitting ONLY the lines that change. "
-)
-
-MINI_DIFF_EDIT_PROTOCOL_STRICT = (
-    "- To EDIT an existing section, emit a mini-diff: the section header followed by only the "
-    "lines that change, prefixing removed lines with '-' and added lines with '+'. The '-'/'+' "
-    "marker must be the FIRST character of the line (column 0) — never indent the marker itself "
-    "to align with the body; only the content AFTER the marker keeps its original indentation. "
-    "The app applies these exact replacements to the current "
-    "file — do not reproduce unchanged lines. Outputting any unchanged line (Jinja tags "
-    "such as {% if %}/{% endif %}, G-codes, or comments) causes the app to reject the "
-    "reply as a full rewrite and retry — emit ONLY the lines that change. "
-)
-
-
-def _build_system_prompt(full_rewrite_guard: bool = False) -> str:
-    """Return SYSTEM_PROMPT with the edit-protocol sentence matching the
-    frontend's full-rewrite-guard state.
-
-    - full_rewrite_guard=True (retry loop enforces mini-diffs): the STRICT
-      wording — emitting a full block write causes the app to reject and
-      retry, so the model must emit ONLY changed lines.
-    - full_rewrite_guard=False (default; the app accepts full block writes
-      and Apply & Review surfaces the diff): the SOFTER wording — mini-diff
-      is preferred because unchanged lines could otherwise be dropped.
-    Kept in lock-step with the frontend VITE_KWC_FULL_REWRITE_GUARD build
-    flag so a future flip changes acceptance behavior AND prompt wording
-    together.
-    """
-    if full_rewrite_guard:
-        return SYSTEM_PROMPT.replace(
-            MINI_DIFF_EDIT_PROTOCOL_SOFT, MINI_DIFF_EDIT_PROTOCOL_STRICT
-        )
-    return SYSTEM_PROMPT
-
-
-# Prose-pipeline edit protocol (fenced cfg blocks / mini-diff). Removed from
-# the system prompt when the tool-mediated write path is armed
-# (EDIT_PROTOCOL_PROMPT replaces it). Phase-5 ablation: KWC_ABLATE_PROSE=1
-# removes it for edit-capable requests as well.
-_PROSE_EDIT_PROTOCOL = (
-    "- For config edits, return only changed, new, or deleted content in fenced cfg code "
-    "blocks. Start each block with a '# file: <filename>' hint line when the target file is "
-    "not obvious. Do not return the whole file unless the user explicitly asks for a full "
-    "replacement.\n"
-    + MINI_DIFF_EDIT_PROTOCOL_SOFT
-    + "Example: if the "
-    "user asks to add ADAPTIVE=1 to the Level_Bed macro, return exactly:\n"
-    "  # file: printer.cfg\n"
-    "  [gcode_macro Level_Bed]\n"
-    "  -    BED_MESH_CALIBRATE\n"
-    "  +    BED_MESH_CALIBRATE ADAPTIVE=1\n"
-    "  The unchanged body of the macro (CLEAN_NOZZLE, G28, the {% if %}/{% endif %} guards, "
-    "M104 S0) is NOT repeated — it is preserved automatically from the current file. "
-    "Plain config params work the same way: if the user asks to raise max_accel to 12000, "
-    "return exactly:\n"
-    "  # file: printer.cfg\n"
-    "  [printer]\n"
-    "  -max_accel: 10000\n"
-    "  +max_accel: 12000\n"
-    "  Other params in [printer] (kinematics, max_velocity, etc.) are NOT repeated.\n"
-    "  A pure addition (nothing removed) needs no '-' line — just the section header "
-    "plus the '+' lines. A pure deletion (nothing added) needs no '+' line — just "
-    "the section header plus the '-' lines. If a section is already correct and you "
-    "only need to show it, quoting it unchanged is allowed.\n"
-    "- To ADD a new section, write the full section. To DELETE a section entirely, write "
-    "`*[section_name]` on its own line inside the cfg block (* = delete). To comment a "
-    "section out, keep it in the file with its header commented out: #[extruder].\n"
-    "- Every cfg block — including mini-diffs — must be fenced with ```cfg ... ```. "
-    "Unfenced '+'/'-' diff lines render as markdown bullet points instead of a diff "
-    "block, and bare config text outside fences is not applied. A validation tool may "
-    "report errors on a partial draft (missing sections or dependencies it cannot see "
-    "yet); that is expected — still return the requested edit, the app validates the "
-    "merged result.\n"
-)
+# Prose edit protocol (fenced cfg blocks / mini-diff) RETIRED 2026-09-22 with
+# the Phase-4 ratchet (.hermes/plans/2026-09-10_tool-mediated-config-editing.md):
+# config edits go through config_edit/config_write + the approval card; fenced
+# cfg output is display-only text. Models may still paste cfg fences in prose —
+# that is fine, nothing consumes them as edits anymore.
 
 
 SYSTEM_PROMPT = (
@@ -335,10 +257,8 @@ SYSTEM_PROMPT = (
     "it. If the user did not specify values, use the documented defaults "
     "or a safe standard value and SAY what you chose — do not ask the user "
     "to provide values the reference already documents.\n"
-    + _PROSE_EDIT_PROTOCOL +
-    "- For macros: valid Klipper syntax, conservative motion and temperature behavior. With "
-    "the mini-diff protocol the unchanged lines are preserved automatically; never drop, "
-    "reorder, or reword lines that were not part of the request.\n"
+    "- For macros: valid Klipper syntax, conservative motion and temperature behavior. Never "
+    "drop, reorder, or reword lines that were not part of the request.\n"
     "- When asked to validate or error-check a macro or g-code, check execution "
     "prerequisites, not just syntax — e.g. BED_MESH_CALIBRATE needs homed axes (G28 "
     "first), G1 E moves need an active extruder with temperature. Name the missing "
@@ -381,11 +301,6 @@ class ChatRequest(BaseModel):
     # server-side only — it is NOT injected into the first prompt; the
     # fallback uses it when the model answers without calling any tool.
     contextFiles: dict[str, dict[str, str]] = {}
-    # The editor's active file, mirroring the frontend draft pipeline's
-    # activeFile input to buildAssistantDraftTargetConfigs (finding #5).
-    # Used ONLY for server-side merged-result target resolution when the
-    # reply carries no explicit '# file:' hint; never injected into prompts.
-    activeFile: str = ''
     # Tool-calling protocol override (frontend setting / harness runs).
     # "auto" (default) uses NATIVE function calling for every provider,
     # local llama.cpp included — the machine channel keeps protocol text out
@@ -424,21 +339,10 @@ class ChatRequest(BaseModel):
     # accepts. Set False explicitly only for A/B testing the trailing
     # task-anchor position.
     mergeSystemMessages: bool = True
-    # Full-rewrite guard state (frontend VITE_KWC_FULL_REWRITE_GUARD build
-    # flag). True = the frontend retry loop rejects full block writes of
-    # existing macro/Jinja sections and forces mini-diff re-emission, so the
-    # system prompt uses the STRICT edit-protocol wording. False (default) =
-    # full block writes are accepted (Apply & Review shows the diff), so the
-    # prompt uses the softer wording. Kept in lock-step with the frontend so
-    # a flip changes acceptance AND prompt together. The harness sends this
-    # via --full-rewrite-guard for A/B runs.
-    fullRewriteGuard: bool = False
-    # Server-side merged-result validation + ONE lean repair pass (#1).
-    # Server-side draft validation/audit are backend-only env switches
-    # (KWC_SERVER_DRAFT_VALIDATION / KWC_POST_APPLY_AUDIT) — deliberately
-    # NOT request fields: per-request control would let a compromised UI
-    # toggle the harness off. (Review finding #3: the old
-    # serverDraftValidation field here was never read and never sent.)
+    # Prose-draft machinery (the fullRewriteGuard request field, server-side
+    # draft validation/audit, and the KWC_SERVER_DRAFT_VALIDATION /
+    # KWC_POST_APPLY_AUDIT env switches) was removed with the Phase-4 ratchet
+    # (2026-09-22): prose→draft ingestion no longer exists.
 
 
 @router.get("/ai/chat/approval")
@@ -572,7 +476,7 @@ def _get_openai_compatible_default_url(provider: str) -> str:
     return defaults.get(provider, "")
 
 
-def _prepare_messages(messages: list[dict], full_rewrite_guard: bool = False,
+def _prepare_messages(messages: list[dict],
                       edit_capable: bool = False, *,
                       skill_gate: bool = False,
                       skill_active: bool = False,
@@ -582,7 +486,7 @@ def _prepare_messages(messages: list[dict], full_rewrite_guard: bool = False,
     and user messages.
     """
     minimal = _minimal_prompt_enabled()
-    system_prompt = _build_system_prompt(full_rewrite_guard)
+    system_prompt = SYSTEM_PROMPT
     no_system = _no_system_prompt_enabled()
 
     # ── Inject printer memory context ──
@@ -605,13 +509,6 @@ def _prepare_messages(messages: list[dict], full_rewrite_guard: bool = False,
                                                skill_gate=skill_gate,
                                                skill_active=skill_active,
                                                native_mode=native_mode)
-        if edit_capable and _ablate_prose_edit_protocol():
-            # ABLATION (2026-09-16, ack-loop investigation): the tool-mediated
-            # law replaces the prose mini-diff protocol; keeping both tells the
-            # model to emit cfg blocks AND to never emit cfg blocks in one
-            # prompt. gemma-4-12b fixates on the protocol text and answers the
-            # instructions instead of the user's request (Q14/Q20 r3).
-            system_prompt = system_prompt.replace(_PROSE_EDIT_PROTOCOL, "")
         system_parts = [system_prompt, tool_context, memory_context]
         if edit_capable and not skill_gate:
             # Edit law only when the write tools are advertised (lazy
@@ -1509,47 +1406,19 @@ def _minimal_prompt_enabled() -> bool:
     return os.environ.get("KWC_MINIMAL_PROMPT", "0") != "0"
 
 
-def _server_draft_validation_enabled() -> bool:
-    """Server-side merged-result validation + ONE repair pass toggle.
-
-    DEFAULTS TO ENABLED (2026-09-09 A/B: both flags ON across the full 69-q
-    bank on gemma-4-12b + qwen3.5-4b with zero false-positive repairs, zero
-    latency complaints, and the harness at its best gemma scores; repair and
-    audit paths verified unit-level + live smoke). Set env
-    KWC_SERVER_DRAFT_VALIDATION=0 to revert to the frontend-only retry path.
-    """
-    return os.environ.get("KWC_SERVER_DRAFT_VALIDATION", "1") != "0"
-
-
-def _server_audit_enabled() -> bool:
-    """Deterministic post-apply audit footer toggle (#3).
-
-    DEFAULTS TO DISABLED (2026-09-10 design review): the stated-requirement
-    regex parses English prose, which fails Sir's standing bar — harness-tier
-    checks must parse structure (AST/config), not prose. Checks 2/3
-    (precondition table, LED inventory) are structural but ship together with
-    check 1; the whole module is scheduled for removal when tool-mediated
-    editing lands (see .hermes/plans/2026-09-10_tool-mediated-config-editing.md,
-    Phase 6). Set env KWC_POST_APPLY_AUDIT=1 to re-enable (harness probes
-    HARNESS-01..03 and dogfooding still work with it on).
-    """
-    return os.environ.get("KWC_POST_APPLY_AUDIT", "0") == "1"
-
-
 def _edit_tools_enabled() -> bool:
     """Tool-mediated config editing (config_edit/config_write write tools).
 
-    DEFAULTS TO DISABLED during Phases 1-3 (plan
-    .hermes/plans/2026-09-10_tool-mediated-config-editing.md): the prose
-    draft path stays the shipped behavior until the per-model A/B at
-    Gate 1 passes. When enabled, the write tools are advertised (native +
-    text protocol parity), routed request-scoped through
-    services.ai_edit_tools.EditSession (seeded from contextFiles; no
-    per-conversation draft store), and the loop cap rises to
-    MAX_MCP_TOOL_TURNS_EDIT. Requires a non-empty contextFiles payload —
-    with no live state to edit, the tools are not advertised at all.
+    DEFAULT-ON since the Phase-4 ratchet (2026-09-22): the prose draft path
+    is deleted, so the write tools are the ONLY edit path. Set env
+    KWC_EDIT_TOOLS=0 only to disable edits entirely (read-only chat). The
+    tools are advertised (native + text protocol parity), routed
+    request-scoped through services.ai_edit_tools.EditSession (seeded from
+    contextFiles; no per-conversation draft store), and the loop cap rises
+    to MAX_MCP_TOOL_TURNS_EDIT. With no contextFiles the session mirror-
+    seeds from the backend user-config store (TRIDENT-16).
     """
-    return os.environ.get("KWC_EDIT_TOOLS", "0") == "1"
+    return os.environ.get("KWC_EDIT_TOOLS", "1") != "0"
 
 
 def _config_fallback_enabled() -> bool:
@@ -3040,253 +2909,6 @@ async def list_models(req: ModelsRequest):
     return {"models": ids}
 
 
-# ── Server-side merged-result validation + ONE lean repair (#1) ───────
-#
-# When KWC_SERVER_DRAFT_VALIDATION=1, after the tool loop produces a final
-# reply the backend applies it to the loaded context files (ported merge
-# engine, services/ai_draft_apply), validates the MERGED result with the
-# project validator, and — when new errors appear (delta vs baseline, same
-# semantics as the frontend's collectNewValidationErrors) — issues exactly
-# ONE REPAIR-01-shaped repair query (lean: error + imperative fix, previous
-# reply never quoted). If the repair reply validates, it replaces the
-# original; otherwise the ORIGINAL reply stands and `serverRepair` reports
-# the failure so the frontend loop (or the user) can act. The reply is
-# never rejected outright — Apply & Review remains the user's gate.
-#
-# The deterministic audit (#3, services/ai_reply_audit) runs unconditionally
-# (flag-gated only) on every reply that changed config: stated-requirement
-# check, macro precondition table, LED inventory sweep. Notes attach as a
-# footer; they never change routing or acceptance.
-
-def _context_files_to_config_files(context_files: dict[str, dict[str, str]]) -> dict:
-    """Convert the frontend contextFiles payload to parseable ConfigFiles."""
-    from parser.config_parser import parse_config
-
-    configs = {}
-    for filename, meta in context_files.items():
-        content = (meta or {}).get("content", "")
-        if not content.strip():
-            continue
-        try:
-            configs[filename] = parse_config(content, filename)
-        except Exception:
-            logger.warning("Context file parse failed | file=%s", filename)
-    return configs
-
-
-async def _server_validate_and_repair(
-    client: httpx.AsyncClient,
-    req: ChatRequest,
-    headers: dict,
-    final_content: str,
-    current_messages: list[dict],
-    usage_events: list[dict],
-    stop_event: "asyncio.Event | None",
-) -> tuple[str, dict | None]:
-    """Apply → validate merged → ONE lean repair. Returns (content, info).
-
-    ``info`` is the ``serverRepair`` response field: ``None`` when nothing
-    needed repair / repair was not possible (no context files), else a dict
-    ``{attempted, repaired, issuesAfter}``.
-    """
-    from services.ai_draft_apply import (
-        MAX_ASSISTANT_HINT_USER_MESSAGES,
-        apply_reply_to_configs,
-    )
-    from services.ai_draft_validation import (
-        build_validation_feedback,
-        collect_new_validation_errors,
-        has_only_retry_exempt_issues,
-        suppress_errors_shadowed_by_full_rewrite,
-    )
-    from services.ai_reply_audit import build_audit_footer, run_post_apply_audit
-    from parser.validator import validate_project_configs
-
-    base_configs = _context_files_to_config_files(req.contextFiles)
-    if not base_configs:
-        return final_content, None
-
-    # Mirror useAssistantDraft.getAssistantMessageHintTexts: the reply plus
-    # up to 3 preceding user messages, so file targets named only by the
-    # user resolve to the same file the client's draft pipeline picks
-    # (finding #5).
-    user_hints = [
-        m.get("content", "")
-        for m in req.messages
-        if m.get("role") == "user" and m.get("content")
-    ][-MAX_ASSISTANT_HINT_USER_MESSAGES:]
-    hint_texts = [final_content, *user_hints]
-
-    apply_result = apply_reply_to_configs(
-        final_content, base_configs,
-        active_file=req.activeFile or None,
-        hint_texts=hint_texts,
-    )
-    merged_files = {
-        filename: entry["merged_config"]
-        for filename, entry in apply_result["files"].items()
-    }
-    if not merged_files:
-        # Prose-only reply or apply failure — nothing merged to validate.
-        return final_content, None
-
-    # Baseline = the untouched project; candidate = base with merged files.
-    project = dict(base_configs)
-    project.update(merged_files)
-    baseline_validations = {
-        filename: result.to_dict()
-        for filename, result in validate_project_configs(base_configs, gcode_registry=False).items()
-    }
-    candidate_validations = {
-        filename: result.to_dict()
-        for filename, result in validate_project_configs(project, gcode_registry=False).items()
-    }
-    blocking = suppress_errors_shadowed_by_full_rewrite(
-        collect_new_validation_errors(baseline_validations, candidate_validations)
-    )
-    if not blocking:
-        # Clean apply: run the deterministic audit (ONLY when its own flag
-        # is on — the outer gate lets us in for validation alone) and
-        # attach its footer.
-        notes = (
-            _run_audit_on_apply(req, apply_result, merged_files, project, run_post_apply_audit)
-            if _server_audit_enabled() else []
-        )
-        if notes:
-            final_content = final_content + build_audit_footer(notes)
-        return final_content, {"attempted": False, "repaired": False, "issuesAfter": []}
-
-    if not _server_draft_validation_enabled():
-        # Audit-only mode (KWC_POST_APPLY_AUDIT without validation): the
-        # deterministic notes still apply; repair stays off.
-        notes = (
-            _run_audit_on_apply(req, apply_result, merged_files, project, run_post_apply_audit)
-            if _server_audit_enabled() else []
-        )
-        if notes:
-            final_content = final_content + build_audit_footer(notes)
-        return final_content, None
-
-    if has_only_retry_exempt_issues(blocking):
-        # The model cannot fix duplicates/reused pins by regenerating —
-        # do not burn a repair query (retry-exempt semantics).
-        return final_content, {
-            "attempted": False,
-            "repaired": False,
-            "issuesAfter": blocking,
-            "reason": "retry-exempt",
-        }
-
-    # ── ONE lean repair (REPAIR-01 shape) ──
-    feedback = build_validation_feedback(blocking, None)
-    repair_messages = list(current_messages) + [
-        {"role": "user", "content": feedback},
-    ]
-    repair_max_tokens = req.maxTokens
-    if _is_local_provider(req.apiProvider, req.apiUrl):
-        repair_max_tokens = max(req.maxTokens, EMPTY_REPROMPT_MAX_TOKENS)
-    logger.info(
-        "Server repair | issuing ONE lean repair (issue_groups=%d)", len(blocking),
-    )
-    try:
-        repair_payload = _build_provider_payload(
-            req.apiProvider, repair_messages, req.model,
-            max_tokens=repair_max_tokens,
-            temperature=req.temperature,
-            tools=_resolve_native_tools(req.apiProvider, req.apiUrl, req.toolProtocol),
-            merge_system=req.mergeSystemMessages,
-        )
-        repair_content, repair_data = await _query_provider(
-            client, req.apiUrl, headers, repair_payload, req.apiProvider,
-            logger_context="server-repair-1",
-            stop_event=stop_event,
-        )
-        repair_usage = _extract_usage_info(repair_data)
-        if repair_usage:
-            repair_usage["context"] = "server-repair-1"
-            usage_events.append(repair_usage)
-    except ChatStoppedError:
-        raise
-    except (ValueError, httpx.HTTPError) as exc:
-        logger.warning("Server repair query failed | %s", exc)
-        return final_content, {"attempted": True, "repaired": False, "issuesAfter": blocking}
-
-    repaired_content = _strip_template_pythonic_calls(repair_content).strip()
-    for pattern in (
-        MCP_TOOL_BLOCK_RE, ALT_TOOL_CALL_CONTENT_RE, CALL_SYNTAX_CLEANUP_RE,
-        FUNC_CALL_CLEANUP_RE, DSML_CLEANUP_RE, XML_TOOL_CALLS_CLEANUP_RE,
-    ):
-        repaired_content = pattern.sub("", repaired_content).strip()
-    repaired_content = _strip_bracket_tool_calls(repaired_content).strip()
-
-    if repaired_content:
-        repair_apply = apply_reply_to_configs(
-            repaired_content, base_configs,
-            active_file=req.activeFile or None,
-            hint_texts=[repaired_content, *user_hints],
-        )
-        repair_merged = {
-            filename: entry["merged_config"]
-            for filename, entry in repair_apply["files"].items()
-        }
-        if repair_merged:
-            repair_project = dict(base_configs)
-            repair_project.update(repair_merged)
-            repair_candidate = {
-                filename: result.to_dict()
-                for filename, result in validate_project_configs(repair_project, gcode_registry=False).items()
-            }
-            repair_blocking = suppress_errors_shadowed_by_full_rewrite(
-                collect_new_validation_errors(baseline_validations, repair_candidate)
-            )
-            if not repair_blocking:
-                notes = (
-                    _run_audit_on_apply(req, repair_apply, repair_merged, repair_project, run_post_apply_audit)
-                    if _server_audit_enabled() else []
-                )
-                if notes:
-                    repaired_content = repaired_content + build_audit_footer(notes)
-                logger.info("Server repair | repaired=1")
-                return repaired_content, {
-                    "attempted": True, "repaired": True, "issuesAfter": [],
-                }
-            # Repair still dirty: keep the ORIGINAL reply (never show a
-            # worse one) but report the exact remaining issues.
-            return final_content, {
-                "attempted": True, "repaired": False, "issuesAfter": repair_blocking,
-            }
-
-    return final_content, {"attempted": True, "repaired": False, "issuesAfter": blocking}
-
-
-def _run_audit_on_apply(req, apply_result, merged_files, project, audit_fn) -> list[str]:
-    """Collect the audit inputs from an apply result and run all checks."""
-    changed_headers: list[str] = []
-    changed_gcode: list[tuple[str, str]] = []
-    for entry in apply_result["files"].values():
-        for change in entry["changes"]:
-            header = change.get("fullHeader", "")
-            if header and header not in changed_headers:
-                changed_headers.append(header)
-        merged_cfg = entry["merged_config"]
-        for section in merged_cfg.sections:
-            # Any section with a gcode param: gcode_macro/delayed_gcode AND
-            # idle_timeout/force_move etc. — the idle_timeout LED class
-            # (#TRIDENT-15) lives on [idle_timeout], not a macro.
-            body = (section.get_value("gcode", "")
-                    if section.full_header in changed_headers else "")
-            if body:
-                changed_gcode.append((section.full_header, body))
-    if not changed_headers:
-        return []
-    return audit_fn(
-        _latest_user_message_text(req.messages),
-        project,
-        changed_gcode,
-        changed_headers,
-    )
-
-
 # Mirror-seed caps (Pi 3B+ memory): per-file and total content limits so a
 # misconfigured scan root can never load gigabytes into an edit session.
 _MIRROR_MAX_FILE_BYTES = 512 * 1024
@@ -3402,7 +3024,7 @@ async def chat_proxy(req: ChatRequest):
     def _current_skill_gate() -> bool:
         return skill_gate and not _skill_state['active']
 
-    messages = _prepare_messages(req.messages, full_rewrite_guard=req.fullRewriteGuard,
+    messages = _prepare_messages(req.messages,
                                  edit_capable=edit_capable,
                                  skill_gate=skill_gate,
                                  skill_active=_skill_state['active'],
@@ -4105,30 +3727,6 @@ async def chat_proxy(req: ChatRequest):
             if not mcp_tool_names and executed_tool_names:
                 mcp_tool_names = list(dict.fromkeys(executed_tool_names))
 
-            # ── Server-side merged-result validation + ONE lean repair (#1) ──
-            # Flag-gated (KWC_SERVER_DRAFT_VALIDATION=1). Needs the loaded
-            # config content (contextFiles); replies that merge cleanly get
-            # the deterministic audit footer (#3) when KWC_POST_APPLY_AUDIT=1.
-            # The frontend fenced-cfg path is untouched: worst case the reply
-            # stands as-is and `serverRepair` reports what happened.
-            server_repair_info = None
-            server_audit_enabled = _server_audit_enabled()
-            if (
-                final_content
-                and (
-                    _server_draft_validation_enabled()
-                    or server_audit_enabled
-                )
-            ):
-                try:
-                    final_content, server_repair_info = await _server_validate_and_repair(
-                        client, req, headers, final_content,
-                        current_messages, usage_events, stop_event,
-                    )
-                except ChatStoppedError:
-                    raise
-                except Exception:
-                    logger.exception("Server draft validation failed | replying unchanged")
 
             # ── Confabulated-completion guard (TRIDENT-15) ──
             # The write path was ATTEMPTED (>=1 config_edit/config_write
@@ -4211,11 +3809,6 @@ async def chat_proxy(req: ChatRequest):
                 "editAttempts": (
                     edit_session.edit_attempts if edit_session is not None else None
                 ),
-                # Set when KWC_SERVER_DRAFT_VALIDATION ran ({attempted,
-                # repaired, issuesAfter[, reason]}); null otherwise. The
-                # frontend may use it to skip its own retry loop when the
-                # server already repaired the reply.
-                "serverRepair": server_repair_info,
                 "usage": {
                     "completionTokens": sum(
                         (e.get("completionTokens") or 0) for e in usage_events

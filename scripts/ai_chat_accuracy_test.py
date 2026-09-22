@@ -61,15 +61,21 @@ Question bank: Q01-Q20 (core tools, minus the retired Q09), MACRO-01..11
 (macro authoring, editing, fixing, template options, and the individual
 validate_macro checks; MACRO-08 retired), TRIDENT-01..14 (real configs from
 reference/Trident_backup and the real backend/user_configs — read, edit,
-delete, manage, and fix the actual printer.cfg/aux_fan.cfg/PIS.cfg via the
-draft-block protocol; the files are attached as read-only context and never
-modified), MINIDIFF-01..04 (the mini-diff edit protocol), AMBI-01..08
+delete, manage, and fix the actual printer.cfg/aux_fan.cfg/PIS.cfg; the
+files are attached as read-only context and never modified), MINIDIFF-01..04
+(historical qids from the retired mini-diff protocol — now scored on the
+staged write-tool artifact like the EDIT-* family), AMBI-01..08
 (ambiguity cases: new-file drafts, hypothetical edits, batch section reads,
 multi-topic explain-and-edit turns, content search), and MEMORY-01..03
 (printer-memory auto-fill, requires --include-memory), and EDIT-01..06
 (tool-mediated editing: criteria read the server-staged pendingEdits —
-these questions force ChatRequest.editTools=True; run the MINIDIFF-*/
-TRIDENT-* families with --edit-tools off for the prose-path A/B arm).
+these questions force ChatRequest.editTools=True).
+
+Criteria law since the Phase-4 ratchet (2026-09-22): when a question
+declares edit_criteria they are THE criteria — the prose→draft path is
+deleted, so the staged pendingEdits artifact is the deliverable. Questions
+without edit_criteria keep their prose criteria (pure Q&A / communication
+checks, which the artifact can never express).
 
 Stdlib only — no third-party dependencies.
 """
@@ -372,11 +378,7 @@ def build_questions() -> list[TestQuestion]:
             text="Generate a PRINT_START macro template for me, including bed mesh "
                  "calibration.",
             require_tool=False,
-            criteria=(
-                ("contains", "PRINT_START"),
-                ("regex", r"\[gcode_macro"),
-                ("contains", "BED_MESH_CALIBRATE"),
-            ),
+            criteria=(),
             # Edit-tools-ON arm: score the staged artifact, not prose
             # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
             edit_criteria=(
@@ -425,11 +427,7 @@ def build_questions() -> list[TestQuestion]:
                  "max_accel: 3000\n",
             expected_tools=(),
             require_tool=False,
-            criteria=(
-                ("regex", r"```(?:cfg|ini|conf|klipper)"),
-                ("contains", "[bed_mesh]"),
-                ("regex", r"probe_count.{0,20}?5"),
-            ),
+            criteria=(),
             # Edit-tools-ON arm: score the staged artifact, not prose
             # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
             edit_criteria=(
@@ -511,12 +509,7 @@ def build_macro_questions() -> list[TestQuestion]:
                   "before the G1 move. Return the full updated macro as a cfg block."),
             expected_tools=("validate_macro", "get_config_reference_section"),
             require_tool=False,
-            criteria=(
-                ("regex", r"\[gcode_macro\s+PRINT_START"),
-                ("regex", r"M140[^\n]*S60"),
-                ("contains", "BED_MESH_CALIBRATE"),
-                ("regex", r"```(?:cfg|ini|conf|klipper)"),
-            ),
+            criteria=(),
             # Edit-tools-ON arm: score the staged artifact, not prose
             # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
             # M1[49]0: M190 S60 satisfies "heat bed to 60" equally (observed
@@ -815,15 +808,7 @@ def build_trident_questions() -> list[TestQuestion]:
             context_files=printer_cfg,
             expected_tools=("validate_klipper_config",),
             require_tool=False,
-            criteria=(
-                # Accept fenced blocks OR bare text with a file hint — the
-                # frontend's extractConfigCodeBlocks falls back to raw text
-                # when a '# file:' hint is present, so bare mini-diffs apply.
-                ("regex", r"```(?:cfg|ini|conf|klipper)|#\s*file\s*:\s*printer\.cfg"),
-                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
-                ("regex", r"\[printer\]"),
-                ("regex", r"max_accel\s*:\s*12000"),
-            ),
+            criteria=(),
             # Edit-tools-ON arm: score the staged artifact, not prose
             # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
             edit_criteria=(
@@ -840,11 +825,7 @@ def build_trident_questions() -> list[TestQuestion]:
             context_files=printer_cfg,
             expected_tools=("validate_klipper_config",),
             require_tool=False,
-            criteria=(
-                ("regex", r"```(?:cfg|ini|conf|klipper)"),
-                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
-                ("regex", r"\*\s*\[gcode_macro\s+RESET_ACCEL\]"),
-            ),
+            criteria=(),
             # Edit-tools-ON arm: score the staged artifact, not prose
             # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
             edit_criteria=(
@@ -860,10 +841,7 @@ def build_trident_questions() -> list[TestQuestion]:
                   "hint line."),
             context_files=printer_cfg,
             require_tool=False,
-            criteria=(
-                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
-                ("regex", r"#\s*\[include\s+sensorless\.cfg\]"),
-            ),
+            criteria=(),
             # Edit-tools-ON arm: score the staged artifact, not prose
             # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
             edit_criteria=(
@@ -880,11 +858,7 @@ def build_trident_questions() -> list[TestQuestion]:
             context_files=printer_and_aux,
             expected_tools=("validate_klipper_config",),
             require_tool=False,
-            criteria=(
-                ("regex", r"#\s*file\s*:\s*aux_fan\.cfg"),
-                ("regex", r"\[fan_generic\s+Aux_Fan\]"),
-                ("regex", r"max_power\s*:\s*0\.8"),
-            ),
+            criteria=(),
             # Edit-tools-ON arm: score the staged artifact, not prose
             # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
             edit_criteria=(
@@ -903,12 +877,7 @@ def build_trident_questions() -> list[TestQuestion]:
             context_files=printer_cfg,
             expected_tools=("validate_macro",),
             require_tool=False,
-            criteria=(
-                ("regex", r"#\s*file\s*:\s*park_head\.cfg"),
-                ("regex", r"\[gcode_macro\s+PARK_HEAD"),
-                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
-                ("regex", r"\[include\s+park_head\.cfg\]"),
-            ),
+            criteria=(),
             # Edit-tools-ON arm: score the staged artifact, not prose
             # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
             edit_criteria=(
@@ -946,12 +915,7 @@ def build_trident_questions() -> list[TestQuestion]:
             context_files=printer_cfg,
             expected_tools=("validate_klipper_config",),
             require_tool=False,
-            criteria=(
-                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
-                ("regex", r"\[bed_mesh\]"),
-                ("regex", r"probe_count\s*:\s*5,\s*5"),
-                ("regex", r"mesh_pps\s*:\s*5,\s*5"),
-            ),
+            criteria=(),
             # Edit-tools-ON arm: score the staged artifact, not prose
             # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
             edit_criteria=(
@@ -987,11 +951,7 @@ def build_trident_questions() -> list[TestQuestion]:
             context_files=_context_with(_load_m109_bugged_printer_cfg()),
             expected_tools=("validate_macro",),
             require_tool=False,
-            criteria=(
-                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
-                ("regex", r"\[gcode_macro\s+M109\]"),
-                ("contains", "{% endif %}"),
-            ),
+            criteria=(),
             # Edit-tools-ON arm: score the staged artifact, not prose
             # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
             edit_criteria=(
@@ -1009,12 +969,7 @@ def build_trident_questions() -> list[TestQuestion]:
                   "'# file:' hint line."),
             context_files=_cfg_context("printer.cfg", "aux_fan.cfg"),
             require_tool=False,
-            criteria=(
-                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
-                ("regex", r"max_accel\s*:\s*12000"),
-                ("regex", r"#\s*file\s*:\s*aux_fan\.cfg"),
-                ("regex", r"max_power\s*:\s*0\.8"),
-            ),
+            criteria=(),
             # Edit-tools-ON arm: score the staged artifact, not prose
             # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
             edit_criteria=(
@@ -1033,12 +988,7 @@ def build_trident_questions() -> list[TestQuestion]:
                   "correct '# file:' hint lines."),
             context_files=_cfg_context("printer.cfg", "aux_fan.cfg", "PIS.cfg"),
             require_tool=False,
-            criteria=(
-                ("regex", r"#\s*file\s*:\s*aux_fan\.cfg"),
-                ("regex", r"max_power\s*:\s*0\.8"),
-                ("regex", r"#\s*file\s*:\s*PIS\.cfg"),
-                ("regex", r"accel_per_hz\s*:\s*50"),
-            ),
+            criteria=(),
             # Edit-tools-ON arm: score the staged artifact, not prose
             # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
             edit_criteria=(
@@ -1059,16 +1009,7 @@ def build_trident_questions() -> list[TestQuestion]:
                   "any other content in the file."),
             context_files=printer_cfg,
             require_tool=False,
-            criteria=(
-                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
-                ("regex", r"\[gcode_macro\s+PARK_HEAD"),
-                ("regex", r"probe_count\s*:\s*5,\s*5"),
-                ("regex", r"\*\s*\[gcode_macro\s+RESET_ACCEL\]"),
-                # Unwanted-content gate: the reply must not contain real
-                # stepper section content (i.e. it did not dump/re-edit
-                # unrelated sections).
-                ("not_contains", "[stepper_x]\nstep_pin"),
-            ),
+            criteria=(),
             # Edit-tools-ON arm: score the staged artifact, not prose
             # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
             edit_criteria=(
@@ -1116,13 +1057,7 @@ def build_trident_questions() -> list[TestQuestion]:
             # structural call; read_user_config remains an accepted route.
             expected_tools=("list_hardware", "read_user_config"),
             require_tool=True,
-            criteria=(
-                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
-                ("regex", r"timeout\s*:\s*300\b"),
-                ("contains", "SB_LEDs"),
-                ("contains", "Chamber_LEDs"),
-                ("contains", "hotkey_leds"),
-            ),
+            criteria=(),
             # Edit-tools-ON arm: score the staged artifact, not prose
             # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
             edit_criteria=(
@@ -1144,13 +1079,7 @@ def build_trident_questions() -> list[TestQuestion]:
             context_files=(),
             expected_tools=("read_user_config", "list_user_configs"),
             require_tool=True,
-            criteria=(
-                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
-                ("regex", r"timeout\s*:\s*300\b"),
-                ("contains", "SB_LEDs"),
-                ("contains", "Chamber_LEDs"),
-                ("contains", "hotkey_leds"),
-            ),
+            criteria=(),
             # Edit-tools-ON arm: score the staged artifact, not prose
             # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
             edit_criteria=(
@@ -1160,29 +1089,22 @@ def build_trident_questions() -> list[TestQuestion]:
                 ("staged_section_regex", r"printer\.cfg::idle_timeout::hotkey_leds"),
             ),
         ),
-        # ── HARNESS-01/03: probes for the server-side apply/validate/
-        # repair (#1) and post-apply audit (#3) machinery. These judge
-        # the HARNESS, not the model: each is engineered so the pipeline
-        # has a deterministic observable, captured via the serverRepair
-        # response field / audit footer in the report JSON.
+        # ── HARNESS-01/03: typo/false-positive probes. Originally they
+        # probed the server-side prose repair + audit harness (deleted by
+        # the Phase-4 ratchet 2026-09-22); the fixtures survive as model
+        # accuracy probes graded on the staged write-tool artifact.
         TestQuestion(
             qid="HARNESS-01",
             title="Repair-probe: typo'd param name must trigger ONE repair",
             text=("In printer.cfg set the printer's max_acceleration to 9000. "
                   "Only change that one value."),
             # max_acceleration is NOT a real [printer] param (the real one
-            # is max_accel) — a plain user typo. If the model writes it
-            # verbatim, the merged result fails validation (unknown_param)
-            # and the server harness MUST fire its ONE repair pass. Pass =
-            # the reply standing in front of the user carries the correct
-            # param (repaired, or never wrong). The serverRepair field in
-            # the report records whether repair actually fired.
+            # is max_accel) — a plain user typo. Under tool-mediated
+            # editing the write gate flags unknown_param, so the staged
+            # artifact must carry the CORRECT param (or nothing bogus).
             context_files=printer_cfg,
             require_tool=False,
-            criteria=(
-                ("regex", r"max_accel(?!eration)\s*:\s*9000"),
-                ("not_contains", "max_acceleration: 9000"),
-            ),
+            criteria=(),
             # Edit-tools-ON arm: score the staged artifact, not prose
             # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
             edit_criteria=(
@@ -1210,10 +1132,7 @@ def build_trident_questions() -> list[TestQuestion]:
             # param is 'speed'; 'probe speed' is how users say it.)
             context_files=_context_with(_load_probe_params_printer_cfg()),
             require_tool=False,
-            criteria=(
-                ("regex", r"speed\s*:\s*8"),
-                ("not_contains", "Harness checks"),
-            ),
+            criteria=(),
             # Edit-tools-ON arm: score the staged artifact, not prose
             # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
             edit_criteria=(
@@ -1228,10 +1147,7 @@ def build_trident_questions() -> list[TestQuestion]:
                   "BED_MESH_CALIBRATE in adaptive mode."),
             context_files=printer_cfg,
             require_tool=False,
-            criteria=(
-                ("mini_diff", "[gcode_macro Level_Bed]"),
-                ("contains", "ADAPTIVE=1"),
-            ),
+            criteria=(),
             # Edit-tools-ON arm: score the staged artifact, not prose
             # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
             edit_criteria=(
@@ -1246,10 +1162,7 @@ def build_trident_questions() -> list[TestQuestion]:
                   "the changed lines."),
             context_files=printer_cfg,
             require_tool=False,
-            criteria=(
-                ("mini_diff", "[printer]"),
-                ("contains", "12000"),
-            ),
+            criteria=(),
             # Edit-tools-ON arm: score the staged artifact, not prose
             # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
             edit_criteria=(
@@ -1263,10 +1176,7 @@ def build_trident_questions() -> list[TestQuestion]:
                   "pin to PB9. Start the cfg block with '# file: aux_fan.cfg'."),
             context_files=printer_and_aux,
             require_tool=False,
-            criteria=(
-                ("mini_diff", "[fan_generic Aux_Fan]"),
-                ("contains", "PB9"),
-            ),
+            criteria=(),
             # Edit-tools-ON arm: score the staged artifact, not prose
             # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
             edit_criteria=(
@@ -1286,15 +1196,7 @@ def build_trident_questions() -> list[TestQuestion]:
             # full-section rewrites via params that only exist in [extruder]).
             expected_tools=("read_user_config",),
             require_tool=True,
-            criteria=(
-                ("regex", r"\[extruder\]"),
-                ("regex", r"(?m)^\s*\+[^\n]*pressure_advance\s*[:=]\s*\d+(?:\.\d+)?"),
-                # Mangle gate: a mini-diff add contains only the changed line.
-                # A full printer.cfg dump would include other sections — the
-                # [stepper_x] header is the distinctive whole-file signal
-                # (showing the edited [extruder] section for context is fine).
-                ("not_contains", "[stepper_x]"),
-            ),
+            criteria=(),
             # Edit-tools-ON arm: score the staged artifact, not prose
             # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
             # The mini-diff gates (+ADD line, no whole-file dump) are prose
@@ -1611,12 +1513,7 @@ def build_ambiguity_questions() -> list[TestQuestion]:
                   "put it in a new file?"),
             context_files=printer_cfg,
             require_tool=False,
-            criteria=(
-                # A new-file hint that is NOT printer.cfg (multiline: the
-                # filename line is followed by section content).
-                ("regex", r"(?m)^\s*#\s*file\s*:\s*(?!printer\.cfg)[^\s#]+\.cfg"),
-                ("contains", "[gcode_macro"),
-            ),
+            criteria=(),
             # Edit-tools-ON arm: score the staged artifact, not prose
             # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
             edit_criteria=(
@@ -1629,12 +1526,7 @@ def build_ambiguity_questions() -> list[TestQuestion]:
             text=("Can you add an adaptive margin of 5 to my bed mesh section?"),
             context_files=printer_cfg,
             require_tool=False,
-            criteria=(
-                ("mini_diff", "[bed_mesh]"),
-                ("regex", r"adaptive_margin\s*:\s*5\b"),
-                # It must target printer.cfg even though the user never named it.
-                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
-            ),
+            criteria=(),
             # Edit-tools-ON arm: score the staged artifact, not prose
             # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
             edit_criteria=(
@@ -1663,10 +1555,7 @@ def build_ambiguity_questions() -> list[TestQuestion]:
                   "value for a direct drive extruder?"),
             context_files=printer_cfg,
             require_tool=False,
-            criteria=(
-                ("contains", "pressure_advance"),
-                ("regex", r"\b0\.\d{2,3}\b"),
-            ),
+            criteria=(),
             # Edit-tools-ON arm: score the staged artifact, not prose
             # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
             edit_criteria=(
@@ -1764,16 +1653,7 @@ def build_setup_questions() -> list[TestQuestion]:
             expected_tools=("get_config_reference_section", "search_klipper_docs",
                             "read_user_config"),
             require_tool=False,
-            criteria=(
-                # The gate: it must return the [firmware_retraction] section —
-                # NOT pressure_advance in [extruder], NOT "doesn't exist".
-                ("contains", "[firmware_retraction]"),
-                # A REAL param of [firmware_retraction] (retract_length) with
-                # a value — catches fabricated param names the model invents
-                # when it never checks the docs (observed 2026-08-07:
-                # default_min_extra_distance etc. are NOT Klipper params).
-                ("regex", r"retract_length\s*[:=]\s*\d+(?:\.\d+)?"),
-            ),
+            criteria=(),
             # Edit-tools-ON arm: score the staged artifact, not prose
             # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
             edit_criteria=(
@@ -1789,13 +1669,7 @@ def build_setup_questions() -> list[TestQuestion]:
             expected_tools=("read_user_config", "list_user_configs",
                             "get_config_reference_section", "search_klipper_docs"),
             require_tool=False,
-            criteria=(
-                # Gate: must return the [idle_timeout] section (the real
-                # user_configs/printer.cfg already has one at line ~400), not
-                # claim it does not exist or ask the user for a value.
-                ("contains", "[idle_timeout]"),
-                ("regex", r"timeout\s*[:=]\s*\d+"),
-            ),
+            criteria=(),
             # Edit-tools-ON arm: score the staged artifact, not prose
             # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
             edit_criteria=(
@@ -1811,17 +1685,7 @@ def build_setup_questions() -> list[TestQuestion]:
             expected_tools=("get_config_reference_section", "search_klipper_docs",
                             "read_user_config"),
             require_tool=False,
-            criteria=(
-                # Gate: must return the [gcode_arcs] section (NOT claim it
-                # needs a firmware change or "doesn't exist"). The section is
-                # valid EMPTY — resolution defaults to 1.0 (Config_Reference
-                # lists it as an optional commented param), so requiring a
-                # written param would be a false fail for a correct answer.
-                ("contains", "[gcode_arcs]"),
-                # It must NOT be the pressure_advance-in-extruder style
-                # hallucination (wrong section for the request).
-                ("not_contains", "pressure_advance"),
-            ),
+            criteria=(),
             # Edit-tools-ON arm: score the staged artifact, not prose
             # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
             # Section valid EMPTY, so only existence is required; the
@@ -1839,13 +1703,7 @@ def build_setup_questions() -> list[TestQuestion]:
             expected_tools=("get_config_reference_section", "search_klipper_docs",
                             "read_user_config"),
             require_tool=False,
-            criteria=(
-                # Gate: must return the [save_variables] section.
-                ("contains", "[save_variables]"),
-                # A REAL param of [save_variables] (filename is required) —
-                # the documented default is ~/variables.cfg.
-                ("regex", r"filename\s*[:=]\s*\S+"),
-            ),
+            criteria=(),
             # Edit-tools-ON arm: score the staged artifact, not prose
             # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
             edit_criteria=(
@@ -1861,12 +1719,7 @@ def build_setup_questions() -> list[TestQuestion]:
             expected_tools=("get_config_reference_section", "search_klipper_docs",
                             "read_user_config"),
             require_tool=False,
-            criteria=(
-                # Gate: must return the [respond] section.
-                ("contains", "[respond]"),
-                # A REAL param of [respond] (default_type or default_prefix).
-                ("regex", r"default_(?:type|prefix)\s*[:=]\s*\S+"),
-            ),
+            criteria=(),
             # Edit-tools-ON arm: score the staged artifact, not prose
             # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
             edit_criteria=(
@@ -2451,7 +2304,6 @@ def _staged_section_body(text: str, section: str) -> str | None:
 def criterion_ok(kind: str, value: str, content: str,
                  memory: tuple[str, dict | None] | None = None,
                  tool_calls: list[dict] | None = None,
-                 server_repair: dict | None = None,
                  pending_edits: list | None = None) -> bool:
     if kind == "staged_param":
         # "<filename>::<substring>" — substring must appear in the staged
@@ -2524,19 +2376,6 @@ def criterion_ok(kind: str, value: str, content: str,
         return value.lower() not in content.lower()
     if kind == "regex":
         return re.search(value, content, re.IGNORECASE | re.DOTALL) is not None
-    if kind == "server_repair_or_absent":
-        # HARNESS-01 (repair-probe): pass when the server-side repair
-        # actually fired (attempted=True — machinery proven), OR when the
-        # token never landed in a cfg BLOCK (prose mentions are fine — a
-        # repaired reply legitimately says "removed bogus_param"). Only
-        # FAILS when the invalid token was applied AND the server harness
-        # stayed silent.
-        token = value.lower()
-        if server_repair and server_repair.get("attempted"):
-            return True
-        blocks = re.findall(r"```[a-zA-Z]*\n.*?```", content, re.DOTALL)
-        scope = "\n".join(blocks) if blocks else content
-        return token not in scope.lower()
     if kind == "memory_block":
         return bool(memory and memory[0])
     if kind == "memory_valid":
@@ -2553,33 +2392,6 @@ def criterion_ok(kind: str, value: str, content: str,
         if field not in memory[1]:
             return False
         return re.search(pattern, str(memory[1].get(field, "")), re.IGNORECASE) is not None
-    if kind == "mini_diff":
-        # value = expected section header, e.g. "[gcode_macro Level_Bed]".
-        # Passes when a cfg block in the reply contains that header and
-        # uses the mini-diff protocol: at least one '+' line (additions) —
-        # a pure add-only edit is valid and needs no '-' anchor (the app
-        # appends '+' lines at the end of the section), matching the
-        # frontend protocol. An all-'-' block with no '+' is a delete-only
-        # edit, also valid. No full-section Jinja reproduction
-        # ({% endif %} / {% endfor %}) — unchanged lines must be preserved
-        # by the app, not re-emitted.
-        # Mirrors the frontend's block extraction: fenced cfg blocks first,
-        # then fall back to the raw text when it looks like config (file
-        # hints / section headers), because models sometimes omit fences.
-        target = value.strip().lower()
-        blocks = re.findall(r"```(?:cfg|conf|ini|klipper|printercfg)?\s*\n(.*?)```", content, re.DOTALL)
-        if not blocks and re.search(r"#\s*file\s*:|^\s*\[[^\]]+\]", content, re.MULTILINE):
-            blocks = [content]
-        for block in blocks:
-            if target not in block.lower():
-                continue
-            has_minus = re.search(r"^\s*-(?=\s|\S)", block, re.MULTILINE) is not None
-            has_plus = re.search(r"^\s*\+", block, re.MULTILINE) is not None
-            if has_plus or has_minus:
-                if "{% endif %}" in block or "{% endfor %}" in block:
-                    return False
-                return True
-        return False
     if kind == "tool_args":
         # value = "tool_name:key[:regex]" — passes when ANY executed call for
         # tool_name carried `key` in its arguments (parsed from the backend's
@@ -2630,10 +2442,6 @@ class QuestionResult:
     checks: list[tuple[str, str, bool]] = field(default_factory=list)
     duration_s: float = 0.0
     usage: dict | None = None
-    # Server-side apply/validate/repair outcome (#1): {attempted, repaired,
-    # issuesAfter} or None when the pipeline was skipped (no config block or
-    # no contextFiles). Tallied across runs to measure the harness itself.
-    server_repair: dict | None = None
     # Tool-mediated editing (EDIT-* family): staged write-tool changes +
     # per-call attempt count from the response; None when not applicable.
     pending_edits: list | None = None
@@ -2731,26 +2539,28 @@ def chat_request(base_url: str, question: TestQuestion, settings: dict,
         "temperature": settings["temperature"],
         "toolProtocol": settings.get("tool_protocol", "auto"),
         "mergeSystemMessages": settings.get("merge_system_messages", False),
-        "fullRewriteGuard": settings.get("full_rewrite_guard", False),
     }
-    # Tool-mediated editing A/B: request-level override only when the
-    # question declares one (older backends ignore unknown fields).
-    if question.edit_tools is not None:
-        payload["editTools"] = question.edit_tools
-    elif settings.get("edit_tools") is not None:
-        payload["editTools"] = settings["edit_tools"]
+    # Tool-mediated editing: per-question override wins over the run flag;
+    # both unset follows the server default, which is ON since the Phase-4
+    # ratchet (the prose path is deleted). 'off' runs the read-only arm.
+    effective_edit = question.edit_tools
+    if effective_edit is None:
+        effective_edit = settings.get("edit_tools")
+    if effective_edit is None:
+        effective_edit = True
+    payload["editTools"] = effective_edit
     # Phase 2 approval gate: the bank tests model behavior PAST the
     # gate, so an edit-tools-enabled request auto-approves (bypasses
     # ONLY the human wait, never re-validation). Without this every
-    # EDIT-* run would block 90s then auto-decline. Gate-mode E2E is
+    # write-tool run would block 90s then auto-decline. Gate-mode E2E is
     # covered by the pytest suite + the manual Gate-2 dogfood pass.
-    if payload.get("editTools"):
+    if effective_edit:
         payload["autoApproveEdits"] = True
     # Skill-gate A/B arm: force the skill ACTIVE (write tools advertised
     # immediately, edit law force-loaded) to compare edit QUALITY with vs
     # without model-triggered loading. Server accepts editSkill only as a
     # harness field (ChatRequest.editSkill).
-    if settings.get("force_skill_active") and payload.get("editTools"):
+    if settings.get("force_skill_active") and effective_edit:
         payload["editSkill"] = True
     url = base_url.rstrip("/") + "/ai/chat"
     try:
@@ -2843,7 +2653,6 @@ def run_one_question(
         result.tool_turns = int(response.get("mcpToolTurns", 0) or 0)
         result.tool_calls = list(response.get("toolCalls", []) or [])
         result.usage = response.get("usage")
-        result.server_repair = response.get("serverRepair")
         result.pending_edits = response.get("pendingEdits")
         result.edit_attempts = response.get("editAttempts")
         log.write(f"Edit tools: pendingEdits="
@@ -2891,17 +2700,15 @@ def run_one_question(
 
             # Answer check (memory criteria get the parsed printer-memory block)
             memory = extract_printer_memory(result.response)
-            # Edit-tools-ON arm: artifact criteria replace prose criteria
-            # when declared (the staged pendingEdits ARE the deliverable).
-            eff_edit = (q.edit_tools if q.edit_tools is not None
-                        else settings.get("edit_tools"))
-            active_criteria = (q.edit_criteria
-                               if (eff_edit and q.edit_criteria)
-                               else q.criteria)
+            # Phase-4 ratchet (2026-09-22): artifact criteria are the
+            # DEFAULT — the prose→draft path is deleted, so a declared
+            # edit_criteria set IS the grading contract (the staged
+            # pendingEdits are the deliverable). Questions without
+            # edit_criteria are pure Q&A and keep their prose criteria.
+            active_criteria = q.edit_criteria or q.criteria
             for kind, value in active_criteria:
                 ok = criterion_ok(kind, value, result.response, memory=memory,
                                   tool_calls=result.tool_calls,
-                                  server_repair=result.server_repair,
                                   pending_edits=result.pending_edits)
                 result.checks.append((kind, value, ok))
             result.answer_ok = all(ok for _, _, ok in result.checks)
@@ -3031,7 +2838,6 @@ def resolve_settings(args: argparse.Namespace) -> dict:
         "temperature": float(temperature),
         "tool_protocol": args.tool_protocol or "auto",
         "merge_system_messages": args.merge_system_messages,
-        "full_rewrite_guard": args.full_rewrite_guard,
         "edit_tools": edit_tools_setting(args),
         "force_skill_active": bool(getattr(args, "force_skill_active", False)),
         "base_url": base_url,
@@ -3039,9 +2845,9 @@ def resolve_settings(args: argparse.Namespace) -> dict:
 
 
 def edit_tools_setting(args: argparse.Namespace) -> bool | None:
-    """--edit-tools on/off/auto: default None (per-server env). EDIT-*
-    questions override per-request anyway; this flag exists so a whole run
-    can force the prose path (off) for A/B baselines."""
+    """--edit-tools on/off/auto: default None (per-server env, ON since the
+    Phase-4 ratchet). Per-question overrides win; 'off' forces the read-only
+    arm for a whole run (write tools never advertised)."""
     value = getattr(args, "edit_tools", "auto")
     return {"on": True, "off": False}.get(value, None)
 
@@ -3170,18 +2976,11 @@ def main() -> int:
                              "message (positionally meaningful for permissive "
                              "chat templates).")
     parser.set_defaults(merge_system_messages=True)
-    parser.add_argument("--full-rewrite-guard", action="store_true",
-                        help="Set fullRewriteGuard on the /ai/chat request: "
-                             "the frontend rejects full block writes of "
-                             "existing macro/Jinja sections and the backend "
-                             "uses the STRICT mini-diff edit-protocol wording. "
-                             "Default off — full writes accepted, softer "
-                             "wording. Use to A/B the guard + prompt pair.")
     parser.add_argument("--edit-tools", default="auto", choices=["auto", "on", "off"],
                         help="Tool-mediated editing for questions without a "
                              "per-question override: 'auto' follows the server "
-                             "env (KWC_EDIT_TOOLS), 'on'/'off' force it for the "
-                             "run (A/B the write-tool path vs prose)")
+                             "env (KWC_EDIT_TOOLS, default ON), 'off' forces "
+                             "the read-only arm (no write tools advertised)")
     parser.add_argument("--force-skill-active", action="store_true",
                         help="Skill-gate A/B arm: send editSkill=true so the "
                              "write tools are advertised immediately (edit law "

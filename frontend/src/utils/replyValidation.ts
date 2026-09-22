@@ -1,18 +1,16 @@
 /**
  * Generic reply-validation pipeline for the AI chat feature.
  *
- * The config-draft validator (built in useAssistantDraft.ts) and the
- * printer-memory validator (below) both conform to ReplyValidator.
+ * The printer-memory validator (below) conforms to ReplyValidator and
  * runReplyValidationPipeline drives the shared retry loop:
  * validate → build feedback → re-request → repeat up to max attempts.
  *
- * Previously ChatDialog.tsx contained two independent retry loops with
- * different max attempts, feedback builders, and error handling. This
- * module unifies the mechanics; each validator keeps only its own
- * domain-specific validation and feedback logic.
+ * The config-draft validator that used to run alongside it retired with the
+ * Phase-4 ratchet (2026-09-22): config edits go through the write tools +
+ * approval card, so there is no prose draft left to validate.
  */
 import type { ChatMessage } from '../stores/aiStore';
-import type { AiChatRole, ServerRepairVerdict } from '../services/api';
+import type { AiChatRole } from '../services/api';
 import {
   MAX_PRINTER_MEMORY_VALIDATION_ATTEMPTS,
   buildPrinterMemoryValidationFeedback,
@@ -63,14 +61,6 @@ export interface ReplyValidationContext {
   attemptsUsed: number;
   /** From the previous feedback: AI may explain instead of producing output. */
   allowExplanationOnly: boolean;
-  /**
-   * Server-side merged-result validation verdict for THIS attempt
-   * (backend KWC_SERVER_DRAFT_VALIDATION). The validator may trust a
-   * decisive verdict instead of re-deriving the same delta checks
-   * (finding #4): `repaired: true` = the returned content already passed;
-   * `reason: 'retry-exempt'` = only issues regeneration cannot fix.
-   */
-  serverRepair?: ServerRepairVerdict | null;
 }
 
 export interface ReplyValidator {
@@ -91,31 +81,6 @@ export interface ReplyRequestAttempt {
   assistantMessage: ChatMessage;
   conversationMessages: ChatMessage[];
   warningMessage: string | null;
-  /** Backend verdict for this attempt's reply, when the server pass ran. */
-  serverRepair?: ServerRepairVerdict | null;
-}
-
-/**
- * Trust the backend's retry-exempt verdict (finding #4): when the server
- * already classified the reply's only remaining issues as ones the model
- * cannot fix by regenerating (duplicate sections / shared pins), the
- * client must not burn a retry round discovering the same thing. Returns
- * the giveUp warning text, or null when the verdict says nothing decisive
- * (no verdict, clean, or a repairable failure — those stay on the normal
- * client path).
- */
-export function serverRetryExemptWarning(verdict?: ServerRepairVerdict | null): string | null {
-  if (!verdict || verdict.reason !== 'retry-exempt') return null;
-  const lines = (verdict.issuesAfter || []).flatMap((group) =>
-    (group.errors as Array<{ section?: string; param?: string; message?: string }>).map((error) => {
-      const location = error.param ? `[${error.section}] ${error.param}` : `[${error.section}]`;
-      return `- ${group.filename}: ${location}: ${error.message ?? 'retry-exempt validation issue'}`;
-    }),
-  );
-  return [
-    'The server-side merged-config validation found only issues the assistant cannot fix by regenerating (duplicate sections or pin conflicts). The response was kept as-is.',
-    ...lines,
-  ].join('\n');
 }
 
 export type ReplyRequestFn = (
@@ -160,7 +125,6 @@ export async function runReplyValidationPipeline(
   let trail = [...params.validationConversation, ...params.initialAttempt.conversationMessages];
   let warnings = params.initialAttempt.warningMessage;
   let retryCount = 0;
-  let lastRepairCount = 0;
 
   for (const validator of validators) {
     let attemptsUsed = 0;
@@ -174,13 +138,9 @@ export async function runReplyValidationPipeline(
         isRetry: attemptsUsed > 0,
         attemptsUsed,
         allowExplanationOnly,
-        serverRepair: currentAttempt.serverRepair ?? null,
       };
 
       const result = await validator.validate(currentAttempt.assistantMessage.content, context);
-      if (typeof result.repairCount === 'number') {
-        lastRepairCount = result.repairCount;
-      }
 
       if (!result.applicable || result.issues.length === 0) {
         break; // Valid or not applicable — move to the next validator
@@ -244,7 +204,6 @@ export async function runReplyValidationPipeline(
   return {
     finalMessage: {
       ...currentAttempt.assistantMessage,
-      repairCount: lastRepairCount,
       retryCount,
     },
     finalConversation: trail,

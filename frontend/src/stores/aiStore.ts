@@ -16,7 +16,6 @@ export interface ChatMessage {
   /** Executed tool calls with arguments + output, in execution order. */
   toolCalls?: AiToolCallDetail[];
   /** Number of macro sections whose trailing Jinja closers were auto-appended. */
-  repairCount?: number;
   /** Number of retries the reply pipeline performed before accepting. */
   retryCount?: number;
   /** Number of backend empty-response re-prompts for this reply. */

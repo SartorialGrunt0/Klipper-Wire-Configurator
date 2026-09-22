@@ -66,32 +66,17 @@ class FakeAsyncClient:
 
 def test_system_prompt_includes_config_and_macro_guardrails():
     assert 'Prefer minimal targeted edits. Preserve unrelated settings, comments, and file structure' in ai_routes.SYSTEM_PROMPT
-    assert 'For config edits, return only changed, new, or deleted content in fenced cfg code blocks' in ai_routes.SYSTEM_PROMPT
     assert 'If a macro changes motion or extrusion state, preserve or restore it' in ai_routes.SYSTEM_PROMPT
     assert 'If no safe grounded answer is possible, say what must be verified next instead of guessing.' in ai_routes.SYSTEM_PROMPT
 
 
-def test_system_prompt_mentions_mini_diff_edit_protocol():
-    assert 'prefer a mini-diff' in ai_routes.SYSTEM_PROMPT
-    assert '-    BED_MESH_CALIBRATE' in ai_routes.SYSTEM_PROMPT
-    assert '+    BED_MESH_CALIBRATE ADAPTIVE=1' in ai_routes.SYSTEM_PROMPT
-
-
-def test_system_prompt_full_rewrite_guard_strict_wording():
-    # With fullRewriteGuard on, the edit protocol uses the STRICT wording
-    # (full block writes cause rejection + retry) so the model complies with
-    # the frontend's enforced mini-diff loop.
-    strict = ai_routes._build_system_prompt(full_rewrite_guard=True)
-    assert 'emit a mini-diff' in strict
-    assert 'causes the app to reject the reply as a full rewrite and retry' in strict
-    # The soft default wording must be gone in strict mode.
-    assert 'prefer a mini-diff' not in strict
-    assert 'risks a full rewrite where those lines could be dropped' not in strict
-    # Default (guard off) keeps the soft wording.
-    assert 'prefer a mini-diff' in ai_routes._build_system_prompt()
-    # Everything else in the prompt is untouched by the wording swap.
-    assert '-    BED_MESH_CALIBRATE' in strict
-    assert '+    BED_MESH_CALIBRATE ADAPTIVE=1' in strict
+def test_system_prompt_no_prose_edit_protocol():
+    # Phase-4 ratchet (2026-09-22): the prose fenced-cfg / mini-diff edit
+    # protocol is retired. Edits go through config_edit/config_write + the
+    # approval card; the system prompt must not advertise the old protocol.
+    assert 'mini-diff' not in ai_routes.SYSTEM_PROMPT
+    assert '# file:' not in ai_routes.SYSTEM_PROMPT
+    assert 'BED_MESH_CALIBRATE ADAPTIVE=1' not in ai_routes.SYSTEM_PROMPT
 
 
 def test_system_prompt_mentions_tools_are_not_gcode_commands():
@@ -733,6 +718,12 @@ def test_chat_proxy_cloud_openai_compatible_requires_api_key():
 
 
 def test_chat_proxy_local_openai_compatible_allows_missing_key(monkeypatch):
+    # Phase-4 ratchet: KWC_EDIT_TOOLS defaults ON, and a request without
+    # contextFiles mirror-seeds an edit session (TRIDENT-16), which makes
+    # `editAttempts` 0 instead of None and couples the assertion to the
+    # host's user-config dir. This test covers the plain Q&A / backstop
+    # path, so pin the read-only arm explicitly.
+    monkeypatch.setenv('KWC_EDIT_TOOLS', '0')
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
     monkeypatch.setattr(ai_routes, '_auto_search_context', lambda query: None)
 
@@ -766,7 +757,6 @@ def test_chat_proxy_local_openai_compatible_allows_missing_key(monkeypatch):
         'mcpToolNames': [],
         'toolCalls': [],
         'repromptCount': 0,
-        'serverRepair': None,
         'pendingEdits': None,
         'editAttempts': None,
         'usage': {
@@ -857,6 +847,12 @@ def test_chat_proxy_local_default_tool_protocol_sends_tools(monkeypatch):
 
 
 def test_chat_proxy_returns_plain_content(monkeypatch):
+    # Phase-4 ratchet: KWC_EDIT_TOOLS defaults ON, and a request without
+    # contextFiles mirror-seeds an edit session (TRIDENT-16), which makes
+    # `editAttempts` 0 instead of None and couples the assertion to the
+    # host's user-config dir. This test covers the plain Q&A / backstop
+    # path, so pin the read-only arm explicitly.
+    monkeypatch.setenv('KWC_EDIT_TOOLS', '0')
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
     monkeypatch.setattr(ai_routes, '_auto_search_context', lambda query: None)
 
@@ -886,7 +882,6 @@ def test_chat_proxy_returns_plain_content(monkeypatch):
         'mcpToolNames': [],
         'toolCalls': [],
         'repromptCount': 0,
-        'serverRepair': None,
         'pendingEdits': None,
         'editAttempts': None,
         'usage': {
@@ -1219,6 +1214,12 @@ def test_chat_proxy_empty_reprompt_executes_xml_calls(monkeypatch):
 
 
 def test_chat_proxy_empty_response_reprompt_recovers(monkeypatch):
+    # Phase-4 ratchet: KWC_EDIT_TOOLS defaults ON, and a request without
+    # contextFiles mirror-seeds an edit session (TRIDENT-16), which makes
+    # `editAttempts` 0 instead of None and couples the assertion to the
+    # host's user-config dir. This test covers the plain Q&A / backstop
+    # path, so pin the read-only arm explicitly.
+    monkeypatch.setenv('KWC_EDIT_TOOLS', '0')
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
     monkeypatch.setattr(
         ai_routes, '_execute_tool_call',
@@ -1283,6 +1284,12 @@ def test_chat_proxy_empty_response_reprompt_recovers(monkeypatch):
 
 
 def test_chat_proxy_empty_response_reprompt_exhausts(monkeypatch):
+    # Phase-4 ratchet: KWC_EDIT_TOOLS defaults ON, and a request without
+    # contextFiles mirror-seeds an edit session (TRIDENT-16), which makes
+    # `editAttempts` 0 instead of None and couples the assertion to the
+    # host's user-config dir. This test covers the plain Q&A / backstop
+    # path, so pin the read-only arm explicitly.
+    monkeypatch.setenv('KWC_EDIT_TOOLS', '0')
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
     monkeypatch.setattr(
         ai_routes, '_execute_tool_call',
@@ -1399,6 +1406,12 @@ def test_chat_proxy_provider_empty_recovers_via_backstop(monkeypatch):
 
 
 def test_chat_proxy_local_reprompt_bumps_max_tokens(monkeypatch):
+    # Phase-4 ratchet: KWC_EDIT_TOOLS defaults ON, and a request without
+    # contextFiles mirror-seeds an edit session (TRIDENT-16), which makes
+    # `editAttempts` 0 instead of None and couples the assertion to the
+    # host's user-config dir. This test covers the plain Q&A / backstop
+    # path, so pin the read-only arm explicitly.
+    monkeypatch.setenv('KWC_EDIT_TOOLS', '0')
     # Local reasoning builds (llama.cpp --reasoning-budget) can exhaust a low
     # max_tokens invisibly and return empty content with finish_reason=length.
     # The tool-less re-prompt must raise the budget so the answer fits.

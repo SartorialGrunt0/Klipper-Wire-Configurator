@@ -14,9 +14,6 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useAiStore, AiProvider, providerRequiresApiKey, type ChatMessage } from '../../stores/aiStore';
 import { useChatHistoryStore } from '../../stores/chatHistoryStore';
 import { useConfigStore } from '../../stores/configStore';
-import { useGraphStore } from '../../stores/graphStore';
-import { useNativeStore } from '../../stores/nativeStore';
-import { restoreLayoutAfterRebuild } from '../../utils/layoutPersistence';
 import { usePrinterMemoryStore, DEFAULT_PRINTER_MEMORY, type PrinterMemory } from '../../stores/printerMemoryStore';
 import * as api from '../../services/api';
 import {
@@ -38,8 +35,7 @@ import {
   findSectionHeaders,
   buildSectionContextMessage,
 } from '../../utils/chatIntent';
-import { buildProjectGraph } from '../../utils/graphBuilder';
-import { useAssistantDraft, FULL_REWRITE_GUARD_ENABLED } from '../../hooks/useAssistantDraft';
+import { useAssistantDraft } from '../../hooks/useAssistantDraft';
 import ChatSettingsPanel from './ChatSettingsPanel';
 import ChatHistoryDialog from './ChatHistoryDialog';
 import PrinterMemoryDialog from './PrinterMemoryDialog';
@@ -48,7 +44,6 @@ import ChatApprovalCard from './ChatApprovalCard';
 import ApprovalDiffPreview from './ApprovalDiffPreview';
 import type { ApprovalCard } from '../../services/api';
 import ChatInputBar from './ChatInputBar';
-import AiDraftPreviewDialog from './AiDraftPreviewDialog';
 import type { PendingAiChatRequest } from '../../types/ai';
 import type { AiChatRole } from '../../services/api';
 import type { SavedConversation } from '../../stores/chatHistoryStore';
@@ -128,21 +123,9 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     markDirty,
   } = useConfigStore();
 
-  // ── Draft Hook ──────────────────────────────────────────────────
+  // ── Draft Hook (request helper) ─────────────────────────────────
   const {
-    assistantDraftPreview,
-    assistantDraftPreviewLoading,
-    assistantDraftApplicableMessages,
-    setAssistantDraftPreview,
-    setAssistantDraftApplicableMessages,
-    handleApplyAssistantEdit,
-    handleAssistantDraftSelectionChange,
-    handleAcceptAssistantEdit,
-    handleNewChat,
     requestAssistantMessage: draftRequestMessage,
-    createDraftReplyValidator,
-    flattenAssistantDraftChanges,
-    updateAssistantDraftApplicableMessages,
   } = useAssistantDraft();
 
   // ── Component State ─────────────────────────────────────────────
@@ -266,14 +249,9 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   }, [messages]);
 
   // ── Detect applicable assistant messages ────────────────────────
-  useEffect(() => {
-    if (!open || !activeFile) {
-      setAssistantDraftApplicableMessages({});
-      return;
-    }
-    void updateAssistantDraftApplicableMessages(messages);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, messages, activeFile, configFiles]);
+  // (Removed with the Phase-4 ratchet: the "Apply and Review Changes"
+  // affordance is gone — writes arrive as approval cards and land in the
+  // dirty store on approve; there is no prose draft to mark applicable.)
 
   // ── Settings Save ───────────────────────────────────────────────
   const handleSaveSettings = useCallback(() => {
@@ -388,11 +366,8 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         // flows are already covered by updateConfigFile's debounced pass.
         void useConfigStore.getState().revalidateAll();
       }
-      // Staged edits are now in the draft — drop any stale review preview
-      // so the "Apply and Review" affordance can't re-apply them.
-      setAssistantDraftPreview(null);
     },
-    [updateConfigFile, removeConfigFile, markDirty, setAssistantDraftPreview],
+    [updateConfigFile, removeConfigFile, markDirty],
   );
 
   // ── Submit Message ──────────────────────────────────────────────
@@ -449,11 +424,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           maxTokens: Math.max(256, parseInt(editMaxTokens, 10) || 4096),
           temperature: parseTemperature(editTemperature),
           toolProtocol: editToolProtocol,
-          fullRewriteGuard: FULL_REWRITE_GUARD_ENABLED,
-          // Server-side target resolution mirror (finding #5): the backend's
-          // merged-result validation resolves an edit's target file with the
-          // same activeFile the client's draft pipeline uses.
-          activeFile,
         };
 
         // Build context messages
@@ -542,23 +512,23 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           }
         }
 
-        // File targeting instructions — the draft/mini-diff reinforcement.
+        // File targeting instructions — the handholding reinforcement.
         // Part of the handholding workflow, GATED OFF by default: the backend
-        // SYSTEM_PROMPT already carries the '# file:' hint + mini-diff
-        // protocol (ai_routes.py), and intent detection was removed — the
-        // model decides whether a message is an edit or a question (harness
-        // AMBI-01..08 all pass without any frontend classifier).
+        // SYSTEM_PROMPT carries the edit law and intent detection was removed
+        // — the model decides whether a message is an edit or a question
+        // (harness AMBI-01..08 all pass without any frontend classifier).
+        // Tool-worded since the Phase-4 ratchet (2026-09-22): edits go through
+        // config_edit/config_write (file = tool argument), never fenced prose.
         if (HANDHOLDING_ENABLED) {
-          const miniDiffInstruction = ` To EDIT an existing section, prefer a mini-diff: the section header followed by only the lines that change, prefixing removed lines with '-' and added lines with '+', keeping their original indentation. The app applies these replacements exactly, so unchanged lines (like Jinja {% if %}/{% endif %} tags) are preserved automatically. Outputting any unchanged line risks a full rewrite where those lines could be dropped — prefer emitting ONLY the lines that change. A pure addition (nothing removed) needs no '-' line: just the header plus the '+' lines. A pure deletion (nothing added) needs no '+' line: just the header plus the '-' lines. If a section is already correct and you only need to show it, quoting it unchanged is allowed. To ADD a new section, write it in full; to delete one, write '*[section_name]'.`;
           if (mentionedConfigFiles.length > 0) {
             contextMessages.push({
               role: 'system',
-              content: `Apply requested edits to these loaded files: ${mentionedConfigFiles.join(', ')}. Start each fenced \`\`\`cfg block with a '# file: <filename>' hint line; use one separate block per file. To create a new file, use '# file: <newfilename>' with a name that does not exist yet.${miniDiffInstruction}`,
+              content: `Apply requested edits to these loaded files: ${mentionedConfigFiles.join(', ')}. Pass each target file as the 'file' argument of config_edit/config_write (one op per file).`,
             });
           } else if (activeFile) {
             contextMessages.push({
               role: 'system',
-              content: `Unless the user names a different file, apply edits to ${activeFile}. Return only changed, new, or deleted content in a fenced \`\`\`cfg code block. Start each fenced \`\`\`cfg block with a '# file: <filename>' hint line when targeting a specific file. To create a new file, use '# file: <newfilename>'. Do not return the whole file unless the user explicitly asks for a full replacement.${miniDiffInstruction}`,
+              content: `Unless the user names a different file, apply edits to ${activeFile} via the config_edit/config_write tools.`,
             });
           }
         }
@@ -585,11 +555,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         );
 
         // ── Unified validation retry pipeline ───────────────────
-        // Runs the config-draft validator and the printer-memory validator
-        // in sequence. Each validator decides whether the reply applies to
-        // it, what feedback to send for retries, and how to handle max
-        // attempts (throw vs. warn). Previously these were two separate
-        // retry loops with independent conversation bookkeeping.
+        // Runs the printer-memory validator over the reply. The config-draft
+        // validator retired with the Phase-4 ratchet (2026-09-22): config
+        // edits go through the write tools + approval card, so there is no
+        // prose draft to validate or retry.
         const pipelineResult = await runReplyValidationPipeline({
           requestFn: (conversation) => draftRequestMessage(
             { ...chatRequestBase, contextFiles: contextFilesPayload },
@@ -601,7 +570,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           validationConversation,
           initialAttempt: assistantAttempt,
           validators: [
-            createDraftReplyValidator(),
             createPrinterMemoryReplyValidator(),
           ],
         });
@@ -616,7 +584,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         if (stagedEdits && stagedEdits.length > 0) {
           await applyApprovedToolEdits(stagedEdits);
         }
-        setAssistantDraftApplicableMessages({}); // Will be re-evaluated by the useEffect
         // Background completion signal: if the dialog is closed when the reply
         // lands, flag the toolbar button so the user knows it's ready.
         if (!openRef.current) {
@@ -626,7 +593,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         const stopped = stopController.signal.aborted || err instanceof api.ChatStoppedError;
         if (stopped) {
           // User pressed Stop — keep the user message in history, no error banner.
-          setAssistantDraftApplicableMessages({});
         } else {
           const message = err instanceof Error ? err.message : 'Failed to get response.';
           setError(message);
@@ -655,9 +621,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       activeFile,
       applyApprovedToolEdits,
       attachedConfigFiles,
-      createDraftReplyValidator,
       draftRequestMessage,
-      setAssistantDraftApplicableMessages,
       editApiKey,
       editApiProvider,
       editMaxTokens,
@@ -853,6 +817,12 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     }
   }, [attachedConfigFiles]);
 
+  // Start a fresh conversation. (The old draft-preview reset retired with
+  // the Phase-4 ratchet — there is no prose draft to drop.)
+  const handleStartNewChat = useCallback(() => {
+    clearMessages();
+  }, [clearMessages]);
+
   const handleNewChatWithSave = useCallback(() => {
     const { messages: currentMessages } = useAiStore.getState();
     const last = currentMessages[currentMessages.length - 1];
@@ -864,15 +834,14 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       return;
     }
     saveCurrentConversation();
-    handleNewChat();
+    handleStartNewChat();
     setAttachedConfigFiles([]);
-  }, [saveCurrentConversation, handleNewChat]);
+  }, [saveCurrentConversation, handleStartNewChat]);
 
   // Carry the existing conversation into the "new" chat so the next prompt
   // appends to it — the model keeps all prior context.
   const handleCarryOverContext = useCallback(() => {
     saveCurrentConversation();
-    setAssistantDraftPreview(null);
     setAttachedConfigFiles([]);
     setError(null);
     setShowCarryOverPrompt(false);
@@ -880,11 +849,11 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
 
   const handleStartFreshChat = useCallback(() => {
     saveCurrentConversation();
-    handleNewChat();
+    handleStartNewChat();
     setAttachedConfigFiles([]);
     setError(null);
     setShowCarryOverPrompt(false);
-  }, [saveCurrentConversation, handleNewChat]);
+  }, [saveCurrentConversation, handleStartNewChat]);
 
   const handleLoadConversation = useCallback(
     (conversation: SavedConversation) => {
@@ -892,7 +861,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       saveCurrentConversation();
       setMessages(conversation.messages);
       setSettings(conversation.settings);
-      setAssistantDraftPreview(null);
       // Restore config files that were attached during the original chat so
       // continuing the conversation keeps the same file context.
       setAttachedConfigFiles(
@@ -943,42 +911,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     },
     [handleSend],
   );
-
-  // ── Handle "Apply and Review Changes" ───────────────────────────
-  const handleApplyEdit = useCallback(
-    async (content: string, messageIndex?: number) => {
-      setError(null);
-      try {
-        await handleApplyAssistantEdit(content, messageIndex);
-      } catch (err: unknown) {
-        setError(err instanceof Error ? err.message : 'Failed to prepare assistant changes.');
-      }
-    },
-    [handleApplyAssistantEdit],
-  );
-
-  // ── Handle Accept Draft ─────────────────────────────────────────
-  const handleAcceptDraft = useCallback(async () => {
-    try {
-      await handleAcceptAssistantEdit();
-      const graphStore = useGraphStore.getState();
-      graphStore.clearGraph();
-      // Read config files AND validation directly from the store so newly
-      // created files and fresh PROJECT-level validation results (refreshed
-      // by handleAcceptAssistantEdit via revalidateAll) are included in the
-      // graph rebuild instead of stale closure values.
-      const latestConfigFiles = useConfigStore.getState().configFiles;
-      const latestValidation = useConfigStore.getState().validation;
-      buildProjectGraph(latestConfigFiles, graphStore, schemas, latestValidation);
-      // The rebuild renumbers node ids — re-apply the saved layout so
-      // accepting an AI edit doesn't auto-arrange over the user's current
-      // arrangement (and the autosave can't persist that reset).
-      await restoreLayoutAfterRebuild(useGraphStore.getState, useNativeStore.getState().isNative);
-      setError(null);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to accept assistant changes.');
-    }
-  }, [handleAcceptAssistantEdit, schemas]);
 
   // ── Pending Request Handling ────────────────────────────────────
   useEffect(() => {
@@ -1118,9 +1050,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
             error={connectionLost ? 'Connection lost — the last question will resend automatically when the network returns.' : error}
             onRetry={handleRetry}
             activeFile={activeFile}
-            assistantDraftApplicableMessages={assistantDraftApplicableMessages}
-            assistantDraftPreviewLoading={assistantDraftPreviewLoading}
-            onApplyEdit={handleApplyEdit}
             onReviewPrinterMemory={handleReviewPrinterMemory}
             onEditMessage={handleEditMessage}
             messagesEndRef={messagesEndRef}
@@ -1168,24 +1097,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           fileInputRef={fileInputRef}
         />
       </div>
-
-      {/* Draft Preview Dialog */}
-      {assistantDraftPreview && (
-        <AiDraftPreviewDialog
-          filePreviews={assistantDraftPreview.filePreviews.map((fp) => ({
-            filename: fp.filename,
-            originalText: fp.originalText,
-            mergedText: fp.mergedText,
-          }))}
-          changes={flattenAssistantDraftChanges(assistantDraftPreview.filePreviews)}
-          selectedChangeIds={assistantDraftPreview.selectedChangeIds}
-          previewUpdating={assistantDraftPreview.previewUpdating}
-          repairedSections={assistantDraftPreview.repairedSections}
-          onSelectionChange={(ids) => { void handleAssistantDraftSelectionChange(ids); }}
-          onAccept={() => { void handleAcceptDraft(); }}
-          onClose={() => setAssistantDraftPreview(null)}
-        />
-      )}
 
       {/* Chat History Dialog */}
       {showChatHistory && (

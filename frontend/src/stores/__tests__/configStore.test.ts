@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ConfigFile, ConfigParam, ConfigSection, ValidationResult } from '@/types/config';
 import { useConfigStore } from '@/stores/configStore';
+import { planApprovedEditApply } from '@/utils/approvalApply';
 
 vi.mock('@/services/api', () => ({
   validateConfig: vi.fn(async (cf: ConfigFile) => ({
@@ -547,5 +548,51 @@ describe('configStore validation helpers', () => {
     expect(useConfigStore.getState().selectedSection).toBeNull();
     expect(useConfigStore.getState().selectedSectionFile).toBeNull();
     expect(useConfigStore.getState().selectedSectionLine).toBeNull();
+  });
+});
+
+describe('approved tool edits land dirty and clear on save', () => {
+  it('an approved upsert marks the project dirty but never saved', () => {
+    const store = useConfigStore.getState();
+    store.setConfigFile('printer.cfg', makeConfigFile());
+    store.markClean();
+    expect(useConfigStore.getState().isDirty).toBe(false);
+
+    // Mirrors ChatDialog.applyApprovedToolEdits: the backend's staged,
+    // validated post-op text goes into the store as an unsaved change.
+    const plan = planApprovedEditApply([
+      { file: 'printer.cfg', op: 'set_param', summary: 'set max_accel = 12000', newText: '[printer]\nmax_accel: 12000\n' },
+    ]);
+    expect(plan.upserts.map((u) => u.file)).toEqual(['printer.cfg']);
+    for (const { file } of plan.upserts) {
+      useConfigStore.getState().updateConfigFile(file, makeConfigFile());
+    }
+
+    // Approve ≠ save: the change is dirty and present in the editor.
+    expect(useConfigStore.getState().isDirty).toBe(true);
+    expect(useConfigStore.getState().configFiles['printer.cfg']).toBeDefined();
+
+    // The save menu's job: writing to disk clears the dirty flag.
+    useConfigStore.getState().markClean();
+    expect(useConfigStore.getState().isDirty).toBe(false);
+  });
+
+  it('a delete-only approval dirties the project and drops the file', () => {
+    const store = useConfigStore.getState();
+    store.setConfigFile('printer.cfg', makeConfigFile());
+    store.setConfigFile('macros.cfg', makeConfigFile());
+    store.markClean();
+
+    const plan = planApprovedEditApply([
+      { file: 'macros.cfg', op: 'delete_file', summary: 'delete macros.cfg', newText: '' },
+    ]);
+    expect(plan.upserts).toEqual([]);
+    expect(plan.deletes).toEqual(['macros.cfg']);
+
+    plan.deletes.forEach((file) => useConfigStore.getState().removeConfigFile(file));
+    useConfigStore.getState().markDirty();
+
+    expect(useConfigStore.getState().configFiles['macros.cfg']).toBeUndefined();
+    expect(useConfigStore.getState().isDirty).toBe(true);
   });
 });

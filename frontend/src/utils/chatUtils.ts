@@ -3,11 +3,10 @@
  *
  * Pure functions — no React state or hooks.
  *
- * Phase 3 cleanup: the provider config, printer-memory, and draft
- * validation groups moved to dedicated modules:
- *   - chatProviders.ts
- *   - printerMemory.ts
- *   - draftValidation.ts
+ * Phase 3 cleanup: the provider config and printer-memory groups moved to
+ * dedicated modules (chatProviders.ts, printerMemory.ts). The draft
+ * validation group (draftValidation.ts) was deleted with the prose edit
+ * path in the Phase-4 ratchet (2026-09-22).
  */
 import type { ConfigFile, ConfigSection } from '../types/config';
 

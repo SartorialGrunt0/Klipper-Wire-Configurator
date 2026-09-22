@@ -1,6 +1,6 @@
 # AI Chat
 
-The KWC AI assistant answers Klipper questions and drafts config changes, macros, and printer-memory updates using the bundled Klipper documentation, example configs, and your loaded project files. Nothing the assistant produces touches your config until you review and approve it in the draft preview dialog. The docs MCP points to your active config file path and the installed Klipper folder. This ensures the docs referenced match your installed version of Klipper and stay up to date.
+The KWC AI assistant answers Klipper questions and edits configs, macros, and printer-memory profiles using the bundled Klipper documentation, example configs, and your loaded project files. Nothing the assistant does touches your config until you approve each change in the approval card, and nothing reaches disk until you save. The docs MCP points to your active config file path and the installed Klipper folder. This ensures the docs referenced match your installed version of Klipper and stay up to date.
 
 I'm still experimenting with this feature, learning new ways help the model create accurate and desired outputs. My goal is for this to be entirely reliable using only a small local model.
 
@@ -21,9 +21,9 @@ Provider settings, conversation history, and attached config files persist local
 
 1. **You send a message.** The app builds the request context: your message, recent conversation history, attached config files, and the current printer memory file.
 2. **The backend prepares the prompt.** It adds the assistant's operating rules, the built-in tool list (Klipper docs search, example configs, validation, board detection, macro templates, and more).
-3. **The model answers with tools.** Cloud providers use native function calling; local servers use a text `tool` block protocol by default. The backend runs the requested tools (for example, searching the bundled docs or validating a snippet) and feeds the results back to the model, up to ten tool rounds.
-4. **The reply is validated.** Config sections and printer-memory proposals are checked; if something is invalid, the assistant is asked to fix it (up to a few attempts) before you ever see it.
-5. **Config changes become a reviewable draft.** If the reply contains `cfg` blocks, an **Apply and Review Changes** button appears. When selected it shows a diff of your current project with every changed, added, or deleted section highlighted. The changes must be approved by applying them. Changes will not fully write your active config or restart your printer until saved with toolbar "Save" menu.
+3. **The model answers with tools.** Every provider — local servers included — uses native function calling, with the text `tool` protocol kept as a fallback for servers that cannot do it. The backend runs the requested tools (for example, searching the bundled docs or validating a snippet) and feeds the results back to the model, up to ten tool rounds.
+4. **Config edits are staged, not written.** To change a file the model must call `config_edit` / `config_write`. The **server** applies each operation mechanically to a working copy of your project and validates the result, so the assistant cannot fabricate a change, silently rewrite a whole file, or mangle lines it did not touch. Invalid edits are kicked straight back to the model to fix before you ever see them.
+5. **You approve each change.** Every validated edit suspends the request and opens an **Approve / Decline** card showing the exact before/after lines the server computed. Approving puts the change into your editor as unsaved (dirty) work; declining leaves your config untouched. Nothing is written to disk until you use the toolbar "Save" menu — and your printer is never restarted behind your back.
 
 ## Printer memory
 
@@ -31,18 +31,15 @@ The assistant sees your printer memory (mainboard, toolhead, expander boards, ki
 
 ## How the assistant targets config edits
 
-> **Tool-mediated editing (`KWC_EDIT_TOOLS=1`).** When the environment flag
-> is on (currently an improvement-branch preview), edit requests work
-> differently: instead of writing `cfg` blocks in prose, the model calls
-> `config_edit` / `config_write` tools and the **server** applies each
-> change mechanically to a working copy of your project. Each op is
-> validated against the live project the moment it is requested — the
-> model cannot fabricate a change, silently rewrite a whole file, or edit
-> commented-out ("dormant") parameters without your explicit confirmation
-> in its next message. Staged changes flow into the same reviewable draft
-> and mini-diff view as before. Config code blocks in prose are strictly
-> display-only under this mode; the loop nudges the model (with exact call
-> shapes) if it answers an edit request without staging it. The tools:
+> **Tool-mediated editing (the only edit path).** Config edits never go
+> through prose. The model calls `config_edit` / `config_write` tools and
+> the **server** applies each change mechanically to a working copy of
+> your project. Each op is validated against the live project the moment
+> it is requested, and every validated change stops at an **Approve /
+> Decline** card whose diff is computed from the text that will actually
+> be applied. Config code blocks pasted into prose are display-only text.
+> The loop nudges the model (with exact call shapes) if it answers an edit
+> request without staging it. The tools:
 >
 > - `config_edit` — one anchored operation per call on an **existing**
 >   file: `set_param`, `add_section`, `replace_section`, `delete_section`,
@@ -51,22 +48,26 @@ The assistant sees your printer memory (mainboard, toolhead, expander boards, ki
 > - `config_write` — creates **new files only** (wholesale rewrites of
 >   existing files are refused; whole-file regeneration is where models
 >   drop comments and mangle Jinja).
-> - Refusals carry exact reasons; commented-out parameters are never
->   touched behind your back, and "enable this pin" style requests come
->   back as an explicit question instead of a staged surprise.
+> - Errors carry exact reasons and name the working alternative (the file
+>   that actually holds the section, the actual include lines), so the
+>   model corrects itself instead of guessing.
 
-Without the flag, the classic `cfg`-block protocol below applies.
+### What the retire of the old protocol means
 
-The assistant communicates file changes as `cfg` code blocks using a simple protocol the app understands:
+Older builds let the model paste fenced `cfg` blocks with `-`/`+`
+mini-diffs and an **Apply and Review Changes** button. That path is gone
+(Phase-4 ratchet, 2026-09-22): its parsing, merge engine, and preview
+dialog were deleted because a second edit path doubled the verification
+work and hid which text was really applied. The assistant may still
+include a `cfg` block in an answer to *show* you something — it is
+display-only and is never applied.
 
-- `# file: filename.cfg` — the first line of a block names the file the sections belong to; use one block per file.
-- **Mini-diffs for edits** — to change an existing section, the assistant returns the section header followed by only the lines that change: removed lines prefixed with `-`, added lines with `+`, keeping original indentation. Unchanged lines are never repeated (reproducing them causes the app to reject the reply as a full rewrite and retry), so Jinja guards like `{% if %}/{% endif %}`, G-codes, and comments are preserved automatically.
-- `*[section_name]` on its own line — delete that section entirely.
-- `#[section_name]` as a header — keep the section but commented out (disabled).
-- A `# file:` hint naming a file that does not exist yet — create a new config file.
-- A pure addition needs no `-` line; a pure deletion needs no `+` line.
+### Retired edit protocol (historical)
 
-Only changed, new, or deleted content is returned — never your whole file unless you ask for it. The app parses, merges, and validates these blocks against your real project, so what you preview is exactly what the merge will produce.
+Kept only so older conversation screenshots make sense: `# file:` hints,
+`-`/`+` mini-diffs, `*[section]` deletes, and `#[section]` comment-outs
+were how prose edits used to be expressed. None of it is consumed by the
+app anymore.
 
 ## Stopping, retrying, and resuming
 
@@ -81,28 +82,30 @@ Only changed, new, or deleted content is returned — never your whole file unle
 How it works:
 
 - Each question starts a **fresh chat dialog** (a single user message, its own requestId), so the model cannot lean on prior conversation context.
-- Every question checks two things: **answer accuracy** (does the reply contain the expected facts / code / file-edit protocol?) and **tool reliability** (does the model use the right embedded tool for the job?).
+- Every question checks two things: **answer accuracy** and **tool reliability** (does the model use the right embedded tool for the job?). For edit questions the graded artifact is the server-staged change set (`pendingEdits`), not the reply's prose — declared `edit_criteria` are the default criteria since the prose path was retired (2026-09-22).
 - Every step is logged: the request payload, raw response, tool names and tool-turn count, the per-question slice of the backend's own log, the pass/fail evaluation for each criterion, and a final summary.
 
 ### Question Bank
 | Item / Feature | Description & Details |
 | :--- | :--- |
-| Core Tools (Q01–Q20) | Covers docs lookups, example configs, validation, calculations, and draft-block protocol. |
+| Core Tools (Q01–Q20) | Covers docs lookups, example configs, validation, calculations, and tool-mediated edit routing. |
 | Macro Authoring (MACRO-01..11) | Includes macro authoring, editing, fixing, template options, and individual `validate_macro` checks. |
 | Trident Configs (TRIDENT-01..14) | Real Trident configs from `reference/Trident_backup` and backend user configs (read, edit, delete, manage). Includes `printer.cfg`, `aux_fan.cfg`, and `PIS.cfg`. Files are read-only context. |
-| Mini-Diff Edit (MINIDIFF-01..04) | Covers mini-diff protocol: `level_bed` adaptive mode, `[printer] max_accel`, pin edits (`aux_fan.cfg`), and tool-required `pressure_advance` edit. |
+| Edit Cases, legacy qids (MINIDIFF-01..04) | Historical question ids from the retired mini-diff protocol; the questions survive as staged-edit cases (`level_bed` adaptive mode, `[printer] max_accel`, pin edits, tool-required `pressure_advance`). |
 | Ambiguity Cases (AMBI-01..08) | Handles new-file drafts without names, hypothetical "what if" questions, batch section reads, multi-topic explain-and-edit turns, and content search for bare pin values. |
-| Edit Tools (EDIT-01..06) | Tool-mediated editing under `KWC_EDIT_TOOLS=1` (text protocol): param edit via `config_edit`, gcode-body anchor edit, cross-file pin edit, new-file + `add_include` staging, pure Q&A must stage nothing, and commented-param refusal (honest surface, no fabricated stage). |
+| Edit Tools (EDIT-01..06) | Tool-mediated editing (the only edit path): param edit via `config_edit`, gcode-body anchor edit, cross-file pin edit, new-file + `add_include` staging, pure Q&A must stage nothing, and honest kickbacks (no fabricated stage). |
 | Optional Memory Check (MEMORY-01..03) | Adds printer-memory auto-fill checks when the `--include-memory` flag is used. |
 
 ### Results on local models (55-question bank)
 
 > Historical frozen-baseline table (prose `cfg`-block pipeline). The bank
-> has since grown (Edit Tools family, expanded ambiguity cases). For the
-> tool-mediated pipeline (`KWC_EDIT_TOOLS=1`), the Edit Tools family runs
-> **6/6 on qwen3.5-9b and 6/6 on gemma-4-12b** (text protocol,
-> `--temperature 0.7`); full-bank A/B under the flag is tracked in
-> `reports/ai-chat-accuracy/`.
+> has since grown (Edit Tools family, ambiguity cases, skill-gate and tool
+> coverage families) and the prose path is retired, so these numbers are
+> context, not current. Tool-mediated editing is the only edit path since
+> the Phase-4 ratchet (2026-09-22); the Edit Tools family scored **6/6 on
+> qwen3.5-9b and 6/6 on gemma-4-12b**, and the last full-bank run before
+> the ratchet was 71/77 on gemma-4-12b (native default). Runs live in
+> `reports/ai-chat-accuracy/` — re-baseline after any prompt change.
 
 Tested on the local llama.cpp with the same settings as day-to-day use (`--max-tokens 4096 --temperature 0.7 --tool-protocol native`):
 
@@ -117,10 +120,10 @@ Tested on the local llama.cpp with the same settings as day-to-day use (`--max-t
 What that looks like in practice:
 
 - **gemma-4-12b** is the strongest local model and the current recommendation — 98% on the full bank. Its only miss (AMBI-04) is the same one as the morning run: it emitted an edit block for a hypothetical "what would happen if" question instead of just answering.
-- **gemma-4-e4b** is a solid mid-size at ~87%, a few points behind 12b. Its misses are a mix of draft-protocol cases (Q17, TRIDENT-13, MINIDIFF-01) and ambiguity turns (AMBI-03/05/07).
-- **qwen3.5-9b** lands ~80%. It handles real-file edits well but misses several mini-diff/ambiguity cases.
-- **qwen3.5-4b** is decent for a 4B model (~76%) and fine for lighter use, but it stumbles on the harder real-file and mini-diff edits (TRIDENT-02/03/04/07/08/10 and MINIDIFF-01/03/04).
-- **gemma-4-e2b** (the smallest we benchmarked, ~2B class) improves to ~75% on the full bank but is still the weakest — it reaches for the wrong tool and fails most macro-validation and draft-protocol edit cases. Fine for casual documentation Q&A, not reliable for edit workflows.
+- **gemma-4-e4b** is a solid mid-size at ~87%, a few points behind 12b. Its misses are a mix of edit-staging cases (Q17, TRIDENT-13, MINIDIFF-01) and ambiguity turns (AMBI-03/05/07).
+- **qwen3.5-9b** lands ~80%. It handles real-file edits well but misses several edit/ambiguity cases.
+- **qwen3.5-4b** is decent for a 4B model (~76%) and fine for lighter use, but it stumbles on the harder real-file edits (TRIDENT-02/03/04/07/08/10 and MINIDIFF-01/03/04).
+- **gemma-4-e2b** (the smallest we benchmarked, ~2B class) improves to ~75% on the full bank but is still the weakest — it reaches for the wrong tool and fails most macro-validation and edit cases. Fine for casual documentation Q&A, not reliable for edit workflows.
 
 Run-to-run variance of a few points is normal (the model gets a fresh dialog per question, and tool calls are nondeterministic), which is why the table shows single-run numbers rather than ranges.
 

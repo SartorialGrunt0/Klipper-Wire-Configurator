@@ -893,20 +893,6 @@ export interface AiChatRequest {
    * question without calling any tool.
    */
   contextFiles?: Record<string, { content: string; label: string }>;
-  /**
-   * Full-rewrite guard state (VITE_KWC_FULL_REWRITE_GUARD build flag).
-   * True = the frontend rejects full block writes and forces mini-diffs, so
-   * the backend uses the STRICT edit-protocol wording. False (default) =
-   * full writes accepted, softer wording. Kept in lock-step with the
-   * frontend acceptance behavior.
-   */
-  fullRewriteGuard?: boolean;
-  /**
-   * The editor's active file. Backend-only use: server-side merged-result
-   * validation resolves an edit's target file with the same activeFile the
-   * client draft pipeline uses (never injected into prompts).
-   */
-  activeFile?: string;
 }
 
 export interface AiToolCallDetail {
@@ -928,13 +914,6 @@ export interface AiChatResponse {
   toolCalls?: AiToolCallDetail[];
   /** Number of empty-response re-prompts the backend performed before content. */
   repromptCount?: number;
-  /**
-   * Server-side merged-result validation result (backend
-   * KWC_SERVER_DRAFT_VALIDATION=1). Null when the server pass did not run.
-   * `repaired: true` means the returned content already passed merged
-   * validation — the client retry loop can trust it.
-   */
-  serverRepair?: ServerRepairVerdict | null;
   /**
    * Tool-mediated editing (KWC_EDIT_TOOLS): changes staged by the
    * config_edit/config_write write tools. Server-validated (delta vs the
@@ -962,14 +941,6 @@ export interface PendingConfigEdit {
     message: string;
     code?: string;
   }>;
-}
-
-/** Wire shape of the backend `serverRepair` response field (finding #4). */
-export interface ServerRepairVerdict {
-  attempted: boolean;
-  repaired: boolean;
-  issuesAfter: Array<{ filename: string; errors: unknown[] }>;
-  reason?: string;
 }
 
 /**
