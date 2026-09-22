@@ -26,10 +26,13 @@ BOARD_TYPE_DIRS = {
     "Other": BOARD_TYPE_OTHER,
 }
 
-# Board identification patterns from config filenames and MCU types
+# Board identification patterns from config filenames and MCU types.
+# ORDER IS SPECIFICITY: within a vendor family the model-specific
+# patterns MUST precede the family pattern — board_name takes the first
+# hit in list order (2026-09-21 audit: family-first ordering let
+# "BTT Octopus Pro" be named just "BigTreeTech").
 BOARD_PATTERNS = [
-    # BigTreeTech boards
-    (r"bigtreetech|btt", "BigTreeTech"),
+    # BigTreeTech models (family catch-all last in this group)
     (r"octopus", "BigTreeTech Octopus"),
     (r"skr[\s_-]?mini[\s_-]?e3", "BigTreeTech SKR Mini E3"),
     (r"skr[\s_-]?pro", "BigTreeTech SKR Pro"),
@@ -38,16 +41,17 @@ BOARD_PATTERNS = [
     (r"skr[\s_-]?pico", "BigTreeTech SKR Pico"),
     (r"manta", "BigTreeTech Manta"),
     (r"skr[\s_-]?e3", "BigTreeTech SKR E3"),
-    # Creality boards
+    (r"bigtreetech|btt", "BigTreeTech"),
+    # Creality models (family catch-all last)
     (r"creality[\s_-]?v4\.2\.[71]0?", "Creality v4.2.x"),
     (r"creality", "Creality"),
-    # FYSETC
+    # FYSETC models (family catch-all last)
     (r"fysetc[\s_-]?s6", "FYSETC S6"),
     (r"fysetc[\s_-]?cheetah", "FYSETC Cheetah"),
     (r"fysetc[\s_-]?f6", "FYSETC F6"),
     (r"fysetc[\s_-]?spider", "FYSETC Spider"),
     (r"fysetc", "FYSETC"),
-    # Duet
+    # Duet models (family catch-all last)
     (r"duet[\s_-]?3[\s_-]?6hc", "Duet 3 6HC"),
     (r"duet[\s_-]?3[\s_-]?mini", "Duet 3 Mini"),
     (r"duet[\s_-]?2[\s_-]?maestro", "Duet 2 Maestro"),
@@ -55,16 +59,16 @@ BOARD_PATTERNS = [
     (r"duet", "Duet"),
     # Einsy
     (r"einsy[\s_-]?rambo", "Einsy Rambo"),
-    # MKS boards
+    # MKS models (family catch-all last)
     (r"mks[\s_-]?robin[\s_-]?nano", "MKS Robin Nano"),
     (r"mks[\s_-]?robin", "MKS Robin"),
     (r"mks[\s_-]?gen[\s_-]?l", "MKS Gen L"),
     (r"mks[\s_-]?sgen", "MKS SGen"),
     (r"mks", "MKS"),
-    # Mellow
+    # Mellow models (family catch-all last)
     (r"mellow[\s_-]?fly", "Mellow Fly"),
     (r"mellow", "Mellow"),
-    # LDO
+    # LDO models (family catch-all last)
     (r"ldo[\s_-]?leviathan", "LDO Leviathan"),
     (r"ldo", "LDO"),
     # Generic
@@ -249,8 +253,12 @@ def detect_board_type_from_content(config: ConfigFile) -> tuple[str, float]:
     if has_accel and not has_printer and not has_extruder:
         return BOARD_TYPE_ACCELEROMETER, 0.8
 
-    # Expander: extra steppers but no printer section
-    if stepper_count > 0 and not has_printer and not has_extruder:
+    # Expander: MULTIPLE extra steppers but no printer section. One
+    # stepper alone proves nothing — fragments, includes-in-progress and
+    # truncated pastes all hit this shape, and a confident 'expander'
+    # guess on them misleads the model (2026-09-21 audit; kickback
+    # doctrine: never over-claim).
+    if stepper_count >= 2 and not has_printer and not has_extruder:
         return BOARD_TYPE_EXPANDER, 0.7
 
     return BOARD_TYPE_OTHER, 0.0
@@ -277,8 +285,10 @@ def detect_board_from_config(config: ConfigFile) -> dict:
         "matches": [],
     }
 
-    # Gather text to search: comments, serial paths, all text
-    search_text = ""
+    # Gather text to search: filename, comments, serial paths, all text.
+    # The filename carries the board model for reference configs
+    # (generic-bigtreetech-octopus-*.cfg) whose contents don't.
+    search_text = config.filename.lower() + "\n"
     for comment in config.header_comments:
         search_text += comment.lower() + "\n"
 
@@ -293,13 +303,15 @@ def detect_board_from_config(config: ConfigFile) -> dict:
 
     search_text += config.raw_text.lower()
 
-    # Board detection
+    # Board detection: report EVERY match so the caller sees the full
+    # evidence chain; board_name is the first hit in list order, which is
+    # specificity-ordered (model patterns before family catch-alls).
     for pattern, name in BOARD_PATTERNS:
         if re.search(pattern, search_text, re.IGNORECASE):
-            result["board_name"] = name
+            if result["board_name"] == "Unknown":
+                result["board_name"] = name
             result["matches"].append(f"Board pattern: {name}")
             result["confidence"] = max(result["confidence"], 0.6)
-            break
 
     # MCU detection
     for pattern, chip in MCU_PATTERNS:
