@@ -179,6 +179,15 @@ description of the change; make the tool call instead.
 Rules:
 - Read before you edit: read_user_config the file or section first so
   anchors, keys, and current values are exact.
+- NEVER ask the user which file to edit or wait for confirmation of the
+  target — the answer is discoverable with tools. Call list_user_configs
+  to see the project's files and search_user_configs to find where a
+  section or macro lives, then edit that file. When the request gives no
+  file and discovery shows no clearer home, edit printer.cfg; for a brand
+  new section with no existing home, add it to printer.cfg.
+- When an existing section has more logic than the user's request
+  mentions, preserve it: edit in place with set_param or patch_gcode
+  instead of refusing or replacing the whole section.
 - One config_edit operation per call; chain calls for multi-part changes.
 - When config_edit returns validation errors, read them, adjust, and
   retry with a CORRECTED change — never repeat the same failed call. On a
