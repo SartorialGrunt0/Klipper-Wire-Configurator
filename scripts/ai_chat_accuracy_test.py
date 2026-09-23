@@ -537,11 +537,23 @@ def build_macro_questions() -> list[TestQuestion]:
                   "```"),
             expected_tools=("validate_macro",),
             require_tool=False,
-            criteria=(
-                ("regex", r"\[gcode_macro\s+FIX_ME"),
-                ("contains", "{% endif %}"),
-                ("contains", "BED_MESH_CALIBRATE"),
-                ("regex", r"```(?:cfg|ini|conf|klipper)"),
+            # Phase-5 (2026-09-22): the quoted FIX_ME macro is absent from
+            # the project, so BOTH outcomes are legitimate: staging the
+            # corrected section (discovery fallthrough -> printer.cfg) or
+            # answering with a corrected display block. Staging arm first.
+            # The old prose criteria predated artifact grading and false-
+            # failed every correct staged answer (rag-filelaw r2 trace).
+            edit_criteria=(
+                ("any_of", json.dumps([
+                    [["staged_section_regex",
+                      "printer\\.cfg::gcode_macro FIX_ME::\\{%\\s+endif\\s+%\\}"],
+                     ["staged_section_regex",
+                      "printer\\.cfg::gcode_macro FIX_ME::BED_MESH_CALIBRATE"]],
+                    [["regex", "```(?:cfg|ini|conf|klipper)"],
+                     ["regex", "\\[gcode_macro\\s+FIX_ME"],
+                     ["contains", "{% endif %}"],
+                     ["contains", "BED_MESH_CALIBRATE"]],
+                ])),
             ),
         ),
         TestQuestion(
@@ -2305,6 +2317,29 @@ def criterion_ok(kind: str, value: str, content: str,
                  memory: tuple[str, dict | None] | None = None,
                  tool_calls: list[dict] | None = None,
                  pending_edits: list | None = None) -> bool:
+    if kind == "any_of":
+        # value = JSON array of ARMS; each arm is a JSON array of
+        # [kind, value] sub-criteria that must ALL pass. The criterion
+        # passes when ANY arm passes (OR of ANDs). Sub-kinds must not be
+        # any_of (single-level guard). Use for legitimate multi-shape
+        # deliverables, e.g. "staged section OR corrected display block".
+        try:
+            arms = json.loads(value)
+        except (ValueError, TypeError):
+            return False
+        if not isinstance(arms, list) or not arms:
+            return False
+        for arm in arms:
+            if not isinstance(arm, list) or not arm:
+                return False
+            if all(
+                isinstance(sub, list) and len(sub) == 2 and sub[0] != "any_of"
+                and criterion_ok(sub[0], sub[1], content, memory=memory,
+                                 tool_calls=tool_calls, pending_edits=pending_edits)
+                for sub in arm
+            ):
+                return True
+        return False
     if kind == "staged_param":
         # "<filename>::<substring>" — substring must appear in the staged
         # newText for that file. Staged = server-validated mechanical apply.
