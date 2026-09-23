@@ -98,7 +98,6 @@ def _install(monkeypatch, replies):
     from api.printer_memory_routes import PrinterMemory
     scripted = _ScriptedClient(replies)
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
-    monkeypatch.setattr(ai_routes, '_auto_search_context', lambda query: None)
     monkeypatch.setattr(ai_routes.httpx, 'AsyncClient', lambda *a, **k: scripted)
     return scripted
 

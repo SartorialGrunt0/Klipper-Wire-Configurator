@@ -198,7 +198,6 @@ def test_chat_proxy_malformed_tool_call_gets_one_format_reprompt(monkeypatch):
     # chat bubble.
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
     monkeypatch.setattr(ai_routes, '_execute_tool_call', lambda call: f"result for {call['name']}")
-    monkeypatch.setattr(ai_routes, '_auto_search_context', lambda query: None)
 
     calls = []
 
@@ -256,7 +255,6 @@ def test_chat_proxy_malformed_reprompt_is_bounded(monkeypatch):
     # (empty after stripping → the existing empty-response backstop takes
     # over, which never leaks markup either).
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
-    monkeypatch.setattr(ai_routes, '_auto_search_context', lambda query: None)
 
     calls = []
 
@@ -303,7 +301,6 @@ def test_unterminated_fence_never_reaches_the_bubble(monkeypatch):
     # A truncated stream (fence opened, never closed) must not leak markup
     # even if every recovery path fails.
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
-    monkeypatch.setattr(ai_routes, '_auto_search_context', lambda query: None)
 
     calls = []
 
@@ -345,7 +342,6 @@ def test_unterminated_fence_preserves_answer_text_after_blank_line(monkeypatch):
     Every provider turn stays malformed so the recovery-prose cleanup path
     (not the successful re-prompt path) produces the final bubble."""
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
-    monkeypatch.setattr(ai_routes, '_auto_search_context', lambda query: None)
 
     broken = (
         'Sure:\n\n```tool\n{"name": "search_klipper\n\n'

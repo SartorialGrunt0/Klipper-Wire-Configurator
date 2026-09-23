@@ -144,7 +144,6 @@ def _install(monkeypatch, replies):
         return scripted
 
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
-    monkeypatch.setattr(ai_routes, '_auto_search_context', lambda query: None)
     monkeypatch.setattr(ai_routes.httpx, 'AsyncClient', factory)
     return scripted
 

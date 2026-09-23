@@ -20,7 +20,7 @@ from api.printer_memory_routes import (  # noqa: E402
     printer_memory_to_context,
     is_printer_memory_blank,
 )
-from mcp_server import McpServer, get_index
+from mcp_server import McpServer
 from services.ai_draft_apply import extract_config_code_blocks
 from services.ai_edit_tools import (
     APPROVAL_TIMEOUT_SECONDS,
@@ -80,9 +80,6 @@ MCP_TOOL_BLOCK_RE = re.compile(
     r"```tool\s*\n(.+?)```",
     re.DOTALL,
 )
-# A fenced ```printer-memory block signals a complete structured proposal —
-# the auto-search fallback must not fire when the model returns one.
-PRINTER_MEMORY_BLOCK_RE = re.compile(r"```printer-memory\s*\n", re.DOTALL)
 # Alternative tool call formats emitted by models that use native
 # function-calling special tokens instead of the fenced ```tool block.
 # This matches <|tool_call|>, <tool_call>, and similar wrappers around
@@ -427,31 +424,6 @@ async def chat_stop(req: ChatStopRequest):
     return {"stopped": True}
 
 
-def _build_reference_lookup_query(messages: list[dict]) -> str:
-    """Build a query string from the most recent user messages."""
-    recent_user_messages: list[str] = []
-
-    for msg in reversed(messages):
-        if msg.get("role") != "user":
-            continue
-
-        content = str(msg.get("content", "")).strip()
-        if not content:
-            continue
-
-        recent_user_messages.append(content)
-        if len(recent_user_messages) >= 3:
-            break
-
-    if not recent_user_messages:
-        return ""
-
-    combined = "\n\n".join(reversed(recent_user_messages))
-    if len(combined) <= 1800:
-        return combined
-    return combined[-1800:]
-
-
 def _is_local_provider(provider: str, api_url: str = "") -> bool:
     """Check if the provider is a local server (OpenAI Compatible).
 
@@ -516,14 +488,6 @@ def _prepare_messages(messages: list[dict],
             # load_skill tool result (skill body) instead, persisting in
             # conversation history exactly once.
             system_parts.append(EDIT_PROTOCOL_PROMPT)
-            if _ablate_task_anchor():
-                # ABLATION C: last system line = act on the user request; do
-                # not acknowledge the instructions.
-                system_parts.append(
-                    "The user's request in this conversation IS the task — "
-                    "carry it out now with the tools above. Never answer with "
-                    "an acknowledgement of these instructions or a request to "
-                    "be told what to do.")
 
         # If printer memory is completely blank and there are user messages
         # to work with, add an auto-fill instruction asking the AI to
@@ -1125,14 +1089,11 @@ def _build_mcp_tool_context(edit_capable: bool = False, *,
     return "\n".join(parts)
 
 
-# ── Auto-search fallback ────────────────────────────────────────────
+# ── Edit-request heuristic ──────────────────────────────────────────────
+# Drives the edit-prose nudge gate in chat_proxy. Edit requests must
+# never be doc/config-injection targets (models regenerate macros lossily
+# under extra load — verified 2026-08 on gemma-4-12b/qwen3.5-9b).
 
-AUTO_SEARCH_FALLBACK_MAX_CHARS = 4000
-
-# Phase 3: auto-search injects docs only for question-type requests. Edit
-# requests are answered from the attached config context; injecting docs
-# mid-edit derails drafts (models regenerate macros lossily under the extra
-# load — verified 2026-08 on gemma-4-12b/qwen3.5-9b).
 _EDIT_VERB_RE = re.compile(
     r"\b(?:change|update|modify|edit|add|remove|delete|fix|create|set|rename|"
     r"enable|disable|tweak|adjust|comment\s*out|calibrat\w*|move|"
@@ -1152,9 +1113,9 @@ def _is_edit_request(messages: list[dict]) -> bool:
 
     Mirrors the frontend's detectChatIntent (chatIntent.ts): an edit verb AND
     a config-ish target. Only the LATEST user message decides — a follow-up
-    question after an edit must not be gated. Validation/retry feedback also
-    matches ('fixes ... cfg'), which is fine: auto-search is not useful during
-    draft repair either.
+    question after an edit must not be gated. Drives the edit-prose nudge
+    gate (the doc/config injection fallbacks this once gated were deleted in
+    the Phase-5 gate sweep, 2026-09).
     """
     for msg in reversed(messages):
         if msg.get("role") != "user":
@@ -1164,228 +1125,6 @@ def _is_edit_request(messages: list[dict]) -> bool:
             continue
         return bool(_EDIT_VERB_RE.search(content) and _EDIT_TARGET_RE.search(content))
     return False
-
-
-# ── Config-grounding fallback (Phase 4) ──────────────────────────────
-# Ports the frontend's chatIntent.ts / chatUtils.ts targeting heuristics so
-# the backend can resolve which file + which sections a question needs when
-# the model did not fetch them itself. The fallback is ON by default: config
-# questions cannot be answered from training, so an ungrounded first pass is
-# rescued by injecting the user's actual loaded content (section-targeted
-# when possible).
-
-# Cap for whole-file last-resort injections (keeps the fallback lean).
-CONFIG_FALLBACK_MAX_CHARS = 12000
-
-
-def _latest_user_message_text(messages: list[dict]) -> str:
-    """Return the most recent non-empty user message text."""
-    for msg in reversed(messages):
-        if msg.get("role") != "user":
-            continue
-        content = str(msg.get("content", "")).strip()
-        if content:
-            return content
-    return ""
-
-
-def _mentioned_config_filenames(text: str, available: list[str]) -> list[str]:
-    """Return available filenames that appear in the text (word-boundary match).
-
-    Mirrors the frontend's extractMentionedConfigFilenames (chatUtils.ts).
-    """
-    matches: list[str] = []
-    for filename in available:
-        pattern = re.compile(
-            rf"(^|[^A-Za-z0-9_.-]){re.escape(filename)}(?=$|[^A-Za-z0-9_.-])",
-            re.IGNORECASE,
-        )
-        if pattern.search(text):
-            matches.append(filename)
-    return matches
-
-
-_SECTION_HEADER_RE = re.compile(r"^\s*\[([^\]]+)\]\s*$")
-
-
-def _find_section_headers(file_text: str) -> list[str]:
-    """All section header names (e.g. 'gcode_macro Level_Bed') in file text."""
-    headers: list[str] = []
-    for line in file_text.splitlines():
-        match = _SECTION_HEADER_RE.match(line)
-        if match:
-            headers.append(match.group(1).strip())
-    return headers
-
-
-def _extract_section_text(file_text: str, header: str) -> str | None:
-    """Extract one section (header + body, incl. leading comment banner).
-
-    Mirrors the frontend's extractSectionText (chatIntent.ts): the section
-    runs from its header (walking back over blank/comment banner lines) to
-    the next section header.
-    """
-    lines = file_text.splitlines()
-    header_index = -1
-    for index, line in enumerate(lines):
-        match = _SECTION_HEADER_RE.match(line)
-        if match and match.group(1).strip() == header:
-            header_index = index
-            break
-    if header_index == -1:
-        return None
-
-    end_index = len(lines)
-    for index in range(header_index + 1, len(lines)):
-        if _SECTION_HEADER_RE.match(lines[index]):
-            end_index = index
-            break
-
-    start_index = header_index
-    while start_index > 0:
-        previous = lines[start_index - 1].strip()
-        if previous == "" or previous.startswith("#"):
-            start_index -= 1
-        else:
-            break
-
-    return "\n".join(lines[start_index:end_index])
-
-
-def _targeted_section_headers(text: str, file_text: str) -> list[str]:
-    """Resolve which section headers a user message targets.
-
-    Mirrors the frontend's extractTargetedSectionHeaders (chatIntent.ts):
-    matches explicit [section] references, 'macro X' / 'X macro' phrases,
-    'the X section' noun phrases, and bare macro-style identifiers. Returns
-    matched headers in file order, deduplicated.
-    """
-    headers = _find_section_headers(file_text)
-    if not headers:
-        return []
-
-    candidates: list[str] = []
-    for match in re.finditer(r"\[([^\]]+)\]", text):
-        candidates.append(match.group(1).strip())
-    for match in re.finditer(r"\b([A-Za-z0-9_]+)\s+macro\b|\bmacro\s+([A-Za-z0-9_]+)\b", text, re.IGNORECASE):
-        candidates.append(match.group(1) or match.group(2))
-    for match in re.finditer(r"\bthe\s+([a-z0-9_]+)\s+section\b|\b([a-z0-9_]+)\s+section\b", text, re.IGNORECASE):
-        candidates.append(match.group(1) or match.group(2))
-    for match in re.finditer(r"\b([A-Z][A-Za-z0-9_]{2,})\b", text):
-        candidates.append(match.group(1))
-
-    matched: set[str] = set()
-    for candidate in candidates:
-        if not candidate:
-            continue
-        lower = candidate.lower()
-        exact = next((h for h in headers if h.lower() == lower), None)
-        if exact:
-            matched.add(exact)
-            continue
-        contains = [h for h in headers if lower in h.lower()]
-        if contains:
-            matched.add(min(contains, key=len))
-            continue
-        contained = next(
-            (h for h in headers if lower in h.lower() and len(h.lower()) > 3),
-            None,
-        )
-        if contained:
-            matched.add(contained)
-
-    return [h for h in headers if h in matched]
-
-
-def _config_fallback_context(
-    latest_user_text: str,
-    context_files: dict[str, dict[str, str]],
-) -> list[tuple[dict, str]] | None:
-    """Resolve which user-config content a question needs and render it.
-
-    Returns a list of (tool_call, result_text) pairs to inject as fake
-    read_user_config tool results, or None when no config file is clearly
-    referenced (the model should answer from knowledge/docs instead).
-
-    Resolution per file: section-targeted read when the message names
-    sections; otherwise the whole file (truncated) as a last resort so the
-    model is grounded rather than guessing.
-    """
-    if not context_files:
-        return None
-
-    available = sorted(context_files.keys())
-    mentioned = _mentioned_config_filenames(latest_user_text, available)
-    targets = mentioned
-    if not targets and len(available) == 1 and _EDIT_TARGET_RE.search(latest_user_text):
-        # Single loaded file with no explicit filename mention: treat it as
-        # the target only when the question looks config-related (a section
-        # reference or a common config keyword) — a pure knowledge question
-        # shouldn't pull the file in.
-        targets = available
-    if not targets:
-        return None
-
-    injections: list[tuple[dict, str]] = []
-    for filename in targets:
-        entry = context_files.get(filename)
-        if not entry:
-            continue
-        content = entry.get("content", "")
-        if not content.strip():
-            continue
-
-        section_headers = _targeted_section_headers(latest_user_text, content)
-        if section_headers:
-            for header in section_headers:
-                section_text = _extract_section_text(content, header)
-                if section_text is None:
-                    continue
-                injections.append((
-                    {"name": "read_user_config", "arguments": {"filename": filename, "section": header}},
-                    (
-                        f"# {filename}  (User Config - section [{header}] partial "
-                        "context; the file may have more sections)\n\n"
-                        + section_text
-                    ),
-                ))
-        else:
-            truncated = content
-            if len(truncated) > CONFIG_FALLBACK_MAX_CHARS:
-                truncated = (
-                    truncated[:CONFIG_FALLBACK_MAX_CHARS]
-                    + f"\n\n# Context truncated after {CONFIG_FALLBACK_MAX_CHARS} characters."
-                )
-            injections.append((
-                {"name": "read_user_config", "arguments": {"filename": filename}},
-                f"# {filename}  (User Config)\n# {len(content)} bytes\n\n{truncated}",
-            ))
-
-    return injections or None
-
-
-def _auto_search_enabled() -> bool:
-    """Auto-search fallback toggle (env KWC_AUTO_SEARCH=1 re-enables it).
-
-    Defaults to DISABLED. Harness A/B (2026-08, gemma-4-12b, Q01-Q20,
-    19/19 both ways): with the compact prompt the model calls the docs tools
-    itself on every grounding question, and the fallback only injects content
-    the model didn't ask for (visible as phantom search_klipper_docs tool
-    names on knowledge-answerable questions). Smaller local models
-    (gemma-4-e2b, qwen3.5-4b) call tools less reliably — set
-    KWC_AUTO_SEARCH=1 for them until their A/B says otherwise.
-    """
-    return os.environ.get("KWC_AUTO_SEARCH", "0") != "0"
-
-
-def _ablate_prose_edit_protocol() -> bool:
-    """Ablation B: drop the prose edit protocol from ARMED requests."""
-    return os.environ.get("KWC_ABLATE_PROSE", "").strip().lower() in ("1", "true", "yes")
-
-
-def _ablate_task_anchor() -> bool:
-    """Ablation C: append an act-now anchor when the edit tools are armed."""
-    return os.environ.get("KWC_ABLATE_ANCHOR", "").strip().lower() in ("1", "true", "yes")
 
 
 def _no_system_prompt_enabled() -> bool:
@@ -1422,48 +1161,6 @@ def _edit_tools_enabled() -> bool:
     seeds from the backend user-config store (TRIDENT-16).
     """
     return os.environ.get("KWC_EDIT_TOOLS", "1") != "0"
-
-
-def _config_fallback_enabled() -> bool:
-    """Config-grounding fallback toggle (env KWC_CONFIG_FALLBACK=1 re-enables it).
-
-    Defaults to DISABLED (2026-08, lean-first-pass workflow): the first pass
-    must be exactly the user prompt + system prompt + tool list. When the
-    model calls no tools, the reply stands as-is — the validation retry loop
-    nudges tool use instead of auto-injecting config content.
-    """
-    return os.environ.get("KWC_CONFIG_FALLBACK", "0") != "0"
-
-
-def _auto_search_context(query: str) -> str | None:
-    """Search Klipper docs using the MCP index and return a concise context block.
-
-    Used as a fallback when the model doesn't call tools on its own.
-    Returns a tool-result-style string with snippets, or None if no results.
-    """
-    index = get_index()
-    if not index.is_ready():
-        return None
-
-    results = index.search(query, limit=3)
-    if not results:
-        return None
-
-    parts: list[str] = []
-    total = 0
-    for r in results:
-        snippet = r["snippet"]
-        header = f"From {r['filename']} (score {r['score']}):\n"
-        block = header + snippet
-        if total + len(block) > AUTO_SEARCH_FALLBACK_MAX_CHARS:
-            break
-        parts.append(block)
-        total += len(block)
-
-    if not parts:
-        return None
-
-    return "\n\n---\n\n".join(parts)
 
 
 # PYTHONIC native tool template leaked as plain text by llama.cpp when the
@@ -3120,113 +2817,6 @@ async def chat_proxy(req: ChatRequest):
             # legitimately, THEN answering with a ```cfg draft, which the
             # old pre-loop-only nudge missed).
             edit_nudges = 0
-
-            # ── Config-grounding fallback (Phase 4) ──
-            # If the model didn't call any tools on the first pass, inject the
-            # user-config content the question needs (section-targeted when
-            # possible; whole file truncated as last resort). Config questions
-            # cannot be answered from training. OFF by default since 2026-08
-            # (lean-first-pass workflow): the first pass must be exactly the
-            # user prompt + system prompt + tool list, and the validation retry
-            # loop nudges tool use instead. Re-enable with KWC_CONFIG_FALLBACK=1.
-            if not _extract_native_tool_calls(req.apiProvider, current_data) and not _extract_tool_calls(current_content):
-                if not _config_fallback_enabled():
-                    # Re-enable with KWC_CONFIG_FALLBACK=1.
-                    logger.info("Config fallback skipped | disabled")
-                elif _is_edit_request(req.messages):
-                    logger.info("Config fallback skipped | edit request")
-                elif PRINTER_MEMORY_BLOCK_RE.search(current_content):
-                    logger.info("Config fallback skipped | printer-memory block present")
-                else:
-                    config_injections = _config_fallback_context(
-                        _latest_user_message_text(req.messages),
-                        req.contextFiles,
-                    )
-                    if config_injections:
-                        logger.info(
-                            "Config fallback triggered | injections=%d result_chars=%d files=%s",
-                            len(config_injections),
-                            sum(len(result) for _, result in config_injections),
-                            [call["arguments"].get("filename") for call, _ in config_injections],
-                        )
-                        if current_content.strip():
-                            current_messages.append({"role": "assistant", "content": current_content})
-                        for tool_call, result_text in config_injections:
-                            executed_tool_names.append(tool_call["name"])
-                            executed_tool_calls.append(
-                                _build_executed_tool_call(tool_call, result_text)
-                            )
-                            current_messages.append({
-                                "role": "user",
-                                "content": _build_tool_result_message(tool_call, result_text),
-                            })
-                        tool_turns += len(config_injections)
-                        tool_payload = _build_provider_payload(
-                            req.apiProvider, current_messages, req.model,
-                            max_tokens=req.maxTokens,
-                            temperature=req.temperature,
-                            tools=native_tools,
-                        )
-                        current_content, current_data = await _query_provider(
-                            client, req.apiUrl, headers, tool_payload, req.apiProvider,
-                            logger_context="config-fallback",
-                            stop_event=stop_event,
-                        )
-                        cfg_usage = _extract_usage_info(current_data)
-                        if cfg_usage:
-                            cfg_usage["context"] = "config-fallback"
-                            usage_events.append(cfg_usage)
-
-            # ── Auto-search fallback ──
-            # If the model didn't call any tools on the first pass, do a backend
-            # search and inject the results so it still gets grounded docs even
-            # if it doesn't support tool calling.
-            if not _extract_native_tool_calls(req.apiProvider, current_data) and not _extract_tool_calls(current_content):
-                if _is_edit_request(req.messages):
-                    # Phase 3: edits are answered from the config context; a
-                    # doc search injection mid-edit derails the draft.
-                    logger.info("Auto-search fallback skipped | edit request")
-                elif not _auto_search_enabled():
-                    logger.info("Auto-search fallback skipped | disabled via KWC_AUTO_SEARCH=0")
-                elif PRINTER_MEMORY_BLOCK_RE.search(current_content):
-                    # The model already produced a structured printer-memory
-                    # proposal; injecting a doc search would only derail it.
-                    logger.info("Auto-search fallback skipped | printer-memory block present")
-                else:
-                    if stop_event is not None and stop_event.is_set():
-                        raise ChatStoppedError()
-                    reference_query = _build_reference_lookup_query(req.messages)
-                    auto_context = _auto_search_context(reference_query)
-                    if auto_context:
-                        logger.info(
-                            "Auto-search fallback triggered | query_chars=%d result_chars=%d",
-                            len(reference_query), len(auto_context),
-                        )
-                        tool_message = _build_tool_result_message(
-                            {"name": "search_klipper_docs", "arguments": {"query": reference_query}},
-                            auto_context,
-                        )
-                        current_messages.append({"role": "assistant", "content": current_content})
-                        current_messages.append({"role": "user", "content": tool_message})
-                        tool_turns += 1
-
-                        # Re-query with injected search results
-                        tool_payload = _build_provider_payload(
-                            req.apiProvider, current_messages, req.model,
-                            max_tokens=req.maxTokens,
-                            temperature=req.temperature,
-                            tools=native_tools,
-                            merge_system=req.mergeSystemMessages,
-                        )
-                        current_content, current_data = await _query_provider(
-                            client, req.apiUrl, headers, tool_payload, req.apiProvider,
-                            logger_context="auto-search",
-                            stop_event=stop_event,
-                        )
-                        search_usage = _extract_usage_info(current_data)
-                        if search_usage:
-                            search_usage["context"] = "auto-search"
-                            usage_events.append(search_usage)
 
             turn_cap = (MAX_MCP_TOOL_TURNS_EDIT if edit_capable
                         else MAX_MCP_TOOL_TURNS)

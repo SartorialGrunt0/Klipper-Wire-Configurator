@@ -2,8 +2,9 @@
 
 The suite was rewritten after the LM Studio-specific MCP integration was
 refactored into a native MCP server: it now covers the current provider
-payload building, response extraction, auto-search fallback, and the
-native tool-calling loop.
+payload building, response extraction, and the native tool-calling loop.
+The doc/config injection fallbacks and their env gates (KWC_AUTO_SEARCH,
+KWC_CONFIG_FALLBACK) were deleted in the Phase-5 gate sweep (2026-09).
 """
 import asyncio
 import json
@@ -91,7 +92,7 @@ def _blank_memory(monkeypatch):
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
 
 
-# ── _is_edit_request (Phase 3 auto-search gating) ─────────────────────
+# ── _is_edit_request (drives the edit-prose nudge gate) ────────────────
 
 
 def test_is_edit_request_positive():
@@ -128,25 +129,6 @@ def test_is_edit_request_uses_latest_user_message():
         {'role': 'assistant', 'content': 'Done.'},
         {'role': 'user', 'content': 'What is pressure advance?'},
     ])
-
-
-def test_auto_search_enabled_toggle(monkeypatch):
-    monkeypatch.delenv('KWC_AUTO_SEARCH', raising=False)
-    assert not ai_routes._auto_search_enabled()  # default disabled (Phase 3 A/B)
-    monkeypatch.setenv('KWC_AUTO_SEARCH', '1')
-    assert ai_routes._auto_search_enabled()
-    monkeypatch.setenv('KWC_AUTO_SEARCH', '0')
-    assert not ai_routes._auto_search_enabled()
-
-
-def test_config_fallback_enabled_toggle(monkeypatch):
-    # Default disabled (Phase 5 lean first pass).
-    monkeypatch.delenv('KWC_CONFIG_FALLBACK', raising=False)
-    assert not ai_routes._config_fallback_enabled()
-    monkeypatch.setenv('KWC_CONFIG_FALLBACK', '1')
-    assert ai_routes._config_fallback_enabled()
-    monkeypatch.setenv('KWC_CONFIG_FALLBACK', '0')
-    assert not ai_routes._config_fallback_enabled()
 
 
 def test_minimal_prompt_enabled_toggle(monkeypatch):
@@ -725,7 +707,6 @@ def test_chat_proxy_local_openai_compatible_allows_missing_key(monkeypatch):
     # path, so pin the read-only arm explicitly.
     monkeypatch.setenv('KWC_EDIT_TOOLS', '0')
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
-    monkeypatch.setattr(ai_routes, '_auto_search_context', lambda query: None)
 
     captured = {}
 
@@ -776,7 +757,6 @@ def test_chat_proxy_local_native_tool_protocol_sends_tools(monkeypatch):
     # toolProtocol="native" forces the OpenAI tools array even for a local
     # plain-http provider (gpt-oss on llama.cpp needs this).
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
-    monkeypatch.setattr(ai_routes, '_auto_search_context', lambda query: None)
 
     captured = {}
 
@@ -813,7 +793,6 @@ def test_chat_proxy_local_default_tool_protocol_sends_tools(monkeypatch):
     # drops the ```tool format law (ack-bubble fuel) in favor of the
     # machine-channel statement.
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
-    monkeypatch.setattr(ai_routes, '_auto_search_context', lambda query: None)
 
     captured = {}
 
@@ -854,7 +833,6 @@ def test_chat_proxy_returns_plain_content(monkeypatch):
     # path, so pin the read-only arm explicitly.
     monkeypatch.setenv('KWC_EDIT_TOOLS', '0')
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
-    monkeypatch.setattr(ai_routes, '_auto_search_context', lambda query: None)
 
     def fake_post(url, headers, payload):
         return DummyResponse(
@@ -918,7 +896,6 @@ def test_chat_proxy_reports_usage_and_truncation(monkeypatch):
     # (finish_reason=length) must surface in /ai/chat as truncated so the
     # harness can distinguish budget exhaustion from a wrong answer.
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
-    monkeypatch.setattr(ai_routes, '_auto_search_context', lambda query: None)
 
     def fake_post(url, headers, payload):
         return DummyResponse(
@@ -955,57 +932,6 @@ def test_chat_proxy_reports_usage_and_truncation(monkeypatch):
     assert usage['truncated'] is True
     assert usage['events'][0]['finishReason'] == 'length'
     assert usage['events'][0]['context'] == 'initial'
-
-
-def test_chat_proxy_auto_search_fallback_injects_docs(monkeypatch):
-    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
-    # The fallback is off by default (Phase 3 A/B) — this test exercises the
-    # injection path with the toggle explicitly enabled.
-    monkeypatch.setenv('KWC_AUTO_SEARCH', '1')
-    monkeypatch.setattr(
-        ai_routes,
-        '_auto_search_context',
-        lambda query: 'From Probes.md (score 1.2):\n- horizontal_move_z is a bed_mesh safety travel height.',
-    )
-
-    captured = {'count': 0}
-
-    def fake_post(url, headers, payload):
-        captured['count'] += 1
-        # First call: model gives a plain (ungrounded) answer -> fallback triggers.
-        if captured['count'] == 1:
-            return DummyResponse(
-                {'choices': [{'message': {'content': 'I think it controls Z travel.'}}]},
-                url=url,
-            )
-        # Second call: model answers after the docs were injected.
-        captured['second_payload'] = payload
-        return DummyResponse(
-            {'choices': [{'message': {'content': 'horizontal_move_z is the Z hop before XY travel.'}}]},
-            url=url,
-        )
-
-    monkeypatch.setattr(httpx, 'AsyncClient', lambda *args, **kwargs: FakeAsyncClient(post_handler=fake_post))
-
-    response = client.post(
-        '/ai/chat',
-        json={
-            'messages': [{'role': 'user', 'content': 'What does [bed_mesh] horizontal_move_z do?'}],
-            'apiKey': 'openai-token',
-            'model': 'gpt-4o',
-            'apiUrl': 'https://api.openai.com/v1/chat/completions',
-            'apiProvider': 'chatgpt',
-        },
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body['content'] == 'horizontal_move_z is the Z hop before XY travel.'
-    assert body['mcpToolTurns'] == 1
-    assert body['mcpToolNames'] == ['search_klipper_docs']
-    # The injected docs must appear as a user-role tool result message in the second payload.
-    second_payload = captured['second_payload']
-    assert any('[Tool result: search_klipper_docs' in str(m.get('content', '')) for m in second_payload['messages'])
 
 
 def test_chat_proxy_native_tool_call_loop(monkeypatch):
@@ -1345,22 +1271,18 @@ def test_chat_proxy_empty_response_reprompt_exhausts(monkeypatch):
 
 def test_chat_proxy_provider_empty_recovers_via_backstop(monkeypatch):
     # A literal empty completion from the provider (llama.cpp transient
-    # hiccup) must not surface as an API error. The auto-search fallback and
-    # the empty-response backstop both re-query; the tool-less re-prompt
-    # recovers with real text.
+    # hiccup) must not surface as an API error. The empty-response backstop
+    # re-queries tool-less and recovers with real text. (The auto-search
+    # fallback that once re-queried here first was deleted in the Phase-5
+    # gate sweep.)
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
-    monkeypatch.setattr(
-        ai_routes, '_auto_search_context',
-        lambda query: 'Snippet: BED_MESH_CALIBRATE ADAPTIVE=1 ...',
-    )
 
     calls = []
 
     def fake_post(url, headers, payload):
         calls.append(payload)
-        if len(calls) <= 2:
-            # Initial pass and the auto-search re-query: literally nothing
-            # from the server.
+        if len(calls) <= 1:
+            # Initial pass: literally nothing from the server.
             return DummyResponse(
                 {'choices': [{'message': {'content': ''}}]},
                 url=url,
@@ -1393,11 +1315,11 @@ def test_chat_proxy_provider_empty_recovers_via_backstop(monkeypatch):
     assert response.status_code == 200
     body = response.json()
     assert body['content'] == 'horizontal_move_z sets the Z hop before XY travel.'
-    # 1 initial + 1 auto-search + 1 backstop re-prompt = 3 provider calls.
-    assert len(calls) == 3
+    # 1 initial + 1 backstop re-prompt = 2 provider calls.
+    assert len(calls) == 2
     # The backstop re-prompt must disable tools and carry the direct-answer
     # instruction.
-    reprompt = calls[2]
+    reprompt = calls[1]
     assert 'tools' not in reprompt
     assert any(
         m.get('role') == 'system' and 'Do not call any tools' in m.get('content', '')
@@ -1617,178 +1539,6 @@ def test_reference_route_returns_full_klipper_doc():
     assert response.status_code == 200
     assert response.json()['filename'] == 'Bed_Mesh.md'
     assert response.json()['content'].startswith('# Bed Mesh')
-
-
-# ── Config-grounding fallback (Phase 4) ───────────────────────────────
-
-
-def test_targeted_section_headers_parity_with_frontend():
-    content = (
-        '[printer]\n'
-        'kinematics: corexy\n'
-        '\n'
-        '[gcode_macro Level_Bed]\n'
-        'gcode:\n'
-        '  BED_MESH_CALIBRATE\n'
-        '\n'
-        '[bed_mesh]\n'
-        'speed: 50\n'
-    )
-    assert ai_routes._targeted_section_headers('fix the Level_Bed macro', content) == ['gcode_macro Level_Bed']
-    assert ai_routes._targeted_section_headers('what does the [bed_mesh] section do?', content) == ['bed_mesh']
-    assert ai_routes._targeted_section_headers('change speed', content) == []
-
-
-def test_mentioned_config_filenames_word_boundaries():
-    available = ['printer.cfg', 'EBB.cfg']
-    assert ai_routes._mentioned_config_filenames('update printer.cfg please', available) == ['printer.cfg']
-    # No '.' between printer and cfg -> not a filename mention.
-    assert ai_routes._mentioned_config_filenames('printer_cfg is fine', available) == []
-
-
-def test_config_fallback_context_section_targeted():
-    context_files = {
-        'printer.cfg': {
-            'content': '[printer]\nkinematics: corexy\nmax_accel: 12000\n\n[bed_mesh]\nspeed: 50\n',
-            'label': 'Loaded config',
-        },
-    }
-    injections = ai_routes._config_fallback_context(
-        'What is my max_accel in the [printer] section of printer.cfg?',
-        context_files,
-    )
-    assert injections is not None
-    assert len(injections) == 1
-    call, result = injections[0]
-    assert call['name'] == 'read_user_config'
-    assert call['arguments'] == {'filename': 'printer.cfg', 'section': 'printer'}
-    assert 'max_accel: 12000' in result
-    # Section-targeted read stays lean — the other section is not included.
-    assert 'bed_mesh' not in result
-
-
-def test_config_fallback_context_whole_file_last_resort():
-    context_files = {
-        'printer.cfg': {
-            'content': '[printer]\nkinematics: corexy\nmax_accel: 12000\n',
-            'label': 'Loaded config',
-        },
-    }
-    injections = ai_routes._config_fallback_context('What is my max_accel in printer.cfg?', context_files)
-    assert injections is not None
-    call, result = injections[0]
-    assert call['arguments'] == {'filename': 'printer.cfg'}
-    assert 'max_accel: 12000' in result
-
-
-def test_config_fallback_context_none_without_reference():
-    context_files = {
-        'printer.cfg': {'content': '[printer]\nkinematics: corexy\n', 'label': 'Loaded config'},
-    }
-    # Pure knowledge question -> no config injection even with one file loaded.
-    assert ai_routes._config_fallback_context('What is pressure advance?', context_files) is None
-    assert ai_routes._config_fallback_context('What is pressure advance?', {}) is None
-
-
-def test_config_fallback_context_single_file_without_filename_mention():
-    context_files = {
-        'printer.cfg': {
-            'content': '[printer]\nkinematics: corexy\nmax_accel: 12000\n\n[bed_mesh]\nspeed: 50\n',
-            'label': 'Loaded config',
-        },
-    }
-    # No filename mention, but a config section reference -> section-targeted.
-    injections = ai_routes._config_fallback_context('What does [bed_mesh] speed do?', context_files)
-    assert injections is not None
-    call, result = injections[0]
-    assert call['arguments'] == {'filename': 'printer.cfg', 'section': 'bed_mesh'}
-    assert 'speed: 50' in result
-
-
-def test_chat_proxy_config_fallback_injects_section(monkeypatch):
-    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
-    monkeypatch.setattr(ai_routes, '_auto_search_context', lambda query: None)
-    # The fallback is off by default (lean-first-pass workflow) — this test
-    # exercises the injection path with the toggle explicitly enabled.
-    monkeypatch.setenv('KWC_CONFIG_FALLBACK', '1')
-
-    captured = {'count': 0}
-
-    def fake_post(url, headers, payload):
-        captured['count'] += 1
-        # First call: model answers without calling any tool -> fallback triggers.
-        if captured['count'] == 1:
-            return DummyResponse(
-                {'choices': [{'message': {'content': 'Your max accel is probably fine.'}}]},
-                url=url,
-            )
-        # Second call: model answers after the config section was injected.
-        captured['second_payload'] = payload
-        return DummyResponse(
-            {'choices': [{'message': {'content': 'Your max_accel is 12000 (from the [printer] section).'}}]},
-            url=url,
-        )
-
-    monkeypatch.setattr(httpx, 'AsyncClient', lambda *args, **kwargs: FakeAsyncClient(post_handler=fake_post))
-
-    response = client.post(
-        '/ai/chat',
-        json={
-            'messages': [{'role': 'user', 'content': 'What is my max_accel in the [printer] section of printer.cfg?'}],
-            'apiKey': 'openai-token',
-            'model': 'gpt-4o',
-            'apiUrl': 'https://api.openai.com/v1/chat/completions',
-            'apiProvider': 'chatgpt',
-            'contextFiles': {
-                'printer.cfg': {
-                    'content': '[printer]\nkinematics: corexy\nmax_accel: 12000\n',
-                    'label': 'Loaded config',
-                },
-            },
-        },
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body['content'] == 'Your max_accel is 12000 (from the [printer] section).'
-    assert body['mcpToolTurns'] == 1
-    assert body['mcpToolNames'] == ['read_user_config']
-    # The injected config must appear as a user-role tool result in the second payload.
-    second_payload = captured['second_payload']
-    assert any('[Tool result: read_user_config' in str(m.get('content', '')) for m in second_payload['messages'])
-
-
-def test_chat_proxy_config_fallback_skips_without_context_files(monkeypatch):
-    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
-    monkeypatch.setattr(ai_routes, '_auto_search_context', lambda query: None)
-
-    captured = {'count': 0}
-
-    def fake_post(url, headers, payload):
-        captured['count'] += 1
-        return DummyResponse(
-            {'choices': [{'message': {'content': 'I think max_accel is around 12000.'}}]},
-            url=url,
-        )
-
-    monkeypatch.setattr(httpx, 'AsyncClient', lambda *args, **kwargs: FakeAsyncClient(post_handler=fake_post))
-
-    response = client.post(
-        '/ai/chat',
-        json={
-            'messages': [{'role': 'user', 'content': 'What is my max_accel in printer.cfg?'}],
-            'apiKey': 'openai-token',
-            'model': 'gpt-4o',
-            'apiUrl': 'https://api.openai.com/v1/chat/completions',
-            'apiProvider': 'chatgpt',
-        },
-    )
-
-    assert response.status_code == 200
-    assert captured['count'] == 1  # no context files -> fallback skipped -> single provider call
-    body = response.json()
-    assert body['mcpToolTurns'] == 0
-    assert body['mcpToolNames'] == []
 
 
 # ── Tool call detail records ──────────────────────────────────────────

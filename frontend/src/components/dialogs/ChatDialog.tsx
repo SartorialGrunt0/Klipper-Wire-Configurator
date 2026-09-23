@@ -16,10 +16,6 @@ import { useChatHistoryStore } from '../../stores/chatHistoryStore';
 import { useConfigStore } from '../../stores/configStore';
 import { usePrinterMemoryStore, DEFAULT_PRINTER_MEMORY, type PrinterMemory } from '../../stores/printerMemoryStore';
 import * as api from '../../services/api';
-import {
-  buildConfigIndexMessage,
-  extractMentionedConfigFilenames,
-} from '../../utils/chatUtils';
 import { extractPrinterMemoryBlock } from '../../utils/printerMemory';
 import { planApprovedEditApply } from '../../utils/approvalApply';
 import {
@@ -29,12 +25,6 @@ import {
   getProviderModel,
 } from '../../utils/chatProviders';
 import { runReplyValidationPipeline, createPrinterMemoryReplyValidator } from '../../utils/replyValidation';
-import {
-  extractTargetedSectionHeaders,
-  extractSectionText,
-  findSectionHeaders,
-  buildSectionContextMessage,
-} from '../../utils/chatIntent';
 import { useAssistantDraft } from '../../hooks/useAssistantDraft';
 import ChatSettingsPanel from './ChatSettingsPanel';
 import ChatHistoryDialog from './ChatHistoryDialog';
@@ -47,22 +37,6 @@ import ChatInputBar from './ChatInputBar';
 import type { PendingAiChatRequest } from '../../types/ai';
 import type { AiChatRole } from '../../services/api';
 import type { SavedConversation } from '../../stores/chatHistoryStore';
-
-/**
- * Frontend "handholding" gate (Phase 4/5 lean injection + file-targeting
- * reinforcement).
- *
- * Default OFF: a capable model discovers config content and targets the
- * right files through its MCP tools plus the backend SYSTEM_PROMPT edit
- * protocol (validated by the harness — AMBI-01..08 pass with zero injected
- * content and no frontend reinforcement). The regex-targeted injection can
- * also steer the model toward the wrong section.
- * Re-enable at build time with VITE_KWC_HANDHOLDING=1 for very small models
- * with flaky tool calling: the guess-work section injection and explicit
- * file-targeting instructions may help them stay grounded step-by-step.
- */
-const HANDHOLDING_ENABLED =
-  (import.meta.env.VITE_KWC_HANDHOLDING as string | undefined) === '1';
 
 /**
  * Heuristic for failures worth auto-recovering from: network drops and
@@ -91,9 +65,6 @@ interface AttachedConfigFile {
 }
 
 // ── Constants ───────────────────────────────────────────────────────
-
-// CONTEXT_TRUNCATION_LIMIT and truncateConfigContext live in
-// utils/chatUtils.ts — imported above to avoid duplicate definitions.
 
 // Parse the temperature edit field into a clamped sampling value.
 // Invalid input falls back to the 0.7 default; range is 0-2.
@@ -163,13 +134,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   const [showCarryOverPrompt, setShowCarryOverPrompt] = useState(false);
   const [showPrinterMemory, setShowPrinterMemory] = useState(false);
   const [proposedMemory, setProposedMemory] = useState<PrinterMemory | null>(null);
-
-  // Phase 4: carry the sections injected last turn so follow-up questions
-  // keep their grounding even when the new message names no section. Entries
-  // are bounded to the last two turns and dropped when the file leaves the
-  // selection.
-  const carriedSectionsRef = useRef<Array<{ filename: string; headers: string[]; turn: number }>>([]);
-  const chatTurnRef = useRef(0);
 
   // ── Settings Editing State (single source of truth) ─────────────
   const [editApiKey, setEditApiKey] = useState(settings.apiKey);
@@ -426,21 +390,16 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           toolProtocol: editToolProtocol,
         };
 
-        // Build context messages
-        const contextMessages: Array<{ role: 'system'; content: string }> = [];
-        const mentionedConfigFiles = extractMentionedConfigFilenames([userMsg.content], loadedConfigFilenames);
         // EXPERIMENT (auto-attach off): mentioned files are NOT auto-injected.
-        // The targeting instructions below still name them so the model can
-        // fetch content itself via read_user_config. Only files the user
-        // explicitly checks in "Include Files" are sent as context.
+        // Only files the user explicitly checks in "Include Files" are sent
+        // as context.
         const contextTargets = Array.from(new Set(selectedConfigContextFiles));
 
         // Phase 4: collect the candidate files (checked in "Include Files" +
         // manually attached) with their content and labels. Content is sent
-        // to the backend as contextFiles so ITS config-grounding fallback can
-        // inject the exact loaded content if the model answers without
-        // calling any tool — but nothing is dumped into the prompt up front
-        // beyond what the intent path below decides.
+        // to the backend as contextFiles for the edit session's working state
+        // — nothing is dumped into the prompt; the model fetches via
+        // read_user_config.
         const candidateFiles = new Map<string, { text: string; label: string }>();
         for (const filename of contextTargets) {
           const fileText = await getConfigText(filename);
@@ -452,96 +411,20 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           candidateFiles.set(file.name, { text: file.content, label: 'User-attached local Klipper config file' });
         }
 
-        // Phase 4/5 lean-context injection (targeted sections + section
-        // index) is part of the handholding workflow — GATED OFF by default;
-        // the model discovers config content via its MCP tools (validated by
-        // the harness). Re-enable with VITE_KWC_HANDHOLDING=1.
-        if (HANDHOLDING_ENABLED) {
-          // Phase 4 carry-over: resolve the sections this message targets for
-          // each candidate file. Targeted sections replace any carried set;
-          // files with no new target keep the previous turn's sections so
-          // follow-up questions stay grounded. Carried entries are bounded to
-          // the last two turns and dropped when the file leaves the selection.
-          chatTurnRef.current += 1;
-          const currentTurn = chatTurnRef.current;
-          const usedSections = new Map<string, string[]>();
-          const nextCarried: Array<{ filename: string; headers: string[]; turn: number }> = [];
-          for (const [filename, candidate] of candidateFiles) {
-            const targetedHeaders = extractTargetedSectionHeaders(userMsg.content, candidate.text);
-            if (targetedHeaders.length > 0) {
-              usedSections.set(filename, targetedHeaders);
-              nextCarried.push({ filename, headers: targetedHeaders, turn: currentTurn });
-              continue;
-            }
-            const recent = [...carriedSectionsRef.current]
-              .filter((entry) => entry.filename === filename && currentTurn - entry.turn <= 2)
-              .sort((a, b) => b.turn - a.turn)[0];
-            if (recent) {
-              usedSections.set(filename, recent.headers);
-              nextCarried.push({ filename, headers: recent.headers, turn: currentTurn });
-            }
-          }
-          carriedSectionsRef.current = nextCarried;
-
-          // Inject the lean context this request actually needs.
-          // Phase 5: always lean — targeted sections when resolved, otherwise a
-          // compact section index. Never dump the whole file as a system message;
-          // the model fetches the sections it needs via read_user_config.
-          const appendFileContext = (filename: string, candidate: { text: string; label: string }) => {
-            const headers = usedSections.get(filename);
-            if (headers && headers.length > 0) {
-              for (const header of headers) {
-                const sectionText = extractSectionText(candidate.text, header);
-                if (sectionText != null) {
-                  contextMessages.push({
-                    role: 'system',
-                    content: buildSectionContextMessage(filename, candidate.label, header, sectionText),
-                  });
-                }
-              }
-              return;
-            }
-            contextMessages.push({
-              role: 'system',
-              content: buildConfigIndexMessage(filename, findSectionHeaders(candidate.text), candidate.label),
-            });
-          };
-
-          for (const [filename, candidate] of candidateFiles) {
-            appendFileContext(filename, candidate);
-          }
-        }
-
-        // File targeting instructions — the handholding reinforcement.
-        // Part of the handholding workflow, GATED OFF by default: the backend
-        // SYSTEM_PROMPT carries the edit law and intent detection was removed
-        // — the model decides whether a message is an edit or a question
-        // (harness AMBI-01..08 all pass without any frontend classifier).
-        // Tool-worded since the Phase-4 ratchet (2026-09-22): edits go through
-        // config_edit/config_write (file = tool argument), never fenced prose.
-        if (HANDHOLDING_ENABLED) {
-          if (mentionedConfigFiles.length > 0) {
-            contextMessages.push({
-              role: 'system',
-              content: `Apply requested edits to these loaded files: ${mentionedConfigFiles.join(', ')}. Pass each target file as the 'file' argument of config_edit/config_write (one op per file).`,
-            });
-          } else if (activeFile) {
-            contextMessages.push({
-              role: 'system',
-              content: `Unless the user names a different file, apply edits to ${activeFile} via the config_edit/config_write tools.`,
-            });
-          }
-        }
-
-        // Context files sent to the backend for its config-grounding fallback
-        // (content never lands in the prompt here — the model must fetch).
+        // Context files sent to the backend for the edit session / approval
+        // re-validation (content never lands in the prompt here — the model
+        // must fetch).
         const contextFilesPayload: Record<string, { content: string; label: string }> = {};
         for (const [filename, candidate] of candidateFiles) {
           contextFilesPayload[filename] = { content: candidate.text, label: candidate.label };
         }
 
+        // Phase-5 gate sweep (2026-09): no frontend-injected system messages
+        // remain — the handholding injections (regex-targeted sections +
+        // file-targeting reinforcement, VITE_KWC_HANDHOLDING) were deleted;
+        // the model discovers config content and its edit target through its
+        // MCP tools plus the backend SYSTEM_PROMPT edit law.
         const requestConversation: Array<{ role: AiChatRole; content: string }> = [
-          ...contextMessages,
           ...newMessages.map((m) => ({ role: m.role, content: m.content })),
         ];
         const validationConversation = [...newMessages];
