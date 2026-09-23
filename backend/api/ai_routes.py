@@ -893,8 +893,11 @@ _LOAD_SKILL_NUDGE_TEXT = (
 
 
 def _edit_skill_gate_enabled() -> bool:
-    """Gate defaults OFF: the flag-OFF path stays byte-identical."""
-    return os.environ.get(EDIT_SKILL_GATE_ENV, "0").strip().lower() in (
+    """Gate defaults ON (Phase-5 A/B, 2026-09-23: full-bank gate-ON leg
+    matched gate-OFF at 91/94 with verified 5/5 activation and equal-or-
+    better edit families; env =0 opts back out to always-on write tools).
+    """
+    return os.environ.get(EDIT_SKILL_GATE_ENV, "1").strip().lower() in (
         "1", "true", "yes", "on")
 
 

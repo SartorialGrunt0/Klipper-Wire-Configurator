@@ -106,6 +106,7 @@ def _install(monkeypatch, replies):
 @pytest.fixture()
 def edit_flag(monkeypatch):
     monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
+    monkeypatch.setenv('KWC_EDIT_SKILL_GATE', '0')  # gate default ON since Phase-5 A/B; these tests script direct write-tool use
 
 
 SET_ACCEL = {'file': 'printer.cfg', 'op': 'set_param',

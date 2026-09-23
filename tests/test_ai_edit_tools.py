@@ -98,6 +98,7 @@ def _final_reply(text='Done — I adjusted the config.'):
 @pytest.fixture()
 def edit_flag(monkeypatch):
     monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
+    monkeypatch.setenv('KWC_EDIT_SKILL_GATE', '0')  # gate default ON since Phase-5 A/B; these tests script direct write-tool use
 
 
 class _ScriptedClient:
@@ -416,6 +417,7 @@ def test_flag_on_without_context_files_and_empty_mirror_no_session(monkeypatch):
     # No contextFiles AND no mirror content (nothing on disk to seed
     # from): session stays unarmed, edit tools stay unadvertised.
     monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
+    monkeypatch.setenv('KWC_EDIT_SKILL_GATE', '0')  # gate default ON since Phase-5 A/B; these tests script direct write-tool use
     monkeypatch.setattr(ai_routes, '_mirror_user_config_files', lambda: {})
     scripted = _install(monkeypatch, [
         _final_reply('no files loaded'),
@@ -436,6 +438,7 @@ def test_flag_on_without_context_files_seeds_from_mirror(monkeypatch):
     # request silently loses the whole write path (model correctly falls
     # back to prose when it has no tools).
     monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
+    monkeypatch.setenv('KWC_EDIT_SKILL_GATE', '0')  # gate default ON since Phase-5 A/B; these tests script direct write-tool use
     mirror = {'printer.cfg': {'content': '[printer]\nmax_accel: 3000\n'}}
     monkeypatch.setattr(ai_routes, '_mirror_user_config_files', lambda: mirror)
     scripted = _install(monkeypatch, [
@@ -459,6 +462,7 @@ def test_flag_on_mirror_failure_disables_edit_tools(monkeypatch):
     # A raising mirror must not 500 the chat: edit tools disable for the
     # request and the plain chat path answers.
     monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
+    monkeypatch.setenv('KWC_EDIT_SKILL_GATE', '0')  # gate default ON since Phase-5 A/B; these tests script direct write-tool use
 
     def boom():
         raise RuntimeError('disk on fire')
@@ -498,6 +502,7 @@ def test_prose_edit_response_gets_nudged_into_tool_call(monkeypatch):
     """Edit request answered with a ```cfg block and no tool call: the
     loop must nudge (max 2) and then execute the tool the model emits."""
     monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
+    monkeypatch.setenv('KWC_EDIT_SKILL_GATE', '0')  # gate default ON since Phase-5 A/B; these tests script direct write-tool use
     scripted = [
         # 1st: prose draft, zero tool calls (the old silent path)
         '```cfg\n# file: printer.cfg\n[printer]\n-max_accel: 9000\n+max_accel: 12000\n```\n'
@@ -540,6 +545,7 @@ def test_prose_edit_response_gets_nudged_into_tool_call(monkeypatch):
 def test_qa_response_not_nudged(monkeypatch):
     """Pure Q&A (no edit verb+target) must NOT be prodded by the nudge."""
     monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
+    monkeypatch.setenv('KWC_EDIT_SKILL_GATE', '0')  # gate default ON since Phase-5 A/B; these tests script direct write-tool use
     calls = []
 
     class _Resp:
@@ -571,6 +577,7 @@ def test_read_then_prose_still_nudged(monkeypatch):
     THEN a ```cfg prose draft. The in-loop nudge must catch prose at any
     turn and drive the model to stage the change."""
     monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
+    monkeypatch.setenv('KWC_EDIT_SKILL_GATE', '0')  # gate default ON since Phase-5 A/B; these tests script direct write-tool use
     scripted = [
         # turn 1: legit read call
         'Let me read the section first.\n```tool\n{"name": "read_user_config", '
@@ -617,6 +624,7 @@ def test_commented_param_edit_stages_end_to_end(monkeypatch):
     old flow refused and produced a prose ask with no tool call, which
     read to users as 'asked for permission but never fired the edit'."""
     monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
+    monkeypatch.setenv('KWC_EDIT_SKILL_GATE', '0')  # gate default ON since Phase-5 A/B; these tests script direct write-tool use
     calls = []
     scripted = [
         # write tool attempt on a commented param -> stages now
@@ -662,6 +670,7 @@ def test_giveup_after_correctable_kickback_gets_nudged(monkeypatch):
     without retrying. Giving up on a fixable kickback must be nudged
     (unlike a user-gated commented-param refusal)."""
     monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
+    monkeypatch.setenv('KWC_EDIT_SKILL_GATE', '0')  # gate default ON since Phase-5 A/B; these tests script direct write-tool use
     calls = []
     scripted = [
         # replace_section with wrong args (text missing) -> correctable error
@@ -717,6 +726,7 @@ def test_duplicate_after_commented_param_stage_is_kicked_back(monkeypatch):
     guard: the user must ask for a different value in a new message.
     Locks the one remaining user_gated write path in the loop."""
     monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
+    monkeypatch.setenv('KWC_EDIT_SKILL_GATE', '0')  # gate default ON since Phase-5 A/B; these tests script direct write-tool use
     calls = []
     scripted = [
         # 1: set_param on the commented param -> stages
@@ -768,6 +778,7 @@ def test_confab_note_appended_when_writes_all_failed(monkeypatch):
     # truth: the reply must carry the trace-truth note, and pendingEdits
     # stays null.
     monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
+    monkeypatch.setenv('KWC_EDIT_SKILL_GATE', '0')  # gate default ON since Phase-5 A/B; these tests script direct write-tool use
     scripted = _install(monkeypatch, [
         _text_tool_call('config_edit', {'file': 'printer.cfg', 'op': 'set_param',
                                         'section': 'ghost_section', 'key': 'k',
@@ -790,6 +801,7 @@ def test_confab_note_appended_when_writes_all_failed(monkeypatch):
 def test_confab_note_absent_when_edit_staged(monkeypatch):
     # A staged edit means the cards show the truth — no note.
     monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
+    monkeypatch.setenv('KWC_EDIT_SKILL_GATE', '0')  # gate default ON since Phase-5 A/B; these tests script direct write-tool use
     _install(monkeypatch, [
         _text_tool_call('config_edit', {'file': 'printer.cfg', 'op': 'set_param',
                                         'section': 'printer', 'key': 'max_accel',
@@ -807,6 +819,7 @@ def test_confab_note_absent_when_edit_staged(monkeypatch):
 def test_confab_note_absent_for_pure_qa(monkeypatch):
     # No write attempts at all: guard must not touch Q&A replies.
     monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
+    monkeypatch.setenv('KWC_EDIT_SKILL_GATE', '0')  # gate default ON since Phase-5 A/B; these tests script direct write-tool use
     _install(monkeypatch, [_final_reply('max_accel is in the [printer] section.')])
     payload = _chat_payload([{'role': 'user',
                               'content': 'where is max_accel configured?'}])
@@ -823,6 +836,7 @@ def test_native_mode_nudge_drops_fence_law(monkeypatch):
     the internal tool calling system'). The native nudge keeps the
     argument shapes but never mentions the ```tool fence."""
     monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
+    monkeypatch.setenv('KWC_EDIT_SKILL_GATE', '0')  # gate default ON since Phase-5 A/B; these tests script direct write-tool use
     monkeypatch.setattr(ai_routes, '_mirror_user_config_files', lambda: {})
     seen = []
 
@@ -870,6 +884,7 @@ def test_text_mode_nudge_keeps_fence_law(monkeypatch):
     """toolProtocol='text' escape hatch keeps the fence-format nudge —
     text-mode models have no other way to learn the call envelope."""
     monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
+    monkeypatch.setenv('KWC_EDIT_SKILL_GATE', '0')  # gate default ON since Phase-5 A/B; these tests script direct write-tool use
     seen = []
 
     class _Resp:
