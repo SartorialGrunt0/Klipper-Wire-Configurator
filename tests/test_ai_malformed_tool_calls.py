@@ -297,6 +297,256 @@ def test_chat_proxy_malformed_reprompt_is_bounded(monkeypatch):
     assert occurrences == 1
 
 
+# ── config_edit arg shapes (Phase-5 text-protocol parity) ────────────
+# The 2eb2984 recovery fixtures covered config_write bodies and the read
+# tools; config_edit — the write tool whose patch_gcode/replace_section
+# values carry Klipper/Jinja bodies — had no extraction coverage at all.
+# Same corruption classes, different argument surface, so the parity claim
+# is asserted here rather than assumed.
+
+
+def test_extract_recovers_config_edit_python_call_form():
+    text = (
+        'Staging that now.\n\n```tool\n'
+        'config_edit(op="set_param", file="printer.cfg", section="printer", '
+        'key="max_accel", value="4000")\n```'
+    )
+    calls = ai_routes._extract_tool_calls(text)
+    assert calls == [{
+        'name': 'config_edit',
+        'arguments': {
+            'op': 'set_param', 'file': 'printer.cfg', 'section': 'printer',
+            'key': 'max_accel', 'value': '4000',
+        },
+    }]
+
+
+def test_extract_recovers_config_edit_in_generic_wrapper():
+    # llama.cpp renders call:tool{"name": X, "arguments": {...}} with the
+    # inner object as real JSON (TRIDENT-16 shape) — must survive for the
+    # write tools, not just the read tools.
+    text = (
+        '```tool\n'
+        'call:tool{"name": "config_edit", "arguments": {"op": "set_param", '
+        '"file": "printer.cfg", "section": "printer", "key": "max_velocity", '
+        '"value": "300"}}\n```'
+    )
+    calls = ai_routes._extract_tool_calls(text)
+    assert calls == [{
+        'name': 'config_edit',
+        'arguments': {
+            'op': 'set_param', 'file': 'printer.cfg', 'section': 'printer',
+            'key': 'max_velocity', 'value': '300',
+        },
+    }]
+
+
+def test_extract_recovers_config_edit_wrapper_with_bare_kwargs():
+    # Same wrapper with UNQUOTED keys inside (python-ish kwargs). The naive
+    # kwargs split stopped at the first nested brace and kept only `op`,
+    # silently dropping file/section/key/value — the op engine then kicked
+    # back on missing args and the turn was wasted. Every inner arg must
+    # survive the unwrap.
+    text = (
+        '```tool\n'
+        'call:tool{name: "config_edit", arguments: {op: "set_param", '
+        'file: "printer.cfg", section: "printer", key: "max_z_accel", '
+        'value: "400"}}\n```'
+    )
+    calls = ai_routes._extract_tool_calls(text)
+    assert len(calls) == 1, calls
+    assert calls[0]['name'] == 'config_edit'
+    assert calls[0]['arguments'] == {
+        'op': 'set_param', 'file': 'printer.cfg', 'section': 'printer',
+        'key': 'max_z_accel', 'value': '400',
+    }
+
+
+def test_extract_recovers_raw_quotes_in_config_edit_body():
+    # patch_gcode old_text/new_text carry Klipper bodies: raw double quotes
+    # (SET_LED LED="x") and raw newlines, exactly as gemma-4-12b emits them.
+    # Strings built from chr() to keep raw quote/backslash shapes out of
+    # this source file (same convention as the config_write fixture).
+    Q = chr(34)
+    B = chr(92)
+    old = ('SET_LED LED=' + Q + 'Chamber_LEDs' + Q + ' RED=1' + B + 'n'
+           + '  {% if ' + Q + 'xyz' + Q + ' not in printer.toolhead %}' + B + 'n')
+    new = ('SET_LED LED=' + Q + 'Chamber_LEDs' + Q + ' RED=0 GREEN=1' + B + 'n'
+           + '  {% if ' + Q + 'xyz' + Q + ' not in printer.toolhead %}' + B + 'n')
+    fence = (
+        '```tool' + chr(10)
+        + '{' + Q + 'name' + Q + ': ' + Q + 'config_edit' + Q + ', '
+        + Q + 'arguments' + Q + ': {' + Q + 'op' + Q + ': ' + Q + 'patch_gcode' + Q + ', '
+        + Q + 'file' + Q + ': ' + Q + 'printer.cfg' + Q + ', '
+        + Q + 'section' + Q + ': ' + Q + 'gcode_macro PRINT_START' + Q + ', '
+        + Q + 'old_text' + Q + ': ' + Q + old + Q + ', '
+        + Q + 'new_text' + Q + ': ' + Q + new + Q + '}}'
+        + chr(10) + '```'
+    )
+    calls = ai_routes._extract_tool_calls(fence)
+    assert len(calls) == 1, calls
+    args = calls[0]['arguments']
+    assert args['op'] == 'patch_gcode'
+    assert args['section'] == 'gcode_macro PRINT_START'
+    assert args['old_text'] == old.replace(B + 'n', chr(10))
+    assert args['new_text'] == new.replace(B + 'n', chr(10))
+
+
+def test_extract_completes_truncated_config_edit_body():
+    # max_tokens cuts the model off mid-body with the fence still closed:
+    # the closer-completion path must recover the partial config_edit (the
+    # delta validator still gates the partial body — fail-safe, never
+    # fabrication). Parity with test_extract_completes_truncated_write_fence.
+    Q = chr(34)
+    B = chr(92)
+    fence = (
+        '```tool' + chr(10)
+        + '{' + Q + 'name' + Q + ': ' + Q + 'config_edit' + Q + ', '
+        + Q + 'arguments' + Q + ': {' + Q + 'op' + Q + ': ' + Q + 'replace_section' + Q + ', '
+        + Q + 'file' + Q + ': ' + Q + 'printer.cfg' + Q + ', '
+        + Q + 'section' + Q + ': ' + Q + 'gcode_macro PRINT_START' + Q + ', '
+        + Q + 'text' + Q + ': ' + Q + '[gcode_macro PRINT_START]' + B + 'n gcode:'
+        + B + 'n  G28' + Q
+        + chr(10) + '```'
+    )
+    calls = ai_routes._extract_tool_calls(fence)
+    assert len(calls) == 1, calls
+    assert calls[0]['name'] == 'config_edit'
+    assert 'G28' in calls[0]['arguments']['text']
+
+
+def test_extract_recovers_config_edit_same_line_closer():
+    # qwen-class models close the fence on the JSON's last line.
+    Q = chr(34)
+    text = (
+        '```tool' + chr(10)
+        + '{' + Q + 'name' + Q + ': ' + Q + 'config_edit' + Q + ', ' + Q + 'arguments' + Q
+        + ': {' + Q + 'op' + Q + ': ' + Q + 'add_section' + Q + ', ' + Q + 'file' + Q + ': '
+        + Q + 'macros.cfg' + Q + ', ' + Q + 'section' + Q + ': ' + Q + 'gcode_macro PARK' + Q
+        + '}}```'
+    )
+    calls = ai_routes._extract_tool_calls(text)
+    assert calls == [{
+        'name': 'config_edit',
+        'arguments': {
+            'op': 'add_section', 'file': 'macros.cfg',
+            'section': 'gcode_macro PARK',
+        },
+    }]
+
+
+def test_config_edit_short_value_corruption_routes_to_reprompt():
+    # The lenient inner-quote scanner is only sound for BODY-CARRYING args
+    # (content/text/new_text/old_text), where the lookahead rule converges.
+    # A dropped quote among SHORT identifier values (section/key/file) is
+    # genuinely ambiguous: scanning it "recovered" the call with garbage
+    # args — section swallowed `printer" key: max_accel` and `key` vanished
+    # — so a corrupted set_param was executed instead of re-prompted. This
+    # is exactly the read-tool contract (see
+    # test_chat_proxy_malformed_tool_call_gets_one_format_reprompt) applied
+    # to the write tools: fail closed, one format correction, never guess.
+    Q = chr(34)
+    text = (
+        '```tool' + chr(10)
+        + '{' + Q + 'name' + Q + ': ' + Q + 'config_edit' + Q + ', ' + Q + 'arguments' + Q
+        + ': {' + Q + 'op' + Q + ': ' + Q + 'set_param' + Q + ', ' + Q + 'file' + Q + ': '
+        + Q + 'printer.cfg' + Q + ', ' + Q + 'section' + Q + ': ' + Q + 'printer' + Q
+        + ' key: max_accel' + Q + ', ' + Q + 'value' + Q + ': ' + Q + '4000' + Q + '}}'
+        + chr(10) + '```'
+    )
+    calls = ai_routes._extract_tool_calls(text)
+    assert calls == [], calls
+    assert ai_routes._malformed_tool_call_detected(text, calls)
+
+
+def test_malformed_detection_catches_json_fenced_tool_call():
+    # qwen3.5-4b, text arm, EDIT-06 (2026-09-24): the model emitted its call
+    # inside a ```json fence instead of ```tool. The extractor scans ```tool
+    # fences only, so the loop saw prose, never re-prompted, and the raw JSON
+    # went into the chat bubble — a silent lost write on the text protocol.
+    text = (
+        '```json\n{\n"name": "load_skill",\n'
+        '"arguments": {"name": "config-editing"}\n}\n```'
+    )
+    assert ai_routes._extract_tool_calls(text) == []
+    assert ai_routes._malformed_tool_call_detected(text, [])
+
+
+def test_malformed_detection_ignores_non_call_json_fences():
+    # A json fence that is not a tool call (config content, an example) must
+    # never trip the guard; and an unknown tool name fails closed — display
+    # JSON is not intent, the guard only asks for one format correction.
+    assert not ai_routes._malformed_tool_call_detected(
+        '```json\n{"max_accel": 3000, "max_velocity": 300}\n```', []
+    )
+    assert not ai_routes._malformed_tool_call_detected(
+        '```json\n{"name": "do_something_else", "arguments": {}}\n```', []
+    )
+    assert not ai_routes._malformed_tool_call_detected(
+        '```json\n{"name": "config_edit"}\n```', []
+    )
+
+
+def test_chat_proxy_json_fenced_tool_call_gets_one_format_reprompt(monkeypatch):
+    """End-to-end for the json-fence case (qwen3.5-4b text arm, EDIT-06
+    2026-09-24): a call fenced as ```json used to be invisible to the
+    extractor AND to the guard, so the loop terminated on "no tool calls"
+    and the raw JSON shipped as the assistant's reply. It must now take the
+    one format correction and then run the properly fenced call."""
+    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
+    monkeypatch.setattr(
+        ai_routes, '_execute_tool_call',
+        lambda call: f"result for {call['name']}",
+    )
+
+    calls = []
+
+    def fake_post(url, headers, payload):
+        calls.append(payload)
+        if len(calls) == 1:
+            return DummyResponse(
+                {'choices': [{'message': {'content': (
+                    '```json\n{"name": "list_user_configs", '
+                    '"arguments": {}}\n```'
+                )}}]},
+                url=url,
+            )
+        if len(calls) == 2:
+            return DummyResponse(
+                {'choices': [{'message': {'content': (
+                    '```tool\n{"name": "list_user_configs", '
+                    '"arguments": {}}\n```'
+                )}}]},
+                url=url,
+            )
+        return DummyResponse(
+            {'choices': [{'message': {'content': 'You have printer.cfg.'}}]},
+            url=url,
+        )
+
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda *a, **k: FakeAsyncClient(post_handler=fake_post))
+
+    response = client.post(
+        '/ai/chat',
+        json={
+            'messages': [{'role': 'user', 'content': 'which config files do I have?'}],
+            'apiKey': 'openai-token',
+            'model': 'qwen3.5-4b',
+            'apiUrl': 'http://localhost:1234/v1/chat/completions',
+            'apiProvider': 'chatgpt',
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body['content'] == 'You have printer.cfg.'
+    # The raw JSON must never reach the bubble, and the correction must have
+    # fired exactly once (second request carries the format feedback).
+    assert '"name": "list_user_configs"' not in body['content']
+    second_messages = [str(m.get('content', '')) for m in calls[1]['messages']]
+    assert any('could not be parsed' in m for m in second_messages)
+
+
 def test_unterminated_fence_never_reaches_the_bubble(monkeypatch):
     # A truncated stream (fence opened, never closed) must not leak markup
     # even if every recovery path fails.

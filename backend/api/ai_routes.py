@@ -1622,18 +1622,65 @@ def _unwrap_generic_tool_calls(calls: list[dict]) -> list[dict]:
     return out
 
 
+_KWARG_PAIR_RE = re.compile(r"\s*(\w+)\s*[=:]\s*(.*)$", re.DOTALL)
+_KWARG_AHEAD_RE = re.compile(r"\s*\w+\s*[=:]")
+# Body-carrying write args. The lenient inner-quote scanner below is only
+# sound for these values (Klipper/Jinja bodies are quote-heavy and its
+# lookahead rule converges there); among SHORT identifier values a dropped
+# quote is genuinely ambiguous and must route to the re-prompt instead of
+# being "recovered" into plausible-but-wrong args.
+_WRITE_BODY_ARG_RE = re.compile(r'"(?:content|text|new_text|old_text)"\s*:')
+
+
 def _parse_kwargs(args_text: str) -> dict:
-    """Parse keyword arguments from text like 'arg1=\"val1\", arg2=123, key=\"value\"'.
+    """Parse keyword arguments from text like 'arg1="val1", arg2=123, key="value"'.
 
     Handles both colon and equals separators, quoted and unquoted values.
+    Splitting is nesting- and quote-aware (Phase-5 text-protocol parity,
+    2026-09-24): a value may itself be an object — the llama.cpp wrapper
+    renders `call:tool{name: "config_edit", arguments: {op: "set_param",
+    file: "printer.cfg", ...}}` with UNQUOTED inner keys, and the old lazy
+    regex stopped at the first nested brace, keeping only the opening pair
+    and silently dropping every later argument (a write call survived with
+    `{"op": "set_param"}` while file/section/key/value vanished). A comma
+    separates arguments only at depth 0, outside quotes, and only when what
+    follows looks like `key=`/`key:`. An object wrapper around the WHOLE
+    text is unwrapped first (the inner fragment arrives braced).
     """
+    text = args_text.strip()
+    if text.startswith("{") and text.endswith("}"):
+        text = text[1:-1]
+    parts: list[str] = []
+    depth = 0
+    quote: str | None = None
+    start = 0
+    for i, ch in enumerate(text):
+        if quote is not None:
+            if ch == quote:
+                quote = None
+            continue
+        if ch in "\"'":
+            quote = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth = max(0, depth - 1)
+        elif ch == "," and depth == 0 and _KWARG_AHEAD_RE.match(text, i + 1):
+            parts.append(text[start:i])
+            start = i + 1
+    parts.append(text[start:])
     arguments: dict = {}
-    for arg_match in re.finditer(
-        r"(\w+)\s*[=:]\s*(.+?)(?:,\s*(?=\w+\s*[=:])|$)",
-        args_text,
-    ):
+    for part in parts:
+        arg_match = _KWARG_PAIR_RE.match(part)
+        if not arg_match:
+            continue
         arg_name = arg_match.group(1)
-        arg_value = arg_match.group(2).strip().strip('"').strip("'")
+        arg_value = arg_match.group(2).strip()
+        # Strip ONE matched surrounding quote pair. The old .strip('"\'')
+        # also ate quotes that belonged to the value itself.
+        if len(arg_value) >= 2 and arg_value[0] == arg_value[-1] \
+                and arg_value[0] in "\"'":
+            arg_value = arg_value[1:-1]
         arguments[arg_name] = arg_value
     return arguments
 
@@ -1804,13 +1851,19 @@ def _recover_fenced_tool_call(raw_json: str) -> dict | None:
             if isinstance(name, str) and name and isinstance(arguments, dict):
                 return {"name": name, "arguments": arguments}
     # 5) Unescaped double quotes inside string VALUES (macro bodies).
-    # Gated to the write tools: only config_write/config_edit carry file
-    # bodies full of quotes, where the lookahead rule converges. For short
-    # identifier values (read_user_config etc.), unescaped quotes are
-    # genuinely ambiguous and MUST route to the re-prompt instead of
-    # executing corrupted args (locked by
-    # test_chat_proxy_malformed_tool_call_gets_one_format_reprompt).
-    if re.search(r"\"name\"\s*:\s*\"(?:config_write|config_edit)\"", normalized):
+    # Gated to the write tools AND to a body-carrying argument: only
+    # config_write/config_edit carry file bodies full of quotes, where the
+    # lookahead rule converges. For short identifier values (read_user_config
+    # etc., and write calls whose only args are op/file/section/key/value),
+    # unescaped quotes are genuinely ambiguous and MUST route to the
+    # re-prompt instead of executing corrupted args (locked by
+    # test_chat_proxy_malformed_tool_call_gets_one_format_reprompt for reads
+    # and test_config_edit_short_value_corruption_routes_to_reprompt for
+    # writes — the scanner used to run on ANY config_edit fence and
+    # "recovered" a corrupted set_param with the section swallowing
+    # `printer" key: max_accel`, Phase-5 parity probe 2026-09-24).
+    if re.search(r'"name"\s*:\s*"(?:config_write|config_edit)"', normalized) \
+            and _WRITE_BODY_ARG_RE.search(normalized):
         escaped = _escape_inner_quotes_json(normalized)
     else:
         escaped = None
@@ -1827,6 +1880,61 @@ def _recover_fenced_tool_call(raw_json: str) -> dict | None:
     return None
 
 
+def _known_tool_names() -> set[str]:
+    """Every tool name the chat loop can dispatch.
+
+    MCP server tools plus the chat-layer extras: the write tools, `load_skill`
+    (only behind the edit-skill gate) and `list_hardware`. Three copies of this
+    set used to live inline (extractor, generic-wrapper unwrap, loop) — they are
+    ONE surface, so keep them from drifting.
+    """
+    known = {t["name"] for t in _mcp_server._list_tools()} | set(EDIT_TOOL_NAMES)
+    if _edit_skill_gate_enabled():
+        known.add(LOAD_SKILL_SPEC["name"])
+    known.add(LIST_HARDWARE_SPEC["name"])
+    return known
+
+
+# A ```json-fenced block (models use json/json5/javascript labels) whose body
+# is a bare tool call. The ```tool extractor cannot see these, so without the
+# malformed guard the loop reads the reply as prose and ships the raw JSON
+# into the chat bubble (qwen3.5-4b text arm, EDIT-06, 2026-09-24).
+_JSON_FENCE_RE = re.compile(
+    r"```(?:json|jsonc|json5|javascript|js)[ \t]*\n(.*?)```", re.DOTALL
+)
+
+
+def _json_fence_tool_call(text: str) -> bool:
+    """True when a ```json fence IS a tool call, not display JSON.
+
+    Literal shape only, fail-closed: the fence body must parse as ONE object
+    carrying a `name` that is a KNOWN tool plus an `arguments` object. Unknown
+    names, config content, and JSON examples in prose are never treated as
+    intent — the guard only asks for one format correction (it never executes
+    the fenced call; execution stays a ```tool-fence privilege).
+    """
+    known: set[str] | None = None
+    for match in _JSON_FENCE_RE.finditer(text):
+        try:
+            obj = json.loads(match.group(1).strip(), strict=False)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(obj, dict):
+            continue
+        name = obj.get("name")
+        # `arguments` must be PRESENT and an object: a bare {"name": …} is a
+        # fragment (often a prose example), not a call shape.
+        if "arguments" not in obj or not isinstance(obj.get("arguments"), dict):
+            continue
+        if not isinstance(name, str):
+            continue
+        if known is None:
+            known = _known_tool_names()
+        if name.strip() in known:
+            return True
+    return False
+
+
 def _malformed_tool_call_detected(text: str, calls: list[dict]) -> bool:
     """True when the reply contains tool-call intent that failed to parse.
 
@@ -1837,6 +1945,8 @@ def _malformed_tool_call_detected(text: str, calls: list[dict]) -> bool:
     """
     if calls:
         return False
+    if _json_fence_tool_call(text):
+        return True
     for fence in MCP_TOOL_BLOCK_RE.finditer(text):
         body = fence.group(1)
         if re.search(r"\bname\b|\bcall\b|\w+\s*[({]", body):
