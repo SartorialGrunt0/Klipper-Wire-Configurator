@@ -450,6 +450,97 @@ def _get_active_project_files(configs: dict[str, ConfigFile]) -> set[str]:
     return active_files
 
 
+def _check_include_cycles(
+    configs: dict[str, ConfigFile],
+    active_files: set[str],
+) -> list[tuple[str, ValidationError]]:
+    """Find circular [include] graphs across the loaded project.
+
+    Klipper loads includes recursively with NO visited-set guard
+    (configfile.py resolves [include] by simply reading the target into the
+    same parser), so a cycle never terminates and the printer cannot start.
+    KWC refused only a file including ITSELF, at the AI op layer — the
+    two-file cycle (A -> B -> A) staged clean through the write path and was
+    invisible to the save gate (live text-protocol trace + REPL repro,
+    Phase-5 parity sweep 2026-09-24).
+
+    Edges are non-commented, non-glob include sections whose target resolves
+    to a loaded file, using the same resolution `_get_active_project_files`
+    uses, so the walk mirrors what Klipper would actually load. Globs are
+    skipped exactly as in the missing-include pass. One error per cycle,
+    anchored on the file + line that closes it.
+    """
+    basename_map = {_basename(name): name for name in configs}
+    # src -> [(dst, line_number, full_header, spec)]
+    edges: dict[str, list[tuple[str, int, str, str]]] = {}
+    for filename, config in configs.items():
+        if filename not in active_files:
+            continue
+        for section in config.sections:
+            if section.section_type != "include" or section.is_commented_out:
+                continue
+            spec = section.section_name.strip()
+            if not spec or glob.has_magic(spec):
+                continue
+            target = spec if spec in configs else basename_map.get(_basename(spec))
+            if target is None:
+                continue
+            edges.setdefault(filename, []).append(
+                (target, section.line_number, section.full_header, spec))
+
+    findings: list[tuple[str, ValidationError]] = []
+    reported_cycles: set[frozenset[str]] = set()
+    reported_edges: set[tuple[str, int]] = set()
+
+    def _emit_cycle(chain: list[str], loop: list[str]) -> None:
+        """Report the loop on EVERY include line that takes part in it.
+
+        Each of those lines is a real defect and removing any one of them
+        breaks the cycle, so anchoring only on the walk's back-edge would
+        hide the other fixable lines — and would make the file that gets
+        the finding depend on walk order. Self-includes (a one-file loop)
+        are emitted per-file by validate_config instead, so they are
+        skipped here to avoid reporting them twice.
+        """
+        key = frozenset(loop)
+        if len(loop) < 2 or key in reported_cycles:
+            return
+        reported_cycles.add(key)
+        message = (
+            "Circular include: " + " -> ".join(chain) + ". Klipper loads "
+            "includes recursively, so this loop never terminates and the "
+            "printer will fail to start — remove one of these [include] "
+            "lines."
+        )
+        for src, dst in zip(chain, chain[1:]):
+            edge = next((e for e in edges.get(src, []) if e[0] == dst), None)
+            if edge is None or (src, edge[1]) in reported_edges:
+                continue
+            _dst, line, header, _spec = edge
+            reported_edges.add((src, line))
+            findings.append((src, ValidationError(
+                severity="error",
+                section=header,
+                param="",
+                message=message,
+                line_number=line,
+                code="include_cycle",
+            )))
+
+    def _walk(node: str, path: list[str], on_path: set[str]) -> None:
+        for target, _line, _header, _spec in edges.get(node, []):
+            if target in on_path:
+                loop = path[path.index(target):]
+                _emit_cycle(loop + [target], loop)
+                continue
+            _walk(target, path + [target], on_path | {target})
+
+    for filename in sorted(active_files):
+        _walk(filename, [filename], {filename})
+
+    return findings
+
+
 def _project_duplicate_message(sec_type: str, other_files: list[str]) -> str:
     # Cross-file duplication of a singleton section is INFO: Klipper merges
     # duplicate sections (RawConfigParser(strict=False), later file wins) and
@@ -761,6 +852,40 @@ def _suppress_acknowledged_warning_identities(
     ]
 
 
+def _include_self_reference(config: ConfigFile) -> ValidationError | None:
+    """Finding for a file whose [include] names itself (None when clean).
+
+    Klipper resolves includes recursively with no visited-set guard, so a
+    self-include never terminates and the printer cannot start. Cross-file
+    loops need the project pass (`_check_include_cycles`); a self-include is
+    visible from ONE file, so it is caught here — and therefore on every
+    validation path, including single-file editor validation.
+    """
+    own = _basename(config.filename)
+    if not own:
+        return None
+    for section in config.sections:
+        if section.section_type != "include" or section.is_commented_out:
+            continue
+        spec = section.section_name.strip()
+        if not spec or glob.has_magic(spec):
+            continue
+        if _basename(spec) == own:
+            return ValidationError(
+                severity="error",
+                section=section.full_header,
+                param="",
+                message=(
+                    f"[include {spec}] makes {own} include itself — Klipper "
+                    "loads includes recursively, so this file can never "
+                    "finish loading. Remove that include line."
+                ),
+                line_number=section.line_number,
+                code="include_cycle",
+            )
+    return None
+
+
 def validate_config(config: ConfigFile, *, gcode_registry: bool = True) -> ValidationResult:
     """Validate a full configuration file.
 
@@ -791,6 +916,14 @@ def validate_config(config: ConfigFile, *, gcode_registry: bool = True) -> Valid
             line_number=line_number,
             code="unclosed_section_header",
         ))
+
+    # A file that includes itself: same recursive-load failure as a
+    # multi-file cycle, but visible from one file — so it is checked here
+    # and shows on every validation path (the cross-file walk in
+    # validate_project_configs skips one-file loops to avoid duplicates).
+    self_reference = _include_self_reference(config)
+    if self_reference is not None:
+        result.errors.append(self_reference)
 
     section_counts: dict[str, int] = {}
     used_pins: dict[str, list[PinUse]] = {}
@@ -1397,6 +1530,18 @@ def validate_project_configs(configs: dict[str, ConfigFile], *,
                     line_number=section.line_number,
                     code="missing_include",
                 ))
+
+    # Circular includes: Klipper resolves [include] recursively with no
+    # visited-set guard, so A -> B -> A never terminates and the printer
+    # fails to start. KWC refused only SELF-includes at the op layer, and
+    # nothing caught the two-file cycle: it staged clean through the AI
+    # write path and the save gate stayed silent (live trace + REPL repro,
+    # Phase-5 parity sweep 2026-09-24). Deterministic graph walk over the
+    # loaded project; the finding is anchored on the file+line holding the
+    # edge that closes the cycle, and names the whole loop so the fix is
+    # obvious. Globs are skipped, exactly as in the missing-include pass.
+    for filename, finding in _check_include_cycles(configs, active_files):
+        results[filename].errors.append(finding)
 
     # Cross-file pin conflicts (F8): a pin shared by sections in different
     # project files is the same conflict as within one file — Klipper loads
