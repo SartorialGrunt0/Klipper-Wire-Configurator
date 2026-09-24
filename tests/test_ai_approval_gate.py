@@ -104,8 +104,12 @@ def _install(monkeypatch, replies):
 
 @pytest.fixture()
 def edit_flag(monkeypatch):
-    monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
-    monkeypatch.setenv('KWC_EDIT_SKILL_GATE', '0')  # gate default ON since Phase-5 A/B; these tests script direct write-tool use
+    """No-op since the Phase-6 flag removal (2026-09-24): the write tools
+    are product behavior; each payload below carries editSkill=True
+    because these tests script write calls directly (the product gate
+    itself has its own E2E coverage in test_ai_edit_tools.py gate-flow
+    tests)."""
+    monkeypatch.delenv('KWC_EDIT_WRITE_CAP', raising=False)
 
 
 SET_ACCEL = {'file': 'printer.cfg', 'op': 'set_param',
@@ -149,7 +153,7 @@ def test_validated_write_suspends_and_approve_commits(edit_flag, monkeypatch):
         'messages': [{'role': 'user', 'content': 'set max_accel to 3000'}],
         'apiKey': 'k', 'model': 'm',
         'apiUrl': 'https://api.example.com/v1/chat/completions',
-        'apiProvider': 'chatgpt', 'contextFiles': _ctx(),
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(), 'editSkill': True,
         'requestId': 'gate-approve-1', 'autoApproveEdits': False,
     }
     t, result = _post_chat_bg(payload)
@@ -185,7 +189,7 @@ def test_decline_reverts_and_model_gets_honest_result(edit_flag, monkeypatch):
         'messages': [{'role': 'user', 'content': 'set max_accel to 3000'}],
         'apiKey': 'k', 'model': 'm',
         'apiUrl': 'https://api.example.com/v1/chat/completions',
-        'apiProvider': 'chatgpt', 'contextFiles': _ctx(),
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(), 'editSkill': True,
         'requestId': 'gate-decline-1', 'autoApproveEdits': False,
     }
     t, result = _post_chat_bg(payload)
@@ -214,7 +218,7 @@ def test_no_card_for_invalid_call(edit_flag, monkeypatch):
         'messages': [{'role': 'user', 'content': 'set x in [ghost]'}],
         'apiKey': 'k', 'model': 'm',
         'apiUrl': 'https://api.example.com/v1/chat/completions',
-        'apiProvider': 'chatgpt', 'contextFiles': _ctx(),
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(), 'editSkill': True,
         'requestId': 'gate-invalid-1', 'autoApproveEdits': False,
     }
     resp = client.post('/ai/chat', json=payload, timeout=30)
@@ -234,7 +238,7 @@ def test_double_decision_rejected(edit_flag, monkeypatch):
         'messages': [{'role': 'user', 'content': 'set max_accel'}],
         'apiKey': 'k', 'model': 'm',
         'apiUrl': 'https://api.example.com/v1/chat/completions',
-        'apiProvider': 'chatgpt', 'contextFiles': _ctx(),
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(), 'editSkill': True,
         'requestId': 'gate-double-1', 'autoApproveEdits': False,
     }
     t, result = _post_chat_bg(payload)
@@ -267,7 +271,7 @@ def test_manual_edit_during_pending_invalidates_anchor(edit_flag, monkeypatch):
         'messages': [{'role': 'user', 'content': 'raise PARK to Z10'}],
         'apiKey': 'k', 'model': 'm',
         'apiUrl': 'https://api.example.com/v1/chat/completions',
-        'apiProvider': 'chatgpt', 'contextFiles': _ctx(),
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(), 'editSkill': True,
         'requestId': 'gate-stale-1', 'autoApproveEdits': False,
     }
     t, result = _post_chat_bg(payload)
@@ -307,7 +311,7 @@ def test_manual_edit_clean_reapply(edit_flag, monkeypatch):
         'messages': [{'role': 'user', 'content': 'set max_accel to 3000'}],
         'apiKey': 'k', 'model': 'm',
         'apiUrl': 'https://api.example.com/v1/chat/completions',
-        'apiProvider': 'chatgpt', 'contextFiles': _ctx(),
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(), 'editSkill': True,
         'requestId': 'gate-merge-1', 'autoApproveEdits': False,
     }
     t, result = _post_chat_bg(payload)
@@ -335,7 +339,7 @@ def test_timeout_auto_declines(edit_flag, monkeypatch):
         'messages': [{'role': 'user', 'content': 'set max_accel'}],
         'apiKey': 'k', 'model': 'm',
         'apiUrl': 'https://api.example.com/v1/chat/completions',
-        'apiProvider': 'chatgpt', 'contextFiles': _ctx(),
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(), 'editSkill': True,
         'requestId': 'gate-timeout-1', 'autoApproveEdits': False,
     }
     resp = client.post('/ai/chat', json=payload, timeout=30)
@@ -361,7 +365,7 @@ def test_multi_call_serializes_cards(edit_flag, monkeypatch):
         'messages': [{'role': 'user', 'content': 'accel 3000, velocity 300'}],
         'apiKey': 'k', 'model': 'm',
         'apiUrl': 'https://api.example.com/v1/chat/completions',
-        'apiProvider': 'chatgpt', 'contextFiles': _ctx(),
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(), 'editSkill': True,
         'requestId': 'gate-multi-1', 'autoApproveEdits': False,
     }
     t, result = _post_chat_bg(payload)
@@ -400,7 +404,7 @@ def test_auto_approve_skips_wait_but_not_validation(edit_flag, monkeypatch):
         'messages': [{'role': 'user', 'content': 'set x in [ghost]'}],
         'apiKey': 'k', 'model': 'm',
         'apiUrl': 'https://api.example.com/v1/chat/completions',
-        'apiProvider': 'chatgpt', 'contextFiles': _ctx(),
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(), 'editSkill': True,
         'requestId': 'gate-auto-1', 'autoApproveEdits': True,
     }
     resp = client.post('/ai/chat', json=payload, timeout=30)
@@ -443,7 +447,7 @@ def test_duplicate_target_never_opens_second_card(edit_flag, monkeypatch):
         'messages': [{'role': 'user', 'content': 'set max_accel to 3200'}],
         'apiKey': 'k', 'model': 'm',
         'apiUrl': 'https://api.example.com/v1/chat/completions',
-        'apiProvider': 'chatgpt', 'contextFiles': _ctx(),
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(), 'editSkill': True,
         'requestId': 'gate-dupe-1', 'autoApproveEdits': False,
     }
     t, result = _post_chat_bg(payload)
@@ -482,7 +486,7 @@ def test_decline_shields_cfg_block_nudge(edit_flag, monkeypatch):
         'messages': [{'role': 'user', 'content': 'set max_accel to 3000'}],
         'apiKey': 'k', 'model': 'm',
         'apiUrl': 'https://api.example.com/v1/chat/completions',
-        'apiProvider': 'chatgpt', 'contextFiles': _ctx(),
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(), 'editSkill': True,
         'requestId': 'gate-shield-1', 'autoApproveEdits': False,
     }
     t, result = _post_chat_bg(payload)
@@ -516,7 +520,7 @@ def test_approve_then_cfg_echo_not_nudged(edit_flag, monkeypatch):
         'messages': [{'role': 'user', 'content': 'set max_accel to 3000'}],
         'apiKey': 'k', 'model': 'm',
         'apiUrl': 'https://api.example.com/v1/chat/completions',
-        'apiProvider': 'chatgpt', 'contextFiles': _ctx(),
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(), 'editSkill': True,
         'requestId': 'gate-echo-1', 'autoApproveEdits': False,
     }
     t, result = _post_chat_bg(payload)
@@ -555,7 +559,7 @@ def test_multipart_giveup_after_staged_first_half_still_nudged(edit_flag, monkey
                       'content': 'set max_accel to 3000 and fan cycle_time to 0.02'}],
         'apiKey': 'k', 'model': 'm',
         'apiUrl': 'https://api.example.com/v1/chat/completions',
-        'apiProvider': 'chatgpt', 'contextFiles': ctx,
+        'apiProvider': 'chatgpt', 'contextFiles': ctx, 'editSkill': True,
         'requestId': 'gate-echo-2', 'autoApproveEdits': False,
     }
     t, result = _post_chat_bg(payload)
@@ -592,7 +596,7 @@ def test_decline_result_wording_and_user_gated_note(edit_flag, monkeypatch):
         'messages': [{'role': 'user', 'content': 'set max_accel to 3000'}],
         'apiKey': 'k', 'model': 'm',
         'apiUrl': 'https://api.example.com/v1/chat/completions',
-        'apiProvider': 'chatgpt', 'contextFiles': _ctx(),
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(), 'editSkill': True,
         'requestId': 'gate-wording-1', 'autoApproveEdits': False,
     }
     t, result = _post_chat_bg(payload)

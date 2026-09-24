@@ -700,12 +700,11 @@ def test_chat_proxy_cloud_openai_compatible_requires_api_key():
 
 
 def test_chat_proxy_local_openai_compatible_allows_missing_key(monkeypatch):
-    # Phase-4 ratchet: KWC_EDIT_TOOLS defaults ON, and a request without
+    # Write tools are product behavior (Phase-6), and a request without
     # contextFiles mirror-seeds an edit session (TRIDENT-16), which makes
     # `editAttempts` 0 instead of None and couples the assertion to the
     # host's user-config dir. This test covers the plain Q&A / backstop
-    # path, so pin the read-only arm explicitly.
-    monkeypatch.setenv('KWC_EDIT_TOOLS', '0')
+    # path, so pin the read-only arm explicitly via editTools=False.
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
 
     captured = {}
@@ -728,6 +727,7 @@ def test_chat_proxy_local_openai_compatible_allows_missing_key(monkeypatch):
             'model': 'gemma-4-12b',
             'apiUrl': 'http://192.168.1.133:8080/v1/chat/completions',
             'apiProvider': 'openai-compatible',
+            'editTools': False,
         },
     )
 
@@ -826,12 +826,11 @@ def test_chat_proxy_local_default_tool_protocol_sends_tools(monkeypatch):
 
 
 def test_chat_proxy_returns_plain_content(monkeypatch):
-    # Phase-4 ratchet: KWC_EDIT_TOOLS defaults ON, and a request without
+    # Write tools are product behavior (Phase-6), and a request without
     # contextFiles mirror-seeds an edit session (TRIDENT-16), which makes
     # `editAttempts` 0 instead of None and couples the assertion to the
     # host's user-config dir. This test covers the plain Q&A / backstop
-    # path, so pin the read-only arm explicitly.
-    monkeypatch.setenv('KWC_EDIT_TOOLS', '0')
+    # path, so pin the read-only arm explicitly via editTools=False.
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
 
     def fake_post(url, headers, payload):
@@ -850,6 +849,7 @@ def test_chat_proxy_returns_plain_content(monkeypatch):
             'model': 'gpt-4o',
             'apiUrl': 'https://api.openai.com/v1/chat/completions',
             'apiProvider': 'chatgpt',
+            'editTools': False,
         },
     )
 
@@ -1140,12 +1140,11 @@ def test_chat_proxy_empty_reprompt_executes_xml_calls(monkeypatch):
 
 
 def test_chat_proxy_empty_response_reprompt_recovers(monkeypatch):
-    # Phase-4 ratchet: KWC_EDIT_TOOLS defaults ON, and a request without
+    # Write tools are product behavior (Phase-6), and a request without
     # contextFiles mirror-seeds an edit session (TRIDENT-16), which makes
     # `editAttempts` 0 instead of None and couples the assertion to the
     # host's user-config dir. This test covers the plain Q&A / backstop
-    # path, so pin the read-only arm explicitly.
-    monkeypatch.setenv('KWC_EDIT_TOOLS', '0')
+    # path, so pin the read-only arm explicitly via editTools=False.
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
     monkeypatch.setattr(
         ai_routes, '_execute_tool_call',
@@ -1190,6 +1189,10 @@ def test_chat_proxy_empty_response_reprompt_recovers(monkeypatch):
             'model': 'gpt-4o',
             'apiUrl': 'https://api.openai.com/v1/chat/completions',
             'apiProvider': 'chatgpt',
+            # Read-only arm: these tests pin the read-only loop cap
+            # (MAX_MCP_TOOL_TURNS) and the host's user-config mirror
+            # must not arm an edit session under them.
+            'editTools': False,
         },
     )
 
@@ -1210,12 +1213,11 @@ def test_chat_proxy_empty_response_reprompt_recovers(monkeypatch):
 
 
 def test_chat_proxy_empty_response_reprompt_exhausts(monkeypatch):
-    # Phase-4 ratchet: KWC_EDIT_TOOLS defaults ON, and a request without
+    # Write tools are product behavior (Phase-6), and a request without
     # contextFiles mirror-seeds an edit session (TRIDENT-16), which makes
     # `editAttempts` 0 instead of None and couples the assertion to the
     # host's user-config dir. This test covers the plain Q&A / backstop
-    # path, so pin the read-only arm explicitly.
-    monkeypatch.setenv('KWC_EDIT_TOOLS', '0')
+    # path, so pin the read-only arm explicitly via editTools=False.
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
     monkeypatch.setattr(
         ai_routes, '_execute_tool_call',
@@ -1251,6 +1253,10 @@ def test_chat_proxy_empty_response_reprompt_exhausts(monkeypatch):
             'model': 'gpt-4o',
             'apiUrl': 'https://api.openai.com/v1/chat/completions',
             'apiProvider': 'chatgpt',
+            # Read-only arm: these tests pin the read-only loop cap
+            # (MAX_MCP_TOOL_TURNS) and the host's user-config mirror
+            # must not arm an edit session under them.
+            'editTools': False,
         },
     )
 
@@ -1279,7 +1285,6 @@ def test_chat_proxy_repeat_read_blocked_without_reexecution(monkeypatch):
     """An identical (name, args) read executes ONCE; the second call gets
     REPEAT_READ_FEEDBACK with no tool execution and a trivial payload,
     and a changed-args call still executes normally."""
-    monkeypatch.setenv('KWC_EDIT_TOOLS', '0')
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
     executed = []
 
@@ -1338,7 +1343,6 @@ def test_chat_proxy_repeat_guard_does_not_touch_unlisted_tools(monkeypatch):
     """Guard scope is literal and allow-listed: get_klippy_status (live
     state, not idempotent) is NOT in REPEAT_GUARD_TOOLS — identical
     repeats keep executing."""
-    monkeypatch.setenv('KWC_EDIT_TOOLS', '0')
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
     executed = []
 
@@ -1420,6 +1424,10 @@ def test_chat_proxy_provider_empty_recovers_via_backstop(monkeypatch):
             'model': 'gpt-4o',
             'apiUrl': 'https://api.openai.com/v1/chat/completions',
             'apiProvider': 'chatgpt',
+            # Read-only arm: these tests pin the read-only loop cap
+            # (MAX_MCP_TOOL_TURNS) and the host's user-config mirror
+            # must not arm an edit session under them.
+            'editTools': False,
         },
     )
 
@@ -1439,12 +1447,11 @@ def test_chat_proxy_provider_empty_recovers_via_backstop(monkeypatch):
 
 
 def test_chat_proxy_local_reprompt_bumps_max_tokens(monkeypatch):
-    # Phase-4 ratchet: KWC_EDIT_TOOLS defaults ON, and a request without
+    # Write tools are product behavior (Phase-6), and a request without
     # contextFiles mirror-seeds an edit session (TRIDENT-16), which makes
     # `editAttempts` 0 instead of None and couples the assertion to the
     # host's user-config dir. This test covers the plain Q&A / backstop
-    # path, so pin the read-only arm explicitly.
-    monkeypatch.setenv('KWC_EDIT_TOOLS', '0')
+    # path, so pin the read-only arm explicitly via editTools=False.
     # Local reasoning builds (llama.cpp --reasoning-budget) can exhaust a low
     # max_tokens invisibly and return empty content with finish_reason=length.
     # The tool-less re-prompt must raise the budget so the answer fits.
@@ -1483,6 +1490,7 @@ def test_chat_proxy_local_reprompt_bumps_max_tokens(monkeypatch):
             'apiUrl': 'http://localhost:1234/v1/chat/completions',
             'apiProvider': 'openai-compatible',
             'maxTokens': 1024,
+            'editTools': False,
         },
     )
 

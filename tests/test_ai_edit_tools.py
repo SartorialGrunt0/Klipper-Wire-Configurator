@@ -1,14 +1,19 @@
-"""Phase 1 tests: config_edit/config_write in the chat loop (KWC_EDIT_TOOLS).
+"""Tests for config_edit/config_write in the chat loop.
 
-Covers the plan's Phase 1 requirements:
+Covers:
 - tool specs advertised on BOTH surfaces (native + text snippet parity),
 - write calls routed request-scoped through EditSession (never the MCP
   server), kickback -> re-attempt converges in <=2 with a scripted model,
 - validation failure does NOT stop the loop,
 - pendingEdits + editAttempts on the response,
-- flag off (default): tools absent everywhere, unknown-tool behavior
-  unchanged (prose path untouched),
-- no contextFiles -> no session, no advertisement even with the flag on.
+- read-only arm (editTools=False, harness-only): tools absent everywhere,
+  unknown-tool behavior unchanged,
+- no contextFiles and no mirror -> no session, no advertisement.
+
+The write tools are product behavior since the Phase-6 flag removal
+(2026-09-24): _chat_payload defaults to editSkill=True (the unlocked
+arm) because these tests script direct write-tool use; gate-flow tests
+set editSkill=False.
 """
 import json
 import sys
@@ -80,6 +85,12 @@ def _chat_payload(messages, **over):
         # suite (test_ai_approval_gate.py). Tests that want the real gate
         # pass autoApproveEdits=False explicitly.
         'autoApproveEdits': True,
+        # The model-triggered skill gate is product behavior since the
+        # Phase-6 flag removal: the write tools stay hidden until
+        # load_skill. These tests script direct write-tool use, so they
+        # force the unlocked arm (harness editSkill override). Gate-flow
+        # tests set editSkill=False explicitly.
+        'editSkill': True,
     }
     payload.update(over)
     return payload
@@ -98,8 +109,11 @@ def _final_reply(text='Done — I adjusted the config.'):
 
 @pytest.fixture()
 def edit_flag(monkeypatch):
-    monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
-    monkeypatch.setenv('KWC_EDIT_SKILL_GATE', '0')  # gate default ON since Phase-5 A/B; these tests script direct write-tool use
+    """No-op since the Phase-6 flag removal (2026-09-24): the write tools
+    are product behavior and the skill gate is unlocked per-request via
+    editSkill=True in _chat_payload. Kept so gate-flow tests can still
+    clear stray experiment env."""
+    monkeypatch.delenv('KWC_EDIT_WRITE_CAP', raising=False)
 
 
 class _ScriptedClient:
@@ -160,10 +174,12 @@ def test_write_tools_not_advertised_by_default():
 
 
 def test_write_tools_advertised_on_both_surfaces():
-    ctx = ai_routes._build_mcp_tool_context(edit_capable=True)
+    ctx = ai_routes._build_mcp_tool_context(edit_capable=True,
+                                            skill_active=True)
     assert '- config_edit:' in ctx
     assert '- config_write:' in ctx
-    native = ai_routes._build_native_tools(edit_capable=True)
+    native = ai_routes._build_native_tools(edit_capable=True,
+                                           skill_active=True)
     by_name = {t['function']['name']: t['function'] for t in native}
     assert EDIT_TOOL_NAMES <= set(by_name)
     # Parity: every schema param of the edit specs appears in its text
@@ -186,11 +202,14 @@ def test_edit_protocol_prompt_only_when_capable(monkeypatch):
     assert 'config_edit' not in plain[0]['content']
     edit = ai_routes._prepare_messages([{'role': 'user', 'content': 'hi'}],
                                        edit_capable=True)
-    assert 'Config Edit' in edit[0]['content'] or 'config_edit' in edit[0]['content']
-    assert 'display-only' in edit[0]['content']
+    # Skill gate product behavior: the system prompt carries the skill
+    # INDEX, never the write-tool list or the edit law (those travel in
+    # the load_skill result body).
+    assert 'config-editing' in edit[0]['content']
+    assert '- config_edit:' not in edit[0]['content']
 
 
-# ── Phase 3: model-triggered edit skill (KWC_EDIT_SKILL_GATE) ──────────
+# ── Model-triggered edit skill (product behavior) ──────────────────────
 
 _SKILL_RESULT_MSG = ('[Tool result: load_skill(name=config-editing)]\n\n'
                      'ok\n\n[End tool result. Use this information to answer '
@@ -218,42 +237,45 @@ def test_load_skill_active_predicate():
 
 
 def test_skill_gate_hides_write_tools_until_loaded():
-    ctx = ai_routes._build_mcp_tool_context(edit_capable=True, skill_gate=True,
+    ctx = ai_routes._build_mcp_tool_context(edit_capable=True,
                                             skill_active=False)
     assert '- config_edit:' not in ctx
     assert '- config_write:' not in ctx
     assert 'load_skill' in ctx and 'config-editing' in ctx
     assert '<available_skills>' in ctx
-    on = ai_routes._build_mcp_tool_context(edit_capable=True, skill_gate=True,
+    on = ai_routes._build_mcp_tool_context(edit_capable=True,
                                            skill_active=True)
     assert '- config_edit:' in on and '- config_write:' in on
 
 
 def test_skill_gate_native_parity():
-    off = ai_routes._build_native_tools(edit_capable=True, skill_gate=True,
+    off = ai_routes._build_native_tools(edit_capable=True,
                                         skill_active=False)
     names = {t['function']['name'] for t in off}
     assert 'load_skill' in names
     assert EDIT_TOOL_NAMES.isdisjoint(names)
-    on = ai_routes._build_native_tools(edit_capable=True, skill_gate=True,
+    on = ai_routes._build_native_tools(edit_capable=True,
                                        skill_active=True)
     names_on = {t['function']['name'] for t in on}
     assert EDIT_TOOL_NAMES <= names_on
 
 
-def test_edit_law_not_in_prompt_until_skill_loaded():
+def test_edit_law_never_in_system_prompt():
+    """The law travels ONLY in the load_skill body (product behavior
+    since the Phase-6 flag removal): neither the locked nor the unlocked
+    system prompt carries it verbatim."""
     monkey = __import__('pytest').MonkeyPatch()
     monkey.delenv('KWC_NO_SYSTEM', raising=False)
     monkey.delenv('KWC_MINIMAL_PROMPT', raising=False)
     msgs = [{'role': 'user', 'content': 'hi'}]
     gated = ai_routes._prepare_messages(msgs, edit_capable=True,
-                                        skill_gate=True, skill_active=False)
+                                        skill_active=False)
     sys_txt = gated[0]['content']
     assert 'MUST call config_edit' not in sys_txt
     assert 'config-editing' in sys_txt  # index block IS present
-    # Status quo (no gate): the law stays in the system prompt verbatim.
-    legacy = ai_routes._prepare_messages(msgs, edit_capable=True)
-    assert 'MUST call config_edit' in legacy[0]['content']
+    unlocked = ai_routes._prepare_messages(msgs, edit_capable=True,
+                                           skill_active=True)
+    assert 'MUST call config_edit' not in unlocked[0]['content']
     monkey.undo()
 
 
@@ -265,10 +287,12 @@ def test_load_skill_returns_body_with_law_and_tools():
     assert 'set_param' in body and 'patch_gcode' in body
 
 
-def test_gate_off_preserves_status_quo():
-    # No gate: write tools advertised immediately, no skill index.
+def test_gate_off_path_no_longer_exists():
+    """Phase-6: there is no ungated edit-capable context anymore —
+    edit_capable without skill_active shows the INDEX, never the bare
+    write-tool list."""
     ctx = ai_routes._build_mcp_tool_context(edit_capable=True)
-    assert '- config_edit:' in ctx and '<available_skills>' not in ctx
+    assert '<available_skills>' in ctx and '- config_edit:' not in ctx
 
 
 # ── session semantics (unit) ────────────────────────────────────────────
@@ -344,10 +368,10 @@ def test_session_config_write_new_file_plus_include():
 
 # ── route-level loop behavior ───────────────────────────────────────────
 
-def test_flag_off_write_tool_is_unknown(monkeypatch):
-    monkeypatch.setenv('KWC_EDIT_TOOLS', '0')
-    # Default env (flag off): a hallucinated config_edit call is handled by
-    # the pre-existing unknown-tool path; response has no edit keys set.
+def test_readonly_arm_write_tool_is_unknown(monkeypatch):
+    # Harness read-only arm (editTools=False): a hallucinated config_edit
+    # call is handled by the pre-existing unknown-tool path; response has
+    # no edit keys set.
     scripted = _install(monkeypatch, [
         _text_tool_call('config_edit', {'file': 'printer.cfg', 'op': 'set_param',
                                         'section': 'printer', 'key': 'max_accel',
@@ -355,12 +379,13 @@ def test_flag_off_write_tool_is_unknown(monkeypatch):
         _final_reply('I could not apply that.'),
     ])
     response = client.post('/ai/chat', json=_chat_payload(
-        [{'role': 'user', 'content': 'set max_accel to 3000'}]))
+        [{'role': 'user', 'content': 'set max_accel to 3000'}],
+        editTools=False))
     assert response.status_code == 200
     body = response.json()
     assert body['pendingEdits'] is None
     assert body['editAttempts'] is None
-    # Flag off: config_edit is not a known tool, and the reply carries
+    # Read-only arm: config_edit is not a known tool, and the reply carries
     # prose alongside the call, so the hallucinated-tool guard keeps the
     # text and breaks — the write tool NEVER executes.
     assert body['toolCalls'] == []
@@ -540,8 +565,6 @@ def test_flag_on_kickback_loop_converges_in_two(edit_flag, monkeypatch):
 def test_flag_on_without_context_files_and_empty_mirror_no_session(monkeypatch):
     # No contextFiles AND no mirror content (nothing on disk to seed
     # from): session stays unarmed, edit tools stay unadvertised.
-    monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
-    monkeypatch.setenv('KWC_EDIT_SKILL_GATE', '0')  # gate default ON since Phase-5 A/B; these tests script direct write-tool use
     monkeypatch.setattr(ai_routes, '_mirror_user_config_files', lambda: {})
     scripted = _install(monkeypatch, [
         _final_reply('no files loaded'),
@@ -561,8 +584,6 @@ def test_flag_on_without_context_files_seeds_from_mirror(monkeypatch):
     # the session from the backend user-config mirror — an un-armed
     # request silently loses the whole write path (model correctly falls
     # back to prose when it has no tools).
-    monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
-    monkeypatch.setenv('KWC_EDIT_SKILL_GATE', '0')  # gate default ON since Phase-5 A/B; these tests script direct write-tool use
     mirror = {'printer.cfg': {'content': '[printer]\nmax_accel: 3000\n'}}
     monkeypatch.setattr(ai_routes, '_mirror_user_config_files', lambda: mirror)
     scripted = _install(monkeypatch, [
@@ -585,8 +606,6 @@ def test_flag_on_without_context_files_seeds_from_mirror(monkeypatch):
 def test_flag_on_mirror_failure_disables_edit_tools(monkeypatch):
     # A raising mirror must not 500 the chat: edit tools disable for the
     # request and the plain chat path answers.
-    monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
-    monkeypatch.setenv('KWC_EDIT_SKILL_GATE', '0')  # gate default ON since Phase-5 A/B; these tests script direct write-tool use
 
     def boom():
         raise RuntimeError('disk on fire')
@@ -601,32 +620,90 @@ def test_flag_on_mirror_failure_disables_edit_tools(monkeypatch):
     assert 'config_edit' not in json.dumps(scripted.payloads[0])
 
 
-def test_flag_on_system_prompt_carries_edit_protocol(edit_flag, monkeypatch):
+def test_edit_system_prompt_carries_tool_surface(edit_flag, monkeypatch):
+    # Unlocked arm (editSkill=True): the text-protocol surface advertises
+    # the write tools. The edit law itself only ever rides the load_skill
+    # body.
     scripted = _install(monkeypatch, [_final_reply('ok')])
     client.post('/ai/chat', json=_chat_payload(
         [{'role': 'user', 'content': 'tweak my config'}]))
     system_msg = scripted.payloads[0]['messages'][0]['content']
-    assert 'display-only' in system_msg
-    # And the text-protocol surface advertises the write tools.
     assert '- config_edit:' in system_msg
 
 
-def test_flag_off_system_prompt_lean(edit_flag, monkeypatch):
-    # Explicit flag-off parity check (defaults-flip gotcha: set to 0, not delenv).
-    monkeypatch.setenv('KWC_EDIT_TOOLS', '0')
+def test_readonly_system_prompt_lean(edit_flag, monkeypatch):
+    # Read-only arm parity check: no write tools, no skill index.
     scripted = _install(monkeypatch, [_final_reply('ok')])
     client.post('/ai/chat', json=_chat_payload(
-        [{'role': 'user', 'content': 'tweak my config'}]))
+        [{'role': 'user', 'content': 'tweak my config'}], editTools=False))
     system_msg = scripted.payloads[0]['messages'][0]['content']
     assert '- config_edit:' not in system_msg
-    assert 'display-only' not in system_msg
+    assert '<available_skills>' not in system_msg
+
+
+def test_locked_gate_kicks_back_before_load(edit_flag, monkeypatch):
+    """Product flow (gate locked = no editSkill override, no load in
+    history): a direct config_edit call gets the load-first kickback,
+    nothing stages, and the NEXT payload unlocks the write tools only
+    after the model actually calls load_skill."""
+    scripted = _install(monkeypatch, [
+        _text_tool_call('config_edit', {'file': 'printer.cfg', 'op': 'set_param',
+                                        'section': 'printer', 'key': 'max_accel',
+                                        'value': '3000'}),
+        _text_tool_call('load_skill', {'name': 'config-editing'}),
+        _text_tool_call('config_edit', {'file': 'printer.cfg', 'op': 'set_param',
+                                        'section': 'printer', 'key': 'max_accel',
+                                        'value': '3000'}),
+        _final_reply('Staged max_accel 3000.'),
+    ])
+    response = client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'set max_accel to 3000'}],
+        editSkill=False))
+    assert response.status_code == 200
+    body = response.json()
+    # First call was refused BEFORE the session: no attempt counted,
+    # nothing staged.
+    first_result = json.dumps(scripted.payloads[1])
+    assert 'not available yet' in first_result
+    assert "load_skill(name='config-editing')" in first_result
+    # After the load_skill tool result lands, the write tools are
+    # re-advertised on the native surface (same-turn unlock).
+    third = scripted.payloads[2]
+    assert 'config-editing loaded' in json.dumps(third) or 'Skill' in json.dumps(third)
+    # And the edit finally executes: staged, one counted attempt.
+    assert body['editAttempts'] == 1
+    assert body['pendingEdits'][0]['summary'].startswith('set [printer] max_accel')
+
+
+def test_history_load_unlocks_without_fresh_call(edit_flag, monkeypatch):
+    """Multi-turn product flow: a load_skill result already in history
+    (previous request) arms the unlocked arm immediately — the first
+    provider payload of THIS request already advertises config_edit."""
+    scripted = _install(monkeypatch, [
+        _text_tool_call('config_edit', {'file': 'printer.cfg', 'op': 'set_param',
+                                        'section': 'printer', 'key': 'max_accel',
+                                        'value': '3000'}),
+        _final_reply('Staged.'),
+    ])
+    load_msg = {'role': 'user', 'content': (
+        '[Tool result: load_skill(name=config-editing)]\n\n'
+        "Skill 'config-editing' loaded.\n\n[End tool result. Use this "
+        'information to answer the user\u2019s latest (last) request above.]}')}
+    response = client.post('/ai/chat', json=_chat_payload([
+        load_msg,
+        {'role': 'assistant', 'content': 'Edit tools ready.'},
+        {'role': 'user', 'content': 'set max_accel to 3000'}],
+        editSkill=False))
+    assert response.status_code == 200
+    body = response.json()
+    assert '- config_edit:' in scripted.payloads[0]['messages'][0]['content']
+    assert body['editAttempts'] == 1
+    assert body['pendingEdits'][0]['summary'].startswith('set [printer] max_accel')
 
 
 def test_prose_edit_response_gets_nudged_into_tool_call(monkeypatch):
     """Edit request answered with a ```cfg block and no tool call: the
     loop must nudge (max 2) and then execute the tool the model emits."""
-    monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
-    monkeypatch.setenv('KWC_EDIT_SKILL_GATE', '0')  # gate default ON since Phase-5 A/B; these tests script direct write-tool use
     scripted = [
         # 1st: prose draft, zero tool calls (the old silent path)
         '```cfg\n# file: printer.cfg\n[printer]\n-max_accel: 9000\n+max_accel: 12000\n```\n'
@@ -668,8 +745,6 @@ def test_prose_edit_response_gets_nudged_into_tool_call(monkeypatch):
 
 def test_qa_response_not_nudged(monkeypatch):
     """Pure Q&A (no edit verb+target) must NOT be prodded by the nudge."""
-    monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
-    monkeypatch.setenv('KWC_EDIT_SKILL_GATE', '0')  # gate default ON since Phase-5 A/B; these tests script direct write-tool use
     calls = []
 
     class _Resp:
@@ -700,8 +775,6 @@ def test_read_then_prose_still_nudged(monkeypatch):
     """r6b qwen3.5-9b EDIT-01 pattern: legitimate read_user_config turn,
     THEN a ```cfg prose draft. The in-loop nudge must catch prose at any
     turn and drive the model to stage the change."""
-    monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
-    monkeypatch.setenv('KWC_EDIT_SKILL_GATE', '0')  # gate default ON since Phase-5 A/B; these tests script direct write-tool use
     scripted = [
         # turn 1: legit read call
         'Let me read the section first.\n```tool\n{"name": "read_user_config", '
@@ -747,8 +820,6 @@ def test_commented_param_edit_stages_end_to_end(monkeypatch):
     in place) and stages — the card/diff is the user's confirmation. The
     old flow refused and produced a prose ask with no tool call, which
     read to users as 'asked for permission but never fired the edit'."""
-    monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
-    monkeypatch.setenv('KWC_EDIT_SKILL_GATE', '0')  # gate default ON since Phase-5 A/B; these tests script direct write-tool use
     calls = []
     scripted = [
         # write tool attempt on a commented param -> stages now
@@ -793,8 +864,6 @@ def test_giveup_after_correctable_kickback_gets_nudged(monkeypatch):
     (replace_section fed old_text; missing text), model explains and stops
     without retrying. Giving up on a fixable kickback must be nudged
     (unlike a user-gated commented-param refusal)."""
-    monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
-    monkeypatch.setenv('KWC_EDIT_SKILL_GATE', '0')  # gate default ON since Phase-5 A/B; these tests script direct write-tool use
     calls = []
     scripted = [
         # replace_section with wrong args (text missing) -> correctable error
@@ -849,8 +918,6 @@ def test_duplicate_after_commented_param_stage_is_kicked_back(monkeypatch):
     allow_comment_change flag) — is caught by the DUPLICATE TARGET
     guard: the user must ask for a different value in a new message.
     Locks the one remaining user_gated write path in the loop."""
-    monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
-    monkeypatch.setenv('KWC_EDIT_SKILL_GATE', '0')  # gate default ON since Phase-5 A/B; these tests script direct write-tool use
     calls = []
     scripted = [
         # 1: set_param on the commented param -> stages
@@ -901,8 +968,6 @@ def test_confab_note_appended_when_writes_all_failed(monkeypatch):
     # the model still claimed the change was staged. The trace is ground
     # truth: the reply must carry the trace-truth note, and pendingEdits
     # stays null.
-    monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
-    monkeypatch.setenv('KWC_EDIT_SKILL_GATE', '0')  # gate default ON since Phase-5 A/B; these tests script direct write-tool use
     scripted = _install(monkeypatch, [
         _text_tool_call('config_edit', {'file': 'printer.cfg', 'op': 'set_param',
                                         'section': 'ghost_section', 'key': 'k',
@@ -924,8 +989,6 @@ def test_confab_note_appended_when_writes_all_failed(monkeypatch):
 
 def test_confab_note_absent_when_edit_staged(monkeypatch):
     # A staged edit means the cards show the truth — no note.
-    monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
-    monkeypatch.setenv('KWC_EDIT_SKILL_GATE', '0')  # gate default ON since Phase-5 A/B; these tests script direct write-tool use
     _install(monkeypatch, [
         _text_tool_call('config_edit', {'file': 'printer.cfg', 'op': 'set_param',
                                         'section': 'printer', 'key': 'max_accel',
@@ -942,8 +1005,6 @@ def test_confab_note_absent_when_edit_staged(monkeypatch):
 
 def test_confab_note_absent_for_pure_qa(monkeypatch):
     # No write attempts at all: guard must not touch Q&A replies.
-    monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
-    monkeypatch.setenv('KWC_EDIT_SKILL_GATE', '0')  # gate default ON since Phase-5 A/B; these tests script direct write-tool use
     _install(monkeypatch, [_final_reply('max_accel is in the [printer] section.')])
     payload = _chat_payload([{'role': 'user',
                               'content': 'where is max_accel configured?'}])
@@ -959,8 +1020,6 @@ def test_native_mode_nudge_drops_fence_law(monkeypatch):
     use that specific fence format... my instructions require me to use
     the internal tool calling system'). The native nudge keeps the
     argument shapes but never mentions the ```tool fence."""
-    monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
-    monkeypatch.setenv('KWC_EDIT_SKILL_GATE', '0')  # gate default ON since Phase-5 A/B; these tests script direct write-tool use
     monkeypatch.setattr(ai_routes, '_mirror_user_config_files', lambda: {})
     seen = []
 
@@ -1007,8 +1066,6 @@ def test_native_mode_nudge_drops_fence_law(monkeypatch):
 def test_text_mode_nudge_keeps_fence_law(monkeypatch):
     """toolProtocol='text' escape hatch keeps the fence-format nudge —
     text-mode models have no other way to learn the call envelope."""
-    monkeypatch.setenv('KWC_EDIT_TOOLS', '1')
-    monkeypatch.setenv('KWC_EDIT_SKILL_GATE', '0')  # gate default ON since Phase-5 A/B; these tests script direct write-tool use
     seen = []
 
     class _Resp:
@@ -1247,8 +1304,7 @@ def test_memory_skill_body_playbook():
 
 
 def test_skill_index_advertises_both_skills():
-    ctx = ai_routes._build_mcp_tool_context(edit_capable=True,
-                                            skill_gate=True)
+    ctx = ai_routes._build_mcp_tool_context(edit_capable=True)
     assert '- config-editing:' in ctx
     assert '- printer-memory:' in ctx
 
@@ -1289,8 +1345,7 @@ def test_native_memory_load_still_locks_write_tools():
     kickback. (Verified at the predicate level above; here the context
     built from a memory-only history still advertises the skill index.)"""
     ctx = ai_routes._build_mcp_tool_context(edit_capable=True,
-                                            skill_gate=True,
-                                            skill_active=False)
+                                                                                        skill_active=False)
     assert '- config_edit:' not in ctx
     assert '<available_skills>' in ctx
 
@@ -1331,7 +1386,7 @@ def test_blank_autofill_prompt_lists_9_fields(monkeypatch):
                         lambda: PrinterMemory())
     msgs = ai_routes._prepare_messages(
         [{'role': 'user', 'content': 'hi'}],
-        edit_capable=True, skill_gate=True)
+        edit_capable=True)
     sys_text = '\n'.join(str(m.get('content', ''))
                          for m in msgs if m.get('role') == 'system')
     assert 'Printer Memory Auto-Fill' in sys_text
@@ -1388,7 +1443,7 @@ def test_autofill_prompt_injects_derived_facts(monkeypatch):
         '[stepper_z]\nposition_max: 210\n'), 'label': 'printer.cfg'}}
     msgs = ai_routes._prepare_messages(
         [{'role': 'user', 'content': 'hi'}],
-        edit_capable=True, skill_gate=True, context_files=ctx)
+        edit_capable=True, context_files=ctx)
     sys_text = '\n'.join(str(m.get('content', ''))
                          for m in msgs if m.get('role') == 'system')
     assert 'DERIVED MACHINE FACTS' in sys_text
@@ -1397,7 +1452,7 @@ def test_autofill_prompt_injects_derived_facts(monkeypatch):
     # no contextFiles -> no facts section (model derives via tools)
     msgs2 = ai_routes._prepare_messages(
         [{'role': 'user', 'content': 'hi'}],
-        edit_capable=True, skill_gate=True)
+        edit_capable=True)
     sys2 = '\n'.join(str(m.get('content', ''))
                      for m in msgs2 if m.get('role') == 'system')
     assert 'DERIVED MACHINE FACTS' not in sys2
@@ -1483,7 +1538,7 @@ def test_autofill_prompt_injects_board_roster(monkeypatch):
     }
     msgs = ai_routes._prepare_messages(
         [{'role': 'user', 'content': 'hi'}],
-        edit_capable=True, skill_gate=True, context_files=ctx)
+        edit_capable=True, context_files=ctx)
     sys_text = '\n'.join(str(m.get('content', ''))
                          for m in msgs if m.get('role') == 'system')
     assert 'DERIVED HARDWARE INVENTORY' in sys_text

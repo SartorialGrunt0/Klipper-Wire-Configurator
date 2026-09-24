@@ -915,10 +915,10 @@ export interface AiChatResponse {
   /** Number of empty-response re-prompts the backend performed before content. */
   repromptCount?: number;
   /**
-   * Tool-mediated editing (KWC_EDIT_TOOLS): changes staged by the
+   * Tool-mediated editing (product behavior): changes staged by the
    * config_edit/config_write write tools. Server-validated (delta vs the
    * sent live state); the draft preview consumes these INSTEAD of parsing
-   * prose cfg blocks. Null when the feature is off or nothing was staged.
+   * prose cfg blocks. Null when nothing was staged.
    */
   pendingEdits?: PendingConfigEdit[] | null;
   /** Write-tool call count for this reply (Gate 1 oscillation telemetry). */

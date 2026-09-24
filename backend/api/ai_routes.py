@@ -308,15 +308,18 @@ class ChatRequest(BaseModel):
     # pins native explicitly. scripts/ai_chat_accuracy_test.py A/Bs these.
     toolProtocol: str = "auto"
     # Tool-mediated editing override (harness A/B runs ONLY; the frontend
-    # never sends it). None = env KWC_EDIT_TOOLS decides; True/False forces
-    # the write tools on/off for this request. Mirrors the toolProtocol
-    # precedent so A/B runs don't need backend restarts.
+    # never sends it). The write tools are unconditional product behavior
+    # since the Phase-6 flag removal (2026-09-24); True/False forces
+    # them on/off for this request only (False = read-only arm). Mirrors
+    # the toolProtocol precedent so A/B runs don't need backend restarts.
     editTools: bool | None = None
-    # Phase 3 skill-gate override (harness A/B runs ONLY; the frontend
-    # never sends it). True forces the skill ACTIVE for the request (write
-    # tools advertised immediately) so SKILL-* evals can grade traces on
-    # both arms; None/False = env KWC_EDIT_SKILL_GATE decides and the
-    # model must call load_skill itself to unlock the write tools.
+    # Skill-gate override (harness A/B runs ONLY; the frontend never
+    # sends it). The model-triggered skill gate is product behavior:
+    # write tools stay hidden until the model calls load_skill itself.
+    # True forces the skill ACTIVE for the request (write tools advertised
+    # immediately) so SKILL-* evals can grade traces on both arms;
+    # None/False = the model must call load_skill to unlock the write
+    # tools.
     editSkill: bool | None = None
     # Approval-gate override (harness A/B runs ONLY; the frontend never
     # sends it). Production default is human-only approval: with the edit
@@ -450,7 +453,6 @@ def _get_openai_compatible_default_url(provider: str) -> str:
 
 def _prepare_messages(messages: list[dict],
                       edit_capable: bool = False, *,
-                      skill_gate: bool = False,
                       skill_active: bool = False,
                       native_mode: bool = False,
                       context_files: dict | None = None) -> list[dict]:
@@ -478,16 +480,13 @@ def _prepare_messages(messages: list[dict],
         # All tools are advertised unconditionally (native/text parity);
         # detect_board and other niche helpers live under "Specialized tools".
         tool_context = _build_mcp_tool_context(edit_capable=edit_capable,
-                                               skill_gate=skill_gate,
                                                skill_active=skill_active,
                                                native_mode=native_mode)
         system_parts = [system_prompt, tool_context, memory_context]
-        if edit_capable and not skill_gate:
-            # Edit law only when the write tools are advertised (lazy
-            # context). With skill_gate the law travels inside the
-            # load_skill tool result (skill body) instead, persisting in
-            # conversation history exactly once.
-            system_parts.append(EDIT_PROTOCOL_PROMPT)
+        # The edit law travels inside the load_skill tool result (skill
+        # body), persisting in conversation history exactly once — it is
+        # never in the system prompt (the model-triggered skill gate is
+        # product behavior since the Phase-6 flag removal).
 
         # If printer memory is completely blank and there are user messages
         # to work with, add an auto-fill instruction asking the AI to
@@ -517,10 +516,11 @@ def _prepare_messages(messages: list[dict],
                 "The user confirms in a review dialog before anything is saved — do NOT save printer "
                 "memory directly."
             )
-            if skill_gate:
+            if edit_capable:
                 # The full fact-finding playbook lives in the
                 # printer-memory skill; the prompt points there instead
-                # of duplicating it.
+                # of duplicating it. (load_skill is only advertised when
+                # the request is edit-capable.)
                 auto_fill_prompt += (
                     "\nCall load_skill(name='printer-memory') first — it "
                     "lists exactly where each field's evidence lives in "
@@ -725,8 +725,8 @@ _MCP_TOOL_SNIPPETS: dict[str, str] = {
 }
 
 
-# Snippets for the chat-loop write tools (advertised only when
-# KWC_EDIT_TOOLS is on; they are NOT registered MCP server tools — the
+# Snippets for the chat-loop write tools (advertised whenever the request is
+# edit-capable; they are NOT registered MCP server tools — the
 # chat proxy routes them request-scoped. Parity with the native surface
 # is enforced by tests/test_ai_edit_tools.py.
 _EDIT_TOOL_SNIPPETS: dict[str, str] = {
@@ -755,13 +755,16 @@ _EDIT_TOOL_SNIPPETS: dict[str, str] = {
 }
 
 
-# ── Phase 3: model-triggered edit skill (KWC_EDIT_SKILL_GATE) ──────────
+# ── Model-triggered edit skill ─────────────────────────────────────────
 # The heavy edit protocol is lazy-loaded like an agent skill: a tiny index
 # block always advertises the skill's NAME+DESCRIPTION; the write tools and
 # the edit law stay hidden until the model itself calls load_skill. No
 # regex auto-activation — intent guessing would re-admit the half-edit-on-
 # a-question failure this gating exists to kill (plan 2026-09-10, Q4).
-EDIT_SKILL_GATE_ENV = "KWC_EDIT_SKILL_GATE"
+# Product behavior since the Phase-6 flag removal (2026-09-24): the old
+# KWC_EDIT_SKILL_GATE env switch is gone (gate-ON matched gate-OFF at
+# 91/94 with verified 5/5 activation); the harness keeps the per-request
+# ChatRequest.editSkill override for A/B traces.
 EDIT_SKILL_NAME = "config-editing"
 MEMORY_SKILL_NAME = "printer-memory"
 MEMORY_SKILL_DESCRIPTION = (
@@ -854,15 +857,6 @@ _LOAD_SKILL_NUDGE_TEXT = (
     "tools: call load_skill(name='config-editing') now, then apply the "
     "change with the edit tool, one operation per call."
 )
-
-
-def _edit_skill_gate_enabled() -> bool:
-    """Gate defaults ON (Phase-5 A/B, 2026-09-23: full-bank gate-ON leg
-    matched gate-OFF at 91/94 with verified 5/5 activation and equal-or-
-    better edit families; env =0 opts back out to always-on write tools).
-    """
-    return os.environ.get(EDIT_SKILL_GATE_ENV, "1").strip().lower() in (
-        "1", "true", "yes", "on")
 
 
 def _edit_skill_body() -> str:
@@ -989,7 +983,6 @@ def _load_skill_active(messages: list[dict]) -> bool:
 
 
 def _build_mcp_tool_context(edit_capable: bool = False, *,
-                            skill_gate: bool = False,
                             skill_active: bool = False,
                             native_mode: bool = False) -> str:
     """Build the 'Available Tools' section for the system prompt.
@@ -1067,9 +1060,10 @@ def _build_mcp_tool_context(edit_capable: bool = False, *,
         "present"
     )
     if edit_capable:
-        if skill_gate and not skill_active:
-            # Model-triggered skill: advertise the skill INDEX; write tools
-            # unlock only after the model calls load_skill itself.
+        if not skill_active:
+            # Model-triggered skill (product behavior): advertise the
+            # skill INDEX; write tools unlock only after the model calls
+            # load_skill itself.
             parts.append("")
             parts.append(_SKILL_INDEX_BLOCK)
         else:
@@ -1077,9 +1071,8 @@ def _build_mcp_tool_context(edit_capable: bool = False, *,
             parts.append("Config edit tools (changes are staged for user review, never saved directly):")
             for name, snippet in _EDIT_TOOL_SNIPPETS.items():
                 parts.append(f"- {name}: {snippet}")
-        if skill_gate:
-            parts.append("")
-            parts.append(f"- load_skill: {_LOAD_SKILL_SNIPPET}")
+        parts.append("")
+        parts.append(f"- load_skill: {_LOAD_SKILL_SNIPPET}")
     parts.append("")
     parts.append(
         "Klipper G-code commands and macro names (e.g. G28, M104, BED_MESH_CALIBRATE, "
@@ -1148,19 +1141,12 @@ def _minimal_prompt_enabled() -> bool:
     return os.environ.get("KWC_MINIMAL_PROMPT", "0") != "0"
 
 
-def _edit_tools_enabled() -> bool:
-    """Tool-mediated config editing (config_edit/config_write write tools).
-
-    DEFAULT-ON since the Phase-4 ratchet (2026-09-22): the prose draft path
-    is deleted, so the write tools are the ONLY edit path. Set env
-    KWC_EDIT_TOOLS=0 only to disable edits entirely (read-only chat). The
-    tools are advertised (native + text protocol parity), routed
-    request-scoped through services.ai_edit_tools.EditSession (seeded from
-    contextFiles; no per-conversation draft store), and the loop cap rises
-    to MAX_MCP_TOOL_TURNS_EDIT. With no contextFiles the session mirror-
-    seeds from the backend user-config store (TRIDENT-16).
-    """
-    return os.environ.get("KWC_EDIT_TOOLS", "1") != "0"
+# _edit_tools_enabled() was REMOVED by the Phase-6 flag removal
+# (2026-09-24): tool-mediated editing is unconditional product behavior
+# (the prose draft path died with the Phase-4 ratchet, so the write tools
+# are the ONLY edit path). The per-request ChatRequest.editTools override
+# remains as the harness A/B knob; chat_proxy arms the session unless the
+# request explicitly forces the read-only arm (editTools=False).
 
 
 # PYTHONIC native tool template leaked as plain text by llama.cpp when the
@@ -1346,8 +1332,7 @@ def _extract_tool_calls(text: str) -> list[dict]:
     # (multi-line macro bodies the line-bounded formats cannot see). Gated
     # on the sentinel AND known tool names — see TEMPLATE_CALL_HEAD_RE.
     tmpl_known = {t["name"] for t in _mcp_server._list_tools()} | set(EDIT_TOOL_NAMES)
-    if _edit_skill_gate_enabled():
-        tmpl_known.add(LOAD_SKILL_SPEC["name"])
+    tmpl_known.add(LOAD_SKILL_SPEC["name"])
     tmpl_known.add(LIST_HARDWARE_SPEC["name"])
     for _start, _stop, t_name, t_args in _template_call_regions(text):
         if t_name not in tmpl_known:
@@ -1591,8 +1576,7 @@ def _unwrap_generic_tool_calls(calls: list[dict]) -> list[dict]:
     name is a known tool (literal-shape inspection only).
     """
     known = {t["name"] for t in _mcp_server._list_tools()} | set(EDIT_TOOL_NAMES)
-    if _edit_skill_gate_enabled():
-        known.add(LOAD_SKILL_SPEC["name"])
+    known.add(LOAD_SKILL_SPEC["name"])
     known.add(LIST_HARDWARE_SPEC["name"])
     out: list[dict] = []
     for call in calls:
@@ -1884,13 +1868,13 @@ def _known_tool_names() -> set[str]:
     """Every tool name the chat loop can dispatch.
 
     MCP server tools plus the chat-layer extras: the write tools, `load_skill`
-    (only behind the edit-skill gate) and `list_hardware`. Three copies of this
+    (the model-triggered skill gate is product behavior) and
+    `list_hardware`. Three copies of this
     set used to live inline (extractor, generic-wrapper unwrap, loop) — they are
     ONE surface, so keep them from drifting.
     """
     known = {t["name"] for t in _mcp_server._list_tools()} | set(EDIT_TOOL_NAMES)
-    if _edit_skill_gate_enabled():
-        known.add(LOAD_SKILL_SPEC["name"])
+    known.add(LOAD_SKILL_SPEC["name"])
     known.add(LIST_HARDWARE_SPEC["name"])
     return known
 
@@ -2268,19 +2252,18 @@ def _native_tool_object(tool: dict) -> dict:
 
 
 def _build_native_tools(edit_capable: bool = False, *,
-                        skill_gate: bool = False,
                         skill_active: bool = False) -> list[dict]:
     """Build native function-calling tool definitions from the MCP server.
 
     Returns OpenAI-style tool objects:
         {"type": "function", "function": {"name", "description", "parameters"}}
 
-    With edit_capable, the request-scoped write tools (config_edit/
-    config_write, defined in services.ai_edit_tools, not registered on the
-    MCP server) join the advertisement — kept in lock-step with the text
-    protocol surface (test_edit_tool_native_text_parity). With skill_gate
-    they unlock only after load_skill, and load_skill itself is advertised
-    (parity with the text surface's skill index).
+    With edit_capable, the model-triggered skill gate is in force:
+    load_skill is advertised and the request-scoped write tools
+    (config_edit/config_write, defined in services.ai_edit_tools, not
+    registered on the MCP server) join the advertisement only once the
+    skill is active — kept in lock-step with the text protocol surface
+    (test_edit_tool_native_text_parity).
     """
     native: list[dict] = []
     for tool in _mcp_server._list_tools():
@@ -2289,12 +2272,8 @@ def _build_native_tools(edit_capable: bool = False, *,
     # advertised on both protocols for parity.
     native.append(_native_tool_object(LIST_HARDWARE_SPEC))
     if edit_capable:
-        if skill_gate:
-            native.append(_native_tool_object(LOAD_SKILL_SPEC))
-            if skill_active:
-                for tool in EDIT_TOOL_SPECS:
-                    native.append(_native_tool_object(tool))
-        else:
+        native.append(_native_tool_object(LOAD_SKILL_SPEC))
+        if skill_active:
             for tool in EDIT_TOOL_SPECS:
                 native.append(_native_tool_object(tool))
     return native
@@ -2302,7 +2281,6 @@ def _build_native_tools(edit_capable: bool = False, *,
 
 def _resolve_native_tools(provider: str, api_url: str, tool_protocol: str,
                           edit_capable: bool = False, *,
-                          skill_gate: bool = False,
                           skill_active: bool = False) -> list[dict] | None:
     """Decide whether to pass native function-calling tools to the provider.
 
@@ -2324,7 +2302,6 @@ def _resolve_native_tools(provider: str, api_url: str, tool_protocol: str,
     if tool_protocol == "text":
         return None
     return _build_native_tools(edit_capable=edit_capable,
-                               skill_gate=skill_gate,
                                skill_active=skill_active)
 
 
@@ -2835,12 +2812,14 @@ def _mirror_user_config_files() -> dict[str, dict]:
 @router.post("/ai/chat")
 async def chat_proxy(req: ChatRequest):
     """Proxy chat messages to the user's configured API provider."""
-    # ── Tool-mediated config editing session (Phase 1, KWC_EDIT_TOOLS) ──
+    # ── Tool-mediated config editing session ──
     # Request-scoped: seeded from this request's contextFiles (the app's
     # live working state), stacked edits returned as pendingEdits. No
     # per-conversation draft store by design. Without live files there is
-    # nothing to edit — tools stay unadvertised.
-    edit_enabled = req.editTools if req.editTools is not None else _edit_tools_enabled()
+    # nothing to edit — tools stay unadvertised. Product behavior since
+    # the Phase-6 flag removal (2026-09-24): only an explicit
+    # editTools=False (harness read-only arm) disables the session.
+    edit_enabled = req.editTools is not False
     edit_session: EditSession | None = None
     if edit_enabled and req.contextFiles:
         try:
@@ -2876,31 +2855,32 @@ async def chat_proxy(req: ChatRequest):
                 edit_session = None
     edit_capable = edit_session is not None
 
-    # ── Phase 3: model-triggered edit skill gate ──
-    # When gated, write tools start HIDDEN even though the session exists;
-    # they unlock when the model calls load_skill itself (mechanical
-    # evidence in message history — never a verb heuristic). Same-turn
-    # unlock: every provider payload below re-resolves tools from
-    # _skill_state, which flips as soon as the load_skill result lands.
-    skill_gate = edit_capable and _edit_skill_gate_enabled()
+    # ── Model-triggered edit skill gate ──
+    # Write tools start HIDDEN whenever a session exists; they unlock when
+    # the model calls load_skill itself (mechanical evidence in message
+    # history — never a verb heuristic). Same-turn unlock: every provider
+    # payload below re-resolves tools from _skill_state, which flips as
+    # soon as the load_skill result lands. Product behavior since the
+    # Phase-6 flag removal (2026-09-24); the harness can force the
+    # unlocked arm per request via editSkill=True.
     _skill_state = {'active': _load_skill_active(req.messages)}
-    # Harness A/B: --edit-skill on forces activation evidence WITHOUT
+    # Harness A/B: --force-skill-active forces activation evidence WITHOUT
     # requiring a live load_skill call (grades tool-call traces directly).
-    if skill_gate and getattr(req, 'editSkill', None) is True:
+    if edit_capable and getattr(req, 'editSkill', None) is True:
         _skill_state['active'] = True
 
-    def _current_skill_gate() -> bool:
-        return skill_gate and not _skill_state['active']
+    def _skill_gate_closed() -> bool:
+        """True while the session's write tools stay locked behind
+        load_skill (only meaningful when a session exists)."""
+        return not _skill_state['active']
 
     messages = _prepare_messages(req.messages,
                                  edit_capable=edit_capable,
-                                 skill_gate=skill_gate,
                                  skill_active=_skill_state['active'],
                                  context_files=req.contextFiles,
                                  native_mode=_resolve_native_tools(
                                      req.apiProvider, req.apiUrl, req.toolProtocol,
                                      edit_capable=edit_capable,
-                                     skill_gate=skill_gate,
                                      skill_active=_skill_state['active']) is not None)
 
     # ── Log request summary ──
@@ -2935,7 +2915,6 @@ async def chat_proxy(req: ChatRequest):
     # native server ignores the tools array, so degradation is graceful.
     native_tools = _resolve_native_tools(req.apiProvider, req.apiUrl, req.toolProtocol,
                                          edit_capable=edit_capable,
-                                         skill_gate=skill_gate,
                                          skill_active=_skill_state['active'])
 
     # ── Stop-event registration ──
@@ -3042,7 +3021,7 @@ async def chat_proxy(req: ChatRequest):
                             malformed_usage["context"] = f"malformed-reprompt-{malformed_reprompts}"
                             usage_events.append(malformed_usage)
                         continue
-                    # ── Edit-prose nudge (KWC_EDIT_TOOLS) ──
+                    # ── Edit-prose nudge ──
                     # Edit request + write tools armed + prose answer (no
                     # tool call): prose edits are INERT — old draft-text
                     # semantics must not silently resume. Correction
@@ -3128,7 +3107,7 @@ async def chat_proxy(req: ChatRequest):
                             # system"). Native arm keeps the argument
                             # shapes, drops the fence law.
                             "content": (_LOAD_SKILL_NUDGE_TEXT
-                                        if _current_skill_gate()
+                                        if _skill_gate_closed()
                                         else EDIT_NUDGE_TEXT_NATIVE
                                         if native_tools is not None
                                         else EDIT_NUDGE_TEXT),
@@ -3164,7 +3143,6 @@ async def chat_proxy(req: ChatRequest):
                 known_tool_names = {t["name"] for t in _mcp_server._list_tools()}
                 if edit_capable:
                     known_tool_names |= EDIT_TOOL_NAMES
-                if skill_gate:
                     known_tool_names.add(LOAD_SKILL_SPEC["name"])
                 known_tool_names.add(LIST_HARDWARE_SPEC["name"])
                 if tool_calls and current_content.strip() and all(
@@ -3203,7 +3181,7 @@ async def chat_proxy(req: ChatRequest):
                         )
                         results.append(result_text)
                         continue
-                    if skill_gate and tool_call.get('name') == 'load_skill':
+                    if edit_capable and tool_call.get('name') == 'load_skill':
                         # Dispatch by REQUESTED skill name — loading
                         # printer-memory must never unlock the edit tools
                         # (only the config-editing load flips the gate).
@@ -3237,7 +3215,7 @@ async def chat_proxy(req: ChatRequest):
                                 f"skills: '{EDIT_SKILL_NAME}', "
                                 f"'{MEMORY_SKILL_NAME}'.")
                     elif edit_session is not None and tool_call.get("name") in EDIT_TOOL_NAMES:
-                        if _current_skill_gate():
+                        if _skill_gate_closed():
                             # Write tool used WITHOUT loading the skill:
                             # kick back with the load step, not the edit.
                             result_text = (

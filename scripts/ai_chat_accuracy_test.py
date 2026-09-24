@@ -1361,11 +1361,10 @@ def build_skill_gate_questions() -> list[TestQuestion]:
                               (false-positive rate; every FP costs an
                               irrelevant edit-law load + latency)
 
-    Runs against a backend with KWC_EDIT_TOOLS=1 and the gate env left to
-    the run config (the questions force editTools=True so the gate is
-    engaged whenever the server flag is on; with the flag off the write
-    tools ship ungated and activation is trivially true — the summary
-    prints the mode). The `tool` criteria kind grades load_skill like any
+    Runs against any backend (the write tools and the model-triggered
+    skill gate are product behavior since the Phase-6 flag removal; the
+    questions force editTools=True so the gate is engaged). The `tool`
+    criteria kind grades load_skill like any
     other expected tool; a False-labelled question uses require_tool=False
     plus the trace check below (criterion kind `skill_not_loaded`).
     """
@@ -2066,9 +2065,9 @@ def build_tool_coverage_questions() -> list[TestQuestion]:
     - generate_macro_template(PRINT_START, include_bed_mesh=true) contains
       G28, M104/M140 and BED_MESH_CALIBRATE; without the flag it has no
       BED_MESH_CALIBRATE — that is the use-gate.
-    - TOOL-06 needs the write tools: run against a backend with
-      KWC_EDIT_TOOLS=1 (with KWC_EDIT_SKILL_GATE=1 also pass
-      --force-skill-active, or activation variance pollutes the signal).
+    - TOOL-06 needs the write tools: the questions force editTools=True;
+      with the model-triggered skill gate in force (default) also pass
+      --force-skill-active, or activation variance pollutes the signal.
     """
     return [
         TestQuestion(
@@ -2894,8 +2893,9 @@ def resolve_settings(args: argparse.Namespace) -> dict:
 
 
 def edit_tools_setting(args: argparse.Namespace) -> bool | None:
-    """--edit-tools on/off/auto: default None (per-server env, ON since the
-    Phase-4 ratchet). Per-question overrides win; 'off' forces the read-only
+    """--edit-tools on/off/auto: default None (server behavior — the write
+    tools are product behavior since the Phase-6 flag removal).
+    Per-question overrides win; 'off' forces the read-only
     arm for a whole run (write tools never advertised)."""
     value = getattr(args, "edit_tools", "auto")
     return {"on": True, "off": False}.get(value, None)
@@ -3028,15 +3028,15 @@ def main() -> int:
     parser.add_argument("--edit-tools", default="auto", choices=["auto", "on", "off"],
                         help="Tool-mediated editing for questions without a "
                              "per-question override: 'auto' follows the server "
-                             "env (KWC_EDIT_TOOLS, default ON), 'off' forces "
-                             "the read-only arm (no write tools advertised)")
+                             "default (write tools ON — product behavior), "
+                             "'off' forces the read-only arm (no write tools "
+                             "advertised)")
     parser.add_argument("--force-skill-active", action="store_true",
                         help="Skill-gate A/B arm: send editSkill=true so the "
                              "write tools are advertised immediately (edit law "
                              "force-loaded) instead of waiting for the model "
-                             "to call load_skill. Pairs with a backend that "
-                             "has KWC_EDIT_SKILL_GATE=1 (SKILL-* evals run "
-                             "with this OFF to measure activation)")
+                             "to call load_skill. SKILL-* evals run with this "
+                             "OFF to measure model-triggered activation")
     parser.add_argument("--questions", default="", metavar="SPEC",
                         help="Subset by QID or index, e.g. 'TRIDENT-15',"
                              " 'AMBI-0*', 'TOOL-01..06', 'TRIDENT,EDIT', '1-5,8'."

@@ -12,9 +12,10 @@ content/details split (pi pattern): the model-facing tool result is LEAN
 miss); the full diff payload rides in ``details`` for the UI only. Nothing
 here re-quotes the model's previous content (REPAIR-01 discipline).
 
-Phase 1 scope: no approval gate yet — validated edits accumulate into
-pendingEdits; ``KWC_EDIT_TOOLS`` off means these tools are not advertised
-and never routed.
+The write tools are the ONLY edit path (product behavior since the
+Phase-6 flag removal, 2026-09-24): a request is edit-capable whenever an
+EditSession arms (contextFiles or the user-config mirror seed), and the
+harness ``editTools=False`` override is the only way to run read-only.
 """
 from __future__ import annotations
 
