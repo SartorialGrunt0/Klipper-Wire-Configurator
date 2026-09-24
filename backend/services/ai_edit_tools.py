@@ -19,8 +19,25 @@ and never routed.
 from __future__ import annotations
 
 import json
+import re
 
 from services.ai_draft_project import ProjectState
+
+
+_TRAILING_COMMENT_RE = re.compile(r"\s+#.*$")
+
+
+def _echo_norm(line: str) -> str:
+    """Normalize one stripped line for DISPLAY-ECHO matching only.
+
+    Cosmetic formatting differences between a project line and the same
+    line re-quoted by a model ('a: 1  # tag' shown as 'a: 1', single vs
+    doubled space after ':') must not turn a recap into an inert draft.
+    Used ONLY by has_inert_draft(); nothing structural (state, diffs,
+    validation) ever sees normalized text.
+    """
+    line = _TRAILING_COMMENT_RE.sub("", line)
+    return re.sub(r"\s+", " ", line).strip()
 
 # Nudge appended (as a user turn) when an edit request is answered in
 # prose. Live Gate-1 traces (qwen3.5-9b, r7) showed the failure mode is
@@ -706,6 +723,16 @@ class EditSession:
         the '# file:' hint) carry no config substance and are ignored;
         '*[section]' delete markers never match project text, so delete
         drafts keep nudging.
+
+        Matching is NORMALIZED on both sides (_echo_norm: trailing
+        comments dropped, internal whitespace collapsed). Live
+        flash-next full-bank 2026-09-23: the model stages both edits,
+        then recaps them in mini-diff form ('-max_accel: 15500 #Ellis
+        Tuned' / '+max_accel: 12000'); the dropped trailing comment on
+        the '+' side made a display recap read as a fresh draft, the
+        nudge fired on 16/61 questions, and the re-attempt hit
+        DUPLICATE TARGET kickbacks. A genuinely new VALUE still never
+        matches — normalization only forgives formatting, never content.
         """
         project_lines: set[str] = set()
         for text in self.state.files.values():
@@ -713,6 +740,14 @@ class EditSession:
                 stripped = line.strip()
                 if stripped:
                     project_lines.add(stripped)
+        project_norm = {_echo_norm(l) for l in project_lines}
+        project_norm.discard("")
+
+        def _echoed(line: str) -> bool:
+            norm = _echo_norm(line)
+            return bool(norm) and (line in project_lines
+                                   or norm in project_norm)
+
         for block in blocks:
             for raw in block.splitlines():
                 stripped = raw.strip()
@@ -731,22 +766,22 @@ class EditSession:
                     if stripped in project_lines:
                         continue
                     body = stripped.lstrip("#").strip()
-                    if body and body in project_lines:
+                    if body and _echoed(body):
                         return True
                     continue
                 if stripped.startswith("+"):
                     # Mini-diff '+' line: the NEW value — echo iff the
                     # post-'+' content is in the project (staged).
-                    if stripped[1:].strip() not in project_lines:
+                    if not _echoed(stripped[1:].strip()):
                         return True
                 elif stripped.startswith("-"):
                     # Mini-diff '-' line: the OLD value. Absent from the
                     # project = display of an applied change (the old line
                     # is gone) -> echo. Still present = deletion was never
                     # applied -> inert draft.
-                    if stripped[1:].strip() in project_lines:
+                    if _echoed(stripped[1:].strip()):
                         return True
-                elif stripped not in project_lines:
+                elif not _echoed(stripped):
                     return True
         return False
 

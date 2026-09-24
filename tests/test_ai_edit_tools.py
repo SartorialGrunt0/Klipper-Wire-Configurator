@@ -966,6 +966,83 @@ def test_has_inert_draft_echoes_stay_quiet():
     assert ses.has_inert_draft(['# nothing config-like here\n']) is False
 
 
+# ── has_inert_draft: diff-form recap echo (flash-next 2026-09-23) ──────
+
+
+def test_has_inert_draft_diff_recap_after_stage_is_echo():
+    """TRIDENT-11 regression: model stages the edit via config_edit, then
+    recaps it in mini-diff form with the trailing comment dropped on the
+    '+' side ('-max_accel: 15500 #Ellis Tuned' / '+max_accel: 12000').
+    After the stage commits to working state the recap is pure display;
+    the byte-exact guard read the dropped ' #Ellis Tuned' as a fresh
+    draft, nudged a question that had already passed, and provoked
+    DUPLICATE TARGET thrash."""
+    from services.ai_edit_tools import EditSession
+    ses = EditSession({'printer.cfg': {'content': (
+        '[printer]\n'
+        'max_velocity: 600\n'
+        'max_accel: 15500 #Ellis Tuned\n'
+    )}})
+    text, details = ses.execute({
+        'name': 'config_edit', 'arguments': {
+            'file': 'printer.cfg', 'op': 'set_param',
+            'section': 'printer', 'key': 'max_accel', 'value': '12000'}})
+    assert details is not None, text
+    assert ses.has_inert_draft([
+        '# file: printer.cfg\n'
+        '[printer]\n'
+        '-max_accel: 15500 #Ellis Tuned\n'
+        '+max_accel: 12000\n'
+    ]) is False
+
+
+def test_has_inert_draft_diff_recap_whitespace_only_diff_is_echo():
+    """Same shape, no comment involved: doubled spacing / tabs around the
+    colon are formatting, not content."""
+    from services.ai_edit_tools import EditSession
+    ses = EditSession({'aux_fan.cfg': {'content': (
+        '[fan_generic Aux_Fan]\n'
+        'pin:\tPB2\n'
+        'max_power:\t1.0\n'
+    )}})
+    text, details = ses.execute({
+        'name': 'config_edit', 'arguments': {
+            'file': 'aux_fan.cfg', 'op': 'set_param',
+            'section': 'fan_generic Aux_Fan', 'key': 'max_power',
+            'value': '0.8'}})
+    assert details is not None, text
+    assert ses.has_inert_draft([
+        '[fan_generic Aux_Fan]\n'
+        '-max_power: 1.0\n'
+        '+max_power: 0.8\n'
+    ]) is False
+
+
+def test_has_inert_draft_diff_recap_with_UNSTAGED_value_still_drafts():
+    """The other side of the normalization: a '+' line whose value is NOT
+    staged is a real inert draft and must still nudge — r5 multi-part
+    give-up protection is unchanged by echo normalization."""
+    from services.ai_edit_tools import EditSession
+    ses = EditSession({'printer.cfg': {'content': (
+        '[printer]\n'
+        'max_accel: 15500 #Ellis Tuned\n'
+    )}})
+    assert ses.has_inert_draft([
+        '[printer]\n'
+        '-max_accel: 15500 #Ellis Tuned\n'
+        '+max_accel: 12000\n'
+    ]) is True
+
+
+def test_has_inert_draft_comment_out_still_drafts_after_normalize():
+    """r4b TRIDENT-04 protection survives the normalizer: commented-out
+    line whose BODY exists in the project (cosmetically different) is
+    still an inert draft."""
+    ses = _draft_session()
+    # body differs only by internal spacing from 'kinematics: cartesian'
+    assert ses.has_inert_draft(['# kinematics:  cartesian\n']) is True
+
+
 # ── commented-param editing (guard REMOVED 2026-09-20) ────────────────
 
 

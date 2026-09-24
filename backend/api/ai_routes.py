@@ -1862,6 +1862,64 @@ MALFORMED_TOOL_FORMAT_FEEDBACK = (
 )
 
 
+# ── Repeat-read guard ───────────────────────────────────────────────────
+#
+# Live flash-next full-bank 2026-09-23: every timeout-class ERROR was a
+# tool-loop that stopped CONVERGING and started re-reading — read_user_config
+# x10 (LIVE-01), x12 (SKILL-05), x6 (TRIDENT-16); search_klipper_docs x9/x6.
+# Identical (name, arguments) calls return identical text, so rounds 2..n
+# add tokens and wall-clock but zero information — and the bigger context
+# makes each following turn slower, ending at the harness timeout with no
+# answer. The guard serves a lean directive instead of re-executing a
+# call it already ran THIS request.
+#
+# Scope is deliberately narrow (intent law): literal (name, canonical-JSON
+# args) equality only — never similarity, never intent. Only idempotent
+# PURE-READ tools are guarded; validation tools are excluded because a
+# re-validate after an edit is a legitimate convergence check, and write
+# tools already have their own identical-failure ladder in EditSession.
+REPEAT_GUARD_TOOLS = frozenset({
+    "read_user_config",
+    "list_user_configs",
+    "list_user_config_sections",
+    "search_user_configs",
+    "read_klipper_doc",
+    "search_klipper_docs",
+    "list_klipper_docs",
+    "get_config_reference_section",
+    "list_config_reference_sections",
+    "read_example_config",
+    "search_example_configs",
+    "get_section_schema",
+})
+
+REPEAT_READ_FEEDBACK = (
+    "ALREADY RETRIEVED — this exact call ran earlier in this request and "
+    "returned the identical result, which is still in this conversation. "
+    "It was not executed again. Repeating identical reads will never add "
+    "information: use the result you already have (apply the edit, or "
+    "answer the user), or change strategy with a DIFFERENT query."
+)
+
+
+def _repeat_read_key(tool_call: dict) -> str:
+    """Literal dedup key: tool name + canonical JSON of its arguments.
+
+    Returns '' for anything outside REPEAT_GUARD_TOOLS so callers can skip
+    cheaply. sort_keys makes argument ordering irrelevant; everything else
+    is exact.
+    """
+    name = tool_call.get("name", "")
+    if name not in REPEAT_GUARD_TOOLS:
+        return ""
+    try:
+        args = json.dumps(tool_call.get("arguments") or {},
+                          sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        args = repr(tool_call.get("arguments"))
+    return f"{name}|{args}"
+
+
 def _strip_bracket_tool_calls(text: str) -> str:
     """Strip bracket-wrapped tool calls whose name is a REAL tool.
 
@@ -2807,6 +2865,10 @@ async def chat_proxy(req: ChatRequest):
             current_messages = list(messages)
             executed_tool_names: list[str] = []
             executed_tool_calls: list[dict] = []
+            # Literal (name, args) keys of every guarded READ executed this
+            # request — see REPEAT_GUARD_TOOLS. Reset per request by
+            # construction (local to chat_proxy).
+            read_ledger: set[str] = set()
             # Re-prompts issued to correct a malformed ```tool fence (see the
             # malformed tool-call guard in the loop below).
             malformed_reprompts = 0
@@ -3011,6 +3073,21 @@ async def chat_proxy(req: ChatRequest):
                 # follow-up messages in the format the provider expects.
                 results = []
                 for tool_call in tool_calls[:MAX_MCP_TOOL_TURNS]:
+                    repeat_key = _repeat_read_key(tool_call)
+                    if repeat_key and repeat_key in read_ledger:
+                        # Literal repeat of a read already answered this
+                        # request: no execution, no payload — the model
+                        # gets the directive and nothing else (see
+                        # REPEAT_GUARD_TOOLS).
+                        result_text = REPEAT_READ_FEEDBACK
+                        logger.info(
+                            "Repeat read blocked | name=%s args=%.120s",
+                            tool_call.get("name"),
+                            json.dumps(tool_call.get("arguments") or {},
+                                       sort_keys=True, default=str),
+                        )
+                        results.append(result_text)
+                        continue
                     if skill_gate and tool_call.get('name') == 'load_skill':
                         # Dispatch by REQUESTED skill name — loading
                         # printer-memory must never unlock the edit tools
@@ -3120,6 +3197,10 @@ async def chat_proxy(req: ChatRequest):
                                            "to search_user_configs.")
                     else:
                         result_text = await _execute_tool_call_async(tool_call)
+                    if repeat_key:
+                        # Executed for the first time this request: any
+                        # literal repeat now gets the lean directive.
+                        read_ledger.add(repeat_key)
                     logger.info(
                         "Tool executed | name=%s result_chars=%d",
                         tool_call["name"], len(result_text),

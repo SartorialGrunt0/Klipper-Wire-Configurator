@@ -1269,6 +1269,117 @@ def test_chat_proxy_empty_response_reprompt_exhausts(monkeypatch):
     assert len(calls) == 2 * max_turns + 3
 
 
+# ── Repeat-read guard (flash-next full-bank 2026-09-23) ────────────────
+# Timeout-class ERRORs were tool loops re-reading identical files
+# (read_user_config x10-x12). The guard serves a lean directive instead
+# of re-executing a (name, args) call already answered this request.
+
+
+def test_chat_proxy_repeat_read_blocked_without_reexecution(monkeypatch):
+    """An identical (name, args) read executes ONCE; the second call gets
+    REPEAT_READ_FEEDBACK with no tool execution and a trivial payload,
+    and a changed-args call still executes normally."""
+    monkeypatch.setenv('KWC_EDIT_TOOLS', '0')
+    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
+    executed = []
+
+    def fake_exec(call):
+        executed.append((call['name'],
+                         json.dumps(call.get('arguments') or {}, sort_keys=True)))
+        return f"result for {call['name']} #{len(executed)}"
+
+    monkeypatch.setattr(ai_routes, '_execute_tool_call', fake_exec)
+
+    read_call = '```tool\n{"name": "read_user_config", "arguments": ' \
+                '{"filename": "printer.cfg"}}\n```'
+    other_call = '```tool\n{"name": "read_user_config", "arguments": ' \
+                 '{"filename": "Hotkey.cfg"}}\n```'
+    scripted = [read_call, read_call, other_call,
+                'The idle_timeout section sets timeout: 1800.']
+    calls = []
+
+    def fake_post(url, headers, payload):
+        calls.append(payload)
+        content = scripted[min(len(calls) - 1, len(scripted) - 1)]
+        return DummyResponse(
+            {'choices': [{'message': {'content': content}}]}, url=url)
+
+    monkeypatch.setattr(
+        httpx, 'AsyncClient',
+        lambda *args, **kwargs: FakeAsyncClient(post_handler=fake_post),
+    )
+
+    response = client.post(
+        '/ai/chat',
+        json={
+            'messages': [{'role': 'user',
+                          'content': 'what is my idle timeout?'}],
+            'apiKey': 'openai-token',
+            'model': 'gpt-4o',
+            'apiUrl': 'https://api.openai.com/v1/chat/completions',
+            'apiProvider': 'chatgpt',
+            'toolProtocol': 'text',
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body['content'] == 'The idle_timeout section sets timeout: 1800.'
+    # The identical second read never reached the tool executor...
+    assert executed == [
+        ('read_user_config', '{"filename": "printer.cfg"}'),
+        ('read_user_config', '{"filename": "Hotkey.cfg"}'),
+    ]
+    # ...and the model saw the directive in the follow-up messages.
+    followups = json.dumps(calls[-1]['messages'])
+    assert 'ALREADY RETRIEVED' in followups
+
+
+def test_chat_proxy_repeat_guard_does_not_touch_unlisted_tools(monkeypatch):
+    """Guard scope is literal and allow-listed: get_klippy_status (live
+    state, not idempotent) is NOT in REPEAT_GUARD_TOOLS — identical
+    repeats keep executing."""
+    monkeypatch.setenv('KWC_EDIT_TOOLS', '0')
+    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
+    executed = []
+
+    def fake_exec(call):
+        executed.append(call['name'])
+        return f"result for {call['name']} #{len(executed)}"
+
+    monkeypatch.setattr(ai_routes, '_execute_tool_call', fake_exec)
+
+    status_call = '```tool\n{"name": "get_klippy_status", "arguments": {}}\n```'
+    scripted = [status_call, status_call,
+                'Klipper is ready.']
+    calls = []
+
+    def fake_post(url, headers, payload):
+        calls.append(payload)
+        content = scripted[min(len(calls) - 1, len(scripted) - 1)]
+        return DummyResponse(
+            {'choices': [{'message': {'content': content}}]}, url=url)
+
+    monkeypatch.setattr(
+        httpx, 'AsyncClient',
+        lambda *args, **kwargs: FakeAsyncClient(post_handler=fake_post),
+    )
+
+    response = client.post(
+        '/ai/chat',
+        json={
+            'messages': [{'role': 'user', 'content': 'is klipper ready?'}],
+            'apiKey': 'openai-token',
+            'model': 'gpt-4o',
+            'apiUrl': 'https://api.openai.com/v1/chat/completions',
+            'apiProvider': 'chatgpt',
+            'toolProtocol': 'text',
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()['content'] == 'Klipper is ready.'
+    assert executed == ['get_klippy_status', 'get_klippy_status']
+
+
 def test_chat_proxy_provider_empty_recovers_via_backstop(monkeypatch):
     # A literal empty completion from the provider (llama.cpp transient
     # hiccup) must not surface as an API error. The empty-response backstop
