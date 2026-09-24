@@ -3084,8 +3084,13 @@ async def chat_proxy(req: ChatRequest):
                                     # decision. Refusal wins. (The commented-
                                     # param refusals this clause originally
                                     # guarded were removed 2026-09-20.)
+                                    # 'budget' (Phase-5 write cap) is the
+                                    # same shield: the loop ORDERED the model
+                                    # to stop editing and report, so a cfg
+                                    # block in that final answer is the report,
+                                    # not an inert draft to nudge back.
                                     and edit_session.last_write_outcome
-                                    != 'user_gated'
+                                    not in ('user_gated', 'budget')
                                     # Echo guard (native-mode traces
                                     # 2026-09-17): after an APPROVED write
                                     # models re-quote the staged section in

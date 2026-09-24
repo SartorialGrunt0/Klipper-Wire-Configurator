@@ -266,6 +266,31 @@ def _lean_success_content(name: str, result: dict) -> str:
     return head
 
 
+# ── per-request write-attempt cap (Phase-5 convergence pass) ─────────
+# The cap exists for THRASH, not for legitimate multi-op work: a model that
+# keeps re-issuing writes after kickbacks burns the whole turn budget with
+# nothing to show (live: a 17-attempt loop; 20-call turns in the 09-23 bank).
+# Hitting it is a SOFT landing, never an error — the model is told to stop
+# editing and report honestly, whatever is already staged still stands, and
+# the user still gets the human approval cards for it.
+# `KWC_EDIT_WRITE_CAP` overrides the default; 0 (or negative) disables it.
+# Measured against every recorded bank run, a cap of 5 would have interrupted
+# roughly 1 ANSWERED question in 40 (each of which eventually passed) — the
+# reason the number is an env knob rather than a frozen constant.
+EDIT_WRITE_CAP_DEFAULT = 5
+
+
+def write_cap() -> int:
+    """Write attempts allowed per request (<=0 = uncapped)."""
+    raw = _os.environ.get("KWC_EDIT_WRITE_CAP", "").strip()
+    if not raw:
+        return EDIT_WRITE_CAP_DEFAULT
+    try:
+        return int(raw)
+    except ValueError:
+        return EDIT_WRITE_CAP_DEFAULT
+
+
 class EditSession:
     """Request-scoped edit session: live state + baseline + staged edits."""
 
@@ -418,6 +443,28 @@ class EditSession:
             "why. Never tell the user a blocked change was staged."
         )
 
+    def _over_write_budget(self) -> str | None:
+        """Lean soft-landing directive once this request's write cap is hit.
+
+        Returns None while the request is still within budget. On cap this
+        is a STOP order for further writes, never an error and never a state
+        change: the model must report what it changed and what it could NOT
+        apply, so the turn ends with the approved set so far plus an honest
+        summary (plan Phase 5 — "never hard-fail the conversation").
+        """
+        cap = write_cap()
+        if cap <= 0 or self.edit_attempts <= cap:
+            return None
+        self.last_write_outcome = "budget"
+        return (
+            f"\n\nWRITE LIMIT REACHED — {self.edit_attempts} of {cap} write "
+            "attempts used for this request, so this call was NOT applied "
+            "and no further write calls will be. Stop calling write tools. "
+            "Tell the user what you changed, what you could NOT apply, and "
+            "what you would try next. Never claim a change was staged "
+            "unless a tool result said so."
+        )
+
     def _repetition_blocked(self, name: str, args: dict) -> str | None:
         """Hard-stop text once the SAME call has failed 3+ times (the
         next repeat is refused WITHOUT touching state); None to allow."""
@@ -500,6 +547,10 @@ class EditSession:
         args = tool_call.get("arguments", {}) or {}
         self.edit_attempts += 1
 
+        budget = self._over_write_budget()
+        if budget is not None:
+            return budget, None
+
         op = self.tool_call_to_op(name, args)
         if op is None:
             return f"Unknown write tool: {name}", None
@@ -554,6 +605,10 @@ class EditSession:
         name = tool_call.get("name", "")
         args = tool_call.get("arguments", {}) or {}
         self.edit_attempts += 1
+
+        budget = self._over_write_budget()
+        if budget is not None:
+            return budget, None, None
 
         op = self.tool_call_to_op(name, args)
         if op is None:

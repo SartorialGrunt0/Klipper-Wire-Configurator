@@ -25,6 +25,7 @@ from main import app  # noqa: E402
 from services.ai_edit_tools import (  # noqa: E402
     EDIT_TOOL_NAMES,
     EDIT_TOOL_SPECS,
+    EDIT_WRITE_CAP_DEFAULT,
     EditSession,
 )
 
@@ -386,6 +387,130 @@ def test_flag_on_edit_applies_and_returns_pending_edits(edit_flag, monkeypatch):
     assert result_msgs
     # Diff payload never enters the model-facing result.
     assert '"diff"' not in str(result_msgs[0]['content'])
+
+
+# ── Phase-5 per-request write-attempt cap (soft landing) ────────────────
+# The cap targets THRASH (a model re-issuing writes after kickbacks with
+# nothing staged), never legitimate multi-op work. Crossing it must be a
+# soft landing: the call is refused without touching state, the model is
+# ordered to stop editing and report, and the conversation still ends with
+# prose — plus the staged set so far, which stays intact.
+
+def _failing_edit_args(i: int) -> dict:
+    """A write call that always kickbacks (unknown section)."""
+    return {'file': 'printer.cfg', 'op': 'set_param', 'section': f'nope{i}',
+            'key': 'max_accel', 'value': '3000'}
+
+
+def test_session_write_cap_soft_lands(monkeypatch):
+    monkeypatch.delenv('KWC_EDIT_WRITE_CAP', raising=False)
+    session = EditSession(_ctx())
+    for i in range(EDIT_WRITE_CAP_DEFAULT):
+        content, details = session.execute(
+            {'name': 'config_edit', 'arguments': _failing_edit_args(i)})
+        assert 'WRITE LIMIT REACHED' not in content
+        assert 'FAILED' in content and details is None
+    assert session.last_write_outcome == 'correctable'
+
+    content, details = session.execute(
+        {'name': 'config_edit', 'arguments': _failing_edit_args(99)})
+    assert details is None
+    assert 'WRITE LIMIT REACHED' in content
+    assert 'Stop calling write tools' in content
+    assert session.last_write_outcome == 'budget'
+    assert session.pending_edits == []
+    assert session.edit_attempts == EDIT_WRITE_CAP_DEFAULT + 1
+
+
+def test_session_write_cap_keeps_earlier_staged_work(monkeypatch):
+    monkeypatch.setenv('KWC_EDIT_WRITE_CAP', '2')
+    session = EditSession(_ctx())
+    # A real staged edit, then enough failures to cross the cap.
+    session.execute({'name': 'config_edit', 'arguments': {
+        'file': 'printer.cfg', 'op': 'set_param', 'section': 'printer',
+        'key': 'max_accel', 'value': '3000'}})
+    session.execute({'name': 'config_edit', 'arguments': _failing_edit_args(1)})
+    content, _ = session.execute(
+        {'name': 'config_edit', 'arguments': _failing_edit_args(2)})
+    assert 'WRITE LIMIT REACHED' in content
+    # The approved set so far is untouched by the cap.
+    payload = session.pending_edits_payload()
+    assert len(payload) == 1 and 'max_accel: 3000' in payload[0]['newText']
+
+
+def test_session_write_cap_env_override_and_disable(monkeypatch):
+    monkeypatch.setenv('KWC_EDIT_WRITE_CAP', '2')
+    session = EditSession(_ctx())
+    for i in range(2):
+        session.execute({'name': 'config_edit', 'arguments': _failing_edit_args(i)})
+    content, _ = session.execute(
+        {'name': 'config_edit', 'arguments': _failing_edit_args(3)})
+    assert 'WRITE LIMIT REACHED' in content
+
+    # 0 = uncapped (the escape/A-B arm) — the guards, not the budget, then
+    # own the loop.
+    monkeypatch.setenv('KWC_EDIT_WRITE_CAP', '0')
+    session = EditSession(_ctx())
+    for i in range(EDIT_WRITE_CAP_DEFAULT + 3):
+        content, _ = session.execute(
+            {'name': 'config_edit', 'arguments': _failing_edit_args(i)})
+    assert 'WRITE LIMIT REACHED' not in content
+    assert session.last_write_outcome == 'correctable'
+
+
+def test_prepare_obeys_write_cap(monkeypatch):
+    # The approval path shares the session counter: a card is never opened
+    # for a write the budget has already refused.
+    monkeypatch.setenv('KWC_EDIT_WRITE_CAP', '1')
+    session = EditSession(_ctx())
+    content, result, state = session.prepare(
+        {'name': 'config_edit', 'arguments': _failing_edit_args(0)})
+    assert result is None and state is None and 'FAILED' in content
+    content, result, state = session.prepare(
+        {'name': 'config_edit', 'arguments': _failing_edit_args(1)})
+    assert result is None and state is None
+    assert 'WRITE LIMIT REACHED' in content
+    assert session.last_write_outcome == 'budget'
+
+
+def test_flag_on_write_cap_soft_lands_and_suppresses_prose_nudge(edit_flag, monkeypatch):
+    """End-to-end: past the cap the turn still ends with prose (never an
+    error), and the prose nudge is suppressed — the loop just ORDERED the
+    model to summarize, so a ```cfg block in that answer is the requested
+    report, not an inert draft to nudge back into another write."""
+    replies = [_text_tool_call('config_edit', _failing_edit_args(i))
+               for i in range(EDIT_WRITE_CAP_DEFAULT + 1)]
+    replies.append(_final_reply(
+        'I could not apply that:\n\n```cfg\n[printer]\nmax_accel: 9999\n```'))
+    scripted = _install(monkeypatch, replies)
+    response = client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'set max_accel to 9999'}]))
+    assert response.status_code == 200
+    body = response.json()
+    # Attempts 1..cap ran; the (cap+1)th was refused with the directive.
+    assert body['editAttempts'] == EDIT_WRITE_CAP_DEFAULT + 1
+    assert body['pendingEdits'] is None
+    assert 'WRITE LIMIT REACHED' in str(scripted.payloads[-1]['messages'])
+    # One provider call per scripted reply — a nudge would add another turn.
+    assert len(scripted.payloads) == EDIT_WRITE_CAP_DEFAULT + 2
+    assert 'Call the tool NOW' not in str(scripted.payloads[-1]['messages'])
+
+
+def test_flag_on_without_cap_still_nudges_inert_draft(edit_flag, monkeypatch):
+    """Control for the test above: with the cap disabled the same scripted
+    run ends on a CORRECTABLE outcome, so the cfg-block nudge DOES fire —
+    the suppression is attributable to the 'budget' outcome, not to the
+    fixture being inert."""
+    monkeypatch.setenv('KWC_EDIT_WRITE_CAP', '0')
+    replies = [_text_tool_call('config_edit', _failing_edit_args(i))
+               for i in range(EDIT_WRITE_CAP_DEFAULT)]
+    replies.append(_final_reply(
+        'I could not apply that:\n\n```cfg\n[printer]\nmax_accel: 9999\n```'))
+    scripted = _install(monkeypatch, replies)
+    response = client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'set max_accel to 9999'}]))
+    assert response.status_code == 200
+    assert 'Call the tool NOW' in str(scripted.payloads[-1]['messages'])
 
 
 def test_flag_on_kickback_loop_converges_in_two(edit_flag, monkeypatch):
