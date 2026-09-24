@@ -1318,18 +1318,32 @@ def build_edit_tool_questions() -> list[TestQuestion]:
         ),
         TestQuestion(
             qid="EDIT-06",
-            title="Edit tools: commented-param edit stages with visible uncomment",
-            text=("Set enable_pin to PF16 on my [stepper_x] in printer.cfg."),
+            title="Edit tools: commented-param uncomment keeps the polarity",
+            text=("Set enable_pin to PF16 on my [stepper_x] in printer.cfg — "
+                  "keep the enable-pin polarity exactly as it is now (leave "
+                  "the ! flag in place)."),
             # Planted fixture (Trident's real enable_pin is ACTIVE): the
             # target param is commented out. 2026-09-20: the refuse-and-ask
             # guard was removed — the write stages directly and the diff
-            # shows the uncomment. Success = staged enable_pin: PF16 with
+            # shows the uncomment. Success = staged `enable_pin: !PF16` with
             # NO commented duplicate left behind.
+            #
+            # POLARITY DECISION 2026-09-24 (Sir): the old wording asked for
+            # "PF16" and graded the bare value, so a model that dropped the
+            # `!` passed while one that preserved it (qwen3.5-4b staged
+            # `!PF16` in both arms) was FAILed. Klipper's reference says
+            # enable_pin is enable-high by default and `!` means enable-low;
+            # EVERY enable_pin in the real Trident config carries the flag
+            # (and the stock Spider reference uses `!PE9`), so the flag is
+            # part of the hardware convention, not part of the pin name.
+            # The request is now explicit and the criterion grades the
+            # convention: dropping the flag is the miss. Prior EDIT-06
+            # numbers are not comparable across this change.
             context_files=_context_with(_printer_cfg_with_commented_enable()),
             edit_tools=True,
             require_tool=False,
             criteria=(
-                ("staged_param", "printer.cfg::enable_pin: PF16"),
+                ("staged_param", "printer.cfg::enable_pin: !PF16"),
                 ("staged_not_regex", r"printer\.cfg::#enable_pin"),
             ),
         ),
