@@ -192,6 +192,16 @@ class TestQuestion:
     # ACTIVE (gate bypass — write tools advertised immediately, measures
     # edit quality with the law force-loaded). None follows the server env.
     edit_skill: bool | None = None
+    # Phase 6.5.5 ack-stall assertion: when True, a request rescued by the
+    # backend ack guard (usage.ackReprompts >= 1 — the model promised the
+    # edit in prose and needed the injected directive to actually do it)
+    # scores FAIL even when the final answer passes. The rescue hid a lie;
+    # grading it clean would hide the weakness (plan §6.5.5).
+    expect_no_ack_stall: bool = False
+    # Per-request ChatRequest.toolProtocol override ('native'/'text');
+    # None follows the run's --tool-protocol. The ACK-* family pins both
+    # protocols so guard parity is graded in one run (plan §6.5.5).
+    tool_protocol: str | None = None
 
 
 # Shared config snippets used by several questions.
@@ -1350,6 +1360,72 @@ def build_edit_tool_questions() -> list[TestQuestion]:
     ]
 
 
+def build_ack_guard_questions() -> list[TestQuestion]:
+    """Ack-guard family (ACK-*), Phase 6.5.5.
+
+    Measures the ack guard's two behaviors on the models that actually
+    stall (qwen-class; gemma+native showed ZERO claimable headroom in the
+    2026-09-24 interim baseline, so on that class these are NON-FIRING
+    regression cases):
+
+      ACK-STALL-NATIVE / ACK-STALL-TEXT  — an unambiguous single-value
+        edit with `expect_no_ack_stall=True`. PASS means the model went
+        straight to the write tool; a rescue (ackReprompts>=1) FAILS even
+        though the staged artifact is correct, because the raw model lied
+        by promise. Protocol pinned per case so native/text parity is
+        graded in one run (the guard's tail check runs on visible text,
+        so both protocols must behave identically).
+
+      ACK-QA-NEG — a pure question, no edit intent: the guard must never
+        fire (the `_is_edit_request` gate). Asserted on both protocols
+        via the run flag plus the paired native/text cases.
+
+    Run these as an edit-family probe, not the full bank: `--questions
+    ACK`. The guard's cap is 1/session, so a PASS/FAIL here says nothing
+    about loop convergence — read editAttempts alongside it.
+    """
+    printer_cfg = _cfg_context("printer.cfg")
+    return [
+        TestQuestion(
+            qid="ACK-STALL-NATIVE",
+            title="Ack guard: single edit, native protocol, no promise-stall",
+            text="In printer.cfg set [printer] max_velocity to 300.",
+            context_files=printer_cfg,
+            edit_tools=True,
+            expected_tools=("config_edit",),
+            require_tool=True,
+            tool_protocol="native",
+            criteria=(("staged_param", "printer.cfg::max_velocity: 300"),),
+            expect_no_ack_stall=True,
+        ),
+        TestQuestion(
+            qid="ACK-STALL-TEXT",
+            title="Ack guard: single edit, text protocol, no promise-stall",
+            text="In printer.cfg set [printer] max_velocity to 300.",
+            context_files=printer_cfg,
+            edit_tools=True,
+            expected_tools=("config_edit",),
+            require_tool=True,
+            tool_protocol="text",
+            criteria=(("staged_param", "printer.cfg::max_velocity: 300"),),
+            expect_no_ack_stall=True,
+        ),
+        TestQuestion(
+            qid="ACK-QA-NEG",
+            title="Ack guard: pure question must never be nudged",
+            text="What does the [printer] max_velocity parameter control?",
+            context_files=printer_cfg,
+            edit_tools=True,
+            expected_tools=("search_klipper_docs", "get_config_reference_section",
+                            "get_section_schema"),
+            require_tool=True,
+            tool_protocol="text",
+            criteria=(("regex", r"maximum.*speed|speed.*maximum|travel"),),
+            expect_no_ack_stall=True,
+        ),
+    ]
+
+
 def build_skill_gate_questions() -> list[TestQuestion]:
     """Phase 3 skill-gate activation eval (SKILL-* family). Each question
     carries a should_trigger label (`skill_expected`); the graded signal is
@@ -2474,6 +2550,39 @@ def criterion_ok(kind: str, value: str, content: str,
     return False
 
 
+# Narration claims the model is APPLYING/EDITING something (present-continuous
+# or immediate-future phrasing tied to the change), not merely reading or
+# explaining. Verb set deliberately narrow: "reading", "checking",
+# "looking up" never match.
+_NARRATE_EDIT_RE = re.compile(
+    r"\b(?:apply(?:ing)?|edit(?:ing)?|writ(?:ing|e|ten)|updat(?:ing|e)|"
+    r"chang(?:ing|e)|set(?:ting)?|add(?:ing)?|remov(?:ing|e)|insert(?:ing)?|"
+    r"replac(?:ing|e)|stagem?ent?|stage)\b[^.]*?\b(?:config|file|section|param|macro|value|printer\.cfg)"
+    r"|\b(?:config|file|section|param|macro|value)\b[^.]*?\b(?:apply(?:ing)?|edit(?:ing)?|updat(?:ing|e)|stage)\b",
+    re.IGNORECASE,
+)
+_WRITE_TOOL_NAMES = frozenset({"config_edit", "config_write"})
+
+
+def _narration_tool_mismatch(narration_turns: list) -> bool:
+    """True when a tool turn's narration claims an edit but its executed
+    batch has no write tool (Phase 6.5.5 structural consistency flag).
+
+    Works on the response's narrationTurns ([{turn, narration,
+    toolNames}]). This is the SET_LED-style hallucination detector: the
+    model says "applying the change to printer.cfg" while the only tool
+    firing is a read. Deliberately structural (narration vs executed
+    trace), never prose-intent guessing at the backend level."""
+    for turn in narration_turns or []:
+        narration = str(turn.get("narration") or "")
+        tool_names = {str(n) for n in (turn.get("toolNames") or [])}
+        if not narration or not _NARRATE_EDIT_RE.search(narration):
+            continue
+        if not (tool_names & _WRITE_TOOL_NAMES):
+            return True
+    return False
+
+
 @dataclass
 class QuestionResult:
     qid: str
@@ -2500,6 +2609,16 @@ class QuestionResult:
     # backend log slice). None when not a skill question.
     skill_expected: bool | None = None
     skill_activated: bool | None = None
+    # Phase 6.5 ack guard: injected-directive count from usage.ackReprompts.
+    ack_reprompts: int = 0
+    # Per-turn narration from the response's narrationTurns
+    # ([{turn, narration, toolNames}]) — feeds the consistency flag.
+    narration_turns: list = field(default_factory=list)
+    # Structural narration-vs-tool mismatch (SET_LED-style hallucination
+    # detector, plan §6.5.5): a tool turn NARRATED an edit but the turn's
+    # executed batch carried no write tool. Flag only — never silently
+    # re-scores; read it when analyzing edit-family FAILs.
+    narration_tool_mismatch: bool = False
 
 
 # ── HTTP helpers (stdlib only) ─────────────────────────────────────────
@@ -2585,7 +2704,7 @@ def chat_request(base_url: str, question: TestQuestion, settings: dict,
         "requestId": request_id,
         "maxTokens": settings["max_tokens"],
         "temperature": settings["temperature"],
-        "toolProtocol": settings.get("tool_protocol", "auto"),
+        "toolProtocol": question.tool_protocol or settings.get("tool_protocol", "auto"),
         "mergeSystemMessages": settings.get("merge_system_messages", False),
     }
     # Tool-mediated editing: per-question override wins over the run flag;
@@ -2703,6 +2822,19 @@ def run_one_question(
         result.usage = response.get("usage")
         result.pending_edits = response.get("pendingEdits")
         result.edit_attempts = response.get("editAttempts")
+        # Phase 6.5: ack-guard rescue count + narration turns.
+        result.ack_reprompts = int((result.usage or {}).get("ackReprompts") or 0)
+        result.narration_turns = list(response.get("narrationTurns") or [])
+        result.narration_tool_mismatch = _narration_tool_mismatch(
+            result.narration_turns)
+        if result.ack_reprompts:
+            log.write(f"Ack guard: ackReprompts={result.ack_reprompts} "
+                      f"(continue-intent promise rescued — expect_no_ack_stall "
+                      f"{'FAILS' if q.expect_no_ack_stall else 'not asserted'} this case)")
+        if result.narration_tool_mismatch:
+            log.write("Narration/tool MISMATCH: a tool turn narrated an edit "
+                      "but fired no write tool (structural SET_LED-style "
+                      "hallucination signal)")
         log.write(f"Edit tools: pendingEdits="
                   f"{[e.get('file') + ':' + e.get('op', '') for e in (result.pending_edits or [])] or 'none'} "
                   f"editAttempts={result.edit_attempts}")
@@ -2760,6 +2892,14 @@ def run_one_question(
                                   pending_edits=result.pending_edits)
                 result.checks.append((kind, value, ok))
             result.answer_ok = all(ok for _, _, ok in result.checks)
+            if (result.answer_ok and q.expect_no_ack_stall
+                    and result.ack_reprompts):
+                # The case only passed because the ack guard rescued a
+                # promise-with-no-action. The rescue cleaned up a lie;
+                # scoring it PASS would hide the weakness (plan §6.5.5).
+                result.checks.append(
+                    ("expect_no_ack_stall", f"ackReprompts={result.ack_reprompts}", False))
+                result.answer_ok = False
             if result.answer_ok and result.tool_ok:
                 result.status = "PASS"
             elif result.answer_ok and q.require_tool:
@@ -3066,7 +3206,7 @@ def main() -> int:
                              "printer memory, blank it, run MEMORY-01..03, then restore it")
     args = parser.parse_args()
 
-    questions = build_questions() + build_macro_questions() + build_trident_questions() + build_ambiguity_questions() + build_setup_questions() + build_live_context_questions() + build_edit_tool_questions() + build_skill_gate_questions() + build_tool_coverage_questions()
+    questions = build_questions() + build_macro_questions() + build_trident_questions() + build_ambiguity_questions() + build_setup_questions() + build_live_context_questions() + build_edit_tool_questions() + build_skill_gate_questions() + build_tool_coverage_questions() + build_ack_guard_questions()
     if args.include_memory:
         questions += build_memory_questions()
     if args.list_questions:
