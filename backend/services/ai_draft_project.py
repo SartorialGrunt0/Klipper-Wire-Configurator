@@ -902,8 +902,30 @@ class ProjectState:
             if path == target or path.removeprefix('./') == target_norm:
                 return _state_error(
                     f"[include {path}] already present in {in_file}.")
-        self.files[in_file] = _insert_above_save_config(
-            self.files[in_file], [f'[{header}]'])
+        # Placement convention (Sir dogfood 2026-09-25): the old code
+        # reused the SECTION inserter (EOF / above-banner), dropping the
+        # line at the very bottom of printer.cfg. Klipper convention puts
+        # includes at the top, together.
+        banner = _save_config_start(lines)
+        active_includes = [t for t in _include_lines(lines) if t[0] < banner]
+        if not self.files[in_file].strip():
+            self.files[in_file] = f'[{header}]\n'
+        elif active_includes:
+            # Join the existing block: directly after the last include.
+            idx = active_includes[-1][0] + 1
+            lines[idx:idx] = [f'[{header}]']
+        else:
+            # No includes yet: top of file, after any leading
+            # header comments/blank lines, before the first real
+            # section — and never at/below the SAVE_CONFIG banner.
+            idx = 0
+            while idx < banner:
+                stripped = lines[idx].strip()
+                if stripped and not stripped.startswith('#'):
+                    break
+                idx += 1
+            lines[idx:idx] = [f'[{header}]', '']
+        self.files[in_file] = '\n'.join(lines)
         return {'status': 'ok', 'file': in_file, 'summary': f"added [include {target}] to {in_file}"}
 
     def _op_comment_include(self, op: dict) -> dict:

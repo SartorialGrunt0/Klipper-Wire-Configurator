@@ -281,6 +281,74 @@ def test_add_include_lands_above_save_config_banner():
     assert out.index('[include dock_macros.cfg]') < out.index('#*# <')
 
 
+# ── add_include placement convention ─────────────────────────────────
+# Sir dogfood 2026-09-25: add_include reused the SECTION inserter
+# (EOF/above-banner), so the line landed at the very bottom of
+# printer.cfg. Klipper convention is includes at the top, together.
+
+INCLUDES_CFG = """# My Voron config
+# (leading header comments stay at the very top)
+[include mainsail.cfg]
+[include aux_fan.cfg]
+
+[printer]
+kinematics: cartesian
+max_velocity: 200
+"""
+
+
+def test_add_include_joins_existing_include_block():
+    st, base = _state(INCLUDES_CFG)
+    st1, r = st.apply(base, {'op': 'add_include', 'file': 'printer.cfg',
+                             'target_file': 'new_macros.cfg'})
+    assert r['status'] == 'applied'
+    out = st1.files['printer.cfg']
+    lines = out.split('\n')
+    assert lines[0] == '# My Voron config'
+    inc = lines.index('[include new_macros.cfg]')
+    # directly after the last existing include — one contiguous block,
+    # before the first real section
+    assert inc == lines.index('[include aux_fan.cfg]') + 1
+    assert inc < lines.index('[printer]')
+
+
+def test_add_include_no_existing_includes_goes_to_top():
+    st, base = _state()
+    st1, r = st.apply(base, {'op': 'add_include', 'file': 'printer.cfg',
+                             'target_file': 'macros.cfg'})
+    assert r['status'] == 'applied'
+    out = st1.files['printer.cfg']
+    lines = out.split('\n')
+    assert lines[0] == '[include macros.cfg]'
+    # blank line separates the include from the first section
+    assert lines[1] == ''
+    assert lines.index('[printer]') == 2
+
+
+def test_add_include_top_insert_keeps_header_comments_first():
+    text = '# Top of file comment\n[printer]\nkinematics: cartesian\n'
+    st, base = _state(text)
+    st1, r = st.apply(base, {'op': 'add_include', 'file': 'printer.cfg',
+                             'target_file': 'macros.cfg'})
+    assert r['status'] == 'applied'
+    lines = st1.files['printer.cfg'].split('\n')
+    assert lines[0] == '# Top of file comment'
+    assert lines[1] == '[include macros.cfg]'
+    assert lines.index('[printer]') == 3
+
+
+def test_add_include_joins_block_above_banner_not_eof():
+    tail = INCLUDES_CFG + SAVE_CONFIG_TAIL
+    st, base = _state(tail)
+    st1, r = st.apply(base, {'op': 'add_include', 'file': 'printer.cfg',
+                             'target_file': 'new_macros.cfg'})
+    assert r['status'] == 'applied'
+    out = st1.files['printer.cfg']
+    assert out.index('[include new_macros.cfg]') < out.index('[printer]')
+    # tail preserved byte-for-byte
+    assert out[out.index('#*# <'):] == tail[tail.index('#*# <'):]
+
+
 def test_add_section_no_tail_still_appends_at_eof():
     """Flag-off parity: files WITHOUT a tail behave exactly as before."""
     st, base = _state()
