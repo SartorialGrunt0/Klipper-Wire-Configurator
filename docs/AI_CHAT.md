@@ -90,29 +90,54 @@ How it works:
 
 Baselines on the current branch (`improvement/ai-chat-edit-refactor`,
 post Phase-5), full 94-Q bank, native tool protocol, `--max-tokens 8192
---temperature 0.7`, edit tools on (runs under
+--temperature 0.7`, edit tools on, one model per run (runs under
 `reports/ai-chat-accuracy/`):
 
-| Model | PASS | Rate |
-| --- | --- | --- |
-| gemma-4-12b | 92/94 | 98% |
+| Model | Host | PASS | Rate |
+| --- | --- | --- | --- |
+| gemma-4-12b | CachyPC | 92/94 | 98% |
+| qwen3.5-4b | CachyPC | 78/94 | 83% |
+| gemma-4-e4b | CachyPC | 77/94 | 82% |
+| qwen3.5-9b | CachyPC | 73/94 | 78% |
 
-The two misses, read from their traces:
+Family detail (PASS/total):
 
-- **TRIDENT-15** (`idle_timeout` turns off all LEDs): the model staged the
-  `Chamber_LEDs` gcode but never edited the other two LED sets, which live
-  in `EBB.cfg` / `Hotkey.cfg` — an incomplete multi-file edit, then a
-  display-only `cfg` block on top. Graded by the staged-artifact criteria,
-  not the prose.
-- **SKILL-N04** (discuss-a-draft must NOT load the edit skill): over-eager —
-  loaded the skill and staged anyway. An over-action failure, the opposite
-  direction of every other guard on the loop.
+| Model | Q | MACRO | TRIDENT | AMBI | MINIDIFF | SETUP | LIVE | EDIT | SKILL | TOOL |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| gemma-4-12b | 19/19 | 10/10 | 15/16 | 8/8 | 4/4 | 5/5 | 7/7 | 6/6 | 8/9 | 8/8 |
+| qwen3.5-4b | 19/19 | 9/10 | 10/16 | 8/8 | 3/4 | 3/5 | 5/7 | 5/6 | 6/9 | 8/8 |
+| gemma-4-e4b | 16/19 | 7/10 | 13/16 | 6/8 | 3/4 | 3/5 | 7/7 | 5/6 | 7/9 | 8/8 |
+| qwen3.5-9b | 16/19 | 8/10 | 12/16 | 5/8 | 3/4 | 3/5 | 6/7 | 5/6 | 8/9 | 6/8 |
 
-Run-to-run variance of a few points is normal (the model gets a fresh dialog
-per question, and tool calls are nondeterministic), which is why results are
-single-run numbers rather than ranges; any model-behaviour *claim* needs
-three runs. Runs live in `reports/ai-chat-accuracy/` — re-baseline after any
-prompt or tool change.
+Failure modes seen across the models (from their traces):
+
+- **Staged but not what was asked** (the dominant mode) — the model picks a
+  blunter operation than the case needs (`replace_section` or `set_param`
+  where an anchored `patch_gcode` is required) and the staged text misses
+  the required line. This is what fails `EDIT-02` / `MINIDIFF-01` (the
+  `level_bed` adaptive-anchor pair) on three of the four models.
+- **Nothing staged after burning the retry budget** — `TRIDENT-03`,
+  `MACRO-02`, `SKILL-02` and `EDIT-02` show 6–7 edit attempts with an empty
+  pending set: the model kept re-sending variations that the server
+  rejected, then landed on the soft-landing summary. The write-attempt cap
+  keeps this honest, but the loop is not converging for these models.
+- **Wrong tool routing** — qwen3.5-9b's weakest area (6/8 on TOOL,
+  5/8 on AMBI): it reaches for prose or an adjacent tool (`AMBI-06/08`
+  tool-argument checks, `TOOL-04/05` use-gates) where a typed lookup was
+  expected. This is why the 9b model scores *below* the 4b here.
+- **Refuses to stay quiet on an edit-shaped request** — `SKILL-N04`
+  (discuss-a-draft) fails on **all four** models: each loads the editing
+  skill and stages something for a request that should stay a discussion.
+
+Two cases fail on every model measured so far and are the strongest
+candidates for a question-design or prompt fix rather than a model
+capability gap: **TRIDENT-15** (the `idle_timeout` multi-LED case, whose
+three LED sets live in three different files) and **SKILL-N04** above.
+
+Single-run numbers with a fresh dialog per question; tool calls are
+nondeterministic, so treat a few points of spread as noise and require
+three runs before claiming a model-behaviour difference. Re-baseline after
+any prompt or tool change.
 
 ### Running the harness
 
