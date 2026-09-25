@@ -1021,6 +1021,29 @@ export async function stopChat(requestId: string): Promise<void> {
   }
 }
 
+// ── Mid-loop progress (Phase 6.5.4) ──────────────────────────────────
+
+export interface ChatProgressPoll {
+  pending: boolean;
+  turn?: number;
+  narration?: string;
+  toolNames?: string[];
+  elapsedMs?: number;
+}
+
+/** Poll mid-loop progress for an in-flight /ai/chat request. Best-effort:
+ *  any network/parse failure reads as "no progress" (display-only rail). */
+export async function pollChatProgress(requestId: string): Promise<ChatProgressPoll> {
+  try {
+    const res = await fetch(`/ai/chat/progress?requestId=${encodeURIComponent(requestId)}`);
+    if (!res.ok) return { pending: false };
+    const data = (await res.json()) as ChatProgressPoll;
+    return data && data.pending === true ? data : { pending: false };
+  } catch {
+    return { pending: false };
+  }
+}
+
 // ── Approval gate (tool-mediated edits, Phase 2) ─────────────────────
 
 export interface ApprovalCard {

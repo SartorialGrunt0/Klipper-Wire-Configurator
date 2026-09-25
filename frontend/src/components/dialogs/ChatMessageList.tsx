@@ -14,6 +14,8 @@ import type { ChatMessage } from '../../stores/aiStore';
 import type { AiToolCallDetail } from '../../services/api';
 import { hasPrinterMemoryBlock } from '../../utils/printerMemory';
 import { classifyMiniDiffLine, fenceUnfencedMiniDiffs, isMiniDiffBlock } from '../../utils/miniDiff';
+import type { ProgressDisplay } from '../../utils/chatProgress';
+import { progressCollapseLabel } from '../../utils/chatProgress';
 
 // ── Markdown Code Block Component ───────────────────────────────────
 
@@ -113,6 +115,9 @@ function MarkdownCode({ children, className, inline }: CodeProps) {
 export interface ChatMessageListProps {
   messages: ChatMessage[];
   loading: boolean;
+  /** Mid-loop tool progress (Phase 6.5.4): subordinate strip on the
+   *  pending bubble while a send is in flight. Display-only. */
+  progress?: ProgressDisplay;
   error: string | null;
   /** Re-submits the last failed user message with full context. */
   onRetry?: () => void;
@@ -220,6 +225,7 @@ const ToolCallDetailsPopup: React.FC<{ calls: AiToolCallDetail[]; onClose: () =>
 const ChatMessageList: React.FC<ChatMessageListProps> = ({
   messages,
   loading,
+  progress,
   error,
   onRetry,
   activeFile,
@@ -228,6 +234,11 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
   messagesEndRef,
 }) => {
   const [toolDetailsMessageIndex, setToolDetailsMessageIndex] = useState<number | null>(null);
+  // Progress strip fold state (Phase 6.5.4). Open while running — the
+  // whole point is not being silent during long tool chains — with a
+  // collapse affordance for users who don't want it. Never persists:
+  // the strip unmounts when the answer lands (never-final law).
+  const [progressCollapsed, setProgressCollapsed] = useState(false);
   const [editMessageIndex, setEditMessageIndex] = useState<number | null>(null);
   const [editDraft, setEditDraft] = useState('');
   const [copyState, setCopyState] = useState<Record<number, 'idle' | 'copied' | 'error'>>({});
@@ -468,7 +479,12 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
         );
       })}
 
-      {/* Loading indicator */}
+      {/* Loading indicator + mid-loop progress strip (Phase 6.5.4).
+          The strip is visually subordinate (smaller, secondary text):
+          local-model narration is low-certainty, and progress never
+          implies more confidence than the loop actually has. Tool names
+          accumulate across turns (deduped) with checkmarks for steps
+          already past; the strip collapses to "▸ N steps". */}
       {loading && (
         <div className="text-left mb-2">
           <div className="inline-block px-3 py-2 rounded-lg text-xs bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">
@@ -477,6 +493,35 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
               <span className="animate-bounce" style={{ animationDelay: '0.15s' }}>●</span>
               <span className="animate-bounce" style={{ animationDelay: '0.3s' }}>●</span>
             </span>
+            {progress && progress.tools.length > 0 && (
+              <div className="mt-1.5 border-t border-[var(--color-bg-tertiary)] pt-1.5">
+                <button
+                  type="button"
+                  onClick={() => setProgressCollapsed((v) => !v)}
+                  className="text-[10px] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
+                  title={progressCollapsed ? 'Show progress' : 'Hide progress'}
+                >
+                  {progressCollapsed ? progressCollapseLabel(progress) : '▾ working'}
+                </button>
+                {!progressCollapsed && (
+                  <div className="mt-1 space-y-0.5">
+                    {progress.narration && (
+                      <p className="text-[10px] italic text-[var(--color-text-secondary)] leading-snug max-w-[420px]">
+                        {progress.narration}
+                      </p>
+                    )}
+                    <ul className="text-[10px] text-[var(--color-text-secondary)]">
+                      {progress.tools.map((name) => (
+                        <li key={name} className="flex items-center gap-1">
+                          <span className="text-green-500/80">✓</span>
+                          <code className="font-mono">{name}</code>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}

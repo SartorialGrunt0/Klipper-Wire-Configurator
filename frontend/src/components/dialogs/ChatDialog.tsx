@@ -19,6 +19,11 @@ import * as api from '../../services/api';
 import { extractPrinterMemoryBlock } from '../../utils/printerMemory';
 import { planApprovedEditApply } from '../../utils/approvalApply';
 import {
+  EMPTY_PROGRESS,
+  applyProgressSnapshot,
+  type ProgressDisplay,
+} from '../../utils/chatProgress';
+import {
   PROVIDER_DEFAULTS,
   isLocalProvider,
   resolveProviderApiUrl,
@@ -125,6 +130,11 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   // In-flight chat request id as STATE so the approval poll effect can
   // key on it (stopRequestIdRef alone never re-renders).
   const [stopRequestId, setStopRequestId] = useState<string | null>(null);
+  // ── Mid-loop progress (Phase 6.5.4) ──
+  // Poll alongside the approval rail while a send is in flight. Display
+  // only: narration is the model's own tool-turn text, visually
+  // subordinate; it never substitutes for the answer (never-final law).
+  const [progress, setProgress] = useState<ProgressDisplay>(EMPTY_PROGRESS);
   const [showSettings, setShowSettings] = useState(false);
   // EXPERIMENT (auto-attach off): don't auto-select the active file.
   // Context only includes files the user explicitly checks in "Include Files".
@@ -582,6 +592,35 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     };
   }, [loading, stopRequestId, approvalBusy]);
 
+  // ── Mid-loop progress polling (Phase 6.5.4) ──────────────────────
+  // Same rail pattern as the approval poll, ~1.5s cadence (progress is
+  // less time-critical than a decision countdown). Accumulates deduped
+  // across polls; cleared when no request is in flight so a new send
+  // never inherits the previous run's steps.
+  useEffect(() => {
+    if (!loading || !stopRequestId) {
+      setProgress(EMPTY_PROGRESS);
+      return undefined;
+    }
+    let cancelled = false;
+    const tick = async () => {
+      const poll = await api.pollChatProgress(stopRequestId);
+      if (cancelled || !poll.pending) return;
+      setProgress((prev) => applyProgressSnapshot(prev, {
+        turn: poll.turn ?? 0,
+        narration: poll.narration ?? '',
+        toolNames: poll.toolNames ?? [],
+        elapsedMs: poll.elapsedMs ?? 0,
+      }));
+    };
+    void tick();
+    const interval = window.setInterval(() => { void tick(); }, 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [loading, stopRequestId]);
+
   // Countdown tick while a card is visible (display only; the backend
   // timer auto-declines authoritatively).
   useEffect(() => {
@@ -930,6 +969,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           <ChatMessageList
             messages={messages}
             loading={loading}
+            progress={progress}
             error={connectionLost ? 'Connection lost — the last question will resend automatically when the network returns.' : error}
             onRetry={handleRetry}
             activeFile={activeFile}
