@@ -37,9 +37,9 @@ The assistant sees your printer memory (mainboard, toolhead, expander boards, ki
 > your project. Each op is validated against the live project the moment
 > it is requested, and every validated change stops at an **Approve /
 > Decline** card whose diff is computed from the text that will actually
-> be applied. Config code blocks pasted into prose are display-only text.
-> The loop nudges the model (with exact call shapes) if it answers an edit
-> request without staging it. The tools:
+> be applied. Config code blocks in an answer are display-only — shown
+> to you, never applied. The loop nudges the model (with exact call
+> shapes) if it answers an edit request without staging it. The tools:
 >
 > - `config_edit` — one anchored operation per call on an **existing**
 >   file: `set_param`, `add_section`, `replace_section`, `delete_section`,
@@ -54,23 +54,6 @@ The assistant sees your printer memory (mainboard, toolhead, expander boards, ki
 >   that actually holds the section, the actual include lines), so the
 >   model corrects itself instead of guessing.
 
-### What the retire of the old protocol means
-
-Older builds let the model paste fenced `cfg` blocks with `-`/`+`
-mini-diffs and an **Apply and Review Changes** button. That path is gone
-(Phase-4 ratchet, 2026-09-22): its parsing, merge engine, and preview
-dialog were deleted because a second edit path doubled the verification
-work and hid which text was really applied. The assistant may still
-include a `cfg` block in an answer to *show* you something — it is
-display-only and is never applied.
-
-### Retired edit protocol (historical)
-
-Kept only so older conversation screenshots make sense: `# file:` hints,
-`-`/`+` mini-diffs, `*[section]` deletes, and `#[section]` comment-outs
-were how prose edits used to be expressed. None of it is consumed by the
-app anymore.
-
 ## Stopping, retrying, and resuming
 
 - **Stop** — while the assistant is processing, the Send button becomes Stop. Pressing it cancels the request immediately.
@@ -84,7 +67,7 @@ app anymore.
 How it works:
 
 - Each question starts a **fresh chat dialog** (a single user message, its own requestId), so the model cannot lean on prior conversation context.
-- Every question checks two things: **answer accuracy** and **tool reliability** (does the model use the right embedded tool for the job?). For edit questions the graded artifact is the server-staged change set (`pendingEdits`), not the reply's prose — declared `edit_criteria` are the default criteria since the prose path was retired (2026-09-22).
+- Every question checks two things: **answer accuracy** and **tool reliability** (does the model use the right embedded tool for the job?). For edit questions the graded artifact is the server-staged change set (`pendingEdits`), not the reply's prose — declared `edit_criteria` grade the change that will actually land.
 - Every step is logged: the request payload, raw response, tool names and tool-turn count, the per-question slice of the backend's own log, the pass/fail evaluation for each criterion, and a final summary.
 
 ### Question Bank (94 questions)
@@ -94,7 +77,7 @@ How it works:
 | Macro Authoring (MACRO-01..11) | Includes macro authoring, editing, fixing, template options, and individual `validate_macro` checks. |
 | Trident Configs (TRIDENT-01..16) | Real Trident configs from `reference/Trident_backup` and backend user configs (read, edit, delete, manage), incl. cross-file edits and the `idle_timeout` multi-LED case. Files are read-only context. |
 | Harness (HARNESS-01..03) | Harness self-checks: criteria that must reject a wrong staged artifact. |
-| Edit Cases, legacy qids (MINIDIFF-01..04) | Historical question ids from the retired mini-diff protocol; the questions survive as staged-edit cases (`level_bed` adaptive mode, `[printer] max_accel`, pin edits, tool-required `pressure_advance`). |
+| Edit Cases (MINIDIFF-01..04) | Staged-edit cases carried forward under their original qids: `level_bed` adaptive mode, `[printer] max_accel`, pin edits, tool-required `pressure_advance`. |
 | Ambiguity Cases (AMBI-01..08) | Handles new-file drafts without names, hypothetical "what if" questions, batch section reads, multi-topic explain-and-edit turns, and content search for bare pin values. |
 | Setup Cases (SETUP-01..05) | New-section requests with no existing home (firmware_retraction, idle_timeout, G2/G3 arcs, save_variables, respond). |
 | Live Routing (LIVE-01..07) | Routes between project validator vs draft validation vs devices vs schema vs reference vs Klippy status (incl. restart-safety ordering). |
@@ -105,14 +88,10 @@ How it works:
 
 ### Current results
 
-The prose-`cfg`-block era tables are retired (deleted 2026-09-24): every
-number pre-dates tool-mediated editing becoming the only edit path, so none
-of them measures the shipped behavior.
-
-Baseline on the current branch (`improvement/ai-chat-edit-refactor`,
-post Phase-5), gemma-4-12b native, `--max-tokens 8192 --temperature 0.7`,
-full 94-Q bank (`reports/ai-chat-accuracy/interim-baseline-gemma-r1/`,
-2026-09-24):
+Baselines on the current branch (`improvement/ai-chat-edit-refactor`,
+post Phase-5), full 94-Q bank, native tool protocol, `--max-tokens 8192
+--temperature 0.7`, edit tools on (runs under
+`reports/ai-chat-accuracy/`):
 
 | Model | PASS | Rate |
 | --- | --- | --- |
