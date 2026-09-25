@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from enum import Enum
 from pathlib import Path
 import re
@@ -412,6 +413,64 @@ class ChatStoppedError(Exception):
 # Registry of in-flight chat request stop events, keyed by client requestId.
 _chat_stop_events: dict[str, asyncio.Event] = {}
 
+# ── Mid-loop progress registry (Phase 6.5) ──
+# Mirrors _chat_stop_events: registered by chat_proxy when a requestId is
+# present, popped in its finally. Entries are written at the tool-loop emit
+# point — after tool calls are EXTRACTED (canonical loop state), BEFORE
+# execution — so GET /ai/chat/progress never observes in-flight-only
+# guesses. Invariants carried from Hermes (response-loss class #65919):
+# progress narration NEVER counts as the final answer — the registry is
+# display state, fully disjoint from final_content.
+_chat_progress: dict[str, dict] = {}
+
+# Trailing-sentence tail of the ack guard's injected correction. Kept
+# separate from the tool-availability prefix so tests can assert the guard
+# picked the arm matching the CURRENT tool surface (locked vs unlocked).
+_ACK_GUARD_TAIL = (
+    " Do not describe the change in prose — an edit written in chat text "
+    "is inert. Keep going with the tools."
+)
+
+# Continue-intent promise shapes: the model announces it WILL do the work
+# and ends the turn with no tool call (the 2026-09 qwen-class ack loops).
+# Sentence-level match only: the tail check requires the promise to sit at
+# the END of the reply, so "I will read the file now. Here is what it
+# means: ..." (an answered question) never matches.
+_CONTINUE_INTENT_RE = re.compile(
+    r"\b(?:i(?:'ll| will)|let me|i'd better|i can now|i need to (?:now )?make|"
+    r"now i(?:'ll| will)|next i(?:'ll| will)|i am going to|i'm going to)\b",
+    re.IGNORECASE,
+)
+
+
+def _ends_with_continue_intent(content: str) -> bool:
+    """True when the reply ENDS on a promise to act rather than an answer.
+
+    The ack guard fires only on a promise-shaped TAIL: strip tool-call
+    markup, take the last non-empty paragraph/sentence, and match
+    _CONTINUE_INTENT_RE against it. A full answer that merely mentions a
+    future action early on ("I will check the file. horizontal_move_z is
+    the Z hop height.") has a non-matching tail and is left alone —
+    answering is never gaslit (Q20 r3/B lesson).
+    """
+    text = MCP_TOOL_BLOCK_RE.sub("", content)
+    text = ALT_TOOL_CALL_CONTENT_RE.sub("", text)
+    text = CALL_SYNTAX_CLEANUP_RE.sub("", text)
+    text = FUNC_CALL_CLEANUP_RE.sub("", text)
+    text = _strip_bracket_tool_calls(text)
+    text = DSML_CLEANUP_RE.sub("", text)
+    text = XML_TOOL_CALLS_CLEANUP_RE.sub("", text)
+    text = text.strip()
+    if not text:
+        return False
+    # The promise must START the closing sentence — a whole-line match
+    # window would false-positive on full answers that merely mention a
+    # future action early ("I will check the docs. <the actual answer>").
+    tail = text.splitlines()[-1].strip()
+    sentences = [s for s in re.split(r"(?<=[.!?])\s+", tail) if s.strip()]
+    tail = sentences[-1] if sentences else tail
+    return bool(_CONTINUE_INTENT_RE.match(tail))
+
 
 @router.post("/ai/chat/stop")
 async def chat_stop(req: ChatStopRequest):
@@ -425,6 +484,30 @@ async def chat_stop(req: ChatStopRequest):
         return {"stopped": False}
     event.set()
     return {"stopped": True}
+
+
+@router.get("/ai/chat/progress")
+async def chat_progress_poll(requestId: str = ""):
+    """Poll mid-loop progress for an in-flight /ai/chat request (Phase 6.5.3).
+
+    Shape mirrors the /ai/chat/approval poll rail: no requestId or no
+    in-flight entry -> {pending: false}. While the loop runs, returns the
+    latest extracted-but-not-yet-executed tool batch plus the turn's
+    narration, so the UI can show a subordinate progress strip during long
+    tool chains. Display-only: nothing here ever feeds the final answer.
+    """
+    if not requestId:
+        return {"pending": False}
+    entry = _chat_progress.get(requestId)
+    if entry is None:
+        return {"pending": False}
+    return {
+        "pending": True,
+        "turn": entry["turn"],
+        "toolNames": list(entry["toolNames"]),
+        "narration": entry["narration"],
+        "elapsedMs": int((time.monotonic() - entry["startedAt"]) * 1000),
+    }
 
 
 def _is_local_provider(provider: str, api_url: str = "") -> bool:
@@ -2922,6 +3005,18 @@ async def chat_proxy(req: ChatRequest):
     if req.requestId:
         stop_event = asyncio.Event()
         _chat_stop_events[req.requestId] = stop_event
+        # Progress registry (Phase 6.5.1/6.5.3): same lifecycle as the stop
+        # event. startedAt drives elapsedMs; turns accumulate the per-turn
+        # narration for harness grading (narrationTurns in the final
+        # response); lastText dedupes identical consecutive emits.
+        _chat_progress[req.requestId] = {
+            "turn": 0,
+            "narration": "",
+            "toolNames": [],
+            "startedAt": time.monotonic(),
+            "lastText": None,
+            "turns": [],
+        }
         logger.info(
             "Stop event registered | requestId=%s registry_size=%d",
             req.requestId, len(_chat_stop_events),
@@ -2968,6 +3063,43 @@ async def chat_proxy(req: ChatRequest):
             # legitimately, THEN answering with a ```cfg draft, which the
             # old pre-loop-only nudge missed).
             edit_nudges = 0
+
+            # Ack-guard budget (Phase 6.5.2): a continue-intent promise
+            # ("I'll now apply that…") with no tool call on an edit request
+            # gets ONE injected execution directive. Cap 1 (Hermes caps at
+            # 2): local-model ack loops make every extra re-prompt real
+            # llama.cpp latency. Bookkeeping shaped like empty_reprompts;
+            # surfaced as usage.ackReprompts.
+            ack_reprompts = 0
+
+            def _emit_progress(tool_names: list[str], narration: str) -> None:
+                """Publish mid-loop progress for the poller (Phase 6.5.1).
+
+                Call site law: AFTER tool-call extraction succeeds, BEFORE
+                execution — only canonical loop state is published, and the
+                narration is the turn's visible assistant text with the
+                tool-call markup stripped (native: `content` beside
+                tool_calls; text protocol: prose beside the call syntax).
+                Hermes invariants: per-turn dedupe (identical consecutive
+                text never re-emits), and progress NEVER touches
+                final_content — a display bubble must not consume or
+                replace the answer (#65919 class)."""
+                if not req.requestId:
+                    return
+                entry = _chat_progress.get(req.requestId)
+                if entry is None:
+                    return
+                entry["turn"] = tool_turns + 1
+                entry["toolNames"] = list(tool_names)
+                entry["updatedAt"] = time.monotonic()
+                if narration and narration != entry.get("lastText"):
+                    entry["lastText"] = narration
+                    entry["narration"] = narration
+                    entry["turns"].append({
+                        "turn": tool_turns + 1,
+                        "narration": narration,
+                        "toolNames": list(tool_names),
+                    })
 
             turn_cap = (MAX_MCP_TOOL_TURNS_EDIT if edit_capable
                         else MAX_MCP_TOOL_TURNS)
@@ -3130,6 +3262,74 @@ async def chat_proxy(req: ChatRequest):
                             nudge_usage["context"] = f"edit-nudge-{edit_nudges}"
                             usage_events.append(nudge_usage)
                         continue
+                    # ── Ack guard (Phase 6.5.2) ──
+                    # The reply ENDS on a promise to act ("I'll now apply
+                    # that to your config") with NO tool call, on an edit
+                    # request where NO write tool has fired yet: the promise
+                    # is a lie by omission — the turn produced nothing.
+                    # Inject ONE execution directive and re-query. Placed
+                    # AFTER the edit-prose nudge so the stronger mechanical
+                    # evidence (inert draft / correctable kickback, up to 3
+                    # corrections) owns those cases; the ack guard catches
+                    # the pure promise. Zero write attempts is the gate:
+                    # once ANY write fired, remaining prose is a partial-
+                    # success report, and the confab guard already handles
+                    # the staged-nothing case with trace truth. Cap 1 — if
+                    # the model acks twice, let the user see it (Hermes
+                    # caps at 2; local latency says 1). Protocol-agnostic:
+                    # the tail check runs on visible text, so it fires
+                    # identically under native and text protocols.
+                    if (ack_reprompts < 1
+                            and edit_capable
+                            and _is_edit_request(req.messages)
+                            and not any(n in EDIT_TOOL_NAMES
+                                         for n in executed_tool_names)
+                            and current_content.strip()
+                            and _ends_with_continue_intent(current_content)):
+                        ack_reprompts += 1
+                        logger.info(
+                            "Ack guard | continue-intent promise with no "
+                            "write tool | nudging once | turn=%d preview=%s",
+                            tool_turns,
+                            current_content[:120].replace("\n", " "),
+                        )
+                        if current_content.strip():
+                            clean_prior = MCP_TOOL_BLOCK_RE.sub("", current_content).strip()
+                            if clean_prior:
+                                current_messages.append(
+                                    {"role": "assistant", "content": clean_prior})
+                        current_messages.append({
+                            "role": "user",
+                            # Arm by CURRENT tool surface: with the skill
+                            # gate still closed the write tools are not
+                            # advertised, so the directive is the load step
+                            # (same shape as _LOAD_SKILL_NUDGE_TEXT); with
+                            # them unlocked it is the execute-directly order.
+                            "content": (
+                                (_LOAD_SKILL_NUDGE_TEXT
+                                 if _skill_gate_closed()
+                                 else "Execute the edit now with the edit "
+                                      "tool — do not describe it.")
+                                + _ACK_GUARD_TAIL),
+                        })
+                        ack_payload = _build_provider_payload(
+                            req.apiProvider, current_messages, req.model,
+                            max_tokens=req.maxTokens,
+                            temperature=req.temperature,
+                            tools=native_tools,
+                            merge_system=req.mergeSystemMessages,
+                        )
+                        current_content, current_data = await _query_provider(
+                            client, req.apiUrl, headers, ack_payload,
+                            req.apiProvider,
+                            logger_context=f"ack-reprompt-{ack_reprompts}",
+                            stop_event=stop_event,
+                        )
+                        ack_usage = _extract_usage_info(current_data)
+                        if ack_usage:
+                            ack_usage["context"] = f"ack-reprompt-{ack_reprompts}"
+                            usage_events.append(ack_usage)
+                        continue
                     if tool_turns > 0:
                         logger.info("Tool call loop done | turns=%d final_chars=%d", tool_turns, len(current_content))
                     break
@@ -3160,6 +3360,25 @@ async def chat_proxy(req: ChatRequest):
                     tool_calls[0]["name"],
                     "native" if native_calls else "text",
                     repr(current_content[:80]),
+                )
+
+                # ── Progress emit point (Phase 6.5.1) ──
+                # Canonical loop state (calls extracted, not yet executed)
+                # published to the poller BEFORE the batch runs, so a long
+                # edit→validate→re-edit chain is never silent. Narration =
+                # the turn's visible text with the call markup stripped
+                # (same cleanup chain the follow-up messages use).
+                _narration = _strip_template_pythonic_calls(current_content).strip()
+                _narration = MCP_TOOL_BLOCK_RE.sub("", _narration).strip()
+                _narration = ALT_TOOL_CALL_CONTENT_RE.sub("", _narration).strip()
+                _narration = CALL_SYNTAX_CLEANUP_RE.sub("", _narration).strip()
+                _narration = FUNC_CALL_CLEANUP_RE.sub("", _narration).strip()
+                _narration = _strip_bracket_tool_calls(_narration).strip()
+                _narration = DSML_CLEANUP_RE.sub("", _narration).strip()
+                _narration = XML_TOOL_CALLS_CLEANUP_RE.sub("", _narration).strip()
+                _emit_progress(
+                    [str(c.get("name", "")) for c in tool_calls],
+                    _narration[:500],
                 )
 
                 # Execute every tool call in this round first, then build the
@@ -3561,6 +3780,14 @@ async def chat_proxy(req: ChatRequest):
                 "mcpToolNames": mcp_tool_names,
                 "toolCalls": executed_tool_calls,
                 "repromptCount": empty_reprompts,
+                # Per-turn narration captured at the progress emit point
+                # ({turn, narration, toolNames}); harness grading for the
+                # narration-vs-tool consistency check (Phase 6.5.5). Empty
+                # list when no requestId (no registry).
+                "narrationTurns": (
+                    list((_chat_progress.get(req.requestId) or {}).get("turns", []))
+                    if req.requestId else []
+                ),
                 # Tool-mediated editing (Phase 1): staged changes from
                 # config_edit/config_write calls (file/op/summary/newText/
                 # advisories), null when the feature is off or nothing was
@@ -3583,6 +3810,12 @@ async def chat_proxy(req: ChatRequest):
                     "reasoningTokens": sum(
                         (e.get("reasoningTokens") or 0) for e in usage_events
                     ),
+                    # Ack-guard bookkeeping (Phase 6.5.2): 1 when a
+                    # continue-intent promise was rescued by the injected
+                    # directive. The harness grades rescued cases FAIL
+                    # (expect_no_ack_stall) — a cleaned-up lie is still
+                    # the weakness.
+                    "ackReprompts": ack_reprompts,
                     "events": usage_events,
                     "truncated": any(
                         (e.get("finishReason") or "") == "length" for e in usage_events
@@ -3604,6 +3837,7 @@ async def chat_proxy(req: ChatRequest):
         finally:
             if req.requestId:
                 _chat_stop_events.pop(req.requestId, None)
+                _chat_progress.pop(req.requestId, None)
 
 
 # ── AI state + chat history file storage ─────────────────────────────
