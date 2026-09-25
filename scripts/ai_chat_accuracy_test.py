@@ -1368,7 +1368,7 @@ def build_ack_guard_questions() -> list[TestQuestion]:
     2026-09-24 interim baseline, so on that class these are NON-FIRING
     regression cases):
 
-      ACK-STALL-NATIVE / ACK-STALL-TEXT  — an unambiguous single-value
+      ACK-01 / ACK-02  — an unambiguous single-value
         edit with `expect_no_ack_stall=True`. PASS means the model went
         straight to the write tool; a rescue (ackReprompts>=1) FAILS even
         though the staged artifact is correct, because the raw model lied
@@ -1376,7 +1376,7 @@ def build_ack_guard_questions() -> list[TestQuestion]:
         graded in one run (the guard's tail check runs on visible text,
         so both protocols must behave identically).
 
-      ACK-QA-NEG — a pure question, no edit intent: the guard must never
+      ACK-N01 — a pure question, no edit intent: the guard must never
         fire (the `_is_edit_request` gate). Asserted on both protocols
         via the run flag plus the paired native/text cases.
 
@@ -1387,7 +1387,7 @@ def build_ack_guard_questions() -> list[TestQuestion]:
     printer_cfg = _cfg_context("printer.cfg")
     return [
         TestQuestion(
-            qid="ACK-STALL-NATIVE",
+            qid="ACK-01",
             title="Ack guard: single edit, native protocol, no promise-stall",
             text="In printer.cfg set [printer] max_velocity to 300.",
             context_files=printer_cfg,
@@ -1399,7 +1399,7 @@ def build_ack_guard_questions() -> list[TestQuestion]:
             expect_no_ack_stall=True,
         ),
         TestQuestion(
-            qid="ACK-STALL-TEXT",
+            qid="ACK-02",
             title="Ack guard: single edit, text protocol, no promise-stall",
             text="In printer.cfg set [printer] max_velocity to 300.",
             context_files=printer_cfg,
@@ -1411,7 +1411,7 @@ def build_ack_guard_questions() -> list[TestQuestion]:
             expect_no_ack_stall=True,
         ),
         TestQuestion(
-            qid="ACK-QA-NEG",
+            qid="ACK-N01",
             title="Ack guard: pure question must never be nudged",
             text="What does the [printer] max_velocity parameter control?",
             context_files=printer_cfg,

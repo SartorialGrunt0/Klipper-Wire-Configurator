@@ -73,18 +73,18 @@ def _ack_questions():
 
 def test_ack_family_exists_with_assertions():
     acks = _ack_questions()
-    assert set(acks) == {"ACK-STALL-NATIVE", "ACK-STALL-TEXT", "ACK-QA-NEG"}
+    assert set(acks) == {"ACK-01", "ACK-02", "ACK-N01"}
     for q in acks.values():
         assert q.expect_no_ack_stall is True
 
 
 def test_ack_family_protocol_parity_pairs():
     acks = _ack_questions()
-    assert acks["ACK-STALL-NATIVE"].tool_protocol == "native"
-    assert acks["ACK-STALL-TEXT"].tool_protocol == "text"
+    assert acks["ACK-01"].tool_protocol == "native"
+    assert acks["ACK-02"].tool_protocol == "text"
     # The two stall cases are the SAME edit — parity means same question.
-    assert acks["ACK-STALL-NATIVE"].text == acks["ACK-STALL-TEXT"].text
-    assert acks["ACK-STALL-NATIVE"].criteria == acks["ACK-STALL-TEXT"].criteria
+    assert acks["ACK-01"].text == acks["ACK-02"].text
+    assert acks["ACK-01"].criteria == acks["ACK-02"].criteria
 
 
 def test_ack_family_reachable_from_main():
