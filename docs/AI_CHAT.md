@@ -24,6 +24,7 @@ Provider settings, conversation history, and attached config files persist local
 3. **The model answers with tools.** Every provider — local servers included — uses native function calling, with the text `tool` protocol kept as a fallback for servers that cannot do it. The backend runs the requested tools (for example, searching the bundled docs or validating a snippet) and feeds the results back to the model: up to ten read-only tool rounds, extended to twenty when edit tools are in play, with a per-request write-attempt cap so a stuck edit loop lands on an honest summary instead of burning the budget.
 4. **Config edits are staged, not written.** To change a file the model must call `config_edit` / `config_write`. The **server** applies each operation mechanically to a working copy of your project and validates the result, so the assistant cannot fabricate a change, silently rewrite a whole file, or mangle lines it did not touch. Invalid edits are kicked straight back to the model to fix before you ever see them.
 5. **You approve each change.** Every validated edit suspends the request and opens an **Approve / Decline** card showing the exact before/after lines the server computed. Approving puts the change into your **pending changes** as unsaved (dirty) work; declining leaves your config untouched. Nothing is written to disk until you use the toolbar "Save" menu — and your printer is never restarted behind your back. If no decision is made within 90 seconds the card **auto-declines** and the assistant reports honestly that you didn't respond; declining a card you still want to change is fine — just ask again.
+6. **Long tool chains show progress.** While the assistant is working through tools, a small subordinate strip under the typing dots shows what it said it was doing plus the tools it has run (deduped, collapsible). It is strictly display state — progress text is never the answer, and it disappears when the reply lands.
 
 ## Printer memory
 
@@ -70,7 +71,7 @@ How it works:
 - Every question checks two things: **answer accuracy** and **tool reliability** (does the model use the right embedded tool for the job?). For edit questions the graded artifact is the server-staged change set (`pendingEdits`), not the reply's prose — declared `edit_criteria` grade the change that will actually land.
 - Every step is logged: the request payload, raw response, tool names and tool-turn count, the per-question slice of the backend's own log, the pass/fail evaluation for each criterion, and a final summary.
 
-### Question Bank (94 questions)
+### Question Bank (97 questions)
 | Item / Feature | Description & Details |
 | :--- | :--- |
 | Core Tools (Q01–Q20, minus retired Q09) | Covers docs lookups, example configs, validation, calculations, and tool-mediated edit routing. |
@@ -84,6 +85,7 @@ How it works:
 | Edit Tools (EDIT-01..06) | Tool-mediated editing (the only edit path): param edit via `config_edit`, gcode-body anchor edit, cross-file pin edit, new-file + `add_include` staging, pure Q&A must stage nothing, and commented-param uncomment keeping the `!` polarity. |
 | Skill Gate (SKILL-01..05, SKILL-N01..04) | The `config-editing` skill must load before any write path (direct param, macro body, multi-part, new file + include, implicit "my prints wobble"), and must NOT load on pure Q&A, how-to, pasted-text validation, or discuss-a-draft. |
 | Tool Coverage (TOOL-01..08) | One case per shipped tool: reference index, section index, board detection, rotation-distance calc, macro template, strict new-file routing, live devices, live Klippy state. |
+| Ack Guard (ACK-01/02, ACK-N01) | Mid-loop ack-guard probes (Phase 6.5.5): the same single-value edit pinned to native AND text protocol with `expect_no_ack_stall` (a promise-with-no-action rescued by the injected directive FAILS even when the staged artifact is right), plus a pure-Q&A case the guard must never touch. Run as `--questions ACK,ACK-N`. |
 | Optional Memory Check (MEMORY-01..03) | Adds printer-memory auto-fill checks when the `--include-memory` flag is used. |
 
 ### Current results
