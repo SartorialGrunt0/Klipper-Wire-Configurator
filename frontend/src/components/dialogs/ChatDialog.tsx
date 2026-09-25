@@ -18,6 +18,7 @@ import { usePrinterMemoryStore, DEFAULT_PRINTER_MEMORY, type PrinterMemory } fro
 import * as api from '../../services/api';
 import { extractPrinterMemoryBlock } from '../../utils/printerMemory';
 import { planApprovedEditApply } from '../../utils/approvalApply';
+import { selectUnsavedDrafts } from '../../utils/chatContext';
 import {
   EMPTY_PROGRESS,
   applyProgressSnapshot,
@@ -94,6 +95,8 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     activeFile,
     validation,
     schemas,
+    originalTexts,
+    isDirty,
     updateConfigFile,
     removeConfigFile,
     markDirty,
@@ -429,6 +432,34 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           contextFilesPayload[filename] = { content: candidate.text, label: candidate.label };
         }
 
+        // Unsaved-delta carry-over (live report 2026-09-25): files edited in
+        // the editor but not yet saved — INCLUDING files the AI created and
+        // the user approved in an EARLIER turn (approved ≠ saved) — were
+        // invisible to this request's edit session. The session then kicked
+        // back 'Include file not found' for a draft sitting right there in
+        // the editor, while the identical manual include validated clean
+        // (editor validation runs against the full store). Append every
+        // store file whose current export differs from the saved baseline
+        // (originalTexts), or that has no baseline at all (never saved).
+        // Checked files above win; validation strictness is untouched — a
+        // dangling include on a truly nonexistent file still errors.
+        // isDirty gates the export sweep: a clean project has no delta.
+        if (isDirty) {
+          const storeTexts: Record<string, string> = {};
+          for (const filename of Object.keys(configFiles)) {
+            const text = await getConfigText(filename);
+            if (text != null) storeTexts[filename] = text;
+          }
+          for (const filename of selectUnsavedDrafts(
+            configFiles, originalTexts, storeTexts, new Set(Object.keys(contextFilesPayload)),
+          )) {
+            contextFilesPayload[filename] = {
+              content: storeTexts[filename],
+              label: getConfigContextLabel(filename),
+            };
+          }
+        }
+
         // Phase-5 gate sweep (2026-09): no frontend-injected system messages
         // remain — the handholding injections (regex-targeted sections +
         // file-targeting reinforcement, VITE_KWC_HANDHOLDING) were deleted;
@@ -514,15 +545,20 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       activeFile,
       applyApprovedToolEdits,
       attachedConfigFiles,
+      configFiles,
       draftRequestMessage,
       editApiKey,
       editApiProvider,
       editMaxTokens,
       editTemperature,
       editModel,
-      loading,
+      getConfigContextLabel,
+      getConfigText,
+      isDirty,
       loadedConfigFilenames,
+      loading,
       messages,
+      originalTexts,
       resolvedEditApiUrl,
       selectedConfigContextFiles,
       setMessages,
