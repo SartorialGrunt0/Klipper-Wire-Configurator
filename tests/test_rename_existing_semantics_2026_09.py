@@ -18,9 +18,15 @@ Ground truth (fixture-proven against real klippy, 2026-09-25):
   * duplicate [gcode_macro X] headers MERGE (RawConfigParser
     strict=False): one merged section, one registration, loads clean.
 
-Severity: warning for all of it — a third-party plugin can register (or
-rename) names the stock registry can't see, and false-ERRORs that block
-saves violate the validator trust contract. Ghost unknown targets stay
+Severity (revised 2026-09-26, user: "these stop the printer from
+starting"): registry-CONFIRMED failures are ERRORS (save-gated,
+non-ack-able) — shadow of a gate-satisfied builtin, self-collision,
+type mismatch, invalid target name. Klipper rejects these with certainty
+(gcode.py:142/145, gcode_macro.py:137/164); no plugin can make them not
+fail. The ONE warning stays on the ghost-target case ("alias not
+registered in this configuration"): a third-party plugin extra can
+register aliases our stock registry can't see, so an un-ack-able error
+there would false-block legitimate setups. Ghost UNKNOWN targets stay
 silent for the same reason.
 """
 import sys
@@ -42,11 +48,11 @@ def _findings(text, code=CODE):
 
 # ── shadow: macro over a stock command without renaming ────────────────
 
-def test_shadow_stock_command_warns():
+def test_shadow_stock_command_errors():
     text = PROBE + "[gcode_macro PROBE_ACCURACY]\ngcode:\n  M114\n"
     fs = _findings(text)
     assert len(fs) == 1
-    assert fs[0].severity == "warning"
+    assert fs[0].severity == "error"
     assert "already registered" in fs[0].message
     assert fs[0].section == "gcode_macro PROBE_ACCURACY"
     assert fs[0].line_number == 6  # header line (PROBE is 5 lines)
@@ -67,11 +73,12 @@ def test_shadow_gate_absent_clean():
 
 # ── rename target validity + type matching ─────────────────────────────
 
-def test_rename_type_mismatch_warns():
+def test_rename_type_mismatch_errors():
     text = PROBE + ("[gcode_macro PROBE_ACCURACY]\n"
                     "rename_existing: G29\ngcode:\n  M114\n")
     fs = _findings(text)
     assert len(fs) == 1 and "different types" in fs[0].message
+    assert fs[0].severity == "error"
 
 
 def test_rename_trad_pair_clean():
@@ -82,12 +89,13 @@ def test_rename_trad_pair_clean():
     assert _findings(text) == []
 
 
-def test_rename_trad_to_word_mismatch_warns():
+def test_rename_trad_to_word_mismatch_errors():
     # ground truth fixture trad.cfg: "rename of different types
     # ('G29' vs 'G29_OLD')" — word names are NOT traditional
     text = "[gcode_macro G29]\nrename_existing: G29_OLD\ngcode:\n  M114\n"
     fs = _findings(text)
     assert len(fs) == 1 and "different types" in fs[0].message
+    assert fs[0].severity == "error"
 
 
 def test_rename_ghost_target_clean():
@@ -101,10 +109,12 @@ def test_rename_alias_gated_out_warns():
     # SET_LED registers only when a led-family section loads. Without one
     # there is nothing to rename -> Klipper fails at connect with
     # "Existing command 'SET_LED' not found in gcode_macro rename".
+    # WARNING tier: a plugin extra could register SET_LED behind our back.
     text = PROBE + ("[gcode_macro SET_LED]\n"
                     "rename_existing: SET_LED_OLD\ngcode:\n  M114\n")
     fs = _findings(text)
     assert len(fs) == 1 and "SET_LED" in fs[0].message
+    assert fs[0].severity == "warning"
 
 
 def test_rename_alias_gate_satisfied_project_wide_clean():
@@ -120,11 +130,12 @@ def test_rename_alias_gate_satisfied_project_wide_clean():
                 for e in r.errors if e.code == CODE]
 
 
-def test_rename_whitespace_value_warns():
+def test_rename_whitespace_value_errors():
     text = PROBE + ("[gcode_macro PROBE_ACCURACY]\n"
                     "rename_existing: \n    PROBE_ACCURACY\ngcode:\n  M114\n")
     fs = _findings(text)
     assert len(fs) == 1 and "invalid" in fs[0].message
+    assert fs[0].severity == "error"
 
 
 # ── self-collision: rename_existing == the macro's own name ────────────
@@ -134,15 +145,16 @@ def test_rename_whitespace_value_warns():
 # PROBE_ACCURACY already registered" (gcode.py:142). Source-simulated
 # 2026-09-26 (connect stage unreachable in headless fake-serial klippy).
 
-def test_rename_self_collision_warns():
+def test_rename_self_collision_errors():
     text = PROBE + ("[gcode_macro PROBE_ACCURACY]\n"
                     "rename_existing: PROBE_ACCURACY\ngcode:\n  M114\n")
     fs = _findings(text)
     assert len(fs) == 1 and "same command" in fs[0].message
+    assert fs[0].severity == "error"
     assert "rename_existing: _PROBE_ACCURACY" in fs[0].message
 
 
-def test_rename_self_collision_lowercase_target_warns():
+def test_rename_self_collision_lowercase_target_errors():
     # Lowercase rename targets are NOT legal in Klipper: register_command
     # rejects any non-traditional name where cmd.upper() != cmd
     # ("Can't register '_probe_accuracy' ... invalid name", gcode.py:145).
@@ -151,6 +163,7 @@ def test_rename_self_collision_lowercase_target_warns():
                     "rename_existing: _probe_accuracy\ngcode:\n  M114\n")
     fs = _findings(text)
     assert len(fs) == 1 and "invalid command name" in fs[0].message
+    assert fs[0].severity == "error"
 
 
 def test_rename_self_collision_gated_out_clean():
@@ -163,7 +176,7 @@ def test_rename_self_collision_gated_out_clean():
     assert len(fs) == 1 and "not registered" in fs[0].message
 
 
-def test_rename_self_collision_traditional_warns():
+def test_rename_self_collision_traditional_errors():
     # G28 -> G28: same collision class; suggestion keeps the traditional
     # shape (G28.1) so the type check stays satisfied.
     text = ("[stepper_x]\nenable_pin: PF2\ndir_pin: PF1\nstep_pin: PF0\n"
@@ -173,6 +186,7 @@ def test_rename_self_collision_traditional_warns():
             "[gcode_macro G28]\nrename_existing: G28\ngcode:\n  M114\n")
     fs = _findings(text)
     assert len(fs) == 1 and "same command" in fs[0].message
+    assert fs[0].severity == "error"
     assert "G28.1" in fs[0].message
 
 

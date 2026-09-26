@@ -1365,7 +1365,7 @@ def _scan_gcode_macro_renames(
             if (known and verdict.status == STATUS_VALID
                     and verdict.source == "registry"):
                 findings.append(ValidationError(
-                    severity="warning",
+                    severity="error",
                     section=section.full_header,
                     param="",
                     message=(
@@ -1390,7 +1390,7 @@ def _scan_gcode_macro_renames(
         # skip the name check (gcode.py:145 guards it on non-traditional).
         if is_traditional_gcode(alias) != is_traditional_gcode(target):
             findings.append(ValidationError(
-                severity="warning",
+                severity="error",
                 section=section.full_header,
                 param="rename_existing",
                 message=(
@@ -1425,7 +1425,7 @@ def _scan_gcode_macro_renames(
         if not is_traditional_gcode(target) and not is_valid_registration_name(target):
             shown = " ".join(target.split()) or "(empty)"
             findings.append(ValidationError(
-                severity="warning",
+                severity="error",
                 section=section.full_header,
                 param="rename_existing",
                 message=(
@@ -1446,7 +1446,7 @@ def _scan_gcode_macro_renames(
             # already registered" (gcode.py:142), the user-reported failure.
             suggest = f"{alias}.1" if is_traditional_gcode(alias) else f"_{alias}"
             findings.append(ValidationError(
-                severity="warning",
+                severity="error",
                 section=section.full_header,
                 param="rename_existing",
                 message=(
