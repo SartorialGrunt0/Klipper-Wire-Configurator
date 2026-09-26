@@ -664,8 +664,11 @@ def test_reprompt_write_respects_skill_gate(edit_flag, monkeypatch):
     body = r.json()
     assert not body.get('pendingEdits'), body
     assert body.get('editAttempts') in (0, None), body
+    # The kickback TEXT (not just the word 'load_skill', which the
+    # gate-closed system prompt contains anyway) must be what re-entered
+    # the model context.
     followup = json.dumps(scripted.payloads[-1])
-    assert 'load_skill' in followup
+    assert 'is not available yet' in followup
 
 
 def test_reprompt_write_opens_approval_card(edit_flag, monkeypatch):

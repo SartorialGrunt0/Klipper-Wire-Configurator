@@ -3713,7 +3713,30 @@ async def chat_proxy(req: ChatRequest):
                     # approval gate unless autoApproveEdits.
                     reprompt_results = []
                     for c in reprompt_calls[:MAX_MCP_TOOL_TURNS]:
-                        if edit_session is not None and c.get("name") in EDIT_TOOL_NAMES:
+                        if edit_capable and c.get("name") == "load_skill":
+                            # Round-2 review: mirror the main loop's
+                            # load_skill arm — without it a load_skill on
+                            # this path hit the MCP dispatcher and got
+                            # "Unknown tool", contradicting the kickback
+                            # the gate itself injects. Fails closed
+                            # either way; now it just works.
+                            requested = str(
+                                (c.get("arguments") or {}).get("name", ""))
+                            if requested == MEMORY_SKILL_NAME:
+                                reprompt_results.append(_memory_skill_body())
+                            elif requested in ("", EDIT_SKILL_NAME):
+                                _skill_state["active"] = True
+                                logger.info(
+                                    "Edit skill activated on re-prompt path"
+                                    " | write tools unlocked requestId=%s",
+                                    req.requestId or 'none')
+                                reprompt_results.append(_edit_skill_body())
+                            else:
+                                reprompt_results.append(
+                                    f"Unknown skill '{requested}'. Available "
+                                    f"skills: '{EDIT_SKILL_NAME}', "
+                                    f"'{MEMORY_SKILL_NAME}'.")
+                        elif edit_session is not None and c.get("name") in EDIT_TOOL_NAMES:
                             if _skill_gate_closed():
                                 reprompt_results.append(
                                     f"'{c.get('name')}' is not available yet. "
