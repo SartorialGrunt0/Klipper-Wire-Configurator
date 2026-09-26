@@ -893,20 +893,6 @@ export interface AiChatRequest {
    * question without calling any tool.
    */
   contextFiles?: Record<string, { content: string; label: string }>;
-  /**
-   * Full-rewrite guard state (VITE_KWC_FULL_REWRITE_GUARD build flag).
-   * True = the frontend rejects full block writes and forces mini-diffs, so
-   * the backend uses the STRICT edit-protocol wording. False (default) =
-   * full writes accepted, softer wording. Kept in lock-step with the
-   * frontend acceptance behavior.
-   */
-  fullRewriteGuard?: boolean;
-  /**
-   * The editor's active file. Backend-only use: server-side merged-result
-   * validation resolves an edit's target file with the same activeFile the
-   * client draft pipeline uses (never injected into prompts).
-   */
-  activeFile?: string;
 }
 
 export interface AiToolCallDetail {
@@ -929,20 +915,32 @@ export interface AiChatResponse {
   /** Number of empty-response re-prompts the backend performed before content. */
   repromptCount?: number;
   /**
-   * Server-side merged-result validation result (backend
-   * KWC_SERVER_DRAFT_VALIDATION=1). Null when the server pass did not run.
-   * `repaired: true` means the returned content already passed merged
-   * validation — the client retry loop can trust it.
+   * Tool-mediated editing (product behavior): changes staged by the
+   * config_edit/config_write write tools. Server-validated (delta vs the
+   * sent live state); the draft preview consumes these INSTEAD of parsing
+   * prose cfg blocks. Null when nothing was staged.
    */
-  serverRepair?: ServerRepairVerdict | null;
+  pendingEdits?: PendingConfigEdit[] | null;
+  /** Write-tool call count for this reply (Gate 1 oscillation telemetry). */
+  editAttempts?: number | null;
 }
 
-/** Wire shape of the backend `serverRepair` response field (finding #4). */
-export interface ServerRepairVerdict {
-  attempted: boolean;
-  repaired: boolean;
-  issuesAfter: Array<{ filename: string; errors: unknown[] }>;
-  reason?: string;
+/** One staged write-tool change (backend services/ai_edit_tools.py). */
+export interface PendingConfigEdit {
+  file: string;
+  op: string;
+  summary: string;
+  /** Full post-op content of the file ('' when op === 'delete_file'). */
+  newText: string;
+  /** New warnings the server attached (non-blocking). */
+  advisories?: Array<{
+    filename: string;
+    severity: string;
+    section: string;
+    param: string;
+    message: string;
+    code?: string;
+  }>;
 }
 
 /**
@@ -1021,6 +1019,83 @@ export async function stopChat(requestId: string): Promise<void> {
   } catch {
     // Best-effort only — ignore network failures here.
   }
+}
+
+// ── Mid-loop progress (Phase 6.5.4) ──────────────────────────────────
+
+export interface ChatProgressPoll {
+  pending: boolean;
+  turn?: number;
+  narration?: string;
+  toolNames?: string[];
+  elapsedMs?: number;
+}
+
+/** Poll mid-loop progress for an in-flight /ai/chat request. Best-effort:
+ *  any network/parse failure reads as "no progress" (display-only rail). */
+export async function pollChatProgress(requestId: string): Promise<ChatProgressPoll> {
+  try {
+    const res = await fetch(`/ai/chat/progress?requestId=${encodeURIComponent(requestId)}`);
+    if (!res.ok) return { pending: false };
+    const data = (await res.json()) as ChatProgressPoll;
+    return data && data.pending === true ? data : { pending: false };
+  } catch {
+    return { pending: false };
+  }
+}
+
+// ── Approval gate (tool-mediated edits, Phase 2) ─────────────────────
+
+export interface ApprovalCard {
+  approvalId: string;
+  file: string;
+  op: string;
+  summary: string;
+  diff: { file: string; before: string; after: string } | null;
+  advisories: Array<{ severity?: string; section?: string; param?: string; message?: string }>;
+  /** Seconds remaining before auto-decline (backend clock, per poll). */
+  timeoutSeconds: number;
+}
+
+export type ApprovalPoll = ({ pending: false } | ({ pending: true } & ApprovalCard));
+
+/** Poll the pending approval card for an in-flight /ai/chat request. */
+export async function pollChatApproval(requestId: string): Promise<ApprovalPoll> {
+  try {
+    const res = await fetch(`/ai/chat/approval?requestId=${encodeURIComponent(requestId)}`);
+    if (!res.ok) return { pending: false };
+    const data = (await res.json()) as ApprovalPoll;
+    return data && data.pending === true ? data : { pending: false };
+  } catch {
+    return { pending: false };
+  }
+}
+
+export interface ApprovalDecisionResult {
+  status: 'ok' | 'not_found' | 'already_decided' | 'invalid' | 'invalidated';
+  reason?: string;
+  newErrors?: Array<{ section?: string; param?: string; message?: string }>;
+}
+
+/**
+ * Decide a pending approval card. An approve carries the frontend's
+ * LATEST file contents so the server re-validates (manual edits during
+ * the pending window never clobber); 'invalidated' means the card is
+ * still open with a reason.
+ */
+export async function decideChatApproval(
+  approvalId: string,
+  decision: 'approve' | 'decline',
+  contextFiles: Record<string, { content: string; label: string }>,
+  reason = '',
+): Promise<ApprovalDecisionResult> {
+  const res = await fetch('/ai/chat/approval', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ approvalId, decision, reason, contextFiles }),
+  });
+  if (!res.ok) throw new Error(`Approval decision failed: ${res.statusText}`);
+  return (await res.json()) as ApprovalDecisionResult;
 }
 
 // ── AI state + chat history (local files, gitignored) ────────────────

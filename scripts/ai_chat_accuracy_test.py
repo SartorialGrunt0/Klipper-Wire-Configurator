@@ -41,7 +41,12 @@ or answer the interactive prompt (never echoed). Keys are redacted to '***'
 in logs and are never written to output files.
 
 Other useful flags:
-    --questions 1-5,8     run only a subset of questions
+    --questions SPEC      run only a subset. QID-based (stable across bank
+                          changes): 'TRIDENT-15', 'TRIDENT-15,AMBI-03',
+                          'TRIDENT' (whole family), 'AMBI-0*', 'EDIT-01..06'.
+                          Positional still works ('1-5,8') but drifts as the
+                          bank grows. Unknown tokens fail fast with the
+                          family list.
     --start N             start at question N (runs N..end); ignored when --questions is set
     --question TEXT       run ONE ad-hoc question of your own instead of the bank
                           (takes priority over --questions/--start); repeatable
@@ -56,12 +61,21 @@ Question bank: Q01-Q20 (core tools, minus the retired Q09), MACRO-01..11
 (macro authoring, editing, fixing, template options, and the individual
 validate_macro checks; MACRO-08 retired), TRIDENT-01..14 (real configs from
 reference/Trident_backup and the real backend/user_configs — read, edit,
-delete, manage, and fix the actual printer.cfg/aux_fan.cfg/PIS.cfg via the
-draft-block protocol; the files are attached as read-only context and never
-modified), MINIDIFF-01..04 (the mini-diff edit protocol), AMBI-01..08
+delete, manage, and fix the actual printer.cfg/aux_fan.cfg/PIS.cfg; the
+files are attached as read-only context and never modified), MINIDIFF-01..04
+(historical qids from the retired mini-diff protocol — now scored on the
+staged write-tool artifact like the EDIT-* family), AMBI-01..08
 (ambiguity cases: new-file drafts, hypothetical edits, batch section reads,
 multi-topic explain-and-edit turns, content search), and MEMORY-01..03
-(printer-memory auto-fill, requires --include-memory).
+(printer-memory auto-fill, requires --include-memory), and EDIT-01..06
+(tool-mediated editing: criteria read the server-staged pendingEdits —
+these questions force ChatRequest.editTools=True).
+
+Criteria law since the Phase-4 ratchet (2026-09-22): when a question
+declares edit_criteria they are THE criteria — the prose→draft path is
+deleted, so the staged pendingEdits artifact is the deliverable. Questions
+without edit_criteria keep their prose criteria (pure Q&A / communication
+checks, which the artifact can never express).
 
 Stdlib only — no third-party dependencies.
 """
@@ -69,6 +83,7 @@ Stdlib only — no third-party dependencies.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import getpass
 import json
 import re
@@ -129,6 +144,11 @@ PROVIDER_ORDER = ["chatgpt", "google", "anthropic", "github", "openai-compatible
 # Each question: a fresh chat dialog (messages=[user text]), the MCP tools
 # the model should reach for (expected_tools), and checkable success
 # criteria. Criterion kinds:
+#   staged_param  "<filename>::<substring>" — the server-staged pendingEdits
+#                 entry for <filename> contains <substring> (tool-mediated
+#                 edit criteria: what WAS applied, not what prose says)
+#   staged_count  "<n>" — exactly n files staged in pendingEdits
+#   not_staged    "<filename>" — that file has no staged entry
 #   contains      -> value appears in the answer (case-insensitive)
 #   not_contains  -> value must NOT appear (case-insensitive)
 #   regex         -> value is a regex searched case-insensitively over the answer
@@ -146,6 +166,42 @@ class TestQuestion:
     # rather than inventing config. Files are never modified — the chat
     # endpoint only returns draft text.
     context_files: tuple[tuple[str, str, str], ...] = ()
+    # Tool-mediated editing A/B (EDIT-* family): True/False forces the
+    # write tools on/off for this request (ChatRequest.editTools); None
+    # follows the server env. The prose criteria families run with the
+    # flag forced OFF so both paths score in one harness config.
+    edit_tools: bool | None = None
+    # Artifact criteria for the edit-tools-ON arm (design approved
+    # 2026-09-14). When the EFFECTIVE editTools for this request is True
+    # and this tuple is non-empty, it REPLACES `criteria` for scoring:
+    # the deliverable is the server-staged pendingEdits (validated
+    # mechanical apply), so prose-shape criteria (# file: hints, fences,
+    # mini-diff protocol) are moot and go false-negative on correct
+    # terse tool runs (fullbank ON run 2026-09-14: ~12 such misses).
+    # Kinds: staged_file / staged_any_param / staged_regex /
+    # staged_not_regex / staged_section_regex / staged_section_absent
+    # (plus the existing staged_param / staged_count / not_staged).
+    edit_criteria: tuple[tuple[str, str], ...] = ()
+    # Phase 3 skill-gate eval (SKILL-* family) — the should_trigger label.
+    # True: an edit request that MUST activate the skill (model calls
+    # load_skill, mechanically observed in the executed tool-call trace).
+    # False: a non-edit request that MUST NOT activate it (false-positive
+    # rate). None: not a skill-gate question.
+    skill_expected: bool | None = None
+    # Per-request ChatRequest.editSkill override: True forces the skill
+    # ACTIVE (gate bypass — write tools advertised immediately, measures
+    # edit quality with the law force-loaded). None follows the server env.
+    edit_skill: bool | None = None
+    # Phase 6.5.5 ack-stall assertion: when True, a request rescued by the
+    # backend ack guard (usage.ackReprompts >= 1 — the model promised the
+    # edit in prose and needed the injected directive to actually do it)
+    # scores FAIL even when the final answer passes. The rescue hid a lie;
+    # grading it clean would hide the weakness (plan §6.5.5).
+    expect_no_ack_stall: bool = False
+    # Per-request ChatRequest.toolProtocol override ('native'/'text');
+    # None follows the run's --tool-protocol. The ACK-* family pins both
+    # protocols so guard parity is graded in one run (plan §6.5.5).
+    tool_protocol: str | None = None
 
 
 # Shared config snippets used by several questions.
@@ -332,10 +388,12 @@ def build_questions() -> list[TestQuestion]:
             text="Generate a PRINT_START macro template for me, including bed mesh "
                  "calibration.",
             require_tool=False,
-            criteria=(
-                ("contains", "PRINT_START"),
-                ("regex", r"\[gcode_macro"),
-                ("contains", "BED_MESH_CALIBRATE"),
+            criteria=(),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_section_regex",
+                 r"printer\.cfg::gcode_macro PRINT_START::BED_MESH_CALIBRATE"),
             ),
         ),
         TestQuestion(
@@ -379,10 +437,12 @@ def build_questions() -> list[TestQuestion]:
                  "max_accel: 3000\n",
             expected_tools=(),
             require_tool=False,
-            criteria=(
-                ("regex", r"```(?:cfg|ini|conf|klipper)"),
-                ("contains", "[bed_mesh]"),
-                ("regex", r"probe_count.{0,20}?5"),
+            criteria=(),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_section_regex",
+                 r"printer\.cfg::bed_mesh::probe_count\s*[:=]\s*5\s*[,\s]\s*5"),
             ),
         ),
         TestQuestion(
@@ -459,11 +519,16 @@ def build_macro_questions() -> list[TestQuestion]:
                   "before the G1 move. Return the full updated macro as a cfg block."),
             expected_tools=("validate_macro", "get_config_reference_section"),
             require_tool=False,
-            criteria=(
-                ("regex", r"\[gcode_macro\s+PRINT_START"),
-                ("regex", r"M140[^\n]*S60"),
-                ("contains", "BED_MESH_CALIBRATE"),
-                ("regex", r"```(?:cfg|ini|conf|klipper)"),
+            criteria=(),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            # M1[49]0: M190 S60 satisfies "heat bed to 60" equally (observed
+            # live 2026-09-15 — staged edit used M190).
+            edit_criteria=(
+                ("staged_section_regex",
+                 r"printer\.cfg::gcode_macro PRINT_START::M1[49]0[^\n]*S60"),
+                ("staged_section_regex",
+                 r"printer\.cfg::gcode_macro PRINT_START::BED_MESH_CALIBRATE"),
             ),
         ),
         TestQuestion(
@@ -482,11 +547,23 @@ def build_macro_questions() -> list[TestQuestion]:
                   "```"),
             expected_tools=("validate_macro",),
             require_tool=False,
-            criteria=(
-                ("regex", r"\[gcode_macro\s+FIX_ME"),
-                ("contains", "{% endif %}"),
-                ("contains", "BED_MESH_CALIBRATE"),
-                ("regex", r"```(?:cfg|ini|conf|klipper)"),
+            # Phase-5 (2026-09-22): the quoted FIX_ME macro is absent from
+            # the project, so BOTH outcomes are legitimate: staging the
+            # corrected section (discovery fallthrough -> printer.cfg) or
+            # answering with a corrected display block. Staging arm first.
+            # The old prose criteria predated artifact grading and false-
+            # failed every correct staged answer (rag-filelaw r2 trace).
+            edit_criteria=(
+                ("any_of", json.dumps([
+                    [["staged_section_regex",
+                      "printer\\.cfg::gcode_macro FIX_ME::\\{%\\s+endif\\s+%\\}"],
+                     ["staged_section_regex",
+                      "printer\\.cfg::gcode_macro FIX_ME::BED_MESH_CALIBRATE"]],
+                    [["regex", "```(?:cfg|ini|conf|klipper)"],
+                     ["regex", "\\[gcode_macro\\s+FIX_ME"],
+                     ["contains", "{% endif %}"],
+                     ["contains", "BED_MESH_CALIBRATE"]],
+                ])),
             ),
         ),
         TestQuestion(
@@ -753,14 +830,11 @@ def build_trident_questions() -> list[TestQuestion]:
             context_files=printer_cfg,
             expected_tools=("validate_klipper_config",),
             require_tool=False,
-            criteria=(
-                # Accept fenced blocks OR bare text with a file hint — the
-                # frontend's extractConfigCodeBlocks falls back to raw text
-                # when a '# file:' hint is present, so bare mini-diffs apply.
-                ("regex", r"```(?:cfg|ini|conf|klipper)|#\s*file\s*:\s*printer\.cfg"),
-                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
-                ("regex", r"\[printer\]"),
-                ("regex", r"max_accel\s*:\s*12000"),
+            criteria=(),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_regex", r"printer\.cfg::max_accel\s*:\s*12000"),
             ),
         ),
         TestQuestion(
@@ -773,10 +847,11 @@ def build_trident_questions() -> list[TestQuestion]:
             context_files=printer_cfg,
             expected_tools=("validate_klipper_config",),
             require_tool=False,
-            criteria=(
-                ("regex", r"```(?:cfg|ini|conf|klipper)"),
-                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
-                ("regex", r"\*\s*\[gcode_macro\s+RESET_ACCEL\]"),
+            criteria=(),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_section_absent", "printer.cfg::gcode_macro RESET_ACCEL"),
             ),
         ),
         TestQuestion(
@@ -788,9 +863,11 @@ def build_trident_questions() -> list[TestQuestion]:
                   "hint line."),
             context_files=printer_cfg,
             require_tool=False,
-            criteria=(
-                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
-                ("regex", r"#\s*\[include\s+sensorless\.cfg\]"),
+            criteria=(),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_regex", r"printer\.cfg::#\s*\[include\s+sensorless\.cfg\]"),
             ),
         ),
         TestQuestion(
@@ -803,10 +880,11 @@ def build_trident_questions() -> list[TestQuestion]:
             context_files=printer_and_aux,
             expected_tools=("validate_klipper_config",),
             require_tool=False,
-            criteria=(
-                ("regex", r"#\s*file\s*:\s*aux_fan\.cfg"),
-                ("regex", r"\[fan_generic\s+Aux_Fan\]"),
-                ("regex", r"max_power\s*:\s*0\.8"),
+            criteria=(),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_regex", r"aux_fan\.cfg::max_power\s*:\s*0\.8"),
             ),
         ),
         TestQuestion(
@@ -821,11 +899,13 @@ def build_trident_questions() -> list[TestQuestion]:
             context_files=printer_cfg,
             expected_tools=("validate_macro",),
             require_tool=False,
-            criteria=(
-                ("regex", r"#\s*file\s*:\s*park_head\.cfg"),
-                ("regex", r"\[gcode_macro\s+PARK_HEAD"),
-                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
-                ("regex", r"\[include\s+park_head\.cfg\]"),
+            criteria=(),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_new_file", ""),
+                ("staged_regex", r"park_head\.cfg::\[gcode_macro\s+PARK_HEAD"),
+                ("staged_regex", r"printer\.cfg::\[include\s+park_head\.cfg\]"),
             ),
         ),
         TestQuestion(
@@ -857,11 +937,12 @@ def build_trident_questions() -> list[TestQuestion]:
             context_files=printer_cfg,
             expected_tools=("validate_klipper_config",),
             require_tool=False,
-            criteria=(
-                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
-                ("regex", r"\[bed_mesh\]"),
-                ("regex", r"probe_count\s*:\s*5,\s*5"),
-                ("regex", r"mesh_pps\s*:\s*5,\s*5"),
+            criteria=(),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_section_regex", r"printer\.cfg::bed_mesh::probe_count\s*:\s*5,\s*5"),
+                ("staged_section_regex", r"printer\.cfg::bed_mesh::mesh_pps\s*:\s*5,\s*5"),
             ),
         ),
         TestQuestion(
@@ -892,10 +973,12 @@ def build_trident_questions() -> list[TestQuestion]:
             context_files=_context_with(_load_m109_bugged_printer_cfg()),
             expected_tools=("validate_macro",),
             require_tool=False,
-            criteria=(
-                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
-                ("regex", r"\[gcode_macro\s+M109\]"),
-                ("contains", "{% endif %}"),
+            criteria=(),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_file", "printer.cfg"),
+                ("staged_regex", r"printer\.cfg::\{%\s*endif\s*%\}"),
             ),
         ),
         TestQuestion(
@@ -908,11 +991,12 @@ def build_trident_questions() -> list[TestQuestion]:
                   "'# file:' hint line."),
             context_files=_cfg_context("printer.cfg", "aux_fan.cfg"),
             require_tool=False,
-            criteria=(
-                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
-                ("regex", r"max_accel\s*:\s*12000"),
-                ("regex", r"#\s*file\s*:\s*aux_fan\.cfg"),
-                ("regex", r"max_power\s*:\s*0\.8"),
+            criteria=(),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_section_regex", r"printer\.cfg::printer::max_accel\s*:\s*12000"),
+                ("staged_section_regex", r"aux_fan\.cfg::fan_generic Aux_Fan::max_power\s*:\s*0\.8"),
             ),
         ),
         TestQuestion(
@@ -926,11 +1010,12 @@ def build_trident_questions() -> list[TestQuestion]:
                   "correct '# file:' hint lines."),
             context_files=_cfg_context("printer.cfg", "aux_fan.cfg", "PIS.cfg"),
             require_tool=False,
-            criteria=(
-                ("regex", r"#\s*file\s*:\s*aux_fan\.cfg"),
-                ("regex", r"max_power\s*:\s*0\.8"),
-                ("regex", r"#\s*file\s*:\s*PIS\.cfg"),
-                ("regex", r"accel_per_hz\s*:\s*50"),
+            criteria=(),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_regex", r"aux_fan\.cfg::max_power\s*:\s*0\.8"),
+                ("staged_regex", r"PIS\.cfg::accel_per_hz\s*:\s*50"),
             ),
         ),
         TestQuestion(
@@ -946,15 +1031,16 @@ def build_trident_questions() -> list[TestQuestion]:
                   "any other content in the file."),
             context_files=printer_cfg,
             require_tool=False,
-            criteria=(
-                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
-                ("regex", r"\[gcode_macro\s+PARK_HEAD"),
-                ("regex", r"probe_count\s*:\s*5,\s*5"),
-                ("regex", r"\*\s*\[gcode_macro\s+RESET_ACCEL\]"),
-                # Unwanted-content gate: the reply must not contain real
-                # stepper section content (i.e. it did not dump/re-edit
-                # unrelated sections).
-                ("not_contains", "[stepper_x]\nstep_pin"),
+            criteria=(),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_section_regex", r"printer\.cfg::gcode_macro PARK_HEAD::gcode"),
+                ("staged_section_regex", r"printer\.cfg::bed_mesh::probe_count\s*:\s*5,\s*5"),
+                ("staged_section_absent", "printer.cfg::gcode_macro RESET_ACCEL"),
+                # Byte-stability: unrelated sections survive in the
+                # staged full file.
+                ("staged_regex", r"printer\.cfg::\[stepper_x\]"),
             ),
         ),
         TestQuestion(
@@ -988,14 +1074,19 @@ def build_trident_questions() -> list[TestQuestion]:
             # via read_user_config (the backend user_configs mirror has all
             # three files).
             context_files=printer_cfg,
-            expected_tools=("read_user_config",),
+            # Class-first discovery: list_hardware(type='led') enumerates
+            # every LED section (working state + config mirror) in one
+            # structural call; read_user_config remains an accepted route.
+            expected_tools=("list_hardware", "read_user_config"),
             require_tool=True,
-            criteria=(
-                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
-                ("regex", r"timeout\s*:\s*300\b"),
-                ("contains", "SB_LEDs"),
-                ("contains", "Chamber_LEDs"),
-                ("contains", "hotkey_leds"),
+            criteria=(),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_section_regex", r"printer\.cfg::idle_timeout::timeout\s*:\s*300\b"),
+                ("staged_section_regex", r"printer\.cfg::idle_timeout::SB_LEDs"),
+                ("staged_section_regex", r"printer\.cfg::idle_timeout::Chamber_LEDs"),
+                ("staged_section_regex", r"printer\.cfg::idle_timeout::hotkey_leds"),
             ),
         ),
         TestQuestion(
@@ -1010,66 +1101,46 @@ def build_trident_questions() -> list[TestQuestion]:
             context_files=(),
             expected_tools=("read_user_config", "list_user_configs"),
             require_tool=True,
-            criteria=(
-                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
-                ("regex", r"timeout\s*:\s*300\b"),
-                ("contains", "SB_LEDs"),
-                ("contains", "Chamber_LEDs"),
-                ("contains", "hotkey_leds"),
+            criteria=(),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_section_regex", r"printer\.cfg::idle_timeout::timeout\s*:\s*300\b"),
+                ("staged_section_regex", r"printer\.cfg::idle_timeout::SB_LEDs"),
+                ("staged_section_regex", r"printer\.cfg::idle_timeout::Chamber_LEDs"),
+                ("staged_section_regex", r"printer\.cfg::idle_timeout::hotkey_leds"),
             ),
         ),
-        # ── HARNESS-01..03: probes for the server-side apply/validate/
-        # repair (#1) and post-apply audit (#3) machinery. These judge
-        # the HARNESS, not the model: each is engineered so the pipeline
-        # has a deterministic observable, captured via the serverRepair
-        # response field / audit footer in the report JSON.
+        # ── HARNESS-01/03: typo/false-positive probes. Originally they
+        # probed the server-side prose repair + audit harness (deleted by
+        # the Phase-4 ratchet 2026-09-22); the fixtures survive as model
+        # accuracy probes graded on the staged write-tool artifact.
         TestQuestion(
             qid="HARNESS-01",
             title="Repair-probe: typo'd param name must trigger ONE repair",
             text=("In printer.cfg set the printer's max_acceleration to 9000. "
                   "Only change that one value."),
             # max_acceleration is NOT a real [printer] param (the real one
-            # is max_accel) — a plain user typo. If the model writes it
-            # verbatim, the merged result fails validation (unknown_param)
-            # and the server harness MUST fire its ONE repair pass. Pass =
-            # the reply standing in front of the user carries the correct
-            # param (repaired, or never wrong). The serverRepair field in
-            # the report records whether repair actually fired.
+            # is max_accel) — a plain user typo. Under tool-mediated
+            # editing the write gate flags unknown_param, so the staged
+            # artifact must carry the CORRECT param (or nothing bogus).
             context_files=printer_cfg,
             require_tool=False,
-            criteria=(
-                ("regex", r"max_accel(?!eration)\s*:\s*9000"),
-                ("not_contains", "max_acceleration: 9000"),
+            criteria=(),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_regex", r"printer\.cfg::max_accel(?!eration)\s*:\s*9000"),
+                ("staged_not_regex", r"printer\.cfg::max_acceleration\s*:\s*9000"),
             ),
         ),
-        TestQuestion(
-            qid="HARNESS-02",
-            title="Audit-probe: partial LED edit must surface the inventory footer",
-            text=("Add SET_LED commands for Chamber_LEDs only to my "
-                  "idle_timeout gcode in printer.cfg, and set the timeout to "
-                  "300 seconds. Do exactly that — no other changes."),
-            # Deterministic partial edit: the user (deliberately) asks for
-            # only ONE strip while all three LED sections (SB_LEDs,
-            # Chamber_LEDs, hotkey_leds) are visible in the project. The
-            # model SHOULD comply — and the deterministic LED inventory
-            # MUST append the 'Harness checks' footer naming the two
-            # untouched strips, because the edit touches an LED via
-            # SET_LED. This is the user-protection path: a real user who
-            # didn't think to say "all LEDs" gets the observation.
-            # (2026-09-09 finding behind this design: when asked for "all
-            # LEDs" with all files attached, gemma turns off ALL three —
-            # TRIDENT-15's historic failure was context visibility, not
-            # capability. So the audit's live-firing probe needs the
-            # partial request, not the complete one.)
-            context_files=_load_trident_led_context(),
-            require_tool=False,
-            criteria=(
-                ("regex", r"timeout\s*:\s*300\b"),
-                ("regex", r"Harness checks"),
-                ("regex", r"SB_LEDs"),
-                ("regex", r"hotkey_leds"),
-            ),
-        ),
+        # HARNESS-02 RETIRED 2026-09-13: it probed the deterministic LED
+        # inventory footer ('Harness checks') from KWC_POST_APPLY_AUDIT,
+        # which is default-OFF since e351669 (audit design review) and on
+        # the Phase-6 deletion path of the tool-mediated-editing plan —
+        # under default config the probe can never pass. The inventory
+        # behavior returns only if the audit is revived; restore the
+        # question here (git history: pre-2026-09-13) if that happens.
         TestQuestion(
             qid="HARNESS-03",
             title="Audit false-positive probe: pre-satisfied requirement = silent footer",
@@ -1083,9 +1154,12 @@ def build_trident_questions() -> list[TestQuestion]:
             # param is 'speed'; 'probe speed' is how users say it.)
             context_files=_context_with(_load_probe_params_printer_cfg()),
             require_tool=False,
-            criteria=(
-                ("regex", r"speed\s*:\s*8"),
-                ("not_contains", "Harness checks"),
+            criteria=(),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_section_regex", r"printer\.cfg::bed_mesh::speed\s*:\s*8\b"),
+                ("staged_section_regex", r"printer\.cfg::bed_mesh::probe_count\s*:\s*3,\s*3"),
             ),
         ),
         TestQuestion(
@@ -1095,9 +1169,11 @@ def build_trident_questions() -> list[TestQuestion]:
                   "BED_MESH_CALIBRATE in adaptive mode."),
             context_files=printer_cfg,
             require_tool=False,
-            criteria=(
-                ("mini_diff", "[gcode_macro Level_Bed]"),
-                ("contains", "ADAPTIVE=1"),
+            criteria=(),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_regex", r"printer\.cfg::ADAPTIVE=1"),
             ),
         ),
         TestQuestion(
@@ -1108,9 +1184,11 @@ def build_trident_questions() -> list[TestQuestion]:
                   "the changed lines."),
             context_files=printer_cfg,
             require_tool=False,
-            criteria=(
-                ("mini_diff", "[printer]"),
-                ("contains", "12000"),
+            criteria=(),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_regex", r"printer\.cfg::max_accel\s*:\s*12000"),
             ),
         ),
         TestQuestion(
@@ -1120,9 +1198,11 @@ def build_trident_questions() -> list[TestQuestion]:
                   "pin to PB9. Start the cfg block with '# file: aux_fan.cfg'."),
             context_files=printer_and_aux,
             require_tool=False,
-            criteria=(
-                ("mini_diff", "[fan_generic Aux_Fan]"),
-                ("contains", "PB9"),
+            criteria=(),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_regex", r"aux_fan\.cfg::pin:\s*!?PB9\b"),
             ),
         ),
         TestQuestion(
@@ -1138,14 +1218,353 @@ def build_trident_questions() -> list[TestQuestion]:
             # full-section rewrites via params that only exist in [extruder]).
             expected_tools=("read_user_config",),
             require_tool=True,
+            criteria=(),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            # The mini-diff gates (+ADD line, no whole-file dump) are prose
+            # protocol; section-scoped staged check keeps the real intent:
+            # pressure_advance WITH A VALUE inside [extruder].
+            edit_criteria=(
+                ("staged_section_regex",
+                 r"printer\.cfg::extruder::pressure_advance\s*[:=]\s*\d+(?:\.\d+)?"),
+            ),
+        ),
+    ]
+
+
+def _printer_cfg_with_commented_enable() -> str:
+    """Trident printer.cfg with [stepper_x] enable_pin commented out.
+
+    Planted on the reference copy (the live enable_pin is active) so the
+    commented-param EDIT path is testable (guard removed 2026-09-20: the
+    write must uncomment-and-stage with the flip visible in the diff);
+    on-disk files untouched.
+    """
+    text = _load_trident_config("printer.cfg")
+    # Comment the FIRST enable_pin (stepper_x is the first stepper section).
+    return text.replace("enable_pin: !PE9", "#enable_pin: !PE9", 1)
+
+
+def build_edit_tool_questions() -> list[TestQuestion]:
+    """Tool-mediated editing (EDIT-* family): success = the staged
+    pendingEdits themselves (server-validated mechanical apply), not prose
+    shape. Runs with the write tools forced ON per request (editTools=True);
+    the MINIDIFF-*/TRIDENT-* families score the prose path for the A/B.
+    Criteria kind 'staged_param' reads the response's staged newText.
+    """
+    printer_cfg = _cfg_context("printer.cfg")
+    printer_and_aux = _cfg_context("printer.cfg", "aux_fan.cfg")
+    return [
+        TestQuestion(
+            qid="EDIT-01",
+            title="Edit tools: [printer] max_accel via config_edit",
+            text="In printer.cfg change the [printer] max_accel to 12000.",
+            context_files=printer_cfg,
+            edit_tools=True,
+            expected_tools=("config_edit",),
+            require_tool=True,
             criteria=(
-                ("regex", r"\[extruder\]"),
-                ("regex", r"(?m)^\s*\+[^\n]*pressure_advance\s*[:=]\s*\d+(?:\.\d+)?"),
-                # Mangle gate: a mini-diff add contains only the changed line.
-                # A full printer.cfg dump would include other sections — the
-                # [stepper_x] header is the distinctive whole-file signal
-                # (showing the edited [extruder] section for context is fine).
-                ("not_contains", "[stepper_x]"),
+                ("staged_param", "printer.cfg::max_accel: 12000"),
+            ),
+        ),
+        TestQuestion(
+            qid="EDIT-02",
+            title="Edit tools: level_bed adaptive (anchor into gcode body)",
+            text=("Modify my level_bed macro in printer.cfg to call "
+                  "BED_MESH_CALIBRATE in adaptive mode."),
+            context_files=printer_cfg,
+            edit_tools=True,
+            expected_tools=("config_edit",),
+            require_tool=True,
+            criteria=(
+                ("staged_param", "printer.cfg::ADAPTIVE=1"),
+                # The staged file is the FULL file post-apply: unrelated
+                # sections must still be intact (byte-stable guarantee).
+                ("staged_param", "printer.cfg::[stepper_x]"),
+            ),
+        ),
+        TestQuestion(
+            qid="EDIT-03",
+            title="Edit tools: cross-file pin edit (aux_fan.cfg)",
+            text=("In aux_fan.cfg change the [fan_generic Aux_Fan] section's "
+                  "pin to PB9."),
+            context_files=printer_and_aux,
+            edit_tools=True,
+            expected_tools=("config_edit",),
+            require_tool=True,
+            criteria=(
+                ("staged_param", "aux_fan.cfg::pin: PB9"),
+                # printer.cfg must NOT be rewritten as a side effect.
+                ("not_staged", "printer.cfg"),
+            ),
+        ),
+        TestQuestion(
+            qid="EDIT-04",
+            title="Edit tools: new macro file + include",
+            text=("Create a new file park_macros.cfg containing a gcode_macro "
+                  "PARK_Z that lifts Z by 5mm relative, and include it from "
+                  "printer.cfg."),
+            context_files=printer_cfg,
+            edit_tools=True,
+            expected_tools=("config_write", "config_edit"),
+            require_tool=False,
+            criteria=(
+                ("staged_param", "park_macros.cfg::[gcode_macro PARK_Z]"),
+                ("staged_param", "printer.cfg::[include park_macros.cfg]"),
+            ),
+        ),
+        TestQuestion(
+            qid="EDIT-05",
+            title="Edit tools: pure Q&A must stage NOTHING",
+            text=("What does pressure_advance do in the [extruder] section, "
+                  "and what value is typical for a direct drive?"),
+            context_files=printer_cfg,
+            edit_tools=True,
+            require_tool=False,
+            criteria=(
+                ("not_staged", "printer.cfg"),
+                ("regex", r"pressure|advance"),
+            ),
+        ),
+        TestQuestion(
+            qid="EDIT-06",
+            title="Edit tools: commented-param uncomment keeps the polarity",
+            text=("Set enable_pin to PF16 on my [stepper_x] in printer.cfg — "
+                  "keep the enable-pin polarity exactly as it is now (leave "
+                  "the ! flag in place)."),
+            # Planted fixture (Trident's real enable_pin is ACTIVE): the
+            # target param is commented out. 2026-09-20: the refuse-and-ask
+            # guard was removed — the write stages directly and the diff
+            # shows the uncomment. Success = staged `enable_pin: !PF16` with
+            # NO commented duplicate left behind.
+            #
+            # POLARITY DECISION 2026-09-24 (Sir): the old wording asked for
+            # "PF16" and graded the bare value, so a model that dropped the
+            # `!` passed while one that preserved it (qwen3.5-4b staged
+            # `!PF16` in both arms) was FAILed. Klipper's reference says
+            # enable_pin is enable-high by default and `!` means enable-low;
+            # EVERY enable_pin in the real Trident config carries the flag
+            # (and the stock Spider reference uses `!PE9`), so the flag is
+            # part of the hardware convention, not part of the pin name.
+            # The request is now explicit and the criterion grades the
+            # convention: dropping the flag is the miss. Prior EDIT-06
+            # numbers are not comparable across this change.
+            context_files=_context_with(_printer_cfg_with_commented_enable()),
+            edit_tools=True,
+            require_tool=False,
+            criteria=(
+                ("staged_param", "printer.cfg::enable_pin: !PF16"),
+                ("staged_not_regex", r"printer\.cfg::#enable_pin"),
+            ),
+        ),
+    ]
+
+
+def build_ack_guard_questions() -> list[TestQuestion]:
+    """Ack-guard family (ACK-*), Phase 6.5.5.
+
+    Measures the ack guard's two behaviors on the models that actually
+    stall (qwen-class; gemma+native showed ZERO claimable headroom in the
+    2026-09-24 interim baseline, so on that class these are NON-FIRING
+    regression cases):
+
+      ACK-01 / ACK-02  — an unambiguous single-value
+        edit with `expect_no_ack_stall=True`. PASS means the model went
+        straight to the write tool; a rescue (ackReprompts>=1) FAILS even
+        though the staged artifact is correct, because the raw model lied
+        by promise. Protocol pinned per case so native/text parity is
+        graded in one run (the guard's tail check runs on visible text,
+        so both protocols must behave identically).
+
+      ACK-N01 — a pure question, no edit intent: the guard must never
+        fire (the `_is_edit_request` gate). Asserted on both protocols
+        via the run flag plus the paired native/text cases.
+
+    Run these as an edit-family probe, not the full bank: `--questions
+    ACK`. The guard's cap is 1/session, so a PASS/FAIL here says nothing
+    about loop convergence — read editAttempts alongside it.
+    """
+    printer_cfg = _cfg_context("printer.cfg")
+    return [
+        TestQuestion(
+            qid="ACK-01",
+            title="Ack guard: single edit, native protocol, no promise-stall",
+            text="In printer.cfg set [printer] max_velocity to 300.",
+            context_files=printer_cfg,
+            edit_tools=True,
+            expected_tools=("config_edit",),
+            require_tool=True,
+            tool_protocol="native",
+            criteria=(("staged_param", "printer.cfg::max_velocity: 300"),),
+            expect_no_ack_stall=True,
+        ),
+        TestQuestion(
+            qid="ACK-02",
+            title="Ack guard: single edit, text protocol, no promise-stall",
+            text="In printer.cfg set [printer] max_velocity to 300.",
+            context_files=printer_cfg,
+            edit_tools=True,
+            expected_tools=("config_edit",),
+            require_tool=True,
+            tool_protocol="text",
+            criteria=(("staged_param", "printer.cfg::max_velocity: 300"),),
+            expect_no_ack_stall=True,
+        ),
+        TestQuestion(
+            qid="ACK-N01",
+            title="Ack guard: pure question must never be nudged",
+            text="What does the [printer] max_velocity parameter control?",
+            context_files=printer_cfg,
+            edit_tools=True,
+            expected_tools=("search_klipper_docs", "get_config_reference_section",
+                            "get_section_schema"),
+            require_tool=True,
+            tool_protocol="text",
+            criteria=(("regex", r"maximum.*speed|speed.*maximum|travel"),),
+            expect_no_ack_stall=True,
+        ),
+    ]
+
+
+def build_skill_gate_questions() -> list[TestQuestion]:
+    """Phase 3 skill-gate activation eval (SKILL-* family). Each question
+    carries a should_trigger label (`skill_expected`); the graded signal is
+    the executed tool-call trace (toolCalls), NOT prose:
+
+      skill_expected=True  -> load_skill must appear in the trace
+                              (activation rate; plan gate: >=90%)
+      skill_expected=False -> load_skill must NOT appear
+                              (false-positive rate; every FP costs an
+                              irrelevant edit-law load + latency)
+
+    Runs against any backend (the write tools and the model-triggered
+    skill gate are product behavior since the Phase-6 flag removal; the
+    questions force editTools=True so the gate is engaged). The `tool`
+    criteria kind grades load_skill like any
+    other expected tool; a False-labelled question uses require_tool=False
+    plus the trace check below (criterion kind `skill_not_loaded`).
+    """
+    printer_cfg = _cfg_context("printer.cfg")
+    return [
+        # ── should_trigger = True (activation) ──
+        TestQuestion(
+            qid="SKILL-01",
+            title="Skill: direct param edit must load first",
+            text="In printer.cfg change the [printer] max_accel to 12000.",
+            context_files=printer_cfg,
+            edit_tools=True,
+            skill_expected=True,
+            expected_tools=("load_skill",),
+            require_tool=True,
+            criteria=(("staged_param", "printer.cfg::max_accel: 12000"),),
+        ),
+        TestQuestion(
+            qid="SKILL-02",
+            title="Skill: macro-body edit must load first",
+            text=("Modify my level_bed macro in printer.cfg to call "
+                  "BED_MESH_CALIBRATE in adaptive mode."),
+            context_files=printer_cfg,
+            edit_tools=True,
+            skill_expected=True,
+            expected_tools=("load_skill",),
+            require_tool=True,
+            criteria=(("staged_param", "printer.cfg::ADAPTIVE=1"),),
+        ),
+        TestQuestion(
+            qid="SKILL-03",
+            title="Skill: multi-part change must load first",
+            text=("Change max_velocity to 300 and max_accel to 4000 in "
+                  "printer.cfg."),
+            context_files=printer_cfg,
+            edit_tools=True,
+            skill_expected=True,
+            expected_tools=("load_skill",),
+            require_tool=True,
+            criteria=(
+                ("staged_param", "printer.cfg::max_velocity: 300"),
+                ("staged_param", "printer.cfg::max_accel: 4000"),
+            ),
+        ),
+        TestQuestion(
+            qid="SKILL-04",
+            title="Skill: new file + include must load first",
+            text=("Create a file dock_macros.cfg with a gcode_macro DOCK_Z "
+                  "that lifts Z 5mm, and include it from printer.cfg."),
+            context_files=printer_cfg,
+            edit_tools=True,
+            skill_expected=True,
+            expected_tools=("load_skill",),
+            require_tool=True,
+            criteria=(
+                ("staged_param", "dock_macros.cfg::[gcode_macro DOCK_Z]"),
+                ("staged_param", "printer.cfg::[include dock_macros.cfg]"),
+            ),
+        ),
+        TestQuestion(
+            qid="SKILL-05",
+            title="Skill: implicit edit ('my prints wobble') must load",
+            text=("My prints wobble at corners. Raise max_accel to 9000 in "
+                  "printer.cfg and see if that's sane."),
+            context_files=printer_cfg,
+            edit_tools=True,
+            skill_expected=True,
+            expected_tools=("load_skill",),
+            require_tool=True,
+            criteria=(("staged_param", "printer.cfg::max_accel: 9000"),),
+        ),
+        # ── should_trigger = False (false positives) ──
+        TestQuestion(
+            qid="SKILL-N01",
+            title="Skill: pure Q&A must NOT load",
+            text=("What does pressure_advance do in the [extruder] section, "
+                  "and what value is typical for a direct drive?"),
+            context_files=printer_cfg,
+            edit_tools=True,
+            skill_expected=False,
+            require_tool=False,
+            criteria=(
+                ("skill_not_loaded", ""),
+                ("not_staged", "printer.cfg"),
+                ("regex", r"pressure|advance"),
+            ),
+        ),
+        TestQuestion(
+            qid="SKILL-N02",
+            title="Skill: how-to question must NOT load",
+            text=("How do I enable input shaper on my printer? Just explain "
+                  "the steps, don't change my files yet."),
+            context_files=printer_cfg,
+            edit_tools=True,
+            skill_expected=False,
+            require_tool=False,
+            criteria=(
+                ("skill_not_loaded", ""),
+                ("not_staged", "printer.cfg"),
+            ),
+        ),
+        TestQuestion(
+            qid="SKILL-N03",
+            title="Skill: validate-pasted-text must NOT load",
+            text=("Is this section valid Klipper? [heater_fan hotend_fan]\n"
+                  "pin: PA0\nheater: extruder\nheater_temp: 50.0"),
+            context_files=printer_cfg,
+            edit_tools=True,
+            skill_expected=False,
+            require_tool=False,
+            criteria=(("skill_not_loaded", ""),),
+        ),
+        TestQuestion(
+            qid="SKILL-N04",
+            title="Skill: discuss-a-draft must NOT load",
+            text=("Draft me a PARK_X macro gcode body I can read over. "
+                  "Don't add it to my config — I just want to see it here."),
+            context_files=printer_cfg,
+            edit_tools=True,
+            skill_expected=False,
+            require_tool=False,
+            criteria=(
+                ("skill_not_loaded", ""),
+                ("not_staged", "printer.cfg"),
             ),
         ),
     ]
@@ -1174,13 +1593,18 @@ def build_ambiguity_questions() -> list[TestQuestion]:
             expected_tools=("search_example_configs", "read_example_config"),
             require_tool=False,
             criteria=(
-                ("regex", r"ender\s*3"),
                 # Its own docstring: a draft OR a clarifying question are both
                 # legitimate outcomes (2026-09-09: gemma AND qwen both asked
                 # which mainboard — the correct refusal when board hardware is
-                # unknowable). Accept either.
-                ("regex", r"#\s*file\s*:\s*printer\.cfg"
+                # unknowable). Criterion bug fixed 2026-09-13: the old first
+                # check unconditionally required an "ender 3" echo, which
+                # false-failed the accepted clarifier path when the model
+                # answered by naming candidate MAINBOARDS instead.
+                ("regex", r"ender\s*3"
                           r"|mainboard|board|MCU|provide|need to know"),
+                ("regex", r"#\s*file\s*:\s*printer\.cfg"
+                          r"|mainboard|board|MCU|provide|need to know"
+                          r"|\?"),
             ),
         ),
         TestQuestion(
@@ -1190,11 +1614,11 @@ def build_ambiguity_questions() -> list[TestQuestion]:
                   "put it in a new file?"),
             context_files=printer_cfg,
             require_tool=False,
-            criteria=(
-                # A new-file hint that is NOT printer.cfg (multiline: the
-                # filename line is followed by section content).
-                ("regex", r"(?m)^\s*#\s*file\s*:\s*(?!printer\.cfg)[^\s#]+\.cfg"),
-                ("contains", "[gcode_macro"),
+            criteria=(),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_new_file", ""),
             ),
         ),
         TestQuestion(
@@ -1203,11 +1627,11 @@ def build_ambiguity_questions() -> list[TestQuestion]:
             text=("Can you add an adaptive margin of 5 to my bed mesh section?"),
             context_files=printer_cfg,
             require_tool=False,
-            criteria=(
-                ("mini_diff", "[bed_mesh]"),
-                ("regex", r"adaptive_margin\s*:\s*5\b"),
-                # It must target printer.cfg even though the user never named it.
-                ("regex", r"#\s*file\s*:\s*printer\.cfg"),
+            criteria=(),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_section_regex", r"printer\.cfg::bed_mesh::adaptive_margin\s*:\s*5\b"),
             ),
         ),
         TestQuestion(
@@ -1232,9 +1656,11 @@ def build_ambiguity_questions() -> list[TestQuestion]:
                   "value for a direct drive extruder?"),
             context_files=printer_cfg,
             require_tool=False,
-            criteria=(
-                ("contains", "pressure_advance"),
-                ("regex", r"\b0\.\d{2,3}\b"),
+            criteria=(),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_count", "0"),
             ),
         ),
         TestQuestion(
@@ -1328,15 +1754,12 @@ def build_setup_questions() -> list[TestQuestion]:
             expected_tools=("get_config_reference_section", "search_klipper_docs",
                             "read_user_config"),
             require_tool=False,
-            criteria=(
-                # The gate: it must return the [firmware_retraction] section —
-                # NOT pressure_advance in [extruder], NOT "doesn't exist".
-                ("contains", "[firmware_retraction]"),
-                # A REAL param of [firmware_retraction] (retract_length) with
-                # a value — catches fabricated param names the model invents
-                # when it never checks the docs (observed 2026-08-07:
-                # default_min_extra_distance etc. are NOT Klipper params).
-                ("regex", r"retract_length\s*[:=]\s*\d+(?:\.\d+)?"),
+            criteria=(),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_section_regex",
+                 r"printer\.cfg::firmware_retraction::retract_length\s*[:=]\s*\d+(?:\.\d+)?"),
             ),
         ),
         TestQuestion(
@@ -1347,12 +1770,12 @@ def build_setup_questions() -> list[TestQuestion]:
             expected_tools=("read_user_config", "list_user_configs",
                             "get_config_reference_section", "search_klipper_docs"),
             require_tool=False,
-            criteria=(
-                # Gate: must return the [idle_timeout] section (the real
-                # user_configs/printer.cfg already has one at line ~400), not
-                # claim it does not exist or ask the user for a value.
-                ("contains", "[idle_timeout]"),
-                ("regex", r"timeout\s*[:=]\s*\d+"),
+            criteria=(),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_section_regex",
+                 r"printer\.cfg::idle_timeout::timeout\s*[:=]\s*\d+"),
             ),
         ),
         TestQuestion(
@@ -1363,16 +1786,14 @@ def build_setup_questions() -> list[TestQuestion]:
             expected_tools=("get_config_reference_section", "search_klipper_docs",
                             "read_user_config"),
             require_tool=False,
-            criteria=(
-                # Gate: must return the [gcode_arcs] section (NOT claim it
-                # needs a firmware change or "doesn't exist"). The section is
-                # valid EMPTY — resolution defaults to 1.0 (Config_Reference
-                # lists it as an optional commented param), so requiring a
-                # written param would be a false fail for a correct answer.
-                ("contains", "[gcode_arcs]"),
-                # It must NOT be the pressure_advance-in-extruder style
-                # hallucination (wrong section for the request).
-                ("not_contains", "pressure_advance"),
+            criteria=(),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            # Section valid EMPTY, so only existence is required; the
+            # not_regex mirrors the wrong-section hallucination gate.
+            edit_criteria=(
+                ("staged_section_regex", r"printer\.cfg::gcode_arcs::.*"),
+                ("staged_not_regex", r"printer\.cfg::pressure_advance"),
             ),
         ),
         TestQuestion(
@@ -1383,12 +1804,12 @@ def build_setup_questions() -> list[TestQuestion]:
             expected_tools=("get_config_reference_section", "search_klipper_docs",
                             "read_user_config"),
             require_tool=False,
-            criteria=(
-                # Gate: must return the [save_variables] section.
-                ("contains", "[save_variables]"),
-                # A REAL param of [save_variables] (filename is required) —
-                # the documented default is ~/variables.cfg.
-                ("regex", r"filename\s*[:=]\s*\S+"),
+            criteria=(),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_section_regex",
+                 r"printer\.cfg::save_variables::filename\s*[:=]\s*\S+"),
             ),
         ),
         TestQuestion(
@@ -1399,11 +1820,12 @@ def build_setup_questions() -> list[TestQuestion]:
             expected_tools=("get_config_reference_section", "search_klipper_docs",
                             "read_user_config"),
             require_tool=False,
-            criteria=(
-                # Gate: must return the [respond] section.
-                ("contains", "[respond]"),
-                # A REAL param of [respond] (default_type or default_prefix).
-                ("regex", r"default_(?:type|prefix)\s*[:=]\s*\S+"),
+            criteria=(),
+            # Edit-tools-ON arm: score the staged artifact, not prose
+            # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
+            edit_criteria=(
+                ("staged_section_regex",
+                 r"printer\.cfg::respond::default_(?:type|prefix)\s*[:=]\s*\S+"),
             ),
         ),
     ]
@@ -1592,6 +2014,34 @@ dir_pin: PB9
 enable_pin: PC3
 microsteps: 16
 rotation_distance: 40
+position_endstop: 0
+position_max: 250
+
+[stepper_y]
+step_pin: PB8
+dir_pin: PB7
+enable_pin: PB6
+microsteps: 16
+rotation_distance: 40
+position_endstop: -8
+position_min: -8
+position_max: 235
+
+[stepper_z]
+step_pin: PA7
+dir_pin: PA6
+enable_pin: PC5
+microsteps: 16
+rotation_distance: 8
+position_endstop: 0
+position_max: 210
+
+[mcu EBBCan]
+canbus_uuid: 42152a9d2f1e
+
+[adxl345]
+cs_pin: EBBCan:PB12
+spi_bus: spi1
 
 [probe]
 pin: PA1
@@ -1606,7 +2056,7 @@ def build_memory_questions() -> list[TestQuestion]:
     The backend only injects the auto-fill prompt when printer memory is
     blank, so these run after the harness blanks memory (backed up first,
     restored after the run). Success = a valid fenced `printer-memory` JSON
-    block with only the 7 allowed fields, plus correct field values.
+    block with only the 9 allowed fields, plus correct field values.
     """
     return [
         TestQuestion(
@@ -1614,6 +2064,7 @@ def build_memory_questions() -> list[TestQuestion]:
             title="Printer memory: derive from config",
             text=("Here is my printer config. Fill in the printer memory profile from it.\n\n"
                   + _MEMORY_CONFIG_SNIPPET),
+            context_files=(("printer.cfg", "printer.cfg", _MEMORY_CONFIG_SNIPPET),),
             expected_tools=("search_klipper_docs",
                             "get_config_reference_section", "search_example_configs",
                             "read_example_config"),
@@ -1623,6 +2074,7 @@ def build_memory_questions() -> list[TestQuestion]:
                 ("memory_valid", ""),
                 ("memory_has", "kinematics:corexy"),
                 ("memory_has", "mainboard:stm32|f446|octopus|mcu|board"),
+                ("memory_has", "toolheadBoard:ebb"),
             ),
         ),
         TestQuestion(
@@ -1661,6 +2113,213 @@ def build_memory_questions() -> list[TestQuestion]:
     ]
 
 
+def build_tool_coverage_questions() -> list[TestQuestion]:
+    """Tool-coverage family (TOOL-*): one question per tool that had ZERO
+    expected_tools coverage in the bank, plus strict-routing top-ups for
+    single-question tools that only ever appeared in any-overlap tuples.
+
+    Added 2026-09-21 after the coverage audit: list_config_reference_sections,
+    list_user_config_sections, detect_board, calculate_rotation_distance and
+    generate_macro_template were never an expected_tools target, and
+    config_write only appeared inside a (config_write, config_edit) OR-tuple.
+
+    Grading law (same bar as the LIVE family): expected_tools carries the
+    TARGET TOOL ALONE — a correct answer reached via another tool grades
+    PASS_WRONG_TOOL, which IS the routing measurement. Where the tool result
+    must be used CORRECTLY (not just called), the use-gate is a tool_args
+    criterion plus an answer criterion that only the right argument shape
+    can produce (e.g. TOOL-04 requires starts=8 to yield 16.0).
+
+    HOST GROUND TRUTH (verified against the MCP server 2026-09-21):
+    - list_config_reference_sections returns 104 sections incl.
+      [bed_mesh], [quad_gantry_level], [neopixel].
+    - list_user_config_sections(filename=printer.cfg) reads the SERVER'S
+      user_configs mirror (dev Pi = Trident backup): contains [stepper_x],
+      [z_tilt], [bed_mesh], [idle_timeout].
+    - detect_board on the f446 serial below -> mcu_chip STM32F446.
+    - calculate_rotation_distance(leadscrew, pitch=2, starts=8) -> 16.0.
+    - generate_macro_template(PRINT_START, include_bed_mesh=true) contains
+      G28, M104/M140 and BED_MESH_CALIBRATE; without the flag it has no
+      BED_MESH_CALIBRATE — that is the use-gate.
+    - TOOL-06 needs the write tools: the questions force editTools=True;
+      with the model-triggered skill gate in force (default) also pass
+      --force-skill-active, or activation variance pollutes the signal.
+    """
+    return [
+        TestQuestion(
+            qid="TOOL-01",
+            title="Coverage: enumerate supported sections via the reference index",
+            text=("what config section names does Klipper support? list them "
+                  "from the config reference — section names only, no "
+                  "descriptions."),
+            context_files=(),
+            edit_tools=False,  # coverage probe: read-only
+            expected_tools=("list_config_reference_sections",),
+            require_tool=True,
+            criteria=(
+                # The index output is a verbatim section list — real members
+                # prove the result was relayed, not a memory dump.
+                ("contains", "bed_mesh"),
+                ("contains", "quad_gantry_level"),
+                ("contains", "neopixel"),
+            ),
+        ),
+        TestQuestion(
+            qid="TOOL-02",
+            title="Coverage: section index of my printer.cfg",
+            text=("what sections are currently defined in my printer.cfg? "
+                  "list the section headers that file contains."),
+            # No context_files on purpose: the ONLY way to see the real
+            # file's headers is the tool (reads the server's user_configs
+            # mirror). Ground truth: dev-Pi Trident backup.
+            context_files=(),
+            edit_tools=False,  # coverage probe: read-only
+            expected_tools=("list_user_config_sections",),
+            require_tool=True,
+            criteria=(
+                ("contains", "stepper_x"),
+                ("contains", "z_tilt"),
+                ("regex", r"idle_timeout|bed_mesh"),
+                # Proof the SECTION-INDEX tool was used with the right arg,
+                # not a whole-file read judged by eye.
+                ("tool_args", r"list_user_config_sections:filename:printer"),
+            ),
+        ),
+        TestQuestion(
+            qid="TOOL-03",
+            title="Coverage: identify the MCU chip from a pasted config",
+            text=("this config came from a second-hand printer and I don't "
+                  "know what board it was written for — can you figure out "
+                  "the MCU chip from it?\n\n"
+                  "[mcu]\n"
+                  "serial: /dev/serial/by-id/"
+                  "usb-Klipper_stm32f446xx_3D002B000E50505734393820-if00\n\n"
+                  "[stepper_x]\n"
+                  "step_pin: PE2\n"
+                  "dir_pin: PE1\n"
+                  "enable_pin: !PC10\n"
+                  "microsteps: 16\n"
+                  "rotation_distance: 40\n"),
+            context_files=(),
+            # Pure Q&A probe: write tools OFF so the read-before-edit law
+            # can't route this into the edit loop (toolcov-r1: TOOL-04's
+            # answer staged a config_edit against the mirror session).
+            edit_tools=False,
+            expected_tools=("detect_board",),
+            require_tool=True,
+            criteria=(
+                # Tool ground truth: mcu_chip STM32F446. The f446 token IS
+                # in the prompt, so the USE gate is the tool_args — the
+                # answer criterion only proves the chip was relayed.
+                ("contains", "f446"),
+                ("tool_args", "detect_board:config_text"),
+            ),
+        ),
+        TestQuestion(
+            qid="TOOL-04",
+            title="Coverage: leadscrew rotation_distance (starts=8 use-gate)",
+            text=("I'm swapping my Z axis to an 8-start leadscrew with 2mm "
+                  "pitch. what rotation_distance should I set in "
+                  "[stepper_z]?"),
+            context_files=(),
+            edit_tools=False,  # coverage probe: no write loop
+            expected_tools=("calculate_rotation_distance",),
+            require_tool=True,
+            criteria=(
+                # 2mm x 8 starts = 16.0. A model that calls the tool but
+                # forgets starts=8 gets 2.0 and FAILS answer_ok — this is
+                # the correct-USE gate, not just a call gate.
+                ("regex", r"\b16(\.0+)?\b"),
+                ("tool_args", r"calculate_rotation_distance:method:leadscrew"),
+                ("tool_args", r"calculate_rotation_distance:starts"),
+            ),
+        ),
+        TestQuestion(
+            qid="TOOL-05",
+            title="Coverage: PRINT_START template with bed mesh (flag use-gate)",
+            text=("I'm helping a friend set up a brand-new printer from "
+                  "scratch — don't use anything from my own config. Use the "
+                  "macro template generator to build a clean starter "
+                  "PRINT_START macro that homes, heats bed and nozzle, runs "
+                  "a bed mesh, and primes the nozzle."),
+            context_files=(),
+            edit_tools=False,  # coverage probe: template goes in the answer, no staging
+            # Explicit generator wording earned its keep: the first wording
+            # ("for my CoreXY") made models read the user's real PRINT_START
+            # and rewrite THAT — a defensible answer that never touches the
+            # template tool (toolcov-r2/r3: 2/3 FAIL_WRONG_TOOL).
+            expected_tools=("generate_macro_template",),
+            require_tool=True,
+            criteria=(
+                ("contains", "gcode_macro PRINT_START"),
+                ("regex", r"\bG28\b"),
+                # Only the include_bed_mesh=true flag puts BED_MESH_CALIBRATE
+                # in the template — a call without it is an incorrect use.
+                ("contains", "BED_MESH_CALIBRATE"),
+                ("tool_args", r"generate_macro_template:macro_name:PRINT_START"),
+            ),
+        ),
+        TestQuestion(
+            qid="TOOL-06",
+            title="Strict routing: new file MUST use config_write",
+            text=("Create a new file named macros_park.cfg containing a "
+                  "gcode_macro PARK_HEAD that moves the toolhead to X0 Y0, "
+                  "then include it from printer.cfg."),
+            context_files=_cfg_context("printer.cfg"),
+            edit_tools=True,
+            # STRICT: config_write alone. EDIT-04's OR-tuple meant
+            # config_write's create-only semantics were never actually
+            # measured; a model reaching for config_edit here grades
+            # PASS_WRONG_TOOL (the routing signal), not a silent pass.
+            expected_tools=("config_write",),
+            require_tool=True,
+            criteria=(),
+            edit_criteria=(
+                ("staged_new_file", ""),
+                ("staged_param", "macros_park.cfg::[gcode_macro PARK_HEAD]"),
+                ("staged_param", "printer.cfg::[include macros_park.cfg]"),
+            ),
+        ),
+        TestQuestion(
+            qid="TOOL-07",
+            title="Coverage: real serial devices for [mcu] serial (variant 2)",
+            text=("scan what's physically plugged into this machine right "
+                  "now — I need the exact serial: value for my [mcu] "
+                  "section, not a generic example path."),
+            context_files=(),
+            edit_tools=False,  # coverage probe: read-only
+            expected_tools=("list_connected_devices",),
+            require_tool=True,
+            criteria=(
+                # Dev Pi: one Klipper RP2040 under /dev/serial/by-id/.
+                # Zero-device relays are also a correct tool use, hence the
+                # honest-empty alternative.
+                ("regex", r"by.id|/dev/tty|ttyACM|ttyUSB|rp2040|"
+                          r"no (?:serial )?devices?|nothing (?:found|attached|"
+                          r"plugged)"),
+            ),
+        ),
+        TestQuestion(
+            qid="TOOL-08",
+            title="Coverage: live Klipper state before editing (variant 2)",
+            text=("before I change anything — what state is Klipper in right "
+                  "this second? give me its actual current state, don't "
+                  "guess."),
+            context_files=(),
+            edit_tools=False,  # coverage probe: read-only
+            expected_tools=("get_klippy_status",),
+            require_tool=True,
+            criteria=(
+                # Any correct verdict passes (state varies per host — dev Pi
+                # is startup error from KAMP includes; Trident is ready).
+                # The hard gate is the status tool call itself.
+                ("regex", r"ready|error|startup|shut ?down|not responding|"
+                          r"not running|standby|disconnected|cannot (?:be )?reach"),
+            ),
+        ),
+    ]
+
+
 ALL_TOOLS = (
     "search_klipper_docs",
     "read_klipper_doc",
@@ -1674,6 +2333,14 @@ ALL_TOOLS = (
     "list_user_configs",
     "list_user_config_sections",
     "read_user_config",
+    # Write tools (tool-mediated editing, Phase 1). Loop-routed, not
+    # MCP-server-routed, but real all the same (EDIT-* false alarm,
+    # 2026-09-13 — same class as the LIVE-01 one below).
+    "config_edit",
+    "config_write",
+    # Class-first hardware discovery (chat-layer tool, 2026-09-19):
+    # loop-routed like the write tools, reading the working state.
+    "list_hardware",
     # Live-context tools (feature/config-mcp-tools, 2026-09). When adding
     # an MCP tool, update this tuple too or the summary lists real calls
     # under "Unknown tool attempts" (LIVE-01 false alarm, 2026-09-08).
@@ -1685,6 +2352,8 @@ ALL_TOOLS = (
     "calculate_rotation_distance",
     "generate_macro_template",
     "validate_macro",
+    # Skill-gate loader (Phase 3): loop-routed like the write tools.
+    "load_skill",
 )
 
 # ── Printer memory (REQ-AI-08) ────────────────────────────────────────
@@ -1696,6 +2365,8 @@ ALLOWED_MEMORY_FIELDS = (
     "printerName",
     "kinematics",
     "probe",
+    "buildVolume",
+    "extruderType",
     "additionalNotes",
 )
 
@@ -1717,30 +2388,118 @@ def extract_printer_memory(content: str) -> tuple[str, dict | None]:
     return block, data
 
 
+def _staged_section_body(text: str, section: str) -> str | None:
+    """Body of [section] in full-file text, up to the next [header] or EOF.
+    Section name matched case-insensitively; brackets optional in `section`."""
+    name = section.strip().strip("[]")
+    m = re.search(r"^\[\s*" + re.escape(name) + r"\s*\][^\n]*\n",
+                  text, re.IGNORECASE | re.MULTILINE)
+    if not m:
+        return None
+    rest = text[m.end():]
+    nxt = re.search(r"^\[", rest, re.MULTILINE)
+    return rest[:nxt.start()] if nxt else rest
+
+
 # ── Evaluation ─────────────────────────────────────────────────────────
 def criterion_ok(kind: str, value: str, content: str,
                  memory: tuple[str, dict | None] | None = None,
                  tool_calls: list[dict] | None = None,
-                 server_repair: dict | None = None) -> bool:
+                 pending_edits: list | None = None) -> bool:
+    if kind == "any_of":
+        # value = JSON array of ARMS; each arm is a JSON array of
+        # [kind, value] sub-criteria that must ALL pass. The criterion
+        # passes when ANY arm passes (OR of ANDs). Sub-kinds must not be
+        # any_of (single-level guard). Use for legitimate multi-shape
+        # deliverables, e.g. "staged section OR corrected display block".
+        try:
+            arms = json.loads(value)
+        except (ValueError, TypeError):
+            return False
+        if not isinstance(arms, list) or not arms:
+            return False
+        for arm in arms:
+            if not isinstance(arm, list) or not arm:
+                return False
+            if all(
+                isinstance(sub, list) and len(sub) == 2 and sub[0] != "any_of"
+                and criterion_ok(sub[0], sub[1], content, memory=memory,
+                                 tool_calls=tool_calls, pending_edits=pending_edits)
+                for sub in arm
+            ):
+                return True
+        return False
+    if kind == "staged_param":
+        # "<filename>::<substring>" — substring must appear in the staged
+        # newText for that file. Staged = server-validated mechanical apply.
+        filename, _, needle = value.partition("::")
+        for edit in pending_edits or []:
+            if edit.get("file") == filename and needle in (edit.get("newText") or ""):
+                return True
+        return False
+    if kind == "staged_file":
+        return any(e.get("file") == value for e in pending_edits or [])
+    if kind == "skill_loaded":
+        # Phase 3 trace criterion: load_skill executed (arguments ignored).
+        # Activation is ALSO covered by expected_tools for True-labelled
+        # questions; this kind exists for paired assertions.
+        return any(c.get("name") == "load_skill" for c in tool_calls or [])
+    if kind == "skill_not_loaded":
+        # Negative control: a non-edit request must not pay for an
+        # irrelevant edit-law load (false-positive rate denominator).
+        return not any(c.get("name") == "load_skill" for c in tool_calls or [])
+    if kind == "staged_new_file":
+        return any(e.get("op") == "new_file" for e in pending_edits or [])
+    if kind == "staged_any_param":
+        return any(value in (e.get("newText") or "") for e in pending_edits or [])
+    if kind == "staged_regex":
+        filename, _, pattern = value.partition("::")
+        filename = filename.replace("\\.", ".")  # data-escaped dots
+        for e in pending_edits or []:
+            if e.get("file") == filename and re.search(pattern, e.get("newText") or "",
+                                                        re.IGNORECASE | re.DOTALL):
+                return True
+        return False
+    if kind == "staged_not_regex":
+        filename, _, pattern = value.partition("::")
+        filename = filename.replace("\\.", ".")  # data-escaped dots
+        for e in pending_edits or []:
+            if e.get("file") == filename:
+                return not re.search(pattern, e.get("newText") or "",
+                                     re.IGNORECASE | re.DOTALL)
+        return False
+    if kind == "staged_section_regex":
+        # "<file>::<section>::<regex>" — regex searched WITHIN the named
+        # section body of the staged newText (section-aware so a stray
+        # mention elsewhere in the file cannot satisfy it).
+        parts = value.split("::")
+        if len(parts) != 3:
+            return False
+        filename, section, pattern = parts
+        filename = filename.replace("\\.", ".")  # data-escaped dots
+        for e in pending_edits or []:
+            if e.get("file") != filename:
+                continue
+            body = _staged_section_body(e.get("newText") or "", section)
+            if body is not None and re.search(pattern, body, re.IGNORECASE | re.DOTALL):
+                return True
+        return False
+    if kind == "staged_section_absent":
+        filename, _, section = value.partition("::")
+        for e in pending_edits or []:
+            if e.get("file") == filename:
+                return _staged_section_body(e.get("newText") or "", section) is None
+        return False
+    if kind == "staged_count":
+        return len(pending_edits or []) == int(value)
+    if kind == "not_staged":
+        return all(e.get("file") != value for e in pending_edits or [])
     if kind == "contains":
         return value.lower() in content.lower()
     if kind == "not_contains":
         return value.lower() not in content.lower()
     if kind == "regex":
         return re.search(value, content, re.IGNORECASE | re.DOTALL) is not None
-    if kind == "server_repair_or_absent":
-        # HARNESS-01 (repair-probe): pass when the server-side repair
-        # actually fired (attempted=True — machinery proven), OR when the
-        # token never landed in a cfg BLOCK (prose mentions are fine — a
-        # repaired reply legitimately says "removed bogus_param"). Only
-        # FAILS when the invalid token was applied AND the server harness
-        # stayed silent.
-        token = value.lower()
-        if server_repair and server_repair.get("attempted"):
-            return True
-        blocks = re.findall(r"```[a-zA-Z]*\n.*?```", content, re.DOTALL)
-        scope = "\n".join(blocks) if blocks else content
-        return token not in scope.lower()
     if kind == "memory_block":
         return bool(memory and memory[0])
     if kind == "memory_valid":
@@ -1757,33 +2516,6 @@ def criterion_ok(kind: str, value: str, content: str,
         if field not in memory[1]:
             return False
         return re.search(pattern, str(memory[1].get(field, "")), re.IGNORECASE) is not None
-    if kind == "mini_diff":
-        # value = expected section header, e.g. "[gcode_macro Level_Bed]".
-        # Passes when a cfg block in the reply contains that header and
-        # uses the mini-diff protocol: at least one '+' line (additions) —
-        # a pure add-only edit is valid and needs no '-' anchor (the app
-        # appends '+' lines at the end of the section), matching the
-        # frontend protocol. An all-'-' block with no '+' is a delete-only
-        # edit, also valid. No full-section Jinja reproduction
-        # ({% endif %} / {% endfor %}) — unchanged lines must be preserved
-        # by the app, not re-emitted.
-        # Mirrors the frontend's block extraction: fenced cfg blocks first,
-        # then fall back to the raw text when it looks like config (file
-        # hints / section headers), because models sometimes omit fences.
-        target = value.strip().lower()
-        blocks = re.findall(r"```(?:cfg|conf|ini|klipper|printercfg)?\s*\n(.*?)```", content, re.DOTALL)
-        if not blocks and re.search(r"#\s*file\s*:|^\s*\[[^\]]+\]", content, re.MULTILINE):
-            blocks = [content]
-        for block in blocks:
-            if target not in block.lower():
-                continue
-            has_minus = re.search(r"^\s*-(?=\s|\S)", block, re.MULTILINE) is not None
-            has_plus = re.search(r"^\s*\+", block, re.MULTILINE) is not None
-            if has_plus or has_minus:
-                if "{% endif %}" in block or "{% endfor %}" in block:
-                    return False
-                return True
-        return False
     if kind == "tool_args":
         # value = "tool_name:key[:regex]" — passes when ANY executed call for
         # tool_name carried `key` in its arguments (parsed from the backend's
@@ -1818,6 +2550,39 @@ def criterion_ok(kind: str, value: str, content: str,
     return False
 
 
+# Narration claims the model is APPLYING/EDITING something (present-continuous
+# or immediate-future phrasing tied to the change), not merely reading or
+# explaining. Verb set deliberately narrow: "reading", "checking",
+# "looking up" never match.
+_NARRATE_EDIT_RE = re.compile(
+    r"\b(?:apply(?:ing)?|edit(?:ing)?|writ(?:ing|e|ten)|updat(?:ing|e)|"
+    r"chang(?:ing|e)|set(?:ting)?|add(?:ing)?|remov(?:ing|e)|insert(?:ing)?|"
+    r"replac(?:ing|e)|stagem?ent?|stage)\b[^.]*?\b(?:config|file|section|param|macro|value|printer\.cfg)"
+    r"|\b(?:config|file|section|param|macro|value)\b[^.]*?\b(?:apply(?:ing)?|edit(?:ing)?|updat(?:ing|e)|stage)\b",
+    re.IGNORECASE,
+)
+_WRITE_TOOL_NAMES = frozenset({"config_edit", "config_write"})
+
+
+def _narration_tool_mismatch(narration_turns: list) -> bool:
+    """True when a tool turn's narration claims an edit but its executed
+    batch has no write tool (Phase 6.5.5 structural consistency flag).
+
+    Works on the response's narrationTurns ([{turn, narration,
+    toolNames}]). This is the SET_LED-style hallucination detector: the
+    model says "applying the change to printer.cfg" while the only tool
+    firing is a read. Deliberately structural (narration vs executed
+    trace), never prose-intent guessing at the backend level."""
+    for turn in narration_turns or []:
+        narration = str(turn.get("narration") or "")
+        tool_names = {str(n) for n in (turn.get("toolNames") or [])}
+        if not narration or not _NARRATE_EDIT_RE.search(narration):
+            continue
+        if not (tool_names & _WRITE_TOOL_NAMES):
+            return True
+    return False
+
+
 @dataclass
 class QuestionResult:
     qid: str
@@ -1834,10 +2599,26 @@ class QuestionResult:
     checks: list[tuple[str, str, bool]] = field(default_factory=list)
     duration_s: float = 0.0
     usage: dict | None = None
-    # Server-side apply/validate/repair outcome (#1): {attempted, repaired,
-    # issuesAfter} or None when the pipeline was skipped (no config block or
-    # no contextFiles). Tallied across runs to measure the harness itself.
-    server_repair: dict | None = None
+    # Tool-mediated editing (EDIT-* family): staged write-tool changes +
+    # per-call attempt count from the response; None when not applicable.
+    pending_edits: list | None = None
+    edit_attempts: int | None = None
+    # Phase 3 skill-gate eval (SKILL-* family): the should_trigger label
+    # and the observed activation (load_skill anywhere in the executed
+    # trace — includes post-nudge activation; the nudge count is in the
+    # backend log slice). None when not a skill question.
+    skill_expected: bool | None = None
+    skill_activated: bool | None = None
+    # Phase 6.5 ack guard: injected-directive count from usage.ackReprompts.
+    ack_reprompts: int = 0
+    # Per-turn narration from the response's narrationTurns
+    # ([{turn, narration, toolNames}]) — feeds the consistency flag.
+    narration_turns: list = field(default_factory=list)
+    # Structural narration-vs-tool mismatch (SET_LED-style hallucination
+    # detector, plan §6.5.5): a tool turn NARRATED an edit but the turn's
+    # executed batch carried no write tool. Flag only — never silently
+    # re-scores; read it when analyzing edit-family FAILs.
+    narration_tool_mismatch: bool = False
 
 
 # ── HTTP helpers (stdlib only) ─────────────────────────────────────────
@@ -1923,10 +2704,31 @@ def chat_request(base_url: str, question: TestQuestion, settings: dict,
         "requestId": request_id,
         "maxTokens": settings["max_tokens"],
         "temperature": settings["temperature"],
-        "toolProtocol": settings.get("tool_protocol", "auto"),
+        "toolProtocol": question.tool_protocol or settings.get("tool_protocol", "auto"),
         "mergeSystemMessages": settings.get("merge_system_messages", False),
-        "fullRewriteGuard": settings.get("full_rewrite_guard", False),
     }
+    # Tool-mediated editing: per-question override wins over the run flag;
+    # both unset follows the server default, which is ON since the Phase-4
+    # ratchet (the prose path is deleted). 'off' runs the read-only arm.
+    effective_edit = question.edit_tools
+    if effective_edit is None:
+        effective_edit = settings.get("edit_tools")
+    if effective_edit is None:
+        effective_edit = True
+    payload["editTools"] = effective_edit
+    # Phase 2 approval gate: the bank tests model behavior PAST the
+    # gate, so an edit-tools-enabled request auto-approves (bypasses
+    # ONLY the human wait, never re-validation). Without this every
+    # write-tool run would block 90s then auto-decline. Gate-mode E2E is
+    # covered by the pytest suite + the manual Gate-2 dogfood pass.
+    if effective_edit:
+        payload["autoApproveEdits"] = True
+    # Skill-gate A/B arm: force the skill ACTIVE (write tools advertised
+    # immediately, edit law force-loaded) to compare edit QUALITY with vs
+    # without model-triggered loading. Server accepts editSkill only as a
+    # harness field (ChatRequest.editSkill).
+    if settings.get("force_skill_active") and effective_edit:
+        payload["editSkill"] = True
     url = base_url.rstrip("/") + "/ai/chat"
     try:
         return http_post_json(url, payload, timeout), ""
@@ -2018,10 +2820,37 @@ def run_one_question(
         result.tool_turns = int(response.get("mcpToolTurns", 0) or 0)
         result.tool_calls = list(response.get("toolCalls", []) or [])
         result.usage = response.get("usage")
-        result.server_repair = response.get("serverRepair")
+        result.pending_edits = response.get("pendingEdits")
+        result.edit_attempts = response.get("editAttempts")
+        # Phase 6.5: ack-guard rescue count + narration turns.
+        result.ack_reprompts = int((result.usage or {}).get("ackReprompts") or 0)
+        result.narration_turns = list(response.get("narrationTurns") or [])
+        result.narration_tool_mismatch = _narration_tool_mismatch(
+            result.narration_turns)
+        if result.ack_reprompts:
+            log.write(f"Ack guard: ackReprompts={result.ack_reprompts} "
+                      f"(continue-intent promise rescued — expect_no_ack_stall "
+                      f"{'FAILS' if q.expect_no_ack_stall else 'not asserted'} this case)")
+        if result.narration_tool_mismatch:
+            log.write("Narration/tool MISMATCH: a tool turn narrated an edit "
+                      "but fired no write tool (structural SET_LED-style "
+                      "hallucination signal)")
+        log.write(f"Edit tools: pendingEdits="
+                  f"{[e.get('file') + ':' + e.get('op', '') for e in (result.pending_edits or [])] or 'none'} "
+                  f"editAttempts={result.edit_attempts}")
 
         log.write(f"Response mcpToolTurns={result.tool_turns} "
                   f"mcpToolNames={result.tool_names}")
+        # Phase 3 skill-gate eval: activation is OBSERVED in the executed
+        # trace (load_skill anywhere, incl. post-nudge — the nudge count
+        # rides in the backend log slice above).
+        if q.skill_expected is not None:
+            result.skill_expected = q.skill_expected
+            result.skill_activated = any(
+                c.get("name") == "load_skill" for c in result.tool_calls)
+            log.write(f"Skill gate: expected={q.skill_expected} "
+                      f"activated={result.skill_activated} "
+                      f"(trace={[c.get('name') for c in result.tool_calls]})")
         if result.usage:
             log.write(
                 "Usage: completion_tokens=%s reasoning_tokens=%s truncated=%s "
@@ -2051,12 +2880,26 @@ def run_one_question(
 
             # Answer check (memory criteria get the parsed printer-memory block)
             memory = extract_printer_memory(result.response)
-            for kind, value in q.criteria:
+            # Phase-4 ratchet (2026-09-22): artifact criteria are the
+            # DEFAULT — the prose→draft path is deleted, so a declared
+            # edit_criteria set IS the grading contract (the staged
+            # pendingEdits are the deliverable). Questions without
+            # edit_criteria are pure Q&A and keep their prose criteria.
+            active_criteria = q.edit_criteria or q.criteria
+            for kind, value in active_criteria:
                 ok = criterion_ok(kind, value, result.response, memory=memory,
                                   tool_calls=result.tool_calls,
-                                  server_repair=result.server_repair)
+                                  pending_edits=result.pending_edits)
                 result.checks.append((kind, value, ok))
             result.answer_ok = all(ok for _, _, ok in result.checks)
+            if (result.answer_ok and q.expect_no_ack_stall
+                    and result.ack_reprompts):
+                # The case only passed because the ack guard rescued a
+                # promise-with-no-action. The rescue cleaned up a lie;
+                # scoring it PASS would hide the weakness (plan §6.5.5).
+                result.checks.append(
+                    ("expect_no_ack_stall", f"ackReprompts={result.ack_reprompts}", False))
+                result.answer_ok = False
             if result.answer_ok and result.tool_ok:
                 result.status = "PASS"
             elif result.answer_ok and q.require_tool:
@@ -2107,6 +2950,15 @@ def _prompt(label: str, default: str = "", secret: bool = False) -> str:
         suffix = f" [{default}]"
     else:
         suffix = ""
+    if not sys.stdin.isatty():
+        # Unattended run (piped/CI): never block on input. Use the default
+        # when there is one; fail loudly instead of hanging when there isn't.
+        if default:
+            return default
+        raise SystemExit(
+            f"error: no TTY and no value for '{label}' — pass the "
+            f"corresponding flag (see --help)"
+        )
     if secret:
         value = getpass.getpass(f"{label}{suffix}: ")
         return value or default
@@ -2174,28 +3026,102 @@ def resolve_settings(args: argparse.Namespace) -> dict:
         "temperature": float(temperature),
         "tool_protocol": args.tool_protocol or "auto",
         "merge_system_messages": args.merge_system_messages,
-        "full_rewrite_guard": args.full_rewrite_guard,
+        "edit_tools": edit_tools_setting(args),
+        "force_skill_active": bool(getattr(args, "force_skill_active", False)),
         "base_url": base_url,
     }
 
 
+def edit_tools_setting(args: argparse.Namespace) -> bool | None:
+    """--edit-tools on/off/auto: default None (server behavior — the write
+    tools are product behavior since the Phase-6 flag removal).
+    Per-question overrides win; 'off' forces the read-only
+    arm for a whole run (write tools never advertised)."""
+    value = getattr(args, "edit_tools", "auto")
+    return {"on": True, "off": False}.get(value, None)
+
+
 # ── Question selection ─────────────────────────────────────────────────
-def parse_question_filter(spec: str, count: int) -> list[int]:
-    """Parse '1-5,8' into zero-based indices."""
+def parse_question_filter(spec: str, questions: list[TestQuestion]) -> list[int]:
+    """Parse a selection spec into zero-based indices into ``questions``.
+
+    Tokens are comma-separated; each is one of:
+      87              1-based positional index (legacy)
+      1-5             1-based positional range (legacy)
+      TRIDENT-15      exact QID (case-insensitive)
+      TRIDENT         whole family (every QID starting with TRIDENT-)
+      AMBI-0* / AMB*  glob via fnmatch (case-insensitive)
+      EDIT-01..06     QID range within one family; the '..' end may be
+                      bare digits ('06') or a full QID ('EDIT-06').
+                      '..' is used (not '-') so QIDs' own dashes stay safe.
+
+    Retired questions make positional indexes drift as the bank grows, so
+    QID-based selection is the stable spelling. Unknown tokens and
+    out-of-range indexes raise ValueError (never a silent empty selection).
+    """
+    count = len(questions)
+    qids_upper = [q.qid.upper() for q in questions]
+
+    def alpha_prefix(qid: str) -> str:
+        """Family prefix of a QID: 'TRIDENT-15' -> 'TRIDENT', 'Q01' -> 'Q'."""
+        return re.sub(r"-?\d+$", "", qid)
+
+    families = sorted({alpha_prefix(qid) for qid in qids_upper})
     indices: set[int] = set()
+
+    def fail(msg: str) -> None:
+        raise ValueError(f"{msg} (families: {', '.join(families)}; "
+                         f"use --list-questions to see QIDs)")
+
     for part in spec.split(","):
         part = part.strip()
         if not part:
             continue
-        if "-" in part:
-            lo, _, hi = part.partition("-")
-            lo_i = int(lo) - 1
-            hi_i = int(hi) - 1
-            indices.update(range(max(0, lo_i), min(count, hi_i + 1)))
-        else:
-            idx = int(part) - 1
-            if 0 <= idx < count:
-                indices.add(idx)
+        up = part.upper()
+        if re.fullmatch(r"\d+(-\d+)?", part):
+            if "-" in part:
+                lo, _, hi = part.partition("-")
+                indices.update(range(max(0, int(lo) - 1), min(count, int(hi))))
+            else:
+                idx = int(part) - 1
+                if 0 <= idx < count:
+                    indices.add(idx)
+                else:
+                    fail(f"index {part} out of range 1..{count}")
+            continue
+        if ".." in up:
+            lo_tok, _, hi_tok = up.partition("..")
+            m_lo = re.fullmatch(r"(.*?)(\d+)", lo_tok)
+            if m_lo is None:
+                fail(f"bad QID range '{part}' (expected FAMILY-nn..mm)")
+                raise ValueError  # unreachable; narrows m_lo for type checkers
+            family, lo_num = (m_lo.group(1), int(m_lo.group(2)))
+            m_hi = re.search(r"(\d+)$", hi_tok)
+            hi_num = int(m_hi.group(1)) if m_hi else None
+            matched = []
+            for i, qid in enumerate(qids_upper):
+                m = re.fullmatch(rf"{re.escape(family)}(\d+)", qid)
+                if not m:
+                    continue
+                num = int(m.group(1))
+                if num >= lo_num and (hi_num is None or num <= hi_num):
+                    matched.append(i)
+            if not matched:
+                fail(f"QID range '{part}' matches no questions")
+            indices.update(matched)
+            continue
+        matched = [i for i, qid in enumerate(qids_upper) if qid == up]
+        if not matched and ("*" in up or "?" in up):
+            matched = [i for i, qid in enumerate(qids_upper)
+                       if fnmatch.fnmatch(qid, up)]
+        if not matched:
+            # Family token: every QID whose alpha prefix equals it
+            # ('TRIDENT' -> TRIDENT-01..16, 'Q' -> Q01..Q20).
+            matched = [i for i, qid in enumerate(qids_upper)
+                       if alpha_prefix(qid) == up]
+        if not matched:
+            fail(f"unknown question '{part}'")
+        indices.update(matched)
     return sorted(indices)
 
 
@@ -2239,14 +3165,22 @@ def main() -> int:
                              "message (positionally meaningful for permissive "
                              "chat templates).")
     parser.set_defaults(merge_system_messages=True)
-    parser.add_argument("--full-rewrite-guard", action="store_true",
-                        help="Set fullRewriteGuard on the /ai/chat request: "
-                             "the frontend rejects full block writes of "
-                             "existing macro/Jinja sections and the backend "
-                             "uses the STRICT mini-diff edit-protocol wording. "
-                             "Default off — full writes accepted, softer "
-                             "wording. Use to A/B the guard + prompt pair.")
-    parser.add_argument("--questions", default="", help="Subset, e.g. '1-5,8' (1-based)")
+    parser.add_argument("--edit-tools", default="auto", choices=["auto", "on", "off"],
+                        help="Tool-mediated editing for questions without a "
+                             "per-question override: 'auto' follows the server "
+                             "default (write tools ON — product behavior), "
+                             "'off' forces the read-only arm (no write tools "
+                             "advertised)")
+    parser.add_argument("--force-skill-active", action="store_true",
+                        help="Skill-gate A/B arm: send editSkill=true so the "
+                             "write tools are advertised immediately (edit law "
+                             "force-loaded) instead of waiting for the model "
+                             "to call load_skill. SKILL-* evals run with this "
+                             "OFF to measure model-triggered activation")
+    parser.add_argument("--questions", default="", metavar="SPEC",
+                        help="Subset by QID or index, e.g. 'TRIDENT-15',"
+                             " 'AMBI-0*', 'TOOL-01..06', 'TRIDENT,EDIT', '1-5,8'."
+                             " QIDs are stable across bank changes; indexes drift.")
     parser.add_argument("--start", default=0, type=int,
                         help="Start at question N (1-based), running N..end. "
                              "Ignored when --questions is set.")
@@ -2272,15 +3206,22 @@ def main() -> int:
                              "printer memory, blank it, run MEMORY-01..03, then restore it")
     args = parser.parse_args()
 
-    questions = build_questions() + build_macro_questions() + build_trident_questions() + build_ambiguity_questions() + build_setup_questions() + build_live_context_questions()
+    questions = build_questions() + build_macro_questions() + build_trident_questions() + build_ambiguity_questions() + build_setup_questions() + build_live_context_questions() + build_edit_tool_questions() + build_skill_gate_questions() + build_tool_coverage_questions() + build_ack_guard_questions()
     if args.include_memory:
         questions += build_memory_questions()
     if args.list_questions:
-        print(f"{'QID':<5} {'TOOLS':<45} TITLE")
-        print("-" * 100)
-        for q in questions:
+        families: dict[str, list[str]] = {}
+        print(f"{'IDX':>4}  {'QID':<12} {'TOOLS':<45} TITLE")
+        print("-" * 112)
+        for i, q in enumerate(questions, start=1):
             tools = ",".join(q.expected_tools) if q.expected_tools else "(any/none)"
-            print(f"{q.qid:<5} {tools:<45} {q.title}")
+            print(f"{i:>4}  {q.qid:<12} {tools:<45} {q.title}")
+            families.setdefault(re.sub(r"-?\d+$", "", q.qid), []).append(q.qid)
+        print()
+        print("Families (for --questions): "
+              + ",  ".join(f"{fam} ({len(m)})" for fam, m in families.items()))
+        print("e.g. --questions TOOL   or   --questions TOOL-01..06   or"
+              "   --questions TRIDENT-15,AMBI-03")
         return 0
 
     # Ad-hoc one-off questions (--question) are appended to the bank so they
@@ -2317,7 +3258,14 @@ def main() -> int:
     if adhoc:
         questions += adhoc
 
-    # Validate --start before any interactive prompts so bad values fail fast.
+    # Validate the selection BEFORE any interactive prompts so bad values
+    # fail fast with the family list instead of an empty run or a hang on
+    # the provider prompt.
+    if args.questions and not args.question:
+        try:
+            parse_question_filter(args.questions, questions)
+        except ValueError as exc:
+            parser.error(str(exc))
     if args.start and not args.questions and not args.question \
             and (args.start < 1 or args.start > len(questions)):
         parser.error(f"--start must be between 1 and {len(questions)}")
@@ -2363,7 +3311,7 @@ def main() -> int:
         # Ad-hoc questions only — the bank is listed in the log but not run.
         selected = list(range(len(questions) - len(adhoc), len(questions)))
     elif args.questions:
-        selected = parse_question_filter(args.questions, len(questions))
+        selected = parse_question_filter(args.questions, questions)
     elif args.start:
         selected = list(range(args.start - 1, len(questions)))
     else:
@@ -2372,6 +3320,12 @@ def main() -> int:
         print("No questions selected (check --questions syntax).", file=sys.stderr)
         log.close()
         return 1
+
+    # Echo the resolved selection as QIDs so the run log always records
+    # exactly which questions ran, independent of positional drift.
+    sel_qids = ", ".join(questions[i].qid for i in selected)
+    log.write(f"Selected {len(selected)}/{len(questions)}: {sel_qids}")
+    print(f"Selected {len(selected)}/{len(questions)}: {sel_qids}")
 
     log.section("Questions")
     for i, q in enumerate(questions):
@@ -2431,6 +3385,25 @@ def main() -> int:
                   f"{len(wrong_tool)} correct-but-wrong-tool")
     log.write(f"Answer accuracy: {len([r for r in results if r.answer_ok])}/{len(results)}")
     log.write(f"Tool-usage accuracy: {len([r for r in results if r.tool_ok])}/{len(results)}")
+    # Phase 3 skill-gate eval: activation rate on should-trigger labels and
+    # false-positive rate on should-not-trigger labels. Plan gate: <90%
+    # activation => iterate the skill DESCRIPTION (never a regex
+    # auto-activation fallback — intent law).
+    skill_pos = [r for r in results if getattr(r, "skill_expected", None) is True]
+    skill_neg = [r for r in results if getattr(r, "skill_expected", None) is False]
+    pos_act = [r for r in skill_pos if r.skill_activated]
+    neg_fp = [r for r in skill_neg if r.skill_activated]
+    if skill_pos or skill_neg:
+        log.write("")
+        log.write(f"Skill activation: {len(pos_act)}/{len(skill_pos)}"
+                  + (f" ({100 * len(pos_act) / len(skill_pos):.0f}%)" if skill_pos else "")
+                  + f"   False positives: {len(neg_fp)}/{len(skill_neg)}"
+                  + (f" ({100 * len(neg_fp) / len(skill_neg):.0f}%)" if skill_neg else ""))
+        if skill_pos and len(pos_act) / len(skill_pos) < 0.9:
+            log.write("  GATE: activation <90% — iterate the skill description")
+        for r in skill_pos + skill_neg:
+            log.write(f"  {r.qid} expected={r.skill_expected} "
+                      f"activated={r.skill_activated} status={r.status}")
     truncated_results = [r for r in results if (r.usage or {}).get("truncated")]
     token_values: list[int] = []
     for r in results:
@@ -2531,6 +3504,9 @@ def main() -> int:
           + (f", {len(conditional)} conditional" if conditional else "") + ")")
     print(f"Answer accuracy: {len([r for r in results if r.answer_ok])}/{len(results)}")
     print(f"Tool-usage accuracy: {len([r for r in results if r.tool_ok])}/{len(results)}")
+    if skill_pos or skill_neg:
+        print(f"Skill activation: {len(pos_act)}/{len(skill_pos)} | "
+              f"false positives: {len(neg_fp)}/{len(skill_neg)}")
     if truncated_results:
         print(f"Truncated (hit max_tokens): {len(truncated_results)} "
               f"-> {', '.join(r.qid for r in truncated_results)}")

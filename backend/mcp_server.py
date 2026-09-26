@@ -857,7 +857,10 @@ class McpServer:
                 "description": (
                     "Analyze a Klipper config snippet and detect the likely printer "
                     "board type and MCU family from common pin names, MCU definitions, "
-                    "and section patterns."
+                    "and section patterns. Also cross-references the pin layout "
+                    "against the bundled reference config library: a strong single "
+                    "match identifies the board even when the text never names it, "
+                    "and near-matches are listed as reference files worth reading."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -1686,6 +1689,22 @@ class McpServer:
                     if match_pos >= 0:
                         section = self._enclosing_user_config_section(text, match_pos)
 
+                    # Enumeration support: when the query matches section
+                    # NAMES, list EVERY such header in the file. The
+                    # enclosing-section label alone hides class members
+                    # (e.g. search 'neopixel' labeled Hotkey.cfg at the
+                    # first hit's macro section, hiding [neopixel
+                    # hotkey_leds] further down — "all my LEDs" edits then
+                    # silently miss it).
+                    matched_headers: list[str] = []
+                    for hm in CONFIG_ALIAS_RE.finditer(text):
+                        header_name = hm.group(1).strip()
+                        if header_name.lower().startswith("include "):
+                            continue
+                        if any(term in header_name.lower() for term in query_terms):
+                            if header_name not in matched_headers:
+                                matched_headers.append(header_name)
+
                     content_lines = [
                         l.strip() for l in text.split("\n")
                         if l.strip() and not l.strip().startswith("#")
@@ -1698,6 +1717,7 @@ class McpServer:
                         "snippet": snippet,
                         "match_pos": match_pos,
                         "section": section,
+                        "matched_headers": matched_headers,
                     })
             except OSError:
                 continue
@@ -1720,6 +1740,12 @@ class McpServer:
                 # header comments, or other preamble.
                 label = f"{r['filename']} (top of file)"
             lines.append(f"## {label}")
+            extra = [h for h in r.get("matched_headers") or [] if h != r.get("section")]
+            if extra:
+                lines.append(
+                    "matching sections here: "
+                    + ", ".join(f"[{h}]" for h in extra)
+                )
             if r["snippet"]:
                 lines.append(f"> {r['snippet']}\n")
         lines.append(f"\n{len(results)} match(es) total. Use read_user_config to read the full file.")
@@ -2094,13 +2120,22 @@ class McpServer:
             from services.board_detector import detect_board_from_config
 
             parsed = parse_config(config_text, "analysis.cfg")
-            board_info = detect_board_from_config(parsed)
+            board_info = detect_board_from_config(parsed, reference_dir=REFERENCE_DIR)
 
             lines: list[str] = ["## Board Detection Results\n"]
             if isinstance(board_info, dict):
+                ref_matches = board_info.pop("reference_matches", None)
                 for key, value in board_info.items():
                     if value:
                         lines.append(f"- **{key}**: {value}")
+                if ref_matches:
+                    lines.append("\n### Closest reference configs (pin-layout match)")
+                    for m in ref_matches:
+                        lines.append(
+                            f"- {m['filename']} — similarity {m['score']} "
+                            f"({m['subdir']}/). Read it with read_example_config "
+                            "to compare full pin maps."
+                        )
             else:
                 lines.append(str(board_info))
 

@@ -3,48 +3,17 @@
  *
  * Pure functions — no React state or hooks.
  *
- * Phase 3 cleanup: the provider config, printer-memory, and draft
- * validation groups moved to dedicated modules:
- *   - chatProviders.ts
- *   - printerMemory.ts
- *   - draftValidation.ts
+ * Phase 3 cleanup: the provider config and printer-memory groups moved to
+ * dedicated modules (chatProviders.ts, printerMemory.ts). The draft
+ * validation group (draftValidation.ts) was deleted with the prose edit
+ * path in the Phase-4 ratchet (2026-09-22).
  */
 import type { ConfigFile, ConfigSection } from '../types/config';
 
 // ── Config Context Helpers ──────────────────────────────────────────
 
-export const CONTEXT_TRUNCATION_LIMIT = 40000;
 export const CONFIG_CODE_LANGUAGES = new Set(['', 'cfg', 'conf', 'ini', 'klipper', 'printercfg']);
 export const ASSISTANT_FILE_HINT_RE = /^[#;]\s*file\s*:\s*(.+?)\s*$/i;
-
-export function truncateConfigContext(content: string): string {
-  if (content.length <= CONTEXT_TRUNCATION_LIMIT) {
-    return content;
-  }
-  return `${content.slice(0, CONTEXT_TRUNCATION_LIMIT)}\n\n# Context truncated after ${CONTEXT_TRUNCATION_LIMIT} characters.`;
-}
-
-export function buildConfigContextMessage(filename: string, content: string, label: string): string {
-  return `${label}: ${filename}\n\n\`\`\`cfg\n${truncateConfigContext(content)}\n\`\`\``;
-}
-
-/**
- * Build a compact section-index context message for a config file whose
- * content is intentionally NOT attached (Phase 4 lean questions). The model
- * uses the index to decide which sections to fetch via read_user_config.
- */
-export function buildConfigIndexMessage(filename: string, headers: string[], label: string): string {
-  const headerList = headers.length > 0 ? headers.map((h) => `[${h}]`).join('\n') : '(no sections detected)';
-  return (
-    `${label}: ${filename} — section index (file content not attached)\n\n`
-    + '```cfg\n'
-    + headerList
-    + '\n```\n\n'
-    + `The file content is NOT included above. To answer accurately, call `
-    + `read_user_config with filename='${filename}' and the section you need, `
-    + `e.g. read_user_config(filename='${filename}', section='bed_mesh').`
-  );
-}
 
 // ── Config Code Block Extraction ───────────────────────────────────
 

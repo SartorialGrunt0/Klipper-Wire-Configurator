@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from enum import Enum
 from pathlib import Path
 import re
@@ -13,11 +14,29 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from api.printer_memory_routes import (  # noqa: E402
+    derive_hardware_inventory,
+    derive_machine_facts,
+    format_hardware_inventory,
     load_printer_memory,
     printer_memory_to_context,
     is_printer_memory_blank,
 )
-from mcp_server import McpServer, get_index
+from mcp_server import McpServer
+from services.ai_draft_apply import extract_config_code_blocks
+from services.ai_edit_tools import (
+    APPROVAL_TIMEOUT_SECONDS,
+    EDIT_NUDGE_TEXT,
+    EDIT_NUDGE_TEXT_NATIVE,
+    EDIT_PROTOCOL_PROMPT,
+    EDIT_TOOL_NAMES,
+    EDIT_TOOL_SPECS,
+    EditSession,
+    create_approval,
+    find_approval_for_request,
+    format_approval_result,
+    get_approval,
+    remove_approval,
+)
 
 router = APIRouter()
 
@@ -62,9 +81,6 @@ MCP_TOOL_BLOCK_RE = re.compile(
     r"```tool\s*\n(.+?)```",
     re.DOTALL,
 )
-# A fenced ```printer-memory block signals a complete structured proposal —
-# the auto-search fallback must not fire when the model returns one.
-PRINTER_MEMORY_BLOCK_RE = re.compile(r"```printer-memory\s*\n", re.DOTALL)
 # Alternative tool call formats emitted by models that use native
 # function-calling special tokens instead of the fenced ```tool block.
 # This matches <|tool_call|>, <tool_call>, and similar wrappers around
@@ -85,8 +101,15 @@ ALT_TOOL_CALL_CONTENT_RE = re.compile(
 # cleanup strips it from the visible reply (2026-08-02: this was eating
 # BED_MESH_CALIBRATE + {% endif %} and G28 + {% else %} out of correct
 # model replies).
+# Key-signature lookahead (`(?=[^}]*[:=])`): the args must contain a ':' or
+# '=' before the first '}'. Klipper macro bodies contain the idiom
+# `RESUME_BASE {get_params}` — a macro call followed by a Jinja dict — and
+# without this guard it extracted a phantom zero-arg RESUME_BASE tool call
+# inside a correct macro-move answer (AMBI-02 r3b run 2026-09-15). Real
+# text-protocol calls always carry key=value or key: value.
 CALL_SYNTAX_RE = re.compile(
-    r"(?:^|\n)\s*(?:call[\s:]?\s*)?(?:tool_call[\s:]*)?(\w+)\s*\{(?!%|\{)(.+)\}",
+    r"(?:^|\n)\s*(?:call[\s:]?\s*)?(?:tool_call[\s:]*)?(\w+)\s*\{(?!%|\{)"
+    r"(?=[^}]*[:=])(.+)\}",
     re.DOTALL,
 )
 # Matches Python-style "function_name(arg1=\"val1\", arg2=123)" or
@@ -172,48 +195,11 @@ XML_TOOL_CALLS_CLEANUP_RE = re.compile(
     re.DOTALL,
 )
 
-MINI_DIFF_EDIT_PROTOCOL_SOFT = (
-    "- To EDIT an existing section, prefer a mini-diff: the section header followed by only the "
-    "lines that change, prefixing removed lines with '-' and added lines with '+'. The '-'/'+' "
-    "marker must be the FIRST character of the line (column 0) — never indent the marker itself "
-    "to align with the body; only the content AFTER the marker keeps its original indentation. "
-    "The app applies these exact replacements to the current "
-    "file — do not reproduce unchanged lines. Outputting any unchanged line (Jinja tags "
-    "such as {% if %}/{% endif %}, G-codes, or comments) risks a full rewrite where those "
-    "lines could be dropped — prefer emitting ONLY the lines that change. "
-)
-
-MINI_DIFF_EDIT_PROTOCOL_STRICT = (
-    "- To EDIT an existing section, emit a mini-diff: the section header followed by only the "
-    "lines that change, prefixing removed lines with '-' and added lines with '+'. The '-'/'+' "
-    "marker must be the FIRST character of the line (column 0) — never indent the marker itself "
-    "to align with the body; only the content AFTER the marker keeps its original indentation. "
-    "The app applies these exact replacements to the current "
-    "file — do not reproduce unchanged lines. Outputting any unchanged line (Jinja tags "
-    "such as {% if %}/{% endif %}, G-codes, or comments) causes the app to reject the "
-    "reply as a full rewrite and retry — emit ONLY the lines that change. "
-)
-
-
-def _build_system_prompt(full_rewrite_guard: bool = False) -> str:
-    """Return SYSTEM_PROMPT with the edit-protocol sentence matching the
-    frontend's full-rewrite-guard state.
-
-    - full_rewrite_guard=True (retry loop enforces mini-diffs): the STRICT
-      wording — emitting a full block write causes the app to reject and
-      retry, so the model must emit ONLY changed lines.
-    - full_rewrite_guard=False (default; the app accepts full block writes
-      and Apply & Review surfaces the diff): the SOFTER wording — mini-diff
-      is preferred because unchanged lines could otherwise be dropped.
-    Kept in lock-step with the frontend VITE_KWC_FULL_REWRITE_GUARD build
-    flag so a future flip changes acceptance behavior AND prompt wording
-    together.
-    """
-    if full_rewrite_guard:
-        return SYSTEM_PROMPT.replace(
-            MINI_DIFF_EDIT_PROTOCOL_SOFT, MINI_DIFF_EDIT_PROTOCOL_STRICT
-        )
-    return SYSTEM_PROMPT
+# Prose edit protocol (fenced cfg blocks / mini-diff) RETIRED 2026-09-22 with
+# the Phase-4 ratchet (.hermes/plans/2026-09-10_tool-mediated-config-editing.md):
+# config edits go through config_edit/config_write + the approval card; fenced
+# cfg output is display-only text. Models may still paste cfg fences in prose —
+# that is fine, nothing consumes them as edits anymore.
 
 
 SYSTEM_PROMPT = (
@@ -241,51 +227,36 @@ SYSTEM_PROMPT = (
     "content with read_user_config (or list_user_configs to see which files "
     "exist) if it is not already in your context. Never ask the user to paste "
     "content the tools can fetch.\n"
+    "- When the request covers a CLASS of items ('all my LEDs', 'every fan', "
+    "'all my macros'), enumerate the whole class BEFORE drafting: class "
+    "members frequently live in OTHER files (toolhead/board configs), not "
+    "just the attached ones. Seeing some members in the attached context is "
+    "NOT proof the class is complete — sections in files you cannot see are "
+    "invisible to you. Call list_hardware(type='led'|'fan'|'stepper'|...) "
+    "FIRST — it enumerates EVERY member of the class in one call from "
+    "the working state, with full section text and file+line (text "
+    "search finds only sections whose name contains the keyword). "
+    "search_user_configs with the class keyword (e.g. query='neopixel') "
+    "remains a fallback for things list_hardware has no class for. "
+    "Edit every member "
+    "found, and before finishing, check your edit lines against the "
+    "enumerated list: every member must be covered. Never silently handle "
+    "only the subset visible in your context; if some files cannot be "
+    "checked, name what you covered and what you could not verify.\n"
     "- When the user asks to ADD or SETUP a section or parameter, verify the "
     "exact section name and its valid parameters BEFORE writing the draft: "
     "list the supported sections with list_config_reference_sections, then "
     "fetch the exact one with get_config_reference_section(section_name=...) "
     "(or search_klipper_docs). A section absent from the user's config may "
     "still be valid Klipper. Do not invent section names or parameters from "
-    "memory. If the user did not specify values, use the documented defaults "
+    "memory. Never claim a section 'does not support' a parameter or that "
+    "Klipper 'lacks' a feature from memory either — check "
+    "get_section_schema(section='...') first; if the schema lists it, use "
+    "it. If the user did not specify values, use the documented defaults "
     "or a safe standard value and SAY what you chose — do not ask the user "
     "to provide values the reference already documents.\n"
-    "- For config edits, return only changed, new, or deleted content in fenced cfg code "
-    "blocks. Start each block with a '# file: <filename>' hint line when the target file is "
-    "not obvious. Do not return the whole file unless the user explicitly asks for a full "
-    "replacement.\n"
-    + MINI_DIFF_EDIT_PROTOCOL_SOFT
-    + "Example: if the "
-    "user asks to add ADAPTIVE=1 to the Level_Bed macro, return exactly:\n"
-    "  # file: printer.cfg\n"
-    "  [gcode_macro Level_Bed]\n"
-    "  -    BED_MESH_CALIBRATE\n"
-    "  +    BED_MESH_CALIBRATE ADAPTIVE=1\n"
-    "  The unchanged body of the macro (CLEAN_NOZZLE, G28, the {% if %}/{% endif %} guards, "
-    "M104 S0) is NOT repeated — it is preserved automatically from the current file. "
-    "Plain config params work the same way: if the user asks to raise max_accel to 12000, "
-    "return exactly:\n"
-    "  # file: printer.cfg\n"
-    "  [printer]\n"
-    "  -max_accel: 10000\n"
-    "  +max_accel: 12000\n"
-    "  Other params in [printer] (kinematics, max_velocity, etc.) are NOT repeated.\n"
-    "  A pure addition (nothing removed) needs no '-' line — just the section header "
-    "plus the '+' lines. A pure deletion (nothing added) needs no '+' line — just "
-    "the section header plus the '-' lines. If a section is already correct and you "
-    "only need to show it, quoting it unchanged is allowed.\n"
-    "- To ADD a new section, write the full section. To DELETE a section entirely, write "
-    "`*[section_name]` on its own line inside the cfg block (* = delete). To comment a "
-    "section out, keep it in the file with its header commented out: #[extruder].\n"
-    "- Every cfg block — including mini-diffs — must be fenced with ```cfg ... ```. "
-    "Unfenced '+'/'-' diff lines render as markdown bullet points instead of a diff "
-    "block, and bare config text outside fences is not applied. A validation tool may "
-    "report errors on a partial draft (missing sections or dependencies it cannot see "
-    "yet); that is expected — still return the requested edit, the app validates the "
-    "merged result.\n"
-    "- For macros: valid Klipper syntax, conservative motion and temperature behavior. With "
-    "the mini-diff protocol the unchanged lines are preserved automatically; never drop, "
-    "reorder, or reword lines that were not part of the request.\n"
+    "- For macros: valid Klipper syntax, conservative motion and temperature behavior. Never "
+    "drop, reorder, or reword lines that were not part of the request.\n"
     "- When asked to validate or error-check a macro or g-code, check execution "
     "prerequisites, not just syntax — e.g. BED_MESH_CALIBRATE needs homed axes (G28 "
     "first), G1 E moves need an active extruder with temperature. Name the missing "
@@ -293,7 +264,8 @@ SYSTEM_PROMPT = (
     "- After config or macro code, briefly explain what changed, why, and cite the exact "
     "documentation section header and parameter or command names you relied on.\n"
     "- Klipper G-code commands and macro names (G28, M104, BED_MESH_CALIBRATE, "
-    "SET_FAN_SPEED, PRINT_START, etc.) are NOT tools — never wrap them in ```tool blocks.\n"
+    "SET_FAN_SPEED, PRINT_START, etc.) are NOT tools — never invoke them as "
+    "tool calls.\n"
 )
 
 
@@ -327,18 +299,36 @@ class ChatRequest(BaseModel):
     # server-side only — it is NOT injected into the first prompt; the
     # fallback uses it when the model answers without calling any tool.
     contextFiles: dict[str, dict[str, str]] = {}
-    # The editor's active file, mirroring the frontend draft pipeline's
-    # activeFile input to buildAssistantDraftTargetConfigs (finding #5).
-    # Used ONLY for server-side merged-result target resolution when the
-    # reply carries no explicit '# file:' hint; never injected into prompts.
-    activeFile: str = ''
-    # Tool-calling protocol override (harness A/B runs). "auto" keeps the
-    # provider-based split (local http -> text ```tool protocol, cloud
-    # https -> native function calling); "native" forces OpenAI native
-    # tool_calls even for local llama.cpp servers (gpt-oss needs this);
-    # "text" forces the text protocol everywhere. The frontend never sends
-    # this; scripts/ai_chat_accuracy_test.py uses it for comparisons.
+    # Tool-calling protocol override (frontend setting / harness runs).
+    # "auto" (default) uses NATIVE function calling for every provider,
+    # local llama.cpp included — the machine channel keeps protocol text out
+    # of prompts and results out of user-role messages (verified b456
+    # --jinja 2026-09); the loop still regex-extracts text calls as a
+    # fallback. "text" forces the ```tool protocol (escape hatch for
+    # servers that advertise tools but emit template garbage); "native"
+    # pins native explicitly. scripts/ai_chat_accuracy_test.py A/Bs these.
     toolProtocol: str = "auto"
+    # Tool-mediated editing override (harness A/B runs ONLY; the frontend
+    # never sends it). The write tools are unconditional product behavior
+    # since the Phase-6 flag removal (2026-09-24); True/False forces
+    # them on/off for this request only (False = read-only arm). Mirrors
+    # the toolProtocol precedent so A/B runs don't need backend restarts.
+    editTools: bool | None = None
+    # Skill-gate override (harness A/B runs ONLY; the frontend never
+    # sends it). The model-triggered skill gate is product behavior:
+    # write tools stay hidden until the model calls load_skill itself.
+    # True forces the skill ACTIVE for the request (write tools advertised
+    # immediately) so SKILL-* evals can grade traces on both arms;
+    # None/False = the model must call load_skill to unlock the write
+    # tools.
+    editSkill: bool | None = None
+    # Approval-gate override (harness A/B runs ONLY; the frontend never
+    # sends it). Production default is human-only approval: with the edit
+    # tools on, every validated write suspends for a card. The accuracy
+    # bank must see model behavior PAST the gate, so it sets this True —
+    # which bypasses ONLY the Future await, never re-validation (invalid
+    # ops still kick back identically).
+    autoApproveEdits: bool = False
     # Merge every system message into a single leading system message.
     # Default off: most OpenAI-compatible servers accept multiple system
     # messages and the trailing task anchor is positionally meaningful
@@ -350,21 +340,66 @@ class ChatRequest(BaseModel):
     # accepts. Set False explicitly only for A/B testing the trailing
     # task-anchor position.
     mergeSystemMessages: bool = True
-    # Full-rewrite guard state (frontend VITE_KWC_FULL_REWRITE_GUARD build
-    # flag). True = the frontend retry loop rejects full block writes of
-    # existing macro/Jinja sections and forces mini-diff re-emission, so the
-    # system prompt uses the STRICT edit-protocol wording. False (default) =
-    # full block writes are accepted (Apply & Review shows the diff), so the
-    # prompt uses the softer wording. Kept in lock-step with the frontend so
-    # a flip changes acceptance AND prompt together. The harness sends this
-    # via --full-rewrite-guard for A/B runs.
-    fullRewriteGuard: bool = False
-    # Server-side merged-result validation + ONE lean repair pass (#1).
-    # Server-side draft validation/audit are backend-only env switches
-    # (KWC_SERVER_DRAFT_VALIDATION / KWC_POST_APPLY_AUDIT) — deliberately
-    # NOT request fields: per-request control would let a compromised UI
-    # toggle the harness off. (Review finding #3: the old
-    # serverDraftValidation field here was never read and never sent.)
+    # Prose-draft machinery (the fullRewriteGuard request field, server-side
+    # draft validation/audit, and the KWC_SERVER_DRAFT_VALIDATION /
+    # KWC_POST_APPLY_AUDIT env switches) was removed with the Phase-4 ratchet
+    # (2026-09-22): prose→draft ingestion no longer exists.
+
+
+@router.get("/ai/chat/approval")
+async def chat_approval_poll(requestId: str = ""):
+    """Poll the pending approval card for an in-flight /ai/chat request.
+
+    The chat request itself stays open while the loop suspends on the
+    approval Future (plan §97); the frontend discovers the card through
+    this lightweight poll. ``{pending: false}`` when no card is open.
+    """
+    if not requestId:
+        return {"pending": False}
+    approval = find_approval_for_request(requestId)
+    if approval is None:
+        return {"pending": False}
+    return {"pending": True, **approval.card_payload()}
+
+
+class ApprovalDecisionRequest(BaseModel):
+    approvalId: str
+    decision: str  # "approve" | "decline"
+    reason: str = ""
+    # Frontend's latest working content at decision time ({file: {content,
+    # label}}). An approve re-applies the op against THIS state — a manual
+    # edit during the pending window can invalidate an anchor or create a
+    # new error (never clobber).
+    contextFiles: dict[str, dict[str, str]] = {}
+
+
+@router.post("/ai/chat/approval")
+async def chat_approval_decide(req: ApprovalDecisionRequest):
+    """Resolve a pending approval card.
+
+    approve  → op re-validated+committed against contextFiles (when
+               provided); decision accepted only if clean. On anchor
+               miss / new errors the decision is NOT accepted:
+               {status: 'invalidated', reason} and the card stays open
+               (user can decline or resolve the conflict and retry).
+    decline  → accepted immediately; the model loop resumes with an
+               honest declined tool result.
+    """
+    approval = get_approval(req.approvalId)
+    if approval is None:
+        return {"status": "not_found"}
+    if req.decision not in ("approve", "decline"):
+        return {"status": "invalid", "reason": "decision must be approve or decline"}
+    outcome = approval.decide(
+        req.decision,
+        reason=req.reason[:500],
+        context_files=req.contextFiles or None,
+    )
+    logger.info(
+        "Approval decision | approvalId=%s decision=%s outcome=%s",
+        req.approvalId, req.decision, outcome.get("status"),
+    )
+    return outcome
 
 
 class ChatStopRequest(BaseModel):
@@ -377,6 +412,64 @@ class ChatStoppedError(Exception):
 
 # Registry of in-flight chat request stop events, keyed by client requestId.
 _chat_stop_events: dict[str, asyncio.Event] = {}
+
+# ── Mid-loop progress registry (Phase 6.5) ──
+# Mirrors _chat_stop_events: registered by chat_proxy when a requestId is
+# present, popped in its finally. Entries are written at the tool-loop emit
+# point — after tool calls are EXTRACTED (canonical loop state), BEFORE
+# execution — so GET /ai/chat/progress never observes in-flight-only
+# guesses. Invariants carried from Hermes (response-loss class #65919):
+# progress narration NEVER counts as the final answer — the registry is
+# display state, fully disjoint from final_content.
+_chat_progress: dict[str, dict] = {}
+
+# Trailing-sentence tail of the ack guard's injected correction. Kept
+# separate from the tool-availability prefix so tests can assert the guard
+# picked the arm matching the CURRENT tool surface (locked vs unlocked).
+_ACK_GUARD_TAIL = (
+    " Do not describe the change in prose — an edit written in chat text "
+    "is inert. Keep going with the tools."
+)
+
+# Continue-intent promise shapes: the model announces it WILL do the work
+# and ends the turn with no tool call (the 2026-09 qwen-class ack loops).
+# Sentence-level match only: the tail check requires the promise to sit at
+# the END of the reply, so "I will read the file now. Here is what it
+# means: ..." (an answered question) never matches.
+_CONTINUE_INTENT_RE = re.compile(
+    r"\b(?:i(?:'ll| will)|let me|i'd better|i can now|i need to (?:now )?make|"
+    r"now i(?:'ll| will)|next i(?:'ll| will)|i am going to|i'm going to)\b",
+    re.IGNORECASE,
+)
+
+
+def _ends_with_continue_intent(content: str) -> bool:
+    """True when the reply ENDS on a promise to act rather than an answer.
+
+    The ack guard fires only on a promise-shaped TAIL: strip tool-call
+    markup, take the last non-empty paragraph/sentence, and match
+    _CONTINUE_INTENT_RE against it. A full answer that merely mentions a
+    future action early on ("I will check the file. horizontal_move_z is
+    the Z hop height.") has a non-matching tail and is left alone —
+    answering is never gaslit (Q20 r3/B lesson).
+    """
+    text = MCP_TOOL_BLOCK_RE.sub("", content)
+    text = ALT_TOOL_CALL_CONTENT_RE.sub("", text)
+    text = CALL_SYNTAX_CLEANUP_RE.sub("", text)
+    text = FUNC_CALL_CLEANUP_RE.sub("", text)
+    text = _strip_bracket_tool_calls(text)
+    text = DSML_CLEANUP_RE.sub("", text)
+    text = XML_TOOL_CALLS_CLEANUP_RE.sub("", text)
+    text = text.strip()
+    if not text:
+        return False
+    # The promise must START the closing sentence — a whole-line match
+    # window would false-positive on full answers that merely mention a
+    # future action early ("I will check the docs. <the actual answer>").
+    tail = text.splitlines()[-1].strip()
+    sentences = [s for s in re.split(r"(?<=[.!?])\s+", tail) if s.strip()]
+    tail = sentences[-1] if sentences else tail
+    return bool(_CONTINUE_INTENT_RE.match(tail))
 
 
 @router.post("/ai/chat/stop")
@@ -393,29 +486,28 @@ async def chat_stop(req: ChatStopRequest):
     return {"stopped": True}
 
 
-def _build_reference_lookup_query(messages: list[dict]) -> str:
-    """Build a query string from the most recent user messages."""
-    recent_user_messages: list[str] = []
+@router.get("/ai/chat/progress")
+async def chat_progress_poll(requestId: str = ""):
+    """Poll mid-loop progress for an in-flight /ai/chat request (Phase 6.5.3).
 
-    for msg in reversed(messages):
-        if msg.get("role") != "user":
-            continue
-
-        content = str(msg.get("content", "")).strip()
-        if not content:
-            continue
-
-        recent_user_messages.append(content)
-        if len(recent_user_messages) >= 3:
-            break
-
-    if not recent_user_messages:
-        return ""
-
-    combined = "\n\n".join(reversed(recent_user_messages))
-    if len(combined) <= 1800:
-        return combined
-    return combined[-1800:]
+    Shape mirrors the /ai/chat/approval poll rail: no requestId or no
+    in-flight entry -> {pending: false}. While the loop runs, returns the
+    latest extracted-but-not-yet-executed tool batch plus the turn's
+    narration, so the UI can show a subordinate progress strip during long
+    tool chains. Display-only: nothing here ever feeds the final answer.
+    """
+    if not requestId:
+        return {"pending": False}
+    entry = _chat_progress.get(requestId)
+    if entry is None:
+        return {"pending": False}
+    return {
+        "pending": True,
+        "turn": entry["turn"],
+        "toolNames": list(entry["toolNames"]),
+        "narration": entry["narration"],
+        "elapsedMs": int((time.monotonic() - entry["startedAt"]) * 1000),
+    }
 
 
 def _is_local_provider(provider: str, api_url: str = "") -> bool:
@@ -442,12 +534,16 @@ def _get_openai_compatible_default_url(provider: str) -> str:
     return defaults.get(provider, "")
 
 
-def _prepare_messages(messages: list[dict], full_rewrite_guard: bool = False) -> list[dict]:
+def _prepare_messages(messages: list[dict],
+                      edit_capable: bool = False, *,
+                      skill_active: bool = False,
+                      native_mode: bool = False,
+                      context_files: dict | None = None) -> list[dict]:
     """Build a clean system prompt with MCP tool descriptions, printer memory,
     and user messages.
     """
     minimal = _minimal_prompt_enabled()
-    system_prompt = _build_system_prompt(full_rewrite_guard)
+    system_prompt = SYSTEM_PROMPT
     no_system = _no_system_prompt_enabled()
 
     # ── Inject printer memory context ──
@@ -466,8 +562,14 @@ def _prepare_messages(messages: list[dict], full_rewrite_guard: bool = False) ->
     else:
         # All tools are advertised unconditionally (native/text parity);
         # detect_board and other niche helpers live under "Specialized tools".
-        tool_context = _build_mcp_tool_context()
+        tool_context = _build_mcp_tool_context(edit_capable=edit_capable,
+                                               skill_active=skill_active,
+                                               native_mode=native_mode)
         system_parts = [system_prompt, tool_context, memory_context]
+        # The edit law travels inside the load_skill tool result (skill
+        # body), persisting in conversation history exactly once — it is
+        # never in the system prompt (the model-triggered skill gate is
+        # product behavior since the Phase-6 flag removal).
 
         # If printer memory is completely blank and there are user messages
         # to work with, add an auto-fill instruction asking the AI to
@@ -485,15 +587,70 @@ def _prepare_messages(messages: list[dict], full_rewrite_guard: bool = False) ->
                 "the user's config — e.g. a Voron 2.4 usually uses CoreXY kinematics.\n"
                 "3. For any field you cannot determine, ask the user to provide it.\n"
                 "4. Return your proposal in a fenced `printer-memory` code block containing ONLY valid "
-                "JSON — no surrounding explanation or markdown inside the block. Only these 7 fields "
+                "JSON — no surrounding explanation or markdown inside the block. Only these 9 fields "
                 "are allowed; unsupported fields will be rejected: mainboard, toolheadBoard, "
-                "expanderBoards, printerName, kinematics, probe, additionalNotes.\n"
+                "expanderBoards, printerName, kinematics, probe, buildVolume, extruderType, "
+                "additionalNotes. extruderType accepts ONLY 'direct' or 'bowden'. Omit fields you "
+                "cannot determine — never guess.\n"
                 "   ```printer-memory\n"
-                "   {\"mainboard\": \"BTT Octopus Pro v1.1\", \"kinematics\": \"CoreXY\"}\n"
+                "   {\"mainboard\": \"BTT Octopus Pro v1.1\", \"kinematics\": \"CoreXY\", "
+                "\"buildVolume\": \"250x250x210\", \"extruderType\": \"direct\"}\n"
                 "   ```\n"
                 "The user confirms in a review dialog before anything is saved — do NOT save printer "
                 "memory directly."
             )
+            if edit_capable:
+                # The full fact-finding playbook lives in the
+                # printer-memory skill; the prompt points there instead
+                # of duplicating it. (load_skill is only advertised when
+                # the request is edit-capable.)
+                auto_fill_prompt += (
+                    "\nCall load_skill(name='printer-memory') first — it "
+                    "lists exactly where each field's evidence lives in "
+                    "the config."
+                )
+            # Mechanical head-start: kinematics and build volume are
+            # derivable from stepper limits (Macro Designer parity —
+            # derive_machine_facts), so the server derives them NOW and
+            # hands them over verbatim. The model must not re-derive
+            # them, and must not ASK for a value the server already
+            # computed.
+            texts = [
+                str((entry or {}).get("content", ""))
+                for entry in (context_files or {}).values()
+            ]
+            try:
+                facts = derive_machine_facts(texts)
+            except Exception:
+                facts = {}
+            if facts:
+                known = ", ".join(f"{k}={v}" for k, v in facts.items())
+                auto_fill_prompt += (
+                    "\n\nDERIVED MACHINE FACTS (computed from the user's "
+                    f"config by the app, treat as ground truth): {known}. "
+                    "Include these in your block verbatim — do NOT ask "
+                    "the user about them."
+                )
+            # Board roster + major components: the graph view already
+            # draws every [mcu] card and probe/accel with this same
+            # classification, so the model gets the identical roster
+            # instead of struggling to spot boards by prose inference.
+            try:
+                inv = derive_hardware_inventory(texts)
+            except Exception:
+                inv = {}
+            inv_line = format_hardware_inventory(inv) if inv else ""
+            if inv_line:
+                auto_fill_prompt += (
+                    "\n\nDERIVED HARDWARE INVENTORY (parsed from the "
+                    f"config by the app — ground truth): {inv_line}. "
+                    "Use it to fill toolheadBoard, expanderBoards, and "
+                    "probe verbatim (board NAMES are facts even when the "
+                    "board model chip is unknown; a CAN uuid board is "
+                    "still that named board). Say 'model unconfirmed' "
+                    "only for the chip/model nuance, never drop a named "
+                    "board."
+                )
             system_parts.append(auto_fill_prompt)
 
     prepared: list[dict] = []
@@ -651,7 +808,266 @@ _MCP_TOOL_SNIPPETS: dict[str, str] = {
 }
 
 
-def _build_mcp_tool_context() -> str:
+# Snippets for the chat-loop write tools (advertised whenever the request is
+# edit-capable; they are NOT registered MCP server tools — the
+# chat proxy routes them request-scoped. Parity with the native surface
+# is enforced by tests/test_ai_edit_tools.py.
+_EDIT_TOOL_SNIPPETS: dict[str, str] = {
+    "config_edit": (
+        "Apply one mechanical edit to the user's config "
+        "(file='printer.cfg', op='set_param'|'add_section'|'replace_section'"
+        "|'delete_section'|'patch_gcode'|'delete_file'|'add_include'"
+        "|'remove_include'|'comment_include', section='bed_mesh', key='speed', value='50', "
+        "text='body for add/replace_section — replace_section replaces "
+        "the ENTIRE body, include every param to keep', old_text='exact lines to "
+        "replace', new_text='replacement lines — new_text REPLACES "
+        "old_text; repeat the anchor lines inside new_text when adding', "
+        "target_file='x.cfg' for "
+        "include ops (comment_include disables an include as '#[include x.cfg]' "
+        "instead of deleting it). value must be ONE LINE — "
+        "multi-line values (gcode:) are dropped by some tool-call "
+        "channels, write those with replace_section/patch_gcode. "
+        "One op per call; changes are "
+        "validated and staged "
+        "for user review"
+    ),
+    "config_write": (
+        "Create a NEW config file (file='new.cfg', content='full file "
+        "content') — new files only; edit existing files with config_edit"
+    ),
+}
+
+
+# ── Model-triggered edit skill ─────────────────────────────────────────
+# The heavy edit protocol is lazy-loaded like an agent skill: a tiny index
+# block always advertises the skill's NAME+DESCRIPTION; the write tools and
+# the edit law stay hidden until the model itself calls load_skill. No
+# regex auto-activation — intent guessing would re-admit the half-edit-on-
+# a-question failure this gating exists to kill (plan 2026-09-10, Q4).
+# Product behavior since the Phase-6 flag removal (2026-09-24): the old
+# KWC_EDIT_SKILL_GATE env switch is gone (gate-ON matched gate-OFF at
+# 91/94 with verified 5/5 activation); the harness keeps the per-request
+# ChatRequest.editSkill override for A/B traces.
+EDIT_SKILL_NAME = "config-editing"
+MEMORY_SKILL_NAME = "printer-memory"
+MEMORY_SKILL_DESCRIPTION = (
+    "Fills in the user's printer memory with hardware facts (boards, "
+    "kinematics, build volume, extruder type, probe). Use when the printer "
+    "memory shows blank or missing fields, when the user asks to set up or "
+    "correct their printer profile, or when a needed hardware fact is "
+    "unknown and guessable-but-risky. Do NOT use when memory already "
+    "contains the fact you need."
+)
+EDIT_SKILL_DESCRIPTION = (
+    "Applies edits to the user's Klipper config files. Use when the request "
+    "asks to change, add, remove, fix, or comment out a section, parameter, "
+    "or macro, or the user approves a proposed edit. Do NOT use for "
+    "questions about settings, validating pasted config text, drafting or "
+    "showing config/macro text to read over or discuss without applying it, "
+    "or any request that says not to change the files."
+)
+
+LIST_HARDWARE_SPEC = {
+    "name": "list_hardware",
+    "description": (
+        "List every section of a hardware class in the user's CURRENT "
+        "config project (working state, including approved unsaved "
+        "edits), each with its full text and file+line location. Use "
+        "this BEFORE editing or advising on a component CLASS so the "
+        "answer covers ALL of them — text search finds only sections "
+        "whose name contains the keyword and misses e.g. [dotstar] or "
+        "[output_pin casing_light]. type must be EXACTLY one of: 'led' "
+        "(also lights/rgb), 'fan', 'stepper' (includes [tmc2240 "
+        "stepper_x]), 'extruder', 'heater', 'probe', 'accelerometer', "
+        "'mcu'/'board', 'servo', 'display', 'filament_sensor', "
+        "'endstop', 'macro'; or any literal section type ('bed_mesh', "
+        "'idle_timeout'). Any other type fails and the result lists "
+        "the valid classes. No type returns a one-line-per-group "
+        "summary of everything present."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "type": {
+                "type": "string",
+                "description": (
+                    "Hardware class ('led', 'fan', 'stepper', ...) or "
+                    "literal section type; empty for a summary"),
+            },
+        },
+    },
+}
+
+LOAD_SKILL_SPEC = {
+    "name": "load_skill",
+    "description": (
+        "Load the full instructions for a listed skill and unlock its "
+        "tools. Call this BEFORE attempting to use a skill; load each "
+        "skill at most once per conversation."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "enum": [EDIT_SKILL_NAME, MEMORY_SKILL_NAME],
+                "description": "Skill name from <available_skills>",
+            },
+        },
+        "required": ["name"],
+    },
+}
+
+_LOAD_SKILL_SNIPPET = (
+    "Load a skill's full instructions before using it — "
+    "name='config-editing' (unlocks the edit tools) or 'printer-memory' "
+    "(hardware fact-finding playbook)"
+)
+
+# Nudge replacement while the skill gate is CLOSED: pointing at a locked
+# write tool (EDIT_NUDGE_TEXT) would be incoherent; the correction is the
+# load step itself. Placeholder-only law (no real keys/values).
+# EXCEPTION-FIRST shape (SKILL-* eval r1-r4, 2026-09-17): pure
+# conditionals made gemma ACK the policy and stop (activation 4/5->2/5);
+# imperative with a TAIL exception made the exception invisible
+# (N04 FP returned). Leading the sentence with the exception ("Unless
+# the user explicitly said NOT...") puts the negation first — gemma
+# honors it on review-only requests — while the action clause stays the
+# only executable path, so edit requests cannot dissolve into an ack.
+_LOAD_SKILL_NUDGE_TEXT = (
+    "Unless the user explicitly said NOT to change their files, the block "
+    "you just wrote in chat text is inert and must be redone through the "
+    "tools: call load_skill(name='config-editing') now, then apply the "
+    "change with the edit tool, one operation per call."
+)
+
+
+def _edit_skill_body() -> str:
+    """The skill body returned by load_skill: the edit law plus the
+    unlocked tools' arg shapes (text-protocol models receive no JSON
+    schema, so the tool snippets travel WITH the body)."""
+    tool_lines = "\n".join(
+        f"- {name}: {snippet}" for name, snippet in _EDIT_TOOL_SNIPPETS.items())
+    return (
+        f"Skill '{EDIT_SKILL_NAME}' loaded — the tools below are now "
+        "available for this conversation.\n\n"
+        f"{EDIT_PROTOCOL_PROMPT}\n\n"
+        "Unlocked tools:\n" + tool_lines
+    )
+
+
+_SKILL_INDEX_BLOCK = (
+    "<available_skills>\n"
+    f"- {EDIT_SKILL_NAME}: {EDIT_SKILL_DESCRIPTION}\n"
+    f"- {MEMORY_SKILL_NAME}: {MEMORY_SKILL_DESCRIPTION}\n"
+    "</available_skills>\n"
+    "If the user's request is about editing their config, call load_skill "
+    "with the skill name FIRST — the edit tools are not available until "
+    "you do. If the printer memory has blank fields you need (or you are "
+    "about to guess a hardware fact), load_skill(name='printer-memory') "
+    "and follow its playbook instead of guessing. Questions about Klipper "
+    "that need neither never need a skill."
+)
+
+
+def _memory_skill_body() -> str:
+    """The skill body returned by load_skill(name='printer-memory'):
+    the hardware fact-finding playbook. No tools unlock — every tool it
+    uses (read_user_config, search_example_configs, ...) is already
+    advertised; what the body adds is WHERE to look for each field."""
+    return (
+        f"Skill '{MEMORY_SKILL_NAME}' loaded.\n\n"
+        "Goal: fill the printer memory fields with FACTS, never guesses.\n"
+        "For each field: (1) look for evidence in the user's config and "
+        "bundled example configs; (2) ask the user only what you cannot "
+        "determine; (3) never invent a value.\n\n"
+        "Where to look:\n"
+        "- mainboard / toolheadBoard / expanderBoards: check the "
+        "DERIVED HARDWARE INVENTORY in this conversation FIRST \u2014 "
+        "the app parses every [mcu] section (names, roles, chips, "
+        "hosting) and it is ground truth; copy board names from it "
+        "verbatim. Without it: the [mcu] sections name MCUs; board "
+        "models come from canbus_query-style notes, "
+        "# comments, or search_example_configs with the MCU chip + "
+        "pin-style clues, confirmed via read_example_config. If the exact "
+        "model stays unconfirmed, STILL record the certain part as a "
+        "factual description (e.g. 'STM32F446 board — model unconfirmed') "
+        "— stating what IS known is not a guess; leaving a known chip "
+        "out is worse than a hedged entry.\n"
+        "- printerName: user messages or config comments first (e.g. "
+        "'# Voron Trident 250'); never guess from kinematics alone.\n"
+        "- kinematics: the [printer] section's kinematics: key — read it, "
+        "do not infer.\n"
+        "- probe: the [probe] / [bltouch] / [load_cell] sections and "
+        "probe pin comments (Voron Tap = [probe] with no bltouch).\n"
+        "- buildVolume: MECHANICALLY DERIVABLE — do not ask for it if "
+        "the config is available. Cartesian/CoreXY: width/depth/height "
+        "from [stepper_x]/[stepper_y]/[stepper_z] position_max minus "
+        "position_min (position_min defaults to 0), e.g. 250x250x210. "
+        "Delta/rotary_delta: 'round Ø' twice the [printer] "
+        "print_radius (or delta_radius). The app's Macro Designer "
+        "derives it this same way programmatically. If the auto-fill "
+        "prompt already gives you derived machine facts, USE them "
+        "verbatim.\n"
+        "- extruderType: 'direct' or 'bowden' ONLY. Evidence: bowden "
+        "tubes show up as long bowden_length / pressure_advance "
+        "discussion, Titan/BMG paired with a remote motor, or the user "
+        "saying so; typical modern Voron toolheads (AbbottCluster, "
+        "Afterwise, Orbiter-on-carriage) are direct drive. If the config "
+        "does not settle it, ASK — one short question, both options "
+        "named.\n\n"
+        "Return the proposal in a fenced `printer-memory` code block "
+        "with ONLY these 9 fields (omit the ones that stay unknown):\n"
+        "mainboard, toolheadBoard, expanderBoards, printerName, "
+        "kinematics, probe, buildVolume, extruderType, additionalNotes.\n"
+        "   ```printer-memory\n"
+        "   {\"kinematics\": \"CoreXY\", \"buildVolume\": \"250x250x210\", "
+        "\"extruderType\": \"direct\"}\n"
+        "   ```\n"
+        "The user confirms before anything is saved. Leave a field out "
+        "rather than guessing — an omitted field is honest; a wrong one "
+        "poisons every later answer.\n\n"
+        "ALWAYS return the block in the SAME reply, even when you are "
+        "also asking questions: emit every fact you have determined NOW "
+        "(a partial profile saves fine), then ask about the rest. Never "
+        "wait for answers before returning what you already know — your "
+        "facts are lost if the conversation moves on."
+    )
+
+
+def _load_skill_active(messages: list[dict]) -> bool:
+    """True once the model has actually invoked load_skill in this
+    conversation. Mechanical evidence only (tool-result markers / echoed
+    native tool_calls) — never keyword heuristics."""
+    for msg in messages:
+        if str(msg.get("role", "")) not in ("user", "assistant"):
+            continue
+        content = str(msg.get("content", ""))
+        # Name-anchored (r4b trap): a printer-memory skill load in the
+        # history must NOT count as the edit skill being active. The
+        # tool-result marker carries `name=config-editing` verbatim.
+        if re.search(r"\[Tool result: load_skill\(name=?['\"]?"
+                     + re.escape(EDIT_SKILL_NAME), content):
+            return True
+        for call in msg.get("tool_calls") or []:
+            fn = call.get("function") if isinstance(call, dict) else None
+            if not isinstance(fn, dict) or fn.get("name") != "load_skill":
+                continue
+            args = fn.get("arguments")
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except (json.JSONDecodeError, ValueError):
+                    args = {}
+            name = str((args or {}).get("name", ""))
+            if not name or name == EDIT_SKILL_NAME:
+                return True
+    return False
+
+
+def _build_mcp_tool_context(edit_capable: bool = False, *,
+                            skill_active: bool = False,
+                            native_mode: bool = False) -> str:
     """Build the 'Available Tools' section for the system prompt.
 
     Every registered tool is advertised so text-protocol and native providers
@@ -686,14 +1102,24 @@ def _build_mcp_tool_context() -> str:
         "get_config_reference_section only when you need the prose "
         "explanation or examples of what the section does.",
         "",
-        "Text format (used by providers without native function calling): put a JSON ",
-        "code block tagged `tool` in your reply:",
-        "",
-        "```tool",
-        """{"name": "tool_name", "arguments": {"key": "value"}}""",
-        "```",
-        "",
-        "The tool runs and the result is returned as a follow-up message — use it to answer.",
+        # Format law is protocol-specific. Advertising the ```tool block to
+        # a native server is what teaches small models to narrate the
+        # protocol back at the user ("I see you've shared the tool-call
+        # instructions..."), so native turns get the short machine-channel
+        # statement instead. The ```tool block stays for tool_protocol=text.
+        *([
+            "Use your tools by calling them directly — the tool results come",
+            "back to you automatically; never write tool calls as text.",
+        ] if native_mode else [
+            "Text format (used by providers without native function calling): put a JSON ",
+            "code block tagged `tool` in your reply:",
+            "",
+            "```tool",
+            """{"name": "tool_name", "arguments": {"key": "value"}}""",
+            "```",
+            "",
+            "The tool runs and the result is returned as a follow-up message — use it to answer.",
+        ]),
         "",
         "Tools:",
     ]
@@ -705,6 +1131,33 @@ def _build_mcp_tool_context() -> str:
         parts.append(f"- {name}: {snippet}")
     parts.append("")
     parts.append(
+        "- list_hardware: List EVERY section of a hardware class "
+        "(type='led'|'fan'|'stepper'|'extruder'|'heater'|'probe'|"
+        "'accelerometer'|'mcu'|'servo'|'display'|'filament_sensor'|"
+        "'endstop'|'macro' — exactly one of these, or a literal section "
+        "type like 'bed_mesh'; any other type fails and lists the "
+        "valid ones) from the CURRENT working state, "
+        "each with full text + file+line — use before class-wide edits "
+        "or advice so nothing is missed (text search misses [dotstar] "
+        "or [output_pin led_strips]); no type = summary of everything "
+        "present"
+    )
+    if edit_capable:
+        if not skill_active:
+            # Model-triggered skill (product behavior): advertise the
+            # skill INDEX; write tools unlock only after the model calls
+            # load_skill itself.
+            parts.append("")
+            parts.append(_SKILL_INDEX_BLOCK)
+        else:
+            parts.append("")
+            parts.append("Config edit tools (changes are staged for user review, never saved directly):")
+            for name, snippet in _EDIT_TOOL_SNIPPETS.items():
+                parts.append(f"- {name}: {snippet}")
+        parts.append("")
+        parts.append(f"- load_skill: {_LOAD_SKILL_SNIPPET}")
+    parts.append("")
+    parts.append(
         "Klipper G-code commands and macro names (e.g. G28, M104, BED_MESH_CALIBRATE, "
         "SET_FAN_SPEED, PRINT_START) are NOT tools — never wrap them in tool blocks."
     )
@@ -712,17 +1165,15 @@ def _build_mcp_tool_context() -> str:
     return "\n".join(parts)
 
 
-# ── Auto-search fallback ────────────────────────────────────────────
+# ── Edit-request heuristic ──────────────────────────────────────────────
+# Drives the edit-prose nudge gate in chat_proxy. Edit requests must
+# never be doc/config-injection targets (models regenerate macros lossily
+# under extra load — verified 2026-08 on gemma-4-12b/qwen3.5-9b).
 
-AUTO_SEARCH_FALLBACK_MAX_CHARS = 4000
-
-# Phase 3: auto-search injects docs only for question-type requests. Edit
-# requests are answered from the attached config context; injecting docs
-# mid-edit derails drafts (models regenerate macros lossily under the extra
-# load — verified 2026-08 on gemma-4-12b/qwen3.5-9b).
 _EDIT_VERB_RE = re.compile(
     r"\b(?:change|update|modify|edit|add|remove|delete|fix|create|set|rename|"
-    r"enable|disable|tweak|adjust|comment\s*out|calibrat\w*)\b",
+    r"enable|disable|tweak|adjust|comment\s*out|calibrat\w*|move|"
+    r"raise|lower|increase|decrease)\b",
     re.IGNORECASE,
 )
 _EDIT_TARGET_RE = re.compile(
@@ -738,9 +1189,9 @@ def _is_edit_request(messages: list[dict]) -> bool:
 
     Mirrors the frontend's detectChatIntent (chatIntent.ts): an edit verb AND
     a config-ish target. Only the LATEST user message decides — a follow-up
-    question after an edit must not be gated. Validation/retry feedback also
-    matches ('fixes ... cfg'), which is fine: auto-search is not useful during
-    draft repair either.
+    question after an edit must not be gated. Drives the edit-prose nudge
+    gate (the doc/config injection fallbacks this once gated were deleted in
+    the Phase-5 gate sweep, 2026-09).
     """
     for msg in reversed(messages):
         if msg.get("role") != "user":
@@ -750,218 +1201,6 @@ def _is_edit_request(messages: list[dict]) -> bool:
             continue
         return bool(_EDIT_VERB_RE.search(content) and _EDIT_TARGET_RE.search(content))
     return False
-
-
-# ── Config-grounding fallback (Phase 4) ──────────────────────────────
-# Ports the frontend's chatIntent.ts / chatUtils.ts targeting heuristics so
-# the backend can resolve which file + which sections a question needs when
-# the model did not fetch them itself. The fallback is ON by default: config
-# questions cannot be answered from training, so an ungrounded first pass is
-# rescued by injecting the user's actual loaded content (section-targeted
-# when possible).
-
-# Cap for whole-file last-resort injections (keeps the fallback lean).
-CONFIG_FALLBACK_MAX_CHARS = 12000
-
-
-def _latest_user_message_text(messages: list[dict]) -> str:
-    """Return the most recent non-empty user message text."""
-    for msg in reversed(messages):
-        if msg.get("role") != "user":
-            continue
-        content = str(msg.get("content", "")).strip()
-        if content:
-            return content
-    return ""
-
-
-def _mentioned_config_filenames(text: str, available: list[str]) -> list[str]:
-    """Return available filenames that appear in the text (word-boundary match).
-
-    Mirrors the frontend's extractMentionedConfigFilenames (chatUtils.ts).
-    """
-    matches: list[str] = []
-    for filename in available:
-        pattern = re.compile(
-            rf"(^|[^A-Za-z0-9_.-]){re.escape(filename)}(?=$|[^A-Za-z0-9_.-])",
-            re.IGNORECASE,
-        )
-        if pattern.search(text):
-            matches.append(filename)
-    return matches
-
-
-_SECTION_HEADER_RE = re.compile(r"^\s*\[([^\]]+)\]\s*$")
-
-
-def _find_section_headers(file_text: str) -> list[str]:
-    """All section header names (e.g. 'gcode_macro Level_Bed') in file text."""
-    headers: list[str] = []
-    for line in file_text.splitlines():
-        match = _SECTION_HEADER_RE.match(line)
-        if match:
-            headers.append(match.group(1).strip())
-    return headers
-
-
-def _extract_section_text(file_text: str, header: str) -> str | None:
-    """Extract one section (header + body, incl. leading comment banner).
-
-    Mirrors the frontend's extractSectionText (chatIntent.ts): the section
-    runs from its header (walking back over blank/comment banner lines) to
-    the next section header.
-    """
-    lines = file_text.splitlines()
-    header_index = -1
-    for index, line in enumerate(lines):
-        match = _SECTION_HEADER_RE.match(line)
-        if match and match.group(1).strip() == header:
-            header_index = index
-            break
-    if header_index == -1:
-        return None
-
-    end_index = len(lines)
-    for index in range(header_index + 1, len(lines)):
-        if _SECTION_HEADER_RE.match(lines[index]):
-            end_index = index
-            break
-
-    start_index = header_index
-    while start_index > 0:
-        previous = lines[start_index - 1].strip()
-        if previous == "" or previous.startswith("#"):
-            start_index -= 1
-        else:
-            break
-
-    return "\n".join(lines[start_index:end_index])
-
-
-def _targeted_section_headers(text: str, file_text: str) -> list[str]:
-    """Resolve which section headers a user message targets.
-
-    Mirrors the frontend's extractTargetedSectionHeaders (chatIntent.ts):
-    matches explicit [section] references, 'macro X' / 'X macro' phrases,
-    'the X section' noun phrases, and bare macro-style identifiers. Returns
-    matched headers in file order, deduplicated.
-    """
-    headers = _find_section_headers(file_text)
-    if not headers:
-        return []
-
-    candidates: list[str] = []
-    for match in re.finditer(r"\[([^\]]+)\]", text):
-        candidates.append(match.group(1).strip())
-    for match in re.finditer(r"\b([A-Za-z0-9_]+)\s+macro\b|\bmacro\s+([A-Za-z0-9_]+)\b", text, re.IGNORECASE):
-        candidates.append(match.group(1) or match.group(2))
-    for match in re.finditer(r"\bthe\s+([a-z0-9_]+)\s+section\b|\b([a-z0-9_]+)\s+section\b", text, re.IGNORECASE):
-        candidates.append(match.group(1) or match.group(2))
-    for match in re.finditer(r"\b([A-Z][A-Za-z0-9_]{2,})\b", text):
-        candidates.append(match.group(1))
-
-    matched: set[str] = set()
-    for candidate in candidates:
-        if not candidate:
-            continue
-        lower = candidate.lower()
-        exact = next((h for h in headers if h.lower() == lower), None)
-        if exact:
-            matched.add(exact)
-            continue
-        contains = [h for h in headers if lower in h.lower()]
-        if contains:
-            matched.add(min(contains, key=len))
-            continue
-        contained = next(
-            (h for h in headers if lower in h.lower() and len(h.lower()) > 3),
-            None,
-        )
-        if contained:
-            matched.add(contained)
-
-    return [h for h in headers if h in matched]
-
-
-def _config_fallback_context(
-    latest_user_text: str,
-    context_files: dict[str, dict[str, str]],
-) -> list[tuple[dict, str]] | None:
-    """Resolve which user-config content a question needs and render it.
-
-    Returns a list of (tool_call, result_text) pairs to inject as fake
-    read_user_config tool results, or None when no config file is clearly
-    referenced (the model should answer from knowledge/docs instead).
-
-    Resolution per file: section-targeted read when the message names
-    sections; otherwise the whole file (truncated) as a last resort so the
-    model is grounded rather than guessing.
-    """
-    if not context_files:
-        return None
-
-    available = sorted(context_files.keys())
-    mentioned = _mentioned_config_filenames(latest_user_text, available)
-    targets = mentioned
-    if not targets and len(available) == 1 and _EDIT_TARGET_RE.search(latest_user_text):
-        # Single loaded file with no explicit filename mention: treat it as
-        # the target only when the question looks config-related (a section
-        # reference or a common config keyword) — a pure knowledge question
-        # shouldn't pull the file in.
-        targets = available
-    if not targets:
-        return None
-
-    injections: list[tuple[dict, str]] = []
-    for filename in targets:
-        entry = context_files.get(filename)
-        if not entry:
-            continue
-        content = entry.get("content", "")
-        if not content.strip():
-            continue
-
-        section_headers = _targeted_section_headers(latest_user_text, content)
-        if section_headers:
-            for header in section_headers:
-                section_text = _extract_section_text(content, header)
-                if section_text is None:
-                    continue
-                injections.append((
-                    {"name": "read_user_config", "arguments": {"filename": filename, "section": header}},
-                    (
-                        f"# {filename}  (User Config - section [{header}] partial "
-                        "context; the file may have more sections)\n\n"
-                        + section_text
-                    ),
-                ))
-        else:
-            truncated = content
-            if len(truncated) > CONFIG_FALLBACK_MAX_CHARS:
-                truncated = (
-                    truncated[:CONFIG_FALLBACK_MAX_CHARS]
-                    + f"\n\n# Context truncated after {CONFIG_FALLBACK_MAX_CHARS} characters."
-                )
-            injections.append((
-                {"name": "read_user_config", "arguments": {"filename": filename}},
-                f"# {filename}  (User Config)\n# {len(content)} bytes\n\n{truncated}",
-            ))
-
-    return injections or None
-
-
-def _auto_search_enabled() -> bool:
-    """Auto-search fallback toggle (env KWC_AUTO_SEARCH=1 re-enables it).
-
-    Defaults to DISABLED. Harness A/B (2026-08, gemma-4-12b, Q01-Q20,
-    19/19 both ways): with the compact prompt the model calls the docs tools
-    itself on every grounding question, and the fallback only injects content
-    the model didn't ask for (visible as phantom search_klipper_docs tool
-    names on knowledge-answerable questions). Smaller local models
-    (gemma-4-e2b, qwen3.5-4b) call tools less reliably — set
-    KWC_AUTO_SEARCH=1 for them until their A/B says otherwise.
-    """
-    return os.environ.get("KWC_AUTO_SEARCH", "0") != "0"
 
 
 def _no_system_prompt_enabled() -> bool:
@@ -985,73 +1224,161 @@ def _minimal_prompt_enabled() -> bool:
     return os.environ.get("KWC_MINIMAL_PROMPT", "0") != "0"
 
 
-def _server_draft_validation_enabled() -> bool:
-    """Server-side merged-result validation + ONE repair pass toggle.
+# _edit_tools_enabled() was REMOVED by the Phase-6 flag removal
+# (2026-09-24): tool-mediated editing is unconditional product behavior
+# (the prose draft path died with the Phase-4 ratchet, so the write tools
+# are the ONLY edit path). The per-request ChatRequest.editTools override
+# remains as the harness A/B knob; chat_proxy arms the session unless the
+# request explicitly forces the read-only arm (editTools=False).
 
-    DEFAULTS TO ENABLED (2026-09-09 A/B: both flags ON across the full 69-q
-    bank on gemma-4-12b + qwen3.5-4b with zero false-positive repairs, zero
-    latency complaints, and the harness at its best gemma scores; repair and
-    audit paths verified unit-level + live smoke). Set env
-    KWC_SERVER_DRAFT_VALIDATION=0 to revert to the frontend-only retry path.
+
+# PYTHONIC native tool template leaked as plain text by llama.cpp when the
+# SERVED model's chat template has native tool tokens (observed 2026-09 on
+# gemma-4-12b @ 192.168.1.135 — the shape comes from the model's training,
+# NOT from our advertised text protocol, so no prompt-side format change can
+# prevent it; same reason formats 5-6 exist for DSML/XML):
+#   <|tool_call>call:NAME{content:<|"|>...multiline value...<|"|>,file: 'macros.cfg'}
+#   plus terminator tokens like <tool_call|> / <|tool_call|> around the region.
+# The head pipe placement varies (leading-only seen in live traffic). The
+# <|"|> sentinel NEVER occurs in legit Klipper/prose text, so sentinel-gated
+# regions are deterministic. Fullbank ON run 2026-09-14 AMBI-02: a correct
+# config_write with a full macro-file body was lost — ALT_TOOL_CALL_CONTENT_RE
+# stops the content group at the first newline, the value is multi-line, and
+# the line-bounded cleanup then ATE the visible reply up to the first '}' in
+# the body.
+TEMPLATE_CALL_HEAD_RE = re.compile(
+    r"<\|?tool_call\|?>\s*call:(?:tool_call[\s:]*)?([\w-]+)\s*\{")
+TEMPLATE_SENTINEL = '<|"|>'
+TEMPLATE_TERM_RE = re.compile(r"</?\|?tool_call\|?>")
+# Non-sentineled variant of the same template: call:tool_call:NAME{k: "v"}
+# with NO sentinel anywhere. Extraction of the single-line shape already
+# works via Format 2/4 (values survive); this regex only removes the leaked
+# head/tail tokens from the visible reply. Key-signature guarded like
+# CALL_SYNTAX_CLEANUP_RE so macro bodies are never stripped.
+TEMPLATE_CALL_CLEANUP_RE = re.compile(
+    r"<\|?tool_call\|?>\s*call:(?:tool_call[\s:]*)?[\w-]+\s*\{"
+    r"(?!%|\{)[^{}]*[:=][^{}]*\}\s*(?:</?\|?tool_call\|?>)?",
+    re.DOTALL,
+)
+
+
+def _parse_pythonic_args(region: str) -> tuple[dict, int]:
+    """Parse 'key:<|"|>value<|"|>,key2: raw}' template arguments.
+
+    Scans from the region START so a 'key:' inside a sentineled value
+    (gcode: inside a macro body) is consumed as data, never re-read as an
+    argument. Non-sentineled values stop at ',' or '}' and are kept only
+    when single-line; anything else ends parsing with what was collected.
+    Returns (args, consumed_chars).
     """
-    return os.environ.get("KWC_SERVER_DRAFT_VALIDATION", "1") != "0"
-
-
-def _server_audit_enabled() -> bool:
-    """Deterministic post-apply audit footer toggle (#3).
-
-    DEFAULTS TO DISABLED (2026-09-10 design review): the stated-requirement
-    regex parses English prose, which fails Sir's standing bar — harness-tier
-    checks must parse structure (AST/config), not prose. Checks 2/3
-    (precondition table, LED inventory) are structural but ship together with
-    check 1; the whole module is scheduled for removal when tool-mediated
-    editing lands (see .hermes/plans/2026-09-10_tool-mediated-config-editing.md,
-    Phase 6). Set env KWC_POST_APPLY_AUDIT=1 to re-enable (harness probes
-    HARNESS-01..03 and dogfooding still work with it on).
-    """
-    return os.environ.get("KWC_POST_APPLY_AUDIT", "0") == "1"
-
-
-def _config_fallback_enabled() -> bool:
-    """Config-grounding fallback toggle (env KWC_CONFIG_FALLBACK=1 re-enables it).
-
-    Defaults to DISABLED (2026-08, lean-first-pass workflow): the first pass
-    must be exactly the user prompt + system prompt + tool list. When the
-    model calls no tools, the reply stands as-is — the validation retry loop
-    nudges tool use instead of auto-injecting config content.
-    """
-    return os.environ.get("KWC_CONFIG_FALLBACK", "0") != "0"
-
-
-def _auto_search_context(query: str) -> str | None:
-    """Search Klipper docs using the MCP index and return a concise context block.
-
-    Used as a fallback when the model doesn't call tools on its own.
-    Returns a tool-result-style string with snippets, or None if no results.
-    """
-    index = get_index()
-    if not index.is_ready():
-        return None
-
-    results = index.search(query, limit=3)
-    if not results:
-        return None
-
-    parts: list[str] = []
-    total = 0
-    for r in results:
-        snippet = r["snippet"]
-        header = f"From {r['filename']} (score {r['score']}):\n"
-        block = header + snippet
-        if total + len(block) > AUTO_SEARCH_FALLBACK_MAX_CHARS:
+    args: dict = {}
+    pos = 0
+    # Optional single/double quotes around the key (JSON-style template
+    # rendering: {"file": <S>macros.cfg<S>, "content": <S>...}).
+    key_re = re.compile(r"\s*['\"]?(\w+)['\"]?\s*:\s*")
+    while pos < len(region):
+        rest = region[pos:]
+        if rest.startswith(TEMPLATE_SENTINEL):
+            # Canonical Hermes joins `,` then re-opens the quote before the
+            # key: `...<|"|>,<|"|>content:<|"|>...`. Skip the quoting token.
+            pos += len(TEMPLATE_SENTINEL)
+            continue
+        m = key_re.match(rest)
+        if not m:
             break
-        parts.append(block)
-        total += len(block)
+        key = m.group(1)
+        v = pos + m.end()
+        if region.startswith(TEMPLATE_SENTINEL, v):
+            v += len(TEMPLATE_SENTINEL)
+            close = region.find(TEMPLATE_SENTINEL, v)
+            if close == -1:
+                # Truncated stream: keep the partial value honestly.
+                args[key] = region[v:]
+                return args, len(region)
+            args[key] = region[v:close]
+            pos = close + len(TEMPLATE_SENTINEL)
+            if pos < len(region) and region[pos] in ",}":
+                pos += 1
+            continue
+        # Non-sentineled value: up to the next ',' or '}' (no braces — a
+        # brace here means we ran past the args region).
+        end = len(region)
+        for i in range(v, len(region)):
+            if region[i] in ",}\n":
+                end = i
+                break
+        value = region[v:end].strip()
+        if not value:
+            break
+        args[key] = value.strip("'\"")
+        pos = end
+        if pos < len(region) and region[pos] in ",}":
+            pos += 1
+    return args, pos
 
-    if not parts:
-        return None
 
-    return "\n\n---\n\n".join(parts)
+def _template_call_regions(
+    text: str,
+) -> list[tuple[int, int, str, dict]]:
+    """Locate pythonic template calls: (start, stop, name, args).
+
+    Returns [] unless the literal <|"|> sentinel AND a call head are both
+    present — no ordinary text (or a Klipper macro full of {braces}) can
+    trigger this path. The region runs from the head through the end of the
+    parsed args plus any trailing terminator tokens; if the args can't
+    parse at all (prose happened to sit between head and sentinel) the
+    region is dropped entirely.
+    """
+    if TEMPLATE_SENTINEL not in text:
+        return []
+    regions: list[tuple[int, int, str, dict]] = []
+    for head in TEMPLATE_CALL_HEAD_RE.finditer(text):
+        name = head.group(1)
+        args, consumed = _parse_pythonic_args(text[head.end():])
+        if not args:
+            continue
+        stop = head.end() + consumed
+        # Consume trailing terminator tokens (<tool_call|>, <|tool_call|>,
+        # </|tool_call|>) and any '}' the parser stopped before.
+        while True:
+            if stop < len(text) and text[stop] == "}":
+                stop += 1
+                continue
+            m = TEMPLATE_TERM_RE.match(text, stop)
+            if m:
+                stop = m.end()
+                continue
+            break
+        regions.append((head.start(), stop, name, args))
+    return regions
+
+
+def _extract_template_pythonic_calls(text: str) -> list[dict]:
+    return [
+        {"name": name, "arguments": args}
+        for _start, _stop, name, args in _template_call_regions(text)
+    ]
+
+
+def _strip_template_pythonic_calls(text: str) -> str:
+    """Remove template call regions from visible text.
+
+    Sentinel-gated regions (see _template_call_regions) plus the leaked
+    head/tail tokens of non-sentineled variants. Regions are code-
+    determined — never prose. The generic line-bounded cleanups only ate
+    the FIRST line of a region, leaking the rest of a macro body into the
+    chat bubble (AMBI-02).
+    """
+    regions = _template_call_regions(text)
+    if regions:
+        out: list[str] = []
+        cursor = 0
+        for start, stop, _name, _args in regions:
+            out.append(text[cursor:start])
+            cursor = max(cursor, stop)
+        out.append(text[cursor:])
+        text = "".join(out)
+    return TEMPLATE_CALL_CLEANUP_RE.sub("", text)
 
 
 def _extract_tool_calls(text: str) -> list[dict]:
@@ -1083,6 +1410,21 @@ def _extract_tool_calls(text: str) -> list[dict]:
     """
     calls: list[dict] = []
     seen_contents: set[str] = set()
+
+    # Format 0: pythonic native-template calls with <|"|>-quoted values
+    # (multi-line macro bodies the line-bounded formats cannot see). Gated
+    # on the sentinel AND known tool names — see TEMPLATE_CALL_HEAD_RE.
+    tmpl_known = {t["name"] for t in _mcp_server._list_tools()} | set(EDIT_TOOL_NAMES)
+    tmpl_known.add(LOAD_SKILL_SPEC["name"])
+    tmpl_known.add(LIST_HARDWARE_SPEC["name"])
+    for _start, _stop, t_name, t_args in _template_call_regions(text):
+        if t_name not in tmpl_known:
+            continue
+        key = repr((t_name, sorted(t_args.items())))
+        if key in seen_contents:
+            continue
+        seen_contents.add(key)
+        calls.append({"name": t_name, "arguments": t_args})
 
     # Format 1: standard fenced ```tool block
     for match in MCP_TOOL_BLOCK_RE.finditer(text):
@@ -1117,6 +1459,11 @@ def _extract_tool_calls(text: str) -> list[dict]:
     for match in ALT_TOOL_CALL_CONTENT_RE.finditer(text):
         content = match.group(1).strip()
         if not content or content in seen_contents:
+            continue
+        if TEMPLATE_SENTINEL in content:
+            # Pythonic template head (Format 0 owns these): this format is
+            # line-bounded and would extract a truncated duplicate call
+            # from the first line of a multi-line sentinel value.
             continue
         seen_contents.add(content)
 
@@ -1242,6 +1589,7 @@ def _extract_tool_calls(text: str) -> list[dict]:
     # Gated on known tool names — config headers ([probe]) and prose with
     # parens must never extract as calls.
     known_tool_names = {t["name"] for t in _mcp_server._list_tools()}
+    known_tool_names.add(LIST_HARDWARE_SPEC["name"])
     for bracket_match in BRACKET_CALL_RE.finditer(text):
         content = bracket_match.group(0).strip()
         if not content or content in seen_contents:
@@ -1253,24 +1601,153 @@ def _extract_tool_calls(text: str) -> list[dict]:
         arguments = _parse_kwargs(bracket_match.group(2).strip())
         calls.append({"name": name, "arguments": arguments})
 
+    calls = _unwrap_generic_tool_calls(calls)
     if calls:
         names = [c["name"] for c in calls]
         logger.debug("Extracted %d tool call(s): %s", len(calls), names)
     return calls
 
 
+# Generic wrapper names a template can emit around the REAL call:
+#   call:tool{name: "search_klipper_docs", arguments: {...}}
+# No real KWC/MCP tool uses any of these names, so seeing one with a
+# `name` argument that resolves to a known tool is a literal-shape
+# unwrap, not intent inference.
+GENERIC_TOOL_WRAPPERS = frozenset({
+    "tool", "tool_call", "function", "functions", "call", "invoke",
+})
+
+
+def _balanced_json_object(s: str) -> str | None:
+    """Return the first balanced {...} object in s (quote-aware), else None."""
+    start = s.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(s)):
+        ch = s[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return s[start:i + 1]
+    return None
+
+
+def _unwrap_generic_tool_calls(calls: list[dict]) -> list[dict]:
+    """Unwrap call:tool{name: X, arguments: {...}} to name=X.
+
+    Observed live 2026-09-15 (TRIDENT-16, gemma-4-12b via llama.cpp): the
+    served template rendered `call:tool{name: "search_klipper_docs",
+    arguments: {...}}`; the line-bounded extractor took `tool` as the
+    function name and stringified the inner arguments, so the hallucination
+    guard skipped a LEGITIMATE call and the answer degraded to ungrounded
+    prose. Only unwraps when the wrapper name is generic AND the inner
+    name is a known tool (literal-shape inspection only).
+    """
+    known = {t["name"] for t in _mcp_server._list_tools()} | set(EDIT_TOOL_NAMES)
+    known.add(LOAD_SKILL_SPEC["name"])
+    known.add(LIST_HARDWARE_SPEC["name"])
+    out: list[dict] = []
+    for call in calls:
+        name = call.get("name", "")
+        args = call.get("arguments")
+        inner_name = args.get("name") if isinstance(args, dict) else None
+        if (
+            name in GENERIC_TOOL_WRAPPERS
+            and isinstance(inner_name, str)
+            and inner_name.strip() in known
+        ):
+            inner = args.get("arguments", {})
+            if isinstance(inner, str):
+                obj_text = _balanced_json_object(inner)
+                parsed = None
+                if obj_text:
+                    try:
+                        parsed = json.loads(obj_text)
+                    except json.JSONDecodeError:
+                        parsed = None
+                inner = parsed if isinstance(parsed, dict) else _parse_kwargs(inner)
+            if not isinstance(inner, dict):
+                inner = {}
+            call = {"name": inner_name.strip(), "arguments": inner}
+        if call not in out:
+            out.append(call)
+    return out
+
+
+_KWARG_PAIR_RE = re.compile(r"\s*(\w+)\s*[=:]\s*(.*)$", re.DOTALL)
+_KWARG_AHEAD_RE = re.compile(r"\s*\w+\s*[=:]")
+# Body-carrying write args. The lenient inner-quote scanner below is only
+# sound for these values (Klipper/Jinja bodies are quote-heavy and its
+# lookahead rule converges there); among SHORT identifier values a dropped
+# quote is genuinely ambiguous and must route to the re-prompt instead of
+# being "recovered" into plausible-but-wrong args.
+_WRITE_BODY_ARG_RE = re.compile(r'"(?:content|text|new_text|old_text)"\s*:')
+
+
 def _parse_kwargs(args_text: str) -> dict:
-    """Parse keyword arguments from text like 'arg1=\"val1\", arg2=123, key=\"value\"'.
+    """Parse keyword arguments from text like 'arg1="val1", arg2=123, key="value"'.
 
     Handles both colon and equals separators, quoted and unquoted values.
+    Splitting is nesting- and quote-aware (Phase-5 text-protocol parity,
+    2026-09-24): a value may itself be an object — the llama.cpp wrapper
+    renders `call:tool{name: "config_edit", arguments: {op: "set_param",
+    file: "printer.cfg", ...}}` with UNQUOTED inner keys, and the old lazy
+    regex stopped at the first nested brace, keeping only the opening pair
+    and silently dropping every later argument (a write call survived with
+    `{"op": "set_param"}` while file/section/key/value vanished). A comma
+    separates arguments only at depth 0, outside quotes, and only when what
+    follows looks like `key=`/`key:`. An object wrapper around the WHOLE
+    text is unwrapped first (the inner fragment arrives braced).
     """
+    text = args_text.strip()
+    if text.startswith("{") and text.endswith("}"):
+        text = text[1:-1]
+    parts: list[str] = []
+    depth = 0
+    quote: str | None = None
+    start = 0
+    for i, ch in enumerate(text):
+        if quote is not None:
+            if ch == quote:
+                quote = None
+            continue
+        if ch in "\"'":
+            quote = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth = max(0, depth - 1)
+        elif ch == "," and depth == 0 and _KWARG_AHEAD_RE.match(text, i + 1):
+            parts.append(text[start:i])
+            start = i + 1
+    parts.append(text[start:])
     arguments: dict = {}
-    for arg_match in re.finditer(
-        r"(\w+)\s*[=:]\s*(.+?)(?:,\s*(?=\w+\s*[=:])|$)",
-        args_text,
-    ):
+    for part in parts:
+        arg_match = _KWARG_PAIR_RE.match(part)
+        if not arg_match:
+            continue
         arg_name = arg_match.group(1)
-        arg_value = arg_match.group(2).strip().strip('"').strip("'")
+        arg_value = arg_match.group(2).strip()
+        # Strip ONE matched surrounding quote pair. The old .strip('"\'')
+        # also ate quotes that belonged to the value itself.
+        if len(arg_value) >= 2 and arg_value[0] == arg_value[-1] \
+                and arg_value[0] in "\"'":
+            arg_value = arg_value[1:-1]
         arguments[arg_name] = arg_value
     return arguments
 
@@ -1296,6 +1773,73 @@ _FENCED_BRACE_CALL_RE = re.compile(
 )
 
 
+def _escape_inner_quotes_json(raw_json: str) -> str | None:
+    """Normalize a JSON object whose string values contain unescaped
+    double quotes.
+
+    Deterministic scanner, fence-scoped only (a ```tool fence is
+    explicit tool intent, never prose): inside a string value, a quote
+    terminates the string ONLY when the next non-space character is
+    one of , : } ] or the input ends; otherwise it is escaped into the
+    value. Klipper macro bodies are full of quotes (SET_LED, Jinja
+    string comparisons) and gemma-4-12b emits them raw inside
+    config_write JSON content strings (AMBI-02 r6 2026-09-15: the same
+    unparseable fence reappeared across 3 nudge rounds + 2 empty
+    re-prompts, nothing staged). Genuinely ambiguous shapes close
+    early, the retry fails, and the existing re-prompt path takes
+    over - fail-closed, same as before.
+    """
+    Q = chr(34)   # double-quote
+    B = chr(92)   # backslash
+    WS = " " + chr(9) + chr(13) + chr(10)
+    CLOSE = ",:}]"
+    out: list[str] = []
+    in_str = False
+    depth = 0
+    i = 0
+    n = len(raw_json)
+    while i < n:
+        c = raw_json[i]
+        if in_str:
+            if c == B and i + 1 < n:
+                out.append(c)
+                out.append(raw_json[i + 1])
+                i += 2
+                continue
+            if c == Q:
+                j = i + 1
+                while j < n and raw_json[j] in WS:
+                    j += 1
+                if j >= n or raw_json[j] in CLOSE:
+                    in_str = False
+                    out.append(c)
+                else:
+                    out.append(B + Q)
+            else:
+                out.append(c)
+        else:
+            if c == Q:
+                in_str = True
+            elif c in "{[":
+                depth += 1
+            elif c in "}]":
+                depth -= 1
+            out.append(c)
+        i += 1
+    # Truncated stream (model hit max_tokens mid-fence — observed live:
+    # fence ends `...rear"}` with the closing outer brace missing). Close
+    # the open string and append the missing closers; the delta validator
+    # still gates the result, so a partial body fails honestly instead of
+    # the whole write vanishing.
+    if in_str:
+        out.append(Q)
+    if depth < 0 or depth > 2:
+        return None
+    if depth:
+        out.append("}" * depth)
+    return "".join(out)
+
+
 def _recover_fenced_tool_call(raw_json: str) -> dict | None:
     """Recover a tool call from a ```tool fence whose JSON failed to parse.
 
@@ -1305,6 +1849,22 @@ def _recover_fenced_tool_call(raw_json: str) -> dict | None:
     python-style ``name(k=v)``, single/smart-quoted pseudo-JSON, and
     unescaped quotes inside values. All are mechanically recoverable.
     """
+    # 0) Relaxed JSON retry: `strict=False` accepts LITERAL newlines/tabs
+    #    inside string values. The config_write/config_edit content values
+    #    ARE multi-line files, and gemma-4-12b emits the macro body with
+    #    raw newlines instead of \n escapes (AMBI-02 r4 2026-09-15: the
+    #    fence was valid-looking, repeated across 3 nudge rounds, burned
+    #    31k tokens, then truncated). Fence-boundary only, so prose is
+    #    never touched — the fence is explicit tool intent.
+    try:
+        parsed = json.loads(raw_json, strict=False)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict):
+        name = parsed.get("name", "")
+        arguments = parsed.get("arguments", {})
+        if isinstance(name, str) and name and isinstance(arguments, dict):
+            return {"name": name, "arguments": arguments}
     # 1) Smart quotes → ASCII, then plain JSON retry.
     normalized = (
         raw_json.replace("\u201c", '"').replace("\u201d", '"')
@@ -1357,7 +1917,89 @@ def _recover_fenced_tool_call(raw_json: str) -> dict | None:
             arguments = parsed.get("arguments", {})
             if isinstance(name, str) and name and isinstance(arguments, dict):
                 return {"name": name, "arguments": arguments}
+    # 5) Unescaped double quotes inside string VALUES (macro bodies).
+    # Gated to the write tools AND to a body-carrying argument: only
+    # config_write/config_edit carry file bodies full of quotes, where the
+    # lookahead rule converges. For short identifier values (read_user_config
+    # etc., and write calls whose only args are op/file/section/key/value),
+    # unescaped quotes are genuinely ambiguous and MUST route to the
+    # re-prompt instead of executing corrupted args (locked by
+    # test_chat_proxy_malformed_tool_call_gets_one_format_reprompt for reads
+    # and test_config_edit_short_value_corruption_routes_to_reprompt for
+    # writes — the scanner used to run on ANY config_edit fence and
+    # "recovered" a corrupted set_param with the section swallowing
+    # `printer" key: max_accel`, Phase-5 parity probe 2026-09-24).
+    if re.search(r'"name"\s*:\s*"(?:config_write|config_edit)"', normalized) \
+            and _WRITE_BODY_ARG_RE.search(normalized):
+        escaped = _escape_inner_quotes_json(normalized)
+    else:
+        escaped = None
+    if escaped:
+        try:
+            parsed = json.loads(escaped, strict=False)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            name = parsed.get("name", "")
+            arguments = parsed.get("arguments", {})
+            if isinstance(name, str) and name and isinstance(arguments, dict):
+                return {"name": name, "arguments": arguments}
     return None
+
+
+def _known_tool_names() -> set[str]:
+    """Every tool name the chat loop can dispatch.
+
+    MCP server tools plus the chat-layer extras: the write tools, `load_skill`
+    (the model-triggered skill gate is product behavior) and
+    `list_hardware`. Three copies of this
+    set used to live inline (extractor, generic-wrapper unwrap, loop) — they are
+    ONE surface, so keep them from drifting.
+    """
+    known = {t["name"] for t in _mcp_server._list_tools()} | set(EDIT_TOOL_NAMES)
+    known.add(LOAD_SKILL_SPEC["name"])
+    known.add(LIST_HARDWARE_SPEC["name"])
+    return known
+
+
+# A ```json-fenced block (models use json/json5/javascript labels) whose body
+# is a bare tool call. The ```tool extractor cannot see these, so without the
+# malformed guard the loop reads the reply as prose and ships the raw JSON
+# into the chat bubble (qwen3.5-4b text arm, EDIT-06, 2026-09-24).
+_JSON_FENCE_RE = re.compile(
+    r"```(?:json|jsonc|json5|javascript|js)[ \t]*\n(.*?)```", re.DOTALL
+)
+
+
+def _json_fence_tool_call(text: str) -> bool:
+    """True when a ```json fence IS a tool call, not display JSON.
+
+    Literal shape only, fail-closed: the fence body must parse as ONE object
+    carrying a `name` that is a KNOWN tool plus an `arguments` object. Unknown
+    names, config content, and JSON examples in prose are never treated as
+    intent — the guard only asks for one format correction (it never executes
+    the fenced call; execution stays a ```tool-fence privilege).
+    """
+    known: set[str] | None = None
+    for match in _JSON_FENCE_RE.finditer(text):
+        try:
+            obj = json.loads(match.group(1).strip(), strict=False)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(obj, dict):
+            continue
+        name = obj.get("name")
+        # `arguments` must be PRESENT and an object: a bare {"name": …} is a
+        # fragment (often a prose example), not a call shape.
+        if "arguments" not in obj or not isinstance(obj.get("arguments"), dict):
+            continue
+        if not isinstance(name, str):
+            continue
+        if known is None:
+            known = _known_tool_names()
+        if name.strip() in known:
+            return True
+    return False
 
 
 def _malformed_tool_call_detected(text: str, calls: list[dict]) -> bool:
@@ -1370,6 +2012,8 @@ def _malformed_tool_call_detected(text: str, calls: list[dict]) -> bool:
     """
     if calls:
         return False
+    if _json_fence_tool_call(text):
+        return True
     for fence in MCP_TOOL_BLOCK_RE.finditer(text):
         body = fence.group(1)
         if re.search(r"\bname\b|\bcall\b|\w+\s*[({]", body):
@@ -1395,6 +2039,64 @@ MALFORMED_TOOL_FORMAT_FEEDBACK = (
 )
 
 
+# ── Repeat-read guard ───────────────────────────────────────────────────
+#
+# Live flash-next full-bank 2026-09-23: every timeout-class ERROR was a
+# tool-loop that stopped CONVERGING and started re-reading — read_user_config
+# x10 (LIVE-01), x12 (SKILL-05), x6 (TRIDENT-16); search_klipper_docs x9/x6.
+# Identical (name, arguments) calls return identical text, so rounds 2..n
+# add tokens and wall-clock but zero information — and the bigger context
+# makes each following turn slower, ending at the harness timeout with no
+# answer. The guard serves a lean directive instead of re-executing a
+# call it already ran THIS request.
+#
+# Scope is deliberately narrow (intent law): literal (name, canonical-JSON
+# args) equality only — never similarity, never intent. Only idempotent
+# PURE-READ tools are guarded; validation tools are excluded because a
+# re-validate after an edit is a legitimate convergence check, and write
+# tools already have their own identical-failure ladder in EditSession.
+REPEAT_GUARD_TOOLS = frozenset({
+    "read_user_config",
+    "list_user_configs",
+    "list_user_config_sections",
+    "search_user_configs",
+    "read_klipper_doc",
+    "search_klipper_docs",
+    "list_klipper_docs",
+    "get_config_reference_section",
+    "list_config_reference_sections",
+    "read_example_config",
+    "search_example_configs",
+    "get_section_schema",
+})
+
+REPEAT_READ_FEEDBACK = (
+    "ALREADY RETRIEVED — this exact call ran earlier in this request and "
+    "returned the identical result, which is still in this conversation. "
+    "It was not executed again. Repeating identical reads will never add "
+    "information: use the result you already have (apply the edit, or "
+    "answer the user), or change strategy with a DIFFERENT query."
+)
+
+
+def _repeat_read_key(tool_call: dict) -> str:
+    """Literal dedup key: tool name + canonical JSON of its arguments.
+
+    Returns '' for anything outside REPEAT_GUARD_TOOLS so callers can skip
+    cheaply. sort_keys makes argument ordering irrelevant; everything else
+    is exact.
+    """
+    name = tool_call.get("name", "")
+    if name not in REPEAT_GUARD_TOOLS:
+        return ""
+    try:
+        args = json.dumps(tool_call.get("arguments") or {},
+                          sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        args = repr(tool_call.get("arguments"))
+    return f"{name}|{args}"
+
+
 def _strip_bracket_tool_calls(text: str) -> str:
     """Strip bracket-wrapped tool calls whose name is a REAL tool.
 
@@ -1403,6 +2105,7 @@ def _strip_bracket_tool_calls(text: str) -> str:
     parens survive the cleanup chain.
     """
     known_tool_names = {t["name"] for t in _mcp_server._list_tools()}
+    known_tool_names.add(LIST_HARDWARE_SPEC["name"])
     return BRACKET_CALL_RE.sub(
         lambda m: "" if m.group(1).strip() in known_tool_names else m.group(0),
         text,
@@ -1496,6 +2199,55 @@ async def _execute_tool_call_async(tool_call: dict) -> str:
     return await asyncio.to_thread(_execute_tool_call, tool_call)
 
 
+async def _run_approval_gate(
+    session: EditSession,
+    tool_call: dict,
+    stop_event: asyncio.Event | None,
+    request_id: str | None,
+    log,
+) -> tuple[str, dict | None]:
+    """Approval-gated write (Phase 2). Returns (lean content, details-or-None)
+    with the same contract as EditSession.execute().
+
+    Invalid calls kick back immediately — the gate NEVER produces a card
+    for a call with new validation errors (plan law). A validated call
+    suspends IN-REQUEST: the frontend polls GET /ai/chat/approval for the
+    card, POST /ai/chat/approval resolves the Future (approve re-validates
+    against the latest frontend state before committing), and a 90s
+    non-response auto-declines with an honest reason. The model loop never
+    sees a fabricated user intent.
+    """
+    name = tool_call.get("name", "")
+    content, result, _preview_state = session.prepare(tool_call)
+    if result is None:
+        return content, None  # kickback; no card, no wait
+
+    op = EditSession.tool_call_to_op(name, tool_call.get("arguments", {}) or {})
+    approval = create_approval(name, op or {}, result, session, request_id)
+    log.info(
+        "Approval card opened | approvalId=%s name=%s file=%s timeout=%ds",
+        approval.approval_id, name, result.get("file", ""),
+        int(APPROVAL_TIMEOUT_SECONDS),
+    )
+    try:
+        decision = await approval.wait_or_stop(APPROVAL_TIMEOUT_SECONDS, stop_event)
+    finally:
+        remove_approval(approval.approval_id)
+    log.info(
+        "Approval resolved | approvalId=%s decision=%s waited=%.1fs",
+        approval.approval_id, decision.get("decision"),
+        approval.loop.time() - approval.created_at,
+    )
+    if decision.get("decision") != "approved":
+        # Decline / timeout / user-stop is USER-GATED: the prose nudge
+        # must not pressure the model to retry a decision the user just
+        # made (live smoke evidence: post-decline nudge looped into
+        # repeated cards for the same target). Only an approve leaves
+        # 'success'.
+        session.last_write_outcome = "user_gated"
+    return format_approval_result(name, decision)
+
+
 # Client-facing tool-call detail records are capped so a huge tool output
 # (e.g. a whole config file read) never bloats the chat response JSON.
 TOOL_CALL_ARGS_MAX_CHARS = 2000
@@ -1541,6 +2293,9 @@ def _build_tool_result_message(tool_call: dict, result_text: str) -> str:
 
 
 MAX_MCP_TOOL_TURNS = 10
+# With the write tools on, multi-edit requests chain read->edit->retry
+# round-trips; 10 exhausted too early (plan Phase 1).
+MAX_MCP_TOOL_TURNS_EDIT = 20
 # When a model ends its turn with only a tool call and no visible text
 # (tool-loop exhaustion, an unparseable call format, or a final tool-only
 # response), re-prompt it without tools to force a direct text answer.
@@ -1568,42 +2323,69 @@ def _collect_tool_names(messages: list[dict]) -> list[str]:
     return names
 
 
-def _build_native_tools() -> list[dict]:
+def _native_tool_object(tool: dict) -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": tool["name"],
+            "description": tool.get("description", "").replace("\n", " "),
+            "parameters": tool.get("inputSchema", {"type": "object", "properties": {}}),
+        },
+    }
+
+
+def _build_native_tools(edit_capable: bool = False, *,
+                        skill_active: bool = False) -> list[dict]:
     """Build native function-calling tool definitions from the MCP server.
 
     Returns OpenAI-style tool objects:
         {"type": "function", "function": {"name", "description", "parameters"}}
+
+    With edit_capable, the model-triggered skill gate is in force:
+    load_skill is advertised and the request-scoped write tools
+    (config_edit/config_write, defined in services.ai_edit_tools, not
+    registered on the MCP server) join the advertisement only once the
+    skill is active — kept in lock-step with the text protocol surface
+    (test_edit_tool_native_text_parity).
     """
     native: list[dict] = []
     for tool in _mcp_server._list_tools():
-        native.append({
-            "type": "function",
-            "function": {
-                "name": tool["name"],
-                "description": tool.get("description", "").replace("\n", " "),
-                "parameters": tool.get("inputSchema", {"type": "object", "properties": {}}),
-            },
-        })
+        native.append(_native_tool_object(tool))
+    # Chat-layer read tool (working-state backed, see dispatch):
+    # advertised on both protocols for parity.
+    native.append(_native_tool_object(LIST_HARDWARE_SPEC))
+    if edit_capable:
+        native.append(_native_tool_object(LOAD_SKILL_SPEC))
+        if skill_active:
+            for tool in EDIT_TOOL_SPECS:
+                native.append(_native_tool_object(tool))
     return native
 
 
-def _resolve_native_tools(provider: str, api_url: str, tool_protocol: str) -> list[dict] | None:
+def _resolve_native_tools(provider: str, api_url: str, tool_protocol: str,
+                          edit_capable: bool = False, *,
+                          skill_active: bool = False) -> list[dict] | None:
     """Decide whether to pass native function-calling tools to the provider.
 
-    tool_protocol values (harness A/B runs via ChatRequest.toolProtocol):
-      - "auto"   keep the provider-based split: local plain-http servers get
-                 the text ```tool protocol (None), cloud https endpoints get
-                 native function calling (OpenAI tools array).
-      - "native" force native tools for ANY provider — unlocks local
-                 llama.cpp servers running --jinja for models like gpt-oss
-                 that cannot handle the text protocol.
-      - "text"   force the text protocol even for cloud providers.
+    tool_protocol values (frontend setting / harness via ChatRequest):
+      - "auto" (default) NATIVE FIRST for every provider, local llama.cpp
+        included. Modern llama.cpp (b456+ --jinja) handles tool templates
+        cleanly (verified 2026-09: finish_reason=tool_calls, empty content,
+        valid JSON args on gemma-4-12b), and the native machine channel is
+        what stops models from reading protocol text back at the user —
+        results travel as role=tool turns instead of user-role
+        "[Tool result: ...]" lookalikes. Servers that ignore the tools
+        array still work: the loop keeps regex text extraction as a
+        fallback (native_calls or _extract_tool_calls).
+      - "text"   force the text ```tool protocol (escape hatch for a
+                 server that advertises tools but emits template garbage).
+      - "native" explicit native (identical to auto today; kept as the
+                 selector value the UI can pin).
     """
-    if tool_protocol == "native":
-        return _build_native_tools()
     if tool_protocol == "text":
         return None
-    return None if _is_local_provider(provider, api_url) else _build_native_tools()
+    return _build_native_tools(edit_capable=edit_capable,
+                               skill_active=skill_active)
 
 
 def _extract_native_tool_calls(provider: str, data: dict) -> list[dict] | None:
@@ -2055,257 +2837,134 @@ async def list_models(req: ModelsRequest):
     return {"models": ids}
 
 
-# ── Server-side merged-result validation + ONE lean repair (#1) ───────
-#
-# When KWC_SERVER_DRAFT_VALIDATION=1, after the tool loop produces a final
-# reply the backend applies it to the loaded context files (ported merge
-# engine, services/ai_draft_apply), validates the MERGED result with the
-# project validator, and — when new errors appear (delta vs baseline, same
-# semantics as the frontend's collectNewValidationErrors) — issues exactly
-# ONE REPAIR-01-shaped repair query (lean: error + imperative fix, previous
-# reply never quoted). If the repair reply validates, it replaces the
-# original; otherwise the ORIGINAL reply stands and `serverRepair` reports
-# the failure so the frontend loop (or the user) can act. The reply is
-# never rejected outright — Apply & Review remains the user's gate.
-#
-# The deterministic audit (#3, services/ai_reply_audit) runs unconditionally
-# (flag-gated only) on every reply that changed config: stated-requirement
-# check, macro precondition table, LED inventory sweep. Notes attach as a
-# footer; they never change routing or acceptance.
-
-def _context_files_to_config_files(context_files: dict[str, dict[str, str]]) -> dict:
-    """Convert the frontend contextFiles payload to parseable ConfigFiles."""
-    from parser.config_parser import parse_config
-
-    configs = {}
-    for filename, meta in context_files.items():
-        content = (meta or {}).get("content", "")
-        if not content.strip():
-            continue
-        try:
-            configs[filename] = parse_config(content, filename)
-        except Exception:
-            logger.warning("Context file parse failed | file=%s", filename)
-    return configs
+# Mirror-seed caps (Pi 3B+ memory): per-file and total content limits so a
+# misconfigured scan root can never load gigabytes into an edit session.
+_MIRROR_MAX_FILE_BYTES = 512 * 1024
+_MIRROR_MAX_TOTAL_BYTES = 4 * 1024 * 1024
 
 
-async def _server_validate_and_repair(
-    client: httpx.AsyncClient,
-    req: ChatRequest,
-    headers: dict,
-    final_content: str,
-    current_messages: list[dict],
-    usage_events: list[dict],
-    stop_event: "asyncio.Event | None",
-) -> tuple[str, dict | None]:
-    """Apply → validate merged → ONE lean repair. Returns (content, info).
+def _mirror_user_config_files() -> dict[str, dict]:
+    """Read the backend's user-config mirror as a contextFiles-shaped dict.
 
-    ``info`` is the ``serverRepair`` response field: ``None`` when nothing
-    needed repair / repair was not possible (no context files), else a dict
-    ``{attempted, repaired, issuesAfter}``.
+    Same source and precedence as the read_user_config/list_user_configs
+    MCP tools (system config path first, then the imported local dir;
+    first occurrence of a relative path wins; SAVE_CONFIG backups
+    skipped). Used to ARM the edit session when a client requests
+    editTools but sends no contextFiles (TRIDENT-16: an un-armed session
+    has no write tools, so the model correctly falls back to prose and
+    the whole tool path silently disappears). The mirror is the disk
+    truth; approval still re-validates against the client's latest
+    contextFiles, so a stale mirror can never clobber unsaved edits.
     """
-    from services.ai_draft_apply import (
-        MAX_ASSISTANT_HINT_USER_MESSAGES,
-        apply_reply_to_configs,
-    )
-    from services.ai_draft_validation import (
-        build_validation_feedback,
-        collect_new_validation_errors,
-        has_only_retry_exempt_issues,
-        suppress_errors_shadowed_by_full_rewrite,
-    )
-    from services.ai_reply_audit import build_audit_footer, run_post_apply_audit
-    from parser.validator import validate_project_configs
+    from mcp_server import LOCAL_CONFIGS_DIR, _system_config_path
+    from services.native_services import is_backup_config_file
 
-    base_configs = _context_files_to_config_files(req.contextFiles)
-    if not base_configs:
-        return final_content, None
-
-    # Mirror useAssistantDraft.getAssistantMessageHintTexts: the reply plus
-    # up to 3 preceding user messages, so file targets named only by the
-    # user resolve to the same file the client's draft pipeline picks
-    # (finding #5).
-    user_hints = [
-        m.get("content", "")
-        for m in req.messages
-        if m.get("role") == "user" and m.get("content")
-    ][-MAX_ASSISTANT_HINT_USER_MESSAGES:]
-    hint_texts = [final_content, *user_hints]
-
-    apply_result = apply_reply_to_configs(
-        final_content, base_configs,
-        active_file=req.activeFile or None,
-        hint_texts=hint_texts,
-    )
-    merged_files = {
-        filename: entry["merged_config"]
-        for filename, entry in apply_result["files"].items()
-    }
-    if not merged_files:
-        # Prose-only reply or apply failure — nothing merged to validate.
-        return final_content, None
-
-    # Baseline = the untouched project; candidate = base with merged files.
-    project = dict(base_configs)
-    project.update(merged_files)
-    baseline_validations = {
-        filename: result.to_dict()
-        for filename, result in validate_project_configs(base_configs, gcode_registry=False).items()
-    }
-    candidate_validations = {
-        filename: result.to_dict()
-        for filename, result in validate_project_configs(project, gcode_registry=False).items()
-    }
-    blocking = suppress_errors_shadowed_by_full_rewrite(
-        collect_new_validation_errors(baseline_validations, candidate_validations)
-    )
-    if not blocking:
-        # Clean apply: run the deterministic audit (ONLY when its own flag
-        # is on — the outer gate lets us in for validation alone) and
-        # attach its footer.
-        notes = (
-            _run_audit_on_apply(req, apply_result, merged_files, project, run_post_apply_audit)
-            if _server_audit_enabled() else []
-        )
-        if notes:
-            final_content = final_content + build_audit_footer(notes)
-        return final_content, {"attempted": False, "repaired": False, "issuesAfter": []}
-
-    if not _server_draft_validation_enabled():
-        # Audit-only mode (KWC_POST_APPLY_AUDIT without validation): the
-        # deterministic notes still apply; repair stays off.
-        notes = (
-            _run_audit_on_apply(req, apply_result, merged_files, project, run_post_apply_audit)
-            if _server_audit_enabled() else []
-        )
-        if notes:
-            final_content = final_content + build_audit_footer(notes)
-        return final_content, None
-
-    if has_only_retry_exempt_issues(blocking):
-        # The model cannot fix duplicates/reused pins by regenerating —
-        # do not burn a repair query (retry-exempt semantics).
-        return final_content, {
-            "attempted": False,
-            "repaired": False,
-            "issuesAfter": blocking,
-            "reason": "retry-exempt",
-        }
-
-    # ── ONE lean repair (REPAIR-01 shape) ──
-    feedback = build_validation_feedback(blocking, None)
-    repair_messages = list(current_messages) + [
-        {"role": "user", "content": feedback},
-    ]
-    repair_max_tokens = req.maxTokens
-    if _is_local_provider(req.apiProvider, req.apiUrl):
-        repair_max_tokens = max(req.maxTokens, EMPTY_REPROMPT_MAX_TOKENS)
-    logger.info(
-        "Server repair | issuing ONE lean repair (issue_groups=%d)", len(blocking),
-    )
-    try:
-        repair_payload = _build_provider_payload(
-            req.apiProvider, repair_messages, req.model,
-            max_tokens=repair_max_tokens,
-            temperature=req.temperature,
-            tools=_resolve_native_tools(req.apiProvider, req.apiUrl, req.toolProtocol),
-            merge_system=req.mergeSystemMessages,
-        )
-        repair_content, repair_data = await _query_provider(
-            client, req.apiUrl, headers, repair_payload, req.apiProvider,
-            logger_context="server-repair-1",
-            stop_event=stop_event,
-        )
-        repair_usage = _extract_usage_info(repair_data)
-        if repair_usage:
-            repair_usage["context"] = "server-repair-1"
-            usage_events.append(repair_usage)
-    except ChatStoppedError:
-        raise
-    except (ValueError, httpx.HTTPError) as exc:
-        logger.warning("Server repair query failed | %s", exc)
-        return final_content, {"attempted": True, "repaired": False, "issuesAfter": blocking}
-
-    repaired_content = repair_content
-    for pattern in (
-        MCP_TOOL_BLOCK_RE, ALT_TOOL_CALL_CONTENT_RE, CALL_SYNTAX_CLEANUP_RE,
-        FUNC_CALL_CLEANUP_RE, DSML_CLEANUP_RE, XML_TOOL_CALLS_CLEANUP_RE,
-    ):
-        repaired_content = pattern.sub("", repaired_content).strip()
-    repaired_content = _strip_bracket_tool_calls(repaired_content).strip()
-
-    if repaired_content:
-        repair_apply = apply_reply_to_configs(
-            repaired_content, base_configs,
-            active_file=req.activeFile or None,
-            hint_texts=[repaired_content, *user_hints],
-        )
-        repair_merged = {
-            filename: entry["merged_config"]
-            for filename, entry in repair_apply["files"].items()
-        }
-        if repair_merged:
-            repair_project = dict(base_configs)
-            repair_project.update(repair_merged)
-            repair_candidate = {
-                filename: result.to_dict()
-                for filename, result in validate_project_configs(repair_project, gcode_registry=False).items()
-            }
-            repair_blocking = suppress_errors_shadowed_by_full_rewrite(
-                collect_new_validation_errors(baseline_validations, repair_candidate)
-            )
-            if not repair_blocking:
-                notes = (
-                    _run_audit_on_apply(req, repair_apply, repair_merged, repair_project, run_post_apply_audit)
-                    if _server_audit_enabled() else []
-                )
-                if notes:
-                    repaired_content = repaired_content + build_audit_footer(notes)
-                logger.info("Server repair | repaired=1")
-                return repaired_content, {
-                    "attempted": True, "repaired": True, "issuesAfter": [],
-                }
-            # Repair still dirty: keep the ORIGINAL reply (never show a
-            # worse one) but report the exact remaining issues.
-            return final_content, {
-                "attempted": True, "repaired": False, "issuesAfter": repair_blocking,
-            }
-
-    return final_content, {"attempted": True, "repaired": False, "issuesAfter": blocking}
-
-
-def _run_audit_on_apply(req, apply_result, merged_files, project, audit_fn) -> list[str]:
-    """Collect the audit inputs from an apply result and run all checks."""
-    changed_headers: list[str] = []
-    changed_gcode: list[tuple[str, str]] = []
-    for entry in apply_result["files"].values():
-        for change in entry["changes"]:
-            header = change.get("fullHeader", "")
-            if header and header not in changed_headers:
-                changed_headers.append(header)
-        merged_cfg = entry["merged_config"]
-        for section in merged_cfg.sections:
-            # Any section with a gcode param: gcode_macro/delayed_gcode AND
-            # idle_timeout/force_move etc. — the idle_timeout LED class
-            # (#TRIDENT-15) lives on [idle_timeout], not a macro.
-            body = (section.get_value("gcode", "")
-                    if section.full_header in changed_headers else "")
-            if body:
-                changed_gcode.append((section.full_header, body))
-    if not changed_headers:
-        return []
-    return audit_fn(
-        _latest_user_message_text(req.messages),
-        project,
-        changed_gcode,
-        changed_headers,
-    )
+    files: dict[str, str] = {}
+    total = 0
+    scan_paths: list[Path] = []
+    system_path = _system_config_path()
+    if system_path.is_dir():
+        scan_paths.append(system_path)
+    if LOCAL_CONFIGS_DIR.is_dir():
+        scan_paths.append(LOCAL_CONFIGS_DIR)
+    for scan_dir in scan_paths:
+        try:
+            for cfg_file in sorted(scan_dir.rglob("*.cfg")):
+                if is_backup_config_file(cfg_file.name):
+                    continue
+                try:
+                    rel = cfg_file.relative_to(scan_dir).as_posix()
+                except ValueError:
+                    continue
+                if rel in files:
+                    continue
+                try:
+                    size = cfg_file.stat().st_size
+                    if size > _MIRROR_MAX_FILE_BYTES or total + size > _MIRROR_MAX_TOTAL_BYTES:
+                        continue
+                    content = cfg_file.read_bytes().decode("utf-8", errors="replace")
+                except OSError:
+                    continue
+                files[rel] = {"content": content}
+                total += size
+        except OSError:
+            continue
+    return files
 
 
 @router.post("/ai/chat")
 async def chat_proxy(req: ChatRequest):
     """Proxy chat messages to the user's configured API provider."""
-    messages = _prepare_messages(req.messages, full_rewrite_guard=req.fullRewriteGuard)
+    # ── Tool-mediated config editing session ──
+    # Request-scoped: seeded from this request's contextFiles (the app's
+    # live working state), stacked edits returned as pendingEdits. No
+    # per-conversation draft store by design. Without live files there is
+    # nothing to edit — tools stay unadvertised. Product behavior since
+    # the Phase-6 flag removal (2026-09-24): only an explicit
+    # editTools=False (harness read-only arm) disables the session.
+    edit_enabled = req.editTools is not False
+    edit_session: EditSession | None = None
+    if edit_enabled and req.contextFiles:
+        try:
+            edit_session = EditSession(req.contextFiles)
+            if not edit_session.has_files():
+                edit_session = None
+        except Exception:
+            logger.exception("Edit session seed failed | edit tools disabled for request")
+            edit_session = None
+    if edit_enabled and edit_session is None:
+        # TRIDENT-16: editTools requested without contextFiles (harness,
+        # API clients, degraded UI state) used to leave the session
+        # un-armed — no write tools advertised, so prose fallback was the
+        # model's only option and every edit silently went inert. Seed
+        # from the backend's user-config mirror instead.
+        try:
+            mirror = _mirror_user_config_files()
+        except Exception:
+            logger.exception("Mirror seed failed | edit tools disabled for request")
+            mirror = {}
+        if mirror:
+            try:
+                edit_session = EditSession(mirror)
+                if not edit_session.has_files():
+                    edit_session = None
+                else:
+                    logger.info(
+                        "Edit session seeded from user-config mirror | files=%d",
+                        len(mirror),
+                    )
+            except Exception:
+                logger.exception("Mirror edit session failed | edit tools disabled")
+                edit_session = None
+    edit_capable = edit_session is not None
+
+    # ── Model-triggered edit skill gate ──
+    # Write tools start HIDDEN whenever a session exists; they unlock when
+    # the model calls load_skill itself (mechanical evidence in message
+    # history — never a verb heuristic). Same-turn unlock: every provider
+    # payload below re-resolves tools from _skill_state, which flips as
+    # soon as the load_skill result lands. Product behavior since the
+    # Phase-6 flag removal (2026-09-24); the harness can force the
+    # unlocked arm per request via editSkill=True.
+    _skill_state = {'active': _load_skill_active(req.messages)}
+    # Harness A/B: --force-skill-active forces activation evidence WITHOUT
+    # requiring a live load_skill call (grades tool-call traces directly).
+    if edit_capable and getattr(req, 'editSkill', None) is True:
+        _skill_state['active'] = True
+
+    def _skill_gate_closed() -> bool:
+        """True while the session's write tools stay locked behind
+        load_skill (only meaningful when a session exists)."""
+        return not _skill_state['active']
+
+    messages = _prepare_messages(req.messages,
+                                 edit_capable=edit_capable,
+                                 skill_active=_skill_state['active'],
+                                 context_files=req.contextFiles,
+                                 native_mode=_resolve_native_tools(
+                                     req.apiProvider, req.apiUrl, req.toolProtocol,
+                                     edit_capable=edit_capable,
+                                     skill_active=_skill_state['active']) is not None)
 
     # ── Log request summary ──
     msg_count = len(messages)
@@ -2333,16 +2992,31 @@ async def chat_proxy(req: ChatRequest):
         req.apiKey,
     )
 
-    # Native function calling for cloud providers only; local providers keep
-    # the text-based ```tool protocol since local tool support varies.
-    # ChatRequest.toolProtocol overrides the split for harness A/B runs.
-    native_tools = _resolve_native_tools(req.apiProvider, req.apiUrl, req.toolProtocol)
+    # Tool protocol: native function calling is the DEFAULT for every
+    # provider (see _resolve_native_tools). toolProtocol="text" forces the
+    # ```tool fallback; the loop still regex-extracts text calls when a
+    # native server ignores the tools array, so degradation is graceful.
+    native_tools = _resolve_native_tools(req.apiProvider, req.apiUrl, req.toolProtocol,
+                                         edit_capable=edit_capable,
+                                         skill_active=_skill_state['active'])
 
     # ── Stop-event registration ──
     stop_event = None
     if req.requestId:
         stop_event = asyncio.Event()
         _chat_stop_events[req.requestId] = stop_event
+        # Progress registry (Phase 6.5.1/6.5.3): same lifecycle as the stop
+        # event. startedAt drives elapsedMs; turns accumulate the per-turn
+        # narration for harness grading (narrationTurns in the final
+        # response); lastText dedupes identical consecutive emits.
+        _chat_progress[req.requestId] = {
+            "turn": 0,
+            "narration": "",
+            "toolNames": [],
+            "startedAt": time.monotonic(),
+            "lastText": None,
+            "turns": [],
+        }
         logger.info(
             "Stop event registered | requestId=%s registry_size=%d",
             req.requestId, len(_chat_stop_events),
@@ -2375,118 +3049,61 @@ async def chat_proxy(req: ChatRequest):
             current_messages = list(messages)
             executed_tool_names: list[str] = []
             executed_tool_calls: list[dict] = []
+            # Literal (name, args) keys of every guarded READ executed this
+            # request — see REPEAT_GUARD_TOOLS. Reset per request by
+            # construction (local to chat_proxy).
+            read_ledger: set[str] = set()
             # Re-prompts issued to correct a malformed ```tool fence (see the
             # malformed tool-call guard in the loop below).
             malformed_reprompts = 0
 
-            # ── Config-grounding fallback (Phase 4) ──
-            # If the model didn't call any tools on the first pass, inject the
-            # user-config content the question needs (section-targeted when
-            # possible; whole file truncated as last resort). Config questions
-            # cannot be answered from training. OFF by default since 2026-08
-            # (lean-first-pass workflow): the first pass must be exactly the
-            # user prompt + system prompt + tool list, and the validation retry
-            # loop nudges tool use instead. Re-enable with KWC_CONFIG_FALLBACK=1.
-            if not _extract_native_tool_calls(req.apiProvider, current_data) and not _extract_tool_calls(current_content):
-                if not _config_fallback_enabled():
-                    # Re-enable with KWC_CONFIG_FALLBACK=1.
-                    logger.info("Config fallback skipped | disabled")
-                elif _is_edit_request(req.messages):
-                    logger.info("Config fallback skipped | edit request")
-                elif PRINTER_MEMORY_BLOCK_RE.search(current_content):
-                    logger.info("Config fallback skipped | printer-memory block present")
-                else:
-                    config_injections = _config_fallback_context(
-                        _latest_user_message_text(req.messages),
-                        req.contextFiles,
-                    )
-                    if config_injections:
-                        logger.info(
-                            "Config fallback triggered | injections=%d result_chars=%d files=%s",
-                            len(config_injections),
-                            sum(len(result) for _, result in config_injections),
-                            [call["arguments"].get("filename") for call, _ in config_injections],
-                        )
-                        if current_content.strip():
-                            current_messages.append({"role": "assistant", "content": current_content})
-                        for tool_call, result_text in config_injections:
-                            executed_tool_names.append(tool_call["name"])
-                            executed_tool_calls.append(
-                                _build_executed_tool_call(tool_call, result_text)
-                            )
-                            current_messages.append({
-                                "role": "user",
-                                "content": _build_tool_result_message(tool_call, result_text),
-                            })
-                        tool_turns += len(config_injections)
-                        tool_payload = _build_provider_payload(
-                            req.apiProvider, current_messages, req.model,
-                            max_tokens=req.maxTokens,
-                            temperature=req.temperature,
-                            tools=native_tools,
-                        )
-                        current_content, current_data = await _query_provider(
-                            client, req.apiUrl, headers, tool_payload, req.apiProvider,
-                            logger_context="config-fallback",
-                            stop_event=stop_event,
-                        )
-                        cfg_usage = _extract_usage_info(current_data)
-                        if cfg_usage:
-                            cfg_usage["context"] = "config-fallback"
-                            usage_events.append(cfg_usage)
+            # Edit-prose nudge budget (the nudge itself lives in the tool
+            # loop's no-tool-calls branch — it must cover prose answers at
+            # ANY turn: r6b found qwen3.5-9b calling read_user_config
+            # legitimately, THEN answering with a ```cfg draft, which the
+            # old pre-loop-only nudge missed).
+            edit_nudges = 0
 
-            # ── Auto-search fallback ──
-            # If the model didn't call any tools on the first pass, do a backend
-            # search and inject the results so it still gets grounded docs even
-            # if it doesn't support tool calling.
-            if not _extract_native_tool_calls(req.apiProvider, current_data) and not _extract_tool_calls(current_content):
-                if _is_edit_request(req.messages):
-                    # Phase 3: edits are answered from the config context; a
-                    # doc search injection mid-edit derails the draft.
-                    logger.info("Auto-search fallback skipped | edit request")
-                elif not _auto_search_enabled():
-                    logger.info("Auto-search fallback skipped | disabled via KWC_AUTO_SEARCH=0")
-                elif PRINTER_MEMORY_BLOCK_RE.search(current_content):
-                    # The model already produced a structured printer-memory
-                    # proposal; injecting a doc search would only derail it.
-                    logger.info("Auto-search fallback skipped | printer-memory block present")
-                else:
-                    if stop_event is not None and stop_event.is_set():
-                        raise ChatStoppedError()
-                    reference_query = _build_reference_lookup_query(req.messages)
-                    auto_context = _auto_search_context(reference_query)
-                    if auto_context:
-                        logger.info(
-                            "Auto-search fallback triggered | query_chars=%d result_chars=%d",
-                            len(reference_query), len(auto_context),
-                        )
-                        tool_message = _build_tool_result_message(
-                            {"name": "search_klipper_docs", "arguments": {"query": reference_query}},
-                            auto_context,
-                        )
-                        current_messages.append({"role": "assistant", "content": current_content})
-                        current_messages.append({"role": "user", "content": tool_message})
-                        tool_turns += 1
+            # Ack-guard budget (Phase 6.5.2): a continue-intent promise
+            # ("I'll now apply that…") with no tool call on an edit request
+            # gets ONE injected execution directive. Cap 1 (Hermes caps at
+            # 2): local-model ack loops make every extra re-prompt real
+            # llama.cpp latency. Bookkeeping shaped like empty_reprompts;
+            # surfaced as usage.ackReprompts.
+            ack_reprompts = 0
 
-                        # Re-query with injected search results
-                        tool_payload = _build_provider_payload(
-                            req.apiProvider, current_messages, req.model,
-                            max_tokens=req.maxTokens,
-                            temperature=req.temperature,
-                            tools=native_tools,
-                            merge_system=req.mergeSystemMessages,
-                        )
-                        current_content, current_data = await _query_provider(
-                            client, req.apiUrl, headers, tool_payload, req.apiProvider,
-                            logger_context="auto-search",
-                            stop_event=stop_event,
-                        )
-                        search_usage = _extract_usage_info(current_data)
-                        if search_usage:
-                            search_usage["context"] = "auto-search"
-                            usage_events.append(search_usage)
+            def _emit_progress(tool_names: list[str], narration: str) -> None:
+                """Publish mid-loop progress for the poller (Phase 6.5.1).
 
-            while tool_turns < MAX_MCP_TOOL_TURNS:
+                Call site law: AFTER tool-call extraction succeeds, BEFORE
+                execution — only canonical loop state is published, and the
+                narration is the turn's visible assistant text with the
+                tool-call markup stripped (native: `content` beside
+                tool_calls; text protocol: prose beside the call syntax).
+                Hermes invariants: per-turn dedupe (identical consecutive
+                text never re-emits), and progress NEVER touches
+                final_content — a display bubble must not consume or
+                replace the answer (#65919 class)."""
+                if not req.requestId:
+                    return
+                entry = _chat_progress.get(req.requestId)
+                if entry is None:
+                    return
+                entry["turn"] = tool_turns + 1
+                entry["toolNames"] = list(tool_names)
+                entry["updatedAt"] = time.monotonic()
+                if narration and narration != entry.get("lastText"):
+                    entry["lastText"] = narration
+                    entry["narration"] = narration
+                    entry["turns"].append({
+                        "turn": tool_turns + 1,
+                        "narration": narration,
+                        "toolNames": list(tool_names),
+                    })
+
+            turn_cap = (MAX_MCP_TOOL_TURNS_EDIT if edit_capable
+                        else MAX_MCP_TOOL_TURNS)
+            while tool_turns < turn_cap:
                 if stop_event is not None and stop_event.is_set():
                     raise ChatStoppedError()
 
@@ -2536,6 +3153,183 @@ async def chat_proxy(req: ChatRequest):
                             malformed_usage["context"] = f"malformed-reprompt-{malformed_reprompts}"
                             usage_events.append(malformed_usage)
                         continue
+                    # ── Edit-prose nudge ──
+                    # Edit request + write tools armed + prose answer (no
+                    # tool call): prose edits are INERT — old draft-text
+                    # semantics must not silently resume. Correction
+                    # re-prompt (max 2), same escalation style as the
+                    # malformed guard. Pure Q&A never matches this gate.
+                    if (edit_session is not None
+                            and _is_edit_request(req.messages)
+                            # Nudge ONLY on mechanical evidence of an inert
+                            # draft: (a) the write trace ENDED on a
+                            # CORRECTABLE kickback (r4 give-up; r5
+                            # multi-part give-up hiding behind a staged
+                            # first half), or (b) the final answer CONTAINS
+                            # a fenced cfg block — the inert-draft shape
+                            # (r6: create succeeded, include re-drafted as
+                            # prose cfg after the tool-side include
+                            # failed). A staged change never proves the
+                            # whole intent is covered; a cfg block in prose
+                            # always proves inert drafting.
+                            # NOT nudged on bare outcome=None: Q20 r3/B
+                            # (2026-09-16) proved the verb+target heuristic
+                            # misfires on pure Q&A ("which command SAVES
+                            # ... into the config file") — the model
+                            # ANSWERED correctly and the nudge gaslit it
+                            # into "tell me what change you want". Prose
+                            # with no draft and no write attempt is treated
+                            # as an answer/refusal (r8 refusal-wins
+                            # philosophy); user_gated refusals likewise
+                            # protected.
+                            and (
+                                edit_session.last_write_outcome
+                                == 'correctable'
+                                or (bool(extract_config_code_blocks(
+                                        current_content))
+                                    # An honest user-gated outcome (decline,
+                                    # timeout, stop, duplicate target) often
+                                    # still illustrates with a ```cfg block;
+                                    # nudging THAT pressure-cooks the model
+                                    # into re-attempting an explicit user
+                                    # decision. Refusal wins. (The commented-
+                                    # param refusals this clause originally
+                                    # guarded were removed 2026-09-20.)
+                                    # 'budget' (Phase-5 write cap) is the
+                                    # same shield: the loop ORDERED the model
+                                    # to stop editing and report, so a cfg
+                                    # block in that final answer is the report,
+                                    # not an inert draft to nudge back.
+                                    and edit_session.last_write_outcome
+                                    not in ('user_gated', 'budget')
+                                    # Echo guard (native-mode traces
+                                    # 2026-09-17): after an APPROVED write
+                                    # models re-quote the staged section in
+                                    # a ```cfg block to show it. Structural
+                                    # test — a block whose config lines all
+                                    # exist in the working state is a
+                                    # display echo; only content absent
+                                    # from the project is an inert draft.
+                                    # (outcome=='correctable' above still
+                                    # nudges unconditionally.)
+                                    and edit_session.has_inert_draft(
+                                        extract_config_code_blocks(
+                                            current_content)))
+                            )
+                            and edit_nudges < 3):
+                        edit_nudges += 1
+                        logger.info(
+                            "Edit prose response nudged | attempt=%d turn=%d content_chars=%d",
+                            edit_nudges, tool_turns, len(current_content),
+                        )
+                        if current_content.strip():
+                            clean_prior = MCP_TOOL_BLOCK_RE.sub("", current_content).strip()
+                            if clean_prior:
+                                current_messages.append(
+                                    {"role": "assistant", "content": clean_prior})
+                        current_messages.append({
+                            "role": "user",
+                            # Protocol-aware nudge: the fence format law in
+                            # EDIT_NUDGE_TEXT is text-protocol only. Under
+                            # native function calling it actively breaks
+                            # template-trained models (live native traces
+                            # 2026-09-17: gemma-4-12b replied "I cannot use
+                            # that specific fence format... my instructions
+                            # require me to use the internal tool calling
+                            # system"). Native arm keeps the argument
+                            # shapes, drops the fence law.
+                            "content": (_LOAD_SKILL_NUDGE_TEXT
+                                        if _skill_gate_closed()
+                                        else EDIT_NUDGE_TEXT_NATIVE
+                                        if native_tools is not None
+                                        else EDIT_NUDGE_TEXT),
+                        })
+                        nudge_payload = _build_provider_payload(
+                            req.apiProvider, current_messages, req.model,
+                            max_tokens=req.maxTokens,
+                            temperature=req.temperature,
+                            tools=native_tools,
+                            merge_system=req.mergeSystemMessages,
+                        )
+                        current_content, current_data = await _query_provider(
+                            client, req.apiUrl, headers, nudge_payload,
+                            req.apiProvider,
+                            logger_context=f"edit-nudge-{edit_nudges}",
+                            stop_event=stop_event,
+                        )
+                        nudge_usage = _extract_usage_info(current_data)
+                        if nudge_usage:
+                            nudge_usage["context"] = f"edit-nudge-{edit_nudges}"
+                            usage_events.append(nudge_usage)
+                        continue
+                    # ── Ack guard (Phase 6.5.2) ──
+                    # The reply ENDS on a promise to act ("I'll now apply
+                    # that to your config") with NO tool call, on an edit
+                    # request where NO write tool has fired yet: the promise
+                    # is a lie by omission — the turn produced nothing.
+                    # Inject ONE execution directive and re-query. Placed
+                    # AFTER the edit-prose nudge so the stronger mechanical
+                    # evidence (inert draft / correctable kickback, up to 3
+                    # corrections) owns those cases; the ack guard catches
+                    # the pure promise. Zero write attempts is the gate:
+                    # once ANY write fired, remaining prose is a partial-
+                    # success report, and the confab guard already handles
+                    # the staged-nothing case with trace truth. Cap 1 — if
+                    # the model acks twice, let the user see it (Hermes
+                    # caps at 2; local latency says 1). Protocol-agnostic:
+                    # the tail check runs on visible text, so it fires
+                    # identically under native and text protocols.
+                    if (ack_reprompts < 1
+                            and edit_capable
+                            and _is_edit_request(req.messages)
+                            and not any(n in EDIT_TOOL_NAMES
+                                         for n in executed_tool_names)
+                            and current_content.strip()
+                            and _ends_with_continue_intent(current_content)):
+                        ack_reprompts += 1
+                        logger.info(
+                            "Ack guard | continue-intent promise with no "
+                            "write tool | nudging once | turn=%d preview=%s",
+                            tool_turns,
+                            current_content[:120].replace("\n", " "),
+                        )
+                        if current_content.strip():
+                            clean_prior = MCP_TOOL_BLOCK_RE.sub("", current_content).strip()
+                            if clean_prior:
+                                current_messages.append(
+                                    {"role": "assistant", "content": clean_prior})
+                        current_messages.append({
+                            "role": "user",
+                            # Arm by CURRENT tool surface: with the skill
+                            # gate still closed the write tools are not
+                            # advertised, so the directive is the load step
+                            # (same shape as _LOAD_SKILL_NUDGE_TEXT); with
+                            # them unlocked it is the execute-directly order.
+                            "content": (
+                                (_LOAD_SKILL_NUDGE_TEXT
+                                 if _skill_gate_closed()
+                                 else "Execute the edit now with the edit "
+                                      "tool — do not describe it.")
+                                + _ACK_GUARD_TAIL),
+                        })
+                        ack_payload = _build_provider_payload(
+                            req.apiProvider, current_messages, req.model,
+                            max_tokens=req.maxTokens,
+                            temperature=req.temperature,
+                            tools=native_tools,
+                            merge_system=req.mergeSystemMessages,
+                        )
+                        current_content, current_data = await _query_provider(
+                            client, req.apiUrl, headers, ack_payload,
+                            req.apiProvider,
+                            logger_context=f"ack-reprompt-{ack_reprompts}",
+                            stop_event=stop_event,
+                        )
+                        ack_usage = _extract_usage_info(current_data)
+                        if ack_usage:
+                            ack_usage["context"] = f"ack-reprompt-{ack_reprompts}"
+                            usage_events.append(ack_usage)
+                        continue
                     if tool_turns > 0:
                         logger.info("Tool call loop done | turns=%d final_chars=%d", tool_turns, len(current_content))
                     break
@@ -2547,6 +3341,10 @@ async def chat_proxy(req: ChatRequest):
                 # instead of feeding "Unknown tool" errors back — that derails
                 # models into explaining the error instead of answering.
                 known_tool_names = {t["name"] for t in _mcp_server._list_tools()}
+                if edit_capable:
+                    known_tool_names |= EDIT_TOOL_NAMES
+                    known_tool_names.add(LOAD_SKILL_SPEC["name"])
+                known_tool_names.add(LIST_HARDWARE_SPEC["name"])
                 if tool_calls and current_content.strip() and all(
                     c.get("name") not in known_tool_names for c in tool_calls
                 ):
@@ -2564,11 +3362,157 @@ async def chat_proxy(req: ChatRequest):
                     repr(current_content[:80]),
                 )
 
+                # ── Progress emit point (Phase 6.5.1) ──
+                # Canonical loop state (calls extracted, not yet executed)
+                # published to the poller BEFORE the batch runs, so a long
+                # edit→validate→re-edit chain is never silent. Narration =
+                # the turn's visible text with the call markup stripped
+                # (same cleanup chain the follow-up messages use).
+                _narration = _strip_template_pythonic_calls(current_content).strip()
+                _narration = MCP_TOOL_BLOCK_RE.sub("", _narration).strip()
+                _narration = ALT_TOOL_CALL_CONTENT_RE.sub("", _narration).strip()
+                _narration = CALL_SYNTAX_CLEANUP_RE.sub("", _narration).strip()
+                _narration = FUNC_CALL_CLEANUP_RE.sub("", _narration).strip()
+                _narration = _strip_bracket_tool_calls(_narration).strip()
+                _narration = DSML_CLEANUP_RE.sub("", _narration).strip()
+                _narration = XML_TOOL_CALLS_CLEANUP_RE.sub("", _narration).strip()
+                _emit_progress(
+                    [str(c.get("name", "")) for c in tool_calls],
+                    _narration[:500],
+                )
+
                 # Execute every tool call in this round first, then build the
                 # follow-up messages in the format the provider expects.
                 results = []
                 for tool_call in tool_calls[:MAX_MCP_TOOL_TURNS]:
-                    result_text = await _execute_tool_call_async(tool_call)
+                    repeat_key = _repeat_read_key(tool_call)
+                    if repeat_key and repeat_key in read_ledger:
+                        # Literal repeat of a read already answered this
+                        # request: no execution, no payload — the model
+                        # gets the directive and nothing else (see
+                        # REPEAT_GUARD_TOOLS).
+                        result_text = REPEAT_READ_FEEDBACK
+                        logger.info(
+                            "Repeat read blocked | name=%s args=%.120s",
+                            tool_call.get("name"),
+                            json.dumps(tool_call.get("arguments") or {},
+                                       sort_keys=True, default=str),
+                        )
+                        results.append(result_text)
+                        continue
+                    if edit_capable and tool_call.get('name') == 'load_skill':
+                        # Dispatch by REQUESTED skill name — loading
+                        # printer-memory must never unlock the edit tools
+                        # (only the config-editing load flips the gate).
+                        edit_details = None
+                        requested = str(
+                            (tool_call.get('arguments') or {}).get('name', ''))
+                        if requested == MEMORY_SKILL_NAME:
+                            result_text = _memory_skill_body()
+                            logger.info(
+                                "Printer-memory skill loaded "
+                                "| requestId=%s", req.requestId or 'none')
+                        elif requested in ('', EDIT_SKILL_NAME):
+                            # Idempotent re-load after activation: body is
+                            # already in history; serve it again. First
+                            # load: flip the gate and re-resolve tools.
+                            if not _skill_state['active']:
+                                _skill_state['active'] = True
+                                native_tools = _resolve_native_tools(
+                                    req.apiProvider, req.apiUrl,
+                                    req.toolProtocol,
+                                    edit_capable=edit_capable,
+                                    skill_active=True)
+                                logger.info(
+                                    "Edit skill activated | write tools "
+                                    "unlocked mid-request requestId=%s",
+                                    req.requestId or 'none')
+                            result_text = _edit_skill_body()
+                        else:
+                            result_text = (
+                                f"Unknown skill '{requested}'. Available "
+                                f"skills: '{EDIT_SKILL_NAME}', "
+                                f"'{MEMORY_SKILL_NAME}'.")
+                    elif edit_session is not None and tool_call.get("name") in EDIT_TOOL_NAMES:
+                        if _skill_gate_closed():
+                            # Write tool used WITHOUT loading the skill:
+                            # kick back with the load step, not the edit.
+                            result_text = (
+                                f"'{tool_call.get('name')}' is not available yet. "
+                                f"Call load_skill(name='{EDIT_SKILL_NAME}') "
+                                "first — it returns the edit rules and "
+                                "unlocks the edit tools.")
+                            edit_details = None
+                            logger.warning(
+                                "Edit tool blocked | skill not loaded name=%s",
+                                tool_call.get('name'))
+                        else:
+                            # Request-scoped write path (never the MCP server).
+                            if req.autoApproveEdits:
+                                # Harness override: skip ONLY the human wait;
+                                # validation (execute's apply+delta gate) is
+                                # unchanged.
+                                result_text, edit_details = edit_session.execute(tool_call)
+                            else:
+                                result_text, edit_details = await _run_approval_gate(
+                                    edit_session, tool_call, stop_event,
+                                    req.requestId, logger)
+                            logger.info(
+                                "Edit tool executed | name=%s attempts=%d ok=%s",
+                                tool_call["name"], edit_session.edit_attempts,
+                                edit_details is not None,
+                            )
+                    elif (tool_call.get("name") == "list_hardware"):
+                        # Chat-layer read tool (NOT the MCP server): the
+                        # MCP server sees only disk, while the approval
+                        # flow keeps the live project in the session's
+                        # working state — a disk read could hand back
+                        # stale section text and manufacture old_text
+                        # mismatch kickbacks one edit later.
+                        from services.hardware_lookup import (
+                            list_hardware as _list_hardware)
+                        # Working state first (approved unsaved edits win),
+                        # with the user-config mirror as a FLOOR: class
+                        # members live in files the frontend may not have
+                        # loaded (TRIDENT-15 design: SB_LEDs in EBB.cfg),
+                        # and the mirror is the same source
+                        # search_user_configs reads.
+                        hw_files = dict(edit_session.state.files) \
+                            if edit_session is not None else {}
+                        if not hw_files:
+                            hw_files = {
+                                name: str((meta or {}).get("content", ""))
+                                for name, meta in
+                                (req.contextFiles or {}).items()
+                            }
+                        try:
+                            for mname, mmeta in (
+                                    _mirror_user_config_files()).items():
+                                hw_files.setdefault(
+                                    mname,
+                                    str((mmeta or {}).get("content", "")))
+                        except Exception:
+                            logger.debug(
+                                "list_hardware mirror floor "
+                                "unavailable", exc_info=True)
+                        try:
+                            result_text = _list_hardware(
+                                hw_files,
+                                str(tool_call.get("arguments", {})
+                                    .get("type", "")))
+                        except Exception:
+                            logger.exception(
+                                "list_hardware failed | type=%s",
+                                tool_call.get("arguments", {}))
+                            result_text = ("list_hardware failed "
+                                           "unexpectedly — fall back "
+                                           "to search_user_configs.")
+                    else:
+                        result_text = await _execute_tool_call_async(tool_call)
+                    if repeat_key:
+                        # Executed for the first time this request: any
+                        # literal repeat now gets the lean directive.
+                        read_ledger.add(repeat_key)
                     logger.info(
                         "Tool executed | name=%s result_chars=%d",
                         tool_call["name"], len(result_text),
@@ -2598,7 +3542,8 @@ async def chat_proxy(req: ChatRequest):
                     for tool_call, result_text in zip(tool_calls, results):
                         tool_message = _build_tool_result_message(tool_call, result_text)
 
-                        clean_content = MCP_TOOL_BLOCK_RE.sub("", current_content).strip()
+                        clean_content = _strip_template_pythonic_calls(current_content).strip()
+                        clean_content = MCP_TOOL_BLOCK_RE.sub("", clean_content).strip()
                         clean_content = ALT_TOOL_CALL_CONTENT_RE.sub("", clean_content).strip()
                         clean_content = CALL_SYNTAX_CLEANUP_RE.sub("", clean_content).strip()
                         clean_content = FUNC_CALL_CLEANUP_RE.sub("", clean_content).strip()
@@ -2631,7 +3576,8 @@ async def chat_proxy(req: ChatRequest):
             # Check whether the content contained tool call blocks BEFORE cleanup
             # so we don't restore raw tool call text back into the visible output.
             had_tool_blocks = bool(
-                MCP_TOOL_BLOCK_RE.search(current_content)
+                TEMPLATE_CALL_HEAD_RE.search(current_content)
+                or MCP_TOOL_BLOCK_RE.search(current_content)
                 or ALT_TOOL_CALL_CONTENT_RE.search(current_content)
                 or CALL_SYNTAX_CLEANUP_RE.search(current_content)
                 or FUNC_CALL_CLEANUP_RE.search(current_content)
@@ -2639,7 +3585,8 @@ async def chat_proxy(req: ChatRequest):
                 or XML_TOOL_CALLS_CLEANUP_RE.search(current_content)
                 or UNTERMINATED_TOOL_FENCE_RE.search(current_content)
             )
-            final_content = MCP_TOOL_BLOCK_RE.sub("", current_content).strip()
+            final_content = _strip_template_pythonic_calls(current_content).strip()
+            final_content = MCP_TOOL_BLOCK_RE.sub("", final_content).strip()
             final_content = ALT_TOOL_CALL_CONTENT_RE.sub("", final_content).strip()
             final_content = CALL_SYNTAX_CLEANUP_RE.sub("", final_content).strip()
             final_content = FUNC_CALL_CLEANUP_RE.sub("", final_content).strip()
@@ -2732,7 +3679,9 @@ async def chat_proxy(req: ChatRequest):
                     if clean_assistant:
                         current_messages.append({"role": "assistant", "content": clean_assistant})
                     reprompt_results = [
-                        await _execute_tool_call_async(c)
+                        (edit_session.execute(c)[0]
+                         if edit_session is not None and c.get("name") in EDIT_TOOL_NAMES
+                         else await _execute_tool_call_async(c))
                         for c in reprompt_calls[:MAX_MCP_TOOL_TURNS]
                     ]
                     for reprompt_call, result_text in zip(
@@ -2764,30 +3713,47 @@ async def chat_proxy(req: ChatRequest):
             if not mcp_tool_names and executed_tool_names:
                 mcp_tool_names = list(dict.fromkeys(executed_tool_names))
 
-            # ── Server-side merged-result validation + ONE lean repair (#1) ──
-            # Flag-gated (KWC_SERVER_DRAFT_VALIDATION=1). Needs the loaded
-            # config content (contextFiles); replies that merge cleanly get
-            # the deterministic audit footer (#3) when KWC_POST_APPLY_AUDIT=1.
-            # The frontend fenced-cfg path is untouched: worst case the reply
-            # stands as-is and `serverRepair` reports what happened.
-            server_repair_info = None
-            server_audit_enabled = _server_audit_enabled()
-            if (
-                final_content
-                and (
-                    _server_draft_validation_enabled()
-                    or server_audit_enabled
+
+            # ── Confabulated-completion guard (TRIDENT-15) ──
+            # The write path was ATTEMPTED (>=1 config_edit/config_write
+            # call) and the request ENDED with NOTHING staged: every op
+            # was a correctable kickback, a user decline, or a 90s
+            # approval timeout. Replies in this state habitually claim
+            # the change "has been staged/applied" (r2: "the tool call
+            # has already been executed and the changes are staged").
+            # We do NOT parse the prose to judge the claim (intent law):
+            # the trace is ground truth, so a note stating it is appended
+            # whenever trace and expectation disagree. Fail-safe — a
+            # wrong note is a useless observation; silence is the status
+            # quo. Never fires when anything IS staged (coarse on
+            # partial success, which the cards show honestly).
+            if (edit_session is not None
+                    and edit_session.edit_attempts
+                    and not edit_session.pending_edits):
+                logger.warning(
+                    "Confab guard | write attempts=%d outcome=%s staged=0"
+                    " | appending trace-truth note",
+                    edit_session.edit_attempts,
+                    edit_session.last_write_outcome,
                 )
-            ):
-                try:
-                    final_content, server_repair_info = await _server_validate_and_repair(
-                        client, req, headers, final_content,
-                        current_messages, usage_events, stop_event,
+                # The trace distinguishes a USER decision from technical
+                # failures — the note must not conflate them (a blanket
+                # "failed validation, was declined, or timed out" made
+                # models report a plain decline as "the system declined
+                # it").
+                if edit_session.last_write_outcome == "user_gated":
+                    note = (
+                        "\n\n---\n*Note: the user chose not to apply the "
+                        "proposed change(s); nothing is staged for "
+                        "saving.*"
                     )
-                except ChatStoppedError:
-                    raise
-                except Exception:
-                    logger.exception("Server draft validation failed | replying unchanged")
+                else:
+                    note = (
+                        "\n\n---\n*Note: no changes from this reply are"
+                        " staged for saving — every edit attempt failed"
+                        " validation, was declined, or timed out.*"
+                    )
+                final_content = final_content.rstrip() + note
 
             logger.info(
                 "Returning response | final_chars=%d tool_turns=%d tools=%s empty=%s",
@@ -2814,11 +3780,29 @@ async def chat_proxy(req: ChatRequest):
                 "mcpToolNames": mcp_tool_names,
                 "toolCalls": executed_tool_calls,
                 "repromptCount": empty_reprompts,
-                # Set when KWC_SERVER_DRAFT_VALIDATION ran ({attempted,
-                # repaired, issuesAfter[, reason]}); null otherwise. The
-                # frontend may use it to skip its own retry loop when the
-                # server already repaired the reply.
-                "serverRepair": server_repair_info,
+                # Per-turn narration captured at the progress emit point
+                # ({turn, narration, toolNames}); harness grading for the
+                # narration-vs-tool consistency check (Phase 6.5.5). Empty
+                # list when no requestId (no registry).
+                "narrationTurns": (
+                    list((_chat_progress.get(req.requestId) or {}).get("turns", []))
+                    if req.requestId else []
+                ),
+                # Tool-mediated editing (Phase 1): staged changes from
+                # config_edit/config_write calls (file/op/summary/newText/
+                # advisories), null when the feature is off or nothing was
+                # staged. The frontend feeds these to the current draft
+                # flow (approval cards arrive in Phase 2).
+                "pendingEdits": (
+                    edit_session.pending_edits_payload()
+                    if edit_session is not None and edit_session.pending_edits
+                    else None
+                ),
+                # Per-call write-attempt accounting (Gate 1 oscillation
+                # analysis); null when the session never ran.
+                "editAttempts": (
+                    edit_session.edit_attempts if edit_session is not None else None
+                ),
                 "usage": {
                     "completionTokens": sum(
                         (e.get("completionTokens") or 0) for e in usage_events
@@ -2826,6 +3810,12 @@ async def chat_proxy(req: ChatRequest):
                     "reasoningTokens": sum(
                         (e.get("reasoningTokens") or 0) for e in usage_events
                     ),
+                    # Ack-guard bookkeeping (Phase 6.5.2): 1 when a
+                    # continue-intent promise was rescued by the injected
+                    # directive. The harness grades rescued cases FAIL
+                    # (expect_no_ack_stall) — a cleaned-up lie is still
+                    # the weakness.
+                    "ackReprompts": ack_reprompts,
                     "events": usage_events,
                     "truncated": any(
                         (e.get("finishReason") or "") == "length" for e in usage_events
@@ -2847,6 +3837,7 @@ async def chat_proxy(req: ChatRequest):
         finally:
             if req.requestId:
                 _chat_stop_events.pop(req.requestId, None)
+                _chat_progress.pop(req.requestId, None)
 
 
 # ── AI state + chat history file storage ─────────────────────────────

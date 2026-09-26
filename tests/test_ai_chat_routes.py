@@ -2,8 +2,9 @@
 
 The suite was rewritten after the LM Studio-specific MCP integration was
 refactored into a native MCP server: it now covers the current provider
-payload building, response extraction, auto-search fallback, and the
-native tool-calling loop.
+payload building, response extraction, and the native tool-calling loop.
+The doc/config injection fallbacks and their env gates (KWC_AUTO_SEARCH,
+KWC_CONFIG_FALLBACK) were deleted in the Phase-5 gate sweep (2026-09).
 """
 import asyncio
 import json
@@ -66,37 +67,22 @@ class FakeAsyncClient:
 
 def test_system_prompt_includes_config_and_macro_guardrails():
     assert 'Prefer minimal targeted edits. Preserve unrelated settings, comments, and file structure' in ai_routes.SYSTEM_PROMPT
-    assert 'For config edits, return only changed, new, or deleted content in fenced cfg code blocks' in ai_routes.SYSTEM_PROMPT
     assert 'If a macro changes motion or extrusion state, preserve or restore it' in ai_routes.SYSTEM_PROMPT
     assert 'If no safe grounded answer is possible, say what must be verified next instead of guessing.' in ai_routes.SYSTEM_PROMPT
 
 
-def test_system_prompt_mentions_mini_diff_edit_protocol():
-    assert 'prefer a mini-diff' in ai_routes.SYSTEM_PROMPT
-    assert '-    BED_MESH_CALIBRATE' in ai_routes.SYSTEM_PROMPT
-    assert '+    BED_MESH_CALIBRATE ADAPTIVE=1' in ai_routes.SYSTEM_PROMPT
-
-
-def test_system_prompt_full_rewrite_guard_strict_wording():
-    # With fullRewriteGuard on, the edit protocol uses the STRICT wording
-    # (full block writes cause rejection + retry) so the model complies with
-    # the frontend's enforced mini-diff loop.
-    strict = ai_routes._build_system_prompt(full_rewrite_guard=True)
-    assert 'emit a mini-diff' in strict
-    assert 'causes the app to reject the reply as a full rewrite and retry' in strict
-    # The soft default wording must be gone in strict mode.
-    assert 'prefer a mini-diff' not in strict
-    assert 'risks a full rewrite where those lines could be dropped' not in strict
-    # Default (guard off) keeps the soft wording.
-    assert 'prefer a mini-diff' in ai_routes._build_system_prompt()
-    # Everything else in the prompt is untouched by the wording swap.
-    assert '-    BED_MESH_CALIBRATE' in strict
-    assert '+    BED_MESH_CALIBRATE ADAPTIVE=1' in strict
+def test_system_prompt_no_prose_edit_protocol():
+    # Phase-4 ratchet (2026-09-22): the prose fenced-cfg / mini-diff edit
+    # protocol is retired. Edits go through config_edit/config_write + the
+    # approval card; the system prompt must not advertise the old protocol.
+    assert 'mini-diff' not in ai_routes.SYSTEM_PROMPT
+    assert '# file:' not in ai_routes.SYSTEM_PROMPT
+    assert 'BED_MESH_CALIBRATE ADAPTIVE=1' not in ai_routes.SYSTEM_PROMPT
 
 
 def test_system_prompt_mentions_tools_are_not_gcode_commands():
     assert 'G28' in ai_routes.SYSTEM_PROMPT
-    assert 'never wrap them in ```tool blocks' in ai_routes.SYSTEM_PROMPT
+    assert 'never invoke them as tool calls' in ai_routes.SYSTEM_PROMPT
 
 
 # ── _prepare_messages ───────────────────────────────────────────────────
@@ -106,7 +92,7 @@ def _blank_memory(monkeypatch):
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
 
 
-# ── _is_edit_request (Phase 3 auto-search gating) ─────────────────────
+# ── _is_edit_request (drives the edit-prose nudge gate) ────────────────
 
 
 def test_is_edit_request_positive():
@@ -143,25 +129,6 @@ def test_is_edit_request_uses_latest_user_message():
         {'role': 'assistant', 'content': 'Done.'},
         {'role': 'user', 'content': 'What is pressure advance?'},
     ])
-
-
-def test_auto_search_enabled_toggle(monkeypatch):
-    monkeypatch.delenv('KWC_AUTO_SEARCH', raising=False)
-    assert not ai_routes._auto_search_enabled()  # default disabled (Phase 3 A/B)
-    monkeypatch.setenv('KWC_AUTO_SEARCH', '1')
-    assert ai_routes._auto_search_enabled()
-    monkeypatch.setenv('KWC_AUTO_SEARCH', '0')
-    assert not ai_routes._auto_search_enabled()
-
-
-def test_config_fallback_enabled_toggle(monkeypatch):
-    # Default disabled (Phase 5 lean first pass).
-    monkeypatch.delenv('KWC_CONFIG_FALLBACK', raising=False)
-    assert not ai_routes._config_fallback_enabled()
-    monkeypatch.setenv('KWC_CONFIG_FALLBACK', '1')
-    assert ai_routes._config_fallback_enabled()
-    monkeypatch.setenv('KWC_CONFIG_FALLBACK', '0')
-    assert not ai_routes._config_fallback_enabled()
 
 
 def test_minimal_prompt_enabled_toggle(monkeypatch):
@@ -635,17 +602,18 @@ def test_list_models_route_graceful_error(monkeypatch):
     assert 'Failed to list models' in body['error']
 
 
-def test_resolve_native_tools_auto_split():
-    # "auto" keeps the provider-based split: local http -> text protocol,
-    # cloud https -> native function calling.
-    assert ai_routes._resolve_native_tools(
-        'openai-compatible', 'http://192.168.1.133:8080/v1/chat/completions', 'auto',
-    ) is None
-    tools = ai_routes._resolve_native_tools(
-        'openai-compatible', 'https://api.deepseek.com/v1/chat/completions', 'auto',
-    )
-    assert tools is not None
-    assert {t['function']['name'] for t in tools} >= {'search_klipper_docs'}
+def test_resolve_native_tools_auto_is_native_first():
+    # "auto" is NATIVE-FIRST for every provider (2026-09-17 decision):
+    # local llama.cpp included — the machine channel is what stops models
+    # from narrating protocol text back at the user. Only toolProtocol=
+    # "text" downgrades to the ```tool fallback.
+    for url in ('http://192.168.1.133:8080/v1/chat/completions',
+                'https://api.deepseek.com/v1/chat/completions'):
+        tools = ai_routes._resolve_native_tools(
+            'openai-compatible', url, 'auto',
+        )
+        assert tools is not None, url
+        assert {t['function']['name'] for t in tools} >= {'search_klipper_docs'}
 
 
 def test_resolve_native_tools_force_native_for_local():
@@ -662,6 +630,20 @@ def test_resolve_native_tools_force_text_for_cloud():
     assert ai_routes._resolve_native_tools(
         'openai-compatible', 'https://api.deepseek.com/v1/chat/completions', 'text',
     ) is None
+
+
+def test_tool_context_format_law_matches_protocol():
+    # The ```tool format law is fuel for "I see you've shared the tool-call
+    # instructions" ack bubbles — it must only appear when the text
+    # protocol is actually in force. Native context states the machine
+    # channel instead; the tool list itself is identical either way.
+    native = ai_routes._build_mcp_tool_context(native_mode=True)
+    text = ai_routes._build_mcp_tool_context(native_mode=False)
+    assert '```tool' not in native
+    assert 'never write tool calls as text' in native
+    assert '```tool' in text  # fallback law intact for tool_protocol=text
+    for name in ai_routes._MCP_TOOL_SNIPPETS:
+        assert f"- {name}:" in native and f"- {name}:" in text
 
 
 def test_extract_provider_content():
@@ -718,8 +700,12 @@ def test_chat_proxy_cloud_openai_compatible_requires_api_key():
 
 
 def test_chat_proxy_local_openai_compatible_allows_missing_key(monkeypatch):
+    # Write tools are product behavior (Phase-6), and a request without
+    # contextFiles mirror-seeds an edit session (TRIDENT-16), which makes
+    # `editAttempts` 0 instead of None and couples the assertion to the
+    # host's user-config dir. This test covers the plain Q&A / backstop
+    # path, so pin the read-only arm explicitly via editTools=False.
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
-    monkeypatch.setattr(ai_routes, '_auto_search_context', lambda query: None)
 
     captured = {}
 
@@ -741,6 +727,7 @@ def test_chat_proxy_local_openai_compatible_allows_missing_key(monkeypatch):
             'model': 'gemma-4-12b',
             'apiUrl': 'http://192.168.1.133:8080/v1/chat/completions',
             'apiProvider': 'openai-compatible',
+            'editTools': False,
         },
     )
 
@@ -751,10 +738,13 @@ def test_chat_proxy_local_openai_compatible_allows_missing_key(monkeypatch):
         'mcpToolNames': [],
         'toolCalls': [],
         'repromptCount': 0,
-        'serverRepair': None,
+        'narrationTurns': [],
+        'pendingEdits': None,
+        'editAttempts': None,
         'usage': {
             'completionTokens': 0,
             'reasoningTokens': 0,
+            'ackReprompts': 0,
             'events': [],
             'truncated': False,
         },
@@ -769,7 +759,6 @@ def test_chat_proxy_local_native_tool_protocol_sends_tools(monkeypatch):
     # toolProtocol="native" forces the OpenAI tools array even for a local
     # plain-http provider (gpt-oss on llama.cpp needs this).
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
-    monkeypatch.setattr(ai_routes, '_auto_search_context', lambda query: None)
 
     captured = {}
 
@@ -800,11 +789,12 @@ def test_chat_proxy_local_native_tool_protocol_sends_tools(monkeypatch):
     assert {t['function']['name'] for t in tools} >= {'search_klipper_docs'}
 
 
-def test_chat_proxy_local_default_tool_protocol_sends_no_tools(monkeypatch):
-    # Default ("auto") keeps the text protocol for local providers: no tools
-    # array in the outgoing payload.
+def test_chat_proxy_local_default_tool_protocol_sends_tools(monkeypatch):
+    # Default ("auto") is NATIVE-FIRST for local providers too (2026-09-17):
+    # the outgoing payload carries the tools array, and the system prompt
+    # drops the ```tool format law (ack-bubble fuel) in favor of the
+    # machine-channel statement.
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
-    monkeypatch.setattr(ai_routes, '_auto_search_context', lambda query: None)
 
     captured = {}
 
@@ -829,12 +819,21 @@ def test_chat_proxy_local_default_tool_protocol_sends_no_tools(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert 'tools' not in captured['payload']
+    payload = captured['payload']
+    assert 'tools' in payload
+    assert {t['function']['name'] for t in payload['tools']} >= {'search_klipper_docs'}
+    sys_txt = '\n'.join(str(m.get('content', '')) for m in payload.get('messages', [])
+                        if m.get('role') == 'system')
+    assert '```tool' not in sys_txt
 
 
 def test_chat_proxy_returns_plain_content(monkeypatch):
+    # Write tools are product behavior (Phase-6), and a request without
+    # contextFiles mirror-seeds an edit session (TRIDENT-16), which makes
+    # `editAttempts` 0 instead of None and couples the assertion to the
+    # host's user-config dir. This test covers the plain Q&A / backstop
+    # path, so pin the read-only arm explicitly via editTools=False.
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
-    monkeypatch.setattr(ai_routes, '_auto_search_context', lambda query: None)
 
     def fake_post(url, headers, payload):
         return DummyResponse(
@@ -852,6 +851,7 @@ def test_chat_proxy_returns_plain_content(monkeypatch):
             'model': 'gpt-4o',
             'apiUrl': 'https://api.openai.com/v1/chat/completions',
             'apiProvider': 'chatgpt',
+            'editTools': False,
         },
     )
 
@@ -862,10 +862,13 @@ def test_chat_proxy_returns_plain_content(monkeypatch):
         'mcpToolNames': [],
         'toolCalls': [],
         'repromptCount': 0,
-        'serverRepair': None,
+        'narrationTurns': [],
+        'pendingEdits': None,
+        'editAttempts': None,
         'usage': {
             'completionTokens': 0,
             'reasoningTokens': 0,
+            'ackReprompts': 0,
             'events': [],
             'truncated': False,
         },
@@ -897,7 +900,6 @@ def test_chat_proxy_reports_usage_and_truncation(monkeypatch):
     # (finish_reason=length) must surface in /ai/chat as truncated so the
     # harness can distinguish budget exhaustion from a wrong answer.
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
-    monkeypatch.setattr(ai_routes, '_auto_search_context', lambda query: None)
 
     def fake_post(url, headers, payload):
         return DummyResponse(
@@ -934,57 +936,6 @@ def test_chat_proxy_reports_usage_and_truncation(monkeypatch):
     assert usage['truncated'] is True
     assert usage['events'][0]['finishReason'] == 'length'
     assert usage['events'][0]['context'] == 'initial'
-
-
-def test_chat_proxy_auto_search_fallback_injects_docs(monkeypatch):
-    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
-    # The fallback is off by default (Phase 3 A/B) — this test exercises the
-    # injection path with the toggle explicitly enabled.
-    monkeypatch.setenv('KWC_AUTO_SEARCH', '1')
-    monkeypatch.setattr(
-        ai_routes,
-        '_auto_search_context',
-        lambda query: 'From Probes.md (score 1.2):\n- horizontal_move_z is a bed_mesh safety travel height.',
-    )
-
-    captured = {'count': 0}
-
-    def fake_post(url, headers, payload):
-        captured['count'] += 1
-        # First call: model gives a plain (ungrounded) answer -> fallback triggers.
-        if captured['count'] == 1:
-            return DummyResponse(
-                {'choices': [{'message': {'content': 'I think it controls Z travel.'}}]},
-                url=url,
-            )
-        # Second call: model answers after the docs were injected.
-        captured['second_payload'] = payload
-        return DummyResponse(
-            {'choices': [{'message': {'content': 'horizontal_move_z is the Z hop before XY travel.'}}]},
-            url=url,
-        )
-
-    monkeypatch.setattr(httpx, 'AsyncClient', lambda *args, **kwargs: FakeAsyncClient(post_handler=fake_post))
-
-    response = client.post(
-        '/ai/chat',
-        json={
-            'messages': [{'role': 'user', 'content': 'What does [bed_mesh] horizontal_move_z do?'}],
-            'apiKey': 'openai-token',
-            'model': 'gpt-4o',
-            'apiUrl': 'https://api.openai.com/v1/chat/completions',
-            'apiProvider': 'chatgpt',
-        },
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body['content'] == 'horizontal_move_z is the Z hop before XY travel.'
-    assert body['mcpToolTurns'] == 1
-    assert body['mcpToolNames'] == ['search_klipper_docs']
-    # The injected docs must appear as a user-role tool result message in the second payload.
-    second_payload = captured['second_payload']
-    assert any('[Tool result: search_klipper_docs' in str(m.get('content', '')) for m in second_payload['messages'])
 
 
 def test_chat_proxy_native_tool_call_loop(monkeypatch):
@@ -1193,6 +1144,11 @@ def test_chat_proxy_empty_reprompt_executes_xml_calls(monkeypatch):
 
 
 def test_chat_proxy_empty_response_reprompt_recovers(monkeypatch):
+    # Write tools are product behavior (Phase-6), and a request without
+    # contextFiles mirror-seeds an edit session (TRIDENT-16), which makes
+    # `editAttempts` 0 instead of None and couples the assertion to the
+    # host's user-config dir. This test covers the plain Q&A / backstop
+    # path, so pin the read-only arm explicitly via editTools=False.
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
     monkeypatch.setattr(
         ai_routes, '_execute_tool_call',
@@ -1237,6 +1193,10 @@ def test_chat_proxy_empty_response_reprompt_recovers(monkeypatch):
             'model': 'gpt-4o',
             'apiUrl': 'https://api.openai.com/v1/chat/completions',
             'apiProvider': 'chatgpt',
+            # Read-only arm: these tests pin the read-only loop cap
+            # (MAX_MCP_TOOL_TURNS) and the host's user-config mirror
+            # must not arm an edit session under them.
+            'editTools': False,
         },
     )
 
@@ -1257,6 +1217,11 @@ def test_chat_proxy_empty_response_reprompt_recovers(monkeypatch):
 
 
 def test_chat_proxy_empty_response_reprompt_exhausts(monkeypatch):
+    # Write tools are product behavior (Phase-6), and a request without
+    # contextFiles mirror-seeds an edit session (TRIDENT-16), which makes
+    # `editAttempts` 0 instead of None and couples the assertion to the
+    # host's user-config dir. This test covers the plain Q&A / backstop
+    # path, so pin the read-only arm explicitly via editTools=False.
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
     monkeypatch.setattr(
         ai_routes, '_execute_tool_call',
@@ -1292,6 +1257,10 @@ def test_chat_proxy_empty_response_reprompt_exhausts(monkeypatch):
             'model': 'gpt-4o',
             'apiUrl': 'https://api.openai.com/v1/chat/completions',
             'apiProvider': 'chatgpt',
+            # Read-only arm: these tests pin the read-only loop cap
+            # (MAX_MCP_TOOL_TURNS) and the host's user-config mirror
+            # must not arm an edit session under them.
+            'editTools': False,
         },
     )
 
@@ -1310,24 +1279,129 @@ def test_chat_proxy_empty_response_reprompt_exhausts(monkeypatch):
     assert len(calls) == 2 * max_turns + 3
 
 
+# ── Repeat-read guard (flash-next full-bank 2026-09-23) ────────────────
+# Timeout-class ERRORs were tool loops re-reading identical files
+# (read_user_config x10-x12). The guard serves a lean directive instead
+# of re-executing a (name, args) call already answered this request.
+
+
+def test_chat_proxy_repeat_read_blocked_without_reexecution(monkeypatch):
+    """An identical (name, args) read executes ONCE; the second call gets
+    REPEAT_READ_FEEDBACK with no tool execution and a trivial payload,
+    and a changed-args call still executes normally."""
+    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
+    executed = []
+
+    def fake_exec(call):
+        executed.append((call['name'],
+                         json.dumps(call.get('arguments') or {}, sort_keys=True)))
+        return f"result for {call['name']} #{len(executed)}"
+
+    monkeypatch.setattr(ai_routes, '_execute_tool_call', fake_exec)
+
+    read_call = '```tool\n{"name": "read_user_config", "arguments": ' \
+                '{"filename": "printer.cfg"}}\n```'
+    other_call = '```tool\n{"name": "read_user_config", "arguments": ' \
+                 '{"filename": "Hotkey.cfg"}}\n```'
+    scripted = [read_call, read_call, other_call,
+                'The idle_timeout section sets timeout: 1800.']
+    calls = []
+
+    def fake_post(url, headers, payload):
+        calls.append(payload)
+        content = scripted[min(len(calls) - 1, len(scripted) - 1)]
+        return DummyResponse(
+            {'choices': [{'message': {'content': content}}]}, url=url)
+
+    monkeypatch.setattr(
+        httpx, 'AsyncClient',
+        lambda *args, **kwargs: FakeAsyncClient(post_handler=fake_post),
+    )
+
+    response = client.post(
+        '/ai/chat',
+        json={
+            'messages': [{'role': 'user',
+                          'content': 'what is my idle timeout?'}],
+            'apiKey': 'openai-token',
+            'model': 'gpt-4o',
+            'apiUrl': 'https://api.openai.com/v1/chat/completions',
+            'apiProvider': 'chatgpt',
+            'toolProtocol': 'text',
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body['content'] == 'The idle_timeout section sets timeout: 1800.'
+    # The identical second read never reached the tool executor...
+    assert executed == [
+        ('read_user_config', '{"filename": "printer.cfg"}'),
+        ('read_user_config', '{"filename": "Hotkey.cfg"}'),
+    ]
+    # ...and the model saw the directive in the follow-up messages.
+    followups = json.dumps(calls[-1]['messages'])
+    assert 'ALREADY RETRIEVED' in followups
+
+
+def test_chat_proxy_repeat_guard_does_not_touch_unlisted_tools(monkeypatch):
+    """Guard scope is literal and allow-listed: get_klippy_status (live
+    state, not idempotent) is NOT in REPEAT_GUARD_TOOLS — identical
+    repeats keep executing."""
+    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
+    executed = []
+
+    def fake_exec(call):
+        executed.append(call['name'])
+        return f"result for {call['name']} #{len(executed)}"
+
+    monkeypatch.setattr(ai_routes, '_execute_tool_call', fake_exec)
+
+    status_call = '```tool\n{"name": "get_klippy_status", "arguments": {}}\n```'
+    scripted = [status_call, status_call,
+                'Klipper is ready.']
+    calls = []
+
+    def fake_post(url, headers, payload):
+        calls.append(payload)
+        content = scripted[min(len(calls) - 1, len(scripted) - 1)]
+        return DummyResponse(
+            {'choices': [{'message': {'content': content}}]}, url=url)
+
+    monkeypatch.setattr(
+        httpx, 'AsyncClient',
+        lambda *args, **kwargs: FakeAsyncClient(post_handler=fake_post),
+    )
+
+    response = client.post(
+        '/ai/chat',
+        json={
+            'messages': [{'role': 'user', 'content': 'is klipper ready?'}],
+            'apiKey': 'openai-token',
+            'model': 'gpt-4o',
+            'apiUrl': 'https://api.openai.com/v1/chat/completions',
+            'apiProvider': 'chatgpt',
+            'toolProtocol': 'text',
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()['content'] == 'Klipper is ready.'
+    assert executed == ['get_klippy_status', 'get_klippy_status']
+
+
 def test_chat_proxy_provider_empty_recovers_via_backstop(monkeypatch):
     # A literal empty completion from the provider (llama.cpp transient
-    # hiccup) must not surface as an API error. The auto-search fallback and
-    # the empty-response backstop both re-query; the tool-less re-prompt
-    # recovers with real text.
+    # hiccup) must not surface as an API error. The empty-response backstop
+    # re-queries tool-less and recovers with real text. (The auto-search
+    # fallback that once re-queried here first was deleted in the Phase-5
+    # gate sweep.)
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
-    monkeypatch.setattr(
-        ai_routes, '_auto_search_context',
-        lambda query: 'Snippet: BED_MESH_CALIBRATE ADAPTIVE=1 ...',
-    )
 
     calls = []
 
     def fake_post(url, headers, payload):
         calls.append(payload)
-        if len(calls) <= 2:
-            # Initial pass and the auto-search re-query: literally nothing
-            # from the server.
+        if len(calls) <= 1:
+            # Initial pass: literally nothing from the server.
             return DummyResponse(
                 {'choices': [{'message': {'content': ''}}]},
                 url=url,
@@ -1354,17 +1428,21 @@ def test_chat_proxy_provider_empty_recovers_via_backstop(monkeypatch):
             'model': 'gpt-4o',
             'apiUrl': 'https://api.openai.com/v1/chat/completions',
             'apiProvider': 'chatgpt',
+            # Read-only arm: these tests pin the read-only loop cap
+            # (MAX_MCP_TOOL_TURNS) and the host's user-config mirror
+            # must not arm an edit session under them.
+            'editTools': False,
         },
     )
 
     assert response.status_code == 200
     body = response.json()
     assert body['content'] == 'horizontal_move_z sets the Z hop before XY travel.'
-    # 1 initial + 1 auto-search + 1 backstop re-prompt = 3 provider calls.
-    assert len(calls) == 3
+    # 1 initial + 1 backstop re-prompt = 2 provider calls.
+    assert len(calls) == 2
     # The backstop re-prompt must disable tools and carry the direct-answer
     # instruction.
-    reprompt = calls[2]
+    reprompt = calls[1]
     assert 'tools' not in reprompt
     assert any(
         m.get('role') == 'system' and 'Do not call any tools' in m.get('content', '')
@@ -1373,6 +1451,11 @@ def test_chat_proxy_provider_empty_recovers_via_backstop(monkeypatch):
 
 
 def test_chat_proxy_local_reprompt_bumps_max_tokens(monkeypatch):
+    # Write tools are product behavior (Phase-6), and a request without
+    # contextFiles mirror-seeds an edit session (TRIDENT-16), which makes
+    # `editAttempts` 0 instead of None and couples the assertion to the
+    # host's user-config dir. This test covers the plain Q&A / backstop
+    # path, so pin the read-only arm explicitly via editTools=False.
     # Local reasoning builds (llama.cpp --reasoning-budget) can exhaust a low
     # max_tokens invisibly and return empty content with finish_reason=length.
     # The tool-less re-prompt must raise the budget so the answer fits.
@@ -1411,6 +1494,7 @@ def test_chat_proxy_local_reprompt_bumps_max_tokens(monkeypatch):
             'apiUrl': 'http://localhost:1234/v1/chat/completions',
             'apiProvider': 'openai-compatible',
             'maxTokens': 1024,
+            'editTools': False,
         },
     )
 
@@ -1578,178 +1662,6 @@ def test_reference_route_returns_full_klipper_doc():
     assert response.status_code == 200
     assert response.json()['filename'] == 'Bed_Mesh.md'
     assert response.json()['content'].startswith('# Bed Mesh')
-
-
-# ── Config-grounding fallback (Phase 4) ───────────────────────────────
-
-
-def test_targeted_section_headers_parity_with_frontend():
-    content = (
-        '[printer]\n'
-        'kinematics: corexy\n'
-        '\n'
-        '[gcode_macro Level_Bed]\n'
-        'gcode:\n'
-        '  BED_MESH_CALIBRATE\n'
-        '\n'
-        '[bed_mesh]\n'
-        'speed: 50\n'
-    )
-    assert ai_routes._targeted_section_headers('fix the Level_Bed macro', content) == ['gcode_macro Level_Bed']
-    assert ai_routes._targeted_section_headers('what does the [bed_mesh] section do?', content) == ['bed_mesh']
-    assert ai_routes._targeted_section_headers('change speed', content) == []
-
-
-def test_mentioned_config_filenames_word_boundaries():
-    available = ['printer.cfg', 'EBB.cfg']
-    assert ai_routes._mentioned_config_filenames('update printer.cfg please', available) == ['printer.cfg']
-    # No '.' between printer and cfg -> not a filename mention.
-    assert ai_routes._mentioned_config_filenames('printer_cfg is fine', available) == []
-
-
-def test_config_fallback_context_section_targeted():
-    context_files = {
-        'printer.cfg': {
-            'content': '[printer]\nkinematics: corexy\nmax_accel: 12000\n\n[bed_mesh]\nspeed: 50\n',
-            'label': 'Loaded config',
-        },
-    }
-    injections = ai_routes._config_fallback_context(
-        'What is my max_accel in the [printer] section of printer.cfg?',
-        context_files,
-    )
-    assert injections is not None
-    assert len(injections) == 1
-    call, result = injections[0]
-    assert call['name'] == 'read_user_config'
-    assert call['arguments'] == {'filename': 'printer.cfg', 'section': 'printer'}
-    assert 'max_accel: 12000' in result
-    # Section-targeted read stays lean — the other section is not included.
-    assert 'bed_mesh' not in result
-
-
-def test_config_fallback_context_whole_file_last_resort():
-    context_files = {
-        'printer.cfg': {
-            'content': '[printer]\nkinematics: corexy\nmax_accel: 12000\n',
-            'label': 'Loaded config',
-        },
-    }
-    injections = ai_routes._config_fallback_context('What is my max_accel in printer.cfg?', context_files)
-    assert injections is not None
-    call, result = injections[0]
-    assert call['arguments'] == {'filename': 'printer.cfg'}
-    assert 'max_accel: 12000' in result
-
-
-def test_config_fallback_context_none_without_reference():
-    context_files = {
-        'printer.cfg': {'content': '[printer]\nkinematics: corexy\n', 'label': 'Loaded config'},
-    }
-    # Pure knowledge question -> no config injection even with one file loaded.
-    assert ai_routes._config_fallback_context('What is pressure advance?', context_files) is None
-    assert ai_routes._config_fallback_context('What is pressure advance?', {}) is None
-
-
-def test_config_fallback_context_single_file_without_filename_mention():
-    context_files = {
-        'printer.cfg': {
-            'content': '[printer]\nkinematics: corexy\nmax_accel: 12000\n\n[bed_mesh]\nspeed: 50\n',
-            'label': 'Loaded config',
-        },
-    }
-    # No filename mention, but a config section reference -> section-targeted.
-    injections = ai_routes._config_fallback_context('What does [bed_mesh] speed do?', context_files)
-    assert injections is not None
-    call, result = injections[0]
-    assert call['arguments'] == {'filename': 'printer.cfg', 'section': 'bed_mesh'}
-    assert 'speed: 50' in result
-
-
-def test_chat_proxy_config_fallback_injects_section(monkeypatch):
-    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
-    monkeypatch.setattr(ai_routes, '_auto_search_context', lambda query: None)
-    # The fallback is off by default (lean-first-pass workflow) — this test
-    # exercises the injection path with the toggle explicitly enabled.
-    monkeypatch.setenv('KWC_CONFIG_FALLBACK', '1')
-
-    captured = {'count': 0}
-
-    def fake_post(url, headers, payload):
-        captured['count'] += 1
-        # First call: model answers without calling any tool -> fallback triggers.
-        if captured['count'] == 1:
-            return DummyResponse(
-                {'choices': [{'message': {'content': 'Your max accel is probably fine.'}}]},
-                url=url,
-            )
-        # Second call: model answers after the config section was injected.
-        captured['second_payload'] = payload
-        return DummyResponse(
-            {'choices': [{'message': {'content': 'Your max_accel is 12000 (from the [printer] section).'}}]},
-            url=url,
-        )
-
-    monkeypatch.setattr(httpx, 'AsyncClient', lambda *args, **kwargs: FakeAsyncClient(post_handler=fake_post))
-
-    response = client.post(
-        '/ai/chat',
-        json={
-            'messages': [{'role': 'user', 'content': 'What is my max_accel in the [printer] section of printer.cfg?'}],
-            'apiKey': 'openai-token',
-            'model': 'gpt-4o',
-            'apiUrl': 'https://api.openai.com/v1/chat/completions',
-            'apiProvider': 'chatgpt',
-            'contextFiles': {
-                'printer.cfg': {
-                    'content': '[printer]\nkinematics: corexy\nmax_accel: 12000\n',
-                    'label': 'Loaded config',
-                },
-            },
-        },
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body['content'] == 'Your max_accel is 12000 (from the [printer] section).'
-    assert body['mcpToolTurns'] == 1
-    assert body['mcpToolNames'] == ['read_user_config']
-    # The injected config must appear as a user-role tool result in the second payload.
-    second_payload = captured['second_payload']
-    assert any('[Tool result: read_user_config' in str(m.get('content', '')) for m in second_payload['messages'])
-
-
-def test_chat_proxy_config_fallback_skips_without_context_files(monkeypatch):
-    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
-    monkeypatch.setattr(ai_routes, '_auto_search_context', lambda query: None)
-
-    captured = {'count': 0}
-
-    def fake_post(url, headers, payload):
-        captured['count'] += 1
-        return DummyResponse(
-            {'choices': [{'message': {'content': 'I think max_accel is around 12000.'}}]},
-            url=url,
-        )
-
-    monkeypatch.setattr(httpx, 'AsyncClient', lambda *args, **kwargs: FakeAsyncClient(post_handler=fake_post))
-
-    response = client.post(
-        '/ai/chat',
-        json={
-            'messages': [{'role': 'user', 'content': 'What is my max_accel in printer.cfg?'}],
-            'apiKey': 'openai-token',
-            'model': 'gpt-4o',
-            'apiUrl': 'https://api.openai.com/v1/chat/completions',
-            'apiProvider': 'chatgpt',
-        },
-    )
-
-    assert response.status_code == 200
-    assert captured['count'] == 1  # no context files -> fallback skipped -> single provider call
-    body = response.json()
-    assert body['mcpToolTurns'] == 0
-    assert body['mcpToolNames'] == []
 
 
 # ── Tool call detail records ──────────────────────────────────────────

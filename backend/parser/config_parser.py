@@ -90,6 +90,15 @@ class ConfigFile:
     # or a comment are still visible there), so validation can point at the
     # exact line Klipper would refuse to load.
     unclosed_headers: list[tuple[int, str]] = field(default_factory=list)
+    # (line_number, line_text) for column-0 lines configparser itself
+    # rejects: not blank/comment/section-header, and no ``:``/``=`` option
+    # delimiter. Klipper parses with configparser, so these abort the load
+    # outright (ParsingError) — e.g. a multi-line value accidentally wrapped
+    # back to column 0 (``rename_existing:`` + unindented continuation),
+    # stray prose, or bare Jinja inside a param block. Detected from the
+    # raw text because the tolerant parser folds such lines into the
+    # previous param's value.
+    malformed_lines: list[tuple[int, str]] = field(default_factory=list)
 
     def get_section(self, full_header: str) -> Optional[ConfigSection]:
         for s in self.sections:
@@ -179,6 +188,56 @@ def find_unclosed_headers(text: str) -> list[tuple[int, str]]:
             continue
         if UNCLOSED_SECTION_RE.match(raw):
             found.append((idx + 1, raw.strip()))
+    return found
+
+
+def find_malformed_lines(text: str) -> list[tuple[int, str]]:
+    """Find column-0 lines configparser itself refuses to parse.
+
+    Klipper loads every file through configparser, which rejects a
+    non-indented line inside a section unless it is blank, a comment, a
+    section header, or an ``option: value`` / ``option = value`` line (its
+    option regex puts no constraint on the option name, so any line
+    containing ':' or '=' is accepted as an option — possibly a bogus one,
+    which check_unused then reports; either way not our syntax check). The
+    classic shape: a multi-line value wrapped back to column 0::
+
+        [gcode_macro PROBE_ACCURACY]
+        rename_existing:
+        PROBE_ACCURACY
+
+    The unindented continuation aborts the whole load with ParsingError.
+    Same for stray prose or bare Jinja at column 0.
+
+    Unclosed section headers are skipped — the dedicated
+    ``unclosed_section_header`` check already points at those lines.
+    Returns ``(line_number, line_text)`` pairs.
+    """
+    found: list[tuple[int, str]] = []
+    in_section = False
+    for idx, raw in enumerate(text.splitlines()):
+        if raw[:1] in (" ", "\t"):  # continuation — legal for configparser
+            continue
+        stripped = raw.strip()
+        if not stripped or stripped[0] in ("#", ";"):
+            continue
+        if SECTION_RE.match(stripped) or INCLUDE_RE.match(stripped):
+            in_section = True
+            continue
+        if not in_section:
+            # configparser aborts with MissingSectionHeaderError the moment
+            # it must treat a line outside any section as content.
+            found.append((idx + 1, stripped))
+            continue
+        if UNCLOSED_SECTION_RE.match(stripped):
+            continue  # reported by the unclosed-header check
+        # configparser.OPTCRE semantics: the option name is everything
+        # before the first ':'/'=' and may not start with one, so a line
+        # matches iff it contains a delimiter and doesn't start with one
+        # ('=======' has '=' but no legal option name -> ParsingError).
+        if stripped[0] not in ":=" and (":" in stripped or "=" in stripped):
+            continue
+        found.append((idx + 1, stripped))
     return found
 
 
@@ -496,6 +555,7 @@ def parse_config(text: str, filename: str = "printer.cfg") -> ConfigFile:
     config.save_config_start_line, config.save_config_sections = _parse_save_config_sections(lines)
 
     config.unclosed_headers = find_unclosed_headers(text)
+    config.malformed_lines = find_malformed_lines(text)
 
     return config
 

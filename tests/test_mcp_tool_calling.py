@@ -254,6 +254,22 @@ def test_extract_tool_calls_call_syntax_without_token():
     assert calls == [{"name": "lookup", "arguments": {"query": "bed_mesh"}}]
 
 
+def test_extract_ignores_klipper_brace_idiom():
+    # `RESUME_BASE {get_params}` is the macro-rename idiom in Klipper macro
+    # bodies, not a tool call. Without the key-signature lookahead,
+    # CALL_SYNTAX_RE extracted a phantom zero-arg RESUME_BASE call from a
+    # correct macro-move answer (AMBI-02 r3b run 2026-09-15), derailing
+    # the loop with an "Unknown tool" kickback.
+    text = (
+        "[gcode_macro RESUME]\n"
+        "gcode:\n"
+        '    {% if printer.idle_timeout.state == "Printing" %}\n'
+        "      RESUME_BASE {get_params}\n"
+        "    {% endif %}\n"
+    )
+    assert _extract_tool_calls(text) == []
+
+
 def test_extract_tool_calls_deduplicates_identical_blocks():
     block = '{"name": "lookup", "arguments": {"query": "x"}}'
     text = f"```tool\n{block}\n```\n```tool\n{block}\n```\n"

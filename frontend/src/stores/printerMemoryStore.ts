@@ -18,6 +18,8 @@ export interface PrinterMemory {
   printerName: string;
   kinematics: string;
   probe: string;
+  buildVolume: string;
+  extruderType: string;
   additionalNotes: string;
 }
 
@@ -28,6 +30,8 @@ export const DEFAULT_PRINTER_MEMORY: PrinterMemory = {
   printerName: '',
   kinematics: '',
   probe: '',
+  buildVolume: '',
+  extruderType: '',
   additionalNotes: '',
 };
 
@@ -72,6 +76,8 @@ export const usePrinterMemoryStore = create<PrinterMemoryStore>((set, get) => ({
         printerName: data.printerName || '',
         kinematics: data.kinematics || '',
         probe: data.probe || '',
+        buildVolume: data.buildVolume || '',
+        extruderType: data.extruderType || '',
         additionalNotes: data.additionalNotes || '',
       };
       set({ memory, loading: false });

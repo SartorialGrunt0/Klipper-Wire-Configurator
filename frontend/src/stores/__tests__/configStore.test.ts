@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ConfigFile, ConfigParam, ConfigSection, ValidationResult } from '@/types/config';
 import { useConfigStore } from '@/stores/configStore';
+import { planApprovedEditApply } from '@/utils/approvalApply';
 
 vi.mock('@/services/api', () => ({
   validateConfig: vi.fn(async (cf: ConfigFile) => ({
@@ -103,6 +104,46 @@ describe('configStore file operations', () => {
     useConfigStore.getState().setActiveFile('a.cfg');
     useConfigStore.getState().removeConfigFile('a.cfg');
     expect(useConfigStore.getState().activeFile).toBe('printer.cfg');
+  });
+
+  it('removeConfigFile comments out include lines pointing at the deleted file', () => {
+    const store = useConfigStore.getState();
+    const printer = makeConfigFile([
+      makeSection({ section_type: 'include', section_name: './KAMP/old.cfg', full_header: 'include ./KAMP/old.cfg' }),
+      makeSection({ section_type: 'include', section_name: 'macros.cfg', full_header: 'include macros.cfg' }),
+    ]);
+    printer.includes = ['./KAMP/old.cfg', 'macros.cfg'];
+    store.setConfigFile('printer.cfg', printer);
+    store.setConfigFile('old.cfg', makeConfigFile());
+    store.setConfigFile('macros.cfg', makeConfigFile());
+
+    useConfigStore.getState().removeConfigFile('old.cfg');
+
+    const state = useConfigStore.getState();
+    expect(state.configFiles['old.cfg']).toBeUndefined();
+    const includes = state.configFiles['printer.cfg'].sections.filter(
+      (sec) => sec.section_type === 'include',
+    );
+    const deleted = includes.find((sec) => sec.section_name === './KAMP/old.cfg')!;
+    const survivor = includes.find((sec) => sec.section_name === 'macros.cfg')!;
+    expect(deleted.is_commented_out).toBe(true); // basename match on './KAMP/old.cfg'
+    expect(survivor.is_commented_out).toBe(false);
+    expect(state.configFiles['printer.cfg'].includes).toEqual(['macros.cfg']);
+  });
+
+  it('removeConfigFile leaves glob includes untouched', () => {
+    const store = useConfigStore.getState();
+    const printer = makeConfigFile([
+      makeSection({ section_type: 'include', section_name: 'KAMP/*.cfg', full_header: 'include KAMP/*.cfg' }),
+    ]);
+    printer.includes = ['KAMP/*.cfg'];
+    store.setConfigFile('printer.cfg', printer);
+    store.setConfigFile('macros.cfg', makeConfigFile());
+
+    useConfigStore.getState().removeConfigFile('macros.cfg');
+
+    const inc = useConfigStore.getState().configFiles['printer.cfg'].sections[0];
+    expect(inc.is_commented_out).toBe(false);
   });
 
   it('renameConfigFile moves the file and rewrites includes in other files', () => {
@@ -401,6 +442,35 @@ describe('configStore dirty / text parse error tracking', () => {
     expect(useConfigStore.getState().validation['printer.cfg']).toBeDefined();
   });
 
+  it('multi-file updateConfigFile revalidates as a PROJECT, not per file', async () => {
+    // Regression (2026-09-20): approving an AI edit wrote the edited file
+    // with setConfigFile + a SINGLE-file validateConfig, so include-graph-
+    // aware findings vanished and every macro defined in an included file
+    // (CLEAN_NOZZLE from clean.cfg, AUX_FAN_* from aux_fan.cfg) reappeared
+    // as unknown_gcode_command. Mutations must route through the project
+    // validation pass whenever more than one file is loaded.
+    vi.useRealTimers();
+    const api = await import('@/services/api');
+    vi.mocked(api.validateProject).mockClear();
+    vi.mocked(api.validateConfig).mockClear();
+
+    const store = useConfigStore.getState();
+    const printer = makeConfigFile();
+    printer.filename = 'printer.cfg';
+    const clean = makeConfigFile();
+    clean.filename = 'clean.cfg';
+    store.setConfigFile('printer.cfg', printer);
+    store.setConfigFile('clean.cfg', clean);
+
+    const edited = makeConfigFile();
+    edited.filename = 'printer.cfg';
+    useConfigStore.getState().updateConfigFile('printer.cfg', edited);
+    await new Promise((resolve) => setTimeout(resolve, 700));
+
+    expect(api.validateProject).toHaveBeenCalledTimes(1);
+    expect(api.validateConfig).not.toHaveBeenCalled();
+  });
+
   it('markClean clears the dirty flag', () => {
     const store = useConfigStore.getState();
     store.setConfigFile('printer.cfg', makeConfigFile());
@@ -478,5 +548,51 @@ describe('configStore validation helpers', () => {
     expect(useConfigStore.getState().selectedSection).toBeNull();
     expect(useConfigStore.getState().selectedSectionFile).toBeNull();
     expect(useConfigStore.getState().selectedSectionLine).toBeNull();
+  });
+});
+
+describe('approved tool edits land dirty and clear on save', () => {
+  it('an approved upsert marks the project dirty but never saved', () => {
+    const store = useConfigStore.getState();
+    store.setConfigFile('printer.cfg', makeConfigFile());
+    store.markClean();
+    expect(useConfigStore.getState().isDirty).toBe(false);
+
+    // Mirrors ChatDialog.applyApprovedToolEdits: the backend's staged,
+    // validated post-op text goes into the store as an unsaved change.
+    const plan = planApprovedEditApply([
+      { file: 'printer.cfg', op: 'set_param', summary: 'set max_accel = 12000', newText: '[printer]\nmax_accel: 12000\n' },
+    ]);
+    expect(plan.upserts.map((u) => u.file)).toEqual(['printer.cfg']);
+    for (const { file } of plan.upserts) {
+      useConfigStore.getState().updateConfigFile(file, makeConfigFile());
+    }
+
+    // Approve ≠ save: the change is dirty and present in the editor.
+    expect(useConfigStore.getState().isDirty).toBe(true);
+    expect(useConfigStore.getState().configFiles['printer.cfg']).toBeDefined();
+
+    // The save menu's job: writing to disk clears the dirty flag.
+    useConfigStore.getState().markClean();
+    expect(useConfigStore.getState().isDirty).toBe(false);
+  });
+
+  it('a delete-only approval dirties the project and drops the file', () => {
+    const store = useConfigStore.getState();
+    store.setConfigFile('printer.cfg', makeConfigFile());
+    store.setConfigFile('macros.cfg', makeConfigFile());
+    store.markClean();
+
+    const plan = planApprovedEditApply([
+      { file: 'macros.cfg', op: 'delete_file', summary: 'delete macros.cfg', newText: '' },
+    ]);
+    expect(plan.upserts).toEqual([]);
+    expect(plan.deletes).toEqual(['macros.cfg']);
+
+    plan.deletes.forEach((file) => useConfigStore.getState().removeConfigFile(file));
+    useConfigStore.getState().markDirty();
+
+    expect(useConfigStore.getState().configFiles['macros.cfg']).toBeUndefined();
+    expect(useConfigStore.getState().isDirty).toBe(true);
   });
 });

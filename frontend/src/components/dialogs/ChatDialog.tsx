@@ -14,16 +14,16 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useAiStore, AiProvider, providerRequiresApiKey, type ChatMessage } from '../../stores/aiStore';
 import { useChatHistoryStore } from '../../stores/chatHistoryStore';
 import { useConfigStore } from '../../stores/configStore';
-import { useGraphStore } from '../../stores/graphStore';
-import { useNativeStore } from '../../stores/nativeStore';
-import { restoreLayoutAfterRebuild } from '../../utils/layoutPersistence';
 import { usePrinterMemoryStore, DEFAULT_PRINTER_MEMORY, type PrinterMemory } from '../../stores/printerMemoryStore';
 import * as api from '../../services/api';
-import {
-  buildConfigIndexMessage,
-  extractMentionedConfigFilenames,
-} from '../../utils/chatUtils';
 import { extractPrinterMemoryBlock } from '../../utils/printerMemory';
+import { planApprovedEditApply } from '../../utils/approvalApply';
+import { selectUnsavedDrafts } from '../../utils/chatContext';
+import {
+  EMPTY_PROGRESS,
+  applyProgressSnapshot,
+  type ProgressDisplay,
+} from '../../utils/chatProgress';
 import {
   PROVIDER_DEFAULTS,
   isLocalProvider,
@@ -31,39 +31,18 @@ import {
   getProviderModel,
 } from '../../utils/chatProviders';
 import { runReplyValidationPipeline, createPrinterMemoryReplyValidator } from '../../utils/replyValidation';
-import {
-  extractTargetedSectionHeaders,
-  extractSectionText,
-  findSectionHeaders,
-  buildSectionContextMessage,
-} from '../../utils/chatIntent';
-import { buildProjectGraph } from '../../utils/graphBuilder';
-import { useAssistantDraft, FULL_REWRITE_GUARD_ENABLED } from '../../hooks/useAssistantDraft';
+import { useAssistantDraft } from '../../hooks/useAssistantDraft';
 import ChatSettingsPanel from './ChatSettingsPanel';
 import ChatHistoryDialog from './ChatHistoryDialog';
 import PrinterMemoryDialog from './PrinterMemoryDialog';
 import ChatMessageList from './ChatMessageList';
+import ChatApprovalCard from './ChatApprovalCard';
+import ApprovalDiffPreview from './ApprovalDiffPreview';
+import type { ApprovalCard } from '../../services/api';
 import ChatInputBar from './ChatInputBar';
-import AiDraftPreviewDialog from './AiDraftPreviewDialog';
 import type { PendingAiChatRequest } from '../../types/ai';
 import type { AiChatRole } from '../../services/api';
 import type { SavedConversation } from '../../stores/chatHistoryStore';
-
-/**
- * Frontend "handholding" gate (Phase 4/5 lean injection + file-targeting
- * reinforcement).
- *
- * Default OFF: a capable model discovers config content and targets the
- * right files through its MCP tools plus the backend SYSTEM_PROMPT edit
- * protocol (validated by the harness — AMBI-01..08 pass with zero injected
- * content and no frontend reinforcement). The regex-targeted injection can
- * also steer the model toward the wrong section.
- * Re-enable at build time with VITE_KWC_HANDHOLDING=1 for very small models
- * with flaky tool calling: the guess-work section injection and explicit
- * file-targeting instructions may help them stay grounded step-by-step.
- */
-const HANDHOLDING_ENABLED =
-  (import.meta.env.VITE_KWC_HANDHOLDING as string | undefined) === '1';
 
 /**
  * Heuristic for failures worth auto-recovering from: network drops and
@@ -93,9 +72,6 @@ interface AttachedConfigFile {
 
 // ── Constants ───────────────────────────────────────────────────────
 
-// CONTEXT_TRUNCATION_LIMIT and truncateConfigContext live in
-// utils/chatUtils.ts — imported above to avoid duplicate definitions.
-
 // Parse the temperature edit field into a clamped sampling value.
 // Invalid input falls back to the 0.7 default; range is 0-2.
 function parseTemperature(value: string): number {
@@ -119,26 +95,16 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     activeFile,
     validation,
     schemas,
-    setConfigFile,
-    setValidation,
+    originalTexts,
+    isDirty,
+    updateConfigFile,
+    removeConfigFile,
     markDirty,
   } = useConfigStore();
 
-  // ── Draft Hook ──────────────────────────────────────────────────
+  // ── Draft Hook (request helper) ─────────────────────────────────
   const {
-    assistantDraftPreview,
-    assistantDraftPreviewLoading,
-    assistantDraftApplicableMessages,
-    setAssistantDraftPreview,
-    setAssistantDraftApplicableMessages,
-    handleApplyAssistantEdit,
-    handleAssistantDraftSelectionChange,
-    handleAcceptAssistantEdit,
-    handleNewChat,
     requestAssistantMessage: draftRequestMessage,
-    createDraftReplyValidator,
-    flattenAssistantDraftChanges,
-    updateAssistantDraftApplicableMessages,
   } = useAssistantDraft();
 
   // ── Component State ─────────────────────────────────────────────
@@ -150,6 +116,28 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   // when the browser reports the connection is back.
   const [connectionLost, setConnectionLost] = useState(false);
   const connectionLostRef = useRef(false);
+  // ── Approval gate (Phase 2) ──
+  // While a chat request is loading, poll for a pending approval card
+  // (validated tool-mediated writes suspend the backend loop). The
+  // backend timer auto-declines; this UI just displays and decides.
+  const [approvalCard, setApprovalCard] = useState<ApprovalCard | null>(null);
+  const [approvalReceivedAt, setApprovalReceivedAt] = useState(0);
+  const [approvalNow, setApprovalNow] = useState(0);
+  const [approvalBusy, setApprovalBusy] = useState(false);
+  const [approvalInvalidation, setApprovalInvalidation] = useState<string | null>(null);
+  // Full-file diff preview opened from the approval card ("show full
+  // file"). Snapshot on open: the live card clears the moment the
+  // decision lands, the preview stays readable while it's open.
+  const [approvalDiffPreview, setApprovalDiffPreview] = useState<ApprovalCard | null>(null);
+  const approvalCardRef = useRef<ApprovalCard | null>(null);
+  // In-flight chat request id as STATE so the approval poll effect can
+  // key on it (stopRequestIdRef alone never re-renders).
+  const [stopRequestId, setStopRequestId] = useState<string | null>(null);
+  // ── Mid-loop progress (Phase 6.5.4) ──
+  // Poll alongside the approval rail while a send is in flight. Display
+  // only: narration is the model's own tool-turn text, visually
+  // subordinate; it never substitutes for the answer (never-final law).
+  const [progress, setProgress] = useState<ProgressDisplay>(EMPTY_PROGRESS);
   const [showSettings, setShowSettings] = useState(false);
   // EXPERIMENT (auto-attach off): don't auto-select the active file.
   // Context only includes files the user explicitly checks in "Include Files".
@@ -159,13 +147,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   const [showCarryOverPrompt, setShowCarryOverPrompt] = useState(false);
   const [showPrinterMemory, setShowPrinterMemory] = useState(false);
   const [proposedMemory, setProposedMemory] = useState<PrinterMemory | null>(null);
-
-  // Phase 4: carry the sections injected last turn so follow-up questions
-  // keep their grounding even when the new message names no section. Entries
-  // are bounded to the last two turns and dropped when the file leaves the
-  // selection.
-  const carriedSectionsRef = useRef<Array<{ filename: string; headers: string[]; turn: number }>>([]);
-  const chatTurnRef = useRef(0);
 
   // ── Settings Editing State (single source of truth) ─────────────
   const [editApiKey, setEditApiKey] = useState(settings.apiKey);
@@ -245,14 +226,9 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   }, [messages]);
 
   // ── Detect applicable assistant messages ────────────────────────
-  useEffect(() => {
-    if (!open || !activeFile) {
-      setAssistantDraftApplicableMessages({});
-      return;
-    }
-    void updateAssistantDraftApplicableMessages(messages);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, messages, activeFile, configFiles]);
+  // (Removed with the Phase-4 ratchet: the "Apply and Review Changes"
+  // affordance is gone — writes arrive as approval cards and land in the
+  // dirty store on approve; there is no prose draft to mark applicable.)
 
   // ── Settings Save ───────────────────────────────────────────────
   const handleSaveSettings = useCallback(() => {
@@ -328,6 +304,49 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     [activeFile],
   );
 
+  // ── Approved tool edits → editor draft ──────────────────────────
+  // The approval card gate (Phase 2) stages validated writes SERVER-side;
+  // once the user approves, the resuming backend loop returns the final
+  // assistant message carrying `pendingEdits` (full post-apply file text,
+  // backend truth — never model prose). Applying them here marks the
+  // editor dirty like any other edit: approved ≠ saved, the Save flow
+  // (and its validation gate) remains the only path to disk.
+  const applyApprovedToolEdits = useCallback(
+    async (edits: NonNullable<ChatMessage['pendingEdits']>): Promise<void> => {
+      const { upserts, deletes } = planApprovedEditApply(edits);
+      if (upserts.length === 0 && deletes.length === 0) return;
+      for (const { file, newText } of upserts) {
+        try {
+          const parsed = await api.parseConfigText(newText, file);
+          const config = { ...parsed.config, raw_text: newText };
+          // updateConfigFile (NOT setConfigFile + single-file validateConfig):
+          // the store's debounced revalidation validates the WHOLE project,
+          // so include-graph-aware findings (gcode registry macros defined in
+          // included files, cross-file dups/pins) re-derive correctly. A
+          // single-file result written here flags every included-file macro
+          // as unknown_gcode_command (live report 2026-09-20: CLEAN_NOZZLE,
+          // AUX_FAN_ON/OFF from clean.cfg / aux_fan.cfg).
+          updateConfigFile(file, config);
+        } catch (err: unknown) {
+          // Should not happen: newText comes from the backend's own
+          // writer. Surface rather than silently drop the approved change.
+          console.error('[Approval] Failed to apply approved edit to', file, err);
+          setError(`Approved change to ${file} could not be applied to the editor — check the diff before saving.`);
+        }
+      }
+      deletes.forEach((file) => removeConfigFile(file));
+      if (upserts.length > 0 || deletes.length > 0) markDirty();
+      if (deletes.length > 0) {
+        // Deletion alone schedules nothing (removeConfigFile only drops the
+        // file's own entry) — re-derive the OTHER files' findings (e.g. a
+        // dangling include) against the surviving project now. Upsert-only
+        // flows are already covered by updateConfigFile's debounced pass.
+        void useConfigStore.getState().revalidateAll();
+      }
+    },
+    [updateConfigFile, removeConfigFile, markDirty],
+  );
+
   // ── Submit Message ──────────────────────────────────────────────
   const submitMessage = useCallback(
     async (messageText: string, options?: { hiddenFromUser?: boolean; retry?: boolean; editIndex?: number }) => {
@@ -342,6 +361,13 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         : `chat-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       stopControllerRef.current = stopController;
       stopRequestIdRef.current = stopRequestId;
+      setStopRequestId(stopRequestId);
+      // Reset the approval card state for the new request; the poll
+      // effect below picks up any card this request suspends on.
+      setApprovalCard(null);
+      approvalCardRef.current = null;
+      setApprovalInvalidation(null);
+      setApprovalBusy(false);
 
       const userMsg = { role: 'user' as const, content: trimmedMessage, hiddenFromUser: options?.hiddenFromUser === true };
       const previousMessages = options?.hiddenFromUser ? [] : messages;
@@ -375,28 +401,18 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           maxTokens: Math.max(256, parseInt(editMaxTokens, 10) || 4096),
           temperature: parseTemperature(editTemperature),
           toolProtocol: editToolProtocol,
-          fullRewriteGuard: FULL_REWRITE_GUARD_ENABLED,
-          // Server-side target resolution mirror (finding #5): the backend's
-          // merged-result validation resolves an edit's target file with the
-          // same activeFile the client's draft pipeline uses.
-          activeFile,
         };
 
-        // Build context messages
-        const contextMessages: Array<{ role: 'system'; content: string }> = [];
-        const mentionedConfigFiles = extractMentionedConfigFilenames([userMsg.content], loadedConfigFilenames);
         // EXPERIMENT (auto-attach off): mentioned files are NOT auto-injected.
-        // The targeting instructions below still name them so the model can
-        // fetch content itself via read_user_config. Only files the user
-        // explicitly checks in "Include Files" are sent as context.
+        // Only files the user explicitly checks in "Include Files" are sent
+        // as context.
         const contextTargets = Array.from(new Set(selectedConfigContextFiles));
 
         // Phase 4: collect the candidate files (checked in "Include Files" +
         // manually attached) with their content and labels. Content is sent
-        // to the backend as contextFiles so ITS config-grounding fallback can
-        // inject the exact loaded content if the model answers without
-        // calling any tool — but nothing is dumped into the prompt up front
-        // beyond what the intent path below decides.
+        // to the backend as contextFiles for the edit session's working state
+        // — nothing is dumped into the prompt; the model fetches via
+        // read_user_config.
         const candidateFiles = new Map<string, { text: string; label: string }>();
         for (const filename of contextTargets) {
           const fileText = await getConfigText(filename);
@@ -408,96 +424,48 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           candidateFiles.set(file.name, { text: file.content, label: 'User-attached local Klipper config file' });
         }
 
-        // Phase 4/5 lean-context injection (targeted sections + section
-        // index) is part of the handholding workflow — GATED OFF by default;
-        // the model discovers config content via its MCP tools (validated by
-        // the harness). Re-enable with VITE_KWC_HANDHOLDING=1.
-        if (HANDHOLDING_ENABLED) {
-          // Phase 4 carry-over: resolve the sections this message targets for
-          // each candidate file. Targeted sections replace any carried set;
-          // files with no new target keep the previous turn's sections so
-          // follow-up questions stay grounded. Carried entries are bounded to
-          // the last two turns and dropped when the file leaves the selection.
-          chatTurnRef.current += 1;
-          const currentTurn = chatTurnRef.current;
-          const usedSections = new Map<string, string[]>();
-          const nextCarried: Array<{ filename: string; headers: string[]; turn: number }> = [];
-          for (const [filename, candidate] of candidateFiles) {
-            const targetedHeaders = extractTargetedSectionHeaders(userMsg.content, candidate.text);
-            if (targetedHeaders.length > 0) {
-              usedSections.set(filename, targetedHeaders);
-              nextCarried.push({ filename, headers: targetedHeaders, turn: currentTurn });
-              continue;
-            }
-            const recent = [...carriedSectionsRef.current]
-              .filter((entry) => entry.filename === filename && currentTurn - entry.turn <= 2)
-              .sort((a, b) => b.turn - a.turn)[0];
-            if (recent) {
-              usedSections.set(filename, recent.headers);
-              nextCarried.push({ filename, headers: recent.headers, turn: currentTurn });
-            }
-          }
-          carriedSectionsRef.current = nextCarried;
-
-          // Inject the lean context this request actually needs.
-          // Phase 5: always lean — targeted sections when resolved, otherwise a
-          // compact section index. Never dump the whole file as a system message;
-          // the model fetches the sections it needs via read_user_config.
-          const appendFileContext = (filename: string, candidate: { text: string; label: string }) => {
-            const headers = usedSections.get(filename);
-            if (headers && headers.length > 0) {
-              for (const header of headers) {
-                const sectionText = extractSectionText(candidate.text, header);
-                if (sectionText != null) {
-                  contextMessages.push({
-                    role: 'system',
-                    content: buildSectionContextMessage(filename, candidate.label, header, sectionText),
-                  });
-                }
-              }
-              return;
-            }
-            contextMessages.push({
-              role: 'system',
-              content: buildConfigIndexMessage(filename, findSectionHeaders(candidate.text), candidate.label),
-            });
-          };
-
-          for (const [filename, candidate] of candidateFiles) {
-            appendFileContext(filename, candidate);
-          }
-        }
-
-        // File targeting instructions — the draft/mini-diff reinforcement.
-        // Part of the handholding workflow, GATED OFF by default: the backend
-        // SYSTEM_PROMPT already carries the '# file:' hint + mini-diff
-        // protocol (ai_routes.py), and intent detection was removed — the
-        // model decides whether a message is an edit or a question (harness
-        // AMBI-01..08 all pass without any frontend classifier).
-        if (HANDHOLDING_ENABLED) {
-          const miniDiffInstruction = ` To EDIT an existing section, prefer a mini-diff: the section header followed by only the lines that change, prefixing removed lines with '-' and added lines with '+', keeping their original indentation. The app applies these replacements exactly, so unchanged lines (like Jinja {% if %}/{% endif %} tags) are preserved automatically. Outputting any unchanged line risks a full rewrite where those lines could be dropped — prefer emitting ONLY the lines that change. A pure addition (nothing removed) needs no '-' line: just the header plus the '+' lines. A pure deletion (nothing added) needs no '+' line: just the header plus the '-' lines. If a section is already correct and you only need to show it, quoting it unchanged is allowed. To ADD a new section, write it in full; to delete one, write '*[section_name]'.`;
-          if (mentionedConfigFiles.length > 0) {
-            contextMessages.push({
-              role: 'system',
-              content: `Apply requested edits to these loaded files: ${mentionedConfigFiles.join(', ')}. Start each fenced \`\`\`cfg block with a '# file: <filename>' hint line; use one separate block per file. To create a new file, use '# file: <newfilename>' with a name that does not exist yet.${miniDiffInstruction}`,
-            });
-          } else if (activeFile) {
-            contextMessages.push({
-              role: 'system',
-              content: `Unless the user names a different file, apply edits to ${activeFile}. Return only changed, new, or deleted content in a fenced \`\`\`cfg code block. Start each fenced \`\`\`cfg block with a '# file: <filename>' hint line when targeting a specific file. To create a new file, use '# file: <newfilename>'. Do not return the whole file unless the user explicitly asks for a full replacement.${miniDiffInstruction}`,
-            });
-          }
-        }
-
-        // Context files sent to the backend for its config-grounding fallback
-        // (content never lands in the prompt here — the model must fetch).
+        // Context files sent to the backend for the edit session / approval
+        // re-validation (content never lands in the prompt here — the model
+        // must fetch).
         const contextFilesPayload: Record<string, { content: string; label: string }> = {};
         for (const [filename, candidate] of candidateFiles) {
           contextFilesPayload[filename] = { content: candidate.text, label: candidate.label };
         }
 
+        // Unsaved-delta carry-over (live report 2026-09-25): files edited in
+        // the editor but not yet saved — INCLUDING files the AI created and
+        // the user approved in an EARLIER turn (approved ≠ saved) — were
+        // invisible to this request's edit session. The session then kicked
+        // back 'Include file not found' for a draft sitting right there in
+        // the editor, while the identical manual include validated clean
+        // (editor validation runs against the full store). Append every
+        // store file whose current export differs from the saved baseline
+        // (originalTexts), or that has no baseline at all (never saved).
+        // Checked files above win; validation strictness is untouched — a
+        // dangling include on a truly nonexistent file still errors.
+        // isDirty gates the export sweep: a clean project has no delta.
+        if (isDirty) {
+          const storeTexts: Record<string, string> = {};
+          for (const filename of Object.keys(configFiles)) {
+            const text = await getConfigText(filename);
+            if (text != null) storeTexts[filename] = text;
+          }
+          for (const filename of selectUnsavedDrafts(
+            configFiles, originalTexts, storeTexts, new Set(Object.keys(contextFilesPayload)),
+          )) {
+            contextFilesPayload[filename] = {
+              content: storeTexts[filename],
+              label: getConfigContextLabel(filename),
+            };
+          }
+        }
+
+        // Phase-5 gate sweep (2026-09): no frontend-injected system messages
+        // remain — the handholding injections (regex-targeted sections +
+        // file-targeting reinforcement, VITE_KWC_HANDHOLDING) were deleted;
+        // the model discovers config content and its edit target through its
+        // MCP tools plus the backend SYSTEM_PROMPT edit law.
         const requestConversation: Array<{ role: AiChatRole; content: string }> = [
-          ...contextMessages,
           ...newMessages.map((m) => ({ role: m.role, content: m.content })),
         ];
         const validationConversation = [...newMessages];
@@ -511,11 +479,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         );
 
         // ── Unified validation retry pipeline ───────────────────
-        // Runs the config-draft validator and the printer-memory validator
-        // in sequence. Each validator decides whether the reply applies to
-        // it, what feedback to send for retries, and how to handle max
-        // attempts (throw vs. warn). Previously these were two separate
-        // retry loops with independent conversation bookkeeping.
+        // Runs the printer-memory validator over the reply. The config-draft
+        // validator retired with the Phase-4 ratchet (2026-09-22): config
+        // edits go through the write tools + approval card, so there is no
+        // prose draft to validate or retry.
         const pipelineResult = await runReplyValidationPipeline({
           requestFn: (conversation) => draftRequestMessage(
             { ...chatRequestBase, contextFiles: contextFilesPayload },
@@ -527,14 +494,20 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           validationConversation,
           initialAttempt: assistantAttempt,
           validators: [
-            createDraftReplyValidator(),
             createPrinterMemoryReplyValidator(),
           ],
         });
 
         if (pipelineResult.warnings) setError(pipelineResult.warnings);
         setMessages([...newMessages, pipelineResult.finalMessage]);
-        setAssistantDraftApplicableMessages({}); // Will be re-evaluated by the useEffect
+        // Approved tool edits (Phase 2 gate): the resuming loop's final
+        // reply carries the staged writes — put them into the editor draft
+        // (dirty, save-gated). Declines/timeouts arrive with no staged
+        // edits, so plain Q&A and declined flows are untouched.
+        const stagedEdits = pipelineResult.finalMessage.pendingEdits;
+        if (stagedEdits && stagedEdits.length > 0) {
+          await applyApprovedToolEdits(stagedEdits);
+        }
         // Background completion signal: if the dialog is closed when the reply
         // lands, flag the toolbar button so the user knows it's ready.
         if (!openRef.current) {
@@ -544,7 +517,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         const stopped = stopController.signal.aborted || err instanceof api.ChatStoppedError;
         if (stopped) {
           // User pressed Stop — keep the user message in history, no error banner.
-          setAssistantDraftApplicableMessages({});
         } else {
           const message = err instanceof Error ? err.message : 'Failed to get response.';
           setError(message);
@@ -571,18 +543,22 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     },
     [
       activeFile,
+      applyApprovedToolEdits,
       attachedConfigFiles,
-      createDraftReplyValidator,
+      configFiles,
       draftRequestMessage,
-      setAssistantDraftApplicableMessages,
       editApiKey,
       editApiProvider,
       editMaxTokens,
       editTemperature,
       editModel,
-      loading,
+      getConfigContextLabel,
+      getConfigText,
+      isDirty,
       loadedConfigFilenames,
+      loading,
       messages,
+      originalTexts,
       resolvedEditApiUrl,
       selectedConfigContextFiles,
       setMessages,
@@ -604,6 +580,144 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       void api.stopChat(requestId);
     }
   }, []);
+
+  // ── Approval card polling (Phase 2) ────────────────────────────
+  // While a chat request is loading AND no decision is in flight, poll
+  // for a suspended approval. Appears when the backend loop suspends on
+  // a validated write; disappears once resolved (approved/declined/
+  // timeout/stop — the next poll returns pending:false).
+  useEffect(() => {
+    if (!loading || !stopRequestId) return undefined;
+    let cancelled = false;
+    const tick = async () => {
+      const poll = await api.pollChatApproval(stopRequestId);
+      if (cancelled) return;
+      if (poll.pending) {
+        const existing = approvalCardRef.current;
+        if (!existing || existing.approvalId !== poll.approvalId) {
+          approvalCardRef.current = poll;
+          setApprovalCard(poll);
+          setApprovalReceivedAt(Date.now());
+          setApprovalNow(Date.now());
+          setApprovalInvalidation(null);
+          // A NEW card is a fresh decision: busy is per-card, never
+          // inherited. Without this, approving op 1 strands approvalBusy
+          // (the ok path clears the card, not the flag) and op 2's card
+          // renders with disabled buttons until timeout.
+          setApprovalBusy(false);
+        } else {
+          // Same card: refresh remaining-time + advisories only when
+          // unchanged fields don't matter; keep decision-in-flight view.
+          setApprovalCard((prev) => (prev && prev.approvalId === poll.approvalId && !approvalBusy
+            ? { ...poll }
+            : prev));
+        }
+      } else if (approvalCardRef.current && !approvalBusy) {
+        // Card resolved/closed server-side (e.g. timeout auto-decline):
+        // drop it. A decision POST in flight keeps it visible until the
+        // main request completes and loading clears.
+        approvalCardRef.current = null;
+        setApprovalCard(null);
+      }
+    };
+    void tick();
+    const interval = window.setInterval(() => { void tick(); }, 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [loading, stopRequestId, approvalBusy]);
+
+  // ── Mid-loop progress polling (Phase 6.5.4) ──────────────────────
+  // Same rail pattern as the approval poll, ~1.5s cadence (progress is
+  // less time-critical than a decision countdown). Accumulates deduped
+  // across polls; cleared when no request is in flight so a new send
+  // never inherits the previous run's steps.
+  useEffect(() => {
+    if (!loading || !stopRequestId) {
+      setProgress(EMPTY_PROGRESS);
+      return undefined;
+    }
+    let cancelled = false;
+    const tick = async () => {
+      const poll = await api.pollChatProgress(stopRequestId);
+      if (cancelled || !poll.pending) return;
+      setProgress((prev) => applyProgressSnapshot(prev, {
+        turn: poll.turn ?? 0,
+        narration: poll.narration ?? '',
+        toolNames: poll.toolNames ?? [],
+        elapsedMs: poll.elapsedMs ?? 0,
+      }));
+    };
+    void tick();
+    const interval = window.setInterval(() => { void tick(); }, 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [loading, stopRequestId]);
+
+  // Countdown tick while a card is visible (display only; the backend
+  // timer auto-declines authoritatively).
+  useEffect(() => {
+    if (!approvalCard) return undefined;
+    const interval = window.setInterval(() => setApprovalNow(Date.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, [approvalCard]);
+
+  const buildDecisionContext = useCallback(async (): Promise<Record<string, { content: string; label: string }>> => {
+    // Latest working content for re-validation: all loaded files (drafts
+    // win over saved), plus anything attached to this conversation.
+    const ctx: Record<string, { content: string; label: string }> = {};
+    for (const filename of Object.keys(configFiles)) {
+      const text = await getConfigText(filename);
+      if (text != null) ctx[filename] = { content: text, label: getConfigContextLabel(filename) };
+    }
+    for (const file of attachedConfigFiles) {
+      ctx[file.name] = { content: file.content, label: 'User-attached local Klipper config file' };
+    }
+    return ctx;
+  }, [configFiles, getConfigText, getConfigContextLabel, attachedConfigFiles]);
+
+  const handleApprovalDecision = useCallback(async (decision: 'approve' | 'decline') => {
+    const card = approvalCardRef.current;
+    if (!card || approvalBusy) return;
+    setApprovalBusy(true);
+    setApprovalInvalidation(null);
+    try {
+      const contextFiles = await buildDecisionContext();
+      const result = await api.decideChatApproval(card.approvalId, decision, contextFiles);
+      if (result.status === 'invalidated') {
+        setApprovalInvalidation(
+          `Config changed since this proposal — ${result.reason || 'the change no longer applies'}. `
+          + 'Decline this card or approve again after resolving the conflict.',
+        );
+        setApprovalBusy(false);
+        return;
+      }
+      if (result.status === 'ok') {
+        // Decision recorded; the suspended backend loop resumes and the
+        // main /ai/chat fetch completes through the normal pipeline.
+        // busy only guards the POST in flight — clear it or the NEXT
+        // card of a multi-op request inherits it (greyed buttons,
+        // chat stuck until timeout).
+        approvalCardRef.current = null;
+        setApprovalCard(null);
+        setApprovalBusy(false);
+      } else {
+        setApprovalInvalidation(
+          result.status === 'already_decided'
+            ? 'Already decided (timeout or another tab).'
+            : 'Could not record the decision.',
+        );
+        approvalCardRef.current = null;
+        setApprovalCard(null);
+      }
+    } catch {
+      setApprovalInvalidation('Approval request failed — check the backend connection.');
+      setApprovalBusy(false);
+    }
+  }, [approvalBusy, buildDecisionContext]);
 
   // ── Handle Retry ────────────────────────────────────────────────
   // Re-submit the last user message after a failure (timeout, unloaded
@@ -661,6 +775,12 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     }
   }, [attachedConfigFiles]);
 
+  // Start a fresh conversation. (The old draft-preview reset retired with
+  // the Phase-4 ratchet — there is no prose draft to drop.)
+  const handleStartNewChat = useCallback(() => {
+    clearMessages();
+  }, [clearMessages]);
+
   const handleNewChatWithSave = useCallback(() => {
     const { messages: currentMessages } = useAiStore.getState();
     const last = currentMessages[currentMessages.length - 1];
@@ -672,15 +792,14 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       return;
     }
     saveCurrentConversation();
-    handleNewChat();
+    handleStartNewChat();
     setAttachedConfigFiles([]);
-  }, [saveCurrentConversation, handleNewChat]);
+  }, [saveCurrentConversation, handleStartNewChat]);
 
   // Carry the existing conversation into the "new" chat so the next prompt
   // appends to it — the model keeps all prior context.
   const handleCarryOverContext = useCallback(() => {
     saveCurrentConversation();
-    setAssistantDraftPreview(null);
     setAttachedConfigFiles([]);
     setError(null);
     setShowCarryOverPrompt(false);
@@ -688,11 +807,11 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
 
   const handleStartFreshChat = useCallback(() => {
     saveCurrentConversation();
-    handleNewChat();
+    handleStartNewChat();
     setAttachedConfigFiles([]);
     setError(null);
     setShowCarryOverPrompt(false);
-  }, [saveCurrentConversation, handleNewChat]);
+  }, [saveCurrentConversation, handleStartNewChat]);
 
   const handleLoadConversation = useCallback(
     (conversation: SavedConversation) => {
@@ -700,7 +819,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       saveCurrentConversation();
       setMessages(conversation.messages);
       setSettings(conversation.settings);
-      setAssistantDraftPreview(null);
       // Restore config files that were attached during the original chat so
       // continuing the conversation keeps the same file context.
       setAttachedConfigFiles(
@@ -751,42 +869,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     },
     [handleSend],
   );
-
-  // ── Handle "Apply and Review Changes" ───────────────────────────
-  const handleApplyEdit = useCallback(
-    async (content: string, messageIndex?: number) => {
-      setError(null);
-      try {
-        await handleApplyAssistantEdit(content, messageIndex);
-      } catch (err: unknown) {
-        setError(err instanceof Error ? err.message : 'Failed to prepare assistant changes.');
-      }
-    },
-    [handleApplyAssistantEdit],
-  );
-
-  // ── Handle Accept Draft ─────────────────────────────────────────
-  const handleAcceptDraft = useCallback(async () => {
-    try {
-      await handleAcceptAssistantEdit();
-      const graphStore = useGraphStore.getState();
-      graphStore.clearGraph();
-      // Read config files AND validation directly from the store so newly
-      // created files and fresh validation results (added by
-      // handleAcceptAssistantEdit via setConfigFile/setValidation) are
-      // included in the graph rebuild instead of stale closure values.
-      const latestConfigFiles = useConfigStore.getState().configFiles;
-      const latestValidation = useConfigStore.getState().validation;
-      buildProjectGraph(latestConfigFiles, graphStore, schemas, latestValidation);
-      // The rebuild renumbers node ids — re-apply the saved layout so
-      // accepting an AI edit doesn't auto-arrange over the user's current
-      // arrangement (and the autosave can't persist that reset).
-      await restoreLayoutAfterRebuild(useGraphStore.getState, useNativeStore.getState().isNative);
-      setError(null);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to accept assistant changes.');
-    }
-  }, [handleAcceptAssistantEdit, schemas]);
 
   // ── Pending Request Handling ────────────────────────────────────
   useEffect(() => {
@@ -923,16 +1005,26 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           <ChatMessageList
             messages={messages}
             loading={loading}
+            progress={progress}
             error={connectionLost ? 'Connection lost — the last question will resend automatically when the network returns.' : error}
             onRetry={handleRetry}
             activeFile={activeFile}
-            assistantDraftApplicableMessages={assistantDraftApplicableMessages}
-            assistantDraftPreviewLoading={assistantDraftPreviewLoading}
-            onApplyEdit={handleApplyEdit}
             onReviewPrinterMemory={handleReviewPrinterMemory}
             onEditMessage={handleEditMessage}
             messagesEndRef={messagesEndRef}
           />
+          {approvalCard && (
+            <ChatApprovalCard
+              card={approvalCard}
+              receivedAtMs={approvalReceivedAt}
+              nowMs={approvalNow}
+              busy={approvalBusy}
+              invalidation={approvalInvalidation}
+              onApprove={() => { void handleApprovalDecision('approve'); }}
+              onDecline={() => { void handleApprovalDecision('decline'); }}
+              onShowFullDiff={() => { if (approvalCard) setApprovalDiffPreview(approvalCard); }}
+            />
+          )}
         </div>
 
         {/* File input (hidden) */}
@@ -965,24 +1057,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         />
       </div>
 
-      {/* Draft Preview Dialog */}
-      {assistantDraftPreview && (
-        <AiDraftPreviewDialog
-          filePreviews={assistantDraftPreview.filePreviews.map((fp) => ({
-            filename: fp.filename,
-            originalText: fp.originalText,
-            mergedText: fp.mergedText,
-          }))}
-          changes={flattenAssistantDraftChanges(assistantDraftPreview.filePreviews)}
-          selectedChangeIds={assistantDraftPreview.selectedChangeIds}
-          previewUpdating={assistantDraftPreview.previewUpdating}
-          repairedSections={assistantDraftPreview.repairedSections}
-          onSelectionChange={(ids) => { void handleAssistantDraftSelectionChange(ids); }}
-          onAccept={() => { void handleAcceptDraft(); }}
-          onClose={() => setAssistantDraftPreview(null)}
-        />
-      )}
-
       {/* Chat History Dialog */}
       {showChatHistory && (
         <ChatHistoryDialog
@@ -999,6 +1073,14 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           onClose={() => { setShowPrinterMemory(false); setProposedMemory(null); }}
           proposedMemory={proposedMemory}
           onAcceptProposal={handleAcceptPrinterMemoryProposal}
+        />
+      )}
+
+      {/* Full-file diff preview for a pending approval card */}
+      {approvalDiffPreview && (
+        <ApprovalDiffPreview
+          card={approvalDiffPreview}
+          onClose={() => setApprovalDiffPreview(null)}
         />
       )}
 
