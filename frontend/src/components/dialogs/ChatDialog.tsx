@@ -10,7 +10,7 @@
  * Single source of truth for settings editing state lives here,
  * passed down to ChatSettingsPanel as props.
  */
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react';
 import { useAiStore, AiProvider, providerRequiresApiKey, type ChatMessage } from '../../stores/aiStore';
 import { useChatHistoryStore } from '../../stores/chatHistoryStore';
 import { useConfigStore } from '../../stores/configStore';
@@ -23,6 +23,7 @@ import {
   type ApprovalCountdownAnchor,
 } from '../../utils/approvalDiff';
 import { selectUnsavedDrafts } from '../../utils/chatContext';
+import { isNearBottom, nextStickToBottom } from '../../utils/chatScroll';
 import {
   EMPTY_PROGRESS,
   applyProgressSnapshot,
@@ -180,6 +181,12 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
 
   // ── Refs ────────────────────────────────────────────────────────
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesScrollRef = useRef<HTMLDivElement>(null);
+  // Auto-scroll stick state (see utils/chatScroll): follow new content
+  // while at the bottom, stop the moment the user scrolls up to read
+  // history. Ref (not state): scroll events must not re-render the dialog.
+  const stickToBottomRef = useRef(true);
+  const lastScrollTopRef = useRef(0);
   const inputRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const handledPendingRequestIdRef = useRef<string | null>(null);
@@ -229,10 +236,54 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     });
   }, [configFiles]);
 
-  // ── Auto-scroll to bottom ───────────────────────────────────────
+  // ── Auto-scroll to bottom (sticky) ──────────────────────────────
+  // Follows new messages AND content growth (approval cards, progress
+  // strip, long markdown reflows) while the user is at the bottom.
+  // Scrolling up releases the stick; returning to the bottom re-arms it.
+  const handleMessagesScroll = useCallback(() => {
+    const el = messagesScrollRef.current;
+    if (!el) return;
+    const scrolledUp = el.scrollTop < lastScrollTopRef.current;
+    lastScrollTopRef.current = el.scrollTop;
+    stickToBottomRef.current = nextStickToBottom(
+      stickToBottomRef.current,
+      isNearBottom(el.scrollTop, el.scrollHeight, el.clientHeight),
+      scrolledUp,
+    );
+  }, []);
+
+  const scrollToBottom = useCallback((behavior: ScrollBehavior) => {
+    messagesEndRef.current?.scrollIntoView({ behavior });
+  }, []);
+
+  // Mount/layout pass: jump to the newest message with no animation —
+  // smooth-scrolling the entire history on every dialog open is what
+  // this replace (the old effect animated on every messages change,
+  // including dialog open and history load).
+  useLayoutEffect(() => {
+    if (stickToBottomRef.current) {
+      lastScrollTopRef.current = messagesScrollRef.current?.scrollTop ?? 0;
+      scrollToBottom('auto');
+    }
+  }, [messages, progress, approvalCard, scrollToBottom]);
+
+  // When a send starts, always snap to the fresh user message: the user
+  // acting is intent to be at the bottom, even while reading history.
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+    if (loading) {
+      stickToBottomRef.current = true;
+      scrollToBottom('auto');
+    }
+  }, [loading, scrollToBottom]);
+
+  // Re-arm on dialog open: the component stays mounted while closed, so
+  // the scroll container remounts fresh at the top of the history.
+  useEffect(() => {
+    if (open) {
+      stickToBottomRef.current = true;
+      scrollToBottom('auto');
+    }
+  }, [open, scrollToBottom]);
 
   // ── Detect applicable assistant messages ────────────────────────
   // (Removed with the Phase-4 ratchet: the "Apply and Review Changes"
@@ -1021,7 +1072,12 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         )}
 
         {/* Messages area */}
-        <div className="flex-1 overflow-y-auto p-4" style={{ minHeight: 350, maxHeight: 450 }}>
+        <div
+          ref={messagesScrollRef}
+          onScroll={handleMessagesScroll}
+          className="flex-1 overflow-y-auto p-4"
+          style={{ minHeight: 350, maxHeight: 450 }}
+        >
           <ChatMessageList
             messages={messages}
             loading={loading}
