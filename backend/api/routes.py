@@ -823,6 +823,10 @@ def _config_update_to_config_file(data: ConfigUpdate) -> ConfigFile:
         # validation endpoints otherwise reconstruct the file without it and
         # the malformed-header check would silently never run.
         unclosed_headers=rederived.unclosed_headers if rederived else [],
+        # same reconstruction trap: malformed_lines is parse-time raw-text
+        # state that to_dict() drops — re-derive or the live editor never
+        # sees the unindented-wrap error.
+        malformed_lines=rederived.malformed_lines if rederived else [],
         save_config_start_line=rederived.save_config_start_line if rederived else 0,
         save_config_sections=rederived.save_config_sections if rederived else [],
     )
