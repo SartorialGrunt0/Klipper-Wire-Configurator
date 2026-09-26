@@ -142,3 +142,48 @@ def test_ai_edit_gate_refuses_the_cycle_closing_include():
     assert result["status"] == "error", result
     assert any("Circular include" in e["message"] for e in result["newErrors"])
     assert new_state.files == st.files
+
+
+def test_deep_include_chain_terminates_without_recursion_error():
+    # Review fix 2026-09-26: the recursive walk raised RecursionError on
+    # a >1000-file include chain (uncaught out of validation). The
+    # iterative three-colour DFS must handle it.
+    files = {}
+    for i in range(1200):
+        nxt = f"f{i + 1}.cfg" if i < 1199 else None
+        files[f"f{i}.cfg"] = f"[include {nxt}]\n" if nxt else "[printer]\nkinematics: corexy\n"
+    results = _project(files)
+    assert not _cycle_findings(results)
+
+
+def test_duplicate_include_edges_do_not_explode_walk():
+    # Same fix: with each edge duplicated the recursive walk took ~12s
+    # (exponential in duplicates). Iterative + BLACK memoization keeps
+    # it linear; 60 files with doubled edges must validate fast.
+    import time
+    files = {"printer.cfg": ""}
+    for i in range(60):
+        nxt = f"f{i + 1}.cfg" if i < 59 else None
+        body = (f"[include {nxt}]\n[include {nxt}]\n" if nxt else "")
+        files[f"f{i}.cfg"] = body
+    start = time.monotonic()
+    results = _project(files)
+    elapsed = time.monotonic() - start
+    assert not _cycle_findings(results)
+    assert elapsed < 2.0, f"include walk took {elapsed:.1f}s — exponential again"
+
+
+def test_cycle_reported_once_with_duplicated_edges():
+    # The BLACK memo must not swallow the finding: a loop reached only
+    # through duplicated edges is still reported exactly once per line.
+    results = _project({
+        "printer.cfg": "[include a.cfg]\n" + PRINTER,
+        "a.cfg": "[include b.cfg]\n[include b.cfg]\n",
+        "b.cfg": "[include printer.cfg]\n",
+    })
+    findings = _cycle_findings(results)
+    assert findings
+    # One finding per participating include line (printer->a, a->b,
+    # b->printer); the duplicated a->b line shares an anchor line and is
+    # deduped.
+    assert len(findings) == 3

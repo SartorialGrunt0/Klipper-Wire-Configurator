@@ -296,19 +296,30 @@ def _project_file_order(configs: dict[str, ConfigFile], main_file: str) -> list[
     ordered: list[str] = []
     seen: set[str] = set()
 
-    def visit(filename: str) -> None:
+    # Iterative post-order DFS (review fix 2026-09-26): the recursive
+    # visit() raised RecursionError on a >1000-file include chain, the
+    # same failure class as the cycle walk. Semantics unchanged: first-
+    # visit wins, a file lands after everything it includes.
+    stack: list[tuple[str, bool]] = [(main_file, False)]
+    while stack:
+        filename, expanded = stack.pop()
+        if expanded:
+            ordered.append(filename)
+            continue
         if filename in seen:
-            return
+            continue
         seen.add(filename)
+        stack.append((filename, True))
         config = configs.get(filename)
         if config is not None:
+            children = []
             for include_path in config.includes:
-                target = include_path if include_path in configs else basename_map.get(_basename(include_path))
+                target = (include_path if include_path in configs
+                          else basename_map.get(_basename(include_path)))
                 if target is not None:
-                    visit(target)
-        ordered.append(filename)
-
-    visit(main_file)
+                    children.append(target)
+            # Reverse so the first include is popped first (visit order).
+            stack.extend((c, False) for c in reversed(children))
     return ordered
 
 
@@ -533,16 +544,43 @@ def _check_include_cycles(
                 code="include_cycle",
             )))
 
-    def _walk(node: str, path: list[str], on_path: set[str]) -> None:
-        for target, _line, _header, _spec in edges.get(node, []):
+    # Iterative three-colour DFS (review fix 2026-09-26): the recursive
+    # walk had no memoization, so cost was exponential in duplicated
+    # include edges (measured: 11.8s on a 22-file chain with each edge
+    # doubled) and a deep chain (>1000 files) raised RecursionError out
+    # of validation. A node fully explored BLACK can never lead to a
+    # cycle that an earlier walk has not already reported, so it is
+    # skipped; iteration moves the depth bound off the Python stack.
+    WHITE, GRAY, BLACK = 0, 1, 2
+    state: dict[str, int] = {}
+
+    for start in sorted(active_files):
+        if state.get(start, WHITE) == BLACK:
+            continue
+        stack: list[tuple[str, "object"]] = [(start, iter(edges.get(start, [])))]
+        path: list[str] = [start]
+        on_path: set[str] = {start}
+        state[start] = GRAY
+        while stack:
+            node, it = stack[-1]
+            edge = next(it, None)  # type: ignore[call-builtins]
+            if edge is None:
+                stack.pop()
+                path.pop()
+                on_path.discard(node)
+                state[node] = BLACK
+                continue
+            target = edge[0]
             if target in on_path:
                 loop = path[path.index(target):]
                 _emit_cycle(loop + [target], loop)
                 continue
-            _walk(target, path + [target], on_path | {target})
-
-    for filename in sorted(active_files):
-        _walk(filename, [filename], {filename})
+            if state.get(target, WHITE) == BLACK:
+                continue  # fully explored; its cycles are already reported
+            stack.append((target, iter(edges.get(target, []))))
+            path.append(target)
+            on_path.add(target)
+            state[target] = GRAY
 
     return findings
 
@@ -1489,6 +1527,21 @@ def validate_project_configs(configs: dict[str, ConfigFile], *,
     # Drop the file-local scan results and re-derive with project context.
     if len(configs) > 1 and gcode_registry:
         project_gcode_ctx = build_project_context(configs)
+        # Review fix 2026-09-26: duplicate [gcode_macro X] headers across
+        # files are ONE option set in Klipper (strict=False merge), so a
+        # rename_existing in ANY file satisfies the shadow collision in
+        # every other file. Probe-proven FP: A defined [gcode_macro G28]
+        # bare, B defined the same alias WITH rename_existing, and A got
+        # a restart-failure error klipper never produces.
+        renames_defined_project_wide: set[str] = set()
+        for _cfg in configs.values():
+            for _sec in _cfg.sections:
+                if _sec.section_type != "gcode_macro" or _sec.is_commented_out:
+                    continue
+                if any(not p.is_commented_out
+                       for p in _sec.get_all_param("rename_existing")):
+                    renames_defined_project_wide.add(
+                        _sec.section_name.strip().upper())
         for filename, result in results.items():
             result.errors = [
                 e for e in result.errors if e.code not in GCODE_FINDING_CODES
@@ -1497,6 +1550,12 @@ def validate_project_configs(configs: dict[str, ConfigFile], *,
                 configs[filename], project_gcode_ctx))
             result.errors.extend(_scan_gcode_macro_renames(
                 configs[filename], project_gcode_ctx))
+            result.errors = [
+                e for e in result.errors
+                if not (e.code == "rename_existing_invalid"
+                        and e.param == ""
+                        and (e.extra or "").upper() in renames_defined_project_wide)
+            ]
             # re-derived warnings bypassed the per-file ack pass above
             _suppress_acknowledged_warning_identities(filename, result)
 

@@ -224,6 +224,17 @@ def find_malformed_lines(text: str) -> list[tuple[int, str]]:
         if SECTION_RE.match(stripped) or INCLUDE_RE.match(stripped):
             in_section = True
             continue
+        # configparser's own SECTCRE is prefix-anchored only: ANY line
+        # starting with '[' parses as a section header, trailing ';'/'#'
+        # comments and junk included (inline_comment_prefixes), and
+        # strict=False lets duplicate headers through. Klipper's own
+        # test/klippy/macros.cfg ships '[gcode_macro TEST_unicode]  ; ...'
+        # (review 2026-09-26: the anchored SECTION_RE flagged it as an
+        # error and blocked saving a config klippy loads cleanly).
+        # Unclosed '[' is exempted below for the dedicated check.
+        if stripped.startswith("["):
+            in_section = True
+            continue
         if not in_section:
             # configparser aborts with MissingSectionHeaderError the moment
             # it must treat a line outside any section as content.

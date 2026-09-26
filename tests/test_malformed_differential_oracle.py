@@ -41,6 +41,12 @@ SHAPES = [
     ("section header", "[new_section]", False),
     ("named section", "[gcode_macro FOO]", False),
     ("include", "[include x.cfg]", False),
+    # Review fix 2026-09-26: configparser's SECTCRE is prefix-anchored —
+    # every '['-prefixed line below parses as a section header (klippy's
+    # own macros.cfg ships the ';'-comment shape).
+    ("section + semi comment", "[gcode_macro T1]  ; Also test end-of-line", False),
+    ("section + trailing junk", "[other] trailing", False),
+    ("double bracket", "[[x]]", False),
     ("unclosed header", "[mcu", False),  # unclosed_section_header owns it
     ("empty line", "", False),
     ("whitespace only", "   ", False),

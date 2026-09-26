@@ -39,6 +39,8 @@ from parser.validator import validate_config, validate_project_configs  # noqa: 
 
 CODE = "rename_existing_invalid"
 PROBE = "[probe]\npin: ^PG1\nz_offset: 2.0\nspeed: 5.0\n\n"
+PROINTER = ("[printer]\nkinematics: corexy\nmax_velocity: 300\n"
+            "max_accel: 3000\n\n")
 
 
 def _findings(text, code=CODE):
@@ -231,3 +233,42 @@ def test_ai_loop_consumers_stay_exempt():
     text = PROBE + "[gcode_macro PROBE_ACCURACY]\ngcode:\n  M114\n"
     r = validate_config(parse_config(text, "printer.cfg"), gcode_registry=False)
     assert not [e for e in r.errors if e.code == CODE]
+
+
+def test_cross_file_rename_satisfies_bare_shadow():
+    # Review fix 2026-09-26: duplicate [gcode_macro X] headers across
+    # files merge into ONE option set in Klipper (strict=False), so
+    # file A's bare [gcode_macro G28] is NOT a load collision when file
+    # B defines the same alias with rename_existing. Pre-fix, A got a
+    # restart-failure error for a config klipper loads clean.
+    files = {
+        "printer.cfg": "[include a.cfg]\n[include b.cfg]\n" + PROINTER,
+        "a.cfg": "[gcode_macro G28]\ngcode:\n  M117 A-home\n",
+        "b.cfg": ("[gcode_macro G28]\nrename_existing: G28.1\n"
+                  "gcode:\n  M117 B-home\n"),
+    }
+    configs = {n: parse_config(t, n) for n, t in files.items()}
+    results = validate_project_configs(configs)
+    shadow = [
+        e for r in results.values() for e in r.errors
+        if e.code == CODE and e.param == ""
+    ]
+    assert not shadow, f"cross-file rename_existing must satisfy the shadow: {shadow}"
+
+
+def test_cross_file_rename_does_not_mask_type_mismatch():
+    # The suppression is shadow-case-only (param == ""): a rename of
+    # different types stays an error even when the alias appears in
+    # several files.
+    files = {
+        "printer.cfg": "[include a.cfg]\n" + PROINTER,
+        "a.cfg": ("[gcode_macro my_home]\nrename_existing: G28\n"
+                  "gcode:\n  M117 A\n"),
+    }
+    configs = {n: parse_config(t, n) for n, t in files.items()}
+    results = validate_project_configs(configs)
+    mismatch = [
+        e for r in results.values() for e in r.errors
+        if e.code == CODE and e.param == "rename_existing"
+    ]
+    assert mismatch, "type-mismatch rename must stay flagged"
