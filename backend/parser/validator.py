@@ -1431,8 +1431,31 @@ def _scan_gcode_macro_renames(
                 message=(
                     f"rename_existing '{shown}' is an invalid command name "
                     "— Klipper rejects it at startup (\"Can't register "
-                    "...\"). If the value wrapped to the next line, "
+                    "...\\\"). If the value wrapped to the next line, "
                     "indent it or keep it on the 'rename_existing:' line."
+                ),
+                line_number=param.line_number,
+                code="rename_existing_invalid",
+                extra=alias,
+            ))
+            continue
+        if target == alias and verdict.source == "registry":
+            # Self-collision (gcode_macro.py:161-169): connect removes the
+            # builtin, re-registers IT under rename_existing == alias, then
+            # the macro's own registration collides — "gcode command X
+            # already registered" (gcode.py:142), the user-reported failure.
+            suggest = f"{alias}.1" if is_traditional_gcode(alias) else f"_{alias}"
+            findings.append(ValidationError(
+                severity="warning",
+                section=section.full_header,
+                param="rename_existing",
+                message=(
+                    f"rename_existing '{target}' is the same command the "
+                    "macro replaces — Klipper moves the builtin to "
+                    f"'{alias}', then the macro fails to register with "
+                    f"'gcode command {alias} already registered'. Rename "
+                    f"the original to something else, e.g. "
+                    f"rename_existing: {suggest}."
                 ),
                 line_number=param.line_number,
                 code="rename_existing_invalid",

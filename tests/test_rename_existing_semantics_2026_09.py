@@ -127,6 +127,55 @@ def test_rename_whitespace_value_warns():
     assert len(fs) == 1 and "invalid" in fs[0].message
 
 
+# ── self-collision: rename_existing == the macro's own name ────────────
+# User-reported 2026-09-25. Klipper handle_connect (gcode_macro.py:161-169)
+# removes the builtin, re-registers IT under rename_existing == alias, then
+# the macro's own register_command(alias) collides -> "gcode command
+# PROBE_ACCURACY already registered" (gcode.py:142). Source-simulated
+# 2026-09-26 (connect stage unreachable in headless fake-serial klippy).
+
+def test_rename_self_collision_warns():
+    text = PROBE + ("[gcode_macro PROBE_ACCURACY]\n"
+                    "rename_existing: PROBE_ACCURACY\ngcode:\n  M114\n")
+    fs = _findings(text)
+    assert len(fs) == 1 and "same command" in fs[0].message
+    assert "rename_existing: _PROBE_ACCURACY" in fs[0].message
+
+
+def test_rename_self_collision_lowercase_target_warns():
+    # Lowercase rename targets are NOT legal in Klipper: register_command
+    # rejects any non-traditional name where cmd.upper() != cmd
+    # ("Can't register '_probe_accuracy' ... invalid name", gcode.py:145).
+    # So this hits the invalid-name case, not the self-collision case.
+    text = PROBE + ("[gcode_macro PROBE_ACCURACY]\n"
+                    "rename_existing: _probe_accuracy\ngcode:\n  M114\n")
+    fs = _findings(text)
+    assert len(fs) == 1 and "invalid command name" in fs[0].message
+
+
+def test_rename_self_collision_gated_out_clean():
+    # Alias not registered here (no [probe]) -> rename branch dies with
+    # "not found in gcode_macro rename", covered by the gated-out case;
+    # self-name adds nothing and must not double-report.
+    text = ("[gcode_macro PROBE_ACCURACY]\n"
+            "rename_existing: PROBE_ACCURACY\ngcode:\n  M114\n")
+    fs = _findings(text)
+    assert len(fs) == 1 and "not registered" in fs[0].message
+
+
+def test_rename_self_collision_traditional_warns():
+    # G28 -> G28: same collision class; suggestion keeps the traditional
+    # shape (G28.1) so the type check stays satisfied.
+    text = ("[stepper_x]\nenable_pin: PF2\ndir_pin: PF1\nstep_pin: PF0\n"
+            "rotation_distance: 40\nmicrostep_pin: PE6\n"
+            "endstop_pin: ^PG10\nposition_min: 0\nposition_endstop: 0\n"
+            "position_max: 200\nhoming_speed: 50\n\n"
+            "[gcode_macro G28]\nrename_existing: G28\ngcode:\n  M114\n")
+    fs = _findings(text)
+    assert len(fs) == 1 and "same command" in fs[0].message
+    assert "G28.1" in fs[0].message
+
+
 def test_rename_option_present_but_empty_warns():
     # `rename_existing:` with no value still takes Klipper's rename branch
     # (the check is `is not None`); register_command('') then rejects the
