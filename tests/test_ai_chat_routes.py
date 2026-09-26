@@ -136,6 +136,17 @@ def test_is_edit_request_advice_questions_are_not_edits():
     assert not ai_routes._is_edit_request([
         {'role': 'user', 'content': 'Can you explain how the probe section works?'},
     ])
+    # Polite requests addressed to the assistant ARE edit commands (the
+    # exact phrasing shape of the product's multi-change repro flow).
+    assert ai_routes._is_edit_request([
+        {'role': 'user', 'content': 'Can you change my max_accel to 3000'},
+    ])
+    assert ai_routes._is_edit_request([
+        {'role': 'user', 'content': 'Could you add a [bed_mesh] section please'},
+    ])
+    assert ai_routes._is_edit_request([
+        {'role': 'user', 'content': 'Would you lower the probe speed'},
+    ])
     # Imperative commands with the same verbs must STILL be edits.
     assert ai_routes._is_edit_request([
         {'role': 'user', 'content': 'Increase max_accel to 5000'},

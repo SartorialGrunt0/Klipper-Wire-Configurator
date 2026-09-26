@@ -1190,14 +1190,19 @@ _EDIT_TARGET_RE = re.compile(
 # Review fix 2026-09-26: the widened verb set (move/raise/lower/
 # increase/decrease) classified pure ADVICE questions as edit requests
 # ("Should I increase max_accel to 5000?" -> True), arming the edit-prose
-# nudge and ack guard on Q&A turns. An interrogative-shaped message is
-# advice, not a command: starts with a question word, or contains an
-# explicit "should I / can I / is it safe" ask.
+# nudge and ack guard on Q&A turns. The veto targets the ASK-SOMEONE-ELSE
+# shape only: info interrogatives (what/how/why...), self-directed asks
+# ("should I", "can I", "am I"), and safety/"good idea" asks. Requests
+# addressed to the assistant ("Can you change my max_accel to 3000")
+# ARE edit commands — the product's own repro flows use that phrasing —
+# so "can/could/would you" must NOT be vetoed.
 _QUESTION_RE = re.compile(
-    r"^\s*(?:who|what|when|where|why|how|is|are|was|were|do|does|did|"
-    r"can|could|would|should|will|shall|may|might|any)\b|"
-    r"\b(?:should|could|would|can)\s+i\b|"
-    r"\bis\s+it\s+safe\b",
+    r"^\s*(?:who|what|when|where|why|which)\b|"
+    r"^\s*how\s+(?:do|does|did|can|could|would|should|is|are|to)\b|"
+    r"\b(?:should|could|would|can|may|might|must)\s+(?:i|we)\b|"
+    r"\bam\s+i\b|"
+    r"\bis\s+it\s+(?:safe|ok|okay|fine|alright|a\s+good\s+idea)\b|"
+    r"\bdoes?\s+it\s+matter\b",
     re.IGNORECASE,
 )
 
