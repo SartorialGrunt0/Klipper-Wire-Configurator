@@ -224,15 +224,20 @@ def find_malformed_lines(text: str) -> list[tuple[int, str]]:
         if SECTION_RE.match(stripped) or INCLUDE_RE.match(stripped):
             in_section = True
             continue
-        # configparser's own SECTCRE is prefix-anchored only: ANY line
-        # starting with '[' parses as a section header, trailing ';'/'#'
-        # comments and junk included (inline_comment_prefixes), and
-        # strict=False lets duplicate headers through. Klipper's own
-        # test/klippy/macros.cfg ships '[gcode_macro TEST_unicode]  ; ...'
-        # (review 2026-09-26: the anchored SECTION_RE flagged it as an
-        # error and blocked saving a config klippy loads cleanly).
-        # Unclosed '[' is exempted below for the dedicated check.
-        if stripped.startswith("["):
+        # configparser's own SECTCRE is prefix-anchored: '\\[(?P<header>.+)\\]'
+        # — a '[' line is a header when it has a ']' after at least one
+        # char; trailing ';'/'#' comments and junk included
+        # (inline_comment_prefixes), duplicates fine (strict=False).
+        # Klipper's own test/klippy/macros.cfg ships
+        # '[gcode_macro TEST_unicode]  ; ...' (review 2026-09-26: the
+        # anchored SECTION_RE flagged it and blocked saving a config
+        # klippy loads cleanly). Round-2 review: plain startswith('[')
+        # over-broadened — EMPTY headers ('[]', '[]x') match nothing in
+        # configparser (the header group needs one char) yet were
+        # exempted; the predicate below mirrors SECTCRE exactly.
+        # Unclosed '[' lines are delegated to the dedicated
+        # unclosed_section_header check (verified: reported exactly once).
+        if re.match(r"\[.+\]", stripped) or UNCLOSED_SECTION_RE.match(stripped):
             in_section = True
             continue
         if not in_section:
@@ -240,8 +245,6 @@ def find_malformed_lines(text: str) -> list[tuple[int, str]]:
             # it must treat a line outside any section as content.
             found.append((idx + 1, stripped))
             continue
-        if UNCLOSED_SECTION_RE.match(stripped):
-            continue  # reported by the unclosed-header check
         # configparser.OPTCRE semantics: the option name is everything
         # before the first ':'/'=' and may not start with one, so a line
         # matches iff it contains a delimiter and doesn't start with one

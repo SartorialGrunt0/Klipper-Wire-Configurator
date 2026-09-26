@@ -47,6 +47,10 @@ SHAPES = [
     ("section + semi comment", "[gcode_macro T1]  ; Also test end-of-line", False),
     ("section + trailing junk", "[other] trailing", False),
     ("double bracket", "[[x]]", False),
+    # Round-2 review: SECTCRE's header group needs >=1 char, so EMPTY
+    # headers are NOT headers — configparser rejects them.
+    ("empty header", "[]", True),
+    ("empty header + junk", "[]x", True),
     ("unclosed header", "[mcu", False),  # unclosed_section_header owns it
     ("empty line", "", False),
     ("whitespace only", "   ", False),
