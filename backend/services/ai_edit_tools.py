@@ -457,9 +457,12 @@ class EditSession:
         if cap <= 0 or self.edit_attempts <= cap:
             return None
         self.last_write_outcome = "budget"
+        # Review fix 2026-09-26: the count printed here included the
+        # just-rejected call ("6 of 5 used"), which reads as nonsense.
+        # State the cap, not the over-count.
         return (
-            f"\n\nWRITE LIMIT REACHED — {self.edit_attempts} of {cap} write "
-            "attempts used for this request, so this call was NOT applied "
+            f"\n\nWRITE LIMIT REACHED — the {cap}-write cap for this "
+            "request is used up, so this call was NOT applied "
             "and no further write calls will be. Stop calling write tools. "
             "Tell the user what you changed, what you could NOT apply, and "
             "what you would try next. Never claim a change was staged "
@@ -614,6 +617,16 @@ class EditSession:
         op = self.tool_call_to_op(name, args)
         if op is None:
             return f"Unknown write tool: {name}", None, None
+
+        # Review fix 2026-09-26: execute() refuses an identical call that
+        # already failed 3+ times; prepare() (the product/approval path)
+        # was missing the same guard, so a looping model reached the
+        # request write cap instead of the earlier strategic hard-stop.
+        # Paths must not drift (class docstring).
+        blocked = self._repetition_blocked(name, args)
+        if blocked is not None:
+            self.last_write_outcome = "correctable"
+            return blocked, None, None
 
         dup = self._duplicate_of_committed(op)
         if dup is not None:
@@ -977,6 +990,18 @@ class ApprovalRequest:
                 # state says 'approved').
                 if self.future.done():
                     return self.future.result()
+                # Review fix 2026-09-26: decide() commits BEFORE
+                # _settle is scheduled via call_soon_threadsafe, so on
+                # the multi-loop case `resolved` can be True (change
+                # already committed) while the future is not yet done.
+                # Return 'timeout' only when no decision was taken at
+                # all; otherwise wait briefly for the settle to land.
+                if self.resolved:
+                    settle_deadline = _time.monotonic() + 2.0
+                    while not self.future.done() and _time.monotonic() < settle_deadline:
+                        await asyncio.sleep(0.05)
+                    if self.future.done():
+                        return self.future.result()
                 return {"decision": "timeout", "reason": ""}
             await asyncio.sleep(min(0.05, remaining))
 

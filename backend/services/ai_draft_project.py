@@ -22,6 +22,7 @@ pattern).
 """
 from __future__ import annotations
 
+import logging
 import re
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -264,6 +265,12 @@ class ProjectState:
                 # A malformed file still participates as raw text; ops on
                 # it stay legal (the user may be mid-edit). Validation of
                 # the *merged* state reports whatever the parser finds.
+                # Review fix 2026-09-26: log the skip — a parser CRASH
+                # (vs a config error) silently removing a file from the
+                # validation basis was undiagnosable.
+                logging.getLogger(__name__).warning(
+                    "File parse failed | excluded from parse basis file=%s",
+                    filename, exc_info=True)
                 continue
         return configs
 
@@ -909,7 +916,12 @@ class ProjectState:
         banner = _save_config_start(lines)
         active_includes = [t for t in _include_lines(lines) if t[0] < banner]
         if not self.files[in_file].strip():
-            self.files[in_file] = f'[{header}]\n'
+            # Empty/whitespace-only file: replace the (empty) line list.
+            # Review fix 2026-09-26: this branch used to write
+            # self.files directly, but the join at the end of the method
+            # rebuilt the text from the PRE-edit `lines` and silently
+            # reverted the include while still reporting status 'ok'.
+            lines = [f'[{header}]']
         elif active_includes:
             # Join the existing block: directly after the last include.
             idx = active_includes[-1][0] + 1
