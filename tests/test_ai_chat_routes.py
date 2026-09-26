@@ -122,6 +122,29 @@ def test_is_edit_request_negative():
     ])
 
 
+def test_is_edit_request_advice_questions_are_not_edits():
+    # Review fix 2026-09-26: the widened verb set (increase/lower/...)
+    # made advice questions classify as edit requests, arming the
+    # edit-prose nudge + ack guard on pure Q&A. Interrogative shape
+    # wins over verb+target.
+    assert not ai_routes._is_edit_request([
+        {'role': 'user', 'content': 'Should I increase max_accel to 5000?'},
+    ])
+    assert not ai_routes._is_edit_request([
+        {'role': 'user', 'content': 'Is it safe to lower the nozzle temperature?'},
+    ])
+    assert not ai_routes._is_edit_request([
+        {'role': 'user', 'content': 'Can you explain how the probe section works?'},
+    ])
+    # Imperative commands with the same verbs must STILL be edits.
+    assert ai_routes._is_edit_request([
+        {'role': 'user', 'content': 'Increase max_accel to 5000'},
+    ])
+    assert ai_routes._is_edit_request([
+        {'role': 'user', 'content': 'Lower the probe speed in [probe]'},
+    ])
+
+
 def test_is_edit_request_uses_latest_user_message():
     # The decision is based on the latest user message, not older context.
     assert not ai_routes._is_edit_request([

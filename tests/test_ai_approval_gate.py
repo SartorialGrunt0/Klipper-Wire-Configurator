@@ -634,3 +634,68 @@ def test_decline_reason_and_timeout_note_wording(edit_flag, monkeypatch):
     assert details is None
     assert 'did not respond' in content
     assert 'NOT APPROVED' in content
+
+
+# ── Empty-reprompt path dispatch (review fix 2026-09-26, CRITICAL) ─────
+# The no-tools empty-response re-prompt used to run extracted write
+# calls through edit_session.execute() directly, bypassing BOTH the
+# load_skill gate and the approval card: a text-protocol config_edit
+# on that path staged straight into pendingEdits with no human decision.
+
+
+def test_reprompt_write_respects_skill_gate(edit_flag, monkeypatch):
+    # Skill NOT loaded: a config_edit on the re-prompt must get the
+    # load_skill kickback, never execute.
+    scripted = _install(monkeypatch, [
+        {'choices': [{'message': {'content': None}}]},          # empty -> re-prompt
+        _text_tool_call('config_edit', SET_ACCEL),               # reprompt emits a write
+        _final_reply('I need to load the editing skill first.'),
+    ])
+    payload = {
+        'messages': [{'role': 'user', 'content': 'set max_accel to 3000'}],
+        'apiKey': 'k', 'model': 'm',
+        'apiUrl': 'https://api.example.com/v1/chat/completions',
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(),
+        'editSkill': False,
+        'requestId': 'gate-reprompt-skill', 'autoApproveEdits': False,
+    }
+    r = client.post('/ai/chat', json=payload)
+    assert r.status_code == 200
+    body = r.json()
+    assert not body.get('pendingEdits'), body
+    assert body.get('editAttempts') in (0, None), body
+    followup = json.dumps(scripted.payloads[-1])
+    assert 'load_skill' in followup
+
+
+def test_reprompt_write_opens_approval_card(edit_flag, monkeypatch):
+    # Skill active + human approval ON: the reprompt write must SUSPEND
+    # on a card like any other write — and only land once approved.
+    scripted = _install(monkeypatch, [
+        {'choices': [{'message': {'content': None}}]},          # empty -> re-prompt
+        _text_tool_call('config_edit', SET_ACCEL),               # reprompt emits a write
+        _final_reply('Set max_accel to 3000.'),
+    ])
+    payload = {
+        'messages': [{'role': 'user', 'content': 'set max_accel to 3000'}],
+        'apiKey': 'k', 'model': 'm',
+        'apiUrl': 'https://api.example.com/v1/chat/completions',
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(), 'editSkill': True,
+        'requestId': 'gate-reprompt-card', 'autoApproveEdits': False,
+    }
+    t, result = _post_chat_bg(payload)
+    card = _wait_card('gate-reprompt-card')
+    assert card['op'] == 'set_param'
+    # Nothing staged before the decision.
+    dec = client.post('/ai/chat/approval', json={
+        'approvalId': card['approvalId'], 'decision': 'approve',
+        'contextFiles': _ctx(),
+    })
+    assert dec.json()['status'] == 'ok'
+    t.join(timeout=10)
+    # Fail if the request thread died (e.g. _wait_card raised because no
+    # card opened when the gate was bypassed) or never finished.
+    assert not t.is_alive(), 'chat request did not finish'
+    assert 'body' in result, 'chat request thread raised before completing'
+    assert result['status'] == 200
+    assert result['body']['pendingEdits'][0]['file'] == 'printer.cfg'

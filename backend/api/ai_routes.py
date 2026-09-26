@@ -622,6 +622,10 @@ def _prepare_messages(messages: list[dict],
             try:
                 facts = derive_machine_facts(texts)
             except Exception:
+                # Review fix 2026-09-26: silently degrading to {} hid
+                # derivation bugs entirely; keep the fail-safe but make
+                # it observable (sibling seeds use logger.exception).
+                logger.exception("Machine-fact derivation failed | prompt degrades to no-facts")
                 facts = {}
             if facts:
                 known = ", ".join(f"{k}={v}" for k, v in facts.items())
@@ -638,6 +642,7 @@ def _prepare_messages(messages: list[dict],
             try:
                 inv = derive_hardware_inventory(texts)
             except Exception:
+                logger.exception("Hardware-inventory derivation failed | prompt degrades to no-inventory")
                 inv = {}
             inv_line = format_hardware_inventory(inv) if inv else ""
             if inv_line:
@@ -1182,16 +1187,29 @@ _EDIT_TARGET_RE = re.compile(
     r"steps_per_mm|rotation_distance|z_offset|nozzle|extruder|heater|fan)\b",
     re.IGNORECASE,
 )
+# Review fix 2026-09-26: the widened verb set (move/raise/lower/
+# increase/decrease) classified pure ADVICE questions as edit requests
+# ("Should I increase max_accel to 5000?" -> True), arming the edit-prose
+# nudge and ack guard on Q&A turns. An interrogative-shaped message is
+# advice, not a command: starts with a question word, or contains an
+# explicit "should I / can I / is it safe" ask.
+_QUESTION_RE = re.compile(
+    r"^\s*(?:who|what|when|where|why|how|is|are|was|were|do|does|did|"
+    r"can|could|would|should|will|shall|may|might|any)\b|"
+    r"\b(?:should|could|would|can)\s+i\b|"
+    r"\bis\s+it\s+safe\b",
+    re.IGNORECASE,
+)
 
 
 def _is_edit_request(messages: list[dict]) -> bool:
     """Heuristic: does the latest user message ask for config/macro changes?
 
-    Mirrors the frontend's detectChatIntent (chatIntent.ts): an edit verb AND
-    a config-ish target. Only the LATEST user message decides — a follow-up
-    question after an edit must not be gated. Drives the edit-prose nudge
-    gate (the doc/config injection fallbacks this once gated were deleted in
-    the Phase-5 gate sweep, 2026-09).
+    An edit verb AND a config-ish target, and NOT an interrogative-shaped
+    advice question (see _QUESTION_RE). Only the LATEST user message
+    decides — a follow-up question after an edit must not be gated. Drives
+    the edit-prose nudge gate (the doc/config injection fallbacks this
+    once gated were deleted in the Phase-5 gate sweep, 2026-09).
     """
     for msg in reversed(messages):
         if msg.get("role") != "user":
@@ -1199,6 +1217,8 @@ def _is_edit_request(messages: list[dict]) -> bool:
         content = str(msg.get("content", "")).strip()
         if not content:
             continue
+        if _QUESTION_RE.search(content):
+            return False
         return bool(_EDIT_VERB_RE.search(content) and _EDIT_TARGET_RE.search(content))
     return False
 
@@ -3678,12 +3698,35 @@ async def chat_proxy(req: ChatRequest):
                     clean_assistant = XML_TOOL_CALLS_CLEANUP_RE.sub("", clean_assistant).strip()
                     if clean_assistant:
                         current_messages.append({"role": "assistant", "content": clean_assistant})
-                    reprompt_results = [
-                        (edit_session.execute(c)[0]
-                         if edit_session is not None and c.get("name") in EDIT_TOOL_NAMES
-                         else await _execute_tool_call_async(c))
-                        for c in reprompt_calls[:MAX_MCP_TOOL_TURNS]
-                    ]
+                    # Review fix 2026-09-26 (CRITICAL): this path used to
+                    # run write calls through edit_session.execute()
+                    # directly, bypassing BOTH the load_skill gate and the
+                    # approval card — a text-protocol config_edit on the
+                    # empty re-prompt staged straight into the editor with
+                    # no human decision. Route through the SAME dispatch as
+                    # the main tool loop: skill-gate check first, then the
+                    # approval gate unless autoApproveEdits.
+                    reprompt_results = []
+                    for c in reprompt_calls[:MAX_MCP_TOOL_TURNS]:
+                        if edit_session is not None and c.get("name") in EDIT_TOOL_NAMES:
+                            if _skill_gate_closed():
+                                reprompt_results.append(
+                                    f"'{c.get('name')}' is not available yet. "
+                                    f"Call load_skill(name='{EDIT_SKILL_NAME}') "
+                                    "first — it returns the edit rules and "
+                                    "unlocks the edit tools.")
+                                logger.warning(
+                                    "Edit tool blocked on re-prompt path | "
+                                    "skill not loaded name=%s", c.get('name'))
+                            elif req.autoApproveEdits:
+                                reprompt_results.append(edit_session.execute(c)[0])
+                            else:
+                                reprompt_results.append(
+                                    (await _run_approval_gate(
+                                        edit_session, c, stop_event,
+                                        req.requestId, logger))[0])
+                        else:
+                            reprompt_results.append(await _execute_tool_call_async(c))
                     for reprompt_call, result_text in zip(
                         reprompt_calls[:MAX_MCP_TOOL_TURNS],
                         reprompt_results,

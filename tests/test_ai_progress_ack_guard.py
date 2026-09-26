@@ -172,18 +172,23 @@ def test_ack_guard_fires_once_text_protocol(blank_memory, monkeypatch):
 
 def test_ack_guard_capped_at_one(blank_memory, monkeypatch):
     # Model acks TWICE: second promise must NOT re-nudge (cap 1 — each
-    # re-prompt is real llama.cpp latency). The second ack terminates:
-    # reply 3 is prose again, loop breaks after it with zero nudges more.
+    # re-prompt is real llama.cpp latency). Review fix 2026-09-26: the
+    # old reply 2 ('Yes, I will make...') did not match
+    # _ends_with_continue_intent at all, so the cap was never exercised
+    # and the test held with the cap removed. Both replies now end on
+    # promise-shaped tails matched by the guard: reply 1 fires the
+    # nudge, reply 2 would fire again WITHOUT the cap.
     body, scripted = _chat(
         {'requestId': 'ack-cap-1'},
         [
             {'choices': [{'message': {'content': "I'll apply that now."}}]},
-            {'choices': [{'message': {'content': 'Yes, I will make that change to the config now.'}}]},
+            {'choices': [{'message': {'content': "I'll make that change now."}}]},
         ],
         monkeypatch,
     )
     assert body['usage']['ackReprompts'] == 1
-    # exactly one extra request beyond the initial
+    # exactly one extra request beyond the initial: the cap blocked the
+    # second nudge even though reply 2 was guard-matching.
     assert len(scripted.payloads) == 2
 
 
