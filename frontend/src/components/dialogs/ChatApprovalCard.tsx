@@ -4,8 +4,9 @@ import { buildApprovalDiffLines, remainingApprovalSeconds, summarizeAdvisorySeve
 
 interface Props {
   card: ApprovalCard;
-  /** performance.now()-style ms when THIS card payload arrived (the
-   *  countdown degrades gracefully between polls). */
+  /** Date.now() ms when the payload currently on screen arrived. The 1s
+   *  poll replaces that payload, so the caller re-anchors this on every
+   *  accepted poll; the countdown degrades gracefully between polls. */
   receivedAtMs: number;
   /** ms timestamp driving countdown re-renders. */
   nowMs: number;

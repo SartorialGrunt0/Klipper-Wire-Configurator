@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { buildApprovalDiffLines, remainingApprovalSeconds, summarizeAdvisorySeverities } from '../approvalDiff';
+import {
+  buildApprovalDiffLines,
+  foldApprovalCountdown,
+  remainingApprovalSeconds,
+  summarizeAdvisorySeverities,
+  type ApprovalCountdownAnchor,
+} from '../approvalDiff';
 import { createConfigPatch, parsePatch, type DiffLine } from '../configDiff';
 
 const BEFORE = `[printer]
@@ -55,6 +61,50 @@ describe('remainingApprovalSeconds', () => {
     expect(remainingApprovalSeconds(0, 0, 0)).toBe(0);
     // Clock skew (nowMs before receivedAt) must not inflate the number.
     expect(remainingApprovalSeconds(5, 10_000, 9_000)).toBe(5);
+  });
+});
+
+describe('approval countdown anchor (the poll replaces the payload)', () => {
+  // 90s backend window polled every second: each payload's timeoutSeconds is
+  // the backend's CURRENT remainder, so the anchor must move with it.
+  const polls = [
+    { t: 0, remaining: 90 },
+    { t: 45_000, remaining: 45 },
+    { t: 60_000, remaining: 30 },
+  ];
+
+  it('a payload whose timeoutSeconds is already-remaining is not double-decremented', () => {
+    const shown: number[] = [];
+    let anchor: ApprovalCountdownAnchor | null = null;
+    for (const { t, remaining } of polls) {
+      anchor = foldApprovalCountdown(anchor, { approvalId: 'ap-1', timeoutSeconds: remaining }, t, false);
+      if (!anchor) throw new Error('an idle poll must produce an anchor');
+      shown.push(remainingApprovalSeconds(remaining, anchor.receivedAtMs, t));
+    }
+    // The display tracks the backend remainder exactly — the time the backend
+    // already counted is not subtracted a second time.
+    expect(shown).toEqual([90, 45, 30]);
+    // ...and the local tick still interpolates BETWEEN polls.
+    expect(remainingApprovalSeconds(30, 60_000, 62_400)).toBe(28);
+    // The pre-fix wiring (anchor pinned at the first sighting) rendered 0 on
+    // the t=45s payload with 45s still on the backend clock. This is the bug
+    // the re-anchor removes.
+    expect(remainingApprovalSeconds(45, 0, 45_000)).toBe(0);
+  });
+
+  it('a new approvalId starts a fresh countdown window', () => {
+    const first = foldApprovalCountdown(null, { approvalId: 'ap-1', timeoutSeconds: 90 }, 0, false);
+    const next = foldApprovalCountdown(first, { approvalId: 'ap-2', timeoutSeconds: 90 }, 30_000, false);
+    expect(next).toEqual({ approvalId: 'ap-2', receivedAtMs: 30_000 });
+    expect(remainingApprovalSeconds(90, next?.receivedAtMs ?? 0, 30_000)).toBe(90);
+  });
+
+  it('keeps the previous anchor while a decision POST is in flight', () => {
+    const anchor = foldApprovalCountdown(null, { approvalId: 'ap-1', timeoutSeconds: 90 }, 0, false);
+    expect(foldApprovalCountdown(anchor, { approvalId: 'ap-1', timeoutSeconds: 80 }, 10_000, true))
+      .toBe(anchor);
+    expect(foldApprovalCountdown(null, { approvalId: 'ap-1', timeoutSeconds: 80 }, 10_000, true))
+      .toBeNull();
   });
 });
 

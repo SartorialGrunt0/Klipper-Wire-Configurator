@@ -312,6 +312,22 @@ def test_add_include_joins_existing_include_block():
     assert inc < lines.index('[printer]')
 
 
+def test_add_include_on_empty_file_actually_writes_the_line():
+    # Review fix 2026-09-26 (CRITICAL): the empty-file branch wrote the
+    # include directly to self.files, but the method's final join
+    # rebuilt the text from the PRE-edit line list — status 'ok' with a
+    # byte-identical file, i.e. the tool reported a change it did not
+    # make.
+    for initial in ('', '  \n'):
+        st = ProjectState({'printer.cfg': initial})
+        st1, r = st.apply_no_gate({'op': 'add_include', 'file': 'printer.cfg',
+                                   'target_file': 'extra.cfg'})
+        assert r['status'] == 'ok', (initial, r)
+        assert st1.files['printer.cfg'] != initial, (
+            f"initial={initial!r} must gain the include line")
+        assert '[include extra.cfg]' in st1.files['printer.cfg']
+
+
 def test_add_include_no_existing_includes_goes_to_top():
     st, base = _state()
     st1, r = st.apply(base, {'op': 'add_include', 'file': 'printer.cfg',

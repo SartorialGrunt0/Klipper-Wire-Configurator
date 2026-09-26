@@ -917,8 +917,8 @@ export interface AiChatResponse {
   /**
    * Tool-mediated editing (product behavior): changes staged by the
    * config_edit/config_write write tools. Server-validated (delta vs the
-   * sent live state); the draft preview consumes these INSTEAD of parsing
-   * prose cfg blocks. Null when nothing was staged.
+   * sent live state); the approval-card rail consumes these INSTEAD of
+   * parsing prose cfg blocks. Null when nothing was staged.
    */
   pendingEdits?: PendingConfigEdit[] | null;
   /** Write-tool call count for this reply (Gate 1 oscillation telemetry). */

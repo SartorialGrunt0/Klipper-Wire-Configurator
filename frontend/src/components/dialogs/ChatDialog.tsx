@@ -18,6 +18,10 @@ import { usePrinterMemoryStore, DEFAULT_PRINTER_MEMORY, type PrinterMemory } fro
 import * as api from '../../services/api';
 import { extractPrinterMemoryBlock } from '../../utils/printerMemory';
 import { planApprovedEditApply } from '../../utils/approvalApply';
+import {
+  foldApprovalCountdown,
+  type ApprovalCountdownAnchor,
+} from '../../utils/approvalDiff';
 import { selectUnsavedDrafts } from '../../utils/chatContext';
 import {
   EMPTY_PROGRESS,
@@ -121,7 +125,12 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   // (validated tool-mediated writes suspend the backend loop). The
   // backend timer auto-declines; this UI just displays and decides.
   const [approvalCard, setApprovalCard] = useState<ApprovalCard | null>(null);
-  const [approvalReceivedAt, setApprovalReceivedAt] = useState(0);
+  // Countdown anchor paired with the payload currently on screen (see
+  // foldApprovalCountdown): the poll replaces the payload every second and
+  // its timeoutSeconds is already the backend's seconds-remaining, so the
+  // anchor must move with the payload — a stale anchor ticks the countdown
+  // down twice as fast as the backend's real deadline.
+  const [approvalAnchor, setApprovalAnchor] = useState<ApprovalCountdownAnchor | null>(null);
   const [approvalNow, setApprovalNow] = useState(0);
   const [approvalBusy, setApprovalBusy] = useState(false);
   const [approvalInvalidation, setApprovalInvalidation] = useState<string | null>(null);
@@ -597,7 +606,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         if (!existing || existing.approvalId !== poll.approvalId) {
           approvalCardRef.current = poll;
           setApprovalCard(poll);
-          setApprovalReceivedAt(Date.now());
           setApprovalNow(Date.now());
           setApprovalInvalidation(null);
           // A NEW card is a fresh decision: busy is per-card, never
@@ -612,12 +620,22 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
             ? { ...poll }
             : prev));
         }
+        // Every accepted payload carries the backend's CURRENT remainder, so
+        // it re-anchors the countdown at its own arrival time (a stale anchor
+        // ticks the window down twice as fast — foldApprovalCountdown).
+        setApprovalAnchor((prev) => foldApprovalCountdown(
+          prev,
+          { approvalId: poll.approvalId, timeoutSeconds: poll.timeoutSeconds },
+          Date.now(),
+          approvalBusy,
+        ));
       } else if (approvalCardRef.current && !approvalBusy) {
         // Card resolved/closed server-side (e.g. timeout auto-decline):
         // drop it. A decision POST in flight keeps it visible until the
         // main request completes and loading clears.
         approvalCardRef.current = null;
         setApprovalCard(null);
+        setApprovalAnchor(null);
       }
     };
     void tick();
@@ -703,6 +721,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         // chat stuck until timeout).
         approvalCardRef.current = null;
         setApprovalCard(null);
+        setApprovalAnchor(null);
         setApprovalBusy(false);
       } else {
         setApprovalInvalidation(
@@ -712,6 +731,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         );
         approvalCardRef.current = null;
         setApprovalCard(null);
+        setApprovalAnchor(null);
       }
     } catch {
       setApprovalInvalidation('Approval request failed — check the backend connection.');
@@ -1016,7 +1036,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           {approvalCard && (
             <ChatApprovalCard
               card={approvalCard}
-              receivedAtMs={approvalReceivedAt}
+              receivedAtMs={approvalAnchor?.receivedAtMs ?? approvalNow}
               nowMs={approvalNow}
               busy={approvalBusy}
               invalidation={approvalInvalidation}

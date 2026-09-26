@@ -173,7 +173,7 @@ Expected result:
 2. Simulation feedback responds to macro content and bounds.
 3. Native layout saves include macro designer payloads.
 
-### FTM-009 AI chat grounding and draft-apply workflow
+### FTM-009 AI chat grounding and tool-mediated edit workflow
 
 Requirements: REQ-AI-01, REQ-AI-05
 
@@ -187,13 +187,13 @@ Procedure:
 3. Ask a documentation-grounded Klipper question that references a specific section or parameter.
 4. Attach at least one local config file or reference one or more loaded config files by name.
 5. Request a config edit that targets the active file and, for multi-file projects, a second named file.
-6. Review the draft preview and apply the suggested changes.
+6. Decide the in-chat approval card for each proposed change: approve one, decline another, and leave a third unanswered long enough to watch the 90s auto-decline.
 
 Expected result:
 1. Provider settings and message history persist across closing and reopening the dialog.
 2. The response arrives through the proxy or returns a clear provider error without corrupting the stored conversation history.
-3. Draft preview groups changes by target file before apply.
-4. Applied changes preserve untouched comments and unrelated section content while rebuilding graph/config state from the accepted draft.
+3. Each validated write raises an in-chat approval card showing a diff of the proposed change computed from the server-prepared before/after text (never model prose); an unanswered card auto-declines after 90s.
+4. An approved change stages into the editor's working state (dirty, unsaved) with untouched comments and unrelated section content preserved; a declined change leaves the file untouched.
 
 ## Result Interpretation
 

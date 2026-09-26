@@ -28,7 +28,17 @@ export function buildApprovalDiffLines(
   return kept;
 }
 
-/** Seconds remaining, clamped — display helper for the card countdown. */
+/**
+ * Seconds remaining, clamped — display helper for the card countdown.
+ *
+ * `serverRemaining` is the backend's "seconds remaining" as of
+ * `receivedAtMs`, so the local elapsed time is only the sub-poll
+ * interpolation BETWEEN polls: pair the value with the arrival time of the
+ * SAME payload (see `foldApprovalCountdown`). A stale anchor subtracts the
+ * window twice — the countdown reaches zero at roughly half the real
+ * deadline while the backend timer and the Approve/Decline buttons are
+ * still live.
+ */
 export function remainingApprovalSeconds(
   serverRemaining: number,
   receivedAtMs: number,
@@ -36,6 +46,39 @@ export function remainingApprovalSeconds(
 ): number {
   const elapsed = Math.max(0, (nowMs - receivedAtMs) / 1000);
   return Math.max(0, Math.ceil(serverRemaining - elapsed));
+}
+
+/** Countdown anchor for the approval card: the arrival time of the payload
+ *  the backend's remainder came with (`ApprovalCard.timeoutSeconds`). */
+export interface ApprovalCountdownAnchor {
+  /** approvalId `receivedAtMs` belongs to (a new card restarts the window). */
+  approvalId: string;
+  /** Date.now() when the payload carrying the current remainder arrived. */
+  receivedAtMs: number;
+}
+
+/**
+ * Fold one approval poll into the countdown anchor.
+ *
+ * The card payload is REPLACED by the ~1s poll and its `timeoutSeconds` is
+ * ALREADY the backend's seconds-remaining for that poll. So every accepted
+ * payload re-anchors the countdown at its own arrival time: carrying an
+ * anchor over from the first sighting of an approvalId would make the
+ * backend's decrement and the local clock count the same seconds twice
+ * (a 90s card would read 0 after ~45s while the backend timer and the
+ * buttons were still live).
+ *
+ * While a decision POST is in flight (`busy`) the previous anchor is kept —
+ * the poll neither refreshes the card nor the countdown under the user.
+ */
+export function foldApprovalCountdown(
+  prev: ApprovalCountdownAnchor | null,
+  poll: { approvalId: string; timeoutSeconds: number },
+  nowMs: number,
+  busy: boolean,
+): ApprovalCountdownAnchor | null {
+  if (busy) return prev;
+  return { approvalId: poll.approvalId, receivedAtMs: nowMs };
 }
 
 /** Per-severity counts over the delta-validation findings attached to an

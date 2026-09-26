@@ -1,29 +1,23 @@
 /**
- * Mini-diff draft protocol for the AI chat feature.
+ * Mini-diff DISPLAY helpers for the AI chat feature (render-only).
  *
- * When the AI edits an EXISTING config section it may emit a mini-diff
- * instead of reproducing the full section: the section header followed by
- * only the lines that change, with removed lines prefixed by '-' and added
- * lines prefixed by '+' (keeping their original indentation). The app
- * applies these exact replacements to the current file text, so unchanged
- * lines — including Jinja tags inside macros — are preserved automatically
- * and can never be dropped or reworded by the model.
+ * Models still answer edit requests with a diff-shaped block: the section
+ * header followed by only the lines that change, removed lines prefixed by
+ * '-' and added lines prefixed by '+' (keeping their original indentation).
+ * Nothing here applies that text — the write tools (`config_edit` /
+ * `config_write`) are the only edit path and their diffs are computed
+ * mechanically server-side. What these helpers do is keep such a block
+ * READABLE inside a chat bubble:
+ * - `classifyMiniDiffLine` colour-codes '-'/'+' lines red/green for
+ *   `ChatMessageList`;
+ * - `fenceUnfencedMiniDiffs` wraps an unfenced diff-shaped run in a ```cfg
+ *   fence so GFM stops rendering the +/- lines as markdown bullets;
+ * - `isMiniDiffBlock` is the shared criterion (a section header AND a +/-
+ *   marker), so a plain bulleted list is never mistaken for a diff.
  *
  * Markers are matched with leading-whitespace tolerance (`^\s*`): models
  * sometimes indent the '-'/'+' to align with a gcode body indentation. The
- * content AFTER the marker keeps its own indentation and is matched
- * indent-tolerantly against the base file.
- *
- * Three shapes are supported:
- * - edit: '-' removal line(s) with optional '+' additions below them
- *   (replace matched lines);
- * - delete-only: '-' lines with no additions (lines are removed);
- * - add-only: '+' lines with NO preceding '-' — there is no line to remove,
- *   so the additions are appended at the end of the section (after the last
- *   non-empty line), which is how "add one param / one line" edits work.
- *
- * A cfg block with no '-' AND no '+' lines is treated as a full-section
- * block (the legacy protocol) and passes through untouched.
+ * content AFTER the marker keeps its own indentation.
  */
 
 export const MINI_DIFF_REMOVAL_RE = /^\s*-(.*)$/;

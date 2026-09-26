@@ -33,8 +33,6 @@ export interface ReplyValidationResult {
   /** Empty = the reply is valid — stop. Non-empty = blocking issues. */
   issues: ReplyValidationIssue[];
   failureReason: string | null;
-  /** Number of sections the reply's draft was deterministically repaired. */
-  repairCount?: number;
   /**
    * True = stop retrying even though issues remain (advisory-only issues
    * such as duplicate sections the AI cannot resolve). Adds warningOnGiveUp.
