@@ -37,7 +37,13 @@ from services.warning_acknowledgments import (
 )
 from services.gcode_registry import (
     STATUS_CONDITIONAL_OUT,
+    STATUS_UNKNOWN,
+    STATUS_VALID,
     build_project_context,
+    classify_command,
+    is_traditional_gcode,
+    is_valid_registration_name,
+    load_registry as load_gcode_registry,
     scan_gcode_body,
 )
 
@@ -917,6 +923,32 @@ def validate_config(config: ConfigFile, *, gcode_registry: bool = True) -> Valid
             code="unclosed_section_header",
         ))
 
+    # Column-0 line configparser itself rejects (unindented value wrap,
+    # stray prose, bare Jinja at column 0) — the load aborts with
+    # ParsingError before anything runs, so this blocks save. Section is
+    # resolved to the enclosing header so the graph dot and gutter agree.
+    for line_number, line_text in config.malformed_lines:
+        enclosing = ""
+        enclosing_line = 0
+        for sec in config.sections:
+            if sec.is_commented_out or not sec.line_number:
+                continue
+            if sec.line_number <= line_number and sec.line_number >= enclosing_line:
+                enclosing = sec.full_header
+                enclosing_line = sec.line_number
+        result.errors.append(ValidationError(
+            severity="error",
+            section=enclosing,
+            param="",
+            message=(
+                f"Line '{line_text}' at column 0 is not a section header or "
+                "an option — Klipper will refuse to load this file. If it is "
+                "the continuation of the value above, indent it."
+            ),
+            line_number=line_number,
+            code="malformed_config_line",
+        ))
+
     # A file that includes itself: same recursive-load failure as a
     # multi-file cycle, but visible from one file — so it is checked here
     # and shows on every validation path (the cross-file walk in
@@ -1167,6 +1199,9 @@ def validate_config(config: ConfigFile, *, gcode_registry: bool = True) -> Valid
     result.errors.extend(_scan_file_gcode_commands(
         config, build_project_context({config.filename: config}),
         enabled=gcode_registry))
+    result.errors.extend(_scan_gcode_macro_renames(
+        config, build_project_context({config.filename: config}),
+        enabled=gcode_registry))
 
     # Bulk-ack suppression (Phase 4 save gate): drop warnings whose stable
     # identity is in the identity store. Warnings ONLY — errors are never
@@ -1266,6 +1301,147 @@ def _scan_file_gcode_commands(
     return findings
 
 
+def _scan_gcode_macro_renames(
+    config: ConfigFile, context, *, enabled: bool = True,
+) -> list[ValidationError]:
+    """rename_existing / command-registration semantics per [gcode_macro].
+
+    Klipper registration rules (fixture-proven + source-simulated
+    2026-09-25, gcode_macro.py:136-171 + gcode.py:133-152):
+      * option ABSENT and the macro name is a registered stock command
+        whose gates are present -> register_command collision at LOAD:
+        "gcode command X already registered" (the reported restart error).
+      * option PRESENT (including empty — Klipper's branch is `is not
+        None`) -> rename path: the alias must currently be registered
+        ("Existing command 'X' not found in gcode_macro rename"), the
+        traditional/non-traditional types must match ("rename of different
+        types"), and the target must be a name register_command accepts
+        ("Can't register ... invalid name").
+    Warning tier by the registry trust contract: a plugin extra can
+    register/rename names the stock artifact can't see. An alias unknown
+    to the registry is therefore SILENT (may be a plugin command); a
+    gated-out alias warns (gates cover plugin sections too — the stock
+    command genuinely isn't registered when its section is absent).
+    `context` is file-local or whole-project like the body scan; gate
+    satisfaction resolves project-wide (one namespace at load).
+    """
+    findings: list[ValidationError] = []
+    if not enabled:
+        return findings
+    try:
+        registry = load_gcode_registry()
+    except (FileNotFoundError, json.JSONDecodeError):
+        return findings  # artifact missing/corrupt: scan no-ops (same policy as body scan)
+    except Exception:  # pragma: no cover - defensive
+        logging.getLogger(__name__).warning(
+            "gcode registry load failed; rename scan skipped", exc_info=True)
+        return findings
+
+    # Merge first: duplicate [gcode_macro X] headers are ONE section in
+    # Klipper (RawConfigParser strict=False, per-option union, last
+    # definition wins). Walk unique aliases, anchored at the last
+    # occurrence, with the last rename_existing seen for that alias.
+    merged: dict[str, tuple] = {}  # alias -> (section, param|None)
+    for section in config.sections:
+        if section.section_type != "gcode_macro" or section.is_commented_out:
+            continue
+        alias = section.section_name.strip().upper()
+        if not alias:
+            continue
+        params = [p for p in section.get_all_param("rename_existing")
+                  if not p.is_commented_out]
+        param = params[-1] if params else None
+        prev_param = merged[alias][1] if alias in merged else None
+        merged[alias] = (section, param if param is not None else prev_param)
+
+    for alias, (section, param) in merged.items():
+        verdict = classify_command(alias, context, registry)
+        known = verdict.status != STATUS_UNKNOWN
+
+        if param is None:
+            # shadow case: stock command + gate satisfied + no rename ->
+            # hard collision at load. Gated-out alias = legal plain
+            # macro; user_macro source = the macro itself, not a shadow.
+            if (known and verdict.status == STATUS_VALID
+                    and verdict.source == "registry"):
+                findings.append(ValidationError(
+                    severity="warning",
+                    section=section.full_header,
+                    param="",
+                    message=(
+                        f"'{alias}' is a registered Klipper command — a "
+                        "[gcode_macro] of the same name without "
+                        "rename_existing will fail the restart with "
+                        f"'gcode command {alias} already registered'. Add "
+                        f"rename_existing: _{alias} (or another name) to "
+                        "wrap the original."
+                    ),
+                    line_number=section.line_number,
+                    code="rename_existing_invalid",
+                    extra=alias,
+                ))
+            continue
+
+        target = param.value
+        # option present (even empty): Klipper's rename branch. Order
+        # mirrors gcode_macro.py: type check at LOAD (:137-141), then
+        # connect-stage alias lookup (:164-166), then the target name
+        # check inside register_command (:145-149). Traditional targets
+        # skip the name check (gcode.py:145 guards it on non-traditional).
+        if is_traditional_gcode(alias) != is_traditional_gcode(target):
+            findings.append(ValidationError(
+                severity="warning",
+                section=section.full_header,
+                param="rename_existing",
+                message=(
+                    f"G-Code macro rename of different types ('{alias}' vs "
+                    f"'{target}') — Klipper refuses it at startup. "
+                    "Traditional (G/M + number) and named commands cannot "
+                    "be renamed onto each other."
+                ),
+                line_number=param.line_number,
+                code="rename_existing_invalid",
+                extra=alias,
+            ))
+            continue
+        if not known:
+            continue  # alias unknown -> may be a plugin command; silent
+        if verdict.status == STATUS_CONDITIONAL_OUT:
+            findings.append(ValidationError(
+                severity="warning",
+                section=section.full_header,
+                param="rename_existing",
+                message=(
+                    f"'{alias}' is not registered in this configuration "
+                    f"(needs {', '.join(f'[{s}]' for s in verdict.required_sections)}) "
+                    "— renaming it fails startup with \"Existing command "
+                    f"'{alias}' not found in gcode_macro rename\"."
+                ),
+                line_number=param.line_number,
+                code="rename_existing_invalid",
+                extra=alias,
+            ))
+            continue
+        if not is_traditional_gcode(target) and not is_valid_registration_name(target):
+            shown = " ".join(target.split()) or "(empty)"
+            findings.append(ValidationError(
+                severity="warning",
+                section=section.full_header,
+                param="rename_existing",
+                message=(
+                    f"rename_existing '{shown}' is an invalid command name "
+                    "— Klipper rejects it at startup (\"Can't register "
+                    "...\"). If the value wrapped to the next line, "
+                    "indent it or keep it on the 'rename_existing:' line."
+                ),
+                line_number=param.line_number,
+                code="rename_existing_invalid",
+                extra=alias,
+            ))
+            continue
+    return findings
+
+
 def validate_project_configs(configs: dict[str, ConfigFile], *,
                              gcode_registry: bool = True,
                              ) -> dict[str, ValidationResult]:
@@ -1295,6 +1471,8 @@ def validate_project_configs(configs: dict[str, ConfigFile], *,
                 e for e in result.errors if e.code not in GCODE_FINDING_CODES
             ]
             result.errors.extend(_scan_file_gcode_commands(
+                configs[filename], project_gcode_ctx))
+            result.errors.extend(_scan_gcode_macro_renames(
                 configs[filename], project_gcode_ctx))
             # re-derived warnings bypassed the per-file ack pass above
             _suppress_acknowledged_warning_identities(filename, result)

@@ -17,6 +17,7 @@ export interface AcknowledgeableWarning {
 export const GCODE_REGISTRY_CODES: ReadonlySet<string> = new Set([
   'unknown_gcode_command',
   'gcode_command_section_missing',
+  'rename_existing_invalid',
 ]);
 
 export function acknowledgeableWarning(

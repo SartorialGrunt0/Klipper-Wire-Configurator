@@ -80,6 +80,33 @@ def normalize_name(name: str) -> str:
     return name.strip().split()[0].upper() if name.strip() else ""
 
 
+def is_traditional_gcode(cmd: str) -> bool:
+    """Klipper's traditional-command test, ported verbatim from
+    gcode.py:125-132 ('a letter followed by a number'). The bare except is
+    intentional (faithful port): empty/suffix-less names are False.
+    NOTE 'G29.1' IS traditional (float('.1') parses) — Klipper's own
+    docs example renames G29 -> G29.1."""
+    try:
+        cmd = cmd.upper().split()[0]
+        val = float(cmd[1:])  # noqa: F841 - presence check, like upstream
+        return cmd[0].isupper() and cmd[1].isdigit()
+    except Exception:
+        return False
+
+
+def is_valid_registration_name(cmd: str) -> bool:
+    """Whether Klipper's register_command would accept `cmd` as a
+    non-traditional command name (gcode.py:145-149). Checks the name
+    EXACTLY as written — Klipper registers rename_existing values without
+    stripping, so ' PROBE_ACCURACY ' and multi-line wraps are rejected at
+    connect with \"Can't register ... invalid name\"."""
+    if cmd.upper() != cmd or not cmd.replace("_", "A").isalnum():
+        return False
+    if cmd[0].isdigit() or cmd[1:2].isdigit():
+        return False
+    return True
+
+
 def _suggest(name: str, pool: list[str], limit: int = _SUGGEST_LIMIT,
              commands: dict | None = None,
              min_score: float = 0.42) -> tuple[str, ...]:
