@@ -272,3 +272,23 @@ def test_cross_file_rename_does_not_mask_type_mismatch():
         if e.code == CODE and e.param == "rename_existing"
     ]
     assert mismatch, "type-mismatch rename must stay flagged"
+
+
+def test_cross_file_rename_outside_include_closure_does_not_suppress():
+    # Round-2 review: Klipper's load namespace is the include CLOSURE
+    # only — a rename_existing in a project file that printer.cfg never
+    # includes must NOT mask a real shadow collision.
+    files = {
+        "printer.cfg": "[include a.cfg]\n" + PROINTER,
+        "a.cfg": "[gcode_macro G28]\ngcode:\n  M117 A-home\n",
+        "c.cfg": ("[gcode_macro G28]\nrename_existing: G28.1\n"
+                  "gcode:\n  M117 C-unused\n"),
+    }
+    configs = {n: parse_config(t, n) for n, t in files.items()}
+    results = validate_project_configs(configs)
+    shadow = [
+        e for r in results.values() for e in r.errors
+        if e.code == CODE and e.param == ""
+    ]
+    assert shadow, ("rename in a NON-included file must not suppress "
+                    "the shadow error")

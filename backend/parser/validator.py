@@ -1534,7 +1534,14 @@ def validate_project_configs(configs: dict[str, ConfigFile], *,
         # bare, B defined the same alias WITH rename_existing, and A got
         # a restart-failure error klipper never produces.
         renames_defined_project_wide: set[str] = set()
-        for _cfg in configs.values():
+        # Round-2 review: scope to the include closure — Klipper's load
+        # namespace is exactly what printer.cfg (transitively) includes
+        # (configfile.py _parse_config); a rename in an UN-included
+        # project file must not mask a real shadow error.
+        for _cfg_file in _get_active_project_files(configs):
+            _cfg = configs.get(_cfg_file)
+            if _cfg is None:
+                continue
             for _sec in _cfg.sections:
                 if _sec.section_type != "gcode_macro" or _sec.is_commented_out:
                     continue
