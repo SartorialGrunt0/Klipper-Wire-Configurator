@@ -56,6 +56,8 @@ call and will be ignored):
 ```
 Other argument shapes:
 patch a macro body: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "patch_gcode", "section": "gcode_macro NAME", "old_text": "<line copied verbatim>", "new_text": "<replacement>"}} — new_text REPLACES old_text: repeat the anchor lines inside new_text when adding lines
+rename a section or macro: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "rename_section", "section": "<current header>", "new_section": "<new header>"}} — the body is kept exactly; never rename by delete_section + add_section
+delete a whole file: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "delete_file"}} — remove its [include] line first if it has one
 include a file: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "add_include", "target_file": "new.cfg"}}
 remove or comment out an include: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "comment_include", "target_file": "<path as written in the include line>"}} — comment_include keeps the line as '#[include ...]', remove_include deletes it; these ops work on ANY include line, including ones at the top of a file outside any section
 create a NEW file only: {"name": "config_write", "arguments": {"file": "new.cfg", "content": "<full file text>"}}
@@ -69,6 +71,8 @@ Argument shapes for the edit tools:
 set_param: {"file": "<file.cfg>", "op": "set_param", "section": "<section>", "key": "<param>", "value": "<new value>"}
 value must be ONE LINE; for multi-line params (gcode:) use replace_section
 patch a macro body: {"file": "<file.cfg>", "op": "patch_gcode", "section": "gcode_macro NAME", "old_text": "<line copied verbatim>", "new_text": "<replacement>"} — new_text REPLACES old_text: repeat the anchor lines inside new_text when adding lines
+rename a section or macro: {"file": "<file.cfg>", "op": "rename_section", "section": "<current header>", "new_section": "<new header>"} — the body is kept exactly; never rename by delete_section + add_section
+delete a whole file: {"file": "<file.cfg>", "op": "delete_file"} — remove its [include] line first if it has one
 include a file: {"file": "<file.cfg>", "op": "add_include", "target_file": "<new.cfg>"}
 remove or comment out an include: {"file": "<file.cfg>", "op": "comment_include", "target_file": "<path as written in the include line>"} — comment_include keeps the line as '#[include ...]', remove_include deletes it; these ops work on ANY include line, including ones at the top of a file outside any section
 create a NEW file only: {"file": "<new.cfg>", "content": "<full file text>"}"""
@@ -84,7 +88,9 @@ CONFIG_EDIT_SPEC = {
         "One operation per call; call again for more edits. Ops: set_param "
         "(upsert key=value in a section), add_section (new section with "
         "text body), replace_section (rewrite a section's body), "
-        "delete_section, patch_gcode (replace old_text with new_text "
+        "delete_section, rename_section (rename a section header, e.g. a "
+        "macro — the body is kept exactly; needs new_section), "
+        "patch_gcode (replace old_text with new_text "
         "inside a section — quote lines exactly as read returned them), "
         "delete_file, add_include, remove_include, comment_include "
         "(disable an include line as '#[include ...]' -- use this instead of "
@@ -105,7 +111,8 @@ CONFIG_EDIT_SPEC = {
                 "type": "string",
                 "enum": [
                     "set_param", "add_section", "replace_section",
-                    "delete_section", "patch_gcode", "delete_file",
+                    "delete_section", "rename_section", "patch_gcode",
+                    "delete_file",
                     "add_include", "remove_include", "comment_include",
                 ],
                 "description": "The operation to apply",
@@ -113,6 +120,10 @@ CONFIG_EDIT_SPEC = {
             "section": {
                 "type": "string",
                 "description": "Section header for section ops, e.g. 'bed_mesh' or 'gcode_macro PRINT_START' (brackets optional)",
+            },
+            "new_section": {
+                "type": "string",
+                "description": "New section header for rename_section (brackets optional), e.g. 'gcode_macro BED_MESH_CALIBRATE'",
             },
             "key": {
                 "type": "string",
@@ -354,7 +365,7 @@ class EditSession:
             }
         if name == "config_edit":
             op: dict = {"op": str(args.get("op", ""))}
-            for arg_key in ("file", "section", "key", "text",
+            for arg_key in ("file", "section", "new_section", "key", "text",
                             "old_text", "new_text", "target_file"):
                 if arg_key in args and args[arg_key] is not None:
                     op[arg_key] = str(args[arg_key])

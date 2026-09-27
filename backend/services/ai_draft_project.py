@@ -434,6 +434,7 @@ class ProjectState:
             'add_section': self._op_add_section,
             'replace_section': self._op_replace_section,
             'delete_section': self._op_delete_section,
+            'rename_section': self._op_rename_section,
             'patch_gcode': self._op_patch_gcode,
             'new_file': self._op_new_file,
             'delete_file': self._op_delete_file,
@@ -444,7 +445,8 @@ class ProjectState:
         if handler is None:
             return _state_error(
                 f"Unknown op '{kind}'. Valid ops: set_param, add_section, "
-                "replace_section, delete_section, patch_gcode, delete_file, "
+                "replace_section, delete_section, rename_section, "
+                "patch_gcode, delete_file, "
                 "add_include, remove_include, comment_include — use "
                 "exactly one of these, one op per call.")
         try:
@@ -732,6 +734,54 @@ class ProjectState:
         self.files[filename] = re.sub(r'\n{3,}', '\n\n', '\n'.join(lines))
         return {'status': 'ok', 'file': filename, 'summary': f"deleted section [{header}] from {filename}"}
 
+    def _op_rename_section(self, op: dict) -> dict:
+        """Rewrite a section's HEADER line, body untouched (byte-stable).
+
+        Rename requests (macro or section) previously required the model
+        to improvise delete+re-add — two approval cards, re-typed body
+        (dropped params, mangled indentation), and a dangling-reference
+        window between the cards. This op is the single-call path: only
+        the header line changes, so the body survives exactly as-is and
+        the whole rename rides ONE card.
+        """
+        filename = self._require_file(op.get('file'))
+        header = self._require_header(op)
+        new_raw = (op.get('new_section') or '').strip()
+        if not new_raw:
+            return _state_error(
+                "Missing required argument: new_section — the new header "
+                "without brackets, e.g. 'gcode_macro PRINT_START'")
+        new_header = new_raw.strip('[]').strip()
+        if not new_header:
+            return _state_error(
+                f"new_section '{new_raw}' is not a section header")
+        if new_header == 'include' or new_header.startswith('include '):
+            return _state_error(
+                "Cannot rename a section to '[include ...]' — include "
+                "lines are managed with add_include / remove_include / "
+                "comment_include.")
+        if new_header == header:
+            return _state_error(
+                f"Section '[{header}]' is already named '[{new_header}]'.")
+        lines = _split_lines(self.files[filename])
+        found = _find_section(lines, header)
+        if found is None:
+            return _state_error(
+                f"Section '[{header}]' not found in {filename}."
+                + _missing_section_hint(self.files, header, filename))
+        if _find_section(lines, new_header) is not None:
+            return _state_error(
+                f"Section '[{new_header}]' already exists in {filename} — "
+                "rename would create a duplicate. Delete or rename that "
+                "section first, or use replace_section on it instead.")
+        header_index, _end = found
+        # RE_SECTION_HEADER anchors ']' to EOL, so a matched header line
+        # carries no trailing comment — replacing the whole line is safe.
+        lines[header_index] = f'[{new_header}]'
+        self.files[filename] = '\n'.join(lines)
+        return {'status': 'ok', 'file': filename,
+                'summary': f"renamed section '[{header}]' to '[{new_header}]' in {filename}"}
+
     # -- patch_gcode -------------------------------------------------------
 
     @staticmethod
@@ -792,6 +842,20 @@ class ProjectState:
                 f"Section '[{header}]' not found in {filename}."
                 + _missing_section_hint(self.files, header, filename)
                 + " Read the file first."
+            )
+        # No-op guard (live report 2026-09-26): a rename attempt landed as
+        # patch_gcode with old_text == new_text; the string replace
+        # "succeeded" and the op reported 'patched [...]' while the file
+        # stayed byte-identical — a FALSE success the model relayed to
+        # the user ("patched [controller_fan _stepper_fan]" for a rename
+        # that never happened). A patch that changes nothing must say so,
+        # and name the real tool for the most common no-op shape.
+        if old_text == new_text:
+            return _state_error(
+                f"patch_gcode made NO change: old_text and new_text are "
+                f"identical. To rename the section itself use "
+                f"op='rename_section' with new_section=<new header>; "
+                f"otherwise quote the lines you actually want to change."
             )
         header_index, end = found
         section_lines = lines[header_index + 1:end]

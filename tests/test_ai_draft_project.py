@@ -705,6 +705,96 @@ def test_delete_section_clean_and_missing():
     assert r2['status'] == 'error' and 'not found' in r2['error']
 
 
+# ── rename_section (live report 2026-09-26: rename had no tool path) ───
+
+
+def test_rename_section_clean_and_body_byte_stable():
+    st, base = _state()
+    st1, r = st.apply(base, {'op': 'rename_section', 'file': 'printer.cfg',
+                             'section': 'stepper_x',
+                             'new_section': 'stepper_x_renamed'})
+    # The renamed header no longer matches the schema's stepper_x, so an
+    # unknown_section ADVISORY rides along (non-blocking, correct: the
+    # user sees it on the card). No new errors.
+    assert r['status'] in ('applied', 'applied_with_advisory')
+    assert not r['newErrors']
+    out = st1.files['printer.cfg']
+    assert '[stepper_x_renamed]' in out
+    assert '[stepper_x]\n' not in out
+    # Body survives byte-for-byte — comments, separators, everything.
+    assert 'dir_pin: PF12   # keep me' in out
+    assert '## enable_pin: PF16' in out
+
+
+def test_rename_section_macro_wraps_builtin():
+    # Clifford's live case: rename [gcode_macro Level_Bed] ->
+    # [gcode_macro BED_MESH_CALIBRATE] in one staged card, not the
+    # delete+re-add improvisation that produced the invalidation loop.
+    text = ("[gcode_macro Level_Bed]\n"
+            "gcode:\n"
+            "    BED_MESH_CALIBRATE\n")
+    st = ProjectState.from_context_files({'printer.cfg': {'content': text}})
+    base = st.validate()
+    st1, r = st.apply(base, {'op': 'rename_section', 'file': 'printer.cfg',
+                             'section': 'gcode_macro Level_Bed',
+                             'new_section': 'gcode_macro BED_MESH_CALIBRATE'})
+    assert r['status'] in ('applied', 'applied_with_advisory')
+    assert 'renamed' in r['summary']
+    assert 'gcode:\n    BED_MESH_CALIBRATE' in st1.files['printer.cfg']
+
+
+def test_patch_gcode_identical_old_new_refused():
+    # Live report 2026-09-26: a rename attempt sent patch_gcode with
+    # old_text == new_text; the replace 'succeeded' on byte-identical
+    # text and reported 'patched [...]' — a FALSE success. Must kick
+    # back with the rename_section pointer instead.
+    st, base = _state()
+    st1, r = st.apply(base, {'op': 'patch_gcode', 'file': 'printer.cfg',
+                             'section': 'gcode_macro PRINT_START',
+                             'old_text': '    G28', 'new_text': '    G28'})
+    assert r['status'] == 'error'
+    assert 'NO change' in r['error'] and 'rename_section' in r['error']
+    assert st1.files['printer.cfg'] == st.files['printer.cfg']
+
+
+def test_rename_section_missing_structured_error():
+    st, base = _state()
+    _, r = st.apply(base, {'op': 'rename_section', 'file': 'printer.cfg',
+                           'section': 'bed_mesh_ghost',
+                           'new_section': 'bed_mesh_new'})
+    assert r['status'] == 'error' and 'not found' in r['error']
+
+
+def test_rename_section_existing_target_refused():
+    st, base = _state()
+    _, r = st.apply(base, {'op': 'rename_section', 'file': 'printer.cfg',
+                           'section': 'bed_mesh', 'new_section': 'stepper_x'})
+    assert r['status'] == 'error' and 'already exists' in r['error']
+    # state untouched
+    _, r2 = st.apply(base, {'op': 'rename_section', 'file': 'printer.cfg',
+                            'section': 'bed_mesh', 'new_section': 'bed_mesh'})
+    assert r2['status'] == 'error' and 'already named' in r2['error']
+
+
+def test_rename_section_brackets_and_include_target():
+    st, base = _state()
+    # Brackets tolerated on new_section.
+    st1, r = st.apply(base, {'op': 'rename_section', 'file': 'printer.cfg',
+                             'section': '[bed_mesh]',
+                             'new_section': '[fade_mesh]'})
+    assert r['status'] in ('applied', 'applied_with_advisory')
+    assert '[fade_mesh]' in st1.files['printer.cfg']
+    # Renaming INTO an include header is refused (not a section op).
+    _, r2 = st.apply(base, {'op': 'rename_section', 'file': 'printer.cfg',
+                            'section': 'bed_mesh',
+                            'new_section': 'include other.cfg'})
+    assert r2['status'] == 'error' and 'include' in r2['error']
+    # Missing new_section is a structured error, not a KeyError.
+    _, r3 = st.apply(base, {'op': 'rename_section', 'file': 'printer.cfg',
+                            'section': 'bed_mesh'})
+    assert r3['status'] == 'error' and 'new_section' in r3['error']
+
+
 # ── files & includes ────────────────────────────────────────────────────
 
 def test_new_file_and_include_roundtrip():
