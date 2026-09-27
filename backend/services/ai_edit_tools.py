@@ -950,7 +950,16 @@ class ApprovalRequest:
             return {"status": "already_decided"}
         if decision == "approve":
             outcome = self.session.revalidate_and_commit(self.op, context_files)
-            if outcome["status"] != "applied":
+            # Only a hard ERROR invalidates. 'applied_with_advisory' is a
+            # COMMIT (live bug 2026-09-26: every gcode_macro rename
+            # invalidated on approve — the rename earns a
+            # rename_existing/unknown-gcode advisory, decide() compared
+            # status != 'applied', and the user saw the generic "config
+            # changed since this proposal" with the config unchanged).
+            # Law: advisories ride the card for the user; approval IS the
+            # confirmation. prepare/execute/auto-approve all gate on
+            # == "error" — decide() must not drift.
+            if outcome["status"] == "error":
                 # Decision NOT accepted (plan): config moved under the
                 # card. Loop keeps waiting; the card shows the reason.
                 return {

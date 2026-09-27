@@ -1935,3 +1935,39 @@ def test_preexisting_unknown_command_still_silent():
         'section': 'idle_timeout', 'key': 'timeout', 'value': '600'}})
     assert details is not None   # no NEW unknown -> no kick
     assert 'NOT STAGED' not in content
+
+
+def test_approve_accepts_applied_with_advisory():
+    """Live bug report 2026-09-26: approving a rename_section of a
+    gcode_macro ALWAYS invalidated — the rename earns an advisory, so
+    revalidate returns 'applied_with_advisory', but decide()'s gate
+    compared status != 'applied' and reported the generic 'config
+    changed since this proposal'. Advisories ride cards; they never
+    block approval (same law as prepare/execute/auto-approve)."""
+    from services.ai_edit_tools import ApprovalRequest, EditSession
+
+    ctx = {'printer.cfg': {'content': (
+        '[printer]\nkinematics: corexy\n'
+        '\n'
+        '[gcode_macro Level_Bed]\n'
+        'rename_existing: _BED_MESH_CALIBRATE\n'
+        'gcode:\n'
+        '    BED_MESH_CALIBRATE\n'
+    )}}
+    es = EditSession(ctx)
+    op = {'file': 'printer.cfg', 'section': 'gcode_macro Level_Bed',
+          'op': 'rename_section', 'new_section': 'gcode_macro BED_MESH_CALIBRATE'}
+    _content, result, state = es.prepare(
+        {'name': 'config_edit', 'arguments': op})
+    assert result is not None and 'applied' in result['status']
+    if result['status'] != 'applied_with_advisory':
+        pytest.skip('fixture lost its advisory trigger')  # gate needs advisory shape
+
+    async def _decide():
+        approval = ApprovalRequest('config_edit', op, result, es, None)
+        return approval.decide('approve', context_files=ctx)
+
+    import asyncio
+    out = asyncio.run(_decide())
+    assert out['status'] == 'ok', out
+    assert es.committed_ops and es.committed_ops[-1]['op'] == 'rename_section'
