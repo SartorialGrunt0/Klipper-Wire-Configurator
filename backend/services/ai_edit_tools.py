@@ -577,10 +577,24 @@ class EditSession:
         earns the correction round.
         """
         renamed_old = ''
+        renamed_sections: set[str] = set()
         if args.get('op') == 'rename_section':
             old_hdr = str(args.get('section', '')).strip().strip('[]')
             if ' ' in old_hdr:  # class header: a rename strands its callers
                 renamed_old = old_hdr.split(' ', 1)[1].strip().casefold()
+            # A rename never touches the BODY, so every advisory ON the
+            # renamed section itself is pre-existing content that merely
+            # changed address: the delta gate dedupes by (file, section,
+            # code, ...) so the header change makes old body warnings
+            # look NEW (bank trace 2026-09-27: CLEAN_NOZZLE — defined in
+            # clean.cfg, called from Level_Bed's body all along — earned
+            # a 'hallucinated command' kick on every rename). Both the
+            # old and new header spellings belong to the same body.
+            for h in (result.get('renamed_from'), result.get('renamed_to'),
+                      old_hdr, str(args.get('new_section', ''))):
+                h = str(h or '').strip().strip('[]').casefold()
+                if h:
+                    renamed_sections.add(h)
         findings = []
         for a in (result.get("advisories") or []):
             if a.get("code") not in self._REGISTRY_KICK_CODES:
@@ -588,6 +602,9 @@ class EditSession:
             if renamed_old and f"'{renamed_old}'" in str(
                     a.get("message", "")).casefold():
                 continue  # expected collateral of this very rename
+            if str(a.get("section", "")).strip().strip('[]').casefold() \
+                    in renamed_sections:
+                continue  # body-carried advisory, just changed address
             findings.append(a)
         if not findings:
             return None

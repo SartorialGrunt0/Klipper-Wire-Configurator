@@ -2077,3 +2077,45 @@ def test_search_falls_back_to_disk_without_session(edit_flag, monkeypatch):
     # No session armed; overlay reset to None (no crash, disk semantics).
     import mcp_server
     assert mcp_server._chat_working_overlay() == {}
+
+
+def test_rename_body_carried_advisory_not_kicked():
+    """Bank trace 2026-09-27: the rename's FIRST send earned the
+    unknown-gcode kick for CLEAN_NOZZLE — a command Level_Bed's BODY had
+    always called (defined in clean.cfg, invisible to the file-set
+    baseline). The delta gate re-flags body findings under the new
+    header as 'new', but the rename did not introduce them and the body
+    is byte-stable, so they must not cost the kick-and-resend round-trip.
+    """
+    es = EditSession({'printer.cfg': {'content': (
+        '[gcode_macro Level_Bed]\n'
+        'gcode:\n'
+        '    CLEAN_NOZZLE\n'
+    )}})
+    args = {'name': 'config_edit', 'arguments': {
+        'file': 'printer.cfg', 'op': 'rename_section',
+        'section': 'gcode_macro Level_Bed',
+        'new_section': 'gcode_macro LEVEL_BED1'}}
+    content, details = es.execute(args)
+    assert details is not None, f"first send was kicked: {content}"
+    assert 'NOT STAGED' not in content
+    # The advisory still rides the success text — visibility unchanged.
+    assert 'CLEAN_NOZZLE' in content
+
+
+def test_rename_genuinely_new_unknown_still_kicked():
+    """The suppression is scoped to the renamed section's body: an
+    unknown command in ANY OTHER section (a real, new finding) still
+    earns the one-shot correction kick."""
+    es = EditSession({'printer.cfg': {'content': (
+        '[gcode_macro Level_Bed]\n'
+        'gcode:\n'
+        '    G28\n'
+    )}})
+    # A new_file write introducing an unknown command is unaffected by
+    # the rename filter (different op entirely).
+    content, details = es.execute({'name': 'config_write', 'arguments': {
+        'file': 'weird.cfg',
+        'content': '[gcode_macro X]\ngcode:\n    TOTALLY_FAKE_CMD\n'}})
+    assert details is None, "genuinely new unknown must still kick"
+    assert 'TOTALLY_FAKE_CMD' in content
