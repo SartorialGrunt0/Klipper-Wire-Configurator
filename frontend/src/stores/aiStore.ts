@@ -163,16 +163,18 @@ interface AiState {
   /**
    * Background completion signal for the toolbar button: 'success' when a
    * request finished while the dialog was closed, 'error' when it failed out
-   * (retry limit / unrecoverable error), 'idle' otherwise. Transient UI state
-   * — NOT persisted to the backend file.
+   * (retry limit / unrecoverable error), 'awaiting' when an approval card
+   * (edit accept/decline) arrived while the dialog was closed — it renders
+   * green like 'success' (the user needs to come look), 'idle' otherwise.
+   * Transient UI state — NOT persisted to the backend file.
    */
-  chatStatus: 'idle' | 'success' | 'error';
+  chatStatus: 'idle' | 'success' | 'error' | 'awaiting';
   /** Load AI settings + messages from the backend file (migrating localStorage). */
   loadState: () => Promise<void>;
   setSettings: (settings: Partial<AiSettings>) => void;
   setMessages: (messages: ChatMessage[]) => void;
   clearMessages: () => void;
-  setChatStatus: (status: 'idle' | 'success' | 'error') => void;
+  setChatStatus: (status: 'idle' | 'success' | 'error' | 'awaiting') => void;
   isConfigured: () => boolean;
 }
 

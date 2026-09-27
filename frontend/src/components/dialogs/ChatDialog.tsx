@@ -219,6 +219,15 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       // toolbar button returns to its default color (the user is looking at
       // the conversation now).
       useAiStore.getState().setChatStatus('idle');
+    } else if (
+      approvalCardRef.current &&
+      !approvalBusy &&
+      useAiStore.getState().chatStatus === 'idle'
+    ) {
+      // Re-raising: an unresolved approval card is still waiting on a
+      // decision — closing the dialog (e.g. after peeking at it) should
+      // turn the button green again.
+      useAiStore.getState().setChatStatus('awaiting');
     }
   }, [open, settings]);
 
@@ -599,6 +608,13 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         stopControllerRef.current = null;
         stopRequestIdRef.current = null;
         setLoading(false);
+        // The request is over: nothing left to decide. If the flow ended
+        // without overwriting the signal (Stop, transient connection loss),
+        // a lingering green 'awaiting' would be a lie — drop it to grey.
+        // 'success'/'error' set above are untouched.
+        if (useAiStore.getState().chatStatus === 'awaiting') {
+          useAiStore.getState().setChatStatus('idle');
+        }
       }
     },
     [
@@ -664,6 +680,14 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           // (the ok path clears the card, not the flag) and op 2's card
           // renders with disabled buttons until timeout.
           setApprovalBusy(false);
+          // Background signal: an edit decision is waiting. Same green
+          // as a finished reply — the point is pulling the user back to
+          // the dialog. 'awaiting' (not 'success') keeps the distinct
+          // tooltip; the request's own completion/error later overwrites
+          // it through the normal submitMessage path.
+          if (!openRef.current) {
+            useAiStore.getState().setChatStatus('awaiting');
+          }
         } else {
           // Same card: refresh remaining-time + advisories only when
           // unchanged fields don't matter; keep decision-in-flight view.
@@ -687,6 +711,14 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         approvalCardRef.current = null;
         setApprovalCard(null);
         setApprovalAnchor(null);
+        // The decision is no longer actionable — a lingering green
+        // 'awaiting' would keep hailing the user for nothing. Return to
+        // grey (only if WE raised the flag; never clobber an 'error').
+        // If the resumed request later completes with a final reply, the
+        // normal success path re-flags green.
+        if (!openRef.current && useAiStore.getState().chatStatus === 'awaiting') {
+          useAiStore.getState().setChatStatus('idle');
+        }
       }
     };
     void tick();

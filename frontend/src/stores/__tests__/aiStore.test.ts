@@ -127,4 +127,16 @@ describe('aiStore file persistence', () => {
     useAiStore.getState().setChatStatus('idle');
     expect(useAiStore.getState().chatStatus).toBe('idle');
   });
+
+  it("chatStatus 'awaiting' (approval card in background) is transient too", async () => {
+    useAiStore.getState().setChatStatus('awaiting');
+    expect(useAiStore.getState().chatStatus).toBe('awaiting');
+
+    await vi.advanceTimersByTimeAsync(500);
+    expect(mockedSaveAiState).not.toHaveBeenCalled();
+
+    // Timeout/stop drop path: awaiting -> idle.
+    useAiStore.getState().setChatStatus('idle');
+    expect(useAiStore.getState().chatStatus).toBe('idle');
+  });
 });
