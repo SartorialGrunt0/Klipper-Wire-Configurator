@@ -15,6 +15,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
+import pytest  # noqa: E402
+
 import mcp_server  # noqa: E402
 
 
@@ -331,3 +333,63 @@ def test_klippy_status_printing_warning(tmp_path, monkeypatch):
     assert "benchy.gcode" in out
     # Restart-safety note must appear whenever a print is active.
     assert "interrupt" in out.lower() or "active" in out.lower()
+
+
+# ── Working-state override (live bug report 2026-09-27) ────────────────
+# The edit session stages changes in a WORKING state (unsaved drafts +
+# approved edits), while the MCP user-config tools read DISK. After a
+# rename/draft, read_user_config handed the model the OLD content and it
+# chased ghosts ("search for level_bed after we changed it to level_bed1
+# in the draft — still finds the old macro"). The chat dispatch now
+# injects the session's working files; working content must win.
+
+WORKING = {
+    "printer.cfg": "[gcode_macro LEVEL_BED1]\ngcode:\n    BED_MESH_CALIBRATE\n",
+}
+
+
+@pytest.fixture(autouse=True)
+def _clean_overlay():
+    """The working-state overlay is a contextvar — reset around every test
+    so an override can never leak into unrelated tests."""
+    mcp_server.set_chat_working_files(None)
+    yield
+    mcp_server.set_chat_working_files(None)
+
+
+def _override_server(tmp_path):
+    """Server with the chat working-state overlay active (what the /ai/chat
+    dispatch installs around MCP calls when an EditSession exists)."""
+    server = mcp_server.McpServer()
+    mcp_server.set_chat_working_files(dict(WORKING))
+    return server
+
+
+def test_read_user_config_prefers_working_override(tmp_path, monkeypatch):
+    server = _override_server(tmp_path)
+    out = _call(server, "read_user_config",
+                {"filename": "printer.cfg", "whole_file": True})
+    assert "LEVEL_BED1" in out
+    assert "WORKING" in out.upper()  # honest source label
+
+
+def test_search_user_configs_sees_working_rename(tmp_path):
+    server = _override_server(tmp_path)
+    out = _call(server, "search_user_configs", {"query": "level_bed1"})
+    assert "LEVEL_BED1" in out
+
+
+def test_list_user_config_sections_working_override(tmp_path):
+    server = _override_server(tmp_path)
+    out = _call(server, "list_user_config_sections", {"filename": "printer.cfg"})
+    assert "gcode_macro LEVEL_BED1" in out
+
+
+def test_list_user_configs_includes_working_only_files(tmp_path):
+    server = mcp_server.McpServer()
+    mcp_server.set_chat_working_files({
+        **WORKING,
+        "park.cfg": "[gcode_macro PARK]\ngcode:\n    G1 Z5\n",
+    })
+    out = _call(server, "list_user_configs", {})
+    assert "printer.cfg" in out and "park.cfg" in out

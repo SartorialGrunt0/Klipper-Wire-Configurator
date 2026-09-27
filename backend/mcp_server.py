@@ -22,6 +22,7 @@ import os
 import re
 import sys
 from collections import Counter
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +56,57 @@ SYSTEM_CONFIG_PATH = resolve_config_path()
 # Local storage dir for browser-mode Save (non-native); also scanned by the
 # user-config tools alongside the system path.
 LOCAL_CONFIGS_DIR = BACKEND_DIR / "user_configs"
+
+# ── chat working-state overlay (live bug report 2026-09-27) ───────────
+# The /ai/chat edit flow stages changes in a WORKING state (the frontend's
+# unsaved drafts + this request's approved edits), while the user-config
+# read tools below read DISK. After a rename or draft edit the model read
+# the stale disk copy, "found" the OLD section again, and chased ghosts
+# (Sir's live report: searched level_bed after staging level_bed1 — still
+# found the old macro; mixed signals between disk-reading and session-
+# reading tools). The chat dispatch sets this contextvar around its tool
+# execution; asyncio.to_thread copies the context, so the overlay reaches
+# the off-thread handlers WITHOUT leaking into other requests or the
+# non-chat MCP surface. Working content always wins over disk.
+_CHAT_WORKING_FILES: ContextVar[dict[str, str] | None] = ContextVar(
+    "kwc_chat_working_files", default=None)
+
+
+def set_chat_working_files(files: "dict[str, str] | None") -> None:
+    """Install the working-state overlay for the current request context.
+
+    Called by the /ai/chat dispatch before executing MCP read tools when
+    an EditSession exists; pass None to clear. Keys are config paths as
+    the session knows them (bare filenames / include-relative paths).
+    """
+    _CHAT_WORKING_FILES.set(files or None)
+
+
+def _chat_working_overlay() -> dict[str, str]:
+    files = _CHAT_WORKING_FILES.get()
+    return files or {}
+
+
+def _overlay_content(name: str) -> "tuple[str, bool]":
+    """Working-state content for `name`, falling back to '' / not-found.
+
+    Returns (content, found_in_overlay).
+    """
+    overlay = _chat_working_overlay()
+    if not overlay:
+        return "", False
+    if name in overlay:
+        return overlay[name], True
+    lowered = {k.lower(): v for k, v in overlay.items()}
+    key = lowered.get(name.lower()) or lowered.get(Path(name).name.lower())
+    return (key, True) if key is not None else ("", False)
+
+
+def _working_scan_items() -> "list[tuple[str, str]]":
+    """(path, content) pairs of the working-state overlay for scan-style
+    tools. Bare session keys double as relative paths (user configs are
+    addressed by bare name in the common case)."""
+    return list(_chat_working_overlay().items())
 
 
 def _system_config_path() -> Path:
@@ -1628,12 +1680,98 @@ class McpServer:
         header = f"# {path.name}  ({path.parent.name})\n# {len(content)} bytes\n\n"
         return header + content
 
+    def _score_user_config_text(
+        self, rel_path: str, text: str, query_terms: list[str],
+    ) -> dict[str, Any] | None:
+        """Score one config file (name first, content fallback) for
+        search_user_configs. Returns the result dict or None on no match.
+
+        Shared by the disk scan and the chat working-state overlay so both
+        surfaces rank identically (live report 2026-09-27: staged drafts
+        were invisible to search, so the model kept 'finding' the pre-edit
+        content)."""
+        name_part = rel_path.rsplit("/", 1)[-1]
+        stem = name_part.rsplit(".", 1)[0] if "." in name_part else name_part
+        search_text = f"{stem} {name_part} {rel_path}".lower().replace("-", " ")
+        score = sum(1 for term in query_terms if term in search_text)
+
+        if score == 0:
+            # Also check content for keyword matches
+            content_lower = text.lower()
+            content_score = sum(1 for term in query_terms if term in content_lower)
+            if content_score == 0:
+                return None
+            score = content_score * 0.5
+
+        # Locate the first content match so results can be
+        # annotated with their enclosing [section] (or
+        # "(top of file)" for preamble matches).
+        content_lower = text.lower()
+        match_pos = -1
+        for term in query_terms:
+            idx = content_lower.find(term)
+            if idx >= 0 and (match_pos < 0 or idx < match_pos):
+                match_pos = idx
+        section = None
+        if match_pos >= 0:
+            section = self._enclosing_user_config_section(text, match_pos)
+
+        # Enumeration support: when the query matches section
+        # NAMES, list EVERY such header in the file. The
+        # enclosing-section label alone hides class members
+        # (e.g. search 'neopixel' labeled Hotkey.cfg at the
+        # first hit's macro section, hiding [neopixel
+        # hotkey_leds] further down — "all my LEDs" edits then
+        # silently miss it).
+        matched_headers: list[str] = []
+        for hm in CONFIG_ALIAS_RE.finditer(text):
+            header_name = hm.group(1).strip()
+            if header_name.lower().startswith("include "):
+                continue
+            if any(term in header_name.lower() for term in query_terms):
+                if header_name not in matched_headers:
+                    matched_headers.append(header_name)
+
+        content_lines = [
+            l.strip() for l in text.split("\n")
+            if l.strip() and not l.strip().startswith("#")
+        ]
+        snippet = " ".join(content_lines[:5])[:200]
+
+        return {
+            "filename": rel_path,
+            "score": round(score, 1),
+            "snippet": snippet,
+            "match_pos": match_pos,
+            "section": section,
+            "matched_headers": matched_headers,
+        }
+
     def _handle_search_user_configs(self, args: dict[str, Any]) -> str:
         query = args.get("query", "").strip().lower()
         limit = min(int(args.get("limit", 10)), 30)
 
         if not query:
             return "Please provide a search query."
+
+        results: list[dict[str, Any]] = []
+        # Shared tokenizer: folds plurals and applies ALIAS_MAP synonyms so
+        # natural-language queries match config terms (same as docs search).
+        query_terms = list(dict.fromkeys(_expand_query_terms(query)))
+        seen_filenames: set[str] = set()
+
+        # Working-state files FIRST (chat overlay): staged drafts/approved
+        # edits win over disk so a staged rename cannot resurface the OLD
+        # section (live report 2026-09-27). Same scoring as disk files.
+        for rel_path, text in _working_scan_items():
+            if rel_path in seen_filenames:
+                continue
+            seen_filenames.add(rel_path)
+            hit = self._score_user_config_text(rel_path, text, query_terms)
+            if hit is None:
+                continue
+            hit["working"] = True
+            results.append(hit)
 
         # Collect config files from both the system path and local fallback
         scan_paths: list[Path] = []
@@ -1642,12 +1780,6 @@ class McpServer:
             scan_paths.append(system_path)
         if LOCAL_CONFIGS_DIR.is_dir():
             scan_paths.append(LOCAL_CONFIGS_DIR)
-
-        results: list[dict[str, Any]] = []
-        # Shared tokenizer: folds plurals and applies ALIAS_MAP synonyms so
-        # natural-language queries match config terms (same as docs search).
-        query_terms = list(dict.fromkeys(_expand_query_terms(query)))
-        seen_filenames: set[str] = set()
 
         for scan_dir in scan_paths:
             try:
@@ -1660,65 +1792,15 @@ class McpServer:
                     seen_filenames.add(cfg_file.name)
 
                     rel_path = cfg_file.relative_to(scan_dir).as_posix()
-                    search_text = f"{cfg_file.stem} {cfg_file.name} {rel_path}".lower().replace("-", " ")
-                    score = sum(1 for term in query_terms if term in search_text)
-
                     try:
                         text = cfg_file.read_bytes().decode("utf-8", errors="replace")
                     except OSError:
                         continue
 
-                    if score == 0:
-                        # Also check content for keyword matches
-                        content_lower = text.lower()
-                        content_score = sum(1 for term in query_terms if term in content_lower)
-                        if content_score == 0:
-                            continue
-                        score = content_score * 0.5
-
-                    # Locate the first content match so results can be
-                    # annotated with their enclosing [section] (or
-                    # "(top of file)" for preamble matches).
-                    content_lower = text.lower()
-                    match_pos = -1
-                    for term in query_terms:
-                        idx = content_lower.find(term)
-                        if idx >= 0 and (match_pos < 0 or idx < match_pos):
-                            match_pos = idx
-                    section = None
-                    if match_pos >= 0:
-                        section = self._enclosing_user_config_section(text, match_pos)
-
-                    # Enumeration support: when the query matches section
-                    # NAMES, list EVERY such header in the file. The
-                    # enclosing-section label alone hides class members
-                    # (e.g. search 'neopixel' labeled Hotkey.cfg at the
-                    # first hit's macro section, hiding [neopixel
-                    # hotkey_leds] further down — "all my LEDs" edits then
-                    # silently miss it).
-                    matched_headers: list[str] = []
-                    for hm in CONFIG_ALIAS_RE.finditer(text):
-                        header_name = hm.group(1).strip()
-                        if header_name.lower().startswith("include "):
-                            continue
-                        if any(term in header_name.lower() for term in query_terms):
-                            if header_name not in matched_headers:
-                                matched_headers.append(header_name)
-
-                    content_lines = [
-                        l.strip() for l in text.split("\n")
-                        if l.strip() and not l.strip().startswith("#")
-                    ]
-                    snippet = " ".join(content_lines[:5])[:200]
-
-                    results.append({
-                        "filename": rel_path,
-                        "score": round(score, 1),
-                        "snippet": snippet,
-                        "match_pos": match_pos,
-                        "section": section,
-                        "matched_headers": matched_headers,
-                    })
+                    hit = self._score_user_config_text(rel_path, text, query_terms)
+                    if hit is None:
+                        continue
+                    results.append(hit)
             except OSError:
                 continue
 
@@ -1739,6 +1821,8 @@ class McpServer:
                 # Content matched before the first [section] — includes,
                 # header comments, or other preamble.
                 label = f"{r['filename']} (top of file)"
+            if r.get("working"):
+                label += "  (WORKING copy — unsaved drafts/approved edits)"
             lines.append(f"## {label}")
             extra = [h for h in r.get("matched_headers") or [] if h != r.get("section")]
             if extra:
@@ -1787,6 +1871,11 @@ class McpServer:
             scan_paths.append(LOCAL_CONFIGS_DIR)
 
         seen: dict[str, str] = {}
+        # Working-state overlay first (chat): staged drafts — including
+        # files that exist ONLY in the session (config_write) — join the
+        # listing so add_include/read see them (live report 2026-09-25/27).
+        for rel in _chat_working_overlay():
+            seen.setdefault(rel, "working copy (unsaved)")
         for scan_dir in scan_paths:
             label = "pi-native" if scan_dir == system_path else "imported"
             try:
@@ -1817,6 +1906,20 @@ class McpServer:
         raw = str(args.get("filename") or args.get("file") or "").strip()
         if not raw:
             return "Please provide a config filename (filename='printer.cfg')."
+        ov_content, ov_found = _overlay_content(raw)
+        if ov_found:
+            headers = self._list_config_sections(ov_content)
+            label = ("  (WORKING copy — unsaved drafts/approved edits; "
+                     "NOT the saved file)")
+            if not headers:
+                return f"# {raw}{label}\n# No sections detected."
+            lines = [
+                f"# {raw}{label}  (section index; file content not attached)",
+                "# Sections in this file — read one with "
+                "read_user_config(filename=..., section='<name>').\n",
+            ]
+            lines.extend(f"[{header}]" for header in headers)
+            return "\n".join(lines)
         candidate = self._resolve_user_config_file(raw)
         if candidate is None:
             return (
@@ -1901,6 +2004,14 @@ class McpServer:
             parts: list[str] = []
             missing: list[str] = []
             for name in names:
+                ov_content, ov_found = _overlay_content(name)
+                if ov_found:
+                    parts.append(
+                        f"# {name}  (WORKING copy — unsaved drafts/"
+                        f"approved edits; NOT the saved file)\n"
+                        f"# {len(ov_content)} bytes\n\n" + _cap_whole_file(ov_content)
+                    )
+                    continue
                 candidate = self._resolve_user_config_file(name)
                 if candidate is None:
                     missing.append(name)
@@ -1929,6 +2040,14 @@ class McpServer:
         if not raw:
             return "Please provide a config filename (filename='printer.cfg')."
 
+        # Working-state overlay first (see module header): during a chat
+        # request the staged/approved content is the truth the edit tools
+        # just wrote; disk is stale until the user saves.
+        ov_content, ov_found = _overlay_content(raw)
+        if ov_found:
+            return self._read_user_config_from_text(
+                raw, ov_content, args, working=True)
+
         candidate = self._resolve_user_config_file(raw)
         if candidate is None:
             return f'User config file "{raw}" not found. Use search_user_configs to find matching files.'
@@ -1938,17 +2057,30 @@ class McpServer:
         except OSError as exc:
             return f"Error reading {candidate.name}: {exc}"
 
+        return self._read_user_config_from_text(candidate.name, content, args)
+
+    def _read_user_config_from_text(
+        self, display_name: str, content: str, args: dict[str, Any],
+        working: bool = False,
+    ) -> str:
+        """Format one user-config read (section/sections/list/whole modes)
+        from already-resolved `content`. `working=True` labels the output
+        as the unsaved working copy (chat overlay) instead of the saved
+        file (live report 2026-09-27: mixed disk/draft signals sent the
+        model chasing renamed-away sections)."""
         list_sections = bool(args.get("list_sections", False))
         section = args.get("section", "").strip()
         whole_file = bool(args.get("whole_file", False))
         sections_raw = args.get("sections")
+        src = ("  (WORKING copy — unsaved drafts/approved edits; "
+               "NOT the saved file)") if working else ""
 
         if list_sections:
             headers = self._list_config_sections(content)
             if not headers:
-                return f"# {candidate.name}  (User Config)\n# No sections detected."
+                return f"# {display_name}{src}\n# No sections detected."
             return (
-                f"# {candidate.name}  (section index; file content not attached)\n\n"
+                f"# {display_name}{src}  (section index; file content not attached)\n\n"
                 + "\n".join(f"[{header}]" for header in headers)
                 + "\n\nRead a section with: read_user_config(filename='<name>', "
                 + f"section='{headers[0]}') — or another header above."
@@ -1958,12 +2090,12 @@ class McpServer:
             section_text = self._extract_config_section(content, section)
             if section_text is None:
                 return (
-                    f'Section "{section}" not found in {candidate.name}. '
+                    f'Section "{section}" not found in {display_name}{src}. '
                     "Use search_user_configs to find the exact filename, or omit "
                     "section to read the whole file."
                 )
             result = (
-                f"# {candidate.name}  (User Config - section [{section}] partial "
+                f"# {display_name}{src}  (User Config - section [{section}] partial "
                 "context; the file may have more sections)\n\n"
             )
             result += section_text
@@ -1988,17 +2120,17 @@ class McpServer:
                     missing.append(name)
                 else:
                     parts.append(
-                        f"# {candidate.name} (User Config - section [{name}] partial "
+                        f"# {display_name}{src} (User Config - section [{name}] partial "
                         "context; the file may have more sections)\n\n" + section_text
                     )
             if missing:
                 parts.append(
-                    f"Sections not found in {candidate.name}: {', '.join(missing)}. "
+                    f"Sections not found in {display_name}{src}: {', '.join(missing)}. "
                     "Use list_sections: true to see all headers."
                 )
             if not parts:
                 return (
-                    f'No sections matched in {candidate.name}. '
+                    f'No sections matched in {display_name}{src}. '
                     "Use search_user_configs to find the exact filename, or "
                     "list_sections: true to see the headers."
                 )
@@ -2006,12 +2138,12 @@ class McpServer:
         elif whole_file:
             # Explicit whole-file read (vs the legacy omit-everything default).
             result = (
-                f"# {candidate.name}  (User Config - whole file)\n"
+                f"# {display_name}{src}  (User Config - whole file)\n"
                 f"# {len(content)} bytes\n\n"
             )
             result += _cap_whole_file(content)
         else:
-            result = f"# {candidate.name}  (User Config)\n# {len(content)} bytes\n\n"
+            result = f"# {display_name}{src}  (User Config)\n# {len(content)} bytes\n\n"
             result += _cap_whole_file(content)
 
         # Append validation results if available (filtered to the requested
@@ -2020,7 +2152,7 @@ class McpServer:
             from parser.config_parser import parse_config
             from parser.validator import validate_config
 
-            parsed = parse_config(content, candidate.name)
+            parsed = parse_config(content, display_name)
             # AI-loop surface (see _handle_validate): registry scan OFF.
             validation = validate_config(parsed, gcode_registry=False)
 

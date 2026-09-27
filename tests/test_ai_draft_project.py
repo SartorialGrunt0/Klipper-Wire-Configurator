@@ -795,6 +795,163 @@ def test_rename_section_brackets_and_include_target():
     assert r3['status'] == 'error' and 'new_section' in r3['error']
 
 
+# ── rename_section family-prefix inheritance (live report 2026-09-26) ──
+
+
+def _macro_state(text):
+    st = ProjectState.from_context_files({'printer.cfg': {'content': text}})
+    return st, st.validate()
+
+
+def test_rename_section_bare_new_name_inherits_family():
+    # Live bug 2026-09-26: "rename the gcode macro Level_Bed to
+    # level_bed1" sent new_section='level_bed1' and the op cheerfully
+    # rewrote the header to '[level_bed1]' — a garbage section. A bare
+    # new name must inherit the SOURCE header's family.
+    text = ("[gcode_macro Level_Bed]\n"
+            "gcode:\n"
+            "    BED_MESH_CALIBRATE\n")
+    st, base = _macro_state(text)
+    st1, r = st.apply(base, {'op': 'rename_section', 'file': 'printer.cfg',
+                             'section': 'gcode_macro Level_Bed',
+                             'new_section': 'level_bed1'})
+    assert r['status'] in ('applied', 'applied_with_advisory')
+    out = st1.files['printer.cfg']
+    assert '[gcode_macro level_bed1]' in out
+    assert '[level_bed1]' not in out
+    # Body survives byte-for-byte.
+    assert 'gcode:\n    BED_MESH_CALIBRATE' in out
+
+
+def test_rename_section_bare_name_preserves_user_casing_and_brackets():
+    # Casing belongs to the user; only the missing family is filled in.
+    # Brackets on new_section stay tolerated (stripped before the rule).
+    st, base = _state()
+    st1, r = st.apply(base, {'op': 'rename_section', 'file': 'printer.cfg',
+                             'section': 'gcode_macro PRINT_START',
+                             'new_section': '[LEVEL_BED1]'})
+    assert r['status'] in ('applied', 'applied_with_advisory')
+    out = st1.files['printer.cfg']
+    assert '[gcode_macro LEVEL_BED1]' in out
+    assert '[gcode_macro PRINT_START]' not in out
+    # fan_generic is the same rule, not a gcode_macro special case.
+    fan = ("[fan_generic Aux_Fan]\n"
+           "pin: PA1\n")
+    st2, base2 = _macro_state(fan)
+    st3, r2 = st2.apply(base2, {'op': 'rename_section', 'file': 'printer.cfg',
+                                'section': 'fan_generic Aux_Fan',
+                                'new_section': 'My_Fan'})
+    assert r2['status'] in ('applied', 'applied_with_advisory')
+    out2 = st3.files['printer.cfg']
+    assert '[fan_generic My_Fan]' in out2
+    assert 'pin: PA1' in out2
+
+
+def test_rename_section_bare_source_stays_bare():
+    # A header with no family (no space) must NOT get one invented.
+    st, base = _state()
+    st1, r = st.apply(base, {'op': 'rename_section', 'file': 'printer.cfg',
+                             'section': 'printer',
+                             'new_section': 'printer2'})
+    assert r['status'] in ('applied', 'applied_with_advisory')
+    out = st1.files['printer.cfg']
+    assert '[printer2]' in out
+    assert '[printer2 ' not in out
+    st2, base2 = _macro_state("[virtual_sdcard]\n"
+                              "path: ~/gcodes\n")
+    st3, r2 = st2.apply(base2, {'op': 'rename_section', 'file': 'printer.cfg',
+                                'section': 'virtual_sdcard',
+                                'new_section': 'gcodes_dir'})
+    assert r2['status'] in ('applied', 'applied_with_advisory')
+    assert '[gcodes_dir]' in st3.files['printer.cfg']
+
+
+def test_rename_section_full_header_honored_including_family_switch():
+    # An explicit family in new_section is honored EXACTLY as today —
+    # family switches included. No heuristics beyond the family fill-in.
+    # (apply_no_gate: a macro body under fan_generic legitimately fails
+    # validation, and validation is not what this test is about.)
+    st, base = _state()
+    st1, r = st.apply_no_gate({'op': 'rename_section', 'file': 'printer.cfg',
+                               'section': 'gcode_macro PRINT_START',
+                               'new_section': 'fan_generic Foo'})
+    assert r['status'] == 'ok'
+    out = st1.files['printer.cfg']
+    assert '[fan_generic Foo]' in out
+    assert '[gcode_macro Foo]' not in out
+
+
+def test_rename_section_duplicate_check_uses_effective_header():
+    # The duplicate lookup runs on the FINAL (family-restored) header.
+    text = ("[gcode_macro Level_Bed]\n"
+            "gcode:\n"
+            "    G28\n"
+            "\n"
+            "[gcode_macro level_bed1]\n"
+            "gcode:\n"
+            "    G28\n")
+    st, base = _macro_state(text)
+    _, r = st.apply(base, {'op': 'rename_section', 'file': 'printer.cfg',
+                           'section': 'gcode_macro Level_Bed',
+                           'new_section': 'level_bed1'})
+    assert r['status'] == 'error' and 'already exists' in r['error']
+    assert 'gcode_macro level_bed1' in r['error']
+
+
+def test_rename_section_already_named_uses_effective_header():
+    # 'Level_Bed' is bare, but the EFFECTIVE name after inheritance is
+    # the current header — a no-op, not a silent rewrite to itself.
+    text = ("[gcode_macro Level_Bed]\n"
+            "gcode:\n"
+            "    G28\n")
+    st, base = _macro_state(text)
+    st1, r = st.apply(base, {'op': 'rename_section', 'file': 'printer.cfg',
+                             'section': 'gcode_macro Level_Bed',
+                             'new_section': 'Level_Bed'})
+    assert r['status'] == 'error' and 'already named' in r['error']
+    assert st1.files['printer.cfg'] == st.files['printer.cfg']
+
+
+def test_rename_section_include_guard_on_effective_header():
+    text = ("[gcode_macro Level_Bed]\n"
+            "gcode:\n"
+            "    G28\n")
+    st, base = _macro_state(text)
+    st1, r = st.apply(base, {'op': 'rename_section', 'file': 'printer.cfg',
+                             'section': 'gcode_macro Level_Bed',
+                             'new_section': '[include other.cfg]'})
+    assert r['status'] == 'error' and 'include' in r['error']
+    assert st1.files['printer.cfg'] == st.files['printer.cfg']
+
+
+def test_rename_section_summary_notes_inherited_family():
+    # Summary names the EFFECTIVE header (same shape as today) and, only
+    # when the family was filled in, says so — cheap honesty for the
+    # model, which otherwise cannot tell what header it just created.
+    text = ("[gcode_macro Level_Bed]\n"
+            "gcode:\n"
+            "    G28\n")
+    st, base = _macro_state(text)
+    _, r = st.apply(base, {'op': 'rename_section', 'file': 'printer.cfg',
+                           'section': 'gcode_macro Level_Bed',
+                           'new_section': 'level_bed1'})
+    assert ("renamed section '[gcode_macro Level_Bed]' to "
+            "'[gcode_macro level_bed1]' in printer.cfg") in r['summary']
+    assert 'inherited family prefix' in r['summary']
+    # A full header was NOT inherited — no note.
+    st2, base2 = _state()
+    _, r2 = st2.apply(base2, {'op': 'rename_section', 'file': 'printer.cfg',
+                              'section': 'gcode_macro PRINT_START',
+                              'new_section': 'gcode_macro PRINT_START2'})
+    assert 'inherited family prefix' not in r2['summary']
+    # Nor for a family-less source renamed bare.
+    st3, base3 = _state()
+    _, r3 = st3.apply(base3, {'op': 'rename_section', 'file': 'printer.cfg',
+                              'section': 'bed_mesh',
+                              'new_section': 'fade_mesh'})
+    assert 'inherited family prefix' not in r3['summary']
+
+
 # ── files & includes ────────────────────────────────────────────────────
 
 def test_new_file_and_include_roundtrip():

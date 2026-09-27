@@ -403,6 +403,11 @@ class ProjectState:
             'advisories': findings['advisories'],
             'diff': {'file': outcome['file'], 'before': base_text, 'after': after_text},
         }
+        # rename_section carries structured from/to through the raw outcome
+        # for the chat layer's post-rename directive (see _op_rename_section).
+        for k in ('renamed_from', 'renamed_to'):
+            if k in outcome:
+                result[k] = outcome[k]
         if result['status'] == 'error':
             # Validation failure = kickback: the state copy is discarded by
             # the caller (we hand back the UNCHANGED state). Add the kick-
@@ -743,6 +748,20 @@ class ProjectState:
         window between the cards. This op is the single-call path: only
         the header line changes, so the body survives exactly as-is and
         the whole rename rides ONE card.
+
+        Family-prefix inheritance (live report 2026-09-26): asked to
+        "rename the gcode macro Level_Bed to level_bed1", the model sends
+        new_section='level_bed1' — the NAME only, not a header — and the
+        op happily wrote '[level_bed1]', a section Klipper knows nothing
+        about. A Klipper header is 'family' or 'family name' (the family
+        is the first token, e.g. 'gcode_macro' in 'gcode_macro Level_Bed').
+        So when new_section carries no space (no family of its own) and
+        the SOURCE header has one, the source family is prefixed to the
+        new name; the user's casing for the name part is preserved
+        exactly as typed. A full header in new_section is honored
+        verbatim (family switches included) — pass the full header to
+        override. Headers without a family stay bare: no family is ever
+        invented.
         """
         filename = self._require_file(op.get('file'))
         header = self._require_header(op)
@@ -755,6 +774,13 @@ class ProjectState:
         if not new_header:
             return _state_error(
                 f"new_section '{new_raw}' is not a section header")
+        # Inherit the source header's family for a bare new name (see
+        # docstring). Everything below — include guard, no-op, duplicate
+        # lookup, written header, summary — works on this FINAL header.
+        inherited_family = False
+        if ' ' not in new_header and ' ' in header:
+            new_header = f"{header.split(' ', 1)[0]} {new_header}"
+            inherited_family = True
         if new_header == 'include' or new_header.startswith('include '):
             return _state_error(
                 "Cannot rename a section to '[include ...]' — include "
@@ -779,8 +805,18 @@ class ProjectState:
         # carries no trailing comment — replacing the whole line is safe.
         lines[header_index] = f'[{new_header}]'
         self.files[filename] = '\n'.join(lines)
-        return {'status': 'ok', 'file': filename,
-                'summary': f"renamed section '[{header}]' to '[{new_header}]' in {filename}"}
+        summary = (f"renamed section '[{header}]' to '[{new_header}]' "
+                   f"in {filename}")
+        if inherited_family:
+            # Tells the model what header it actually created, so the
+            # next turn reasons about the real section name.
+            summary += ' (inherited family prefix from the original section)'
+        return {'status': 'ok', 'file': filename, 'summary': summary,
+                # Structured keys for the chat layer: a macro rename
+                # leaves STALE CALLERS behind (unknown_gcode advisories);
+                # ai_edit_tools uses these to append the fix-them
+                # directive without parsing prose.
+                'renamed_from': header, 'renamed_to': new_header}
 
     # -- patch_gcode -------------------------------------------------------
 

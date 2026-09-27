@@ -502,9 +502,15 @@ def test_flag_on_write_cap_soft_lands_and_suppresses_prose_nudge(edit_flag, monk
     """End-to-end: past the cap the turn still ends with prose (never an
     error), and the prose nudge is suppressed — the loop just ORDERED the
     model to summarize, so a ```cfg block in that answer is the requested
-    report, not an inert draft to nudge back into another write."""
+    report, not an inert draft to nudge back into another write.
+
+    Cap pinned to 3 (behavior test, not a default-value test — the e2e
+    loop is bounded by MAX_MCP_TOOL_TURNS_EDIT, so scripting
+    EDIT_WRITE_CAP_DEFAULT calls would exhaust the turn cap first)."""
+    monkeypatch.setenv('KWC_EDIT_WRITE_CAP', '3')
+    cap = 3
     replies = [_text_tool_call('config_edit', _failing_edit_args(i))
-               for i in range(EDIT_WRITE_CAP_DEFAULT + 1)]
+               for i in range(cap + 1)]
     replies.append(_final_reply(
         'I could not apply that:\n\n```cfg\n[printer]\nmax_accel: 9999\n```'))
     scripted = _install(monkeypatch, replies)
@@ -513,11 +519,11 @@ def test_flag_on_write_cap_soft_lands_and_suppresses_prose_nudge(edit_flag, monk
     assert response.status_code == 200
     body = response.json()
     # Attempts 1..cap ran; the (cap+1)th was refused with the directive.
-    assert body['editAttempts'] == EDIT_WRITE_CAP_DEFAULT + 1
+    assert body['editAttempts'] == cap + 1
     assert body['pendingEdits'] is None
     assert 'WRITE LIMIT REACHED' in str(scripted.payloads[-1]['messages'])
     # One provider call per scripted reply — a nudge would add another turn.
-    assert len(scripted.payloads) == EDIT_WRITE_CAP_DEFAULT + 2
+    assert len(scripted.payloads) == cap + 2
     assert 'Call the tool NOW' not in str(scripted.payloads[-1]['messages'])
 
 
@@ -528,7 +534,7 @@ def test_flag_on_without_cap_still_nudges_inert_draft(edit_flag, monkeypatch):
     fixture being inert."""
     monkeypatch.setenv('KWC_EDIT_WRITE_CAP', '0')
     replies = [_text_tool_call('config_edit', _failing_edit_args(i))
-               for i in range(EDIT_WRITE_CAP_DEFAULT)]
+               for i in range(3)]
     replies.append(_final_reply(
         'I could not apply that:\n\n```cfg\n[printer]\nmax_accel: 9999\n```'))
     scripted = _install(monkeypatch, replies)
@@ -1971,3 +1977,103 @@ def test_approve_accepts_applied_with_advisory():
     out = asyncio.run(_decide())
     assert out['status'] == 'ok', out
     assert es.committed_ops and es.committed_ops[-1]['op'] == 'rename_section'
+
+
+# ── post-rename stale-callers directive (live report 2026-09-27) ──────
+# After a gcode_macro rename the old callers become unknown_gcode
+# advisories. The advisories alone made the model STOP and ASK the user
+# whether to update them; the directive makes it go fix them.
+
+_RENAME_CTX = {'printer.cfg': {'content': (
+    '[gcode_macro Level_Bed]\n'
+    'gcode:\n'
+    '    BED_MESH_CALIBRATE\n'
+    '\n'
+    '[gcode_macro START_PRINT]\n'
+    'gcode:\n'
+    '    Level_Bed\n'
+)}}
+
+
+def test_macro_rename_success_carries_fix_callers_directive():
+    es = EditSession(_RENAME_CTX)
+    content, details = es.execute({'name': 'config_edit', 'arguments': {
+        'file': 'printer.cfg', 'op': 'rename_section',
+        'section': 'gcode_macro Level_Bed',
+        'new_section': 'gcode_macro LEVEL_BED1'}})
+    assert details is not None
+    assert 'STALE' in content and 'START_PRINT' in content
+    # Directive names the old + new command and orders the fix, no asking.
+    assert 'Level_Bed' in content and 'LEVEL_BED1' in content
+    assert 'Do not ask' in content
+
+
+def test_non_macro_rename_has_no_callers_directive():
+    es = EditSession({'printer.cfg': {'content': (
+        '[controller_fan _stepper_fan]\npin: PA13\n')}})
+    content, details = es.execute({'name': 'config_edit', 'arguments': {
+        'file': 'printer.cfg', 'op': 'rename_section',
+        'section': 'controller_fan _stepper_fan',
+        'new_section': 'controller_fan my_fan'}})
+    assert details is not None
+    assert 'STALE' not in content
+
+
+# ── working-state overlay e2e (live report 2026-09-27) ────────────────
+_RENAME_E2E_CFG = """[gcode_macro Level_Bed]
+gcode:
+    G28
+
+[gcode_macro START_PRINT]
+gcode:
+    Level_Bed
+"""
+
+
+def test_search_sees_staged_rename_not_disk(edit_flag, monkeypatch):
+    """The mixed-signal bug end-to-end: rename staged via config_edit,
+    then a read-side search_user_configs (MCP tool, reads disk) must see
+    the WORKING content — after the rename, searching for level_bed must
+    find [gcode_macro LEVEL_BED1], never the renamed-away old section."""
+    replies = [
+        _text_tool_call('config_edit', {
+            'file': 'printer.cfg', 'op': 'rename_section',
+            'section': 'gcode_macro Level_Bed',
+            'new_section': 'gcode_macro LEVEL_BED1'}),
+        _text_tool_call('search_user_configs', {'query': 'level_bed'}),
+        _final_reply('Renamed and verified.'),
+    ]
+    scripted = _install(monkeypatch, replies)
+    response = client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'rename my Level_Bed macro'}],
+        contextFiles={'printer.cfg': {'content': _RENAME_E2E_CFG}}))
+    assert response.status_code == 200
+    body = response.json()
+    calls = {c['name']: c for c in body.get('toolCalls') or []}
+    assert 'config_edit' in calls and 'search_user_configs' in calls
+    # First send staged (rename collateral must not earn the unknown-
+    # gcode kickback).
+    assert 'applied' in calls['config_edit']['output']
+    # Search saw the working copy: new header present, old one gone.
+    search_out = calls['search_user_configs']['output']
+    assert 'LEVEL_BED1' in search_out
+    assert '[gcode_macro Level_Bed]' not in search_out
+    assert 'WORKING' in search_out.upper()
+
+
+def test_search_falls_back_to_disk_without_session(edit_flag, monkeypatch):
+    """No contextFiles -> no session -> no overlay: MCP reads keep their
+    old disk-backed behavior (the overlay is strictly additive)."""
+    from api import ai_routes as ar
+    replies = [
+        _text_tool_call('list_hardware', {'type': ''}),
+        _final_reply('Checked.'),
+    ]
+    _install(monkeypatch, replies)
+    response = client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'anything'}],
+        contextFiles={}, editTools=False))
+    assert response.status_code == 200
+    # No session armed; overlay reset to None (no crash, disk semantics).
+    import mcp_server
+    assert mcp_server._chat_working_overlay() == {}

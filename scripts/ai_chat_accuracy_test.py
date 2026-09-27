@@ -67,9 +67,12 @@ files are attached as read-only context and never modified), MINIDIFF-01..04
 staged write-tool artifact like the EDIT-* family), AMBI-01..08
 (ambiguity cases: new-file drafts, hypothetical edits, batch section reads,
 multi-topic explain-and-edit turns, content search), and MEMORY-01..03
-(printer-memory auto-fill, requires --include-memory), and EDIT-01..06
+(printer-memory auto-fill, requires --include-memory), EDIT-01..06
 (tool-mediated editing: criteria read the server-staged pendingEdits —
-these questions force ChatRequest.editTools=True).
+these questions force ChatRequest.editTools=True), and RENAME-01..03
+(macro-section renames: the staged header must keep the 'gcode_macro '
+prefix and the stale callers must be repaired — same staged-artifact
+scoring as EDIT-*, editTools forced ON per question).
 
 Criteria law since the Phase-4 ratchet (2026-09-22): when a question
 declares edit_criteria they are THE criteria — the prose→draft path is
@@ -1355,6 +1358,95 @@ def build_edit_tool_questions() -> list[TestQuestion]:
             criteria=(
                 ("staged_param", "printer.cfg::enable_pin: !PF16"),
                 ("staged_not_regex", r"printer\.cfg::#enable_pin"),
+            ),
+        ),
+    ]
+
+
+def build_rename_questions() -> list[TestQuestion]:
+    """Section-rename family (RENAME-*): a rename must keep the Klipper
+    header form ('[gcode_macro <name>]', never a bare '[<name>]') and must
+    REPAIR the callers that referenced the old macro name.
+
+    Reproduces the 2026-09-27 macro-rename bug: given 'rename my Level_Bed
+    macro to level_bed1' the model staged a bogus '[level_bed1]' section
+    (dropping the 'gcode_macro ' prefix), and once a rename did apply it
+    ASKED the user whether to update the stale caller instead of just
+    fixing it. Fixture (reference/Trident_backup printer.cfg): the
+    '[gcode_macro Level_Bed]' section (line ~463) is called by a bare
+    'Level_Bed' line inside '[gcode_macro PRINT_START]' (line ~569).
+
+    Like EDIT-*, the deliverable is the server-staged pendingEdits
+    (editTools forced ON per question; the harness auto-approves the
+    edit). RENAME-03 is EXPECTED TO FAIL until the post-rename
+    caller-repair directive lands — that baseline is the point.
+    """
+    printer_cfg = _cfg_context("printer.cfg")
+    return [
+        TestQuestion(
+            qid="RENAME-01",
+            title="Rename: explicit full header (gcode_macro Level_Bed)",
+            text=("Rename the [gcode_macro Level_Bed] section in printer.cfg "
+                  "to [gcode_macro LEVEL_BED1]. Keep the macro body exactly "
+                  "as-is."),
+            context_files=printer_cfg,
+            edit_tools=True,
+            expected_tools=("config_edit",),
+            require_tool=True,
+            criteria=(
+                # The prompt dictates the exact header, so a literal match
+                # is fair: the renamed section must exist...
+                ("staged_param", "printer.cfg::[gcode_macro LEVEL_BED1]"),
+                # ...and the OLD header must be gone (no duplicate/stale
+                # '[gcode_macro Level_Bed]' left behind).
+                ("staged_section_absent",
+                 "printer.cfg::gcode_macro Level_Bed"),
+            ),
+        ),
+        TestQuestion(
+            qid="RENAME-02",
+            title="Rename: casual bare-name phrasing (Level_Bed -> level_bed1)",
+            text="rename my Level_Bed macro to level_bed1",
+            context_files=printer_cfg,
+            edit_tools=True,
+            expected_tools=("config_edit",),
+            require_tool=True,
+            criteria=(
+                # The defect under test is the DROPPED 'gcode_macro ' prefix
+                # (the model stages a bogus '[level_bed1]'), NOT the name's
+                # case: the prompt itself says 'level_bed1' lowercase, so a
+                # case-SENSITIVE substring criterion would FAIL a correct
+                # lowercase rename — the same class of false negative as the
+                # EDIT-06 polarity mistake. staged_regex is compiled
+                # IGNORECASE, and the inline '(?m)' anchors at line start so
+                # a commented-out header cannot satisfy it.
+                ("staged_regex",
+                 r"printer\.cfg::(?m)^\[\s*gcode_macro\s+LEVEL_BED1\s*\]"),
+                ("staged_section_absent",
+                 "printer.cfg::gcode_macro Level_Bed"),
+            ),
+        ),
+        TestQuestion(
+            qid="RENAME-03",
+            title="Rename + repair caller (PRINT_START invokes Level_Bed)",
+            text=("Rename the [gcode_macro Level_Bed] section in printer.cfg "
+                  "to [gcode_macro LEVEL_BED1], and leave the config in a "
+                  "working state — one of my other macros calls Level_Bed."),
+            context_files=printer_cfg,
+            edit_tools=True,
+            expected_tools=("config_edit",),
+            require_tool=True,
+            criteria=(
+                ("staged_param", "printer.cfg::[gcode_macro LEVEL_BED1]"),
+                # Sole real caller: the bare 'Level_Bed' line inside
+                # [gcode_macro PRINT_START] (line ~569). The regex demands a
+                # line that BEGINS with the new macro name, so the cosmetic
+                # 'RESPOND ... MSG=Level_Bed' string on line ~567 can never
+                # satisfy it (that line starts with 'RESPOND'). Case is left
+                # insensitive: the miss under test is the STALE OLD NAME
+                # lingering, not its casing.
+                ("staged_section_regex",
+                 r"printer\.cfg::gcode_macro PRINT_START::\n[ \t]*LEVEL_BED1\b"),
             ),
         ),
     ]
@@ -3206,7 +3298,7 @@ def main() -> int:
                              "printer memory, blank it, run MEMORY-01..03, then restore it")
     args = parser.parse_args()
 
-    questions = build_questions() + build_macro_questions() + build_trident_questions() + build_ambiguity_questions() + build_setup_questions() + build_live_context_questions() + build_edit_tool_questions() + build_skill_gate_questions() + build_tool_coverage_questions() + build_ack_guard_questions()
+    questions = build_questions() + build_macro_questions() + build_trident_questions() + build_ambiguity_questions() + build_setup_questions() + build_live_context_questions() + build_edit_tool_questions() + build_rename_questions() + build_skill_gate_questions() + build_tool_coverage_questions() + build_ack_guard_questions()
     if args.include_memory:
         questions += build_memory_questions()
     if args.list_questions:

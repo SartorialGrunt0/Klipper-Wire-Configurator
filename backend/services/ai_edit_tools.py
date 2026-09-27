@@ -275,7 +275,48 @@ def _lean_success_content(name: str, result: dict) -> str:
             head += f"\n- advisory ({adv.get('severity', 'warning')}) {where}: {adv.get('message', '')}"
         head += "\nAdvisories do not block the staged change."
     head += "\nChange is STAGED for the user's review (not saved)."
+    stale = _stale_callers_directive(result, advisories)
+    if stale:
+        head += "\n\n" + stale
     return head
+
+
+def _stale_callers_directive(result: dict, advisories: list) -> str:
+    """Directive appended after a gcode_macro rename: the old command's
+    callers are now STALE advisories.
+
+    Live report 2026-09-27: after renaming Level_Bed, the model saw the
+    unknown_gcode advisories, explained them to the user, and ASKED
+    whether to update the callers — instead of just doing the obviously
+    implied follow-up edits. When the user already asked for a rename,
+    updating its callers is part of completing the rename, not a new
+    decision. Names the stale sections and orders the fix in the same
+    request.
+    """
+    renamed_from = str(result.get("renamed_from", ""))
+    renamed_to = str(result.get("renamed_to", ""))
+    if not renamed_from or " " not in renamed_from or not renamed_to:
+        return ""  # not a class-header rename
+    old_name = renamed_from.split(" ", 1)[1].strip()
+    if not old_name:
+        return ""
+    stale_sections = [
+        str(a.get("section", "")) for a in advisories
+        if a.get("code") == "unknown_gcode_command"
+        and f"'{old_name}'".casefold() in str(a.get("message", "")).casefold()
+        and str(a.get("section", "")).strip().casefold() != renamed_from.casefold()
+    ]
+    if not stale_sections:
+        return ""
+    where = ", ".join(f"[{s}]" for s in list(dict.fromkeys(stale_sections))[:6])
+    return (
+        f"STALE CALLERS: '{old_name}' no longer exists — still called in "
+        f"{where}. The user asked for the rename, so updating its callers "
+        f"is part of the SAME job: fix each call with a patch_gcode op "
+        f"(old_text quoting the call line, new_text using '{renamed_to.split(' ', 1)[1]}') "
+        f"NOW, in this request. Do not ask the user whether to update "
+        f"them; do not stop here."
+    )
 
 
 # ── per-request write-attempt cap (Phase-5 convergence pass) ─────────
@@ -286,10 +327,13 @@ def _lean_success_content(name: str, result: dict) -> str:
 # editing and report honestly, whatever is already staged still stands, and
 # the user still gets the human approval cards for it.
 # `KWC_EDIT_WRITE_CAP` overrides the default; 0 (or negative) disables it.
-# Measured against every recorded bank run, a cap of 5 would have interrupted
-# roughly 1 ANSWERED question in 40 (each of which eventually passed) — the
-# reason the number is an env knob rather than a frozen constant.
-EDIT_WRITE_CAP_DEFAULT = 5
+# Sir 2026-09-27: raised 5 -> 20. Real multi-op work (rename + fix every
+# caller + verify) kept hitting the 5-write wall mid-task, which reads to
+# the user as "the tools don't work". Thrash is still guarded by the
+# identical-call hard-stop (3x) and the request turn cap
+# (MAX_MCP_TOOL_TURNS_EDIT), so the budget cap only ever punishes
+# legitimate work.
+EDIT_WRITE_CAP_DEFAULT = 20
 
 
 def write_cap() -> int:
@@ -521,11 +565,30 @@ class EditSession:
         legit (plugin/custom module the stock registry can't see); the
         advisory then rides on the approval card as the user's safety
         net, and a second kick could only loop.
+
+        Rename collateral (live report 2026-09-27): a rename_section of a
+        gcode_macro ALWAYS strands its existing callers — the validator
+        flags each old call as unknown_gcode_command. That is NOT a
+        hallucination and must not earn the 'typo? fix and call again'
+        kickback: it made the rename itself look invalid, and the model
+        burned turns (and asked the user) instead of staging the rename
+        and fixing the callers. Advisories naming the renamed-away
+        command are filtered out here; any OTHER unknown command still
+        earns the correction round.
         """
-        findings = [
-            a for a in (result.get("advisories") or [])
-            if a.get("code") in self._REGISTRY_KICK_CODES
-        ]
+        renamed_old = ''
+        if args.get('op') == 'rename_section':
+            old_hdr = str(args.get('section', '')).strip().strip('[]')
+            if ' ' in old_hdr:  # class header: a rename strands its callers
+                renamed_old = old_hdr.split(' ', 1)[1].strip().casefold()
+        findings = []
+        for a in (result.get("advisories") or []):
+            if a.get("code") not in self._REGISTRY_KICK_CODES:
+                continue
+            if renamed_old and f"'{renamed_old}'" in str(
+                    a.get("message", "")).casefold():
+                continue  # expected collateral of this very rename
+            findings.append(a)
         if not findings:
             return None
         key = self._call_key(name, args)

@@ -2229,6 +2229,26 @@ async def _execute_tool_call_async(tool_call: dict) -> str:
     return await asyncio.to_thread(_execute_tool_call, tool_call)
 
 
+def _set_working_overlay(edit_session: "EditSession | None") -> None:
+    """Mirror the request's live working state into the MCP read tools.
+
+    The session is the truth during a chat request: the frontend's
+    unsaved drafts seeded it, and every approved edit commits into it.
+    The MCP user-config tools read DISK, which lags until the user saves
+    — the mixed-signal class of bug Sir hit live 2026-09-27 (search
+    'level_bed' after staging 'level_bed1' → the OLD section kept
+    "existing"). Refreshed before EVERY MCP tool call so overlays track
+    mid-request commits; the contextvar is per-request-task, so nothing
+    leaks across requests, and the non-chat MCP surface is untouched.
+    """
+    from mcp_server import set_chat_working_files
+    try:
+        set_chat_working_files(
+            dict(edit_session.state.files) if edit_session is not None else None)
+    except Exception:  # pragma: no cover - defensive; reads fall back to disk
+        logger.debug("working overlay unavailable", exc_info=True)
+
+
 async def _run_approval_gate(
     session: EditSession,
     tool_call: dict,
@@ -3538,6 +3558,11 @@ async def chat_proxy(req: ChatRequest):
                                            "unexpectedly — fall back "
                                            "to search_user_configs.")
                     else:
+                        # MCP read/other tool: expose the session's live
+                        # working state first (drafts + this request's
+                        # approved edits win over disk; see
+                        # _set_working_overlay).
+                        _set_working_overlay(edit_session)
                         result_text = await _execute_tool_call_async(tool_call)
                     if repeat_key:
                         # Executed for the first time this request: any
@@ -3759,6 +3784,7 @@ async def chat_proxy(req: ChatRequest):
                                         edit_session, c, stop_event,
                                         req.requestId, logger))[0])
                         else:
+                            _set_working_overlay(edit_session)
                             reprompt_results.append(await _execute_tool_call_async(c))
                     for reprompt_call, result_text in zip(
                         reprompt_calls[:MAX_MCP_TOOL_TURNS],
