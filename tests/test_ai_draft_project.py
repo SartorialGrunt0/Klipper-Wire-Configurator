@@ -1442,3 +1442,27 @@ def test_patch_section_comment_out_no_longer_screams_gone():
         'section': 'verify_heater heater_bed',
         'old_text': 'max_heating_variance: 2.0', 'new_text': ''})
     assert r2['status'] == 'applied' and 'WARNING' in r2['summary']
+
+
+def test_patch_section_commented_header_misroute_names_uncomment():
+    """COMMENT-02 gemma trace (2026-09-28): model anchored the whole
+    '#[temperature_sensor Raspberry_Pi]' block as old_text inside an
+    ACTIVE section — anchor-miss dumped the wrong body and the loop died.
+    Now: patch_section whose old_text starts with '#[<header>]' of a
+    commented section that EXISTS errors and names uncomment_section."""
+    st, base = _comment_state()
+    _, r = st.apply(base, {
+        'op': 'patch_section', 'file': 'printer.cfg',
+        'section': 'verify_heater heater_bed',
+        'old_text': '#[gcode_macro T3]\n#gcode:',
+        'new_text': '[gcode_macro T3]\ngcode:'})
+    assert r['status'] == 'error'
+    assert 'uncomment_section' in r['error'] and 'gcode_macro T3' in r['error']
+    # A literal '#[...]' comment INSIDE a real body, with no such dormant
+    # section, stays patchable (guard scoped to existing commented
+    # headers — no false-positive on macro text quoting the shape).
+    st2, r2 = st.apply(base, {
+        'op': 'patch_section', 'file': 'printer.cfg',
+        'section': 'gcode_macro PARK', 'old_text': '    G91',
+        'new_text': '    G91  # note: #[like_this] is prose'})
+    assert r2['status'] in ('applied', 'applied_with_advisory'), r2

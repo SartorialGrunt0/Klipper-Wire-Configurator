@@ -762,6 +762,19 @@ class EditSession:
         self.state = new_state
         self.last_write_outcome = "success"
         file_name = result.get("file", "")
+        # Stale-failure invalidation (COMMENT-06 gemma trace 2026-09-28):
+        # rename FAILED twice (rename_existing_invalid), the model then
+        # APPLIED the uncomment that made the rename valid, retried the
+        # identical rename — and the 3x repetition guard BLOCKED a call
+        # that now passes validation. The ladder is args-only and the
+        # world moved under it. A successful write to a file changes what
+        # any earlier failure against that file MEANT, so drop those
+        # counters (the budget for genuine template loops is preserved:
+        # without an intervening apply, nothing is cleared).
+        if file_name:
+            self._identical_failures = {
+                k: v for k, v in self._identical_failures.items()
+                if file_name not in k}
         details = self._details_for(name, result)
         # Stacked edits to the same file replace its staged entry so the
         # draft UI shows the cumulative result, not intermediate states.

@@ -1114,6 +1114,32 @@ class ProjectState:
                 "to delete it use op='remove_include' — both take "
                 "target_file=<path inside the include brackets>. One op "
                 "per include line.")
+        # Commented-HEADER misroute (COMMENT-02 gemma trace 2026-09-28):
+        # asked to restore '#[temperature_sensor Raspberry_Pi]', the model
+        # anchored the whole commented block as old_text inside an ACTIVE
+        # section — where it can never match (a '#[...]' block is its own
+        # dormant section, invisible to _find_section). The generic
+        # anchor-miss dumped the WRONG section's body and the loop died.
+        # A commented header can never be patch body: name the dedicated
+        # ops instead (same correction pattern as the include misroute).
+        # Scoped (2026-09-28 review): fires only when the anchored
+        # '#[header]' actually EXISTS commented-out in this file — a
+        # macro body legitimately containing a literal '#[...]' comment
+        # line stays patchable when no such dormant section exists.
+        first_line = old_probe.lstrip('\n \t')
+        if first_line.startswith('#['):
+            hdr_m = re.match(r'#+\s*\[([^\]]+)\]', first_line)
+            hdr = hdr_m.group(1).strip() if hdr_m else ''
+            if hdr and self._find_commented_section(
+                    _split_lines(self.files[filename]), hdr):
+                return _state_error(
+                    f"patch_section cannot edit the commented-out header "
+                    f"'#[{hdr}]' — a commented section is not part of any "
+                    f"section's body. To restore the whole block use "
+                    f"op='uncomment_section' with section='{hdr}'; to keep "
+                    f"it disabled leave it as-is. Individual commented "
+                    f"lines are only patchable after the block is "
+                    f"uncommented.")
         header = self._require_header(op)
         old_text = op.get('old_text')
         new_text = op.get('new_text')

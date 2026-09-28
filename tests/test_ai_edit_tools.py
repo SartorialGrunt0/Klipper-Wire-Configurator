@@ -2119,3 +2119,42 @@ def test_rename_genuinely_new_unknown_still_kicked():
         'content': '[gcode_macro X]\ngcode:\n    TOTALLY_FAKE_CMD\n'}})
     assert details is None, "genuinely new unknown must still kick"
     assert 'TOTALLY_FAKE_CMD' in content
+
+
+def test_apply_between_failures_clears_stale_repeat_pressure():
+    """COMMENT-06 gemma trace (2026-09-28): rename FAILED twice
+    (rename_existing_invalid), the model then APPLIED the uncomment that
+    made the rename valid — and the identical-call BLOCK vetoed a retry
+    that now passes validation. A successful write to a file invalidates
+    earlier failure counts against that file; template-loop protection
+    is kept (no intervening apply -> the ladder still escalates)."""
+    from services.ai_edit_tools import EditSession
+    # [bed_mesh] is what makes BED_MESH_CALIBRATE a REGISTERED command —
+    # the rename_existing_invalid gate only fires against registered
+    # aliases (mini cfg without it renames clean and proves nothing).
+    cfg = ('[bed_mesh]\nprobe_count: 3,3\n'
+           '[gcode_macro Level_Bed]\n'
+           '#rename_existing: _BED_MESH_CALIBRATE\n'
+           'gcode:\n    G28\n')
+    es = EditSession({'printer.cfg': {'content': cfg}})
+    rename = {'name': 'config_edit',
+              'arguments': {'file': 'printer.cfg', 'op': 'rename_section',
+                            'section': 'gcode_macro Level_Bed',
+                            'new_section': 'BED_MESH_CALIBRATE'}}
+    c1, d1 = es.execute(rename)
+    assert d1 is None and 'rename_existing' in c1
+    c2, d2 = es.execute(rename)
+    assert d2 is None and 'SECOND IDENTICAL' in c2
+    # Intervening SUCCESS on the same file: uncomment the rename_existing.
+    fix = {'name': 'config_edit',
+           'arguments': {'file': 'printer.cfg', 'op': 'patch_section',
+                         'section': 'gcode_macro Level_Bed',
+                         'old_text': '#rename_existing: _BED_MESH_CALIBRATE',
+                         'new_text': 'rename_existing: _BED_MESH_CALIBRATE'}}
+    c3, d3 = es.execute(fix)
+    assert d3 is not None, c3
+    # The world changed under the ladder: the previously-failing rename
+    # is now VALID and must not be BLOCKED.
+    c4, d4 = es.execute(rename)
+    assert 'BLOCKED' not in c4, c4
+    assert d4 is not None, c4
