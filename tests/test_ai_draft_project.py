@@ -174,13 +174,13 @@ def test_error_key_ignores_message_uses_code_extra():
     assert _error_key('f', mk(extra='CMD')) != _error_key('f', mk(extra='OTHER'))
 
 
-# ── patch_gcode ─────────────────────────────────────────────────────────
+# ── patch_section ─────────────────────────────────────────────────────────
 
-PATCH_OP = {'op': 'patch_gcode', 'file': 'printer.cfg',
+PATCH_OP = {'op': 'patch_section', 'file': 'printer.cfg',
             'section': 'gcode_macro PRINT_START'}
 
 
-def test_patch_gcode_exact():
+def test_patch_section_exact():
     st, base = _state()
     st1, r = st.apply(base, dict(PATCH_OP, old_text='    G28', new_text='    G28\n    M400'))
     assert r['status'] == 'applied'
@@ -189,7 +189,7 @@ def test_patch_gcode_exact():
     assert '{% set temp = params.T | default(60) | float %}' in st1.files['printer.cfg']
 
 
-def test_patch_gcode_anchor_miss_returns_current_section_text():
+def test_patch_section_anchor_miss_returns_current_section_text():
     st, base = _state()
     st1, r = st.apply(base, dict(PATCH_OP, old_text='    G28 ; hallucinated suffix', new_text='X'))
     assert r['status'] == 'error'
@@ -197,7 +197,7 @@ def test_patch_gcode_anchor_miss_returns_current_section_text():
     assert st1.files == st.files
 
 
-def test_patch_gcode_indent_tolerant_fallback():
+def test_patch_section_indent_tolerant_fallback():
     st, base = _state()
     st1, r = st.apply(base, dict(PATCH_OP, old_text='G28', new_text='G28\n    M400'))
     assert r['status'] == 'applied'
@@ -205,16 +205,16 @@ def test_patch_gcode_indent_tolerant_fallback():
     assert '\n    M400' in st1.files['printer.cfg']
 
 
-def test_patch_gcode_ambiguous_anchor_errors_with_count():
+def test_patch_section_ambiguous_anchor_errors_with_count():
     text = BASE_CFG + '\n[gcode_macro DUP]\ngcode:\n    G28\n    G28\n'
     st, base = _state(text)
-    _, r = st.apply(base, {'op': 'patch_gcode', 'file': 'printer.cfg',
+    _, r = st.apply(base, {'op': 'patch_section', 'file': 'printer.cfg',
                            'section': 'gcode_macro DUP', 'old_text': 'G28', 'new_text': 'X'})
     assert r['status'] == 'error'
     assert '2 places' in r['error']
 
 
-def test_patch_gcode_deletion():
+def test_patch_section_deletion():
     st, base = _state()
     st1, r = st.apply(base, dict(PATCH_OP, old_text='    M104 S{temp}\n    G28', new_text='    G28'))
     assert r['status'] == 'applied'
@@ -543,7 +543,7 @@ def test_include_ops_trailing_comment_shape():
     '[include ./KAMP/x.cfg]       # Include to enable ...' — the header
     regex anchors ']' to EOL, so RE_SECTION_HEADER never matched and
     every include op reported 'has no include lines'; the model fell
-    back to patch_gcode with section='' and told the user it was
+    back to patch_section with section='' and told the user it was
     impossible."""
     st = ProjectState.from_context_files({'KAMP_Settings.cfg': {'content':
         KAMP_TRAILING_COMMENTS}})
@@ -566,15 +566,15 @@ def test_include_ops_trailing_comment_shape():
     assert r3['status'] == 'error' and 'already present' in r3['error']
 
 
-def test_patch_gcode_include_misroute_names_right_op():
-    """Same trace: the model's fallback was patch_gcode with an empty
+def test_patch_section_include_misroute_names_right_op():
+    """Same trace: the model's fallback was patch_section with an empty
     section quoting the include lines. The kickback must name
     comment_include/remove_include, not the generic missing-section
     error the model read as a capability gap."""
     st = ProjectState.from_context_files({'KAMP_Settings.cfg': {'content':
         KAMP_TRAILING_COMMENTS}})
     _, r = st.apply(st.validate(), {
-        'op': 'patch_gcode', 'file': 'KAMP_Settings.cfg', 'section': '',
+        'op': 'patch_section', 'file': 'KAMP_Settings.cfg', 'section': '',
         'old_text': '[include ./KAMP/Adaptive_Meshing.cfg]', 'new_text': ''})
     assert r['status'] == 'error'
     assert 'comment_include' in r['error'] and 'remove_include' in r['error']
@@ -585,13 +585,13 @@ def test_patch_gcode_include_misroute_names_right_op():
     stg = ProjectState.from_context_files({'macros.cfg': {'content':
         '[gcode_macro SHOW_INCLUDES]\ngcode:\n    M117 edit [include x] not valid here\n'}})
     sg, rg = stg.apply(stg.validate(), {
-        'op': 'patch_gcode', 'file': 'macros.cfg',
+        'op': 'patch_section', 'file': 'macros.cfg',
         'section': 'gcode_macro SHOW_INCLUDES',
         'old_text': 'M117 edit [include x] not valid here',
         'new_text': 'M117 includes listed elsewhere'})
     assert rg['status'] == 'applied', rg
     _, rg2 = stg.apply(stg.validate(), {
-        'op': 'patch_gcode', 'file': 'macros.cfg', 'section': '',
+        'op': 'patch_section', 'file': 'macros.cfg', 'section': '',
         'old_text': 'no include here', 'new_text': ''})
     assert rg2['status'] == 'error' and 'Missing required argument: section' in rg2['error']
 
@@ -627,14 +627,14 @@ def test_section_ops_include_shaped_section_kickback():
     st = ProjectState.from_context_files({'printer.cfg': {'content':
         '[include ./KAMP/Line_Purge.cfg]\n[printer]\nkinematics: cartesian\n'}})
     for op in ('set_param', 'replace_section', 'delete_section',
-               'add_section', 'patch_gcode'):
+               'add_section', 'patch_section'):
         args = {'op': op, 'file': 'printer.cfg',
                 'section': 'include ./KAMP/Line_Purge.cfg'}
         if op == 'set_param':
             args.update(key='x', value='')
         elif op in ('replace_section', 'add_section'):
             args['text'] = ''
-        elif op == 'patch_gcode':
+        elif op == 'patch_section':
             args.update(old_text='y', new_text='')
         _, r = st.apply_no_gate(args)
         assert r['status'] == 'error', (op, r)
@@ -685,7 +685,7 @@ def test_replace_section_missing_text_never_wipes():
                            'section': 'bed_mesh',
                            'old_text': 'speed: 50', 'new_text': 'speed: 80'})
     assert r['status'] == 'error' and "'text'" in r['error']
-    assert 'patch_gcode' in r['error']
+    assert 'patch_section' in r['error']
     st2, r2 = st.apply(base, {'op': 'replace_section', 'file': 'printer.cfg',
                               'section': 'bed_mesh', 'text': ''})
     # Explicit empty string passes the argument guard; whether it then
@@ -743,13 +743,13 @@ def test_rename_section_macro_wraps_builtin():
     assert 'gcode:\n    BED_MESH_CALIBRATE' in st1.files['printer.cfg']
 
 
-def test_patch_gcode_identical_old_new_refused():
-    # Live report 2026-09-26: a rename attempt sent patch_gcode with
+def test_patch_section_identical_old_new_refused():
+    # Live report 2026-09-26: a rename attempt sent patch_section with
     # old_text == new_text; the replace 'succeeded' on byte-identical
     # text and reported 'patched [...]' — a FALSE success. Must kick
     # back with the rename_section pointer instead.
     st, base = _state()
-    st1, r = st.apply(base, {'op': 'patch_gcode', 'file': 'printer.cfg',
+    st1, r = st.apply(base, {'op': 'patch_section', 'file': 'printer.cfg',
                              'section': 'gcode_macro PRINT_START',
                              'old_text': '    G28', 'new_text': '    G28'})
     assert r['status'] == 'error'
@@ -965,7 +965,7 @@ def test_bare_macro_name_resolves_for_edit_ops():
     # gcode_macro prefix. A unique bare name now resolves; the result
     # summary/renamed keys name the FULL header actually edited.
     st, base = _macro_state(_MACRO_TEXT)
-    st1, r = st.apply(base, {'op': 'patch_gcode', 'file': 'printer.cfg',
+    st1, r = st.apply(base, {'op': 'patch_section', 'file': 'printer.cfg',
                              'section': 'Level_Bed',
                              'old_text': '    BED_MESH_CALIBRATE',
                              'new_text': '    G28\n    BED_MESH_CALIBRATE'})
@@ -1099,7 +1099,7 @@ def test_delete_file_rules():
     {'op': 'set_param'},
     {'op': 'set_param', 'file': 'printer.cfg'},
     {'op': 'set_param', 'file': 'printer.cfg', 'section': 'printer'},
-    {'op': 'patch_gcode', 'file': 'printer.cfg', 'section': 'printer'},
+    {'op': 'patch_section', 'file': 'printer.cfg', 'section': 'printer'},
     {'op': 'add_include'},
     {'op': 'new_file'},
 ])
@@ -1214,7 +1214,7 @@ def test_new_file_real_content_errors_still_kick_back():
     assert not ghost, f"include ghost leaked into kickback: {ghost}"
 
 
-# ── comment-boundary guard on patch_gcode (EDIT-06, 2026-09-13) ─────────
+# ── comment-boundary guard on patch_section (EDIT-06, 2026-09-13) ─────────
 
 _X_PRINTER = ("[stepper_x]\nstep_pin: PB0\n#enable_pin: !PE9\n"
               "rotation_distance: 40\nmicrosteps:Sixteen\ndir_pin: PB1\n")
@@ -1225,14 +1225,14 @@ def _guard_state():
     return st, st.validate()
 
 
-def test_patch_gcode_uncomment_param_applies():
+def test_patch_section_uncomment_param_applies():
     """2026-09-20: the comment-boundary guard was REMOVED. Comment flips
     apply as-told — the approval-card diff (red commented line, green
     uncommented line) is the user's confirmation. The old refusal pushed
     models into prose ask-first flows that read as a broken edit tool."""
     st, base = _guard_state()
     st2, r = st.apply(base, {
-        'op': 'patch_gcode', 'file': 'printer.cfg', 'section': 'stepper_x',
+        'op': 'patch_section', 'file': 'printer.cfg', 'section': 'stepper_x',
         'old_text': '#enable_pin: !PE9', 'new_text': 'enable_pin: PF16',
     })
     assert r['status'] in ('applied', 'applied_with_advisory'), r
@@ -1240,22 +1240,22 @@ def test_patch_gcode_uncomment_param_applies():
     assert '#enable_pin' not in st2.files['printer.cfg']
 
 
-def test_patch_gcode_comment_to_comment_edit_applies():
+def test_patch_section_comment_to_comment_edit_applies():
     """Dormant-content edits (comment-to-comment) apply as-told too: the
     diff shows the edited commented line; the user approves or declines.
     (r3's dormant-rewrite concern now surfaces honestly IN the diff —
     the user sees the param stays commented.)"""
     st, base = _guard_state()
     st2, r = st.apply(base, {
-        'op': 'patch_gcode', 'file': 'printer.cfg', 'section': 'stepper_x',
+        'op': 'patch_section', 'file': 'printer.cfg', 'section': 'stepper_x',
         'old_text': '#enable_pin: !PE9', 'new_text': '#enable_pin: !PF16',
     })
     assert r['status'] in ('applied', 'applied_with_advisory'), r
     assert '#enable_pin: !PF16' in st2.files['printer.cfg']
 
 
-def test_patch_gcode_gcode_body_edits_never_guarded():
-    """Macro-body patches (the bread-and-butter patch_gcode use) must be
+def test_patch_section_gcode_body_edits_never_guarded():
+    """Macro-body patches (the bread-and-butter patch_section use) must be
     untouched by the comment guard: comments inside gcode bodies are
     prose, not params."""
     printer = ("[gcode_macro PARK]\n"
@@ -1266,15 +1266,15 @@ def test_patch_gcode_gcode_body_edits_never_guarded():
     st = ProjectState.from_context_files({'printer.cfg': {'content': printer}})
     base = st.validate()
     st2, r = st.apply(base, {
-        'op': 'patch_gcode', 'file': 'printer.cfg', 'section': 'gcode_macro PARK',
+        'op': 'patch_section', 'file': 'printer.cfg', 'section': 'gcode_macro PARK',
         'old_text': '    # lift\n    G91', 'new_text': '    G91',
     })
     assert r['status'] in ('applied', 'applied_with_advisory'), r
 
 
-def test_patch_gcode_commenting_out_param_applies():
+def test_patch_section_commenting_out_param_applies():
     """2026-09-20: comment-OUT flips apply as-told (see
-    test_patch_gcode_uncomment_param_applies). Uses an OPTIONAL param —
+    test_patch_section_uncomment_param_applies). Uses an OPTIONAL param —
     commenting out a REQUIRED param (e.g. stepper step_pin) still kicks
     back through the delta validator, which is correct and unrelated to
     the removed comment guard."""
@@ -1282,7 +1282,7 @@ def test_patch_gcode_commenting_out_param_applies():
         '[output_pin case_light]\npin: PB7\ncycle_time: 0.01\n'}})
     base = st.validate()
     st2, r = st.apply(base, {
-        'op': 'patch_gcode', 'file': 'printer.cfg', 'section': 'output_pin case_light',
+        'op': 'patch_section', 'file': 'printer.cfg', 'section': 'output_pin case_light',
         'old_text': 'cycle_time: 0.01', 'new_text': '#cycle_time: 0.01',
     })
     assert r['status'] in ('applied', 'applied_with_advisory'), r
@@ -1308,7 +1308,7 @@ def test_add_include_refuses_self_include():
     assert '[include park.cfg]' in st2.files['printer.cfg']
 
 
-def test_patch_gcode_dormant_param_update_applies_visibly():
+def test_patch_section_dormant_param_update_applies_visibly():
     """r3 9b finding: model anchored '#enable_pin: !PE9' and rewrote it to
     '#enable_pin: !PF16' while the param stayed INACTIVE. 2026-09-20:
     guard removed — the edit applies as-told, and the diff is honest:
@@ -1316,7 +1316,7 @@ def test_patch_gcode_dormant_param_update_applies_visibly():
     remains commented before approving."""
     st, base = _guard_state()
     st2, r = st.apply(base, {
-        'op': 'patch_gcode', 'file': 'printer.cfg', 'section': 'stepper_x',
+        'op': 'patch_section', 'file': 'printer.cfg', 'section': 'stepper_x',
         'old_text': '#enable_pin: !PE9', 'new_text': '#enable_pin: !PF16',
     })
     assert r['status'] in ('applied', 'applied_with_advisory'), r
@@ -1324,3 +1324,121 @@ def test_patch_gcode_dormant_param_update_applies_visibly():
     # the diff itself carries the truth for the approval card
     assert '#enable_pin: !PE9' in r['diff']['before']
     assert '#enable_pin: !PF16' in r['diff']['after']
+
+
+# ── comment_section / uncomment_section (2026-09-28 toolset gap) ───────
+
+COMMENT_CFG = """[mcu]
+serial: /tmp/x
+
+[gcode_macro PARK]
+rename_existing: PARK_BASE
+gcode:
+    G91
+    G1 Z10 F600
+
+#[gcode_macro T3]
+#gcode:
+#    SET_DUAL_CARRIAGE CARRIAGE=3
+
+[verify_heater heater_bed]
+max_heating_variance: 2.0
+"""
+
+
+def _comment_state():
+    st = ProjectState.from_context_files({'printer.cfg': {'content': COMMENT_CFG}})
+    return st, st.validate()
+
+
+def test_comment_section_headers_and_body_in_one_op():
+    """The gap patch_section could not cover: '#'-ing the [header] line
+    itself. A body-only comment leaves Klipper an active zero-param
+    header; comment_section disables the whole block."""
+    st, base = _comment_state()
+    st1, r = st.apply(base, {'op': 'comment_section', 'file': 'printer.cfg',
+                             'section': 'gcode_macro PARK'})
+    assert r['status'] in ('applied', 'applied_with_advisory'), r
+    text = st1.files['printer.cfg']
+    assert '#[gcode_macro PARK]' in text
+    assert '#rename_existing: PARK_BASE' in text  # active line gains one '#'
+    assert '#    G1 Z10 F600' in text
+    # the neighbor commented block must NOT be swallowed into the op
+    assert '##[gcode_macro T3]' not in text
+    # and the parse really lost the section
+    from parser.config_parser import parse_config
+    p = parse_config(text, 'printer.cfg')
+    live = [s.full_header for s in p.sections if not s.is_commented_out]
+    assert not any('PARK' in h for h in live), live
+
+
+def test_comment_section_already_commented_errors():
+    st, base = _comment_state()
+    st1, _ = st.apply(base, {'op': 'comment_section', 'file': 'printer.cfg',
+                             'section': 'gcode_macro PARK'})
+    _, r2 = st1.apply(st1.validate(), {'op': 'comment_section',
+                                       'file': 'printer.cfg',
+                                       'section': 'gcode_macro PARK'})
+    assert r2['status'] == 'error'
+    assert 'ALREADY commented' in r2['error'] and 'uncomment_section' in r2['error']
+
+
+def test_uncomment_section_restores_dormant_block():
+    """The '#[gcode_macro T3]' fixture block: uncomment_section finds
+    commented headers that _find_section/RE_SECTION_HEADER never match."""
+    st, base = _comment_state()
+    st1, r = st.apply(base, {'op': 'uncomment_section', 'file': 'printer.cfg',
+                             'section': 'gcode_macro T3'})
+    assert r['status'] in ('applied', 'applied_with_advisory'), r
+    text = st1.files['printer.cfg']
+    assert '\n[gcode_macro T3]\n' in text
+    assert 'gcode:\n    SET_DUAL_CARRIAGE CARRIAGE=3' in text
+    assert text.count('#[gcode_macro T3]') == 0
+
+
+def test_comment_uncomment_round_trip_is_lossless():
+    st, base = _comment_state()
+    st1, r1 = st.apply(base, {'op': 'comment_section', 'file': 'printer.cfg',
+                              'section': 'gcode_macro PARK'})
+    assert r1['status'] in ('applied', 'applied_with_advisory'), r1
+    st2, r2 = st1.apply(st1.validate(), {'op': 'uncomment_section',
+                                         'file': 'printer.cfg',
+                                         'section': 'gcode_macro PARK'})
+    assert r2['status'] in ('applied', 'applied_with_advisory'), r2
+    assert st2.files['printer.cfg'] == COMMENT_CFG
+
+
+def test_uncomment_section_active_section_errors():
+    st, base = _comment_state()
+    _, r = st.apply(base, {'op': 'uncomment_section', 'file': 'printer.cfg',
+                           'section': 'mcu'})
+    assert r['status'] == 'error' and 'already active' in r['error']
+
+
+def test_comment_section_missing_section_hints():
+    st, base = _comment_state()
+    _, r = st.apply(base, {'op': 'comment_section', 'file': 'printer.cfg',
+                           'section': 'bed_mesh'})
+    assert r['status'] == 'error' and 'not found' in r['error']
+
+
+def test_patch_section_comment_out_no_longer_screams_gone():
+    """2026-09-28: commenting a param via patch_section triggered the
+    drop-warning ('key is GONE... resend') because _top_level_keys only
+    counts ACTIVE lines. A key that survives in '#'-form is disabled,
+    not lost — the exemption keeps the warning for real drops only."""
+    st, base = _comment_state()
+    st1, r = st.apply(base, {
+        'op': 'patch_section', 'file': 'printer.cfg',
+        'section': 'verify_heater heater_bed',
+        'old_text': 'max_heating_variance: 2.0',
+        'new_text': '# max_heating_variance: 2.0'})
+    assert r['status'] == 'applied', r
+    assert 'WARNING' not in r['summary']
+    assert '# max_heating_variance: 2.0' in st1.files['printer.cfg']
+    # real deletion STILL warns (original hazard preserved)
+    st2, r2 = st.apply(base, {
+        'op': 'patch_section', 'file': 'printer.cfg',
+        'section': 'verify_heater heater_bed',
+        'old_text': 'max_heating_variance: 2.0', 'new_text': ''})
+    assert r2['status'] == 'applied' and 'WARNING' in r2['summary']

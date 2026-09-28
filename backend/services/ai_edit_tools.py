@@ -55,13 +55,14 @@ call and will be ignored):
 {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "set_param", "section": "<section>", "key": "<param>", "value": "<new value>"}}
 ```
 Other argument shapes:
-patch a macro body: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "patch_gcode", "section": "gcode_macro NAME", "old_text": "<line copied verbatim>", "new_text": "<replacement>"}} — new_text REPLACES old_text: repeat the anchor lines inside new_text when adding lines
+patch any exact lines in a named section (config params OR macro gcode): {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "patch_section", "section": "<section or gcode_macro NAME>", "old_text": "<line copied verbatim>", "new_text": "<replacement>"}} — new_text REPLACES old_text: repeat the anchor lines inside new_text when adding lines; comment out a line: new_text = '# ' + the line; uncomment a line: old_text = the '#'-prefixed line, new_text = without the '#'
+comment out or restore a WHOLE section (header + body): {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "comment_section", "section": "<section>"}} / {"op": "uncomment_section", "section": "<section>"}
 rename a section or macro: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "rename_section", "section": "<current header>", "new_section": "<new header>"}} — the body is kept exactly; never rename by delete_section + add_section
 delete a whole file: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "delete_file"}} — remove its [include] line first if it has one
 include a file: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "add_include", "target_file": "new.cfg"}}
 remove or comment out an include: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "comment_include", "target_file": "<path as written in the include line>"}} — comment_include keeps the line as '#[include ...]', remove_include deletes it; these ops work on ANY include line, including ones at the top of a file outside any section
 create a NEW file only: {"name": "config_write", "arguments": {"file": "new.cfg", "content": "<full file text>"}}
-set_param value must be ONE LINE — multi-line values (e.g. gcode:) are dropped by some tool-call channels and must go through replace_section or patch_gcode."""
+set_param value must be ONE LINE — multi-line values (e.g. gcode:) are dropped by some tool-call channels and must go through replace_section or patch_section."""
 
 EDIT_NUDGE_TEXT_NATIVE = """Call the tool NOW using your tool-calling interface (do not read \
 files again first -- the section text you need is already in this \
@@ -70,7 +71,8 @@ why to the user and ask.
 Argument shapes for the edit tools:
 set_param: {"file": "<file.cfg>", "op": "set_param", "section": "<section>", "key": "<param>", "value": "<new value>"}
 value must be ONE LINE; for multi-line params (gcode:) use replace_section
-patch a macro body: {"file": "<file.cfg>", "op": "patch_gcode", "section": "gcode_macro NAME", "old_text": "<line copied verbatim>", "new_text": "<replacement>"} — new_text REPLACES old_text: repeat the anchor lines inside new_text when adding lines
+patch any exact lines in a named section (config params OR macro gcode): {"file": "<file.cfg>", "op": "patch_section", "section": "<section or gcode_macro NAME>", "old_text": "<line copied verbatim>", "new_text": "<replacement>"} — new_text REPLACES old_text: repeat the anchor lines inside new_text when adding lines; comment out a line: new_text = '# ' + the line; uncomment a line: old_text = the '#'-prefixed line, new_text = without the '#'
+comment out or restore a WHOLE section (header + body): {"file": "<file.cfg>", "op": "comment_section", "section": "<section>"} / {"op": "uncomment_section", "section": "<section>"}
 rename a section or macro: {"file": "<file.cfg>", "op": "rename_section", "section": "<current header>", "new_section": "<new header>"} — the body is kept exactly; never rename by delete_section + add_section
 delete a whole file: {"file": "<file.cfg>", "op": "delete_file"} — remove its [include] line first if it has one
 include a file: {"file": "<file.cfg>", "op": "add_include", "target_file": "<new.cfg>"}
@@ -90,8 +92,13 @@ CONFIG_EDIT_SPEC = {
         "text body), replace_section (rewrite a section's body), "
         "delete_section, rename_section (rename a section header, e.g. a "
         "macro — the body is kept exactly; needs new_section), "
-        "patch_gcode (replace old_text with new_text "
-        "inside a section — quote lines exactly as read returned them), "
+        "patch_section (replace old_text with new_text "
+        "inside ANY named section — config params or macro gcode alike; "
+        "quote lines exactly as read returned them), "
+        "comment_section (disable a whole section: '#' the [header] line "
+        "AND its body in one op), uncomment_section (restore a "
+        "commented-out section written as '#[header]' + '#'-prefixed "
+        "body), "
         "delete_file, add_include, remove_include, comment_include "
         "(disable an include line as '#[include ...]' -- use this instead of "
         "remove_include when the user wants the file to stop loading but the "
@@ -111,7 +118,8 @@ CONFIG_EDIT_SPEC = {
                 "type": "string",
                 "enum": [
                     "set_param", "add_section", "replace_section",
-                    "delete_section", "rename_section", "patch_gcode",
+                    "delete_section", "rename_section", "patch_section",
+                    "comment_section", "uncomment_section",
                     "delete_file",
                     "add_include", "remove_include", "comment_include",
                 ],
@@ -135,7 +143,7 @@ CONFIG_EDIT_SPEC = {
                     "New parameter value (set_param only) — ONE LINE. "
                     "Multi-line values (gcode:, a list) get DROPPED by "
                     "some tool-call channels: write them with "
-                    "replace_section or patch_gcode instead"
+                    "replace_section or patch_section instead"
                 ),
             },
             "text": {
@@ -149,12 +157,12 @@ CONFIG_EDIT_SPEC = {
             },
             "old_text": {
                 "type": "string",
-                "description": "Exact lines to replace (patch_gcode) — copy verbatim from the file content you read",
+                "description": "Exact lines to replace (patch_section) — copy verbatim from the file content you read",
             },
             "new_text": {
                 "type": "string",
                 "description": (
-                    "Replacement lines (patch_gcode); empty string deletes "
+                    "Replacement lines (patch_section); empty string deletes "
                     "the matched lines. new_text REPLACES old_text "
                     "entirely: to ADD lines while keeping the quoted "
                     "anchor, repeat the anchor lines inside new_text"
@@ -219,7 +227,7 @@ Rules:
   the confirmation, so stage first; NEVER replace a possible edit with
   "would you like me to..." or "tell me the filename and I will...".
 - When an existing section has more logic than the user's request
-  mentions, preserve it: edit in place with set_param or patch_gcode
+  mentions, preserve it: edit in place with set_param or patch_section
   instead of refusing or replacing the whole section.
 - When the user QUOTES a section or macro in their message, that quote is
   the target — it is NOT always something to hunt for in their files. If
@@ -231,7 +239,7 @@ Rules:
 - One config_edit operation per call; chain calls for multi-part changes.
 - When config_edit returns validation errors, read them, adjust, and
   retry with a CORRECTED change — never repeat the same failed call. On a
-  patch_gcode anchor miss the result includes the section's current text;
+  patch_section anchor miss the result includes the section's current text;
   quote lines exactly as they appear there.
 - Warnings returned as advisories do not block the change; mention them
   to the user when relevant. EXCEPTION: gcode the command registry flags
@@ -312,7 +320,7 @@ def _stale_callers_directive(result: dict, advisories: list) -> str:
     return (
         f"STALE CALLERS: '{old_name}' no longer exists — still called in "
         f"{where}. The user asked for the rename, so updating its callers "
-        f"is part of the SAME job: fix each call with a patch_gcode op "
+        f"is part of the SAME job: fix each call with a patch_section op "
         f"(old_text quoting the call line, new_text using '{renamed_to.split(' ', 1)[1]}') "
         f"NOW, in this request. Do not ask the user whether to update "
         f"them; do not stop here."
@@ -433,7 +441,7 @@ class EditSession:
     @staticmethod
     def _op_target(op: dict) -> tuple | None:
         """Identity of what an op OVERWRITES, for the same-request
-        duplicate guard. Only set_param qualifies: two legit patch_gcode
+        duplicate guard. Only set_param qualifies: two legit patch_section
         hunks in one macro body must stay possible, config_write on an
         existing file already errors elsewhere. None = no guard."""
         if op.get("op") == "set_param":

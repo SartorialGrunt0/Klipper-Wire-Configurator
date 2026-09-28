@@ -72,7 +72,11 @@ multi-topic explain-and-edit turns, content search), and MEMORY-01..03
 these questions force ChatRequest.editTools=True), and RENAME-01..03
 (macro-section renames: the staged header must keep the 'gcode_macro '
 prefix and the stale callers must be repaired — same staged-artifact
-scoring as EDIT-*, editTools forced ON per question).
+scoring as EDIT-*, editTools forced ON per question), and COMMENT-01..06
+(comment/uncomment ops: whole-section disable including the header via
+comment_section, block restore via uncomment_section, single-line
+comment/uncomment via patch_section, and the rename+uncomment combo that
+surfaced the gap; staged-artifact scoring, editTools forced ON).
 
 Criteria law since the Phase-4 ratchet (2026-09-22): when a question
 declares edit_criteria they are THE criteria — the prose→draft path is
@@ -1447,6 +1451,154 @@ def build_rename_questions() -> list[TestQuestion]:
                 # lingering, not its casing.
                 ("staged_section_regex",
                  r"printer\.cfg::gcode_macro PRINT_START::\n[ \t]*LEVEL_BED1\b"),
+            ),
+        ),
+    ]
+
+
+def build_comment_questions() -> list[TestQuestion]:
+    """Comment/uncomment family (COMMENT-*), added 2026-09-28 with the
+    rename patch_gcode->patch_section and the new comment_section /
+    uncomment_section ops.
+
+    Covers the toolset gap Clifford identified: commenting/restoring
+    whole blocks (header included), single lines, and commented-out
+    params. Fixture is the real Trident backup printer.cfg, which ships
+    every shape live: an active macro with a commented '#rename_existing'
+    (Level_Bed, line ~463), fully-commented '#[temperature_sensor ...]'
+    blocks, and the active [idle_timeout].
+
+    Scoring law (EDIT/RENAME family): the staged pendingEdits artifact
+    is the deliverable; criteria NEVER pin the exact op name — commenting
+    via comment_section OR patch_section both grade PASS (routing
+    preference is visible in the trace, not the score). COMMENT-06
+    reproduces the prompt that surfaced the gap: rename Level_Bed ->
+    bed_mesh_calibrate AND uncomment its rename_existing. Ordering
+    matters THERE for a reason (engine-verified): renaming first trips
+    the rename_existing_invalid gate ('bed_mesh_calibrate' would shadow
+    the built-in BED_MESH_CALIBRATE with no rename_existing active), so
+    a model that uncomments first converges and one that renames first
+    must recover from a corrective kickback — both acceptable, the
+    staged end state is what scores.
+    """
+    printer_cfg = _cfg_context("printer.cfg")
+    return [
+        TestQuestion(
+            qid="COMMENT-01",
+            title="Comment out a whole active section (header + body)",
+            text=("Disable the [idle_timeout] section in printer.cfg "
+                  "completely — comment the whole thing out so Klipper "
+                  "ignores it."),
+            context_files=printer_cfg,
+            edit_tools=True,
+            expected_tools=("config_edit",),
+            require_tool=True,
+            criteria=(
+                # '[idle_timeout]' line with leading spaces before the
+                # '#' is fine, but the '#' must be ON the header line.
+                ("staged_regex",
+                 r"printer\.cfg::(?m)^[ \t]*#+[ \t]*\[[ \t]*idle_timeout[ \t]*\]"),
+                ("staged_regex",
+                 r"printer\.cfg::(?m)^[ \t]*#+[ \t]*timeout:[ \t]*1800"),
+            ),
+        ),
+        TestQuestion(
+            qid="COMMENT-02",
+            title="Restore a commented-out section (uncomment block)",
+            text=("I have a commented-out Raspberry_Pi temperature sensor "
+                  "section in printer.cfg — uncomment it so it loads "
+                  "again."),
+            context_files=printer_cfg,
+            edit_tools=True,
+            expected_tools=("config_edit",),
+            require_tool=True,
+            criteria=(
+                # The '#[temperature_sensor Raspberry_Pi]' header (line
+                # ~322) must become a real section header. (?m) line-anchored
+                # WITHOUT '#' — the commented fixture form cannot satisfy
+                # it, so only a real uncomment passes.
+                ("staged_regex",
+                 r"printer\.cfg::(?m)^\[\s*temperature_sensor\s+Raspberry_Pi\s*\]"),
+                # body param restored — SECTION-SCOPED: the fixture has
+                # active 'sensor_type: temperature_host' lines in other
+                # sections (283, 393), so an unscoped regex would pass
+                # without any edit. staged_section_regex extracts the body
+                # under the restored header and demands the param there.
+                ("staged_section_regex",
+                 r"printer\.cfg::temperature_sensor Raspberry_Pi::sensor_type:\s*temperature_host"),
+            ),
+        ),
+        TestQuestion(
+            qid="COMMENT-03",
+            title="Comment out a single config line",
+            text=("In printer.cfg, comment out the max_accel line in the "
+                  "[printer] section (keep the text, just disable it)."),
+            context_files=printer_cfg,
+            edit_tools=True,
+            expected_tools=("config_edit",),
+            require_tool=True,
+            criteria=(
+                # The active 'max_accel: 15500 #Ellis Tuned' line must be
+                # staged commented — the key text survives behind a '#'.
+                ("staged_regex",
+                 r"printer\.cfg::(?m)^#+\s*max_accel:\s*15500"),
+            ),
+        ),
+        TestQuestion(
+            qid="COMMENT-04",
+            title="Restore a commented-out parameter line",
+            text=("In the [gcode_macro Level_Bed] section of printer.cfg "
+                  "there is a commented-out rename_existing line — "
+                  "uncomment it."),
+            context_files=printer_cfg,
+            edit_tools=True,
+            expected_tools=("config_edit",),
+            require_tool=True,
+            criteria=(
+                # '#rename_existing: _BED_MESH_CALIBRATE' -> active.
+                # Anchored at column 0 WITHOUT '#' — commented form must
+                # not satisfy it.
+                ("staged_regex",
+                 r"printer\.cfg::(?m)^rename_existing:\s*_BED_MESH_CALIBRATE"),
+            ),
+        ),
+        TestQuestion(
+            qid="COMMENT-05",
+            title="Comment out a whole macro section by casual name",
+            text=("Comment out the FILTER_FAN_OFF macro in printer.cfg — "
+                  "the whole thing, I want it disabled but kept in the "
+                  "file."),
+            context_files=printer_cfg,
+            edit_tools=True,
+            expected_tools=("config_edit",),
+            require_tool=True,
+            criteria=(
+                ("staged_regex",
+                 r"printer\.cfg::(?m)^[ \t]*#+[ \t]*\[[ \t]*gcode_macro[ \t]+FILTER_FAN_OFF[ \t]*\]"),
+                ("staged_regex",
+                 r"printer\.cfg::(?m)^[ \t]*#+[ \t]*SET_FAN_SPEED FAN=_filter_fan"),
+            ),
+        ),
+        TestQuestion(
+            qid="COMMENT-06",
+            title="Rename Level_Bed + uncomment its rename_existing (the "
+                  "prompt that surfaced the toolset gap)",
+            text=("Can you rename the level_bed macro to bed_mesh_calibrate "
+                  "and comment back in the rename_existing: "
+                  "_bed_mesh_calibrate"),
+            context_files=printer_cfg,
+            edit_tools=True,
+            expected_tools=("config_edit",),
+            require_tool=True,
+            criteria=(
+                # Renamed header keeps the gcode_macro family (same law
+                # as RENAME-02; case-insensitive).
+                ("staged_regex",
+                 r"printer\.cfg::(?m)^\[\s*gcode_macro\s+bed_mesh_calibrate\s*\]"),
+                ("staged_section_absent", "printer.cfg::gcode_macro Level_Bed"),
+                # rename_existing restored to active form.
+                ("staged_regex",
+                 r"printer\.cfg::(?m)^rename_existing:\s*_BED_MESH_CALIBRATE"),
             ),
         ),
     ]
@@ -3298,7 +3450,7 @@ def main() -> int:
                              "printer memory, blank it, run MEMORY-01..03, then restore it")
     args = parser.parse_args()
 
-    questions = build_questions() + build_macro_questions() + build_trident_questions() + build_ambiguity_questions() + build_setup_questions() + build_live_context_questions() + build_edit_tool_questions() + build_rename_questions() + build_skill_gate_questions() + build_tool_coverage_questions() + build_ack_guard_questions()
+    questions = build_questions() + build_macro_questions() + build_trident_questions() + build_ambiguity_questions() + build_setup_questions() + build_live_context_questions() + build_edit_tool_questions() + build_rename_questions() + build_comment_questions() + build_skill_gate_questions() + build_tool_coverage_questions() + build_ack_guard_questions()
     if args.include_memory:
         questions += build_memory_questions()
     if args.list_questions:

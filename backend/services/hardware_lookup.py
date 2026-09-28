@@ -221,7 +221,7 @@ def list_hardware(files: dict[str, str], hw_type: str = "") -> str:
     law = (
         "\n# If the task applies to this hardware CLASS, apply it to "
         "EVERY match above — never a subset. Each edit uses this exact "
-        "verbatim text as old_text in config_edit (patch_gcode / "
+        "verbatim text as old_text in config_edit (patch_section / "
         "replace_section).\n"
     )
     return header_line + "\n" + rendered + law

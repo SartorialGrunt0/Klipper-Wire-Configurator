@@ -16,7 +16,7 @@ decision 2026-09-12). The typed write ops of ``config_edit``/
 
 Error results never raise: ops return structured ``{'status': 'error',
 'error': ..., ...}`` dicts so the tool loop can hand them to the model as
-tool results (kickback). ``patch_gcode`` anchor misses return the CURRENT
+tool results (kickback). ``patch_section`` anchor misses return the CURRENT
 section text so the model can re-quote exactly (Claude Code edit-tool
 pattern).
 """
@@ -48,7 +48,7 @@ RE_COMMENTED_PARAM_LINE = re.compile(r'^(\s*)#+\s*([A-Za-z_][A-Za-z0-9_.\-]*)\s*
 # anchors ']' to EOL, so with a trailing comment the line looked like
 # "no include lines" and every include op failed even with the exact
 # path (live KAMP trace 2026-09-20, round 2: model fell back to
-# patch_gcode with an empty section and reported it impossible).
+# patch_section with an empty section and reported it impossible).
 RE_INCLUDE_LINE = re.compile(r'^\s*\[include\s+([^\]]+)\]\s*(?:#.*)?$')
 
 
@@ -512,7 +512,9 @@ class ProjectState:
             'replace_section': self._op_replace_section,
             'delete_section': self._op_delete_section,
             'rename_section': self._op_rename_section,
-            'patch_gcode': self._op_patch_gcode,
+            'patch_section': self._op_patch_section,
+            'comment_section': self._op_comment_section,
+            'uncomment_section': self._op_uncomment_section,
             'new_file': self._op_new_file,
             'delete_file': self._op_delete_file,
             'add_include': self._op_add_include,
@@ -523,9 +525,9 @@ class ProjectState:
             return _state_error(
                 f"Unknown op '{kind}'. Valid ops: set_param, add_section, "
                 "replace_section, delete_section, rename_section, "
-                "patch_gcode, delete_file, "
-                "add_include, remove_include, comment_include — use "
-                "exactly one of these, one op per call.")
+                "patch_section, comment_section, uncomment_section, "
+                "delete_file, add_include, remove_include, comment_include "
+                "— use exactly one of these, one op per call.")
         try:
             return handler(self._resolve_op_section(op))
         except _OpError as exc:  # precondition failure — structured, no raise
@@ -536,7 +538,7 @@ class ProjectState:
     def _resolve_op_section(self, op: dict) -> dict:
         """Rewrite op['section'] to the actual header it refers to (live
         report 2026-09-27, see :func:`_resolve_section_ref`). Applied
-        centrally so EVERY section op — set_param, patch_gcode, rename,
+        centrally so EVERY section op — set_param, patch_section, rename,
         delete, replace, and add_section's duplicate check — resolves a
         bare macro name identically; per-handler fixing left the loop's
         second guesses scattered. No-op when file/section are missing or
@@ -748,7 +750,7 @@ class ProjectState:
             return _state_error(
                 f"replace_section needs the full new body of [{header}] in "
                 "'text' (pass text: \"\" to intentionally empty it). To edit "
-                "part of the body, use op=patch_gcode with old_text/new_text."
+                "part of the body, use op=patch_section with old_text/new_text."
             )
         if not isinstance(body, str):
             return _state_error('Argument text must be a string')
@@ -914,7 +916,151 @@ class ProjectState:
                 # directive without parsing prose.
                 'renamed_from': header, 'renamed_to': new_header}
 
-    # -- patch_gcode -------------------------------------------------------
+    # -- patch_section -----------------------------------------------------
+
+    # -- comment_section / uncomment_section -------------------------------
+
+    @staticmethod
+    def _find_commented_section(lines: list[str],
+                                header: str) -> tuple[int, int] | None:
+        """(header_index, end) for a '#'-prefixed section header whose
+        inner name matches `header` (e.g. '#[gcode_macro T3]' matches
+        'gcode_macro T3'). Symmetric with _find_section: the block runs
+        to the next ACTIVE or commented header, bounded by SAVE_CONFIG.
+
+        Needed because RE_SECTION_HEADER never matches commented headers,
+        so uncomment requests looked 'impossible' to every section op
+        (Clifford's comment/uncomment toolset request, 2026-09-28)."""
+        re_commented = re.compile(r'^\s*#+\s*\[([^\]]+)\]\s*$')
+        header_index = -1
+        for i, line in enumerate(lines):
+            match = re_commented.match(line)
+            if match and match.group(1).strip() == header:
+                header_index = i
+                break
+        if header_index == -1:
+            return None
+        end = _save_config_start(lines)
+        for scan in range(header_index + 1, end):
+            if RE_SECTION_HEADER.match(lines[scan]) \
+                    or re_commented.match(lines[scan]):
+                end = scan
+                break
+        return header_index, end
+
+    def _op_comment_section(self, op: dict) -> dict:
+        """Disable a whole section: '#' the [header] line and every
+        non-blank body line in ONE staged card (2026-09-28 toolset gap:
+        patch_section could only comment the BODY, leaving an active
+        header over a dead block, and the [header] line itself was out
+        of reach — Klipper still parses '[foo]' + commented body as a
+        (zero-param, usually invalid) section).
+
+        Blank lines stay blank. Lines that are already comments gain a
+        second '#' — that is intentional: uncomment_section reverses
+        exactly one '#' level, so a comment/uncomment round trip is
+        lossless."""
+        filename = self._require_file(op.get('file'))
+        header = self._require_header(op)
+        lines = _split_lines(self.files[filename])
+        found = _find_section(lines, header)
+        if found is None:
+            commented = self._find_commented_section(lines, header)
+            if commented is not None:
+                return _state_error(
+                    f"Section '[{header}]' in {filename} is ALREADY "
+                    "commented out. To restore it use "
+                    "op='uncomment_section'.")
+            return _state_error(
+                f"Section '[{header}]' not found in {filename}."
+                + _ambiguous_section_hint(header, lines)
+                + _missing_section_hint(self.files, header, filename))
+        header_index, end = found
+        # Boundary clamp: _find_section's end stops only at ACTIVE headers,
+        # so a dormant '#[other]' block directly below would get swallowed
+        # and double-#'-d (and uncomment_section's own boundary scan would
+        # then strand it). Never touch another section's commented block.
+        re_other_commented = re.compile(r'^#\s*\[([^\]]+)\]')
+        for scan in range(header_index + 1, end):
+            m = re_other_commented.match(lines[scan])
+            if m and m.group(1).strip() != header:
+                end = scan
+                break
+        count = 0
+        for scan in range(header_index, end):
+            if lines[scan].strip():
+                lines[scan] = '#' + lines[scan]
+                count += 1
+        self.files[filename] = '\n'.join(lines)
+        return {'status': 'ok', 'file': filename,
+                'summary': f"commented out section '[{header}]' in "
+                           f"{filename} ({count} lines, header included)"}
+
+    def _op_uncomment_section(self, op: dict) -> dict:
+        """Re-enable a commented-out section: strip ONE leading '#' from
+        the '#[header]' line and each non-blank body line (mirrors
+        comment_section exactly). A body line that was a plain comment
+        before the block was commented ('## old note') correctly becomes
+        '# old note' again. Refuses when the block contains no commented
+        content to strip and the section is already active."""
+        filename = self._require_file(op.get('file'))
+        header = self._require_header(op)
+        lines = _split_lines(self.files[filename])
+        found = self._find_commented_section(lines, header)
+        if found is None:
+            active = _find_section(lines, header)
+            if active is not None:
+                return _state_error(
+                    f"Section '[{header}]' in {filename} is not "
+                    "commented out — it is already active.")
+            return _state_error(
+                f"No commented-out section '[{header}]' found in "
+                f"{filename}." + _missing_section_hint(self.files, header,
+                                                       filename))
+        header_index, end = found
+        # Strip EXACTLY one leading '#' (no space-eating): comment_section
+        # prepends bare '#', so '#    G28' must restore to '    G28' with
+        # its original indent, and '## old note' to '# old note'. Eating
+        # an optional space here shifted every restored line one column
+        # left (round-trip lossiness caught by unit test, 2026-09-28).
+        re_strip = re.compile(r'^(\s*)#(.*)$')
+        count = 0
+        for scan in range(header_index, end):
+            if not lines[scan].strip():
+                continue
+            match = re_strip.match(lines[scan])
+            if match:
+                lines[scan] = match.group(1) + match.group(2)
+                count += 1
+        # Guard: a section whose header lost its '#' but whose body had
+        # no commented content would silently keep dead params; the
+        # re-parse below cannot happen here, so assert the header is now
+        # a plain header line.
+        if not RE_SECTION_HEADER.match(lines[header_index]):
+            return _state_error(
+                f"uncomment_section could not restore '[{header}]' in "
+                f"{filename} — the header line is not a section header "
+                "after stripping '#'.")
+        self.files[filename] = '\n'.join(lines)
+        return {'status': 'ok', 'file': filename,
+                'summary': f"uncommented section '[{header}]' in "
+                           f"{filename} ({count} lines restored)"}
+
+    @staticmethod
+    def _commented_top_level_keys(body_lines: list[str]) -> set[str]:
+        """Param keys present ONLY in '#'-commented form at the body's
+        base indent — the shape a deliberate comment-out produces."""
+        matches = []
+        for line in body_lines:
+            if not line.strip() or not line.lstrip().startswith('#'):
+                continue
+            match = RE_COMMENTED_PARAM_LINE.match(line)
+            if match:
+                matches.append((len(match.group(1)), match.group(2)))
+        if not matches:
+            return set()
+        base = min(indent for indent, _ in matches)
+        return {key for indent, key in matches if indent == base}
 
     @staticmethod
     def _drop_warning(old_body_lines: list[str],
@@ -928,9 +1074,18 @@ class ProjectState:
         the string replace then silently deletes the anchor. Applied-as-
         told semantics stay; the success output makes the loss visible
         so the next turn can fix it. (Sir's live diff report 2026-09-19:
-        approval gate showed patch_gcode dropping timeout: 1800.)"""
+        approval gate showed patch_section dropping timeout: 1800.)
+
+        Comment-out exemption (2026-09-28): keys that survive the edit in
+        '#'-commented form are DISABLED, not lost — the text is still on
+        the card and the red/green diff shows it. Without this exemption
+        every deliberate comment via patch_section screamed 'key is GONE,
+        resend', pushing models to undo correct edits. A key commented
+        at a DEEPER indent than the body base is still treated as lost
+        (buried in a multi-line value = the original hazard)."""
         lost = sorted(ProjectState._top_level_keys(old_body_lines)
-                      - ProjectState._top_level_keys(new_body_lines))
+                      - ProjectState._top_level_keys(new_body_lines)
+                      - ProjectState._commented_top_level_keys(new_body_lines))
         if not lost:
             return ''
         return (
@@ -939,11 +1094,11 @@ class ProjectState:
             f"to ADD lines rather than delete them, include the quoted "
             f"anchor lines inside new_text and resend.")
 
-    def _op_patch_gcode(self, op: dict) -> dict:
+    def _op_patch_section(self, op: dict) -> dict:
         filename = self._require_file(op.get('file'))
         # Include-line misroute (live KAMP trace 2026-09-20): models
         # delete/comment top-of-file '[include ...]' lines by calling
-        # patch_gcode with an empty section — which has no named section
+        # patch_section with an empty section — which has no named section
         # to anchor on. A generic 'missing section' error reads as "the
         # tools can't do this"; name the right op instead. Fires ONLY
         # on an empty section: an old_text that merely contains
@@ -953,7 +1108,7 @@ class ProjectState:
         if not (op.get('section') or '').strip() and isinstance(old_probe, str) \
                 and '[include' in old_probe:
             return _state_error(
-                "patch_gcode edits inside a named section; '[include ...]' "
+                "patch_section edits inside a named section; '[include ...]' "
                 "lines live outside sections. To disable an include line "
                 "use op='comment_include' (keeps it as '#[include ...]'), "
                 "to delete it use op='remove_include' — both take "
@@ -977,7 +1132,7 @@ class ProjectState:
                 + " Read the file first."
             )
         # No-op guard (live report 2026-09-26): a rename attempt landed as
-        # patch_gcode with old_text == new_text; the string replace
+        # patch_section with old_text == new_text; the string replace
         # "succeeded" and the op reported 'patched [...]' while the file
         # stayed byte-identical — a FALSE success the model relayed to
         # the user ("patched [controller_fan _stepper_fan]" for a rename
@@ -985,7 +1140,7 @@ class ProjectState:
         # and name the real tool for the most common no-op shape.
         if old_text == new_text:
             return _state_error(
-                f"patch_gcode made NO change: old_text and new_text are "
+                f"patch_section made NO change: old_text and new_text are "
                 f"identical. To rename the section itself use "
                 f"op='rename_section' with new_section=<new header>; "
                 f"otherwise quote the lines you actually want to change."
@@ -1046,7 +1201,7 @@ class ProjectState:
         if filename in self.files:
             return _state_error(
                 f"File '{filename}' already exists. config_write creates NEW files only; "
-                "edit existing files with set_param/patch_gcode/replace_section."
+                "edit existing files with set_param/patch_section/replace_section."
             )
         content = op.get('content', '')
         if not isinstance(content, str):

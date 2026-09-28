@@ -284,7 +284,7 @@ def test_load_skill_returns_body_with_law_and_tools():
     assert 'config_edit' in body and 'MUST call' in body
     assert 'STAGED' in body
     # text-protocol models need the arg shapes (no schema is sent)
-    assert 'set_param' in body and 'patch_gcode' in body
+    assert 'set_param' in body and 'patch_section' in body
 
 
 def test_gate_off_path_no_longer_exists():
@@ -339,7 +339,7 @@ def test_session_anchor_miss_returns_section_text():
     session = EditSession(_ctx())
     content, details = session.execute({
         'name': 'config_edit',
-        'arguments': {'file': 'printer.cfg', 'op': 'patch_gcode',
+        'arguments': {'file': 'printer.cfg', 'op': 'patch_section',
                       'section': 'gcode_macro PRINT_START',
                       'old_text': '    G29 ; not present', 'new_text': 'X'},
     })
@@ -1269,12 +1269,12 @@ def test_set_param_on_commented_param_stages_directly():
     assert '#enable_pin' not in ses.pending_edits[0]['newText']
 
 
-def test_patch_gcode_uncomment_stages_directly():
-    """patch_gcode '#' flips stage too — same card-diff rationale."""
+def test_patch_section_uncomment_stages_directly():
+    """patch_section '#' flips stage too — same card-diff rationale."""
     ses = _stepper_session()
     content, details = ses.execute({
         'name': 'config_edit',
-        'arguments': {'op': 'patch_gcode', 'file': 'printer.cfg',
+        'arguments': {'op': 'patch_section', 'file': 'printer.cfg',
                       'section': 'stepper_x',
                       'old_text': '#enable_pin: !PE9',
                       'new_text': 'enable_pin: !PE9'}})
@@ -1289,7 +1289,7 @@ def test_commented_param_prepares_card_after_prior_edit():
     ses = _stepper_session()
     c1, r1, _ = ses.prepare({
         'name': 'config_edit',
-        'arguments': {'op': 'patch_gcode', 'file': 'printer.cfg',
+        'arguments': {'op': 'patch_section', 'file': 'printer.cfg',
                       'section': 'stepper_x',
                       'old_text': '#enable_pin: !PE9',
                       'new_text': 'enable_pin: PF16'}})
@@ -1742,10 +1742,10 @@ def test_explicit_value_beats_new_text_synonym():
                         'section': 's', 'key': 'k',
                         'value': 'good', 'new_text': 'bad'})
     assert op['value'] == 'good'
-    # patch_gcode keeps new_text as new_text (no aliasing)
+    # patch_section keeps new_text as new_text (no aliasing)
     op2 = __import__('services.ai_edit_tools',
                      fromlist=['EditSession']).EditSession.tool_call_to_op(
-        'config_edit', {'file': 'p.cfg', 'op': 'patch_gcode',
+        'config_edit', {'file': 'p.cfg', 'op': 'patch_section',
                         'section': 's', 'old_text': 'a',
                         'new_text': 'b'})
     assert op2['new_text'] == 'b' and 'value' not in op2
@@ -1795,16 +1795,16 @@ def test_replace_section_indented_lines_are_not_keys():
     assert 'WARNING' not in res['summary']
 
 
-# ── patch_gcode anchor-drop warning (Sir's approval-gate diff report) ──
+# ── patch_section anchor-drop warning (Sir's approval-gate diff report) ──
 
 
-def test_patch_gcode_warns_when_anchor_param_dropped():
+def test_patch_section_warns_when_anchor_param_dropped():
     from services.ai_edit_tools import EditSession
     es = EditSession({'printer.cfg': {'content':
         '[idle_timeout]\ntimeout: 1800\n'}})
     content, details = es.execute({
         'name': 'config_edit',
-        'arguments': {'file': 'printer.cfg', 'op': 'patch_gcode',
+        'arguments': {'file': 'printer.cfg', 'op': 'patch_section',
                       'section': 'idle_timeout',
                       'old_text': 'timeout: 1800',
                       'new_text': 'gcode:\n  M106'}})
@@ -1812,13 +1812,13 @@ def test_patch_gcode_warns_when_anchor_param_dropped():
     assert 'WARNING' in content and 'timeout' in content
 
 
-def test_patch_gcode_anchor_kept_no_warning():
+def test_patch_section_anchor_kept_no_warning():
     from services.ai_edit_tools import EditSession
     es = EditSession({'printer.cfg': {'content':
         '[idle_timeout]\ntimeout: 1800\n'}})
     content, details = es.execute({
         'name': 'config_edit',
-        'arguments': {'file': 'printer.cfg', 'op': 'patch_gcode',
+        'arguments': {'file': 'printer.cfg', 'op': 'patch_section',
                       'section': 'idle_timeout',
                       'old_text': 'timeout: 1800',
                       'new_text': 'timeout: 300\ngcode:\n  M106'}})
@@ -1827,12 +1827,12 @@ def test_patch_gcode_anchor_kept_no_warning():
     assert 'timeout: 300' in es.state.files['printer.cfg']
 
 
-def test_patch_gcode_indent_tolerant_path_warns_too():
+def test_patch_section_indent_tolerant_path_warns_too():
     from services.ai_edit_tools import ProjectState
     st = ProjectState({'printer.cfg': (
         '[idle_timeout]\n    timeout: 1800\n')})
     _, res = st.apply_no_gate({
-        'op': 'patch_gcode', 'file': 'printer.cfg',
+        'op': 'patch_section', 'file': 'printer.cfg',
         'section': 'idle_timeout',
         'old_text': 'timeout: 1800',
         'new_text': 'gcode:\n  STOP_ALL'})
@@ -1840,14 +1840,14 @@ def test_patch_gcode_indent_tolerant_path_warns_too():
     assert 'WARNING' in res['summary']
 
 
-def test_patch_gcode_intentional_deletion_warns_once_only():
+def test_patch_section_intentional_deletion_warns_once_only():
     # Deleting a param IS legal — the warning is informational,
     # not an error; status stays ok.
     from services.ai_edit_tools import ProjectState
     st = ProjectState({'printer.cfg': (
         '[idle_timeout]\ntimeout: 1800\nslow_to_down: true\n')})
     _, res = st.apply_no_gate({
-        'op': 'patch_gcode', 'file': 'printer.cfg',
+        'op': 'patch_section', 'file': 'printer.cfg',
         'section': 'idle_timeout',
         'old_text': 'slow_to_down: true', 'new_text': ''})
     assert res['status'] == 'ok'
@@ -1869,7 +1869,7 @@ def _led_cfg():
 
 def _set_color_call(cmd='SET_LED_COLOR'):
     return {'name': 'config_edit', 'arguments': {
-        'file': 'printer.cfg', 'op': 'patch_gcode',
+        'file': 'printer.cfg', 'op': 'patch_section',
         'section': 'gcode_macro PARK',
         'old_text': '    G91',
         'new_text': f'    G91\n    {cmd} LED=led_strip RED=1 GREEN=0 BLUE=0'}}

@@ -299,7 +299,7 @@ def test_chat_proxy_malformed_reprompt_is_bounded(monkeypatch):
 
 # ── config_edit arg shapes (Phase-5 text-protocol parity) ────────────
 # The 2eb2984 recovery fixtures covered config_write bodies and the read
-# tools; config_edit — the write tool whose patch_gcode/replace_section
+# tools; config_edit — the write tool whose patch_section/replace_section
 # values carry Klipper/Jinja bodies — had no extraction coverage at all.
 # Same corruption classes, different argument surface, so the parity claim
 # is asserted here rather than assumed.
@@ -363,7 +363,7 @@ def test_extract_recovers_config_edit_wrapper_with_bare_kwargs():
 
 
 def test_extract_recovers_raw_quotes_in_config_edit_body():
-    # patch_gcode old_text/new_text carry Klipper bodies: raw double quotes
+    # patch_section old_text/new_text carry Klipper bodies: raw double quotes
     # (SET_LED LED="x") and raw newlines, exactly as gemma-4-12b emits them.
     # Strings built from chr() to keep raw quote/backslash shapes out of
     # this source file (same convention as the config_write fixture).
@@ -376,7 +376,7 @@ def test_extract_recovers_raw_quotes_in_config_edit_body():
     fence = (
         '```tool' + chr(10)
         + '{' + Q + 'name' + Q + ': ' + Q + 'config_edit' + Q + ', '
-        + Q + 'arguments' + Q + ': {' + Q + 'op' + Q + ': ' + Q + 'patch_gcode' + Q + ', '
+        + Q + 'arguments' + Q + ': {' + Q + 'op' + Q + ': ' + Q + 'patch_section' + Q + ', '
         + Q + 'file' + Q + ': ' + Q + 'printer.cfg' + Q + ', '
         + Q + 'section' + Q + ': ' + Q + 'gcode_macro PRINT_START' + Q + ', '
         + Q + 'old_text' + Q + ': ' + Q + old + Q + ', '
@@ -386,7 +386,7 @@ def test_extract_recovers_raw_quotes_in_config_edit_body():
     calls = ai_routes._extract_tool_calls(fence)
     assert len(calls) == 1, calls
     args = calls[0]['arguments']
-    assert args['op'] == 'patch_gcode'
+    assert args['op'] == 'patch_section'
     assert args['section'] == 'gcode_macro PRINT_START'
     assert args['old_text'] == old.replace(B + 'n', chr(10))
     assert args['new_text'] == new.replace(B + 'n', chr(10))

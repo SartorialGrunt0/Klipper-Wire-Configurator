@@ -44,8 +44,12 @@ The assistant sees your printer memory (mainboard, toolhead, expander boards, ki
 >
 > - `config_edit` — one anchored operation per call on an **existing**
 >   file: `set_param`, `add_section`, `replace_section`, `delete_section`,
->   `patch_gcode` (quote `old_text` exactly as `read_user_config`
->   returned it), `delete_file`, `add_include`, `remove_include`,
+>   `patch_section` (replace exact lines inside any named section —
+>   config params or macro gcode alike; quote `old_text` exactly as
+>   `read_user_config` returned it; comment a line out = `# ` in front),
+>   `comment_section` / `uncomment_section` (disable / restore a whole
+>   section including its `[header]` line), `delete_file`, `add_include`,
+>   `remove_include`,
 >   `comment_include` (disables an include as `#[include x.cfg]` instead
 >   of deleting it).
 > - `config_write` — creates **new files only** (wholesale rewrites of
@@ -115,7 +119,7 @@ Failure modes seen across the models (from their traces):
 
 - **Staged but not what was asked** (the dominant mode) — the model picks a
   blunter operation than the case needs (`replace_section` or `set_param`
-  where an anchored `patch_gcode` is required) and the staged text misses
+  where an anchored `patch_section` is required) and the staged text misses
   the required line. This is what fails `EDIT-02` / `MINIDIFF-01` (the
   `level_bed` adaptive-anchor pair) on three of the four models.
 - **Nothing staged after burning the retry budget** — `TRIDENT-03`,

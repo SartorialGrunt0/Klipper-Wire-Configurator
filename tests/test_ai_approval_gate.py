@@ -262,7 +262,7 @@ def test_manual_edit_during_pending_invalidates_anchor(edit_flag, monkeypatch):
     """Approve carries the frontend's LATEST files; if the anchor died,
     the decision is NOT accepted and the card stays open for decline."""
     _install(monkeypatch, [
-        _text_tool_call('config_edit', {'file': 'printer.cfg', 'op': 'patch_gcode',
+        _text_tool_call('config_edit', {'file': 'printer.cfg', 'op': 'patch_section',
                                         'section': 'gcode_macro PARK',
                                         'old_text': 'G1 Z5', 'new_text': 'G1 Z10'}),
         _final_reply('Waiting on your review.'),
