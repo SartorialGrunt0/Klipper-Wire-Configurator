@@ -2089,10 +2089,22 @@ class McpServer:
         if section:
             section_text = self._extract_config_section(content, section)
             if section_text is None:
+                _, candidates = self._locate_config_section(content, section)
+                if candidates:
+                    # Bare-name fallback was ambiguous (live report 2026-09-27):
+                    # list the headers so the model picks one instead of
+                    # retrying the same bare name forever.
+                    listed = ", ".join(f"[{c}]" for c in candidates)
+                    return (
+                        f'Multiple sections match "{section}" in '
+                        f"{display_name}{src} — read one of: {listed}."
+                    )
+                bare = section.strip().strip("[]").strip()
                 return (
                     f'Section "{section}" not found in {display_name}{src}. '
                     "Use search_user_configs to find the exact filename, or omit "
                     "section to read the whole file."
+                    f" If this is a macro, the header is gcode_macro {bare}."
                 )
             result = (
                 f"# {display_name}{src}  (User Config - section [{section}] partial "
@@ -2206,23 +2218,68 @@ class McpServer:
                     headers.append(header)
         return headers
 
+    def _locate_config_section(
+        self, content: str, section_name: str
+    ) -> tuple[int | None, list[str]]:
+        """Resolve a section request to a header line index.
+
+        Returns ``(header_index, [])`` on a unique hit and ``(None, [])``
+        when nothing matched. On an *ambiguous* bare-name hit it returns
+        ``(None, candidates)`` where ``candidates`` holds the distinct full
+        headers that matched, so callers can tell 'ambiguous' from 'absent'.
+
+        An exact (case-insensitive) full-header match wins outright with the
+        first hit — ambiguity can only arise from the bare-name fallback.
+        """
+        branch = section_name.strip().strip("[]").strip().lower()
+        lines = content.splitlines()
+        headers: list[str] = []
+        for line in lines:
+            m = re.match(r"^\s*\[([^\]]+)\]\s*$", line)
+            headers.append(m.group(1).strip() if m else "")
+
+        # Full-header comparison (unchanged: first case-insensitive hit wins).
+        for i, header in enumerate(headers):
+            if header and header.lower() == branch:
+                return i, []
+
+        # Bare-name fallback (live report 2026-09-27): the chat model addresses
+        # a macro by its bare name ('Level_Bed') instead of the full header
+        # ('gcode_macro Level_Bed') and then loops on the not-found error.
+        # Match the request against each header's LAST whitespace token (the
+        # family keyword for '[printer]' is the header itself), casefolded.
+        # Resolve ONLY when exactly one section matches — never silently pick
+        # one of several.
+        if not branch:
+            return None, []
+        matched: list[str] = []
+        hit_index: int | None = None
+        for i, header in enumerate(headers):
+            if header and header.split()[-1].casefold() == branch.casefold():
+                matched.append(header)
+                if hit_index is None:
+                    hit_index = i
+        if len(matched) == 1:
+            return hit_index, []
+        candidates: list[str] = []
+        for header in matched:
+            if header not in candidates:
+                candidates.append(header)
+        return None, candidates
+
     def _extract_config_section(self, content: str, section_name: str) -> str | None:
         """Return the raw text of one config section: banner comments above the
         header through the last line before the next section header.
 
         Case-insensitive; accepts 'name' or '[name]'. Mirrors the frontend's
         extractSectionText so tool reads and edit-path section targeting agree.
+        Falls back to a unique bare-name match (live report 2026-09-27);
+        ambiguous bare names return None rather than guessing.
         """
-        wanted = section_name.strip().strip("[]").lower()
-        lines = content.splitlines()
-        header_index: int | None = None
-        for i, line in enumerate(lines):
-            m = re.match(r"^\s*\[([^\]]+)\]\s*$", line)
-            if m and m.group(1).strip().lower() == wanted:
-                header_index = i
-                break
+        header_index, _candidates = self._locate_config_section(content, section_name)
         if header_index is None:
             return None
+        lines = content.splitlines()
 
         end_index = len(lines)
         for i in range(header_index + 1, len(lines)):

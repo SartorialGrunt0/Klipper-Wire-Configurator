@@ -393,3 +393,97 @@ def test_list_user_configs_includes_working_only_files(tmp_path):
     })
     out = _call(server, "list_user_configs", {})
     assert "printer.cfg" in out and "park.cfg" in out
+
+
+# ── Bare-name section lookup (live report 2026-09-27) ──────────────────
+# The chat model habitually addresses a macro by its bare name
+# (section='Level_Bed') instead of the full header ('gcode_macro
+# Level_Bed'), then loops on 'Section "Level_Bed" not found'. A bare name
+# resolves when it maps to exactly ONE header in the file; ambiguous names
+# must still fail, naming the candidate headers instead of guessing.
+
+SECTIONS = (
+    "[gcode_macro Level_Bed]\n"
+    "gcode:\n"
+    "    BED_MESH_CALIBRATE\n"
+    "\n"
+    "[fan_generic My_Fan]\n"
+    "pin: PA1\n"
+    "\n"
+    "[gcode_macro Level]\n"
+    "gcode:\n"
+    "    G28\n"
+    "\n"
+    "[gcode_macro level]\n"
+    "gcode:\n"
+    "    G29\n"
+)
+
+
+def _sections_server(tmp_path):
+    """Server reading one on-disk printer.cfg that mixes bare-name-unique
+    and casefold-colliding headers."""
+    server = mcp_server.McpServer()
+    user_dir = tmp_path / "user_configs"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    (user_dir / "printer.cfg").write_text(SECTIONS, encoding="utf-8")
+    mcp_server.LOCAL_CONFIGS_DIR = user_dir
+    mcp_server._system_config_path = lambda: tmp_path / "system_config"
+    return server
+
+
+def _read_section(server, section):
+    return _call(server, "read_user_config",
+                 {"filename": "printer.cfg", "section": section})
+
+
+def test_bare_macro_name_resolves_section(tmp_path):
+    server = _sections_server(tmp_path)
+    out = _read_section(server, "Level_Bed")
+    assert "BED_MESH_CALIBRATE" in out      # the right section's body
+    assert "G28" not in out                 # not a neighbouring macro
+    assert "not found" not in out.lower()
+
+
+def test_bare_name_case_insensitive(tmp_path):
+    server = _sections_server(tmp_path)
+    out = _read_section(server, "level_bed")
+    assert "BED_MESH_CALIBRATE" in out
+
+
+def test_bare_fan_instance_name_resolves(tmp_path):
+    server = _sections_server(tmp_path)
+    out = _read_section(server, "My_Fan")
+    assert "pin: PA1" in out
+
+
+def test_full_header_still_resolves(tmp_path):
+    server = _sections_server(tmp_path)
+    out = _read_section(server, "gcode_macro Level_Bed")
+    assert "BED_MESH_CALIBRATE" in out
+    assert "not found" not in out.lower()
+
+
+def test_full_header_wins_over_casefold_collision(tmp_path):
+    # The exact (case-insensitive) header path keeps its old behaviour: it
+    # returns the first hit even when a case-variant header also exists.
+    server = _sections_server(tmp_path)
+    out = _read_section(server, "gcode_macro LEVEL")
+    assert "G28" in out
+    assert "G29" not in out
+
+
+def test_ambiguous_bare_name_lists_candidates(tmp_path):
+    server = _sections_server(tmp_path)
+    out = _read_section(server, "Level")
+    assert "Multiple sections match" in out
+    assert "[gcode_macro Level]" in out
+    assert "[gcode_macro level]" in out
+    assert "G28" not in out and "G29" not in out
+
+
+def test_unknown_section_adds_macro_guidance(tmp_path):
+    server = _sections_server(tmp_path)
+    out = _read_section(server, "No_Such_Thing")
+    assert "not found" in out
+    assert "gcode_macro No_Such_Thing" in out

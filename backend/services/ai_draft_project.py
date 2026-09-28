@@ -129,13 +129,85 @@ def _missing_section_hint(files: dict[str, str], header: str,
     ANOTHER project file, name it. Wrong-file calls are the common cause
     in multi-file projects, and bare 'read the file first' sends models
     re-reading the SAME file — a dead loop that ends in 'the tool
-    cannot do this' (live traces 2026-09-20). Exact-header match only."""
+    cannot do this' (live traces 2026-09-20). Resolution-aware
+    (2026-09-27): a bare 'HOME' finds '[gcode_macro HOME]' in another
+    file too, naming the FULL header the model should pass."""
     for other in sorted(files):
         if other == filename:
             continue
-        if _find_section(_split_lines(files[other]), header):
+        other_lines = _split_lines(files[other])
+        if _find_section(other_lines, header):
             return f" It exists in {other} — pass file='{other}'."
+        resolved = _resolve_section_ref(header, other_lines)
+        if resolved != header:
+            return (f" It exists in {other} as '[{resolved}]' — pass "
+                    f"file='{other}', section='{resolved}'.")
     return ''
+
+
+def _header_name_part(header: str) -> str:
+    """The instance-name part of a header: after the first space for
+    family headers ('gcode_macro Level_Bed' -> 'Level_Bed'), else the
+    header itself."""
+    return header.split(' ', 1)[1] if ' ' in header else header
+
+
+def _resolve_section_ref(requested: str, lines: list[str]) -> str:
+    """Resolve a requested section reference to an actual header (live
+    report 2026-09-27).
+
+    Models habitually call config_edit with the BARE macro name
+    (section='Level_Bed' for '[gcode_macro Level_Bed]'); every op then
+    died on 'Section not found' and burned retry turns guessing the
+    gcode_macro prefix back. Resolution: exact header wins; otherwise a
+    bare (family-less) request matches the NAME PART of family headers
+    — applied only when it is UNIQUE in the file. Ambiguous or absent
+    returns the request unchanged so the caller's 'not found' path (and
+    its cross-file hint) fires as before. Never invents a header for an
+    absent name; add_section therefore still creates whatever the model
+    asked for.
+    """
+    exact = re.compile(r'^\[([^\]]+)\]\s*$')
+    headers = []
+    for line in lines:
+        match = exact.match(line)
+        if match:
+            headers.append(match.group(1).strip())
+    if requested in headers:
+        return requested
+    if ' ' in requested:  # full-header form that simply isn't there
+        return requested
+    wanted = requested.casefold()
+    matches = [h for h in headers if ' ' in h
+               and _header_name_part(h).casefold() == wanted]
+    distinct = list(dict.fromkeys(matches))
+    if len(distinct) == 1:
+        return distinct[0]
+    return requested
+
+
+def _ambiguous_section_hint(requested: str, lines: list[str]) -> str:
+    """Suffix for 'Section not found' when a BARE name matches 2+ family
+    headers (live report 2026-09-27): the resolution stays off (never
+    pick one silently), but the error names the candidates so the model
+    retries with a full header instead of guessing prefixes."""
+    if ' ' in requested:
+        return ''
+    wanted = requested.casefold()
+    matches = []
+    for line in lines:
+        match = RE_SECTION_HEADER.match(line)
+        if not match:
+            continue
+        header = match.group(1).strip()
+        if (' ' in header
+                and _header_name_part(header).casefold() == wanted
+                and header not in matches):
+            matches.append(header)
+    if len(matches) < 2:
+        return ''
+    return (f" Multiple sections match '{requested}' — pass one of these "
+            f"full headers: {', '.join('[' + h + ']' for h in matches)}.")
 
 
 def _include_target_matches(target: str, path: str) -> bool:
@@ -455,11 +527,31 @@ class ProjectState:
                 "add_include, remove_include, comment_include — use "
                 "exactly one of these, one op per call.")
         try:
-            return handler(op)
+            return handler(self._resolve_op_section(op))
         except _OpError as exc:  # precondition failure — structured, no raise
             return exc.to_result()
         except KeyError as exc:  # missing required arg — structured, no raise
             return _state_error(f"Missing required argument for {kind}: {exc.args[0]}")
+
+    def _resolve_op_section(self, op: dict) -> dict:
+        """Rewrite op['section'] to the actual header it refers to (live
+        report 2026-09-27, see :func:`_resolve_section_ref`). Applied
+        centrally so EVERY section op — set_param, patch_gcode, rename,
+        delete, replace, and add_section's duplicate check — resolves a
+        bare macro name identically; per-handler fixing left the loop's
+        second guesses scattered. No-op when file/section are missing or
+        the name doesn't resolve (the handler's own error paths, incl.
+        the cross-file and ambiguity hints, then fire unchanged)."""
+        section = (op.get('section') or '').strip().strip('[]').strip()
+        filename = op.get('file')
+        if not section or ' ' in section or filename not in self.files:
+            return op
+        resolved = _resolve_section_ref(section, _split_lines(self.files[filename]))
+        if resolved == section:
+            return op
+        new_op = dict(op)
+        new_op['section'] = resolved
+        return new_op
 
     def _require_file(self, filename: str | None) -> str:
         if not filename:
@@ -516,6 +608,7 @@ class ProjectState:
         if found is None:
             return _state_error(
                 f"Section '[{header}]' not found in {filename}."
+                + _ambiguous_section_hint(header, lines)
                 + _missing_section_hint(self.files, header, filename)
                 + " Read the file first or use add_section for a new section."
             )
@@ -664,6 +757,7 @@ class ProjectState:
         if found is None:
             return _state_error(
                 f"Section '[{header}]' not found in {filename}."
+                + _ambiguous_section_hint(header, lines)
                 + _missing_section_hint(self.files, header, filename)
                 + " Read the file first."
             )
@@ -730,6 +824,7 @@ class ProjectState:
         if found is None:
             return _state_error(
                 f"Section '[{header}]' not found in {filename}."
+                + _ambiguous_section_hint(header, lines)
                 + _missing_section_hint(self.files, header, filename))
         header_index, end = found
         while end > header_index + 1 and not lines[end - 1].strip():
@@ -794,6 +889,7 @@ class ProjectState:
         if found is None:
             return _state_error(
                 f"Section '[{header}]' not found in {filename}."
+                + _ambiguous_section_hint(header, lines)
                 + _missing_section_hint(self.files, header, filename))
         if _find_section(lines, new_header) is not None:
             return _state_error(
@@ -876,6 +972,7 @@ class ProjectState:
         if found is None:
             return _state_error(
                 f"Section '[{header}]' not found in {filename}."
+                + _ambiguous_section_hint(header, lines)
                 + _missing_section_hint(self.files, header, filename)
                 + " Read the file first."
             )

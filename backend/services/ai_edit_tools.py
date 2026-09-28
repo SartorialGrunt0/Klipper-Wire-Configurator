@@ -119,7 +119,7 @@ CONFIG_EDIT_SPEC = {
             },
             "section": {
                 "type": "string",
-                "description": "Section header for section ops, e.g. 'bed_mesh' or 'gcode_macro PRINT_START' (brackets optional)",
+                "description": "Section header for section ops, e.g. 'bed_mesh' or 'gcode_macro PRINT_START' (brackets optional). A bare macro name like 'PRINT_START' also works when unique in the file.",
             },
             "new_section": {
                 "type": "string",

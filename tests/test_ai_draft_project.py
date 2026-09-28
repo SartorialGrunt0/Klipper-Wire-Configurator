@@ -952,6 +952,106 @@ def test_rename_section_summary_notes_inherited_family():
     assert 'inherited family prefix' not in r3['summary']
 
 
+# ── bare section-name resolution (live report 2026-09-27) ─────────────
+
+_MACRO_TEXT = ("[gcode_macro Level_Bed]\n"
+               "gcode:\n"
+               "    BED_MESH_CALIBRATE\n")
+
+
+def test_bare_macro_name_resolves_for_edit_ops():
+    # Models call config_edit with section='Level_Bed' for
+    # '[gcode_macro Level_Bed]' and burned retry turns rediscovering the
+    # gcode_macro prefix. A unique bare name now resolves; the result
+    # summary/renamed keys name the FULL header actually edited.
+    st, base = _macro_state(_MACRO_TEXT)
+    st1, r = st.apply(base, {'op': 'patch_gcode', 'file': 'printer.cfg',
+                             'section': 'Level_Bed',
+                             'old_text': '    BED_MESH_CALIBRATE',
+                             'new_text': '    G28\n    BED_MESH_CALIBRATE'})
+    assert r['status'] in ('applied', 'applied_with_advisory')
+    assert 'gcode_macro Level_Bed' in r['summary']
+    assert 'BED_MESH_CALIBRATE' in st1.files['printer.cfg']
+    # rename via bare name inherits the family exactly like the full header.
+    st2, r2 = st.apply(base, {'op': 'rename_section', 'file': 'printer.cfg',
+                              'section': 'Level_Bed',
+                              'new_section': 'level_bed1'})
+    assert r2['status'] in ('applied', 'applied_with_advisory')
+    assert r2['renamed_from'] == 'gcode_macro Level_Bed'
+    assert '[gcode_macro level_bed1]' in st2.files['printer.cfg']
+    # delete via bare name.
+    st3, r3 = st.apply(base, {'op': 'delete_section', 'file': 'printer.cfg',
+                              'section': 'Level_Bed'})
+    assert r3['status'] in ('applied', 'applied_with_advisory')
+    assert 'gcode_macro' not in st3.files['printer.cfg']
+
+
+def test_bare_name_resolution_is_case_insensitive_and_fan_scope():
+    st, base = _macro_state("[fan_generic Aux_Fan]\n"
+                            "pin: PA1\n")
+    st1, r = st.apply(base, {'op': 'set_param', 'file': 'printer.cfg',
+                             'section': 'aux_fan', 'key': 'pin',
+                             'value': 'PA2'})
+    assert r['status'] in ('applied', 'applied_with_advisory')
+    assert 'pin: PA2' in st1.files['printer.cfg']
+
+
+def test_bare_name_ambiguous_does_not_resolve_lists_candidates():
+    # Two family headers sharing a casefolded name must NEVER silently
+    # pick one; the error names the full headers to pass.
+    text = ("[gcode_macro Level]\n"
+            "gcode:\n"
+            "    G28\n"
+            "\n"
+            "[gcode_macro level]\n"
+            "gcode:\n"
+            "    G1 Z1\n")
+    st, base = _macro_state(text)
+    _, r = st.apply(base, {'op': 'delete_section', 'file': 'printer.cfg',
+                           'section': 'level'})
+    assert r['status'] == 'error' and 'not found' in r['error']
+    assert 'Multiple sections match' in r['error']
+    assert '[gcode_macro Level]' in r['error']
+    assert '[gcode_macro level]' in r['error']
+    assert st.files['printer.cfg'] == text
+
+
+def test_bare_name_absent_still_errors_plainly():
+    # A name matching nothing keeps the old error shape (no invented
+    # header, no candidate list).
+    st, base = _macro_state(_MACRO_TEXT)
+    _, r = st.apply(base, {'op': 'delete_section', 'file': 'printer.cfg',
+                           'section': 'Nope_Macro'})
+    assert r['status'] == 'error' and 'not found' in r['error']
+    assert 'Multiple sections match' not in r['error']
+
+
+def test_bare_name_add_section_duplicate_guard_resolves():
+    # add_section with a bare name that resolves to an existing macro
+    # must hit the duplicate guard, not create a stray [Level_Bed].
+    st, base = _macro_state(_MACRO_TEXT)
+    _, r = st.apply(base, {'op': 'add_section', 'file': 'printer.cfg',
+                           'section': 'Level_Bed',
+                           'text': 'gcode:\n    G28'})
+    assert r['status'] == 'error' and 'already exists' in r['error']
+    assert 'gcode_macro Level_Bed' in r['error']
+    assert '\n[Level_Bed]' not in st.files['printer.cfg']
+
+
+def test_missing_section_wrong_file_resolves_bare_name():
+    # Cross-file hint is resolution-aware: bare name in the wrong file
+    # names the other file AND the full header to pass.
+    st = ProjectState.from_context_files({
+        'printer.cfg': {'content': '[printer]\nkinematics: cartesian\n'},
+        'macros.cfg': {'content': '[gcode_macro HOME]\ngcode:\n    G28\n'}})
+    _, r = st.apply(st.validate(), {'op': 'delete_section',
+                                    'file': 'printer.cfg',
+                                    'section': 'home'})
+    assert r['status'] == 'error'
+    assert "It exists in macros.cfg as '[gcode_macro HOME]'" in r['error']
+    assert "section='gcode_macro HOME'" in r['error']
+
+
 # ── files & includes ────────────────────────────────────────────────────
 
 def test_new_file_and_include_roundtrip():
