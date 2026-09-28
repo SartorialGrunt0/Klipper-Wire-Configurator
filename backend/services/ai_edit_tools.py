@@ -265,6 +265,25 @@ def _lean_error_content(name: str, result: dict) -> str:
             "repeat the same op and values. Read the affected section with "
             "read_user_config if unsure of the current content."
         )
+        # Rename-ordering directive (COMMENT-06 gemma r2 trace
+        # 2026-09-28): renaming a macro onto a stock command name while
+        # its 'rename_existing' line sits COMMENTED OUT trips the shadow
+        # gate; the validator's 'add rename_existing' advice reads as
+        # 'the task is impossible' to a model that sees '#rename_existing'
+        # in the body — it never connects the commented line to the fix.
+        # Name the exact recovery so the kickback teaches the ORDER:
+        # uncomment first, then rename. (Edit-loop text only — the
+        # validator's general finding stays Klipper-neutral.)
+        if any(err.get("code") == "rename_existing_invalid"
+               for err in new_errors):
+            lines.append(
+                "NOTE: if this macro already has a '#'-commented "
+                "'#rename_existing:' line, uncommenting it FIRST (via "
+                "patch_section: the '#'-prefixed line as old_text, the "
+                "line without '#' as new_text) makes the rename pass "
+                "validation — do the uncomment, then retry the rename "
+                "unchanged."
+            )
     if result.get("sectionText"):
         lines.append("")
         lines.append("Current section text (quote from this verbatim):")

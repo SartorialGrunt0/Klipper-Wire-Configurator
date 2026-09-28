@@ -1505,7 +1505,7 @@ def build_comment_questions() -> list[TestQuestion]:
         TestQuestion(
             qid="COMMENT-02",
             title="Restore a commented-out section (uncomment block)",
-            text=("I have a commented-out Raspberry_Pi temperature sensor "
+            text=("I have a commented-out chamber_2 temperature sensor "
                   "section in printer.cfg — uncomment it so it loads "
                   "again."),
             context_files=printer_cfg,
@@ -1513,19 +1513,22 @@ def build_comment_questions() -> list[TestQuestion]:
             expected_tools=("config_edit",),
             require_tool=True,
             criteria=(
-                # The '#[temperature_sensor Raspberry_Pi]' header (line
-                # ~322) must become a real section header. (?m) line-anchored
-                # WITHOUT '#' — the commented fixture form cannot satisfy
-                # it, so only a real uncomment passes.
+                # chamber_2 (line ~381), NOT Raspberry_Pi: restoring the
+                # latter is genuinely INVALID — its 'sensor_type:
+                # temperature_host' collides with the ACTIVE
+                # [temperature_sensor pi] ('Only one temperature_sensor
+                # may use temperature_host'), so no model could ever pass
+                # that variant (engine-verified; gemma r2 wasted its run
+                # discovering this). chamber_2 restores clean.
+                # (?m) line-anchored WITHOUT '#' — the commented fixture
+                # form cannot satisfy it, so only a real uncomment passes.
                 ("staged_regex",
-                 r"printer\.cfg::(?m)^\[\s*temperature_sensor\s+Raspberry_Pi\s*\]"),
-                # body param restored — SECTION-SCOPED: the fixture has
-                # active 'sensor_type: temperature_host' lines in other
-                # sections (283, 393), so an unscoped regex would pass
-                # without any edit. staged_section_regex extracts the body
-                # under the restored header and demands the param there.
+                 r"printer\.cfg::(?m)^\[\s*temperature_sensor\s+chamber_2\s*\]"),
+                # body param restored — SECTION-SCOPED: 'sensor_type'
+                # lines are everywhere in the fixture, so an unscoped
+                # regex would pass without any edit.
                 ("staged_section_regex",
-                 r"printer\.cfg::temperature_sensor Raspberry_Pi::sensor_type:\s*temperature_host"),
+                 r"printer\.cfg::temperature_sensor chamber_2::sensor_type:\s*DS18B20"),
             ),
         ),
         TestQuestion(
