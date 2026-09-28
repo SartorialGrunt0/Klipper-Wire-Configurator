@@ -22,6 +22,7 @@ import {
   foldApprovalCountdown,
   type ApprovalCountdownAnchor,
 } from '../../utils/approvalDiff';
+import { buildChatRequestCredentials } from '../../utils/chatRequestBase';
 import { selectUnsavedDrafts } from '../../utils/chatContext';
 import { isNearBottom, nextStickToBottom } from '../../utils/chatScroll';
 import {
@@ -461,16 +462,18 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       setConnectionLost(false);
 
       try {
-        const chatRequestBase = {
-          apiKey: editApiKey,
-          model: editModel,
-          apiUrl: resolvedEditApiUrl,
-          apiProvider: editApiProvider,
-          requestId: stopRequestId,
-          maxTokens: Math.max(256, parseInt(editMaxTokens, 10) || 4096),
-          temperature: parseTemperature(editTemperature),
-          toolProtocol: editToolProtocol,
-        };
+        // Credentials come from the COMMITTED store, read fresh at submit
+        // time — never the settings-panel mirror. The mirror only syncs in
+        // the open-effect, and the AI-Analyze flow submits in the same
+        // render pass that opens the dialog, where the sync's state updates
+        // aren't visible yet: the request went out with mount-time defaults
+        // ("AI settings not configured" on a configured provider, live
+        // report 2026-09-27). Typed-but-unsaved panel edits were never
+        // meant to drive a send anyway.
+        const chatRequestBase = buildChatRequestCredentials(
+          useAiStore.getState().settings,
+          stopRequestId,
+        );
 
         // EXPERIMENT (auto-attach off): mentioned files are NOT auto-injected.
         // Only files the user explicitly checks in "Include Files" are sent
@@ -623,11 +626,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       attachedConfigFiles,
       configFiles,
       draftRequestMessage,
-      editApiKey,
-      editApiProvider,
-      editMaxTokens,
-      editTemperature,
-      editModel,
       getConfigContextLabel,
       getConfigText,
       isDirty,
@@ -635,7 +633,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       loading,
       messages,
       originalTexts,
-      resolvedEditApiUrl,
       selectedConfigContextFiles,
       setMessages,
     ],
