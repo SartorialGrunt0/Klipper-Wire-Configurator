@@ -462,10 +462,16 @@ class EditSession:
         """Identity of what an op OVERWRITES, for the same-request
         duplicate guard. Only set_param qualifies: two legit patch_section
         hunks in one macro body must stay possible, config_write on an
-        existing file already errors elsewhere. None = no guard."""
+        existing file already errors elsewhere. None = no guard.
+
+        Casefolded (final-pass review 2026-09-29): committed_ops stores
+        the UNRESOLVED op, so 'printer' vs 'Printer' — which resolve to
+        the same key — compared unequal and a re-overwrite slipped past
+        the guard into a second approval card for a decided target."""
         if op.get("op") == "set_param":
-            return ("set_param", op.get("file"), op.get("section"),
-                    op.get("key"))
+            return ("set_param", *(
+                str(op.get(part, "")).casefold()
+                for part in ("file", "section", "key")))
         return None
 
     def _duplicate_of_committed(self, op: dict) -> dict | None:

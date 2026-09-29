@@ -2224,24 +2224,41 @@ class McpServer:
         """Resolve a section request to a header line index.
 
         Returns ``(header_index, [])`` on a unique hit and ``(None, [])``
-        when nothing matched. On an *ambiguous* bare-name hit it returns
+        when nothing matched. On an *ambiguous* hit it returns
         ``(None, candidates)`` where ``candidates`` holds the distinct full
         headers that matched, so callers can tell 'ambiguous' from 'absent'.
 
-        An exact (case-insensitive) full-header match wins outright with the
-        first hit — ambiguity can only arise from the bare-name fallback.
+        An EXACT-spelling full-header request wins outright. A wrong-case
+        full-header request resolves only when the case-insensitive match
+        is unique — a case-variant pair is ambiguity, same rule as the
+        edit side's ``_resolve_section_ref`` and the bare-name fallback
+        below (final-pass review 2026-09-29: this used to return the first
+        hit silently, and read output feeds the model's patch anchors, so
+        the surfaces must agree on what an identifier means).
         """
-        branch = section_name.strip().strip("[]").strip().lower()
+        branch_raw = section_name.strip().strip("[]").strip()
+        branch = branch_raw.lower()
         lines = content.splitlines()
         headers: list[str] = []
         for line in lines:
             m = re.match(r"^\s*\[([^\]]+)\]\s*$", line)
             headers.append(m.group(1).strip() if m else "")
 
-        # Full-header comparison (unchanged: first case-insensitive hit wins).
+        # Full-header comparison: exact spelling first, then a UNIQUE
+        # case-insensitive match.
         for i, header in enumerate(headers):
-            if header and header.lower() == branch:
+            if header and header == branch_raw:
                 return i, []
+        ci_hits = [i for i, header in enumerate(headers)
+                   if header and header.lower() == branch]
+        if len(ci_hits) == 1:
+            return ci_hits[0], []
+        if len(ci_hits) > 1:
+            candidates: list[str] = []
+            for i in ci_hits:
+                if headers[i] not in candidates:
+                    candidates.append(headers[i])
+            return None, candidates
 
         # Bare-name fallback (live report 2026-09-27): the chat model addresses
         # a macro by its bare name ('Level_Bed') instead of the full header

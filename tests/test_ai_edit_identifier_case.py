@@ -172,6 +172,34 @@ def test_add_section_wrong_case_of_existing_is_a_duplicate_not_a_variant():
     assert session.state.files['printer.cfg'].count('[printer]') == 1
 
 
+def test_config_write_wrong_case_of_existing_is_refused_not_a_variant():
+    """Final-pass review 2026-09-29: config_write was the one file op that
+    bypassed _require_file, so file='Printer.cfg' staged a case-variant
+    SIBLING of the existing printer.cfg — the exact thing this file's
+    invariant forbids. Refuse, naming the real spelling."""
+    session = EditSession(_ctx())
+    content, details = session.execute({
+        'name': 'config_write',
+        'arguments': {'file': 'Printer.cfg',
+                      'content': '[gcode_macro ZZZ]\ngcode:\n    G28\n'}})
+    assert details is None
+    assert 'already exists' in content
+    assert 'printer.cfg' in content          # names the real spelling
+    assert session.pending_edits == []
+    assert sorted(session.state.files) == ['aux_fan.cfg', 'printer.cfg']
+
+
+def test_config_write_genuinely_new_file_still_works():
+    session = EditSession(_ctx())
+    content, details = session.execute({
+        'name': 'config_write',
+        'arguments': {'file': 'My_Extra.cfg',
+                      'content': '[gcode_macro EXTRA]\ngcode:\n    M117 x\n'}})
+    assert details is not None, content
+    payload = session.pending_edits_payload()
+    assert [p['file'] for p in payload] == ['My_Extra.cfg']
+
+
 def test_add_section_new_section_is_still_created_as_asked():
     session = EditSession(_ctx())
     content, details = _edit(session, op='add_section', file='printer.cfg',

@@ -785,6 +785,15 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     try {
       const contextFiles = await buildDecisionContext();
       const result = await api.decideChatApproval(card.approvalId, decision, contextFiles);
+      // Stale-decision guard (final-pass review 2026-09-29): the two
+      // awaits above give a stop/new request room to reset the card slot
+      // (or the poll to install a NEW card). If OUR card is gone, this
+      // response must touch nothing but the busy flag — clearing or
+      // annotating a card the user hasn't decided yet is a phantom.
+      if (approvalCardRef.current?.approvalId !== card.approvalId) {
+        setApprovalBusy(false);
+        return;
+      }
       if (result.status === 'invalidated') {
         setApprovalInvalidation(
           `Config changed since this proposal — ${result.reason || 'the change no longer applies'}. `
@@ -814,7 +823,9 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         setApprovalAnchor(null);
       }
     } catch {
-      setApprovalInvalidation('Approval request failed — check the backend connection.');
+      if (approvalCardRef.current?.approvalId === card.approvalId) {
+        setApprovalInvalidation('Approval request failed — check the backend connection.');
+      }
       setApprovalBusy(false);
     }
   }, [approvalBusy, buildDecisionContext]);

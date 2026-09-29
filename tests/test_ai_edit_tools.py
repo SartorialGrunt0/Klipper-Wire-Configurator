@@ -348,6 +348,34 @@ def test_session_anchor_miss_returns_section_text():
     assert 'FAILED' in content
 
 
+def test_session_duplicate_guard_sees_through_case_variants():
+    """Final-pass review 2026-09-29: committed_ops stored the UNRESOLVED
+    op, so after approving set_param section='printer' the model's next
+    call with section='Printer' — which resolves to the same key — slipped
+    past the DUPLICATE TARGET guard and opened a second approval card for
+    a target the user already decided."""
+    session = EditSession(_ctx())
+    c1, d1 = session.execute({
+        'name': 'config_edit',
+        'arguments': {'file': 'printer.cfg', 'op': 'set_param',
+                      'section': 'printer', 'key': 'max_accel',
+                      'value': '3200'}})
+    assert d1 is not None, c1
+    session.commit(session.state, 'config_edit',
+                   {'file': 'printer.cfg', 'op': 'set_param',
+                    'summary': 'x'},
+                   raw_op={'op': 'set_param', 'file': 'printer.cfg',
+                           'section': 'printer', 'key': 'max_accel',
+                           'value': '3200'})
+    c2, d2 = session.execute({
+        'name': 'config_edit',
+        'arguments': {'file': 'Printer.cfg', 'op': 'set_param',
+                      'section': 'Printer', 'key': 'max_accel',
+                      'value': '9999'}})
+    assert d2 is None
+    assert 'DUPLICATE TARGET' in c2
+
+
 def test_session_config_write_new_file_plus_include():
     session = EditSession(_ctx())
     content, details = session.execute({

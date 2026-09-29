@@ -103,6 +103,24 @@ def test_continue_intent_tail_positive():
     assert ai_routes._ends_with_continue_intent("Sure!\n\nI will update max_accel next.")
 
 
+def test_continue_intent_clarifying_question_not_matched():
+    """Final-pass review 2026-09-29: 'let me' and \"i'll\" in the promise
+    regex false-positived on honest clarifying replies — 'Let me know
+    which fan you mean...' is an ask, not a stall; injecting 'Execute the
+    edit now — do not describe it' over it forces the model to guess
+    between two real sections AND the harness grades the forced rescue as
+    a FAIL (expect_no_ack_stall). A tail that asks the user something is
+    never continue-intent."""
+    assert not ai_routes._ends_with_continue_intent(
+        "Let me know which fan you mean — there are two aux fans in "
+        "your config.")
+    assert not ai_routes._ends_with_continue_intent(
+        "I'll need to know which extruder you mean before I change "
+        "anything.")
+    assert not ai_routes._ends_with_continue_intent(
+        "I'll update max_accel — which value do you want, 3000 or 4000?")
+
+
 def test_continue_intent_complete_answer_not_matched():
     # Answered question that merely MENTIONS a future action early: the
     # tail is the answer, not a promise. The guard must never gaslight a

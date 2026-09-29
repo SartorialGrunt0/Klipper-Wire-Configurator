@@ -1305,9 +1305,22 @@ class ProjectState:
         filename = (op.get('file') or '').strip()
         if not filename:
             return _state_error('Missing required argument: file')
-        if filename in self.files:
+        # Final-pass review 2026-09-29: this was the ONE file-taking op that
+        # bypassed _require_file, testing `filename in self.files` case-
+        # sensitively — config_write file='Printer.cfg' staged a case-
+        # variant SIBLING of the real printer.cfg, breaking the invariant
+        # the rest of this module enforces ("a case variant can never reach
+        # the config"). Compare the full relative path casefolded (two
+        # paths in different directories ARE distinct files; two spellings
+        # of one path are not).
+        same_ci = [f for f in self.files
+                   if f.casefold() == filename.casefold()]
+        if same_ci:
+            real = same_ci[0]
             return _state_error(
-                f"File '{filename}' already exists. config_write creates NEW files only; "
+                f"File '{filename}' already exists"
+                + (f" as '{real}'" if real != filename else '')
+                + ". config_write creates NEW files only; "
                 "edit existing files with set_param/patch_section/replace_section."
             )
         content = op.get('content', '')
@@ -1502,11 +1515,14 @@ def _find_indent_tolerant(section_lines: list[str], old_text: str) -> tuple[int,
         ok = True
         for offset, want in enumerate(wanted):
             have = section_lines[start + offset].strip()
-            if want != '#':  # bare '#' comment line must match shape
-                if have != want and not (want == '' and have == ''):
-                    ok = False
-                    break
-            if want == '' and have != '':
+            # Final-pass review 2026-09-29: this loop used to SKIP the
+            # equality check whenever a wanted line was a bare '#', making
+            # it a wildcard that matched any line. An anchor quoting a '#'
+            # that did not exist was 'applied' by silently replacing an
+            # unrelated line (probe: dropped max_z_velocity from
+            # [printer]). Indentation tolerance needs only the strip()s;
+            # every quoted line must match for real, '#' included.
+            if have != want:
                 ok = False
                 break
         if ok:

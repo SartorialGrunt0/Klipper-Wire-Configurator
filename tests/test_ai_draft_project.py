@@ -205,6 +205,36 @@ def test_patch_section_indent_tolerant_fallback():
     assert '\n    M400' in st1.files['printer.cfg']
 
 
+def test_patch_section_bare_hash_anchor_is_not_a_wildcard():
+    """Final-pass review 2026-09-29: `_find_indent_tolerant` skipped the
+    equality check whenever a wanted line was a bare '#', so an anchor
+    quoting a '#' that does NOT exist still matched an arbitrary line and
+    silently deleted it while reporting success (probe: '#\\nmax_accel:
+    3000' against a [printer] with no '#' line dropped max_z_velocity).
+    A '#' in old_text must only match a line that IS a bare '#'."""
+    text = ('[printer]\nkinematics: corexy\nmax_velocity: 300\n'
+            'max_z_velocity: 10\nmax_accel: 3000\n')
+    st, base = _state(text)
+    st1, r = st.apply(base, {'op': 'patch_section', 'file': 'printer.cfg',
+                             'section': 'printer',
+                             'old_text': '#\nmax_accel: 3000',
+                             'new_text': '#\nmax_accel: 3500'})
+    assert r['status'] == 'error'
+    assert 'not found' in r['error']
+    assert st1.files == st.files
+
+
+def test_patch_section_real_bare_hash_anchor_still_matches():
+    text = ('[printer]\nkinematics: corexy\n#\nmax_accel: 3000\n')
+    st, base = _state(text)
+    st1, r = st.apply(base, {'op': 'patch_section', 'file': 'printer.cfg',
+                             'section': 'printer',
+                             'old_text': '#\nmax_accel: 3000',
+                             'new_text': '#\nmax_accel: 3500'})
+    assert r['status'] == 'applied', r
+    assert 'max_accel: 3500' in st1.files['printer.cfg']
+
+
 def test_patch_section_ambiguous_anchor_errors_with_count():
     text = BASE_CFG + '\n[gcode_macro DUP]\ngcode:\n    G28\n    G28\n'
     st, base = _state(text)

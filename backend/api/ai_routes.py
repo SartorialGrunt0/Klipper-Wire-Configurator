@@ -462,6 +462,17 @@ _CONTINUE_INTENT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Clarifying-question shapes on the TAIL: the model asked the user
+# something (interrogative phrase, or the sentence ends on '?'). These
+# are an interaction, not a stall — checked BEFORE the promise match so
+# 'I'll update max_accel — which value do you want?' stays unanswered
+# (final-pass review 2026-09-29).
+_CLARIFYING_TAIL_RE = re.compile(
+    r"(?:\?|which\b|what\b|do you (?:want|prefer|mean|need)|should i|"
+    r"let me know|i(?:'ll| will) need to know|i need (?:you to|which))",
+    re.IGNORECASE,
+)
+
 
 def _ends_with_continue_intent(content: str) -> bool:
     """True when the reply ENDS on a promise to act rather than an answer.
@@ -469,9 +480,15 @@ def _ends_with_continue_intent(content: str) -> bool:
     The ack guard fires only on a promise-shaped TAIL: strip tool-call
     markup, take the last non-empty paragraph/sentence, and match
     _CONTINUE_INTENT_RE against it. A full answer that merely mentions a
-    future action early on ("I will check the file. horizontal_move_z is
-    the Z hop height.") has a non-matching tail and is left alone —
-    answering is never gaslit (Q20 r3/B lesson).
+    future action early ("I will read the file now. Here is what it
+    means: ...") has a non-matching tail and is left alone — answering is
+    never gaslit (Q20 r3/B lesson).
+
+    Final-pass review 2026-09-29: a tail that ASKS the user something is
+    also never continue-intent. 'Let me know which fan you mean' and
+    \"I'll need to know which extruder\" matched the promise regex, so the
+    guard answered an honest clarifying question with 'Execute the edit
+    now — do not describe it', forcing a guess between real candidates.
     """
     text = MCP_TOOL_BLOCK_RE.sub("", content)
     text = ALT_TOOL_CALL_CONTENT_RE.sub("", text)
@@ -489,6 +506,8 @@ def _ends_with_continue_intent(content: str) -> bool:
     tail = text.splitlines()[-1].strip()
     sentences = [s for s in re.split(r"(?<=[.!?])\s+", tail) if s.strip()]
     tail = sentences[-1] if sentences else tail
+    if _CLARIFYING_TAIL_RE.search(tail):
+        return False
     return bool(_CONTINUE_INTENT_RE.match(tail))
 
 
@@ -2997,10 +3016,19 @@ def _mirror_user_config_files() -> dict[str, dict]:
                         continue
                     content = cfg_file.read_bytes().decode("utf-8", errors="replace")
                 except OSError:
+                    # Final-pass review 2026-09-29: best-effort stays
+                    # best-effort (never raise from the arm path), but a
+                    # silently skipped file meant a partially-armed edit
+                    # session ('File X is not in the project') with
+                    # nothing in the log to explain it.
+                    logger.warning("Mirror skip | unreadable cfg %s", cfg_file,
+                                   exc_info=True)
                     continue
                 files[rel] = {"content": content}
                 total += size
         except OSError:
+            logger.warning("Mirror skip | scan dir %s unreadable", scan_dir,
+                           exc_info=True)
             continue
     return files
 
@@ -3270,8 +3298,10 @@ async def chat_proxy(req: ChatRequest):
                     # Edit request + write tools armed + prose answer (no
                     # tool call): prose edits are INERT — old draft-text
                     # semantics must not silently resume. Correction
-                    # re-prompt (max 2), same escalation style as the
-                    # malformed guard. Pure Q&A never matches this gate.
+                    # re-prompt (max 3 — the `edit_nudges < 3` gate below;
+                    # log lines count up to edit-nudge-3), same escalation
+                    # style as the malformed guard. Pure Q&A never matches
+                    # this gate.
                     if (edit_session is not None
                             and _is_edit_request(req.messages)
                             # Nudge ONLY on mechanical evidence of an inert

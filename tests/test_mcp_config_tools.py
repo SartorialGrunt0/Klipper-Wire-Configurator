@@ -464,13 +464,34 @@ def test_full_header_still_resolves(tmp_path):
     assert "not found" not in out.lower()
 
 
-def test_full_header_wins_over_casefold_collision(tmp_path):
-    # The exact (case-insensitive) header path keeps its old behaviour: it
-    # returns the first hit even when a case-variant header also exists.
+def test_full_header_exact_case_wins_outright(tmp_path):
+    # An exact-spelling request is unambiguous intent: [gcode_macro Level]
+    # resolves even though a case-variant twin exists.
     server = _sections_server(tmp_path)
-    out = _read_section(server, "gcode_macro LEVEL")
+    out = _read_section(server, "gcode_macro Level")
     assert "G28" in out
     assert "G29" not in out
+
+
+def test_full_header_wrong_case_unique_still_resolves(tmp_path):
+    server = _sections_server(tmp_path)
+    out = _read_section(server, "GCODE_MACRO level_bed")
+    assert "BED_MESH_CALIBRATE" in out
+
+
+def test_full_header_casefold_collision_refuses_like_the_edit_side(tmp_path):
+    """Final-pass review 2026-09-29: the read side used to return the FIRST
+    case-insensitive full-header hit, silently. The edit side
+    (_resolve_section_ref) refuses the same identifier as ambiguous, and
+    read output is what the model quotes as patch anchors — the surfaces
+    must agree. 'gcode_macro LEVEL' now lists candidates like the bare-name
+    path always has."""
+    server = _sections_server(tmp_path)
+    out = _read_section(server, "gcode_macro LEVEL")
+    assert "Multiple sections match" in out
+    assert "[gcode_macro Level]" in out
+    assert "[gcode_macro level]" in out
+    assert "G28" not in out and "G29" not in out
 
 
 def test_ambiguous_bare_name_lists_candidates(tmp_path):
