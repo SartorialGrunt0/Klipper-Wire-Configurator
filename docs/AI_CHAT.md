@@ -116,9 +116,10 @@ miss. Errored qids were re-run where possible; `qwen3.8-27B` kept 12 timeouts
 1 is `RENAME`, families where the shortfall is infra, not quality. `gemma-4-26B-A4B`
 has one genuine repeat-timeout (`AMBI-02`).
 
-**Known harness false negatives still counted in the table above** — see
-`reports/ai-chat-accuracy/bank106-r1-criteria-audit.md`. Applying them
-(`AMBI-07` +1, `MACRO-01` +1, `Q19` +1) the three leaders reach 98/106:
+**The table above is PRE-FIX scoring.** The four harness false negatives it
+still counts were corrected on 2026-09-28 (see below) and the affected qids have
+not been re-run, so the "adjusted" column is a *prediction* of the next run, not
+a measured result:
 
 | Model | raw | adjusted | credits |
 | --- | --- | --- | --- |
@@ -190,16 +191,33 @@ Failure modes seen across the models (from their traces):
   write-attempt cap keeps this honest, but the loop is not converging for the
   smaller models.
 
-**Known harness false negatives — do not read the raw table as pure model
-quality.** Four are documented in
-`reports/ai-chat-accuracy/bank106-r1-criteria-audit.md`: `AMBI-07` grades the
-reply prose instead of the staged artifact (3/3 models staged correctly and all
-FAILed); `MACRO-01` demands `G1…X0` and rejects `G0`, which the bundled Klipper
-docs define as the same command; `Q19`'s clarifying-question regex misses
-"I'll need some basic hardware details… paste them here"; and `COMMENT-03` is a
-trap — `max_accel` is a required `[printer]` parameter, so the literal request is
-rejected by validation unless the model invents an unstated two-part swap (1 of 7
-did).
+**Harness false negatives — FIXED 2026-09-28, awaiting re-run.** Four were
+found by auditing every repeat failure against the real artifacts, and are now
+corrected in the harness:
+
+- `AMBI-07` graded the reply *prose* for a numeric assignment, so a correct
+  staged edit FAILed whenever the model wrote "added to `[extruder]`". The
+  explanation half stays prose; the edit half is now `staged_regex`. This
+  flipped 2 false negatives to PASS **and 1 false positive to FAIL** (a model
+  that explained but staged nothing used to pass).
+- `MACRO-01` demanded `G1…X0` and rejected `G0`, which the bundled Klipper docs
+  define as the same command ("Move (G0 or G1)").
+- `Q19`'s clarifying-question regex did not match "I'll need some basic hardware
+  details… paste them here".
+- `COMMENT-03` asked for `max_accel` — a *required* `[printer]` parameter — to be
+  commented out, which the validator correctly refuses to stage; passing needed
+  an unstated two-part swap (1 of 7 managed it). Retargeted to the optional
+  `max_z_velocity`.
+
+Two latent scoring gaps were closed at the same time: `staged_param` was
+case-sensitive while `staged_regex` is not (Klipper normalises gcode param names
+and config option names, so those checks are now `staged_param_ci` — section
+headers deliberately stay case-sensitive), and `not_staged` was file-scoped, so
+a "don't change my files" request passed when the model edited a *different*
+file (`not_staged_any` closes it).
+
+Validation and evidence: `reports/ai-chat-accuracy/bank106-r1-criteria-audit.md`;
+re-check any of it offline with `scripts/validate_criteria_offline.py`.
 
 **Variance, not shared breakage.** Across 106 questions × 7 models: **61 pass on
 all 7**, **45 are mixed**, and **0 fail on all 7**. 17 of the mixed ones fail on

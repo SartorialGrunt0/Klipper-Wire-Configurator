@@ -154,8 +154,13 @@ PROVIDER_ORDER = ["chatgpt", "google", "anthropic", "github", "openai-compatible
 #   staged_param  "<filename>::<substring>" — the server-staged pendingEdits
 #                 entry for <filename> contains <substring> (tool-mediated
 #                 edit criteria: what WAS applied, not what prose says)
+#   staged_param_ci  same, case-insensitive — use for PARAMETER names and
+#                 numeric values (Klipper normalises those), never for
+#                 section headers (it does not)
 #   staged_count  "<n>" — exactly n files staged in pendingEdits
 #   not_staged    "<filename>" — that file has no staged entry
+#   not_staged_any  "" — NO file has a staged entry (use for "don't change
+#                 my files" requests, where any file counts as a change)
 #   contains      -> value appears in the answer (case-insensitive)
 #   not_contains  -> value must NOT appear (case-insensitive)
 #   regex         -> value is a regex searched case-insensitively over the answer
@@ -470,7 +475,16 @@ def build_questions() -> list[TestQuestion]:
             expected_tools=(),
             require_tool=False,
             criteria=(
-                ("regex", r"provide|need to know|what|which|need a few|key details|tell me|share it|from scratch"),
+                # Clarification phrasing is open-ended, so this arm list has
+                # to be generous: `need some|need your|details|paste|send me|
+                # let me know` were added 2026-09-28 after Q19 FAILed a model
+                # that asked a textbook question ("I'll need some basic
+                # hardware details: 1. Printer model… 9. Bed heater… paste
+                # them here"). The criterion is FLOOR, not ceiling — the
+                # paired `kinematic|…` check below still requires the model to
+                # name the facts it wants, so a bare "need more info" cannot
+                # pass on this arm alone.
+                ("regex", r"provide|need to know|need (some|your|a few)|what|which|key details|details|tell me|share it|share|send me|let me know|paste|from scratch"),
                 ("regex", r"kinematic|mainboard|probe|toolhead|bed|printer|config"),
             ),
         ),
@@ -504,7 +518,11 @@ def build_macro_questions() -> list[TestQuestion]:
             criteria=(
                 ("regex", r"\[gcode_macro\s+PARK_HEAD"),
                 ("contains", "description:"),
-                ("regex", r"G1\b[^\n]*X0|G28"),
+                # `G0` and `G1` are the SAME command in Klipper — the bundled
+                # G-Codes.md documents them as "Move (G0 or G1)". The regex
+                # was `G1\b…` until 2026-09-28, which FAILed a model that
+                # emitted a textbook-correct `G0 X0 Y0 Z10 F6000` park.
+                ("regex", r"G[01]\b[^\n]*X0|G28"),
                 ("regex", r"M106[^\n]*S0"),
                 ("regex", r"```(?:cfg|ini|conf|klipper)"),
             ),
@@ -1271,7 +1289,7 @@ def build_edit_tool_questions() -> list[TestQuestion]:
             expected_tools=("config_edit",),
             require_tool=True,
             criteria=(
-                ("staged_param", "printer.cfg::max_accel: 12000"),
+                ("staged_param_ci", "printer.cfg::max_accel: 12000"),
             ),
         ),
         TestQuestion(
@@ -1284,7 +1302,7 @@ def build_edit_tool_questions() -> list[TestQuestion]:
             expected_tools=("config_edit",),
             require_tool=True,
             criteria=(
-                ("staged_param", "printer.cfg::ADAPTIVE=1"),
+                ("staged_param_ci", "printer.cfg::ADAPTIVE=1"),
                 # The staged file is the FULL file post-apply: unrelated
                 # sections must still be intact (byte-stable guarantee).
                 ("staged_param", "printer.cfg::[stepper_x]"),
@@ -1534,17 +1552,30 @@ def build_comment_questions() -> list[TestQuestion]:
         TestQuestion(
             qid="COMMENT-03",
             title="Comment out a single config line",
-            text=("In printer.cfg, comment out the max_accel line in the "
+            text=("In printer.cfg, comment out the max_z_velocity line in the "
                   "[printer] section (keep the text, just disable it)."),
             context_files=printer_cfg,
             edit_tools=True,
             expected_tools=("config_edit",),
             require_tool=True,
             criteria=(
-                # The active 'max_accel: 15500 #Ellis Tuned' line must be
-                # staged commented — the key text survives behind a '#'.
+                # The active 'max_z_velocity: 15' line must be staged
+                # commented — the key text survives behind a '#'.
+                #
+                # RETARGETED from max_accel 2026-09-28. max_accel is a
+                # REQUIRED [printer] parameter (Config_Reference: "This
+                # parameter must be specified"), so the literal request
+                # produced a config the validator correctly REFUSED to stage.
+                # Only a model that spotted the fixture's other, commented
+                # `#max_accel: 4800` line and invented a two-part swap could
+                # pass (1/7), while models that reasoned "this would break
+                # [printer]" were scored as misses for being right. The trap
+                # was never hinted at in the prompt. max_z_velocity is
+                # OPTIONAL and stages clean (verified against the live
+                # EditSession), so this now tests the intended skill — a
+                # single-line comment through patch_section — with no trap.
                 ("staged_regex",
-                 r"printer\.cfg::(?m)^#+\s*max_accel:\s*15500"),
+                 r"printer\.cfg::(?m)^#+\s*max_z_velocity:\s*15"),
             ),
         ),
         TestQuestion(
@@ -1642,7 +1673,7 @@ def build_ack_guard_questions() -> list[TestQuestion]:
             expected_tools=("config_edit",),
             require_tool=True,
             tool_protocol="native",
-            criteria=(("staged_param", "printer.cfg::max_velocity: 300"),),
+            criteria=(("staged_param_ci", "printer.cfg::max_velocity: 300"),),
             expect_no_ack_stall=True,
         ),
         TestQuestion(
@@ -1654,7 +1685,7 @@ def build_ack_guard_questions() -> list[TestQuestion]:
             expected_tools=("config_edit",),
             require_tool=True,
             tool_protocol="text",
-            criteria=(("staged_param", "printer.cfg::max_velocity: 300"),),
+            criteria=(("staged_param_ci", "printer.cfg::max_velocity: 300"),),
             expect_no_ack_stall=True,
         ),
         TestQuestion(
@@ -1703,7 +1734,7 @@ def build_skill_gate_questions() -> list[TestQuestion]:
             skill_expected=True,
             expected_tools=("load_skill",),
             require_tool=True,
-            criteria=(("staged_param", "printer.cfg::max_accel: 12000"),),
+            criteria=(("staged_param_ci", "printer.cfg::max_accel: 12000"),),
         ),
         TestQuestion(
             qid="SKILL-02",
@@ -1715,7 +1746,7 @@ def build_skill_gate_questions() -> list[TestQuestion]:
             skill_expected=True,
             expected_tools=("load_skill",),
             require_tool=True,
-            criteria=(("staged_param", "printer.cfg::ADAPTIVE=1"),),
+            criteria=(("staged_param_ci", "printer.cfg::ADAPTIVE=1"),),
         ),
         TestQuestion(
             qid="SKILL-03",
@@ -1728,8 +1759,8 @@ def build_skill_gate_questions() -> list[TestQuestion]:
             expected_tools=("load_skill",),
             require_tool=True,
             criteria=(
-                ("staged_param", "printer.cfg::max_velocity: 300"),
-                ("staged_param", "printer.cfg::max_accel: 4000"),
+                ("staged_param_ci", "printer.cfg::max_velocity: 300"),
+                ("staged_param_ci", "printer.cfg::max_accel: 4000"),
             ),
         ),
         TestQuestion(
@@ -1757,7 +1788,7 @@ def build_skill_gate_questions() -> list[TestQuestion]:
             skill_expected=True,
             expected_tools=("load_skill",),
             require_tool=True,
-            criteria=(("staged_param", "printer.cfg::max_accel: 9000"),),
+            criteria=(("staged_param_ci", "printer.cfg::max_accel: 9000"),),
         ),
         # ── should_trigger = False (false positives) ──
         TestQuestion(
@@ -1811,7 +1842,12 @@ def build_skill_gate_questions() -> list[TestQuestion]:
             require_tool=False,
             criteria=(
                 ("skill_not_loaded", ""),
-                ("not_staged", "printer.cfg"),
+                # not_staged_any, NOT `not_staged printer.cfg`: the request
+                # says "don't add it to MY CONFIG", so staging a brand-new
+                # file is equally a miss. The file-scoped kind went green for
+                # gemma-4-e4b when it created macros.cfg (2026-09-28); only
+                # the skill_not_loaded check kept that qid honest.
+                ("not_staged_any", ""),
             ),
         ),
     ]
@@ -1940,11 +1976,27 @@ def build_ambiguity_questions() -> list[TestQuestion]:
             # tool turns — exercises the MAX_MCP_TOOL_TURNS budget.
             context_files=printer_cfg,
             require_tool=False,
+            # Read-only arm: the explanation is prose and the edit cannot
+            # stage, so the prose shape is all that can be graded here.
             criteria=(
                 ("contains", "pressure_advance"),
                 ("regex", r"input[_ ]shaper"),
                 ("regex", r"pressure_advance\s*[:=]\s*\d+(?:\.\d+)?"),
                 ("contains", "[input_shaper]"),
+            ),
+            # Edit arm (2026-09-28): the third prose criterion demanded a
+            # literal `pressure_advance: <n>` in the REPLY, so a correct
+            # staged edit still FAILed whenever the model phrased it as
+            # "added to [extruder]" — 3/3 models in bank106-r1 staged the
+            # value and all three scored FAIL. The explanation half stays
+            # prose; the edit half is graded on the server-staged artifact,
+            # which is the contract for every edit question.
+            edit_criteria=(
+                ("contains", "pressure_advance"),
+                ("regex", r"input[_ ]shaper"),
+                ("staged_regex",
+                 r"printer\.cfg::(?m)^\s*pressure_advance\s*[:=]\s*\d+(?:\.\d+)?"),
+                ("staged_regex", r"printer\.cfg::(?m)^\s*\[input_shaper\s*\]"),
             ),
         ),
         TestQuestion(
@@ -2684,6 +2736,22 @@ def criterion_ok(kind: str, value: str, content: str,
             if edit.get("file") == filename and needle in (edit.get("newText") or ""):
                 return True
         return False
+    if kind == "staged_param_ci":
+        # Case-insensitive sibling of staged_param, for criteria that name a
+        # PARAMETER or a numeric VALUE — never a section header.
+        # Klipper normalises both channels, so casing there carries no
+        # meaning: gcode params are upper-cased (klippy/gcode.py:274
+        # `{k.upper(): v}`) and config option names are lower-cased
+        # (klippy/configfile.py uses configparser.RawConfigParser, whose
+        # default optionxform is str.lower). Section names are NOT
+        # normalised, which is why those stay on the case-sensitive kind.
+        filename, _, needle = value.partition("::")
+        needle_l = needle.lower()
+        for edit in pending_edits or []:
+            if edit.get("file") == filename and needle_l in (
+                    edit.get("newText") or "").lower():
+                return True
+        return False
     if kind == "staged_file":
         return any(e.get("file") == value for e in pending_edits or [])
     if kind == "skill_loaded":
@@ -2741,6 +2809,12 @@ def criterion_ok(kind: str, value: str, content: str,
         return len(pending_edits or []) == int(value)
     if kind == "not_staged":
         return all(e.get("file") != value for e in pending_edits or [])
+    if kind == "not_staged_any":
+        # No staged edit in ANY file. The file-scoped kind above silently
+        # passes a request that says "don't change my files" when the model
+        # stages into a different file (SKILL-N04 2026-09-28: gemma-4-e4b
+        # created macros.cfg and `not_staged printer.cfg` went green).
+        return not (pending_edits or [])
     if kind == "contains":
         return value.lower() in content.lower()
     if kind == "not_contains":
