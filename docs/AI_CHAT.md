@@ -233,6 +233,58 @@ file (`not_staged_any` closes it).
 Validation and evidence: `reports/ai-chat-accuracy/bank106-r1-criteria-audit.md`;
 re-check any of it offline with `scripts/validate_criteria_offline.py`.
 
+**Harness false negatives, round 2 — FIXED 2026-09-29, awaiting re-run.** A
+second pass audited the remaining non-PASS slots across all seven runs and
+found four more defects (all on failures that repeat on ≥2 models), plus two
+product defects the bank cannot see:
+
+- `Q04`'s list regex accepted only `-` bullets and bare filenames, so
+  `* **Config_Reference.md**` and `**\`Config_Reference.md\`**` (bold wrapping
+  code) — both naming five real docs — were scored FAIL.
+- `SETUP-05`'s criterion was file-scoped to `printer.cfg`, but the fixture's
+  `[respond]` lives in `mainsail.cfg:61` (empty). Driving the real `EditSession`
+  (`scripts/probe_setup05_respond_routes.py`) shows `add_section` in
+  `printer.cfg`, `set_param` and `replace_section` in `mainsail.cfg` all stage
+  cleanly, so the arm now accepts either file.
+- `TRIDENT-10` asked for a **display** block ("return the corrected macro in a
+  fenced cfg code block with a '# file: printer.cfg' hint line") while the
+  criteria graded the staged artifact. 5 of 7 models followed the instruction
+  with a perfect fix and FAILed; the prompt now asks for the edit, like every
+  other artifact-graded qid.
+- `TOOL-05`'s header arm graded the reply prose, but the deliverable there is
+  the *tool's* return value: two models called `generate_macro_template` with
+  `include_bed_mesh: true` and the tool returned the full
+  `[gcode_macro PRINT_START]` body, while their prose only described it. New
+  `tool_output_regex` criterion kind grades `toolCalls[].output`.
+- Two questions were re-worded for premise conflicts (`SETUP-02` asks for a
+  *change* now; `SETUP-05` names the target state), the same family as
+  `COMMENT-03`. `Q17` / `MACRO-02` / `Q14` have the same shape and are left
+  as-is pending a decision.
+
+Offline validation (`scripts/validate_criteria_offline.py`, now with 15
+negative controls): **6 new verdict flips, all intended, 0 controls wrongly
+passing** — the widening did not touch a single unaffected qid. `TRIDENT-10`
+and `SETUP-02` cannot be replayed (their question text changed), so they need
+the live re-run.
+
+Product fixes shipped with the same work, both model-agnostic:
+
+- **Staged work no longer reports as a failure.** When a request ends with no
+  visible text, the reply used to be *"I wasn't able to generate a response.
+  Please try rephrasing your question."* — which hit **11 qids in one model's
+  run, every one with a validated edit waiting for review**. The fallback now
+  names the staged changes ("I staged 1 change to printer.cfg for your
+  review…") and keeps the old wording only when nothing was staged.
+- **Orphan tool-call markup no longer reaches the bubble.** Three replies
+  carried the *tail* of a native call (`<parameter=…>…</parameter>`,
+  `</function>`, `</tool_call>`) that every opener-anchored cleanup regex
+  missed — one of them was the entire reply. `TOOL_RESIDUE_RE` strips those
+  fragments and, when nothing else survives, routes the reply into the empty
+  fallback above instead of showing raw markup.
+
+Evidence for the second round (per-qid verdicts, the probe output, and the
+replay diff): `reports/ai-chat-accuracy/bank106-r1-failure-states.md`.
+
 **Variance, not shared breakage.** Across 106 questions × 7 models: **61 pass on
 all 7**, **45 are mixed**, and **0 fail on all 7**. 17 of the mixed ones fail on
 exactly 1 of 7 — single-model flakiness. Only 6 fail on 5+ of 7, and of those 3
