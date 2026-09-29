@@ -267,6 +267,38 @@ passing** — the widening did not touch a single unaffected qid. `TRIDENT-10`
 and `SETUP-02` cannot be replayed (their question text changed), so they need
 the live re-run.
 
+**Round-2 spot re-run — MEASURED.** The 9 qids touched by rounds 1–2 were
+re-run on all seven models (same hosts and flags, `bank106-r2-spotfix-*`, after
+restarting the backend at 10:02 so it served the fixed code):
+
+| model | before | after | Δ |
+| --- | --- | --- | --- |
+| gemma-4-12b | 4/9 | **9/9** | +5 |
+| qwen3.5-4b | 2/9 | **7/9** | +5 |
+| gemma-4-26B-A4B | 3/9 | **8/9** | +5 |
+| qwen3.6-35B-A3B | 5/9 | **8/9** | +3 |
+| qwen3.8-27B | 4/9 | **8/9** | +4 (3 were infra ERRORs) |
+| gemma-4-e4b | 5/9 | **7/9** | +2 |
+| qwen3.5-9b | 4/9 | **6/9** | +2 |
+| **total** | **27/63** | **53/63** | **+26** |
+
+No errored qids in any leg. Per-defect: `COMMENT-03` +5, `SETUP-05` +5,
+`TRIDENT-10` +4, `MACRO-01` +3, `Q19` +3 (1 criteria, 2 infra), `Q04` +2,
+`TOOL-05` +2, `AMBI-07` +1, `SETUP-02` +1. **These 9 qids are now measured and
+the rest of the table above still is not.**
+
+Two regressions surfaced, and one of them is a criterion contradicting the
+product's own rule: `SETUP-02` — the fixture defines `[idle_timeout]` in BOTH
+`printer.cfg` and `Hotkey.cfg`, and **4 of 6 models edit the `Hotkey.cfg` copy**
+(one citing load order). KWC's validator agrees with them:
+`severity=info, code=project_duplicate, "Section [idle_timeout] is defined
+multiple times in this file — the later definition wins"`
+(`scripts/probe_duplicate_idle_timeout.py`). The criterion only accepts
+`printer.cfg`, so models behaving the way the app itself describes are scored
+FAIL. `MACRO-01` failed qwen3.5-4b on a *parameterised* park
+(`params.PARK_X|default(0)`, the idiom KWC's own `PAUSE` template uses) while
+demanding a literal `X0`.
+
 Product fixes shipped with the same work, both model-agnostic:
 
 - **Staged work no longer reports as a failure.** When a request ends with no
