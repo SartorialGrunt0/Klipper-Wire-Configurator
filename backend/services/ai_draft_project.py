@@ -152,20 +152,71 @@ def _header_name_part(header: str) -> str:
     return header.split(' ', 1)[1] if ' ' in header else header
 
 
+def _resolve_file_ref(requested: str, files: "dict[str, str]") -> str | None:
+    """Resolve a requested project filename to the project's REAL key.
+
+    Exact key wins. Otherwise the name is matched case-insensitively —
+    whole relative path first, then basename — and only when the match is
+    UNIQUE (ambiguous returns None so the caller's 'not in the project'
+    error names the candidates instead of guessing).
+
+    Always returns the project's own spelling, so a mis-cased request edits
+    the existing file rather than creating a case-variant sibling. This
+    mirrors what the READ side has always done (``mcp_server``:
+    ``cfg_file.name.lower() == raw.lower()``, and ``_overlay_content``'s
+    lowered lookup) — the edit side was the odd one out, so
+    ``read_user_config(filename='Printer.cfg')`` resolved while
+    ``config_edit`` on the same name hard-failed.
+
+    Section *names* being case-insensitive is not the same argument:
+    Klipper stores headers verbatim. But a filename here is a key into OUR
+    project map, not Klipper content — and a case-variant of a real file is
+    never what the model meant.
+    """
+    if requested in files:
+        return requested
+    wanted = requested.casefold()
+    by_path = [f for f in files if f.casefold() == wanted]
+    if len(by_path) == 1:
+        return by_path[0]
+    if len(by_path) > 1:
+        return None  # two project keys differing only by case: never guess
+    wanted_base = PurePosixPath(requested.replace('\\', '/')).name.casefold()
+    if not wanted_base:
+        return None
+    by_base = [f for f in files
+               if PurePosixPath(f.replace('\\', '/')).name.casefold() == wanted_base]
+    if len(by_base) == 1:
+        return by_base[0]
+    return None
+
+
 def _resolve_section_ref(requested: str, lines: list[str]) -> str:
     """Resolve a requested section reference to an actual header (live
-    report 2026-09-27).
+    report 2026-09-27; extended 2026-09-28).
 
-    Models habitually call config_edit with the BARE macro name
-    (section='Level_Bed' for '[gcode_macro Level_Bed]'); every op then
-    died on 'Section not found' and burned retry turns guessing the
-    gcode_macro prefix back. Resolution: exact header wins; otherwise a
-    bare (family-less) request matches the NAME PART of family headers
-    — applied only when it is UNIQUE in the file. Ambiguous or absent
-    returns the request unchanged so the caller's 'not found' path (and
-    its cross-file hint) fires as before. Never invents a header for an
-    absent name; add_section therefore still creates whatever the model
-    asked for.
+    Two habitual model errors, one mechanism:
+
+    1. the BARE macro name — ``section='Level_Bed'`` for
+       ``[gcode_macro Level_Bed]`` (2026-09-27): every op died on 'Section
+       not found' and burned turns guessing the ``gcode_macro`` prefix;
+    2. the WRONG CASE — ``section='Gcode_Macro level_bed'`` for
+       ``[gcode_macro Level_Bed]`` (2026-09-28): the old code returned any
+       spaced request unchanged, so a case-only mismatch hard-failed even
+       though the read side has always resolved it case-insensitively.
+
+    Order: exact header wins; then a case-insensitive FULL-HEADER match;
+    then the bare-name match against family headers' NAME PART. Every
+    fallback applies only when UNIQUE in the file. Ambiguous or absent
+    returns the request unchanged so the caller's 'not found' path (and its
+    cross-file / ambiguity hints) fires as before.
+
+    Resolving to the REAL header is what keeps a case variant out of the
+    config: add_section on ``'Printer'`` now finds ``[printer]`` and reports
+    the duplicate instead of appending a second, differently-cased section.
+
+    Never invents a header for an absent name; add_section therefore still
+    creates whatever the model asked for.
     """
     exact = re.compile(r'^\[([^\]]+)\]\s*$')
     headers = []
@@ -175,9 +226,15 @@ def _resolve_section_ref(requested: str, lines: list[str]) -> str:
             headers.append(match.group(1).strip())
     if requested in headers:
         return requested
+    wanted = requested.casefold()
+    # Case-insensitive full-header match (Klipper section casing is not
+    # content — see the module note on gcode_macro aliases).
+    ci = [h for h in headers if h.casefold() == wanted]
+    distinct_ci = list(dict.fromkeys(ci))
+    if len(distinct_ci) == 1:
+        return distinct_ci[0]
     if ' ' in requested:  # full-header form that simply isn't there
         return requested
-    wanted = requested.casefold()
     matches = [h for h in headers if ' ' in h
                and _header_name_part(h).casefold() == wanted]
     distinct = list(dict.fromkeys(matches))
@@ -187,22 +244,33 @@ def _resolve_section_ref(requested: str, lines: list[str]) -> str:
 
 
 def _ambiguous_section_hint(requested: str, lines: list[str]) -> str:
-    """Suffix for 'Section not found' when a BARE name matches 2+ family
-    headers (live report 2026-09-27): the resolution stays off (never
-    pick one silently), but the error names the candidates so the model
-    retries with a full header instead of guessing prefixes."""
-    if ' ' in requested:
-        return ''
+    """Suffix for 'Section not found' when the request matches 2+ headers
+    (live report 2026-09-27; extended 2026-09-28): the resolution stays off
+    (never pick one silently), but the error names the candidates so the
+    model retries with a full header instead of guessing prefixes.
+
+    Two ambiguity shapes now:
+      - a BARE name matching several family headers ('Level_Bed' →
+        '[gcode_macro Level_Bed]' and '[gcode_macro level_bed]' …);
+      - a SPACED request matching several headers that differ only by case
+        (resolution is case-insensitive, so those collide). A spaced request
+        that simply does not exist yields no hint — the cross-file hint owns
+        that case.
+    """
     wanted = requested.casefold()
-    matches = []
+    spaced = ' ' in requested
+    matches: list[str] = []
     for line in lines:
         match = RE_SECTION_HEADER.match(line)
         if not match:
             continue
         header = match.group(1).strip()
-        if (' ' in header
-                and _header_name_part(header).casefold() == wanted
-                and header not in matches):
+        if not header or header in matches:
+            continue
+        if spaced:
+            if header.casefold() == wanted:
+                matches.append(header)
+        elif ' ' in header and _header_name_part(header).casefold() == wanted:
             matches.append(header)
     if len(matches) < 2:
         return ''
@@ -536,23 +604,35 @@ class ProjectState:
             return _state_error(f"Missing required argument for {kind}: {exc.args[0]}")
 
     def _resolve_op_section(self, op: dict) -> dict:
-        """Rewrite op['section'] to the actual header it refers to (live
-        report 2026-09-27, see :func:`_resolve_section_ref`). Applied
+        """Rewrite op['section'] / op['file'] to the real header and key
+        they refer to (live report 2026-09-27, extended 2026-09-28; see
+        :func:`_resolve_section_ref` and :func:`_resolve_file_ref`). Applied
         centrally so EVERY section op — set_param, patch_section, rename,
         delete, replace, and add_section's duplicate check — resolves a
-        bare macro name identically; per-handler fixing left the loop's
-        second guesses scattered. No-op when file/section are missing or
-        the name doesn't resolve (the handler's own error paths, incl.
-        the cross-file and ambiguity hints, then fire unchanged)."""
+        bare macro name, a wrong-cased header and a wrong-cased filename
+        identically; per-handler fixing left the loop's second guesses
+        scattered.
+
+        Spaced headers are no longer skipped: that early-return was why a
+        case-only mismatch ('Gcode_Macro level_bed') hard-failed while the
+        read side resolved it. No-op when the section/file is missing or
+        doesn't resolve (the handler's own error paths, incl. the cross-file
+        and ambiguity hints, then fire unchanged)."""
         section = (op.get('section') or '').strip().strip('[]').strip()
         filename = op.get('file')
-        if not section or ' ' in section or filename not in self.files:
+        if not section or not filename:
             return op
-        resolved = _resolve_section_ref(section, _split_lines(self.files[filename]))
-        if resolved == section:
+        real_file = _resolve_file_ref(str(filename), self.files)
+        if real_file is None:
+            return op
+        resolved = _resolve_section_ref(section, _split_lines(self.files[real_file]))
+        if resolved == section and real_file == filename:
             return op
         new_op = dict(op)
         new_op['section'] = resolved
+        # Carry the resolved key: the op must act on the EXISTING file, not
+        # create a case-variant sibling of it.
+        new_op['file'] = real_file
         return new_op
 
     def _require_file(self, filename: str | None) -> str:
@@ -560,10 +640,11 @@ class ProjectState:
             raise _OpError(
                 'Missing required argument: file (the project file to '
                 "edit, e.g. 'printer.cfg')")
-        if filename not in self.files:
+        resolved = _resolve_file_ref(str(filename), self.files)
+        if resolved is None:
             known = ', '.join(sorted(self.files)) or '(none)'
             raise _OpError(f"File '{filename}' is not in the project. Known files: {known}.")
-        return filename
+        return resolved
 
     @staticmethod
     def _require_header(op: dict) -> str:

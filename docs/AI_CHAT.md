@@ -58,6 +58,13 @@ The assistant sees your printer memory (mainboard, toolhead, expander boards, ki
 > - Errors carry exact reasons and name the working alternative (the file
 >   that actually holds the section, the actual include lines), so the
 >   model corrects itself instead of guessing.
+> - File and section names resolve **case-insensitively to the project's
+>   real spelling** — `Printer.cfg` → `printer.cfg`, `Gcode_Macro level_bed`
+>   → `[gcode_macro Level_Bed]` — matching what the read tools have always
+>   done. The resolution only ever lands on an identifier that already
+>   exists, so a case variant can never be created: an `add_section` whose
+>   name differs only by case is reported as the duplicate it is. Ambiguity
+>   is never guessed — the error lists the candidates.
 
 ## Stopping, retrying, and resuming
 
