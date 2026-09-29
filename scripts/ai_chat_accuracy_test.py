@@ -309,7 +309,17 @@ def build_questions() -> list[TestQuestion]:
                 ("contains", "Config_Reference"),
                 # Accept numbered or bullet lists (models differ in how they
                 # format the filenames; both mark them as .md entries).
-                ("regex", r"(?:(?:\d+\.|-)\s+(?:\*\*|`)?[^*\n`]+\.md(?:\*\*|`)?[^\n]*(?:\n|$)){4,}"),
+                # WIDENED 2026-09-29 (bank106-r1 failure-state audit). The
+                # alternation only carried `\d+\.` and `-`, so both of these
+                # correct answers were false negatives:
+                #   * **Config_Reference.md**              (`*` bullet)
+                #   1.  **`Config_Reference.md`**:  …      (bold wraps code)
+                # `*` joins the bullet alternation and the bold/backtick
+                # wrapper became REPEATABLE, so `**\`Name.md\`**` parses.
+                # Verified offline over all 7 captured answers: 2 flips, 5
+                # PASSes held; controls (3-doc list, 5 non-.md bullets,
+                # prose sentence naming five docs) all still FAIL.
+                ("regex", r"(?:(?:\d+\.|[-*])\s+(?:\*\*|`)*[^*\n`]+\.md(?:\*\*|`)*[^\n]*(?:\n|$)){4,}"),
             ),
         ),
         TestQuestion(
@@ -994,10 +1004,17 @@ def build_trident_questions() -> list[TestQuestion]:
         TestQuestion(
             qid="TRIDENT-10",
             title="Real macro: fix unbalanced Jinja in M109",
+            # REWORDED 2026-09-29 (bank106-r1 failure-state audit). The old
+            # prompt asked for a DISPLAY block ("return the corrected macro
+            # in a fenced cfg code block with a '# file: printer.cfg' hint
+            # line") while the grading arms read the staged artifact
+            # (staged_file + staged_regex). 5 of 7 models followed the
+            # instruction literally with a perfect fix and were scored FAIL;
+            # the 2 that ignored it and staged an edit passed. The prompt now
+            # asks for the edit, like every other artifact-graded qid.
             text=("The [gcode_macro M109] macro in the provided printer.cfg has "
-                  "a bug: its Jinja conditional is unbalanced. Fix it and return "
-                  "the corrected macro in a fenced cfg code block with a "
-                  "'# file: printer.cfg' hint line."),
+                  "a bug: its Jinja conditional is unbalanced. Fix it in "
+                  "printer.cfg."),
             # Same planted bug as TRIDENT-09.
             context_files=_context_with(_load_m109_bugged_printer_cfg()),
             expected_tools=("validate_macro",),
@@ -2071,7 +2088,16 @@ def build_setup_questions() -> list[TestQuestion]:
         TestQuestion(
             qid="SETUP-02",
             title="New section: setup idle_timeout (safe default)",
-            text=("can you setup idle timeout for my config? pick a safe default."),
+            # REWORDED 2026-09-29 (bank106-r1 failure-state audit). The
+            # fixture ALREADY carries `[idle_timeout] timeout: 1800`
+            # (printer.cfg:400, plus a duplicate in Hotkey.cfg:5), so "set up
+            # idle timeout" had no work in it: 4 of 7 models read the file,
+            # judged 1800 s already safe and offered to change it — scored
+            # FAIL by the criterion below. The prompt now asks for the
+            # CHANGE, so the same skill (locate the section, edit one param)
+            # is tested without the false premise.
+            text=("my idle timeout is set too long. can you shorten it in my "
+                  "config? pick a safe value."),
             context_files=(),
             expected_tools=("read_user_config", "list_user_configs",
                             "get_config_reference_section", "search_klipper_docs"),
@@ -2121,7 +2147,21 @@ def build_setup_questions() -> list[TestQuestion]:
         TestQuestion(
             qid="SETUP-05",
             title="New section: setup respond (M118/RESPOND)",
-            text="can you setup the respond section in my config?",
+            # REWORDED + RE-SCOPED 2026-09-29 (bank106-r1 failure-state
+            # audit). Two defects on this qid:
+            #   1. the fixture ALREADY has an empty `[respond]` in
+            #      mainsail.cfg:61, so "set it up" was ambiguous — the
+            #      reworded prompt names the target state ("documented
+            #      defaults"), matching the SETUP-02/04 convention.
+            #   2. the criterion was file-scoped to printer.cfg, so the two
+            #      models that edited the section WHERE IT LIVES were scored
+            #      FAIL. Verified against the real EditSession
+            #      (scripts/probe_setup05_respond_routes.py): add_section
+            #      printer.cfg, set_param mainsail.cfg and replace_section
+            #      mainsail.cfg ALL stage cleanly — both files are legal
+            #      routes, so the criterion now accepts either.
+            text=("can you setup the respond section in my config? use the "
+                  "documented defaults."),
             context_files=(),
             expected_tools=("get_config_reference_section", "search_klipper_docs",
                             "read_user_config"),
@@ -2130,8 +2170,12 @@ def build_setup_questions() -> list[TestQuestion]:
             # Edit-tools-ON arm: score the staged artifact, not prose
             # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
             edit_criteria=(
-                ("staged_section_regex",
-                 r"printer\.cfg::respond::default_(?:type|prefix)\s*[:=]\s*\S+"),
+                ("any_of", json.dumps([
+                    [["staged_section_regex",
+                      r"printer\.cfg::respond::default_(?:type|prefix)\s*[:=]\s*\S+"]],
+                    [["staged_section_regex",
+                      r"mainsail\.cfg::respond::default_(?:type|prefix)\s*[:=]\s*\S+"]],
+                ])),
             ),
         ),
     ]
@@ -2557,7 +2601,19 @@ def build_tool_coverage_questions() -> list[TestQuestion]:
             expected_tools=("generate_macro_template",),
             require_tool=True,
             criteria=(
-                ("contains", "gcode_macro PRINT_START"),
+                # The deliverable here is produced BY the tool, so the header
+                # check accepts either place it legitimately lands: the reply
+                # prose (a model that pastes the template) OR the tool's own
+                # return value (a model that only summarises it). The old
+                # prose-only `contains` false-failed 2 of 7 models whose
+                # captured generate_macro_template output carried the full
+                # `[gcode_macro PRINT_START]` body — bank106-r1
+                # failure-state audit 2026-09-29.
+                ("any_of", json.dumps([
+                    [["contains", "gcode_macro PRINT_START"]],
+                    [["tool_output_regex",
+                      r"generate_macro_template::\[gcode_macro\s+PRINT_START\s*\]"]],
+                ])),
                 ("regex", r"\bG28\b"),
                 # Only the include_bed_mesh=true flag puts BED_MESH_CALIBRATE
                 # in the template — a call without it is an incorrect use.
@@ -2922,6 +2978,28 @@ def criterion_ok(kind: str, value: str, content: str,
                 return True
             rendered = json.dumps(args.get(key), ensure_ascii=False)
             if re.search(pattern, rendered, re.IGNORECASE):
+                return True
+        return False
+    if kind == "tool_output_regex":
+        # value = "tool_name::regex" — passes when ANY executed call to
+        # tool_name RETURNED output matching the regex. The graded object is
+        # the tool's return value, not the reply prose.
+        #
+        # Use when the deliverable is produced BY the tool and the model only
+        # summarises it. TOOL-05 (bank106-r1 failure-state audit 2026-09-29):
+        # two models called generate_macro_template correctly
+        # (`include_bed_mesh: true`, verified in the captured toolCalls) and
+        # the tool returned the full `[gcode_macro PRINT_START]` body; both
+        # were FAILed by a prose `contains` arm that the artifact satisfies.
+        # Grade the artifact, same principle as the staged_* kinds.
+        name, _, pattern = value.partition("::")
+        for call in tool_calls or []:
+            if call.get("name") != name:
+                continue
+            output = call.get("output") or ""
+            if not isinstance(output, str):
+                output = json.dumps(output, ensure_ascii=False)
+            if re.search(pattern, output, re.IGNORECASE | re.DOTALL):
                 return True
         return False
     return False

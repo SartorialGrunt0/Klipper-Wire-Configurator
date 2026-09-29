@@ -143,6 +143,52 @@ NEGATIVE_CONTROLS = [
 ]
 
 
+# Controls added 2026-09-29 for the second widening round (bank106-r1
+# failure-state audit): the Q04 list regex, the SETUP-05 file re-scope and
+# the new `tool_output_regex` kind.
+_TEMPLATE_ARGS = json.dumps({"macro_name": "PRINT_START",
+                             "include_bed_mesh": True})
+
+NEGATIVE_CONTROLS += [
+    # Q04 — the widened regex must still demand FIVE .md list entries.
+    ("Q04: only three docs listed", "Q04",
+     {"response": "Here are some bundled docs:\n\n1. **Config_Reference.md**\n"
+                  "2. **G-Codes.md**\n3. **Bed_Mesh.md**\n",
+      "pending_edits": [], "tool_calls": []}),
+    ("Q04: `*` bullet list of non-.md entries", "Q04",
+     {"response": "Bundled docs include:\n\n* **Config_Reference**\n"
+                  "* **G-Codes**\n* **Bed_Mesh**\n* **Kinematics**\n"
+                  "* **BLTouch**\n",
+      "pending_edits": [], "tool_calls": []}),
+    # SETUP-05 — staging the defaults into an UNRELATED file must not pass.
+    ("SETUP-05: [respond] defaults staged into EBB.cfg", "SETUP-05",
+     {"response": "Done.", "pending_edits": [
+         {"file": "EBB.cfg", "op": "add_section",
+          "summary": "added [respond]",
+          "newText": "[respond]\ndefault_type: echo\ndefault_prefix: echo:\n"}],
+      "tool_calls": []}),
+    # TOOL-05 — the tool_output arm is scoped to the RIGHT tool AND output.
+    ("TOOL-05: template tool returned nothing (empty output)", "TOOL-05",
+     {"response": "Generated a PRINT_START template that runs G28 and then "
+                  "BED_MESH_CALIBRATE.",
+      "pending_edits": [],
+      "tool_calls": [{"name": "generate_macro_template",
+                      "arguments": _TEMPLATE_ARGS,
+                      "output": ""}]}),
+    ("TOOL-05: header only in a DIFFERENT tool's output", "TOOL-05",
+     {"response": "Generated a PRINT_START template that runs G28 and then "
+                  "BED_MESH_CALIBRATE.",
+      "pending_edits": [],
+      "tool_calls": [
+          {"name": "generate_macro_template",
+           "arguments": _TEMPLATE_ARGS,
+           "output": "## PRINT_START\n```\n[gcode_macro DOCK]\ngcode:\n    G28\n```"},
+          {"name": "search_klipper_docs",
+           "arguments": json.dumps({"query": "printer start"}),
+           "output": "[gcode_macro PRINT_START] appears in example configs."}]}),
+]
+
+
 def controls() -> int:
     qmap = bank()
     print("=" * 74)

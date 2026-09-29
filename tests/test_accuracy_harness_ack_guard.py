@@ -6,6 +6,7 @@ expect_no_ack_stall FAIL override shape, plus the ACK-* bank cases
 existing with their assertions wired.
 """
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -271,3 +272,105 @@ def test_rename_criteria_use_staged_header():
         assert "staged_header" in kinds, qid
     # RENAME-02 already relaxed to staged_regex (IGNORECASE).
     assert "staged_regex" in [k for k, _ in ren["RENAME-02"].criteria]
+
+
+# ── bank106-r1 second widening round (2026-09-29) ──────────────────────
+# Four harness defects found by auditing the 7-model sweep on ≥2 models:
+#   Q04       list regex rejected `*` bullets and `**`code`**` filenames
+#   SETUP-05  criterion file-scoped to printer.cfg while the section lives
+#             in mainsail.cfg
+#   TRIDENT-10 prompt asked for a DISPLAY block while the criteria graded
+#             the staged artifact (question-text change, no criterion)
+#   TOOL-05   prose criterion graded the reply while the artifact came back
+#             from a tool call (needs the new `tool_output_regex` kind)
+
+
+def _bank():
+    qs = (harness.build_questions() + harness.build_macro_questions()
+          + harness.build_trident_questions() + harness.build_ambiguity_questions()
+          + harness.build_setup_questions() + harness.build_live_context_questions()
+          + harness.build_edit_tool_questions() + harness.build_rename_questions()
+          + harness.build_comment_questions() + harness.build_skill_gate_questions()
+          + harness.build_tool_coverage_questions() + harness.build_ack_guard_questions())
+    return {q.qid: q for q in qs}
+
+
+def _crit_full(kind, value, *, response="", edits=(), calls=()):
+    return harness.criterion_ok(kind, value, response, memory=None,
+                                tool_calls=list(calls), pending_edits=list(edits))
+
+
+def _q04_passes(text):
+    kinds = _bank()["Q04"].criteria
+    return all(_crit_full(k, v, response=text) for k, v in kinds)
+
+
+def test_q04_list_regex_accepts_star_bullets_and_bold_wrapped_code():
+    # Both shapes are in the captured 2026-09-28 run and named five real docs.
+    assert _q04_passes(
+        "There are 63 docs. Five:\n\n"
+        "* **Config_Reference.md**\n* **G-Codes.md**\n* **Bed_Mesh.md**\n"
+        "* **TMC_Drivers.md**\n* **Pressure_Advance.md**\n") is True
+    assert _q04_passes(
+        "Five bundled files:\n\n"
+        "1.  **`Config_Reference.md`**: the reference.\n"
+        "2.  **`G-Codes.md`**: commands.\n3.  **`Bed_Mesh.md`**: mesh.\n"
+        "4.  **`BLTouch.md`**: probe.\n5.  **`Kinematics.md`**: motion.\n") is True
+
+
+def test_q04_list_regex_negative_controls():
+    # Fewer than five, non-.md entries, and a prose sentence must all FAIL.
+    assert _q04_passes("1. **Config_Reference.md**\n2. **G-Codes.md**\n"
+                       "3. **Bed_Mesh.md**\n") is False
+    assert _q04_passes("* **Config_Reference**\n* **G-Codes**\n"
+                       "* **Bed_Mesh**\n* **Kinematics**\n"
+                       "* **BLTouch**\n") is False
+    assert _q04_passes("The bundled docs include Config_Reference.md, "
+                       "G-Codes.md, Bed_Mesh.md, Kinematics.md and "
+                       "BLTouch.md.") is False
+
+
+def test_setup05_accepts_both_legal_files_and_rejects_others():
+    kinds = _bank()["SETUP-05"].edit_criteria
+    printer = [{"file": "printer.cfg", "op": "add_section", "summary": "",
+                "newText": "[respond]\ndefault_type: echo\n"}]
+    mainsail = [{"file": "mainsail.cfg", "op": "set_param", "summary": "",
+                 "newText": "[respond]\ndefault_type: echo\n"}]
+    unrelated = [{"file": "EBB.cfg", "op": "add_section", "summary": "",
+                  "newText": "[respond]\ndefault_type: echo\n"}]
+    for edits in (printer, mainsail):
+        assert all(_crit_full(k, v, edits=edits) for k, v in kinds) is True
+    assert all(_crit_full(k, v, edits=unrelated) for k, v in kinds) is False
+
+
+def test_tool05_accepts_a_tool_delivered_template():
+    kinds = _bank()["TOOL-05"].criteria
+    template = ("## PRINT_START\n```\n[gcode_macro PRINT_START]\ngcode:\n"
+                "    G28\n    BED_MESH_CALIBRATE\n```")
+    calls = [{"name": "generate_macro_template",
+              "arguments": json.dumps({"macro_name": "PRINT_START",
+                                       "include_bed_mesh": True}),
+              "output": template}]
+    # Prose that only SUMMARISES the template, in the exact shape the two
+    # false-negative models produced ("Homing (G28) … Bed mesh calibration
+    # (BED_MESH_CALIBRATE)") — the header is the arm they omit, so every
+    # arm must pass on the tool's return value.
+    assert all(_crit_full(k, v, response="Generated the PRINT_START macro "
+                                         "template: it homes (G28), runs "
+                                         "BED_MESH_CALIBRATE, primes.",
+                          calls=calls) for k, v in kinds) is True
+
+
+def test_tool_output_regex_requires_the_named_tool():
+    kind = "tool_output_regex"
+    value = r"generate_macro_template::\[gcode_macro\s+PRINT_START\s*\]"
+    pattern_in_other_tool = [{"name": "search_klipper_docs", "arguments": "{}",
+                              "output": "[gcode_macro PRINT_START] is in the "
+                                        "example configs."}]
+    assert _crit_full(kind, value, calls=pattern_in_other_tool) is False
+    empty_output = [{"name": "generate_macro_template", "arguments": "{}",
+                     "output": ""}]
+    assert _crit_full(kind, value, calls=empty_output) is False
+    real = [{"name": "generate_macro_template", "arguments": "{}",
+             "output": "```\n[gcode_macro PRINT_START]\ngcode:\n    G28\n```"}]
+    assert _crit_full(kind, value, calls=real) is True
