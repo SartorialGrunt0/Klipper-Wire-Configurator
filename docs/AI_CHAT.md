@@ -75,7 +75,7 @@ How it works:
 - Every question checks two things: **answer accuracy** and **tool reliability** (does the model use the right embedded tool for the job?). For edit questions the graded artifact is the server-staged change set (`pendingEdits`), not the reply's prose — declared `edit_criteria` grade the change that will actually land.
 - Every step is logged: the request payload, raw response, tool names and tool-turn count, the per-question slice of the backend's own log, the pass/fail evaluation for each criterion, and a final summary.
 
-### Question Bank (97 questions)
+### Question Bank (106 questions)
 | Item / Feature | Description & Details |
 | :--- | :--- |
 | Core Tools (Q01–Q20, minus retired Q09) | Covers docs lookups, example configs, validation, calculations, and tool-mediated edit routing. |
@@ -89,61 +89,124 @@ How it works:
 | Edit Tools (EDIT-01..06) | Tool-mediated editing (the only edit path): param edit via `config_edit`, gcode-body anchor edit, cross-file pin edit, new-file + `add_include` staging, pure Q&A must stage nothing, and commented-param uncomment keeping the `!` polarity. |
 | Skill Gate (SKILL-01..05, SKILL-N01..04) | The `config-editing` skill must load before any write path (direct param, macro body, multi-part, new file + include, implicit "my prints wobble"), and must NOT load on pure Q&A, how-to, pasted-text validation, or discuss-a-draft. |
 | Tool Coverage (TOOL-01..08) | One case per shipped tool: reference index, section index, board detection, rotation-distance calc, macro template, strict new-file routing, live devices, live Klippy state. |
+| Rename Cases (RENAME-01..03) | Macro-section renames: the staged header must keep the `gcode_macro` family, and stale callers must be repaired. |
+| Comment Cases (COMMENT-01..06) | Comment/uncomment ops: whole-section disable including the header via `comment_section`, block restore via `uncomment_section`, single-line comment/uncomment via `patch_section`, and the rename+uncomment combo. |
 | Ack Guard (ACK-01/02, ACK-N01) | Mid-loop ack-guard probes (Phase 6.5.5): the same single-value edit pinned to native AND text protocol with `expect_no_ack_stall` (a promise-with-no-action rescued by the injected directive FAILS even when the staged artifact is right), plus a pure-Q&A case the guard must never touch. Run as `--questions ACK,ACK-N`. |
 | Optional Memory Check (MEMORY-01..03) | Adds printer-memory auto-fill checks when the `--include-memory` flag is used. |
 
 ### Current results
 
-Baselines on the current branch (`improvement/ai-chat-edit-refactor`,
-post Phase-5), full 94-Q bank, native tool protocol, `--max-tokens 8192
---temperature 0.7`, edit tools on, one model per run (runs under
-`reports/ai-chat-accuracy/`):
+Baselines on `improvement/ai-chat-edit-refactor` @ `9c6bdf4`, **full 106-question
+bank**, native tool protocol, `--max-tokens 8192 --temperature 0.7`, edit tools on,
+one model per run (runs under `reports/ai-chat-accuracy/bank106-r1-*`):
 
-| Model | Host | PASS | Rate |
+| Model | Host | PASS | Rate | Errored |
+| --- | --- | --- | --- | --- |
+| gemma-4-12b | CachyPC | 97/106 | 92% | 0 |
+| qwen3.6-35B-A3B | Thor | 97/106 | 92% | 0 |
+| gemma-4-26B-A4B | Thor | 97/106 | 92% | 1 |
+| gemma-4-e4b | CachyPC | 91/106 | 86% | 0 |
+| qwen3.5-4b | CachyPC | 90/106 | 85% | 0 |
+| qwen3.8-27B | Thor | 89/106 | 84% | 12 |
+| qwen3.5-9b | CachyPC | 86/106 | 81% | 0 |
+
+Errored = per-request failure (provider 5xx or the 600 s timeout), not a model
+miss. Errored qids were re-run where possible; `qwen3.8-27B` kept 12 timeouts
+(its 600 s loops), so its row is understated — 3 of its misses are `COMMENT` and
+1 is `RENAME`, families where the shortfall is infra, not quality. `gemma-4-26B-A4B`
+has one genuine repeat-timeout (`AMBI-02`).
+
+**Known harness false negatives still counted in the table above** — see
+`reports/ai-chat-accuracy/bank106-r1-criteria-audit.md`. Applying them
+(`AMBI-07` +1, `MACRO-01` +1, `Q19` +1) the three leaders reach 98/106:
+
+| Model | raw | adjusted | credits |
 | --- | --- | --- | --- |
-| gemma-4-12b | CachyPC | 92/94 | 98% |
-| qwen3.5-4b | CachyPC | 78/94 | 83% |
-| gemma-4-e4b | CachyPC | 77/94 | 82% |
-| qwen3.5-9b | CachyPC | 73/94 | 78% |
+| gemma-4-12b | 97 | 98 | AMBI-07 |
+| qwen3.6-35B-A3B | 97 | 98 | Q19 |
+| gemma-4-26B-A4B | 97 | 98 | AMBI-07 |
+| gemma-4-e4b | 91 | 93 | MACRO-01, AMBI-07 |
+| qwen3.5-4b | 90 | 91 | AMBI-07 |
+| qwen3.8-27B | 89 | 89+ | (AMBI-07 errored — unknown) |
+| qwen3.5-9b | 86 | 86 | — |
 
-Family detail (PASS/total):
+Family detail (raw PASS/total):
 
-| Model | Q | MACRO | TRIDENT | AMBI | MINIDIFF | SETUP | LIVE | EDIT | SKILL | TOOL |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| gemma-4-12b | 19/19 | 10/10 | 15/16 | 8/8 | 4/4 | 5/5 | 7/7 | 6/6 | 8/9 | 8/8 |
-| qwen3.5-4b | 19/19 | 9/10 | 10/16 | 8/8 | 3/4 | 3/5 | 5/7 | 5/6 | 6/9 | 8/8 |
-| gemma-4-e4b | 16/19 | 7/10 | 13/16 | 6/8 | 3/4 | 3/5 | 7/7 | 5/6 | 7/9 | 8/8 |
-| qwen3.5-9b | 16/19 | 8/10 | 12/16 | 5/8 | 3/4 | 3/5 | 6/7 | 5/6 | 8/9 | 6/8 |
+| Model | Q | MACRO | TRIDENT | HARNESS | MINIDIFF | AMBI | SETUP | LIVE | EDIT | RENAME | COMMENT | SKILL | SKILL-N | TOOL | ACK | ACK-N |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| gemma-4-12b | 19/19 | 9/10 | 15/16 | 2/2 | 4/4 | 7/8 | 4/5 | 7/7 | 6/6 | 3/3 | 4/6 | 5/5 | 2/4 | 8/8 | 2/2 | 0/1 |
+| qwen3.6-35B-A3B | 18/19 | 10/10 | 15/16 | 2/2 | 4/4 | 8/8 | 3/5 | 6/7 | 6/6 | 3/3 | 5/6 | 4/5 | 3/4 | 8/8 | 1/2 | 1/1 |
+| gemma-4-26B-A4B | 18/19 | 9/10 | 15/16 | 2/2 | 4/4 | 6/8 | 4/5 | 7/7 | 6/6 | 3/3 | 5/6 | 4/5 | 4/4 | 8/8 | 2/2 | 0/1 |
+| gemma-4-e4b | 18/19 | 8/10 | 13/16 | 2/2 | 3/4 | 6/8 | 4/5 | 7/7 | 5/6 | 3/3 | 4/6 | 4/5 | 3/4 | 8/8 | 2/2 | 1/1 |
+| qwen3.5-4b | 18/19 | 9/10 | 13/16 | 2/2 | 3/4 | 6/8 | 4/5 | 7/7 | 5/6 | 3/3 | 5/6 | 4/5 | 3/4 | 6/8 | 2/2 | 0/1 |
+| qwen3.8-27B | 16/19 | 7/10 | 16/16 | 2/2 | 4/4 | 3/8 | 3/5 | 7/7 | 6/6 | 2/3 | 3/6 | 5/5 | 4/4 | 8/8 | 2/2 | 1/1 |
+| qwen3.5-9b | 16/19 | 8/10 | 15/16 | 2/2 | 3/4 | 7/8 | 3/5 | 7/7 | 5/6 | 2/3 | 3/6 | 4/5 | 3/4 | 6/8 | 2/2 | 0/1 |
+
+Movement against the previous 94-Q baseline, on the **94 overlapping qids** (all
+four documented models re-measured on the same host, so this is apples-to-apples):
+
+| Model | New | Old | Δ |
+| --- | --- | --- | --- |
+| gemma-4-12b | 88/94 | 92/94 | **−4** |
+| qwen3.5-4b | 80/94 | 78/94 | +2 |
+| gemma-4-e4b | 81/94 | 77/94 | +4 |
+| qwen3.5-9b | 79/94 | 73/94 | **+6** |
+
+gemma-4-12b is the only genuine regression; its losses concentrate in `SKILL-N01`
+(skill false-positives 1/4 → 2/4) plus two of the harness false negatives above.
+`TRIDENT-15` — previously the all-model failure — now passes on 5 of 7.
 
 Failure modes seen across the models (from their traces):
 
 - **Staged but not what was asked** (the dominant mode) — the model picks a
   blunter operation than the case needs (`replace_section` or `set_param`
   where an anchored `patch_section` is required) and the staged text misses
-  the required line. This is what fails `EDIT-02` / `MINIDIFF-01` (the
-  `level_bed` adaptive-anchor pair) on three of the four models.
-- **Nothing staged after burning the retry budget** — `TRIDENT-03`,
-  `MACRO-02`, `SKILL-02` and `EDIT-02` show 6–7 edit attempts with an empty
-  pending set: the model kept re-sending variations that the server
-  rejected, then landed on the soft-landing summary. The write-attempt cap
-  keeps this honest, but the loop is not converging for these models.
-- **Wrong tool routing** — qwen3.5-9b's weakest area (6/8 on TOOL,
-  5/8 on AMBI): it reaches for prose or an adjacent tool (`AMBI-06/08`
-  tool-argument checks, `TOOL-04/05` use-gates) where a typed lookup was
-  expected. This is why the 9b model scores *below* the 4b here.
-- **Refuses to stay quiet on an edit-shaped request** — `SKILL-N04`
-  (discuss-a-draft) fails on **all four** models: each loads the editing
-  skill and stages something for a request that should stay a discussion.
+  the required line. This is what fails `EDIT-02` / `MINIDIFF-01` / `SKILL-02`
+  (the `level_bed` adaptive-anchor trio) on 4 of 7 models. Verified genuine
+  against Klipper's own source: `bed_mesh.py` gates adaptive mode on
+  `gcmd.get_int('ADAPTIVE', 0)`, so `adaptive=true` is invalid and
+  `adaptive_margin` alone does **not** enable it. Only gemma-4-12b writes the
+  documented `ADAPTIVE=1`.
+- **Skill gate fires on an explicit "don't change my files"** — `SKILL-N04`
+  ("Draft me a PARK_X macro… Don't add it to my config"). 5 of 7 models load
+  the editing skill and 4 of 7 stage an edit anyway. Traced end-to-end: the
+  model writes the draft, the backend fires its edit-prose nudge, and the
+  nudge's leading exception — *"Unless the user explicitly said NOT to change
+  their files…"* — is honoured by only 1 of 7 (qwen3.8-27B, the only pass).
+- **Over-clarification** — qwen3.8-27B alone refuses to stage on `Q14`, `Q17`
+  and `MACRO-02`, because each question's premise contradicts the real Trident
+  fixture (a `[bed_mesh]` already exists; `PRINT_START` is heavily customised).
+  Safe behaviour, scored as a miss — a question-design question, not a bug.
+- **Runaway tool loops** — qwen3.8-27B burned 21 tool calls and 108k characters
+  of context on `MACRO-03`, a question about a 7-line macro, and hit the
+  10-minute request ceiling. 12 of its 106 questions timed out this way; every
+  other model had ≤3 request errors.
+- **Registry kickback not re-sent** — `AMBI-02` / `AMBI-03`: an unknown gcode
+  command (`CLEAN_NOZZLE`, `SMART_PARK` from plugins) kicks the write back
+  unstaged, and the design needs an *identical* resend to pass. Most models
+  narrate the rejection and stop instead.
+- **Nothing staged after burning the retry budget** — the model keeps re-sending
+  variations the server rejects, then lands on the soft-landing summary. The
+  write-attempt cap keeps this honest, but the loop is not converging for the
+  smaller models.
 
-Two cases fail on every model measured so far and are the strongest
-candidates for a question-design or prompt fix rather than a model
-capability gap: **TRIDENT-15** (the `idle_timeout` multi-LED case, whose
-three LED sets live in three different files) and **SKILL-N04** above.
+**Known harness false negatives — do not read the raw table as pure model
+quality.** Four are documented in
+`reports/ai-chat-accuracy/bank106-r1-criteria-audit.md`: `AMBI-07` grades the
+reply prose instead of the staged artifact (3/3 models staged correctly and all
+FAILed); `MACRO-01` demands `G1…X0` and rejects `G0`, which the bundled Klipper
+docs define as the same command; `Q19`'s clarifying-question regex misses
+"I'll need some basic hardware details… paste them here"; and `COMMENT-03` is a
+trap — `max_accel` is a required `[printer]` parameter, so the literal request is
+rejected by validation unless the model invents an unstated two-part swap (1 of 7
+did).
 
-Single-run numbers with a fresh dialog per question; tool calls are
-nondeterministic, so treat a few points of spread as noise and require
-three runs before claiming a model-behaviour difference. Re-baseline after
-any prompt or tool change.
+**Variance, not shared breakage.** Across 106 questions × 7 models: **61 pass on
+all 7**, **45 are mixed**, and **0 fail on all 7**. 17 of the mixed ones fail on
+exactly 1 of 7 — single-model flakiness. Only 6 fail on 5+ of 7, and of those 3
+are harness defects above rather than model gaps. Treat a few points of spread as
+noise and require three runs before claiming a model-behaviour difference.
+Re-baseline after any prompt or tool change.
 
 ### Running the harness
 
