@@ -1772,3 +1772,144 @@ def test_ai_state_returns_empty_for_invalid_json(monkeypatch, tmp_path):
     monkeypatch.setattr(ai_routes, 'AI_STATE_FILE', tmp_path / 'state.json')
     (tmp_path / 'state.json').write_text('{not valid json', encoding='utf-8')
     assert client.get('/ai/state').json() == {}
+
+
+# ── Orphan tool-call residue + staged-work fallback ─────────────────────
+# bank106-r1 sweep (2026-09-29). Two live shapes reached the chat bubble:
+#   1. the TAIL of a native tool call whose opener the parser had already
+#      consumed — every cleanup regex was opener-anchored, so a fragment
+#      survived as the ENTIRE reply (qwen3.5-4b AMBI-07), as a suffix on
+#      prose (qwen3.6-35B-A3B AMBI-02) or as a bare trailing tag
+#      (qwen3.5-9b RENAME-03);
+#   2. "I wasn't able to generate a response. Please try rephrasing…" on 11
+#      qids in ONE run — every one with a validated edit waiting for review.
+
+RESIDUE_TAIL = ('<parameter=filename>\nprinter.cfg\n</parameter>\n'
+                '</function>\n</tool_call>')
+
+
+def test_strip_tool_residue_removes_orphan_native_markup():
+    assert ai_routes._strip_tool_residue(RESIDUE_TAIL) == ''
+    assert ai_routes._strip_tool_residue('Done.\n\n</tool_call>') == 'Done.'
+    assert ai_routes._strip_tool_residue(
+        'Staged for review.\n\n<parameter=op>\ndelete_section\n</parameter>\n'
+        '</function>\n</tool_call>') == 'Staged for review.'
+
+
+def test_strip_tool_residue_keeps_macro_text_intact():
+    macro = ('# file: printer.cfg\n[gcode_macro Level_Bed]\ngcode:\n'
+             '    {% if printer.toolhead.position.z < 2 %}\n'
+             '        G1 Z5 F600\n'
+             '    {% endif %}\n')
+    assert ai_routes._strip_tool_residue(macro) == macro.strip()
+    # Only the '<name=' residue form is stripped; a documentation quote
+    # written with a space must survive untouched.
+    doc_quote = 'Klipper writes <parameter name="x">5</parameter> there.'
+    assert ai_routes._strip_tool_residue(doc_quote) == doc_quote
+
+
+class _FakeEditSession:
+    def __init__(self, pending):
+        self.pending_edits = pending
+
+
+def test_empty_content_fallback_names_staged_changes():
+    from services.ai_edit_tools import EditSession
+
+    session = EditSession({'printer.cfg': {'content': '[printer]\nmax_velocity: 200\n'}})
+    session.execute({'name': 'config_edit', 'arguments': {
+        'file': 'printer.cfg', 'op': 'set_param', 'section': 'printer',
+        'key': 'max_velocity', 'value': '300'}})
+    assert session.pending_edits, 'setup: the edit must stage'
+
+    out = ai_routes._empty_content_fallback(session)
+    assert 'staged 1 change to printer.cfg' in out
+    assert 'rephrasing' not in out
+
+    two_files = _FakeEditSession([
+        {'file': 'printer.cfg', 'op': 'set_param'},
+        {'file': 'macros.cfg', 'op': 'add_section'},
+    ])
+    assert 'staged 2 changes to printer.cfg, macros.cfg' in \
+        ai_routes._empty_content_fallback(two_files)
+
+
+def test_empty_content_fallback_plain_stub_without_staged_work():
+    plain = ("I wasn't able to generate a response. "
+             "Please try rephrasing your question.")
+    assert ai_routes._empty_content_fallback(None) == plain
+    assert ai_routes._empty_content_fallback(_FakeEditSession([])) == plain
+
+
+def _residue_reply(url, headers, payload):
+    return {'choices': [{'message': {'content': RESIDUE_TAIL}}]}
+
+
+def test_chat_residue_only_reply_never_reaches_the_bubble(monkeypatch):
+    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
+
+    def fake_post(url, headers, payload):
+        return DummyResponse(_residue_reply(url, headers, payload), url=url)
+
+    monkeypatch.setattr(
+        httpx, 'AsyncClient',
+        lambda *args, **kwargs: FakeAsyncClient(post_handler=fake_post))
+
+    response = client.post('/ai/chat', json={
+        'messages': [{'role': 'user', 'content': 'Explain pressure advance.'}],
+        'apiKey': 'local', 'model': 'qwen3.5-4b',
+        'apiUrl': 'http://localhost:1234/v1/chat/completions',
+        'apiProvider': 'openai-compatible',
+        'editTools': False,
+    })
+
+    assert response.status_code == 200
+    body = response.json()
+    # Pre-fix this returned the raw fragment: the opener-anchored cleanups
+    # found nothing to strip and the `not had_tool_blocks` fallback handed
+    # current_content straight back.
+    assert 'parameter=' not in body['content']
+    assert 'tool_call' not in body['content']
+    assert body['content'] == ("I wasn't able to generate a response. "
+                               "Please try rephrasing your question.")
+
+
+def test_chat_staged_edit_with_lost_summary_names_the_change(monkeypatch):
+    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
+    calls = {'n': 0}
+    tool_call = '```tool\n' + json.dumps({
+        'name': 'config_edit',
+        'arguments': {'file': 'printer.cfg', 'op': 'set_param',
+                      'section': 'printer', 'key': 'max_velocity',
+                      'value': '300'},
+    }) + '\n```'
+
+    def fake_post(url, headers, payload):
+        calls['n'] += 1
+        content = tool_call if calls['n'] == 1 else RESIDUE_TAIL
+        return DummyResponse(
+            {'choices': [{'message': {'content': content}}]}, url=url)
+
+    monkeypatch.setattr(
+        httpx, 'AsyncClient',
+        lambda *args, **kwargs: FakeAsyncClient(post_handler=fake_post))
+
+    cfg = ('[printer]\nkinematics: cartesian\nmax_velocity: 200\n'
+           'max_accel: 3000\n')
+    response = client.post('/ai/chat', json={
+        'messages': [{'role': 'user',
+                      'content': 'In printer.cfg set max_velocity to 300.'}],
+        'apiKey': 'k', 'model': 'm',
+        'apiUrl': 'http://localhost:1234/v1/chat/completions',
+        'apiProvider': 'openai-compatible',
+        'toolProtocol': 'text',
+        'contextFiles': {'printer.cfg': {'content': cfg}},
+        'editTools': True, 'editSkill': True, 'autoApproveEdits': True,
+        'requestId': 'residue-staged-1',
+    })
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body['pendingEdits'], 'setup: the edit must stage'
+    assert 'staged 1 change to printer.cfg' in body['content']
+    assert 'parameter=' not in body['content']

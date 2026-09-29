@@ -195,6 +195,26 @@ XML_TOOL_CALLS_CLEANUP_RE = re.compile(
     re.DOTALL,
 )
 
+# Orphan tool-call RESIDUE — the TAIL of a native call whose opening tokens
+# the parser already consumed. Every cleanup regex above is anchored on a
+# call OPENER, so a tail-only fragment survived into the chat bubble.
+# Observed live 2026-09-29 (bank106-r1 sweep), three shapes:
+#   * the WHOLE reply was "<parameter=filename>\nprinter.cfg\n</parameter>\n
+#     </function>\n</tool_call>"            (qwen3.5-4b AMBI-07)
+#   * the same block appended after prose   (qwen3.6-35B-A3B AMBI-02)
+#   * a bare trailing "</tool_call>"        (qwen3.5-9b RENAME-03)
+# These shapes cannot occur in Klipper config, macro, or G-code text, so the
+# strip is unconditional — but the residue keeps its '<name=' form, so a
+# documentation quote like "<parameter name=\"x\">" is left alone.
+TOOL_RESIDUE_RE = re.compile(
+    r"<parameter\s*=\s*[^>]*>.*?</parameter\s*>"
+    r"|<parameter\s*=\s*[^>]*/?>"
+    r"|<function\s*=\s*[^>]*/?>"
+    r"|</?\|?(?:tool_calls?|function)\|?>"
+    r"|<\|?tool_calls?\|?>",
+    re.IGNORECASE | re.DOTALL,
+)
+
 # Prose edit protocol (fenced cfg blocks / mini-diff) RETIRED 2026-09-22 with
 # the Phase-4 ratchet (.hermes/plans/2026-09-10_tool-mediated-config-editing.md):
 # config edits go through config_edit/config_write + the approval card; fenced
@@ -1414,6 +1434,44 @@ def _strip_template_pythonic_calls(text: str) -> str:
         out.append(text[cursor:])
         text = "".join(out)
     return TEMPLATE_CALL_CLEANUP_RE.sub("", text)
+
+
+def _strip_tool_residue(text: str) -> str:
+    """Remove orphan tool-call markup (see TOOL_RESIDUE_RE) from visible text.
+
+    A reply that was NOTHING but a fragment must come out empty, so the
+    empty-response backstop can act on it instead of raw markup reaching the
+    bubble. Blank lines left where a block was removed are collapsed.
+    """
+    return re.sub(r"\n{3,}", "\n\n", TOOL_RESIDUE_RE.sub("", text)).strip()
+
+
+def _empty_content_fallback(edit_session: "EditSession | None") -> str:
+    """What to show when the model produced no visible text at all.
+
+    The generic "try rephrasing" line is actively misleading once the tool
+    turns have STAGED work: the review card sits right there while the bubble
+    says nothing happened. In the bank106-r1 sweep (2026-09-29) that hit 11
+    qids in ONE model's run — every one of them with a valid pendingEdits
+    payload. Name the staged changes instead; the user's next action is to
+    review them, not to rephrase the question.
+    """
+    edits = list(getattr(edit_session, "pending_edits", None) or [])
+    if not edits:
+        return ("I wasn't able to generate a response. "
+                "Please try rephrasing your question.")
+    files: list[str] = []
+    for edit in edits:
+        name = edit.get("file") if isinstance(edit, dict) else None
+        if name and name not in files:
+            files.append(name)
+    plural = "change" if len(edits) == 1 else "changes"
+    where = f" to {', '.join(files)}" if files else ""
+    return (
+        f"I staged {len(edits)} {plural}{where} for your review, but my "
+        "summary didn't come through. Approve or discard the card below — "
+        "or ask me to explain the change."
+    )
 
 
 def _extract_tool_calls(text: str) -> list[dict]:
@@ -3644,6 +3702,7 @@ async def chat_proxy(req: ChatRequest):
                 or DSML_CLEANUP_RE.search(current_content)
                 or XML_TOOL_CALLS_CLEANUP_RE.search(current_content)
                 or UNTERMINATED_TOOL_FENCE_RE.search(current_content)
+                or TOOL_RESIDUE_RE.search(current_content)
             )
             final_content = _strip_template_pythonic_calls(current_content).strip()
             final_content = MCP_TOOL_BLOCK_RE.sub("", final_content).strip()
@@ -3656,6 +3715,9 @@ async def chat_proxy(req: ChatRequest):
             # otherwise leak raw markup into the bubble — it always extends
             # to end of content, so a tail-strip is safe.
             final_content = UNTERMINATED_TOOL_FENCE_RE.sub("", final_content).strip()
+            # Tail-only native-call fragments (no opener for the regexes
+            # above to anchor on) — same reason as the unterminated fence.
+            final_content = _strip_tool_residue(final_content)
             # If the cleanup left nothing but the original was a tool call,
             # don't restore the raw tool call text — return empty instead.
             if not final_content and not had_tool_blocks:
@@ -3812,6 +3874,7 @@ async def chat_proxy(req: ChatRequest):
                 final_content = _strip_bracket_tool_calls(final_content).strip()
                 final_content = DSML_CLEANUP_RE.sub("", final_content).strip()
                 final_content = XML_TOOL_CALLS_CLEANUP_RE.sub("", final_content).strip()
+                final_content = _strip_tool_residue(final_content)
 
             # Collect tool names used during the MCP tool loop. Native tool
             # calls don't leave `[Tool result: ...]` messages, so fall back
@@ -3870,16 +3933,18 @@ async def chat_proxy(req: ChatRequest):
             )
             if not final_content:
                 logger.warning(
-                    "Empty final content after %d tool turns (%d re-prompts)",
+                    "Empty final content after %d tool turns (%d re-prompts) "
+                    "| staged=%d — using fallback",
                     tool_turns, empty_reprompts,
+                    len(getattr(edit_session, "pending_edits", None) or []),
                 )
                 # Never surface a blank bubble: the UI would show "No response."
                 # The re-prompt loop already burned EMPTY_REPROMPT_LIMIT queries,
                 # so return an explicit fallback the user can act on instead.
-                final_content = (
-                    "I wasn't able to generate a response. "
-                    "Please try rephrasing your question."
-                )
+                # When the tool turns DID stage work, name it — a "try
+                # rephrasing" line next to a live review card reads as a
+                # failure that never happened (bank106-r1, 11 qids).
+                final_content = _empty_content_fallback(edit_session)
 
             return {
                 "content": final_content,
