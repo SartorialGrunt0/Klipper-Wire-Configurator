@@ -117,6 +117,20 @@ one model per run (runs under `reports/ai-chat-accuracy/bank106-r1-*`):
 | qwen3.8-27B | Thor | 89/106 | 84% | 12 |
 | qwen3.5-9b | CachyPC | 86/106 | 81% | 0 |
 
+**One row is now superseded by a measurement.** `gemma-4-12b` was re-run on the
+full bank under the round-1 + round-2 criteria
+(`reports/ai-chat-accuracy/bank106-r2-full-cachypc-gemma-4-12b`): **102/106, 0
+errored** — exactly the projection, so the other projected rows below are the
+more credible for it. The 4 remaining non-passes are `MACRO-03` (fixed the macro
+correctly but staged it into a NEW `fix_me.cfg` + include — the criterion's
+`any_of` covers staging into printer.cfg or a display block, not a third file),
+`AMBI-02` (the registry kickback refused the new file, and the model went on to
+stage 12 section DELETIONS in printer.cfg — partial, destructive in effect if
+approved), `SKILL-N04` (the open nudge question) and `ACK-N01` (conditional
+pass, no tool needed). `COMMENT-02` and `SKILL-N01` flipped the other way
+(model variance — neither was edited in either round), which is the reminder
+that ±1 on a single run is noise.
+
 Errored = per-request failure (provider 5xx or the 600 s timeout), not a model
 miss. Errored qids were re-run where possible; `qwen3.8-27B` kept 12 timeouts
 (its 600 s loops), so its row is understated — 3 of its misses are `COMMENT` and
