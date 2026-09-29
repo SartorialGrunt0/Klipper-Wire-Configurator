@@ -2739,12 +2739,25 @@ def criterion_ok(kind: str, value: str, content: str,
     if kind == "staged_param_ci":
         # Case-insensitive sibling of staged_param, for criteria that name a
         # PARAMETER or a numeric VALUE — never a section header.
-        # Klipper normalises both channels, so casing there carries no
-        # meaning: gcode params are upper-cased (klippy/gcode.py:274
-        # `{k.upper(): v}`) and config option names are lower-cased
-        # (klippy/configfile.py uses configparser.RawConfigParser, whose
-        # default optionxform is str.lower). Section names are NOT
-        # normalised, which is why those stay on the case-sensitive kind.
+        # Klipper normalises both parameter channels, so casing there carries
+        # no meaning: gcode params are upper-cased (klippy/gcode.py:210
+        # `self.args_r.split(line.upper())` for traditional params, and
+        # :274 `{k.upper(): v}` for extended KEY=VALUE params), and config
+        # OPTION names are lower-cased (configparser.RawConfigParser's
+        # default optionxform — verified: fileconfig.options('Printer')
+        # returns ['kinematics'] and has_option matches either case).
+        #
+        # SECTION names are deliberately NOT covered. Verified against
+        # Klipper 2026-09: the parser stores section headers verbatim
+        # (build_fileconfig returns 'Printer', 'Bed_Mesh', 'stepper_X'
+        # unchanged), and load_object (klippy.py:92-102) resolves the
+        # section's TYPE token to a module FILENAME — extras/<token>.py.
+        # That lookup is literal, so `bed_mesh` loads and `Bed_Mesh` raises
+        # "Unable to load module". (The INSTANCE part after the type token
+        # is a separate story: gcode_macro.py:130 does name.upper() for the
+        # command alias, so `[gcode_macro park_z]` and `[gcode_macro
+        # PARK_Z]` register the same command. Macro-name criteria on the
+        # case-sensitive kind are correspondingly stricter than Klipper.)
         filename, _, needle = value.partition("::")
         needle_l = needle.lower()
         for edit in pending_edits or []:
