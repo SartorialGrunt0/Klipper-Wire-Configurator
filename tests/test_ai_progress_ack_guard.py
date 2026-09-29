@@ -121,6 +121,22 @@ def test_continue_intent_clarifying_question_not_matched():
         "I'll update max_accel — which value do you want, 3000 or 4000?")
 
 
+def test_continue_intent_relative_clause_promises_still_matched():
+    """Round-2 review 2026-09-29: the first clarify-exclusion used bare
+    'which'/'what' triggers, exempting every promise with a relative
+    clause. These are stalls dressed as sentences — the guard must still
+    fire on them."""
+    assert ai_routes._ends_with_continue_intent(
+        "I'll now update the [printer] section which contains max_accel.")
+    assert ai_routes._ends_with_continue_intent(
+        "I'll apply the change which corrects the offset now.")
+    assert ai_routes._ends_with_continue_intent("I'll do what you asked now.")
+    assert ai_routes._ends_with_continue_intent(
+        "Let me now apply what we discussed.")
+    assert ai_routes._ends_with_continue_intent(
+        "I will make the change which you requested now.")
+
+
 def test_continue_intent_complete_answer_not_matched():
     # Answered question that merely MENTIONS a future action early: the
     # tail is the answer, not a promise. The guard must never gaslight a

@@ -2126,15 +2126,29 @@ class McpServer:
                 ]
             parts: list[str] = []
             missing: list[str] = []
+            ambiguous: list[str] = []
             for name in section_names:
                 section_text = self._extract_config_section(content, name)
                 if section_text is None:
-                    missing.append(name)
+                    # Round-2 review 2026-09-29: a case-variant collision
+                    # resolves to None too — report it as ambiguous with
+                    # its candidates, like the single-section path, not
+                    # under 'not found' (the retry-loop shape live report
+                    # 2026-09-27 added the ambiguity message to stop).
+                    _idx, candidates = self._locate_config_section(content, name)
+                    if candidates:
+                        listed = ", ".join(f"[{c}]" for c in candidates)
+                        ambiguous.append(
+                            f'Multiple sections match "{name}" — read one of: {listed}'
+                        )
+                    else:
+                        missing.append(name)
                 else:
                     parts.append(
                         f"# {display_name}{src} (User Config - section [{name}] partial "
                         "context; the file may have more sections)\n\n" + section_text
                     )
+            parts.extend(ambiguous)
             if missing:
                 parts.append(
                     f"Sections not found in {display_name}{src}: {', '.join(missing)}. "
@@ -2245,20 +2259,19 @@ class McpServer:
             headers.append(m.group(1).strip() if m else "")
 
         # Full-header comparison: exact spelling first, then a UNIQUE
-        # case-insensitive match.
+        # case-insensitive SPELLING (round-2 review 2026-09-29: uniqueness
+        # counts distinct spellings like the edit side, not line indices —
+        # two verbatim-identical headers are one spelling and resolve).
         for i, header in enumerate(headers):
             if header and header == branch_raw:
                 return i, []
-        ci_hits = [i for i, header in enumerate(headers)
-                   if header and header.lower() == branch]
-        if len(ci_hits) == 1:
-            return ci_hits[0], []
-        if len(ci_hits) > 1:
-            candidates: list[str] = []
-            for i in ci_hits:
-                if headers[i] not in candidates:
-                    candidates.append(headers[i])
-            return None, candidates
+        ci_hits = [(i, h) for i, h in enumerate(headers)
+                   if h and h.lower() == branch]
+        ci_distinct = list(dict.fromkeys(h for _, h in ci_hits))
+        if len(ci_distinct) == 1:
+            return ci_hits[0][0], []
+        if len(ci_distinct) > 1:
+            return None, ci_distinct
 
         # Bare-name fallback (live report 2026-09-27): the chat model addresses
         # a macro by its bare name ('Level_Bed') instead of the full header
@@ -2269,20 +2282,14 @@ class McpServer:
         # one of several.
         if not branch:
             return None, []
-        matched: list[str] = []
-        hit_index: int | None = None
+        matched: list[tuple[int, str]] = []
         for i, header in enumerate(headers):
             if header and header.split()[-1].casefold() == branch.casefold():
-                matched.append(header)
-                if hit_index is None:
-                    hit_index = i
-        if len(matched) == 1:
-            return hit_index, []
-        candidates: list[str] = []
-        for header in matched:
-            if header not in candidates:
-                candidates.append(header)
-        return None, candidates
+                matched.append((i, header))
+        matched_distinct = list(dict.fromkeys(h for _, h in matched))
+        if len(matched_distinct) == 1:
+            return matched[0][0], []
+        return None, matched_distinct
 
     def _extract_config_section(self, content: str, section_name: str) -> str | None:
         """Return the raw text of one config section: banner comments above the

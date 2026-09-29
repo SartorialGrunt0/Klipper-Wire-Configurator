@@ -36,6 +36,7 @@ from services.ai_edit_tools import (
     format_approval_result,
     get_approval,
     remove_approval,
+    was_decided,
 )
 
 router = APIRouter()
@@ -407,6 +408,11 @@ async def chat_approval_decide(req: ApprovalDecisionRequest):
     """
     approval = get_approval(req.approvalId)
     if approval is None:
+        # A decided-then-removed card answers already_decided, not
+        # not_found (race: the loop completed between the first decision
+        # and this POST). See remove_approval()'s tombstone.
+        if was_decided(req.approvalId):
+            return {"status": "already_decided"}
         return {"status": "not_found"}
     if req.decision not in ("approve", "decline"):
         return {"status": "invalid", "reason": "decision must be approve or decline"}
@@ -467,9 +473,14 @@ _CONTINUE_INTENT_RE = re.compile(
 # are an interaction, not a stall — checked BEFORE the promise match so
 # 'I'll update max_accel — which value do you want?' stays unanswered
 # (final-pass review 2026-09-29).
+# Round-2 review 2026-09-29: bare 'which'/'what' triggers over-exempted —
+# relative clauses ("I'll apply the change which corrects the offset
+# now.") are promises, not asks. Interrogatives must be tied to the
+# USER (do you / should I / you want...) or a final '?'.
 _CLARIFYING_TAIL_RE = re.compile(
-    r"(?:\?|which\b|what\b|do you (?:want|prefer|mean|need)|should i|"
-    r"let me know|i(?:'ll| will) need to know|i need (?:you to|which))",
+    r"(?:\?|do you (?:want|prefer|mean|need)|should i|let me know|"
+    r"i(?:'ll| will) need to know|i need (?:you to|which)|"
+    r"\b(?:which|what)(?:\s+\S+)?\s+(?:do|does|would|should|can|will)\s+(?:i|you)\b)",
     re.IGNORECASE,
 )
 

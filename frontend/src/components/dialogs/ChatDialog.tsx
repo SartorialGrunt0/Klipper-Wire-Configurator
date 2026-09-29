@@ -790,8 +790,12 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       // (or the poll to install a NEW card). If OUR card is gone, this
       // response must touch nothing but the busy flag — clearing or
       // annotating a card the user hasn't decided yet is a phantom.
+      // Round-2 review 2026-09-29: busy is GLOBAL, not per-card — if the
+      // slot holds a NEWER card whose own decision is in flight
+      // (busy=true), dropping our stale response must not unlock it.
+      // Only clear busy when nothing owns it anymore (slot empty).
       if (approvalCardRef.current?.approvalId !== card.approvalId) {
-        setApprovalBusy(false);
+        if (approvalCardRef.current === null) setApprovalBusy(false);
         return;
       }
       if (result.status === 'invalidated') {
@@ -825,8 +829,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     } catch {
       if (approvalCardRef.current?.approvalId === card.approvalId) {
         setApprovalInvalidation('Approval request failed — check the backend connection.');
+        setApprovalBusy(false);
+      } else if (approvalCardRef.current === null) {
+        setApprovalBusy(false);
       }
-      setApprovalBusy(false);
     }
   }, [approvalBusy, buildDecisionContext]);
 

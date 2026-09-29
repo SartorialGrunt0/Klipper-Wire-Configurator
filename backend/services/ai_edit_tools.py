@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import OrderedDict
 
 from services.ai_draft_project import ProjectState
 
@@ -474,6 +475,22 @@ class EditSession:
                 for part in ("file", "section", "key")))
         return None
 
+    def _resolved_op_target(self, op: dict) -> tuple | None:
+        """_op_target over the RESOLVED identifiers. Round-2 review
+        2026-09-29: committed_ops stores the UNRESOLVED op and apply()
+        resolves internally, so raw comparison missed bare-name <->
+        full-header respells ('Level_Bed' vs 'gcode_macro level_bed') and
+        path aliases of the same decided target. ProjectState.
+        _resolve_op_section is the same resolve-only rewrite every op
+        goes through (pure — returns a rewritten dict, mutates nothing);
+        resolution is best-effort: anything unresolvable falls back to
+        the raw spelling, same as apply() does."""
+        try:
+            resolved = self.state._resolve_op_section(op)
+        except Exception:
+            resolved = op
+        return self._op_target(resolved)
+
     def _duplicate_of_committed(self, op: dict) -> dict | None:
         """If this op re-overwrites a target already committed THIS
         request, return the committed result; else None.
@@ -486,11 +503,11 @@ class EditSession:
         (auto-decline window). A repeat on an identical target within one
         request is mechanically detectable; block it with an honest
         kickback instead of opening another card."""
-        target = self._op_target(op)
+        target = self._resolved_op_target(op)
         if target is None:
             return None
         for entry in reversed(self.committed_ops):
-            if self._op_target(entry.get("raw_op") or {}) == target:
+            if self._resolved_op_target(entry.get("raw_op") or {}) == target:
                 return entry
         return None
 
@@ -1013,6 +1030,13 @@ APPROVAL_TIMEOUT_SECONDS = float(_os.environ.get("KWC_EDIT_APPROVAL_TIMEOUT", "9
 # stateless w.r.t. sessions.
 _pending_approvals: dict[str, "ApprovalRequest"] = {}
 
+# Decided approval ids that have been removed from _pending_approvals
+# (bounded): lets the decision endpoint answer 'already_decided' instead
+# of 'not_found' when a second POST races the loop's cleanup. See
+# remove_approval().
+_decided_approvals: "OrderedDict[str, None]" = OrderedDict()
+_DECIDED_TOMBSTONES_MAX = 256
+
 
 class ApprovalRequest:
     """One suspended validated write awaiting the user's decision.
@@ -1172,7 +1196,21 @@ def find_approval_for_request(request_id: str) -> ApprovalRequest | None:
 
 
 def remove_approval(approval_id: str) -> None:
+    # Tombstone (review 2026-09-29): the loop removes the entry the moment
+    # its decision resolves, so a SECOND decision POST racing the request's
+    # completion got 'not_found' while the same double-click a millisecond
+    # earlier got 'already_decided' (flaky test_double_decision_rejected:
+    # ~1/6). A decided id never becomes undecided — answer honestly from
+    # the tombstone. Bounded LRU, no unbounded growth.
+    _decided_approvals[approval_id] = None
+    while len(_decided_approvals) > _DECIDED_TOMBSTONES_MAX:
+        _decided_approvals.popitem(last=False)
     _pending_approvals.pop(approval_id, None)
+
+
+def was_decided(approval_id: str) -> bool:
+    """True when this id was decided and already removed from pending."""
+    return approval_id in _decided_approvals
 
 
 def format_approval_result(name: str, decision: dict) -> tuple[str, dict | None]:

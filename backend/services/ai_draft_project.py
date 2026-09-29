@@ -1305,18 +1305,18 @@ class ProjectState:
         filename = (op.get('file') or '').strip()
         if not filename:
             return _state_error('Missing required argument: file')
-        # Final-pass review 2026-09-29: this was the ONE file-taking op that
-        # bypassed _require_file, testing `filename in self.files` case-
-        # sensitively — config_write file='Printer.cfg' staged a case-
-        # variant SIBLING of the real printer.cfg, breaking the invariant
-        # the rest of this module enforces ("a case variant can never reach
-        # the config"). Compare the full relative path casefolded (two
-        # paths in different directories ARE distinct files; two spellings
-        # of one path are not).
-        same_ci = [f for f in self.files
-                   if f.casefold() == filename.casefold()]
-        if same_ci:
-            real = same_ci[0]
+        # Final-pass review 2026-09-29 + round-2: existence goes through
+        # _resolve_file_ref — the SAME resolver every other file op uses —
+        # so case variants ('Printer.cfg') and path aliases ('./printer.
+        # cfg', '.\\printer.cfg') all land on the real key and refuse
+        # instead of staging a sibling. A collision the resolver refuses
+        # to guess (two project keys differing only by case) is likewise
+        # 'already exists': creating a third spelling is never the move.
+        resolved_existing = _resolve_file_ref(filename, self.files)
+        if resolved_existing is not None or any(
+                f.casefold() == filename.casefold() for f in self.files):
+            real = resolved_existing or next(
+                f for f in sorted(self.files) if f.casefold() == filename.casefold())
             return _state_error(
                 f"File '{filename}' already exists"
                 + (f" as '{real}'" if real != filename else '')

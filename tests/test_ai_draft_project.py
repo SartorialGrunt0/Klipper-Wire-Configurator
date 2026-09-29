@@ -254,6 +254,32 @@ def test_patch_section_deletion():
 
 # ── sections ────────────────────────────────────────────────────────────
 
+def test_new_file_path_alias_of_existing_is_refused(tmp_path):
+    """Round-2 review 2026-09-29: the E1 fix compared raw strings
+    casefolded, so './printer.cfg' / './/printer.cfg' staged a sibling —
+    while _resolve_file_ref treats those as the SAME file. Existence must
+    go through the same resolver."""
+    st = ProjectState.from_context_files(
+        {'printer.cfg': {'content': '[printer]\nkinematics: corexy\n'}})
+    base = st.validate()
+    for alias in ('./printer.cfg', './/printer.cfg', '.\\printer.cfg'):
+        st2, r = st.apply(base, {'op': 'new_file', 'file': alias,
+                                 'content': '[gcode_macro ZZZ]\ngcode:\n    G28\n'})
+        assert r['status'] == 'error', alias
+        assert 'already exists' in r['error'], alias
+        assert sorted(st2.files) == ['printer.cfg'], alias
+
+
+def test_new_file_in_subdirectory_is_still_created(tmp_path):
+    st = ProjectState.from_context_files(
+        {'printer.cfg': {'content': '[printer]\nkinematics: corexy\n'}})
+    base = st.validate()
+    st2, r = st.apply(base, {'op': 'new_file', 'file': 'macros/park.cfg',
+                             'content': '[gcode_macro PARK]\ngcode:\n    G28\n'})
+    assert r['status'] in ('applied', 'applied_with_advisory'), r
+    assert 'macros/park.cfg' in st2.files
+
+
 def test_add_section_clean():
     st, base = _state()
     st1, r = st.apply(base, {'op': 'add_section', 'file': 'printer.cfg',

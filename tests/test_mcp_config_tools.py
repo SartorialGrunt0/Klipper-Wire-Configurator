@@ -494,6 +494,56 @@ def test_full_header_casefold_collision_refuses_like_the_edit_side(tmp_path):
     assert "G28" not in out and "G29" not in out
 
 
+def test_exact_case_wins_when_the_twin_comes_first(tmp_path):
+    """Round-2 review 2026-09-29: the SECTIONS fixture happens to put the
+    exact-cased twin first, which made the old first-hit logic pass this
+    case by luck. Load-bearing version: wrong-case twin BEFORE the exact
+    spelling — the exact request must still win."""
+    server = mcp_server.McpServer()
+    user_dir = tmp_path / "user_configs"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    (user_dir / "printer.cfg").write_text(
+        "[gcode_macro level]\ngcode:\n    G29\n\n"
+        "[gcode_macro Level]\ngcode:\n    G28\n", encoding="utf-8")
+    mcp_server.LOCAL_CONFIGS_DIR = user_dir
+    mcp_server._system_config_path = lambda: tmp_path / "system_config"
+    out = _read_section(server, "gcode_macro Level")
+    assert "G28" in out
+    assert "G29" not in out
+
+
+def test_duplicate_identical_headers_resolve_like_the_edit_side(tmp_path):
+    """Round-2 review 2026-09-29: uniqueness must count distinct
+    SPELLINGS (like _resolve_section_ref), not line indices — two verbatim
+    identical headers are one spelling; the edit side resolves it."""
+    server = mcp_server.McpServer()
+    user_dir = tmp_path / "user_configs"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    (user_dir / "printer.cfg").write_text(
+        "[gcode_macro LEVEL]\ngcode:\n    G28\n\n"
+        "[gcode_macro LEVEL]\ngcode:\n    G29\n", encoding="utf-8")
+    mcp_server.LOCAL_CONFIGS_DIR = user_dir
+    mcp_server._system_config_path = lambda: tmp_path / "system_config"
+    out = _read_section(server, "gcode_macro level")
+    assert "Multiple sections match" not in out
+    assert "G28" in out
+
+
+def test_batch_read_reports_collision_as_ambiguous_not_absent(tmp_path):
+    """Round-2 review 2026-09-29: the batch path (sections=[...]) dropped
+    the resolver's candidate list and reported the collision under
+    'Sections not found' — the retry-loop shape the ambiguity message was
+    added to stop (live report 2026-09-27)."""
+    server = _sections_server(tmp_path)
+    out = _call(server, "read_user_config", {
+        "filename": "printer.cfg",
+        "sections": ["gcode_macro LEVEL", "fan_generic My_Fan"]})
+    assert "Multiple sections match" in out
+    assert "[gcode_macro Level]" in out and "[gcode_macro level]" in out
+    assert "pin: PA1" in out          # the good section still reads
+    assert "not found" not in out.lower()
+
+
 def test_ambiguous_bare_name_lists_candidates(tmp_path):
     server = _sections_server(tmp_path)
     out = _read_section(server, "Level")

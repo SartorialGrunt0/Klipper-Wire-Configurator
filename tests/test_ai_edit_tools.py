@@ -376,6 +376,34 @@ def test_session_duplicate_guard_sees_through_case_variants():
     assert 'DUPLICATE TARGET' in c2
 
 
+def test_session_duplicate_guard_resolves_before_comparing():
+    """Round-2 review 2026-09-29: committed_ops stores the UNRESOLVED op
+    and the guard compared raw strings, so a bare-name <-> full-header
+    respell of the SAME resolved target slipped past DUPLICATE TARGET and
+    opened a second approval card for a decided target — the exact
+    nudge-copy scenario the guard exists for. Resolve both sides first."""
+    session = EditSession(_ctx())
+    c1, d1 = session.execute({
+        'name': 'config_edit',
+        'arguments': {'file': 'printer.cfg', 'op': 'set_param',
+                      'section': 'PRINT_START', 'key': 'description',
+                      'value': 'first'}})
+    assert d1 is not None, c1
+    session.commit(session.state, 'config_edit',
+                   {'file': 'printer.cfg', 'op': 'set_param',
+                    'summary': 'x'},
+                   raw_op={'op': 'set_param', 'file': 'printer.cfg',
+                           'section': 'PRINT_START', 'key': 'description',
+                           'value': 'first'})
+    c2, d2 = session.execute({
+        'name': 'config_edit',
+        'arguments': {'file': 'printer.cfg', 'op': 'set_param',
+                      'section': 'gcode_macro print_start',
+                      'key': 'description', 'value': 'second'}})
+    assert d2 is None
+    assert 'DUPLICATE TARGET' in c2
+
+
 def test_session_config_write_new_file_plus_include():
     session = EditSession(_ctx())
     content, details = session.execute({
