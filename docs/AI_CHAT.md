@@ -101,11 +101,12 @@ How it works:
 | Ack Guard (ACK-01/02, ACK-N01) | Mid-loop ack-guard probes (Phase 6.5.5): the same single-value edit pinned to native AND text protocol with `expect_no_ack_stall` (a promise-with-no-action rescued by the injected directive FAILS even when the staged artifact is right), plus a pure-Q&A case the guard must never touch. Run as `--questions ACK,ACK-N`. |
 | Optional Memory Check (MEMORY-01..03) | Adds printer-memory auto-fill checks when the `--include-memory` flag is used. |
 
-### Current results
+### Baselines (pre-fix)
 
-Baselines on `improvement/ai-chat-edit-refactor` @ `9c6bdf4`, **full 106-question
-bank**, native tool protocol, `--max-tokens 8192 --temperature 0.7`, edit tools on,
-one model per run (runs under `reports/ai-chat-accuracy/bank106-r1-*`):
+Full 106-question bank on `improvement/ai-chat-edit-refactor` @ `9c6bdf4`, native
+tool protocol, `--max-tokens 8192 --temperature 0.7`, edit tools on, one model per
+run (runs under `reports/ai-chat-accuracy/bank106-r1-*`). These numbers still
+carry the four round-1 harness false negatives and the four round-2 ones:
 
 | Model | Host | PASS | Rate | Errored |
 | --- | --- | --- | --- | --- |
@@ -117,42 +118,50 @@ one model per run (runs under `reports/ai-chat-accuracy/bank106-r1-*`):
 | qwen3.8-27B | Thor | 89/106 | 84% | 12 |
 | qwen3.5-9b | CachyPC | 86/106 | 81% | 0 |
 
-**One row is now superseded by a measurement.** `gemma-4-12b` was re-run on the
-full bank under the round-1 + round-2 criteria
-(`reports/ai-chat-accuracy/bank106-r2-full-cachypc-gemma-4-12b`): **102/106, 0
-errored** — exactly the projection, so the other projected rows below are the
-more credible for it. The 4 remaining non-passes are `MACRO-03` (fixed the macro
-correctly but staged it into a NEW `fix_me.cfg` + include — the criterion's
-`any_of` covers staging into printer.cfg or a display block, not a third file),
-`AMBI-02` (the registry kickback refused the new file, and the model went on to
-stage 12 section DELETIONS in printer.cfg — partial, destructive in effect if
-approved), `SKILL-N04` (the open nudge question) and `ACK-N01` (conditional
-pass, no tool needed). `COMMENT-02` and `SKILL-N01` flipped the other way
-(model variance — neither was edited in either round), which is the reminder
-that ±1 on a single run is noise.
-
 Errored = per-request failure (provider 5xx or the 600 s timeout), not a model
 miss. Errored qids were re-run where possible; `qwen3.8-27B` kept 12 timeouts
 (its 600 s loops), so its row is understated — 3 of its misses are `COMMENT` and
 1 is `RENAME`, families where the shortfall is infra, not quality. `gemma-4-26B-A4B`
 has one genuine repeat-timeout (`AMBI-02`).
 
-**The table above is PRE-FIX scoring.** The four harness false negatives it
-still counts were corrected on 2026-09-28 (see below) and the affected qids have
-not been re-run, so the "adjusted" column is a *prediction* of the next run, not
-a measured result:
+### Updated (post-fix)
 
-| Model | raw | adjusted | credits |
-| --- | --- | --- | --- |
-| gemma-4-12b | 97 | 98 | AMBI-07 |
-| qwen3.6-35B-A3B | 97 | 98 | Q19 |
-| gemma-4-26B-A4B | 97 | 98 | AMBI-07 |
-| gemma-4-e4b | 91 | 93 | MACRO-01, AMBI-07 |
-| qwen3.5-4b | 90 | 91 | AMBI-07 |
-| qwen3.8-27B | 89 | 89+ | (AMBI-07 errored — unknown) |
-| qwen3.5-9b | 86 | 86 | — |
+Eight harness false negatives were corrected across two rounds (2026-09-28 →
+09-29, see below), plus one premise-conflict question reworded (`SETUP-02`). The
+bank edits touched **nine qids and nothing else**, so re-running those nine on a
+model settles its whole score: every other qid's verdict is unaffected by
+construction. Runs: `bank106-r2-spotfix-*`.
 
-Family detail (raw PASS/total):
+| Model | Host | Baseline | Updated | Evidence |
+| --- | --- | --- | --- | --- |
+| gemma-4-12b | CachyPC | 97/106 | **102/106** | **full bank re-run** — measured |
+| gemma-4-26B-A4B | Thor | 97/106 | **102/106** | 9-qid spot (+5) |
+| qwen3.6-35B-A3B | Thor | 97/106 | **100/106** | 9-qid spot (+3) |
+| qwen3.5-4b | CachyPC | 90/106 | **95/106** | 9-qid spot (+5; `Q19` recovered from a provider 500) |
+| gemma-4-e4b | CachyPC | 91/106 | **93/106** | 9-qid spot (+3, −1: `SETUP-02`) |
+| qwen3.8-27B | Thor | 89/106 | **93/106** | 9-qid spot (+4; 3 were infra ERRORs, 9 timeouts still unmeasured) |
+| qwen3.5-9b | CachyPC | 86/106 | **88/106** | 9-qid spot (+3, −1: `MACRO-01`) |
+
+`gemma-4-12b` was re-run on the **full** bank to check the method: 102/106, 0
+errored, exactly the spot projection. Its seven flips up are `MACRO-01`,
+`TRIDENT-10`, `AMBI-07`, `SETUP-05`, `COMMENT-03` (the fixes) plus `COMMENT-02`
+and `SKILL-N01` (variance — neither was edited either round); the two down
+(`MACRO-03`, `AMBI-02`) are variance on untouched qids. Its four remaining
+non-passes are `MACRO-03` (fixed the macro correctly but staged it into a NEW
+`fix_me.cfg` + include — the criterion's `any_of` covers staging into
+printer.cfg or a display block, not a third file), `AMBI-02` (the registry
+kickback refused the new file and the model went on to stage 12 section
+**deletions** in printer.cfg — partial, and destructive in effect if approved),
+`SKILL-N04` (the open nudge question) and `ACK-N01` (conditional pass, no tool
+needed).
+
+Per-defect flips across all seven models: `COMMENT-03` +5, `SETUP-05` +5,
+`TRIDENT-10` +4, `MACRO-01` +3, `Q19` +3, `Q04` +2, `TOOL-05` +2, `AMBI-07` +1,
+`SETUP-02` +1 (against one regression each on `SETUP-02` and `MACRO-01`).
+`±1` on a single run is noise on this bank — only consistent, directional
+movement is evidence.
+
+### Family detail (baseline run, pre-fix)
 
 | Model | Q | MACRO | TRIDENT | HARNESS | MINIDIFF | AMBI | SETUP | LIVE | EDIT | RENAME | COMMENT | SKILL | SKILL-N | TOOL | ACK | ACK-N |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
