@@ -215,6 +215,13 @@ corrected in the harness:
   commented out, which the validator correctly refuses to stage; passing needed
   an unstated two-part swap (1 of 7 managed it). Retargeted to the optional
   `max_z_velocity`.
+- The rename criteria matched the macro **name** case-sensitively
+  (`[gcode_macro LEVEL_BED1]`), but Klipper upper-cases the alias
+  (`gcode_macro.py`: `self.alias = name.upper()`) and the command token before
+  dispatch, so `Level_Bed1` and `LEVEL_BED1` are the *same* command. Those
+  checks now use `staged_header` — type token exact (it resolves to a module
+  filename, so `[Gcode_Macro …]` genuinely fails to load), instance name
+  case-insensitive.
 
 Two latent scoring gaps were closed at the same time: `staged_param` was
 case-sensitive while `staged_regex` is not (Klipper normalises gcode param names

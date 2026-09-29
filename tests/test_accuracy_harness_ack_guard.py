@@ -208,3 +208,66 @@ def test_q19_clarification_accepts_natural_phrasing():
         harness.criterion_ok(k, v, "Sure! Here is a complete printer.cfg for "
                                    "a Voron 2.4 with an Octopus board.")
         for k, v in q.criteria)
+
+
+# ── staged_header: type token exact, instance name case-insensitive ────
+
+
+def _hdr(name, body="", *, op="add_section", file="printer.cfg"):
+    return [{"file": file, "op": op, "summary": "",
+             "newText": f"[{name}]\n{body}"}]
+
+
+def test_staged_header_name_case_is_not_observable():
+    # Klipper upper-cases the macro alias (gcode_macro.py:130) and
+    # upper-cases the command token before dispatch (gcode.py:210), so
+    # '[gcode_macro probe_accuracy]' and '[gcode_macro PROBE_ACCURACY]'
+    # register the SAME command. A case difference in the NAME is not a
+    # defect.
+    want = "printer.cfg::gcode_macro LEVEL_BED1"
+    for name in ("gcode_macro LEVEL_BED1", "gcode_macro level_bed1",
+                 "gcode_macro Level_Bed1"):
+        assert _crit("staged_header", want, edits=_hdr(name)) is True, name
+
+
+def test_staged_header_type_token_stays_case_sensitive():
+    # The type token resolves to a module FILENAME (klippy.py:92-102:
+    # extras/<token>.py), so '[Gcode_Macro x]' fails to load.
+    want = "printer.cfg::gcode_macro LEVEL_BED1"
+    assert _crit("staged_header", want,
+                 edits=_hdr("Gcode_Macro LEVEL_BED1")) is False
+    assert _crit("staged_header", want,
+                 edits=_hdr("GCODE_MACRO LEVEL_BED1")) is False
+
+
+def test_staged_header_rejects_a_different_name_and_a_bare_header():
+    want = "printer.cfg::gcode_macro LEVEL_BED1"
+    assert _crit("staged_header", want,
+                 edits=_hdr("gcode_macro level_bed1_extra")) is False
+    # The dropped-prefix defect RENAME-02 covers: a bogus '[level_bed1]'
+    # is a different TYPE token entirely.
+    assert _crit("staged_header", want, edits=_hdr("level_bed1")) is False
+
+
+def test_staged_header_ignores_commented_out_headers():
+    edits = [{"file": "printer.cfg", "op": "uncomment_section", "summary": "",
+              "newText": "#[gcode_macro Level_Bed1]\n#gcode:\n#    G28\n"}]
+    assert _crit("staged_header", "printer.cfg::gcode_macro Level_Bed1",
+                 edits=edits) is False
+
+
+def test_staged_header_plain_section_requires_exact():
+    # No space -> the whole header is the type token -> exact only.
+    assert _crit("staged_header", "printer.cfg::stepper_x",
+                 edits=_hdr("stepper_x")) is True
+    assert _crit("staged_header", "printer.cfg::stepper_x",
+                 edits=_hdr("Stepper_X")) is False
+
+
+def test_rename_criteria_use_staged_header():
+    ren = {q.qid: q for q in harness.build_rename_questions()}
+    for qid in ("RENAME-01", "RENAME-03"):
+        kinds = [k for k, _ in ren[qid].criteria]
+        assert "staged_header" in kinds, qid
+    # RENAME-02 already relaxed to staged_regex (IGNORECASE).
+    assert "staged_regex" in [k for k, _ in ren["RENAME-02"].criteria]

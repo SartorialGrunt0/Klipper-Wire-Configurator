@@ -157,6 +157,10 @@ PROVIDER_ORDER = ["chatgpt", "google", "anthropic", "github", "openai-compatible
 #   staged_param_ci  same, case-insensitive — use for PARAMETER names and
 #                 numeric values (Klipper normalises those), never for
 #                 section headers (it does not)
+#   staged_header  "<file>::<header>" — a header exists whose TYPE token
+#                 matches exactly and whose INSTANCE NAME matches
+#                 case-insensitively (Klipper upper-cases gcode_macro
+#                 aliases, so a macro-name case difference is not observable)
 #   staged_count  "<n>" — exactly n files staged in pendingEdits
 #   not_staged    "<filename>" — that file has no staged entry
 #   not_staged_any  "" — NO file has a staged entry (use for "don't change
@@ -1334,7 +1338,7 @@ def build_edit_tool_questions() -> list[TestQuestion]:
             expected_tools=("config_write", "config_edit"),
             require_tool=False,
             criteria=(
-                ("staged_param", "park_macros.cfg::[gcode_macro PARK_Z]"),
+                ("staged_header", "park_macros.cfg::gcode_macro PARK_Z"),
                 ("staged_param", "printer.cfg::[include park_macros.cfg]"),
             ),
         ),
@@ -1416,10 +1420,13 @@ def build_rename_questions() -> list[TestQuestion]:
             expected_tools=("config_edit",),
             require_tool=True,
             criteria=(
-                # The prompt dictates the exact header, so a literal match
-                # is fair: the renamed section must exist...
-                ("staged_param", "printer.cfg::[gcode_macro LEVEL_BED1]"),
-                # ...and the OLD header must be gone (no duplicate/stale
+                # The renamed section must exist. staged_header compares the
+                # TYPE token exactly and the NAME case-insensitively: Klipper
+                # upper-cases the macro alias (gcode_macro.py:130), so
+                # 'LEVEL_BED1' and 'Level_Bed1' are the same command and a
+                # case difference is not an observable defect.
+                ("staged_header", "printer.cfg::gcode_macro LEVEL_BED1"),
+                # The OLD header must be gone (no duplicate/stale
                 # '[gcode_macro Level_Bed]' left behind).
                 ("staged_section_absent",
                  "printer.cfg::gcode_macro Level_Bed"),
@@ -1459,7 +1466,7 @@ def build_rename_questions() -> list[TestQuestion]:
             expected_tools=("config_edit",),
             require_tool=True,
             criteria=(
-                ("staged_param", "printer.cfg::[gcode_macro LEVEL_BED1]"),
+                ("staged_header", "printer.cfg::gcode_macro LEVEL_BED1"),
                 # Sole real caller: the bare 'Level_Bed' line inside
                 # [gcode_macro PRINT_START] (line ~569). The regex demands a
                 # line that BEGINS with the new macro name, so the cosmetic
@@ -1774,7 +1781,7 @@ def build_skill_gate_questions() -> list[TestQuestion]:
             expected_tools=("load_skill",),
             require_tool=True,
             criteria=(
-                ("staged_param", "dock_macros.cfg::[gcode_macro DOCK_Z]"),
+                ("staged_header", "dock_macros.cfg::gcode_macro DOCK_Z"),
                 ("staged_param", "printer.cfg::[include dock_macros.cfg]"),
             ),
         ),
@@ -2575,7 +2582,7 @@ def build_tool_coverage_questions() -> list[TestQuestion]:
             criteria=(),
             edit_criteria=(
                 ("staged_new_file", ""),
-                ("staged_param", "macros_park.cfg::[gcode_macro PARK_HEAD]"),
+                ("staged_header", "macros_park.cfg::gcode_macro PARK_HEAD"),
                 ("staged_param", "printer.cfg::[include macros_park.cfg]"),
             ),
         ),
@@ -2764,6 +2771,42 @@ def criterion_ok(kind: str, value: str, content: str,
             if edit.get("file") == filename and needle_l in (
                     edit.get("newText") or "").lower():
                 return True
+        return False
+    if kind == "staged_header":
+        # "<file>::<header>" — the staged file contains that section header,
+        # comparing the TYPE token EXACTLY and the INSTANCE NAME
+        # case-insensitively.
+        #
+        # Klipper is asymmetric here, so the criterion has to be too. The
+        # type token becomes a module filename (klippy.py:92-102 loads
+        # extras/<token>.py), so `[Gcode_Macro x]` fails to load. The
+        # instance name is only ever used uppercased — gcode_macro.py:130
+        # does `self.alias = name.upper()` and gcode dispatch upper-cases
+        # the command token first (gcode.py:210) — so '[gcode_macro
+        # probe_accuracy]' and '[gcode_macro PROBE_ACCURACY]' register the
+        # SAME command. Casing the name therefore changes nothing a user or
+        # a printer can observe; casing the type breaks the load.
+        #
+        # Use this for "a macro named X now exists". Include targets and
+        # plain sections stay on staged_param, where a case variant IS
+        # meaningful. Not expressible with staged_regex: that kind is
+        # compiled IGNORECASE throughout and would wrongly accept
+        # '[Gcode_Macro …]'.
+        filename, _, header = value.partition("::")
+        filename = filename.replace("\\.", ".")  # data-escaped dots
+        token, _, name = header.strip().partition(" ")
+        for e in pending_edits or []:
+            if e.get("file") != filename:
+                continue
+            for line in (e.get("newText") or "").splitlines():
+                match = re.match(r"^\s*\[([^\]]+)\]", line)
+                if not match:
+                    continue
+                got_token, _, got_name = match.group(1).strip().partition(" ")
+                if got_token != token:
+                    continue
+                if not name or got_name.casefold() == name.casefold():
+                    return True
         return False
     if kind == "staged_file":
         return any(e.get("file") == value for e in pending_edits or [])

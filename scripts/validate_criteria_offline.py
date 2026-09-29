@@ -124,6 +124,16 @@ NEGATIVE_CONTROLS = [
      {"response": "Sure! Here is a complete printer.cfg for a Voron 2.4 with an "
                   "Octopus board. Save it as printer.cfg.",
       "pending_edits": [], "tool_calls": []}),
+    ("RENAME-01: bogus '[level_bed1]' (dropped gcode_macro prefix)", "RENAME-01",
+     {"response": "Renamed.", "pending_edits": [
+         {"file": "printer.cfg", "op": "replace_section", "summary": "renamed",
+          "newText": "[level_bed1]\ngcode:\n    G28\n"}],
+      "tool_calls": []}),
+    ("RENAME-01: '[Gcode_Macro LEVEL_BED1]' (type token mis-cased)", "RENAME-01",
+     {"response": "Renamed.", "pending_edits": [
+         {"file": "printer.cfg", "op": "replace_section", "summary": "renamed",
+          "newText": "[Gcode_Macro LEVEL_BED1]\ngcode:\n    G28\n"}],
+      "tool_calls": []}),
     ("COMMENT-03: max_z_velocity left active", "COMMENT-03",
      {"response": "Done.", "pending_edits": [
          {"file": "printer.cfg", "op": "patch_section",
