@@ -1,4 +1,12 @@
-"""Probe: is `printer.cfg::[respond]` a legal target, or does the existing
+"""Probe which file/op routes the real EditSession ACCEPTS for a given change.
+
+Use before writing or widening a `staged_*` criterion: the answer decides
+which files the criterion must accept, and whether a question is passable at
+all. Two argument-shape pitfalls this probe exists to document: `set_param`
+needs `key`/`value` (not `param`), and `add_section`/`replace_section` take
+the section BODY only — passing the `[header]` line is a hard failure.
+
+Scenario below: is `printer.cfg::[respond]` a legal target, or does the existing
 empty `[respond]` in mainsail.cfg make it a duplicate-section error?
 
 Context: SETUP-05's criterion is file-scoped to printer.cfg
