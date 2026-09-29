@@ -1057,6 +1057,33 @@ def validate_config(config: ConfigFile, *, gcode_registry: bool = True) -> Valid
         section_counts[sec_type] = section_counts.get(sec_type, 0) + 1
 
         if sec_def is None:
+            # A KNOWN type written in the WRONG CASE is a hard fail, not an
+            # acknowledgeable typo (2026-09-29). Klipper's load_object
+            # resolves a section's type token to a module FILENAME —
+            # extras/<token>.py, a literal lookup (klippy.py:92-102) — so
+            # '[Gcode_Macro x]' raises "Unable to load module 'Gcode_Macro x'"
+            # while '[gcode_macro x]' loads. Checked BEFORE the ack path on
+            # purpose: an ack granted for the old warning must not silence a
+            # finding that can never be saved. A genuinely unknown token
+            # stays a warning below — it may be a plugin-provided section,
+            # which loads fine and is KWC's documented blind spot.
+            token = sec_type.split()[0] if sec_type else sec_type
+            folded = token.lower()
+            if token and folded != token and get_section_def(folded) is not None:
+                result.errors.append(ValidationError(
+                    severity="error",
+                    section=section.full_header,
+                    param="",
+                    message=(
+                        f"Section type '{token}' is not valid — Klipper "
+                        f"section types are case-sensitive and this one "
+                        f"resolves to a module file that does not exist, so "
+                        f"the config cannot load. Write '[{folded}"
+                        f"{sec_type[len(token):]}]'."),
+                    line_number=section.line_number,
+                    code="section_type_case",
+                ))
+                continue
             if canonicalize_section(section) in acknowledged_sections:
                 continue
             # Unknown section - just a warning

@@ -189,3 +189,29 @@ def test_absent_file_still_errors_and_names_the_known_files():
     assert details is None
     assert 'not in the project' in content
     assert 'printer.cfg' in content
+
+
+# ── a mis-cased TYPE token is a hard fail, not a case variant ─────────
+
+
+def test_miscased_type_token_on_a_new_section_is_refused_not_staged():
+    """The type token is not an identifier we can resolve — it names a
+    module file. '[Gcode_Macro x]' can never load, so the edit must not
+    stage with a mere advisory (2026-09-29)."""
+    session = EditSession(_ctx())
+    content, details = _edit(session, op='add_section', file='printer.cfg',
+                             section='Gcode_Macro Park_Head',
+                             text='gcode:\n    G28\n')
+    assert details is None
+    assert session.pending_edits == []
+    assert 'Gcode_Macro' in content
+    assert 'case-sensitive' in content
+
+
+def test_correct_case_type_token_still_stages():
+    session = EditSession(_ctx())
+    content, details = _edit(session, op='add_section', file='printer.cfg',
+                             section='gcode_macro Park_Head',
+                             text='gcode:\n    G28\n')
+    assert details is not None, content
+    assert '[gcode_macro Park_Head]' in session.pending_edits_payload()[0]['newText']
