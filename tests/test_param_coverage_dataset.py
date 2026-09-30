@@ -17,6 +17,8 @@ import re
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "backend"))
 
@@ -122,6 +124,10 @@ def _snapshot_module_exists(snapshot: Path, dotted: str) -> bool:
     return any(p.name.lower() == target for p in dirpath.glob("*.py"))
 
 
+@pytest.mark.skipif(
+    not (REPO_ROOT / "reference" / "klipper" / "klippy").is_dir(),
+    reason="reference/klipper tree not present (gitignored; regenerate manually)",
+)
 def test_every_recorded_section_has_evidence():
     """Every section in the dataset must be attributable to the bundled
     artifacts: a doc pattern or an owning module with load_config* in the
