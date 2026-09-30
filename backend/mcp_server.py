@@ -109,6 +109,95 @@ def _working_scan_items() -> "list[tuple[str, str]]":
     return list(_chat_working_overlay().items())
 
 
+# ── overlay dirtiness: "in the overlay" ≠ "unsaved" ────────────────────
+# The overlay means "this is the request's working state", NOT "this file
+# has unsaved changes". The chat session is seeded from the app's unsaved
+# drafts AND (TRIDENT-16) from the backend's disk mirror whenever the
+# client sends no contextFiles, so a pristine project lands in the overlay
+# too — on a fresh load every file does. Labelling all of them "unsaved"
+# told the model to distrust bytes that ARE the saved file, and left the
+# warning unable to flag the case it exists for (live report 2026-09-30:
+# fresh load, no edits, all 16 files marked unsaved; the label was
+# byte-identical whether or not anything was actually dirty).
+# The label is now earned: a file keeps it only when its working text
+# provably differs from the file on disk.
+
+
+def _normalize_config_eol(text: str) -> str:
+    """CRLF/CR → LF. The frontend's own dirty test normalises the same way
+    (utils/chatContext.ts), so a line-ending-only difference never reads as
+    an unsaved edit."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _disk_exact_user_config(rel: str) -> "Path | None":
+    """Exact (case-insensitive) on-disk match for a bare filename or a
+    nested relative path, or None when nothing matches.
+
+    Deliberately NOT `_resolve_user_config_file`: that one fuzzy-matches,
+    and a fuzzy hit on a session-only draft could pair it with an unrelated
+    file and call it clean. Precedence mirrors the resolver (local dir,
+    then system) so the compared file is the one a read would serve.
+    """
+    wanted = rel.strip().lower()
+    if not wanted:
+        return None
+    scan_paths: list[Path] = []
+    if LOCAL_CONFIGS_DIR.is_dir():
+        scan_paths.append(LOCAL_CONFIGS_DIR)
+    system_path = _system_config_path()
+    if system_path.is_dir():
+        scan_paths.append(system_path)
+    for scan_dir in scan_paths:
+        try:
+            for cfg_file in scan_dir.rglob("*.cfg"):
+                # Klipper SAVE_CONFIG backups are never user configs.
+                if is_backup_config_file(cfg_file.name):
+                    continue
+                if cfg_file.name.lower() == wanted:
+                    return cfg_file
+                try:
+                    rel_path = cfg_file.relative_to(scan_dir).as_posix()
+                except ValueError:
+                    continue
+                if rel_path.lower() == wanted:
+                    return cfg_file
+        except OSError:
+            continue
+    return None
+
+
+def _config_text_matches(path: Path, content: str) -> bool:
+    """True when `content` is equivalent (EOL-normalised) to `path`."""
+    try:
+        disk = path.read_bytes().decode("utf-8", errors="replace")
+    except OSError:
+        return False
+    return _normalize_config_eol(disk) == _normalize_config_eol(content)
+
+
+def _config_label_for_path(path: Path) -> str:
+    """The label list_user_configs gives this disk file: "pi-native" under
+    the system config dir, "imported" otherwise."""
+    try:
+        path.relative_to(_system_config_path())
+        return "pi-native"
+    except ValueError:
+        return "imported"
+
+
+def _overlay_is_dirty(rel: str, content: str) -> bool:
+    """True when the working-state text genuinely differs from the saved
+    file — i.e. the "unsaved" warning is factually true.
+
+    Conservative by design: a file that exists only in the session
+    (config_write draft), an unreadable one, or any text difference is
+    dirty. Only a proven match loses the label.
+    """
+    target = _disk_exact_user_config(rel)
+    return target is None or not _config_text_matches(target, content)
+
+
 def _system_config_path() -> Path:
     """Resolve the system config dir per call so a path change made in the
     frontend ("Open from Pi" → PUT /native/settings) takes effect without a
@@ -1770,7 +1859,9 @@ class McpServer:
             hit = self._score_user_config_text(rel_path, text, query_terms)
             if hit is None:
                 continue
-            hit["working"] = True
+            # Only a genuinely-unsaved file carries the warning (see
+            # _overlay_is_dirty); a clean overlay file is the saved file.
+            hit["working"] = _overlay_is_dirty(rel_path, text)
             results.append(hit)
 
         # Collect config files from both the system path and local fallback
@@ -1874,8 +1965,18 @@ class McpServer:
         # Working-state overlay first (chat): staged drafts — including
         # files that exist ONLY in the session (config_write) — join the
         # listing so add_include/read see them (live report 2026-09-25/27).
-        for rel in _chat_working_overlay():
-            seen.setdefault(rel, "working copy (unsaved)")
+        # The "unsaved" label is EARNED (live report 2026-09-30): the
+        # overlay also carries clean files whenever the session was seeded
+        # from the disk mirror, and calling those unsaved was both false
+        # and, because it was unconditional, useless as a signal. A file
+        # whose working text matches disk gets the disk label instead —
+        # identical to the listing with no chat session at all.
+        for rel, content in _chat_working_overlay().items():
+            on_disk = _disk_exact_user_config(rel)
+            if on_disk is not None and _config_text_matches(on_disk, content):
+                seen.setdefault(rel, _config_label_for_path(on_disk))
+            else:
+                seen.setdefault(rel, "working copy (unsaved)")
         for scan_dir in scan_paths:
             label = "pi-native" if scan_dir == system_path else "imported"
             try:
@@ -1907,7 +2008,7 @@ class McpServer:
         if not raw:
             return "Please provide a config filename (filename='printer.cfg')."
         ov_content, ov_found = _overlay_content(raw)
-        if ov_found:
+        if ov_found and _overlay_is_dirty(raw, ov_content):
             headers = self._list_config_sections(ov_content)
             label = ("  (WORKING copy — unsaved drafts/approved edits; "
                      "NOT the saved file)")
@@ -2005,7 +2106,7 @@ class McpServer:
             missing: list[str] = []
             for name in names:
                 ov_content, ov_found = _overlay_content(name)
-                if ov_found:
+                if ov_found and _overlay_is_dirty(name, ov_content):
                     parts.append(
                         f"# {name}  (WORKING copy — unsaved drafts/"
                         f"approved edits; NOT the saved file)\n"
@@ -2042,11 +2143,15 @@ class McpServer:
 
         # Working-state overlay first (see module header): during a chat
         # request the staged/approved content is the truth the edit tools
-        # just wrote; disk is stale until the user saves.
+        # just wrote; disk is stale until the user saves. The "unsaved"
+        # label is earned — a clean overlay file is the saved file, and
+        # serving it through the overlay is byte-identical anyway (live
+        # report 2026-09-30).
         ov_content, ov_found = _overlay_content(raw)
         if ov_found:
             return self._read_user_config_from_text(
-                raw, ov_content, args, working=True)
+                raw, ov_content, args,
+                working=_overlay_is_dirty(raw, ov_content))
 
         candidate = self._resolve_user_config_file(raw)
         if candidate is None:

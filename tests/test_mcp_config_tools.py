@@ -395,6 +395,146 @@ def test_list_user_configs_includes_working_only_files(tmp_path):
     assert "printer.cfg" in out and "park.cfg" in out
 
 
+# ── Overlay dirtiness: "in the overlay" ≠ "unsaved" ────────────────────
+# Live report 2026-09-30: on a fresh load with no edits, EVERY file came
+# back "working copy (unsaved)". The chat request carried no contextFiles
+# (nothing checked in "Include Files"), so chat_proxy armed the edit
+# session from the backend's disk mirror — a pristine project lands in the
+# read overlay, and the label was applied on presence alone. Worse, it was
+# byte-identical whether or not anything was actually dirty, so the warning
+# could never flag the case it exists for (the 2026-09-27 mixed disk/draft
+# bug). The label must be EARNED: applied only when the working text
+# provably differs from the file on disk.
+
+DISK_FILES = {
+    "printer.cfg": "[mcu]\nserial: /dev/ttyACM0\n\n[include mainsail.cfg]\n",
+    "mainsail.cfg": "[virtual_sdcard]\npath: ~/printer_data/gcodes\n",
+    "clean.cfg": "[gcode_macro CLEAN_NOZZLE]\ngcode:\n    G28\n",
+}
+
+
+def _disk_server(tmp_path):
+    """Server over a synthetic config dir; returns (server, system_dir)."""
+    system_dir = tmp_path / "system_config"
+    system_dir.mkdir(parents=True, exist_ok=True)
+    for name, text in DISK_FILES.items():
+        (system_dir / name).write_text(text, encoding="utf-8")
+    server, _ = _server(tmp_path)
+    return server, system_dir
+
+
+def _mirror_overlay(system_dir):
+    """The disk-mirror seed chat_proxy installs when the client sends no
+    contextFiles — the fresh-load case that produced the live report."""
+    return {
+        f.relative_to(system_dir).as_posix(): f.read_bytes().decode("utf-8")
+        for f in sorted(system_dir.rglob("*.cfg"))
+    }
+
+
+def test_clean_mirror_seed_marks_nothing_unsaved(tmp_path):
+    """Fresh load, no drafts: the listing must read exactly like the
+    non-chat listing — no file may claim to be an unsaved working copy."""
+    server, system_dir = _disk_server(tmp_path)
+    mcp_server.set_chat_working_files(_mirror_overlay(system_dir))
+
+    out = _call(server, "list_user_configs", {})
+    assert "working copy (unsaved)" not in out
+    for name in DISK_FILES:
+        assert f"- {name}  (pi-native)" in out
+
+
+def test_only_dirty_overlay_files_are_unsaved(tmp_path):
+    """A real draft keeps the warning; its clean neighbours do not."""
+    server, system_dir = _disk_server(tmp_path)
+    overlay = _mirror_overlay(system_dir)
+    overlay["clean.cfg"] = DISK_FILES["clean.cfg"] + "[gcode_macro NEW]\ngcode:\n    G28\n"
+    mcp_server.set_chat_working_files(overlay)
+
+    out = _call(server, "list_user_configs", {})
+    assert "- clean.cfg  (working copy (unsaved))" in out
+    assert "- printer.cfg  (pi-native)" in out
+    assert "- mainsail.cfg  (pi-native)" in out
+
+
+def test_session_only_overlay_file_is_still_unsaved(tmp_path):
+    """Regression guard on the conservative rule: a file that exists only
+    in the session (config_write draft) has no disk twin to match."""
+    server, system_dir = _disk_server(tmp_path)
+    mcp_server.set_chat_working_files({
+        **_mirror_overlay(system_dir),
+        "park.cfg": "[gcode_macro PARK]\ngcode:\n    G1 Z5\n",
+    })
+
+    out = _call(server, "list_user_configs", {})
+    assert "- park.cfg  (working copy (unsaved))" in out
+    assert "- printer.cfg  (pi-native)" in out
+
+
+def test_line_ending_difference_is_not_dirty(tmp_path):
+    """CRLF on disk vs LF in the store is not an edit — the frontend's own
+    dirty test normalises the same way (utils/chatContext.ts)."""
+    server, system_dir = _disk_server(tmp_path)
+    (system_dir / "printer.cfg").write_bytes(
+        DISK_FILES["printer.cfg"].replace("\n", "\r\n").encode("utf-8"))
+    mcp_server.set_chat_working_files(_mirror_overlay(system_dir))
+
+    out = _call(server, "list_user_configs", {})
+    assert "- printer.cfg  (pi-native)" in out
+    assert "working copy (unsaved)" not in out
+
+
+def test_clean_overlay_read_has_no_working_label(tmp_path):
+    server, system_dir = _disk_server(tmp_path)
+    mcp_server.set_chat_working_files(_mirror_overlay(system_dir))
+
+    out = _call(server, "read_user_config",
+                {"filename": "printer.cfg", "whole_file": True})
+    assert "WORKING copy" not in out
+    assert "serial: /dev/ttyACM0" in out
+
+
+def test_dirty_overlay_read_keeps_working_label(tmp_path):
+    server, system_dir = _disk_server(tmp_path)
+    overlay = _mirror_overlay(system_dir)
+    overlay["printer.cfg"] = DISK_FILES["printer.cfg"].replace(
+        "/dev/ttyACM0", "/dev/ttyUSB0")
+    mcp_server.set_chat_working_files(overlay)
+
+    out = _call(server, "read_user_config",
+                {"filename": "printer.cfg", "whole_file": True})
+    assert "WORKING copy" in out
+    assert "/dev/ttyUSB0" in out
+
+
+def test_clean_overlay_section_listing_has_no_working_label(tmp_path):
+    server, system_dir = _disk_server(tmp_path)
+    mcp_server.set_chat_working_files(_mirror_overlay(system_dir))
+
+    out = _call(server, "list_user_config_sections", {"filename": "printer.cfg"})
+    assert "WORKING copy" not in out
+    assert "[mcu]" in out
+
+
+def test_clean_overlay_search_has_no_working_label(tmp_path):
+    server, system_dir = _disk_server(tmp_path)
+    mcp_server.set_chat_working_files(_mirror_overlay(system_dir))
+
+    out = _call(server, "search_user_configs", {"query": "clean_nozzle"})
+    assert "WORKING copy" not in out
+    assert "clean.cfg" in out
+
+
+def test_dirty_overlay_search_keeps_working_label(tmp_path):
+    server, system_dir = _disk_server(tmp_path)
+    overlay = _mirror_overlay(system_dir)
+    overlay["clean.cfg"] = DISK_FILES["clean.cfg"] + "[gcode_macro NEW]\ngcode:\n    G28\n"
+    mcp_server.set_chat_working_files(overlay)
+
+    out = _call(server, "search_user_configs", {"query": "clean_nozzle"})
+    assert "WORKING copy" in out
+
+
 # ── Bare-name section lookup (live report 2026-09-27) ──────────────────
 # The chat model habitually addresses a macro by its bare name
 # (section='Level_Bed') instead of the full header ('gcode_macro
