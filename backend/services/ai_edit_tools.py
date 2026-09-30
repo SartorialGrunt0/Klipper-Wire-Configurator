@@ -292,16 +292,25 @@ def _lean_error_content(name: str, result: dict) -> str:
     return "\n".join(lines)
 
 
+def _advisory_lines(advisories: list) -> str:
+    """Render the model-facing advisory block (' with N advisories' + one
+    line each). Shared by BOTH write paths so the approval gate and the
+    auto-approve arm cannot drift (2026-09-30: the gate showed none)."""
+    text = f" with {len(advisories)} advisory" + ("s" if len(advisories) != 1 else "")
+    for adv in advisories[:6]:
+        where = f"[{adv.get('section', '')}] {adv.get('param', '')}".rstrip()
+        text += (f"\n- advisory ({adv.get('severity', 'warning')}) {where}: "
+                 f"{adv.get('message', '')}")
+    return text
+
+
 def _lean_success_content(name: str, result: dict) -> str:
     status = result.get("status", "applied")
     head = f"{name} applied — {result.get('summary', '')}"
     advisories = result.get("advisories") or []
     runtime = _runtime_section_directive(result)
     if status == "applied_with_advisory" and advisories:
-        head += f" with {len(advisories)} advisory" + ("s" if len(advisories) != 1 else "")
-        for adv in advisories[:6]:
-            where = f"[{adv.get('section', '')}] {adv.get('param', '')}".rstrip()
-            head += f"\n- advisory ({adv.get('severity', 'warning')}) {where}: {adv.get('message', '')}"
+        head += _advisory_lines(advisories)
         if not runtime:
             # Only while nothing in this result is runtime-blocking: next to
             # a WILL-FAIL advisory the neutral phrasing reads as "ignore me"
@@ -320,7 +329,7 @@ def _lean_success_content(name: str, result: dict) -> str:
 _RUNTIME_BLOCKING_ADVISORY_CODES = frozenset({"gcode_command_section_missing"})
 
 
-def _runtime_section_directive(result: dict) -> str:
+def _runtime_section_directive(result: dict, *, approved: bool = False) -> str:
     """Strong directive when a staged change will fail at runtime.
 
     Live report 2026-09-29: asked for "a macro that homes, travels in a
@@ -335,6 +344,13 @@ def _runtime_section_directive(result: dict) -> str:
 
     Conditional by design: other advisory classes keep the neutral tail, so
     the escalation never inflates a genuinely cosmetic warning.
+
+    ``approved`` selects the post-approval tail (2026-09-30): on the
+    product path this directive is appended AFTER the human accepted the
+    edit, where "do not ask permission first — the approval card already
+    gates the write" describes a step that already happened. The rest of
+    the text is identical — the follow-up edit is equally mandatory either
+    way.
     """
     advisories = result.get("advisories") or []
     blocking = [a for a in advisories
@@ -345,6 +361,20 @@ def _runtime_section_directive(result: dict) -> str:
         str(a.get("section", "")).strip() for a in blocking
         if str(a.get("section", "")).strip()))[:6]
     scope = f" (used in {', '.join(f'[{s}]' for s in where)})" if where else ""
+    if approved:
+        # Post-approval (2026-09-30): the card was ALREADY accepted, so
+        # "do not ask permission first" described a finished step. Says
+        # the permission fact without re-ordering what the text above
+        # already ordered.
+        tail = (
+            "The edit above is already approved; the fix still needs its "
+            "own staged config_edit call — do not leave the macro broken."
+        )
+    else:
+        tail = (
+            "Do not ask permission first — the approval card already gates "
+            "the write — and do not leave the macro broken."
+        )
     return (
         f"RUNTIME FAILURE{scope}: the advisories above are NOT cosmetic — "
         "the staged gcode calls a command that this configuration does not "
@@ -354,9 +384,7 @@ def _runtime_section_directive(result: dict) -> str:
         "— add the missing section (an empty body is valid where Klipper "
         "defines defaults, e.g. [gcode_arcs] or [firmware_retraction]), "
         "and/or set the option it names (e.g. enable_force_move: true) — "
-        "then tell the user both edits are staged. Do not ask permission "
-        "first — the approval card already gates the write — and do not "
-        "leave the macro broken."
+        "then tell the user both edits are staged. " + tail
     )
 
 
@@ -1171,6 +1199,19 @@ class ApprovalRequest:
             self.resolved = True
             payload = {"decision": "approved",
                        "summary": outcome.get("summary", self.result.get("summary", "")),
+                       # The gated advisories of THIS op (2026-09-30).
+                       # outcome comes from a delta-gated apply, but its
+                       # ``details`` record is rebuilt through
+                       # apply_no_gate (a newText helper that runs NO
+                       # validation), so details['advisories'] is always
+                       # empty. The model-facing result must not read the
+                       # escalation's input from there. The rename fields
+                       # ride along for the same reason: the post-rename
+                       # stale-caller directive needs them and they are on
+                       # the gated result, not on ``details``.
+                       "advisories": outcome.get("advisories", []),
+                       "renamed_from": outcome.get("renamed_from", ""),
+                       "renamed_to": outcome.get("renamed_to", ""),
                        "details": outcome["details"], "reason": ""}
         else:
             self.resolved = True
@@ -1272,12 +1313,43 @@ def format_approval_result(name: str, decision: dict) -> tuple[str, dict | None]
     """
     kind = decision.get("decision")
     if kind == "approved":
-        return (
-            f"{name} applied — {decision.get('summary', '')}\n"
-            "The user APPROVED this change. It is staged for their review "
-            "(not saved until they use the save menu).",
-            decision.get("details"),
+        details = decision.get("details")
+        # Advisories come from the DECISION payload (the gated result of
+        # the re-validated op); the details record cannot supply them —
+        # see ApprovalRequest.decide(). Fall back to it only defensively.
+        advisories = (decision.get("advisories")
+                      or (details or {}).get("advisories") or [])
+        # 2026-09-30 live bug: this result used to be the bare approval
+        # sentence. prepare() builds the full advisory block AND the
+        # RUNTIME FAILURE escalation, but _run_approval_gate discards that
+        # content (it is only used for the kickback branch), so on the
+        # PRODUCT path the model was never told anything about what it had
+        # just staged — a G2/G3 CIRCLE_HOME macro came back advisory-free
+        # after approval, the model closed with "macro added", and
+        # [gcode_arcs] was never added. Same shape as the 09-27
+        # stale-caller miss. The approved result now carries the SAME
+        # advisory block and directives as _lean_success_content; only the
+        # STAGED/APPROVED sentence differs, so the two write paths cannot
+        # drift again.
+        content = f"{name} applied — {decision.get('summary', '')}"
+        runtime = _runtime_section_directive({"advisories": advisories},
+                                             approved=True)
+        if advisories:
+            content += _advisory_lines(advisories)
+            if not runtime:
+                content += "\nAdvisories do not block the staged change."
+        content += (
+            "\nThe user APPROVED this change. It is staged for their review "
+            "(not saved until they use the save menu)."
         )
+        if runtime:
+            content += "\n\n" + runtime
+        stale = _stale_callers_directive(
+            {"renamed_from": decision.get("renamed_from", ""),
+             "renamed_to": decision.get("renamed_to", "")}, advisories)
+        if stale:
+            content += "\n\n" + stale
+        return content, details
     if kind == "timeout":
         return (
             f"{name} NOT APPROVED — the user did not respond within "

@@ -702,3 +702,157 @@ def test_reprompt_write_opens_approval_card(edit_flag, monkeypatch):
     assert 'body' in result, 'chat request thread raised before completing'
     assert result['status'] == 200
     assert result['body']['pendingEdits'][0]['file'] == 'printer.cfg'
+
+
+# ── Runtime-failure advisory must survive the gate (2026-09-30) ─────────
+# Live bug: asked for "a macro that homes, travels in a 100mm circle three
+# times, then homes again", the model staged a G2/G3 macro and got
+# `gcode_command_section_missing`. In the auto-approve arm (eval harness)
+# the tool result carries the RUNTIME FAILURE escalation; on the PRODUCT
+# path _run_approval_gate threw prepare()'s content away and returned the
+# bare "The user APPROVED this change" line instead — so the model was
+# never told the staged macro cannot run, closed with "macro added", and
+# never staged [gcode_arcs]. Same shape as the 09-27 stale-caller miss.
+
+CIRCLE_MACRO = (
+    'gcode:\n'
+    '    G28\n'
+    '    G90\n'
+    '    G1 X100 Y100 Z50 F3000\n'
+    '    {% for i in range(3) %}\n'
+    '        G2 X100 Y100 I-50 J50 F3000\n'
+    '    {% endfor %}\n'
+    '    G28\n'
+)
+
+ADD_CIRCLE_MACRO = {'file': 'printer.cfg', 'op': 'add_section',
+                    'section': 'gcode_macro CIRCLE_HOME',
+                    'text': CIRCLE_MACRO}
+
+_RUNTIME_ADVISORY = {'severity': 'warning',
+                     'code': 'gcode_command_section_missing',
+                     'section': 'gcode_macro CIRCLE_HOME', 'param': 'gcode',
+                     'message': "'G2' needs a [gcode_arcs] section — it will "
+                                'error at runtime without one.'}
+
+
+def test_approved_runtime_advisory_reaches_the_model(edit_flag, monkeypatch):
+    """The product path: approve a G2 macro with no [gcode_arcs] and the
+    model's NEXT prompt must contain the advisory and the escalation."""
+    scripted = _install(monkeypatch, [
+        _text_tool_call('config_edit', ADD_CIRCLE_MACRO),
+        _final_reply('Macro added.'),
+    ])
+    payload = {
+        'messages': [{'role': 'user', 'content':
+                      'add a macro that homes, travels in a 100mm circle '
+                      'three times, then homes again'}],
+        'apiKey': 'k', 'model': 'm',
+        'apiUrl': 'https://api.example.com/v1/chat/completions',
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(), 'editSkill': True,
+        'requestId': 'gate-runtime-advisory', 'autoApproveEdits': False,
+    }
+    t, result = _post_chat_bg(payload)
+    card = _wait_card('gate-runtime-advisory')
+    assert [a.get('code') for a in card['advisories']] == [
+        'gcode_command_section_missing'], (
+        'precondition: the card carries the runtime advisory')
+
+    dec = client.post('/ai/chat/approval', json={
+        'approvalId': card['approvalId'], 'decision': 'approve',
+        'contextFiles': _ctx(),
+    })
+    assert dec.json()['status'] == 'ok'
+    t.join(timeout=10)
+    assert not t.is_alive(), 'chat request did not finish'
+    assert result['status'] == 200
+
+    followup = json.dumps(scripted.payloads[-1])
+    # The completed edit is still staged and still honest about it.
+    assert 'APPROVED' in followup
+    # ...and the model is told, in the same tool result, that it is not
+    # finished — the bug was this text being discarded by the gate.
+    assert 'gcode_command_section_missing' in followup or \
+        'gcode_arcs' in followup, 'the advisory itself must be shown'
+    assert '[gcode_arcs]' in followup
+    assert 'RUNTIME FAILURE' in followup
+    # Post-approval wording: the card was already answered, so the
+    # pre-approval "do not ask permission first" clause must not appear.
+    assert 'Do not ask permission first' not in followup
+
+
+def test_approved_result_carries_the_runtime_escalation():
+    from services.ai_edit_tools import format_approval_result
+    content, details = format_approval_result('config_edit', {
+        'decision': 'approved',
+        'summary': 'added section [gcode_macro CIRCLE_HOME] to printer.cfg',
+        'details': {'advisories': [_RUNTIME_ADVISORY]},
+    })
+    assert details is not None            # approval still returns the stack
+    assert 'APPROVED' in content
+    assert 'RUNTIME FAILURE' in content
+    assert '[gcode_arcs]' in content
+    # Post-approval tail: the card was already answered.
+    assert 'already approved' in content
+    assert 'Do not ask permission first' not in content
+
+
+def test_runtime_directive_default_tail_is_the_pre_approval_one():
+    """The auto-approve arm (execute()) must keep the original tail — the
+    ``approved`` switch changes only the post-approval sentence."""
+    from services.ai_edit_tools import _runtime_section_directive
+    pre = _runtime_section_directive({'advisories': [_RUNTIME_ADVISORY]})
+    assert 'Do not ask permission first' in pre
+    assert 'already approved' not in pre
+    post = _runtime_section_directive({'advisories': [_RUNTIME_ADVISORY]},
+                                      approved=True)
+    # Same escalation, only the closing sentence differs.
+    assert pre.split('. Do not')[0] == post.split('. The edit')[0]
+
+
+def test_approved_result_keeps_cosmetic_advisories_without_escalation():
+    """Control: the RUNTIME escalation is code-gated. A cosmetic advisory
+    is now SHOWN (arm parity) but earns no escalation."""
+    from services.ai_edit_tools import format_approval_result
+    content, _ = format_approval_result('config_edit', {
+        'decision': 'approved', 'summary': 'renamed a macro',
+        'advisories': [
+            {'severity': 'warning', 'code': 'duplicate_section',
+             'section': 'gcode_macro PARK', 'param': '',
+             'message': "'gcode_macro PARK' is defined more than once; "
+                        'the later definition wins.'}],
+    })
+    assert "'gcode_macro PARK' is defined more than once" in content
+    assert 'with 1 advisory' in content
+    assert 'RUNTIME FAILURE' not in content
+    assert 'APPROVED' in content
+
+
+def test_approved_rename_carries_the_stale_caller_directive():
+    """09-27 shape, product path: a rename's stranded callers must come
+    back with the ORDER to fix them, not just the advisory."""
+    from services.ai_edit_tools import format_approval_result
+    content, _ = format_approval_result('config_edit', {
+        'decision': 'approved',
+        'summary': 'renamed [gcode_macro Level_Bed] to [gcode_macro BED_LEVEL]',
+        'renamed_from': 'gcode_macro Level_Bed',
+        'renamed_to': 'gcode_macro BED_LEVEL',
+        'advisories': [
+            {'severity': 'warning', 'code': 'unknown_gcode_command',
+             'section': 'gcode_macro PRINT_START', 'param': 'gcode',
+             'message': "'Level_Bed' is not a Klipper command."}],
+    })
+    assert 'Level_Bed' in content                # the stale caller is named
+    assert 'PRINT_START' in content
+    assert "'Level_Bed'" in content
+    assert 'STALE' in content.upper()
+
+
+def test_approved_result_without_details_is_unchanged():
+    """Defensive: an approval with no details dict must not raise."""
+    from services.ai_edit_tools import format_approval_result
+    content, details = format_approval_result('config_edit', {
+        'decision': 'approved', 'summary': 'noop'})
+    assert details is None
+    assert 'RUNTIME FAILURE' not in content
+    assert 'APPROVED' in content
