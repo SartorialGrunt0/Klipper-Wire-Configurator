@@ -1334,10 +1334,22 @@ def _scan_file_gcode_commands(
         for rel_line, verdict in problems:
             if verdict.status == STATUS_CONDITIONAL_OUT:
                 wanted = ", ".join(f"[{s}]" for s in verdict.required_sections)
-                message = (
-                    f"'{verdict.name}' needs a {wanted} section in the "
-                    "configuration — it will error at runtime without one."
-                )
+                if verdict.requires_flags:
+                    # Flag-gated: the section can exist and the command
+                    # still not register (force_move.py:42-57).
+                    opts = ", ".join(
+                        f"{f.split('.', 1)[1]}: true"
+                        for f in verdict.requires_flags)
+                    message = (
+                        f"'{verdict.name}' needs {wanted} with {opts} set "
+                        "in the configuration — it will error at runtime "
+                        "without it."
+                    )
+                else:
+                    message = (
+                        f"'{verdict.name}' needs a {wanted} section in the "
+                        "configuration — it will error at runtime without one."
+                    )
                 code = "gcode_command_section_missing"
             else:
                 if verdict.suggestions:

@@ -296,17 +296,68 @@ def _lean_success_content(name: str, result: dict) -> str:
     status = result.get("status", "applied")
     head = f"{name} applied — {result.get('summary', '')}"
     advisories = result.get("advisories") or []
+    runtime = _runtime_section_directive(result)
     if status == "applied_with_advisory" and advisories:
         head += f" with {len(advisories)} advisory" + ("s" if len(advisories) != 1 else "")
         for adv in advisories[:6]:
             where = f"[{adv.get('section', '')}] {adv.get('param', '')}".rstrip()
             head += f"\n- advisory ({adv.get('severity', 'warning')}) {where}: {adv.get('message', '')}"
-        head += "\nAdvisories do not block the staged change."
+        if not runtime:
+            # Only while nothing in this result is runtime-blocking: next to
+            # a WILL-FAIL advisory the neutral phrasing reads as "ignore me"
+            # (live report 2026-09-29).
+            head += "\nAdvisories do not block the staged change."
     head += "\nChange is STAGED for the user's review (not saved)."
+    if runtime:
+        head += "\n\n" + runtime
     stale = _stale_callers_directive(result, advisories)
     if stale:
         head += "\n\n" + stale
     return head
+
+
+# Advisory codes that mean the staged artifact CANNOT RUN as written.
+_RUNTIME_BLOCKING_ADVISORY_CODES = frozenset({"gcode_command_section_missing"})
+
+
+def _runtime_section_directive(result: dict) -> str:
+    """Strong directive when a staged change will fail at runtime.
+
+    Live report 2026-09-29: asked for "a macro that homes, travels in a
+    100mm circle three times, then homes again", the model staged a G2/G3
+    macro, received `gcode_command_section_missing` ("needs a [gcode_arcs]
+    section — it will error at runtime without one"), and confidently
+    ignored it — the user got a macro that cannot run and no mention of the
+    missing section. The advisory alone ("do not block the change") reads
+    as cosmetic; when the user's OWN request produced the dependency, adding
+    the section is part of finishing the job, exactly like the stale-caller
+    follow-up after a rename (2026-09-27).
+
+    Conditional by design: other advisory classes keep the neutral tail, so
+    the escalation never inflates a genuinely cosmetic warning.
+    """
+    advisories = result.get("advisories") or []
+    blocking = [a for a in advisories
+                if str(a.get("code", "")) in _RUNTIME_BLOCKING_ADVISORY_CODES]
+    if not blocking:
+        return ""
+    where = list(dict.fromkeys(
+        str(a.get("section", "")).strip() for a in blocking
+        if str(a.get("section", "")).strip()))[:6]
+    scope = f" (used in {', '.join(f'[{s}]' for s in where)})" if where else ""
+    return (
+        f"RUNTIME FAILURE{scope}: the advisories above are NOT cosmetic — "
+        "the staged gcode calls a command that this configuration does not "
+        "provide as written, so it WILL error as soon as the macro runs. "
+        "This change is NOT finished. Resolve it now, in THIS request: "
+        "stage whatever the advisory asks for with another config_edit call "
+        "— add the missing section (an empty body is valid where Klipper "
+        "defines defaults, e.g. [gcode_arcs] or [firmware_retraction]), "
+        "and/or set the option it names (e.g. enable_force_move: true) — "
+        "then tell the user both edits are staged. Do not ask permission "
+        "first — the approval card already gates the write — and do not "
+        "leave the macro broken."
+    )
 
 
 def _stale_callers_directive(result: dict, advisories: list) -> str:

@@ -153,10 +153,24 @@ GATE_TABLE: dict[str, list[str]] = {
 # Commands registered outside the scanned pattern set, or needing an override.
 # value: dict merged over the extracted entry (requires_sections, ...).
 # Applied by main() after extract_registry (fixture trees extract exactly
-# what their source says). Currently empty: the klippy/*.py scan covers the
-# pre-config builtins (gcode.py) and core commands (toolhead.py,
-# configfile.py) directly.
-EXTRA_MANUAL: dict[str, dict] = {}
+# what their source says). The klippy/*.py scan covers the pre-config
+# builtins (gcode.py) and core commands (toolhead.py, configfile.py)
+# directly; the entries below override what the AST cannot see.
+EXTRA_MANUAL: dict[str, dict] = {
+    # force_move.py:42-57 registers these INSIDE `if self._enable_force_move`,
+    # so the AST scan sees a bare register_command in a module whose gate
+    # table entry is section-only. The real gate is the flag: a config with
+    # `[force_move]` and no `enable_force_move` still fails at runtime with
+    # "Unknown command FORCE_MOVE" (review 2026-09-29, live report).
+    "FORCE_MOVE": {
+        "requires_sections": ["force_move"],
+        "requires_flags": {"force_move": "enable_force_move"},
+    },
+    "SET_KINEMATIC_POSITION": {
+        "requires_sections": ["force_move"],
+        "requires_flags": {"force_move": "enable_force_move"},
+    },
+}
 
 # Commands covered by frontend/src/utils/gcodeSimulator.ts (seed list, grepped
 # 2026-09 from its `case '...'` switch; refresh alongside simulator changes).
