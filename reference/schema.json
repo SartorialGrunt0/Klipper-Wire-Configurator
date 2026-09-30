@@ -11294,6 +11294,24 @@
           "unit": ""
         },
         {
+          "name": "gcode_id",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "ID for M105 temperature reporting",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "smooth_time",
+          "type": "float",
+          "required": false,
+          "default": "1.0",
+          "description": "Temperature smoothing window",
+          "enum_values": [],
+          "unit": "s"
+        },
+        {
           "name": "control",
           "type": "enum",
           "required": false,
@@ -12553,6 +12571,15 @@
           "required": false,
           "default": "0",
           "description": "UART address (0-7)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "rref",
+          "type": "int",
+          "required": false,
+          "default": "12000",
+          "description": "Resistance (ohms) of IREF to GND resistor",
           "enum_values": [],
           "unit": ""
         }
@@ -14303,6 +14330,24 @@
           "description": "Rapid scan overshoot",
           "enum_values": [],
           "unit": "mm"
+        },
+        {
+          "name": "faulty_region_*_min",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Faulty region start X,Y (region 1..99)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "faulty_region_*_max",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Faulty region end X,Y (region 1..99)",
+          "enum_values": [],
+          "unit": ""
         }
       ]
     },
@@ -16993,6 +17038,15 @@
           "unit": ""
         },
         {
+          "name": "debounce_delay",
+          "type": "float",
+          "required": false,
+          "default": "0",
+          "description": "Debounce delay",
+          "enum_values": [],
+          "unit": "s"
+        },
+        {
           "name": "analog_pullup_resistor",
           "type": "float",
           "required": false,
@@ -17055,6 +17109,15 @@
           "required": false,
           "default": "0.5",
           "description": "Pause delay",
+          "enum_values": [],
+          "unit": "s"
+        },
+        {
+          "name": "debounce_delay",
+          "type": "float",
+          "required": false,
+          "default": "0",
+          "description": "Debounce delay",
           "enum_values": [],
           "unit": "s"
         },
@@ -17168,6 +17231,24 @@
           "description": "Event delay",
           "enum_values": [],
           "unit": ""
+        },
+        {
+          "name": "pause_delay",
+          "type": "float",
+          "required": false,
+          "default": "0.5",
+          "description": "Pause delay",
+          "enum_values": [],
+          "unit": "s"
+        },
+        {
+          "name": "debounce_delay",
+          "type": "float",
+          "required": false,
+          "default": "0",
+          "description": "Debounce delay",
+          "enum_values": [],
+          "unit": "s"
         }
       ]
     },
@@ -18538,6 +18619,24 @@
           "description": "Max acceleration",
           "enum_values": [],
           "unit": ""
+        },
+        {
+          "name": "position_min",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "Minimum position limit",
+          "enum_values": [],
+          "unit": "mm"
+        },
+        {
+          "name": "position_max",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "Maximum position limit",
+          "enum_values": [],
+          "unit": "mm"
         }
       ]
     },
@@ -19921,6 +20020,33 @@
           "unit": ""
         },
         {
+          "name": "gcode_id",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "ID for M105 temperature reporting",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "max_z_adjustment",
+          "type": "float",
+          "required": false,
+          "default": "99999999.0",
+          "description": "Maximum absolute Z adjustment",
+          "enum_values": [],
+          "unit": "mm"
+        },
+        {
+          "name": "z_adjust_off_above",
+          "type": "float",
+          "required": false,
+          "default": "99999999.0",
+          "description": "Disable adjustments above this Z height",
+          "enum_values": [],
+          "unit": "mm"
+        },
+        {
           "name": "cs_pin",
           "type": "pin",
           "required": false,
@@ -20653,6 +20779,15 @@
           "required": false,
           "default": "0.000400",
           "description": "Sample period",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "stepper",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Stepper section name for angle calibration",
           "enum_values": [],
           "unit": ""
         },
@@ -21393,7 +21528,117 @@
       "description": "",
       "max_instances": 0,
       "requires": [],
-      "params": []
+      "params": [
+        {
+          "name": "chip",
+          "type": "enum",
+          "required": true,
+          "default": null,
+          "description": "ADC chip type",
+          "enum_values": [
+            "ADS1013",
+            "ADS1014",
+            "ADS1015",
+            "ADS1113",
+            "ADS1114",
+            "ADS1115"
+          ],
+          "unit": ""
+        },
+        {
+          "name": "pga",
+          "type": "enum",
+          "required": false,
+          "default": "4.096V",
+          "description": "Max voltage range (gain)",
+          "enum_values": [
+            "6.144V",
+            "4.096V",
+            "2.048V",
+            "1.024V",
+            "0.512V",
+            "0.256V"
+          ],
+          "unit": ""
+        },
+        {
+          "name": "adc_voltage",
+          "type": "float",
+          "required": false,
+          "default": "3.3",
+          "description": "Supply voltage for additional scaling",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "address_pin",
+          "type": "enum",
+          "required": false,
+          "default": null,
+          "description": "Address pin wiring (alternative to i2c_address)",
+          "enum_values": [
+            "GND",
+            "VCC",
+            "SDA",
+            "SCL"
+          ],
+          "unit": ""
+        },
+        {
+          "name": "i2c_mcu",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "I2C MCU name (defaults to the main mcu)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "i2c_bus",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "I2C bus name (hardware I2C)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "i2c_address",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "I2C device address (0-127)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "i2c_speed",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "I2C clock speed in Hz",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "i2c_software_scl_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software I2C SCL pin",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "i2c_software_sda_pin",
+          "type": "pin",
+          "required": false,
+          "default": null,
+          "description": "Software I2C SDA pin",
+          "enum_values": [],
+          "unit": ""
+        }
+      ]
     },
     "replicape": {
       "section_type": "replicape",
@@ -21601,6 +21846,15 @@
           "description": "Initial white",
           "enum_values": [],
           "unit": ""
+        },
+        {
+          "name": "color_order",
+          "type": "string",
+          "required": false,
+          "default": "RGBW",
+          "description": "Pixel colour order (RGBW permutation)",
+          "enum_values": [],
+          "unit": ""
         }
       ]
     },
@@ -21703,6 +21957,15 @@
           "description": "Initial white",
           "enum_values": [],
           "unit": ""
+        },
+        {
+          "name": "color_order",
+          "type": "string",
+          "required": false,
+          "default": "RGBW",
+          "description": "Pixel colour order (RGBW permutation)",
+          "enum_values": [],
+          "unit": ""
         }
       ]
     },
@@ -21797,6 +22060,33 @@
           "required": false,
           "default": null,
           "description": "Y position",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "calibrate_start_y",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "Min Y for Y-axis twist calibration",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "calibrate_end_y",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "Max Y for Y-axis twist calibration",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "calibrate_x",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "X coordinate for Y-axis twist calibration",
           "enum_values": [],
           "unit": ""
         }
@@ -23061,6 +23351,108 @@
           "description": "Time to average tare samples",
           "enum_values": [],
           "unit": "s"
+        },
+        {
+          "name": "reference_tare_counts",
+          "type": "int",
+          "required": false,
+          "default": null,
+          "description": "Tare reference counts",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "counts_per_gram",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "Calibration counts per gram",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "sensor_orientation",
+          "type": "enum",
+          "required": false,
+          "default": "normal",
+          "description": "Sensor orientation",
+          "enum_values": [
+            "normal",
+            "inverted"
+          ],
+          "unit": ""
+        },
+        {
+          "name": "drift_filter_cutoff_frequency",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "Drift filter cutoff (Hz)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "drift_filter_delay",
+          "type": "int",
+          "required": false,
+          "default": "2",
+          "description": "Drift filter order",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "buzz_filter_cutoff_frequency",
+          "type": "float",
+          "required": false,
+          "default": null,
+          "description": "Buzz filter cutoff (Hz)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "buzz_filter_delay",
+          "type": "int",
+          "required": false,
+          "default": "2",
+          "description": "Buzz filter order",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "notch_filter_frequencies",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Power line frequencies to notch (Hz)",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "notch_filter_quality",
+          "type": "float",
+          "required": false,
+          "default": "2.0",
+          "description": "Notch filter quality",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "activate_gcode",
+          "type": "multi_line",
+          "required": false,
+          "default": null,
+          "description": "G-code run when the probe activates",
+          "enum_values": [],
+          "unit": ""
+        },
+        {
+          "name": "deactivate_gcode",
+          "type": "multi_line",
+          "required": false,
+          "default": null,
+          "description": "G-code run when the probe deactivates",
+          "enum_values": [],
+          "unit": ""
         }
       ]
     },
