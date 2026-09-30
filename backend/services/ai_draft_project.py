@@ -1305,18 +1305,30 @@ class ProjectState:
         filename = (op.get('file') or '').strip()
         if not filename:
             return _state_error('Missing required argument: file')
-        # Final-pass review 2026-09-29 + round-2: existence goes through
-        # _resolve_file_ref — the SAME resolver every other file op uses —
-        # so case variants ('Printer.cfg') and path aliases ('./printer.
-        # cfg', '.\\printer.cfg') all land on the real key and refuse
-        # instead of staging a sibling. A collision the resolver refuses
-        # to guess (two project keys differing only by case) is likewise
-        # 'already exists': creating a third spelling is never the move.
-        resolved_existing = _resolve_file_ref(filename, self.files)
-        if resolved_existing is not None or any(
-                f.casefold() == filename.casefold() for f in self.files):
-            real = resolved_existing or next(
-                f for f in sorted(self.files) if f.casefold() == filename.casefold())
+        # Final-pass review 2026-09-29 + rounds 2/3: existence keys on the
+        # NORMALIZED full relative path (backslashes folded, '.' segments
+        # dropped, casefolded), so case variants ('Printer.cfg') and path
+        # aliases ('./printer.cfg', './/printer.cfg', '.\\printer.cfg')
+        # all land on the real key and refuse instead of staging a
+        # sibling. A BARE request whose name matches an existing file's
+        # basename is refused too — every other op would resolve it there
+        # via _resolve_file_ref, so creating a second spelling is never
+        # the move. Two DIFFERENT directories with the same basename are
+        # two files (round-3: _resolve_file_ref's basename fallback
+        # over-reached and refused 'other/park.cfg' because
+        # 'macros/park.cfg' existed).
+        def _norm(p: str) -> str:
+            return str(PurePosixPath(p.replace('\\', '/'))).casefold()
+
+        wanted = _norm(filename)
+        same_path = [f for f in self.files if _norm(f) == wanted]
+        bare_wanted = '/' not in wanted
+        same_base = ([] if not bare_wanted else
+                     [f for f in self.files
+                      if PurePosixPath(_norm(f)).name == wanted])
+        existing = same_path or same_base
+        if existing:
+            real = sorted(existing)[0]
             return _state_error(
                 f"File '{filename}' already exists"
                 + (f" as '{real}'" if real != filename else '')

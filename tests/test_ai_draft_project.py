@@ -280,6 +280,21 @@ def test_new_file_in_subdirectory_is_still_created(tmp_path):
     assert 'macros/park.cfg' in st2.files
 
 
+def test_new_file_same_basename_other_directory_is_created():
+    """Round-3 review 2026-09-29: reusing _resolve_file_ref's basename
+    fallback over-reached — with macros/park.cfg present, a GENUINELY new
+    other/park.cfg was refused ('already exists as macros/park.cfg').
+    Existence must key on the normalized full path: aliases of one path
+    refused, two directories stay two files."""
+    st = ProjectState.from_context_files(
+        {'macros/park.cfg': {'content': '[gcode_macro PARK]\ngcode:\n    G28\n'}})
+    base = st.validate()
+    st2, r = st.apply(base, {'op': 'new_file', 'file': 'other/park.cfg',
+                             'content': '[gcode_macro PARK2]\ngcode:\n    G29\n'})
+    assert r['status'] in ('applied', 'applied_with_advisory'), r
+    assert 'other/park.cfg' in st2.files
+
+
 def test_add_section_clean():
     st, base = _state()
     st1, r = st.apply(base, {'op': 'add_section', 'file': 'printer.cfg',

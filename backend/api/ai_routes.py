@@ -479,7 +479,7 @@ _CONTINUE_INTENT_RE = re.compile(
 # USER (do you / should I / you want...) or a final '?'.
 _CLARIFYING_TAIL_RE = re.compile(
     r"(?:\?|do you (?:want|prefer|mean|need)|should i|let me know|"
-    r"i(?:'ll| will) need to know|i need (?:you to|which)|"
+    r"i(?:'ll| will) need to know|i need (?:you to|which)|need your input|"
     r"\b(?:which|what)(?:\s+\S+)?\s+(?:do|does|would|should|can|will)\s+(?:i|you)\b)",
     re.IGNORECASE,
 )

@@ -119,6 +119,9 @@ def test_continue_intent_clarifying_question_not_matched():
         "anything.")
     assert not ai_routes._ends_with_continue_intent(
         "I'll update max_accel — which value do you want, 3000 or 4000?")
+    # Round-3 review 2026-09-29: '?'-less user-tied asks.
+    assert not ai_routes._ends_with_continue_intent(
+        "I'll need your input on which fan to use now.")
 
 
 def test_continue_intent_relative_clause_promises_still_matched():
