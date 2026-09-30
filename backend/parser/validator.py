@@ -28,6 +28,7 @@ from parser.config_schema import (
     ParamType,
     get_section_def,
 )
+from parser import param_coverage
 from services.warning_acknowledgments import (
     canonicalize_section,
     finding_identity,
@@ -1197,11 +1198,37 @@ def validate_config(config: ConfigFile, *, gcode_registry: bool = True) -> Valid
             param_def = _find_param_def(sec_def, param.key)
 
             if param_def is None:
+                # Escalate only when KWC can GROUND the claim (plan
+                # 2026-09-29_230500-unknown-param-escalation). Klipper
+                # hard-fails on any option no module read:
+                # configfile.py check_unused (424-441) runs as the last step
+                # of startup (klippy.py:127). An ungrounded warning here
+                # means a config klippy REFUSES to load can still be saved
+                # from the editor or applied by the AI chat edit path (both
+                # treat warnings as advisory). Grounding requires: the
+                # SectionDef models at least one param (params=[] means KWC
+                # makes no claim), a coverage record exists for the section
+                # type, and the param is absent from it. Wildcard param
+                # names never reach here — _find_param_def above matched
+                # them. Reaching this point also means the section type is
+                # known (the unknown_section continue is upstream), so
+                # plugin sections are unaffected.
+                grounded = (
+                    bool(sec_def.params)
+                    and param_coverage.has_record(sec_type)
+                    and not param_coverage.param_known(sec_type, param.key.lower())
+                )
                 result.errors.append(ValidationError(
-                    severity="warning",
+                    severity="error" if grounded else "warning",
                     section=section.full_header,
                     param=param.key,
-                    message=f"Unknown parameter '{param.key}' for section [{sec_type}].",
+                    message=(
+                        f"Unknown parameter '{param.key}' for section [{sec_type}] "
+                        "— Klipper reads no such option here and will refuse to "
+                        "start with this config."
+                        if grounded else
+                        f"Unknown parameter '{param.key}' for section [{sec_type}]."
+                    ),
                     line_number=param.line_number,
                     code="unknown_param",
                 ))

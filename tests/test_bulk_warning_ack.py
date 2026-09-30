@@ -35,12 +35,11 @@ def _layout_dir():
 
 
 def _unknown_param_project():
-    text = (
-        "[idle_timeout]\n"
-        "timeout: 300\n"
-        "gcode: G28\n"
-        "not_a_real_param: 1\n"
-    )
+    # sdcard_loop: its SectionDef is params=[] (KWC makes no claim), so its
+    # unknown_param findings stay WARNING after the 2026-09-30 grounding
+    # flip — this suite tests the WARNING ack path, so it needs a warning
+    # the escalation guard cannot ground.
+    text = "[sdcard_loop]\nnot_a_real_param: 1\n"
     return {
         "printer.cfg": parse_config(text, "printer.cfg"),
         "other.cfg": parse_config("[gcode_macro X]\ngcode: G28\n", "other.cfg"),
@@ -66,8 +65,8 @@ def test_store_roundtrip(monkeypatch, tmp_path):
         warning_identity,
     )
     ident = warning_identity(
-        "printer.cfg", "unknown_param", "idle_timeout", "not_a_real_param", "")
-    assert ident == "printer.cfg|unknown_param|idle_timeout|not_a_real_param|"
+        "printer.cfg", "unknown_param", "sdcard_loop", "not_a_real_param", "")
+    assert ident == "printer.cfg|unknown_param|sdcard_loop|not_a_real_param|"
     path = acknowledge_warning_identities([ident])
     assert Path(path).name == "acknowledged_warning_identities.txt"
     assert Path(path).exists()
@@ -80,8 +79,8 @@ def test_store_idempotent_append(monkeypatch, tmp_path):
         acknowledge_warning_identities,
         load_acknowledged_warning_identities,
     )
-    a = "printer.cfg|unknown_param|idle_timeout|p1|"
-    b = "other.cfg|unknown_param|idle_timeout|p2|"
+    a = "printer.cfg|unknown_param|sdcard_loop|p1|"
+    b = "other.cfg|unknown_param|sdcard_loop|p2|"
     acknowledge_warning_identities([a, b])
     acknowledge_warning_identities([a, b])  # re-ack: no duplicates
     lines = [
@@ -113,7 +112,7 @@ def test_validator_suppresses_acknowledged_warning(monkeypatch, tmp_path):
 
     from services.warning_acknowledgments import finding_identity
     acknowledge_warning_identities([
-        finding_identity("printer.cfg", "unknown_param", "idle_timeout",
+        finding_identity("printer.cfg", "unknown_param", "sdcard_loop",
                          "not_a_real_param"),
     ])
     after = _unknown_param_findings(validate_project_configs(configs))
@@ -126,7 +125,7 @@ def test_validator_keeps_warning_with_different_param(monkeypatch, tmp_path):
         acknowledge_warning_identities, finding_identity,
     )
     acknowledge_warning_identities([
-        finding_identity("printer.cfg", "unknown_param", "idle_timeout",
+        finding_identity("printer.cfg", "unknown_param", "sdcard_loop",
                          "different_param"),
     ])
     results = validate_project_configs(_unknown_param_project())
@@ -176,15 +175,11 @@ def test_validator_never_suppresses_info(monkeypatch, tmp_path):
 def test_single_file_mode_suppression(monkeypatch, tmp_path):
     monkeypatch.setenv("KWC_LAYOUT_DIR", str(tmp_path))
     from services.warning_acknowledgments import acknowledge_warning_identities
-    config = parse_config(
-        "[idle_timeout]\n"
-        "timeout: 300\n"
-        "not_a_real_param: 1\n",
-        "printer.cfg")
+    config = parse_config("[sdcard_loop]\nnot_a_real_param: 1\n", "printer.cfg")
     assert any(e.code == "unknown_param" for e in validate_config(config).errors)
     from services.warning_acknowledgments import finding_identity
     acknowledge_warning_identities([
-        finding_identity("printer.cfg", "unknown_param", "idle_timeout",
+        finding_identity("printer.cfg", "unknown_param", "sdcard_loop",
                          "not_a_real_param"),
     ])
     result = validate_config(config)
@@ -198,7 +193,7 @@ def _bulk_payload() -> list[dict]:
         {
             "file": "printer.cfg",
             "code": "unknown_param",
-            "section": "idle_timeout",
+            "section": "sdcard_loop",
             "param": "not_a_real_param",
             "extra": "",
         },
@@ -216,7 +211,7 @@ def test_bulk_endpoint_acknowledges_and_writes_file(monkeypatch, tmp_path):
     assert Path(body["file"]).name == "acknowledged_warning_identities.txt"
     content = (tmp_path / "acknowledged_warning_identities.txt").read_text(
         encoding="utf-8")
-    assert "printer.cfg|unknown_param|idle_timeout|not_a_real_param|" in content
+    assert "printer.cfg|unknown_param|sdcard_loop|not_a_real_param|" in content
 
 
 def test_bulk_endpoint_idempotent(monkeypatch, tmp_path):
@@ -271,8 +266,8 @@ def test_finding_identity_missing_include_carries_spec():
     assert a == "printer.cfg|missing_include|include missing_a.cfg||missing_a.cfg"
     assert a != b, "different includes in one file must not collide"
     # Non-discriminator codes keep an empty extra (stable across edits).
-    plain = finding_identity("printer.cfg", "unknown_param", "idle_timeout", "p")
-    assert plain == "printer.cfg|unknown_param|idle_timeout|p|"
+    plain = finding_identity("printer.cfg", "unknown_param", "sdcard_loop", "p")
+    assert plain == "printer.cfg|unknown_param|sdcard_loop|p|"
 
 
 def test_endpoint_and_suppression_agree_on_warning_identity(monkeypatch, tmp_path):
@@ -280,18 +275,14 @@ def test_endpoint_and_suppression_agree_on_warning_identity(monkeypatch, tmp_pat
     halves share finding_identity() by construction."""
     monkeypatch.setenv("KWC_LAYOUT_DIR", str(tmp_path))
     from services.warning_acknowledgments import finding_identity
-    config = parse_config(
-        "[idle_timeout]\n"
-        "timeout: 300\n"
-        "not_a_real_param: 1\n",
-        "printer.cfg")
+    config = parse_config("[sdcard_loop]\nnot_a_real_param: 1\n", "printer.cfg")
     findings = [e for e in validate_config(config).errors if e.code == "unknown_param"]
     assert len(findings) == 1
     response = client.post("/api/warning-acknowledgements/bulk", json={
         "identities": [{
             "file": "printer.cfg",
             "code": "unknown_param",
-            "section": "idle_timeout",
+            "section": "sdcard_loop",
             "param": "not_a_real_param",
             "extra": "",
         }],
@@ -301,6 +292,6 @@ def test_endpoint_and_suppression_agree_on_warning_identity(monkeypatch, tmp_pat
     content = (tmp_path / "acknowledged_warning_identities.txt").read_text(
         encoding="utf-8")
     assert finding_identity(
-        "printer.cfg", "unknown_param", "idle_timeout", "not_a_real_param"
+        "printer.cfg", "unknown_param", "sdcard_loop", "not_a_real_param"
     ) in content
     assert not [e for e in validate_config(config).errors if e.code == "unknown_param"]

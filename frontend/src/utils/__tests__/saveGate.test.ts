@@ -47,15 +47,20 @@ describe('selectSaveGateIssues', () => {
     const validation: Record<string, ValidationResult> = {
       'printer.cfg': result([
         ['error', 'stepper_x', 'missing rail', { code: 'kinematics_stepper_missing', line: 2 }],
-        ['warning', 'idle_timeout', 'unknown param', { code: 'unknown_param', line: 7, param: 'x' }],
+        // 2026-09-30: unknown_param in a grounded section arrives as an
+        // ERROR and must land in out.errors, not out.warnings.
+        ['error', 'idle_timeout', 'unknown param', { code: 'unknown_param', line: 7, param: 'x' }],
+        // ungrounded sections (params=[] / no coverage record) still warn
+        ['warning', 'sdcard_loop', 'unknown param', { code: 'unknown_param', line: 9, param: 'y' }],
       ]),
     };
     const out = selectSaveGateIssues(validation, ['printer.cfg']);
-    expect(out.errors).toHaveLength(1);
+    expect(out.errors).toHaveLength(2);
     expect(out.warnings).toHaveLength(1);
     expect(out.hasErrors).toBe(true);
     expect(out.hasWarnings).toBe(true);
     expect(out.errors[0].code).toBe('kinematics_stepper_missing');
+    expect(out.errors[1].code).toBe('unknown_param');
     expect(out.warnings[0].code).toBe('unknown_param');
   });
 
@@ -134,7 +139,9 @@ describe('selectSaveGateIssues', () => {
   it('carries file/section/param/line_number on each finding', () => {
     const validation: Record<string, ValidationResult> = {
       'printer.cfg': result([
-        ['warning', 'idle_timeout', 'unknown', { code: 'unknown_param', param: 'foo', line: 42 }],
+        // sdcard_loop is ungrounded (params=[]) — warning is the correct
+        // post-escalation severity for its unknown params.
+        ['warning', 'sdcard_loop', 'unknown', { code: 'unknown_param', param: 'foo', line: 42 }],
       ]),
     };
     const out = selectSaveGateIssues(validation, ['printer.cfg']);
@@ -142,7 +149,7 @@ describe('selectSaveGateIssues', () => {
     expect(finding).toEqual({
       file: 'printer.cfg',
       code: 'unknown_param',
-      section: 'idle_timeout',
+      section: 'sdcard_loop',
       param: 'foo',
       message: 'unknown',
       line_number: 42,
@@ -155,7 +162,7 @@ describe('warningToBulkAck', () => {
     const finding: SaveGateFinding = {
       file: 'printer.cfg',
       code: 'unknown_param',
-      section: 'idle_timeout',
+      section: 'sdcard_loop',  // ungrounded -> ack-able warning tier
       param: 'foo',
       message: 'unknown',
       line_number: 42,
@@ -165,7 +172,7 @@ describe('warningToBulkAck', () => {
     expect(warningToBulkAck(finding)).toEqual({
       file: 'printer.cfg',
       code: 'unknown_param',
-      section: 'idle_timeout',
+      section: 'sdcard_loop',
       param: 'foo',
       extra: '',
     });
