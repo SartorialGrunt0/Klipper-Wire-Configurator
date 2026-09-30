@@ -346,12 +346,34 @@ def test_unknown_param_in_section_without_coverage_record_stays_warning():
         "[update_manager my_ext]\npath: ~/kiauh\nbogus_option: 1\n",
         "printer.cfg"))
     findings = [e for e in result.errors if e.code == "unknown_param"]
-    if not findings:
-        # update_manager resolved with bogus_option unknown only if the type
-        # itself is recognized; either way an ERROR is what must not appear.
-        return
+    # update_manager IS a modeled type, so the finding must exist — pin that
+    # too, or this test passes vacuously if emission ever breaks.
+    assert findings, "bogus_option in a modeled section must still be flagged"
     assert all(e.severity == "warning" for e in findings), \
         f"ungrounded section must not escalate: {[(e.severity, e.message) for e in findings]}"
+
+
+def test_param_in_record_but_not_section_def_stays_warning():
+    # Guard 4 inverse (review 2026-09-30): a param Klipper reads that KWC has
+    # NOT modeled is in the coverage record and unknown to _find_param_def —
+    # param_known must catch it and hold the warning tier. [heater_bed]
+    # 'heaters' is the canonical case (heaters.py reads it; the SectionDef
+    # does not model it). If param_known were mutated to always-False — the
+    # direction that BROADENS escalation — this test fails.
+    result = validate_config(parse_config(
+        "[heater_bed]\n"
+        "heater_pin: PA0\n"
+        "sensor_type: NTC 100k M3911\n"
+        "sensor_pin: PA1\n"
+        "min_temp: 0\n"
+        "max_temp: 120\n"
+        "heaters: heater\n",
+        "printer.cfg"))
+    findings = [e for e in result.errors
+                if e.code == "unknown_param" and e.param == "heaters"]
+    assert findings, "fixture moved: 'heaters' became modeled"
+    assert all(e.severity == "warning" for e in findings), \
+        f"record-known param must never escalate: {[(e.severity, e.message) for e in findings]}"
 
 
 def test_unknown_param_matching_wildcard_is_clean():

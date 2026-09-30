@@ -1210,7 +1210,9 @@ def validate_config(config: ConfigFile, *, gcode_registry: bool = True) -> Valid
                 # makes no claim), a coverage record exists for the section
                 # type, and the param is absent from it. Wildcard param
                 # names never reach here — _find_param_def above matched
-                # them. Reaching this point also means the section type is
+                # them. (SectionDef wildcards only; coverage-record
+                # wildcards are matched inside param_known.) Reaching this
+                # point also means the section type is
                 # known (the unknown_section continue is upstream), so
                 # plugin sections are unaffected.
                 grounded = (

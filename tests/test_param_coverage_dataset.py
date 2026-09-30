@@ -136,14 +136,26 @@ def test_every_recorded_section_has_evidence():
     doc = json.loads(DOC_SECTIONS_PATH.read_text())["sections"]
     doc_patterns = {s["pattern"] for s in doc}
     snapshot = REPO_ROOT / "reference" / "klipper" / "klippy"
-    for sec_type, rec in coverage.items():
+
+    def has_evidence(sec_type: str, depth: int = 0) -> bool:
+        rec = coverage[sec_type]
         sources = rec["sources"]
-        has_module = any(
+        if any(
             _snapshot_module_exists(snapshot, rel)
             for rel in sources.get("modules", [])
-        )
-        has_doc = sec_type in doc_patterns or bool(sources.get("doc"))
-        assert has_module or has_doc, f"{sec_type}: no evidence in bundled artifacts"
+        ):
+            return True
+        if sec_type in doc_patterns or sources.get("doc"):
+            return True
+        # family alias (extruder1..7, stepper_x1, ...): evidence flows from
+        # the base section's own record
+        base = sources.get("family_of", "")
+        if base and base in coverage and depth < 2:
+            return has_evidence(base, depth + 1)
+        return False
+
+    for sec_type in coverage:
+        assert has_evidence(sec_type), f"{sec_type}: no evidence in bundled artifacts"
 
 
 def test_third_party_and_moonraker_sections_have_no_record():
@@ -188,3 +200,79 @@ def test_format_string_reads_become_wildcards():
             for p in bm
         )
         assert matched, name
+
+
+def test_record_wildcards_are_instantiable_via_param_known():
+    # Review finding (2026-09-30): param_known must EXPAND record wildcards,
+    # not string-compare. delta_calibrate.py:97-119 reads 'height%d',
+    # 'distance%d_pos1', ... — the concrete options Klipper accepts must be
+    # known to the guard, or valid configs escalate to false ERRORs.
+    from parser import param_coverage
+    for name in ("height1", "height3_pos", "manual_height2",
+                 "manual_height2_pos", "distance1", "distance2_pos1",
+                 "distance3_pos2"):
+        assert param_coverage.param_known("delta_calibrate", name), name
+
+
+def test_getlists_reads_present_in_records():
+    # READ_RE blind spot (review 2026-09-30): config.getlists(...) options.
+    # axis_twist_compensation.py:32/47 read z_compensations/zy_compensations;
+    # they must be in the record or [axis_twist_compensation] valid configs
+    # escalate. Other getlists users pinned too.
+    coverage = load_coverage()
+    assert {"z_compensations", "zy_compensations"} <= set(
+        coverage["axis_twist_compensation"]["params"])
+    for sec, opt in (("z_tilt", "z_positions"), ("quad_gantry_level", "gantry_corners")):
+        assert opt in coverage[sec]["params"], (sec, opt)
+
+
+def test_family_alias_sections_have_records():
+    # extruder1..7 / stepper_x1..z3 / corexy rails are SECTION_DEFS models
+    # with no owning module and no doc section; without FAMILY_ALIASES
+    # expansion they'd carry no record and under-escalate — the exact
+    # multi-toolhead case the AI-edit guard targets.
+    coverage = load_coverage()
+    for sec in ("extruder1", "extruder7", "stepper_x1", "stepper_z3", "stepper_a"):
+        assert sec in coverage, sec
+    bogus_param = "not_a_real_extruder_option"
+    assert not param_known_safe("extruder1", bogus_param)
+
+
+def param_known_safe(sec: str, param: str) -> bool:
+    from parser import param_coverage
+    return param_coverage.param_known(sec, param)
+
+
+@pytest.mark.skipif(
+    not (REPO_ROOT / "reference" / "klipper" / "klippy").is_dir(),
+    reason="needs the reference/klipper tree (generator re-scan)",
+)
+def test_dataset_matches_fresh_generation():
+    # Strongest tripwire (review finding 4): the committed dataset must equal
+    # what the generator derives TODAY. Any omission class fixed in the
+    # generator (e.g. the getlists regex hole) but not regenerated goes RED
+    # here instead of shipping silently.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "_derive_cov", REPO_ROOT / "scripts" / "derive_klipper_param_coverage.py")
+    gen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gen)
+    mods = gen.collect_modules()
+    own = gen.owners(mods)
+    docs = gen.doc_records()
+    cl: dict = {}
+    coverage = load_coverage()
+    for token, owner_mods in own.items():
+        if token not in coverage:
+            continue  # waived / not modeled — no claim either way
+        params: set[str] = set()
+        for om in owner_mods:
+            for r in gen.closure(om, mods, cl):
+                if r != om and gen.is_factory(r):
+                    continue
+                params |= gen.reads_from(mods[r])
+        params |= docs.get(token, set())
+        if token in gen.TMC_TYPES:
+            params -= gen.TMC_EXCLUDE
+        missing = {p for p in params if isinstance(p, str)} - set(coverage[token]["params"])
+        assert not missing, f"{token}: dataset is stale, missing {sorted(missing)[:5]}"

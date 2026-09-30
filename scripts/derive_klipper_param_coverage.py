@@ -52,7 +52,7 @@ from parser.config_schema import SECTION_DEFS  # noqa: E402
 # gcmd) must not contribute, or we'd attribute the stepper rail's options
 # to the driver section that merely holds `sconfig`.
 READ_RE = re.compile(
-    r"\bconfig\s*\.\s*get(?:float|int|boolean|choice|str|list|intlist|floatlist|with_preprocess)?\s*\(\s*['\"]([A-Za-z][A-Za-z0-9_%.\-]*)['\"]"
+    r"\bconfig\s*\.\s*get(?:float|int|boolean|choice|str|lists|list|intlist|floatlist|with_preprocess)?\s*\(\s*['\"]([A-Za-z][A-Za-z0-9_%.\-]*)['\"]"
 )
 # helper-mediated: gcode_macro.load_template(config, 'activate_gcode', ''),
 # intParamHelper(config, "buzz_filter_delay", ...), setup_heater(config, ...)
@@ -116,6 +116,25 @@ def normalize(raw: str) -> list[str]:
         # 'faulty_region_*_min'); the literal % form is not a real option
         return [wild] if OPTIONISH_RE.match(wild.replace("*", "x")) else []
     return [name] if OPTIONISH_RE.match(name) else []
+
+
+# Numbered/suffixed section families klippy treats as copies of a base
+# section: delta_calibrate-style doc extraction never lists them and no
+# module owns the token, so without expansion they'd carry no record and
+# silently under-escalate ([extruder1] bogus params stay warnings). Each
+# alias's record is a UNION of the base's source reads and doc params.
+FAMILY_ALIASES: dict[str, str] = {}
+for _n in range(1, 8):
+    FAMILY_ALIASES[f"extruder{_n}"] = "extruder"
+for _axis in ("x", "y", "z"):
+    for _n in range(1, 4):
+        FAMILY_ALIASES[f"stepper_{_axis}{_n}"] = f"stepper_{_axis}"
+# corexy/delta/cartesian alias rails (corexy.py registers a/b/c,
+# polar/delta rails read like x/y/z)
+for _tok in ("a", "b", "c"):
+    FAMILY_ALIASES[f"stepper_{_tok}"] = "stepper_x"
+for _tok in ("left", "right", "arm", "bed"):
+    FAMILY_ALIASES[f"stepper_{_tok}"] = "stepper_x"
 
 
 def collect_modules() -> dict[str, str]:
@@ -231,7 +250,7 @@ def main() -> int:
     sections: dict[str, dict] = {}
 
     def record(sec_type: str, params: set[str], modules: list[str], from_doc: bool,
-               doc_params: "set[str] | None" = None):
+               doc_params: "set[str] | None" = None, family_of: str = ""):
         if sec_type in WAIVED_SECTIONS or sec_type not in SECTION_DEFS:
             return
         doc_params = set(doc_params) if doc_params else set()
@@ -239,9 +258,11 @@ def main() -> int:
             params -= TMC_EXCLUDE
             doc_params -= TMC_EXCLUDE
         rec = sections.setdefault(
-            sec_type, {"params": set(), "doc_params": set(), "modules": [], "doc": False})
+            sec_type, {"params": set(), "doc_params": set(), "modules": [], "doc": False,
+                       "family_of": ""})
         rec["params"] |= params
         rec["doc_params"] |= set(doc_params)
+        rec["family_of"] = rec["family_of"] or family_of
         for m in modules:
             if m not in rec["modules"]:
                 rec["modules"].append(m)
@@ -264,6 +285,22 @@ def main() -> int:
     for token, params in sorted(docs.items()):
         record(token, set(params), [], from_doc=True, doc_params=set(params))
 
+    # Family aliases (extruder1..7, stepper_x1, ...) inherit the base's
+    # source-read params. Only when the base actually got one — a base
+    # without ground truth must not spawn alias ground truth either.
+    # doc_params stay EMPTY: Config_Reference.md lists no alias section, and
+    # the alias's own SectionDef may model a subset of the base — claiming
+    # the base's doc params would fail the doc-coverage contract for no gain
+    # (escalation only consults `params`).
+    for alias, base in sorted(FAMILY_ALIASES.items()):
+        if alias in WAIVED_SECTIONS or alias not in SECTION_DEFS:
+            continue
+        base_rec = sections.get(base)
+        if not base_rec or not base_rec["params"]:
+            continue
+        record(alias, set(base_rec["params"]), list(base_rec["modules"]),
+               from_doc=False, doc_params=set(), family_of=base)
+
     out_sections = {}
     for sec_type in sorted(sections):
         rec = sections[sec_type]
@@ -272,7 +309,8 @@ def main() -> int:
         out_sections[sec_type] = {
             "params": sorted(rec["params"]),
             "doc_params": sorted(rec["doc_params"]),
-            "sources": {"modules": rec["modules"], "doc": rec["doc"]},
+            "sources": {"modules": rec["modules"], "doc": rec["doc"],
+                        "family_of": rec["family_of"]},
         }
 
     payload = {

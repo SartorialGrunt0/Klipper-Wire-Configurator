@@ -40,6 +40,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.ad5206",
@@ -70,6 +71,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.adc_scaled",
      "extras.canbus_ids",
@@ -121,6 +123,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.adc_temperature",
@@ -162,6 +165,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.ads1x1x",
@@ -204,6 +208,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.adxl345",
@@ -252,6 +257,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.angle",
@@ -311,10 +317,13 @@
     "speed",
     "x_offset",
     "y_offset",
-    "z_offset"
+    "z_compensations",
+    "z_offset",
+    "zy_compensations"
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.axis_twist_compensation",
@@ -406,6 +415,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.bed_mesh",
@@ -455,6 +465,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.bed_screws",
      "extras.canbus_ids",
@@ -505,6 +516,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.bed_tilt",
@@ -580,6 +592,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.bltouch",
@@ -630,6 +643,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.bmi160",
@@ -671,6 +685,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": []
    }
   },
@@ -729,6 +744,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.canbus_ids",
@@ -763,6 +779,7 @@
    ],
    "sources": {
     "doc": false,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.bus",
@@ -791,6 +808,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.canbus_ids",
      "extras.delayed_gcode",
@@ -845,6 +863,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.canbus_ids",
@@ -881,6 +900,7 @@
    ],
    "sources": {
     "doc": false,
+    "family_of": "",
     "modules": [
      "extras.aio_executor",
      "extras.canbus_ids",
@@ -927,6 +947,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.bus",
@@ -970,6 +991,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": []
    }
   },
@@ -982,6 +1004,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.duplicate_pin_override",
      "pins"
@@ -1002,6 +1025,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.canbus_ids",
@@ -1022,6 +1046,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.canbus_ids",
      "extras.error_mcu",
@@ -1047,6 +1072,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": []
    }
   },
@@ -1119,6 +1145,294 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
+    "modules": []
+   }
+  },
+  "extruder1": {
+   "doc_params": [],
+   "params": [
+    "control",
+    "dir_pin",
+    "enable_pin",
+    "filament_diameter",
+    "full_steps_per_rotation",
+    "gear_ratio",
+    "heater_pin",
+    "instantaneous_corner_velocity",
+    "max_delta",
+    "max_extrude_cross_section",
+    "max_extrude_only_accel",
+    "max_extrude_only_distance",
+    "max_extrude_only_velocity",
+    "max_power",
+    "max_temp",
+    "microsteps",
+    "min_extrude_temp",
+    "min_temp",
+    "nozzle_diameter",
+    "pid_kd",
+    "pid_ki",
+    "pid_kp",
+    "pressure_advance",
+    "pressure_advance_smooth_time",
+    "pullup_resistor",
+    "pwm_cycle_time",
+    "rotation_distance",
+    "sensor_pin",
+    "sensor_type",
+    "smooth_time",
+    "step_pin"
+   ],
+   "sources": {
+    "doc": true,
+    "family_of": "extruder",
+    "modules": []
+   }
+  },
+  "extruder2": {
+   "doc_params": [],
+   "params": [
+    "control",
+    "dir_pin",
+    "enable_pin",
+    "filament_diameter",
+    "full_steps_per_rotation",
+    "gear_ratio",
+    "heater_pin",
+    "instantaneous_corner_velocity",
+    "max_delta",
+    "max_extrude_cross_section",
+    "max_extrude_only_accel",
+    "max_extrude_only_distance",
+    "max_extrude_only_velocity",
+    "max_power",
+    "max_temp",
+    "microsteps",
+    "min_extrude_temp",
+    "min_temp",
+    "nozzle_diameter",
+    "pid_kd",
+    "pid_ki",
+    "pid_kp",
+    "pressure_advance",
+    "pressure_advance_smooth_time",
+    "pullup_resistor",
+    "pwm_cycle_time",
+    "rotation_distance",
+    "sensor_pin",
+    "sensor_type",
+    "smooth_time",
+    "step_pin"
+   ],
+   "sources": {
+    "doc": true,
+    "family_of": "extruder",
+    "modules": []
+   }
+  },
+  "extruder3": {
+   "doc_params": [],
+   "params": [
+    "control",
+    "dir_pin",
+    "enable_pin",
+    "filament_diameter",
+    "full_steps_per_rotation",
+    "gear_ratio",
+    "heater_pin",
+    "instantaneous_corner_velocity",
+    "max_delta",
+    "max_extrude_cross_section",
+    "max_extrude_only_accel",
+    "max_extrude_only_distance",
+    "max_extrude_only_velocity",
+    "max_power",
+    "max_temp",
+    "microsteps",
+    "min_extrude_temp",
+    "min_temp",
+    "nozzle_diameter",
+    "pid_kd",
+    "pid_ki",
+    "pid_kp",
+    "pressure_advance",
+    "pressure_advance_smooth_time",
+    "pullup_resistor",
+    "pwm_cycle_time",
+    "rotation_distance",
+    "sensor_pin",
+    "sensor_type",
+    "smooth_time",
+    "step_pin"
+   ],
+   "sources": {
+    "doc": true,
+    "family_of": "extruder",
+    "modules": []
+   }
+  },
+  "extruder4": {
+   "doc_params": [],
+   "params": [
+    "control",
+    "dir_pin",
+    "enable_pin",
+    "filament_diameter",
+    "full_steps_per_rotation",
+    "gear_ratio",
+    "heater_pin",
+    "instantaneous_corner_velocity",
+    "max_delta",
+    "max_extrude_cross_section",
+    "max_extrude_only_accel",
+    "max_extrude_only_distance",
+    "max_extrude_only_velocity",
+    "max_power",
+    "max_temp",
+    "microsteps",
+    "min_extrude_temp",
+    "min_temp",
+    "nozzle_diameter",
+    "pid_kd",
+    "pid_ki",
+    "pid_kp",
+    "pressure_advance",
+    "pressure_advance_smooth_time",
+    "pullup_resistor",
+    "pwm_cycle_time",
+    "rotation_distance",
+    "sensor_pin",
+    "sensor_type",
+    "smooth_time",
+    "step_pin"
+   ],
+   "sources": {
+    "doc": true,
+    "family_of": "extruder",
+    "modules": []
+   }
+  },
+  "extruder5": {
+   "doc_params": [],
+   "params": [
+    "control",
+    "dir_pin",
+    "enable_pin",
+    "filament_diameter",
+    "full_steps_per_rotation",
+    "gear_ratio",
+    "heater_pin",
+    "instantaneous_corner_velocity",
+    "max_delta",
+    "max_extrude_cross_section",
+    "max_extrude_only_accel",
+    "max_extrude_only_distance",
+    "max_extrude_only_velocity",
+    "max_power",
+    "max_temp",
+    "microsteps",
+    "min_extrude_temp",
+    "min_temp",
+    "nozzle_diameter",
+    "pid_kd",
+    "pid_ki",
+    "pid_kp",
+    "pressure_advance",
+    "pressure_advance_smooth_time",
+    "pullup_resistor",
+    "pwm_cycle_time",
+    "rotation_distance",
+    "sensor_pin",
+    "sensor_type",
+    "smooth_time",
+    "step_pin"
+   ],
+   "sources": {
+    "doc": true,
+    "family_of": "extruder",
+    "modules": []
+   }
+  },
+  "extruder6": {
+   "doc_params": [],
+   "params": [
+    "control",
+    "dir_pin",
+    "enable_pin",
+    "filament_diameter",
+    "full_steps_per_rotation",
+    "gear_ratio",
+    "heater_pin",
+    "instantaneous_corner_velocity",
+    "max_delta",
+    "max_extrude_cross_section",
+    "max_extrude_only_accel",
+    "max_extrude_only_distance",
+    "max_extrude_only_velocity",
+    "max_power",
+    "max_temp",
+    "microsteps",
+    "min_extrude_temp",
+    "min_temp",
+    "nozzle_diameter",
+    "pid_kd",
+    "pid_ki",
+    "pid_kp",
+    "pressure_advance",
+    "pressure_advance_smooth_time",
+    "pullup_resistor",
+    "pwm_cycle_time",
+    "rotation_distance",
+    "sensor_pin",
+    "sensor_type",
+    "smooth_time",
+    "step_pin"
+   ],
+   "sources": {
+    "doc": true,
+    "family_of": "extruder",
+    "modules": []
+   }
+  },
+  "extruder7": {
+   "doc_params": [],
+   "params": [
+    "control",
+    "dir_pin",
+    "enable_pin",
+    "filament_diameter",
+    "full_steps_per_rotation",
+    "gear_ratio",
+    "heater_pin",
+    "instantaneous_corner_velocity",
+    "max_delta",
+    "max_extrude_cross_section",
+    "max_extrude_only_accel",
+    "max_extrude_only_distance",
+    "max_extrude_only_velocity",
+    "max_power",
+    "max_temp",
+    "microsteps",
+    "min_extrude_temp",
+    "min_temp",
+    "nozzle_diameter",
+    "pid_kd",
+    "pid_ki",
+    "pid_kp",
+    "pressure_advance",
+    "pressure_advance_smooth_time",
+    "pullup_resistor",
+    "pwm_cycle_time",
+    "rotation_distance",
+    "sensor_pin",
+    "sensor_type",
+    "smooth_time",
+    "step_pin"
+   ],
+   "sources": {
+    "doc": true,
+    "family_of": "extruder",
     "modules": []
    }
   },
@@ -1141,6 +1455,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.extruder_stepper"
     ]
@@ -1175,6 +1490,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.canbus_ids",
      "extras.error_mcu",
@@ -1217,6 +1533,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.canbus_ids",
      "extras.error_mcu",
@@ -1269,6 +1586,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.aio_executor",
      "extras.buttons",
@@ -1327,6 +1645,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.aio_executor",
      "extras.buttons",
@@ -1364,6 +1683,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.canbus_ids",
      "extras.error_mcu",
@@ -1387,6 +1707,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.canbus_ids",
      "extras.error_mcu",
@@ -1410,6 +1731,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.canbus_ids",
      "extras.error_mcu",
@@ -1448,6 +1770,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.buttons",
      "extras.canbus_ids",
@@ -1478,6 +1801,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.canbus_ids",
      "extras.error_mcu",
@@ -1551,6 +1875,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.aio_executor",
      "extras.buttons",
@@ -1613,6 +1938,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.canbus_ids",
@@ -1678,6 +2004,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.canbus_ids",
@@ -1732,6 +2059,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.canbus_ids",
@@ -1773,6 +2101,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.canbus_ids",
@@ -1811,6 +2140,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.canbus_ids",
      "extras.error_mcu",
@@ -1852,6 +2182,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.bus",
@@ -1880,6 +2211,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.canbus_ids",
      "extras.error_mcu",
@@ -1924,6 +2256,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.canbus_ids",
      "extras.error_mcu",
@@ -1974,6 +2307,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.canbus_ids",
      "extras.error_mcu",
@@ -2022,6 +2356,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.bus",
@@ -2051,6 +2386,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.bus",
@@ -2096,6 +2432,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.ads1220",
@@ -2194,6 +2531,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.ads1220",
@@ -2247,6 +2585,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.canbus_ids",
@@ -2284,6 +2623,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.bus",
@@ -2327,6 +2667,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.bus",
@@ -2368,6 +2709,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.bus",
@@ -2399,6 +2741,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": []
    }
   },
@@ -2427,6 +2770,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.bus",
@@ -2450,6 +2794,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.multi_pin",
      "pins"
@@ -2488,6 +2833,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.canbus_ids",
      "extras.error_mcu",
@@ -2530,6 +2876,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.canbus_ids",
      "extras.error_mcu",
@@ -2575,6 +2922,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.aio_executor",
      "extras.canbus_ids",
@@ -2612,6 +2960,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.aio_executor",
      "extras.canbus_ids",
@@ -2656,6 +3005,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.bus",
@@ -2698,6 +3048,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.bus",
@@ -2733,6 +3084,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": []
    }
   },
@@ -2779,6 +3131,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.canbus_ids",
@@ -2866,6 +3219,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.bus",
@@ -2905,6 +3259,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.canbus_ids",
      "extras.error_mcu",
@@ -2939,6 +3294,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.canbus_ids",
      "extras.error_mcu",
@@ -2991,6 +3347,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.canbus_ids",
@@ -3038,6 +3395,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.bus",
@@ -3095,6 +3453,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.canbus_ids",
@@ -3122,6 +3481,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.canbus_ids",
      "extras.error_mcu",
@@ -3154,6 +3514,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.canbus_ids",
@@ -3186,6 +3547,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.samd_sercom",
      "pins"
@@ -3202,6 +3564,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.aio_executor",
      "extras.canbus_ids",
@@ -3256,6 +3619,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.canbus_ids",
@@ -3292,6 +3656,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.aio_executor",
      "extras.canbus_ids",
@@ -3340,6 +3705,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.canbus_ids",
      "extras.error_mcu",
@@ -3401,6 +3767,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.canbus_ids",
@@ -3430,6 +3797,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.static_digital_output",
      "pins"
@@ -3447,6 +3815,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.static_pwm_clock",
      "pins"
@@ -3478,6 +3847,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": []
    }
   },
@@ -3522,6 +3892,34 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "stepper_x",
+    "modules": []
+   }
+  },
+  "stepper_arm": {
+   "doc_params": [],
+   "params": [
+    "dir_pin",
+    "enable_pin",
+    "endstop_pin",
+    "full_steps_per_rotation",
+    "gear_ratio",
+    "homing_positive_dir",
+    "homing_retract_dist",
+    "homing_retract_speed",
+    "homing_speed",
+    "microsteps",
+    "position_endstop",
+    "position_max",
+    "position_min",
+    "rotation_distance",
+    "second_homing_speed",
+    "step_pin",
+    "step_pulse_duration"
+   ],
+   "sources": {
+    "doc": false,
+    "family_of": "stepper_x",
     "modules": []
    }
   },
@@ -3566,6 +3964,34 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "stepper_x",
+    "modules": []
+   }
+  },
+  "stepper_bed": {
+   "doc_params": [],
+   "params": [
+    "dir_pin",
+    "enable_pin",
+    "endstop_pin",
+    "full_steps_per_rotation",
+    "gear_ratio",
+    "homing_positive_dir",
+    "homing_retract_dist",
+    "homing_retract_speed",
+    "homing_speed",
+    "microsteps",
+    "position_endstop",
+    "position_max",
+    "position_min",
+    "rotation_distance",
+    "second_homing_speed",
+    "step_pin",
+    "step_pulse_duration"
+   ],
+   "sources": {
+    "doc": false,
+    "family_of": "stepper_x",
     "modules": []
    }
   },
@@ -3610,6 +4036,61 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "stepper_x",
+    "modules": []
+   }
+  },
+  "stepper_left": {
+   "doc_params": [],
+   "params": [
+    "dir_pin",
+    "enable_pin",
+    "endstop_pin",
+    "full_steps_per_rotation",
+    "gear_ratio",
+    "homing_positive_dir",
+    "homing_retract_dist",
+    "homing_retract_speed",
+    "homing_speed",
+    "microsteps",
+    "position_endstop",
+    "position_max",
+    "position_min",
+    "rotation_distance",
+    "second_homing_speed",
+    "step_pin",
+    "step_pulse_duration"
+   ],
+   "sources": {
+    "doc": true,
+    "family_of": "stepper_x",
+    "modules": []
+   }
+  },
+  "stepper_right": {
+   "doc_params": [],
+   "params": [
+    "dir_pin",
+    "enable_pin",
+    "endstop_pin",
+    "full_steps_per_rotation",
+    "gear_ratio",
+    "homing_positive_dir",
+    "homing_retract_dist",
+    "homing_retract_speed",
+    "homing_speed",
+    "microsteps",
+    "position_endstop",
+    "position_max",
+    "position_min",
+    "rotation_distance",
+    "second_homing_speed",
+    "step_pin",
+    "step_pulse_duration"
+   ],
+   "sources": {
+    "doc": true,
+    "family_of": "stepper_x",
     "modules": []
    }
   },
@@ -3654,6 +4135,88 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
+    "modules": []
+   }
+  },
+  "stepper_x1": {
+   "doc_params": [],
+   "params": [
+    "dir_pin",
+    "enable_pin",
+    "endstop_pin",
+    "full_steps_per_rotation",
+    "gear_ratio",
+    "homing_positive_dir",
+    "homing_retract_dist",
+    "homing_retract_speed",
+    "homing_speed",
+    "microsteps",
+    "position_endstop",
+    "position_max",
+    "position_min",
+    "rotation_distance",
+    "second_homing_speed",
+    "step_pin",
+    "step_pulse_duration"
+   ],
+   "sources": {
+    "doc": false,
+    "family_of": "stepper_x",
+    "modules": []
+   }
+  },
+  "stepper_x2": {
+   "doc_params": [],
+   "params": [
+    "dir_pin",
+    "enable_pin",
+    "endstop_pin",
+    "full_steps_per_rotation",
+    "gear_ratio",
+    "homing_positive_dir",
+    "homing_retract_dist",
+    "homing_retract_speed",
+    "homing_speed",
+    "microsteps",
+    "position_endstop",
+    "position_max",
+    "position_min",
+    "rotation_distance",
+    "second_homing_speed",
+    "step_pin",
+    "step_pulse_duration"
+   ],
+   "sources": {
+    "doc": false,
+    "family_of": "stepper_x",
+    "modules": []
+   }
+  },
+  "stepper_x3": {
+   "doc_params": [],
+   "params": [
+    "dir_pin",
+    "enable_pin",
+    "endstop_pin",
+    "full_steps_per_rotation",
+    "gear_ratio",
+    "homing_positive_dir",
+    "homing_retract_dist",
+    "homing_retract_speed",
+    "homing_speed",
+    "microsteps",
+    "position_endstop",
+    "position_max",
+    "position_min",
+    "rotation_distance",
+    "second_homing_speed",
+    "step_pin",
+    "step_pulse_duration"
+   ],
+   "sources": {
+    "doc": false,
+    "family_of": "stepper_x",
     "modules": []
    }
   },
@@ -3698,6 +4261,88 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
+    "modules": []
+   }
+  },
+  "stepper_y1": {
+   "doc_params": [],
+   "params": [
+    "dir_pin",
+    "enable_pin",
+    "endstop_pin",
+    "full_steps_per_rotation",
+    "gear_ratio",
+    "homing_positive_dir",
+    "homing_retract_dist",
+    "homing_retract_speed",
+    "homing_speed",
+    "microsteps",
+    "position_endstop",
+    "position_max",
+    "position_min",
+    "rotation_distance",
+    "second_homing_speed",
+    "step_pin",
+    "step_pulse_duration"
+   ],
+   "sources": {
+    "doc": false,
+    "family_of": "stepper_y",
+    "modules": []
+   }
+  },
+  "stepper_y2": {
+   "doc_params": [],
+   "params": [
+    "dir_pin",
+    "enable_pin",
+    "endstop_pin",
+    "full_steps_per_rotation",
+    "gear_ratio",
+    "homing_positive_dir",
+    "homing_retract_dist",
+    "homing_retract_speed",
+    "homing_speed",
+    "microsteps",
+    "position_endstop",
+    "position_max",
+    "position_min",
+    "rotation_distance",
+    "second_homing_speed",
+    "step_pin",
+    "step_pulse_duration"
+   ],
+   "sources": {
+    "doc": false,
+    "family_of": "stepper_y",
+    "modules": []
+   }
+  },
+  "stepper_y3": {
+   "doc_params": [],
+   "params": [
+    "dir_pin",
+    "enable_pin",
+    "endstop_pin",
+    "full_steps_per_rotation",
+    "gear_ratio",
+    "homing_positive_dir",
+    "homing_retract_dist",
+    "homing_retract_speed",
+    "homing_speed",
+    "microsteps",
+    "position_endstop",
+    "position_max",
+    "position_min",
+    "rotation_distance",
+    "second_homing_speed",
+    "step_pin",
+    "step_pulse_duration"
+   ],
+   "sources": {
+    "doc": false,
+    "family_of": "stepper_y",
     "modules": []
    }
   },
@@ -3742,6 +4387,88 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
+    "modules": []
+   }
+  },
+  "stepper_z1": {
+   "doc_params": [],
+   "params": [
+    "dir_pin",
+    "enable_pin",
+    "endstop_pin",
+    "full_steps_per_rotation",
+    "gear_ratio",
+    "homing_positive_dir",
+    "homing_retract_dist",
+    "homing_retract_speed",
+    "homing_speed",
+    "microsteps",
+    "position_endstop",
+    "position_max",
+    "position_min",
+    "rotation_distance",
+    "second_homing_speed",
+    "step_pin",
+    "step_pulse_duration"
+   ],
+   "sources": {
+    "doc": false,
+    "family_of": "stepper_z",
+    "modules": []
+   }
+  },
+  "stepper_z2": {
+   "doc_params": [],
+   "params": [
+    "dir_pin",
+    "enable_pin",
+    "endstop_pin",
+    "full_steps_per_rotation",
+    "gear_ratio",
+    "homing_positive_dir",
+    "homing_retract_dist",
+    "homing_retract_speed",
+    "homing_speed",
+    "microsteps",
+    "position_endstop",
+    "position_max",
+    "position_min",
+    "rotation_distance",
+    "second_homing_speed",
+    "step_pin",
+    "step_pulse_duration"
+   ],
+   "sources": {
+    "doc": false,
+    "family_of": "stepper_z",
+    "modules": []
+   }
+  },
+  "stepper_z3": {
+   "doc_params": [],
+   "params": [
+    "dir_pin",
+    "enable_pin",
+    "endstop_pin",
+    "full_steps_per_rotation",
+    "gear_ratio",
+    "homing_positive_dir",
+    "homing_retract_dist",
+    "homing_retract_speed",
+    "homing_speed",
+    "microsteps",
+    "position_endstop",
+    "position_max",
+    "position_min",
+    "rotation_distance",
+    "second_homing_speed",
+    "step_pin",
+    "step_pulse_duration"
+   ],
+   "sources": {
+    "doc": false,
+    "family_of": "stepper_z",
     "modules": []
    }
   },
@@ -3763,6 +4490,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.bus",
@@ -3840,6 +4568,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.canbus_ids",
@@ -3884,6 +4613,7 @@
     "deactivate_gcode",
     "deactivate_on_each_sample",
     "description",
+    "drift_calibration",
     "drift_calibration_min_temp",
     "enable_pin",
     "extruder_heating_z",
@@ -3925,6 +4655,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.canbus_ids",
@@ -3976,6 +4707,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.canbus_ids",
@@ -4089,6 +4821,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.bus",
@@ -4206,6 +4939,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.bulk_sensor",
@@ -4351,6 +5085,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.bulk_sensor",
@@ -4461,6 +5196,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.bus",
@@ -4547,6 +5283,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.bus",
@@ -4649,6 +5386,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.bus",
@@ -4678,6 +5416,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.canbus_ids",
      "extras.error_mcu",
@@ -4720,6 +5459,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.canbus_ids",
@@ -4753,6 +5493,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "extras.aio_executor",
      "extras.canbus_ids",
@@ -4806,6 +5547,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.canbus_ids",
@@ -4860,6 +5602,7 @@
    ],
    "sources": {
     "doc": true,
+    "family_of": "",
     "modules": [
      "configfile",
      "extras.canbus_ids",

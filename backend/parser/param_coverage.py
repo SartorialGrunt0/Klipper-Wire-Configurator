@@ -13,6 +13,11 @@ weakens escalation for one section, while a false positive would block a
 config Klipper loads. Absence of a section is load-bearing — third-party,
 Moonraker-owned, and dynamically-named sections carry no record precisely so
 the guard can never ground a claim against them.
+
+Record entries may be `prefix*suffix` wildcards (format-string reads like
+"height%d" -> "height*"). They must be matched, not compared literally: a
+concrete option Klipper really reads (delta_calibrate height1) absent from
+an exact-only match would escalate into a false ERROR on a valid config.
 """
 from __future__ import annotations
 
@@ -23,10 +28,27 @@ from pathlib import Path
 _DATASET_PATH = Path(__file__).resolve().parent / "klipper_param_coverage.json"
 
 _lock = threading.Lock()
-_cache: dict[str, frozenset[str]] | None = None
+# sec_type -> (exact names, [(prefix, suffix), ...])
+_cache: dict[str, tuple[frozenset[str], list[tuple[str, str]]]] | None = None
 
 
-def _load() -> dict[str, frozenset[str]]:
+def _parse(data: object) -> dict:
+    out: dict[str, tuple[frozenset[str], list[tuple[str, str]]]] = {}
+    sections = data.get("sections") if isinstance(data, dict) else None
+    if not isinstance(sections, dict):
+        return out
+    for sec, rec in sections.items():
+        raw = rec.get("params", ()) if isinstance(rec, dict) else ()
+        names = {p for p in raw if isinstance(p, str)}
+        wilds: list[tuple[str, str]] = [
+            (w[0], w[1]) for w in (p.lower().split("*", 1) for p in names if "*" in p)
+        ]
+        exact = frozenset(p for p in names if "*" not in p)
+        out[sec] = (exact, wilds)
+    return out
+
+
+def _load() -> dict:
     global _cache
     if _cache is not None:
         return _cache
@@ -34,14 +56,13 @@ def _load() -> dict[str, frozenset[str]]:
         if _cache is None:
             try:
                 data = json.loads(_DATASET_PATH.read_text(encoding="utf-8"))
-                _cache = {
-                    sec: frozenset(rec.get("params", ()))
-                    for sec, rec in data.get("sections", {}).items()
-                }
-            except (OSError, ValueError):
-                # A missing/corrupt dataset must degrade to "no ground truth
-                # anywhere" (everything stays a warning), never raise inside
-                # validation and never block a save.
+                _cache = _parse(data)
+            except Exception:
+                # Any unreadable/unparseable/oddly-shaped dataset must degrade
+                # to "no ground truth anywhere" (everything stays a warning),
+                # never raise inside validation and never block a save. Shape
+                # errors (valid JSON, wrong types) are AttributeError/TypeError
+                # territory, so the catch is deliberately broad here.
                 _cache = {}
     return _cache
 
@@ -52,9 +73,18 @@ def has_record(sec_type: str) -> bool:
 
 
 def param_known(sec_type: str, param: str) -> bool:
-    """True when `param` (exact, lowercase-normalized) is in the record.
+    """True when `param` is in the record, exact or via a record wildcard.
 
     Callers pass keys already lowercased; Klipper lowercases configfile
     options (configfile.py:433-438) and the generator normalized on write.
+    Wildcard semantics match `_find_param_def` in validator.py (single '*',
+    prefix-and-suffix).
     """
-    return param.lower() in _load().get(sec_type, frozenset())
+    entry = _load().get(sec_type)
+    if entry is None:
+        return False
+    exact, wilds = entry
+    pl = param.lower()
+    if pl in exact:
+        return True
+    return any(pl.startswith(pre) and pl.endswith(suf) for pre, suf in wilds)
