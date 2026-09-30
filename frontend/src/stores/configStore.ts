@@ -204,11 +204,45 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     scheduleRevalidation(get, set);
   },
 
-  removeConfigFile: (filename) =>
+  removeConfigFile: (filename) => {
     set((s) => {
       if (!s.configFiles[filename]) return s;
       const nextConfigFiles = { ...s.configFiles };
       delete nextConfigFiles[filename];
+
+      // Mirror edge-delete: removing a file comments out the
+      // '[include <file>]' lines that pointed at it, in every remaining
+      // file. Without this, node/file-tree deletes left an active
+      // include pointing at a deleted file — a Klipper startup
+      // hard-fail the user only learned about from a red
+      // missing_include error after the fact. Commenting (not deleting)
+      // matches removeInclude's idiom: the line survives disabled and
+      // undo/re-add re-activates it in place. Match on basename:
+      // includes are relative paths ('./sub/x.cfg'), the store keys by
+      // name. Globs ('[include dir/*.cfg]') are left alone — deleting
+      // one file they match is legal in Klipper.
+      const baseOf = (p: string) => p.replace(/\\/g, '/').split('/').pop() || p;
+      for (const [fn, cf] of Object.entries(nextConfigFiles)) {
+        let touched = false;
+        const sections = cf.sections.map((sec) => {
+          if (
+            sec.section_type === 'include' &&
+            !sec.is_commented_out &&
+            !baseOf(sec.section_name).includes('*') &&
+            baseOf(sec.section_name) === filename
+          ) {
+            touched = true;
+            return { ...sec, is_commented_out: true };
+          }
+          return sec;
+        });
+        if (!touched) continue;
+        nextConfigFiles[fn] = {
+          ...cf,
+          sections,
+          includes: cf.includes.filter((i) => baseOf(i) !== filename),
+        };
+      }
 
       const nextValidation = { ...s.validation };
       delete nextValidation[filename];
@@ -232,7 +266,12 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         selectedSectionFile: s.selectedSectionFile === filename ? null : s.selectedSectionFile,
         selectedSectionLine: s.selectedSectionFile === filename ? null : s.selectedSectionLine,
       };
-    }),
+    });
+    // The include-comment pass above mutated OTHER files' section
+    // models — their findings (and the include dots in the UI) must
+    // re-derive, same debounced pass every other mutation schedules.
+    scheduleRevalidation(get, set);
+  },
 
   setActiveFile: (filename) => set({ activeFile: filename }),
 

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "source_rev": "2d7717e3b62ea2fe3401b27f54f8681f80451c69",
-  "generated_at": "2026-09-11T14:28:34+00:00",
+  "generated_at": "2026-09-30T05:37:43+00:00",
   "commands": {
     "ABORT": {
       "extra": "bed_screws",
@@ -465,7 +465,9 @@
     },
     "FORCE_MOVE": {
       "extra": "force_move",
-      "requires_sections": [],
+      "requires_sections": [
+        "force_move"
+      ],
       "requires_mode": "any",
       "params": {
         "STEPPER": {
@@ -474,7 +476,10 @@
       },
       "mux_key": "STEPPER",
       "simulated": true,
-      "source_line": 57
+      "source_line": 57,
+      "requires_flags": {
+        "force_move": "enable_force_move"
+      }
     },
     "G0": {
       "extra": "gcode_move",
@@ -1588,11 +1593,16 @@
     },
     "SET_KINEMATIC_POSITION": {
       "extra": "force_move",
-      "requires_sections": [],
+      "requires_sections": [
+        "force_move"
+      ],
       "requires_mode": "any",
       "mux_key": null,
       "simulated": false,
-      "source_line": 45
+      "source_line": 45,
+      "requires_flags": {
+        "force_move": "enable_force_move"
+      }
     },
     "SET_LED": {
       "extra": "led",

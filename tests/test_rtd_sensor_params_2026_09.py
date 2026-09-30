@@ -152,6 +152,12 @@ max_temp: 350
     result = _validate(text)
     flagged = [e for e in _unknown_params(result) if "rtd_bogus_r" in e.message]
     assert len(flagged) == 1, "a param outside the sensor family must still be unknown_param"
+    # 2026-09-30 escalation: [extruder] is a grounded section (coverage
+    # record), so a param outside every sensor family is an un-acknowledgeable
+    # ERROR — klippy's check_unused refuses the load.
+    assert flagged[0].severity == "error", (
+        f"bogus param in a grounded section must escalate: {flagged[0]}"
+    )
 
 
 def test_fixed_enum_sections_do_not_carry_rtd_params():

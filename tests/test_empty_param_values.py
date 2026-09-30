@@ -14,7 +14,8 @@ KWC gap: _validate_param_value only errors an empty value for ENUM; a
 later with a confusing traceback.
 
 Scope: only KNOWN (schema-typed) params — unknown params already get their own
-'unknown_param' warning and must not be double-flagged. STRING and MULTI_LINE
+'unknown_param' finding (warning, or ERROR when the section is grounded per the
+2026-09-30 escalation) and must not be double-flagged. STRING and MULTI_LINE
 params may legitimately be empty, so they are never flagged.
 """
 import sys

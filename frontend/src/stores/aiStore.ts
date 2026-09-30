@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { loadAiState, saveAiState, type AiToolCallDetail } from '../services/api';
+import { loadAiState, saveAiState, type AiToolCallDetail, type PendingConfigEdit } from '../services/api';
 
 const STORAGE_KEY = 'klipper-wire-ai-state';
 const LEGACY_SETTINGS_KEY = 'klipper-wire-ai-settings';
@@ -16,11 +16,12 @@ export interface ChatMessage {
   /** Executed tool calls with arguments + output, in execution order. */
   toolCalls?: AiToolCallDetail[];
   /** Number of macro sections whose trailing Jinja closers were auto-appended. */
-  repairCount?: number;
   /** Number of retries the reply pipeline performed before accepting. */
   retryCount?: number;
   /** Number of backend empty-response re-prompts for this reply. */
   repromptCount?: number;
+  /** Changes staged by the config_edit/config_write write tools (server-validated). */
+  pendingEdits?: PendingConfigEdit[];
 }
 
 export interface AiSettings {
@@ -162,16 +163,18 @@ interface AiState {
   /**
    * Background completion signal for the toolbar button: 'success' when a
    * request finished while the dialog was closed, 'error' when it failed out
-   * (retry limit / unrecoverable error), 'idle' otherwise. Transient UI state
-   * — NOT persisted to the backend file.
+   * (retry limit / unrecoverable error), 'awaiting' when an approval card
+   * (edit accept/decline) arrived while the dialog was closed — it renders
+   * green like 'success' (the user needs to come look), 'idle' otherwise.
+   * Transient UI state — NOT persisted to the backend file.
    */
-  chatStatus: 'idle' | 'success' | 'error';
+  chatStatus: 'idle' | 'success' | 'error' | 'awaiting';
   /** Load AI settings + messages from the backend file (migrating localStorage). */
   loadState: () => Promise<void>;
   setSettings: (settings: Partial<AiSettings>) => void;
   setMessages: (messages: ChatMessage[]) => void;
   clearMessages: () => void;
-  setChatStatus: (status: 'idle' | 'success' | 'error') => void;
+  setChatStatus: (status: 'idle' | 'success' | 'error' | 'awaiting') => void;
   isConfigured: () => boolean;
 }
 

@@ -1,0 +1,858 @@
+"""Phase 2 tests: the approval gate (suspend -> decide -> resume).
+
+Covers the plan's Phase 2 requirements:
+- validated write SUSPENDS in-request; GET /ai/chat/approval surfaces
+  the card; approve commits (re-validated against the frontend's latest
+  contextFiles) and the loop continues;
+- decline reverts (nothing staged) and the model gets an honest result;
+- timeout auto-declines with the honest 'did not respond' reason;
+- NEVER a card for a call with new validation errors (kickback is
+  identical to the auto-approve path);
+- approve-after-manual-edit: clean re-apply vs anchor-miss invalidation;
+- double decision rejected; decision on unknown id -> not_found;
+- multi-call serialization (second card only after the first decision);
+- autoApproveEdits bypasses the wait but not validation.
+
+Concurrency pattern: the chat request runs in a helper thread while the
+main thread polls/decides, mirroring the real frontend.
+"""
+import json
+import sys
+import threading
+import time
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'backend'))
+
+from fastapi.testclient import TestClient  # noqa: E402
+
+import api.ai_routes as ai_routes  # noqa: E402
+from main import app  # noqa: E402
+
+client = TestClient(app)
+
+PRINTER_CFG = """[printer]
+kinematics: cartesian
+max_velocity: 200
+max_accel: 1000
+max_z_velocity: 5
+max_z_accel: 100
+
+[gcode_macro PARK]
+gcode:
+    G91
+    G1 Z5
+"""
+
+
+def _ctx():
+    return {'printer.cfg': {'content': PRINTER_CFG}}
+
+
+def _text_tool_call(name, arguments):
+    args = {k: str(v) for k, v in arguments.items()}
+    block = f"```tool\n{json.dumps({'name': name, 'arguments': args})}\n```"
+    return {'choices': [{'message': {'content': f'Sure.\n\n{block}'}}]}
+
+
+def _final_reply(text='Done.'):
+    return {'choices': [{'message': {'content': text}}]}
+
+
+class _Resp:
+    def __init__(self, payload):
+        self._payload = payload
+        self.status_code = 200
+        self.text = json.dumps(payload)
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._payload
+
+
+class _ScriptedClient:
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.payloads = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def post(self, url, headers=None, json=None):
+        self.payloads.append(json)
+        reply = self.replies.pop(0) if self.replies else _final_reply()
+        return _Resp(reply)
+
+    async def get(self, url, headers=None):
+        raise AssertionError('Unexpected GET')
+
+
+def _install(monkeypatch, replies):
+    from api.printer_memory_routes import PrinterMemory
+    scripted = _ScriptedClient(replies)
+    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
+    monkeypatch.setattr(ai_routes.httpx, 'AsyncClient', lambda *a, **k: scripted)
+    return scripted
+
+
+@pytest.fixture()
+def edit_flag(monkeypatch):
+    """No-op since the Phase-6 flag removal (2026-09-24): the write tools
+    are product behavior; each payload below carries editSkill=True
+    because these tests script write calls directly (the product gate
+    itself has its own E2E coverage in test_ai_edit_tools.py gate-flow
+    tests)."""
+    monkeypatch.delenv('KWC_EDIT_WRITE_CAP', raising=False)
+
+
+SET_ACCEL = {'file': 'printer.cfg', 'op': 'set_param',
+             'section': 'printer', 'key': 'max_accel', 'value': '3000'}
+
+
+def _post_chat_bg(payload_holder):
+    """Run one in-flight chat request in a thread; return (thread, result)."""
+    result = {}
+
+    def run():
+        r = client.post('/ai/chat', json=payload_holder)
+        result['body'] = r.json() if r.status_code == 200 else r.text
+        result['status'] = r.status_code
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    return t, result
+
+
+def _wait_card(request_id, timeout=5.0):
+    """Poll until the card appears; return its payload."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        r = client.get(f'/ai/chat/approval?requestId={request_id}')
+        body = r.json()
+        if body.get('pending'):
+            return body
+        time.sleep(0.05)
+    raise AssertionError('approval card never appeared')
+
+
+# ── suspend / approve ────────────────────────────────────────────────────
+
+def test_validated_write_suspends_and_approve_commits(edit_flag, monkeypatch):
+    scripted = _install(monkeypatch, [
+        _text_tool_call('config_edit', SET_ACCEL),
+        _final_reply('Set max_accel to 3000.'),
+    ])
+    payload = {
+        'messages': [{'role': 'user', 'content': 'set max_accel to 3000'}],
+        'apiKey': 'k', 'model': 'm',
+        'apiUrl': 'https://api.example.com/v1/chat/completions',
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(), 'editSkill': True,
+        'requestId': 'gate-approve-1', 'autoApproveEdits': False,
+    }
+    t, result = _post_chat_bg(payload)
+    card = _wait_card('gate-approve-1')
+    assert card['file'] == 'printer.cfg'
+    assert card['op'] == 'set_param'
+    assert card['timeoutSeconds'] > 0
+    assert 'approvalId' in card
+
+    # Nothing is staged until the decision lands.
+    dec = client.post('/ai/chat/approval', json={
+        'approvalId': card['approvalId'], 'decision': 'approve',
+        'contextFiles': _ctx(),
+    })
+    assert dec.json()['status'] == 'ok'
+    t.join(timeout=10)
+    assert result['status'] == 200
+    body = result['body']
+    assert body['pendingEdits'][0]['file'] == 'printer.cfg'
+    assert 'max_accel: 3000' in body['pendingEdits'][0]['newText']
+    # The approved result re-entering model context is honest about
+    # approval (not 'saved').
+    followup = json.dumps(scripted.payloads[-1])
+    assert 'APPROVED' in followup
+
+
+def test_decline_reverts_and_model_gets_honest_result(edit_flag, monkeypatch):
+    _install(monkeypatch, [
+        _text_tool_call('config_edit', SET_ACCEL),
+        _final_reply('Understood, leaving it as is.'),
+    ])
+    payload = {
+        'messages': [{'role': 'user', 'content': 'set max_accel to 3000'}],
+        'apiKey': 'k', 'model': 'm',
+        'apiUrl': 'https://api.example.com/v1/chat/completions',
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(), 'editSkill': True,
+        'requestId': 'gate-decline-1', 'autoApproveEdits': False,
+    }
+    t, result = _post_chat_bg(payload)
+    card = _wait_card('gate-decline-1')
+    dec = client.post('/ai/chat/approval', json={
+        'approvalId': card['approvalId'], 'decision': 'decline',
+        'reason': 'I want to keep the stock value',
+    })
+    assert dec.json()['status'] == 'ok'
+    t.join(timeout=10)
+    body = result['body']
+    # NOTHING staged — a declined op never enters pendingEdits.
+    assert not body['pendingEdits']
+    assert body['editAttempts'] == 1
+
+
+def test_no_card_for_invalid_call(edit_flag, monkeypatch):
+    """Plan law: a call with new validation errors kicks back
+    immediately — no card, no wait, identical lean error."""
+    _install(monkeypatch, [
+        _text_tool_call('config_edit', {'file': 'printer.cfg', 'op': 'set_param',
+                                        'section': 'ghost', 'key': 'x', 'value': '1'}),
+        _final_reply('That section does not exist.'),
+    ])
+    payload = {
+        'messages': [{'role': 'user', 'content': 'set x in [ghost]'}],
+        'apiKey': 'k', 'model': 'm',
+        'apiUrl': 'https://api.example.com/v1/chat/completions',
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(), 'editSkill': True,
+        'requestId': 'gate-invalid-1', 'autoApproveEdits': False,
+    }
+    resp = client.post('/ai/chat', json=payload, timeout=30)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert not body['pendingEdits']
+    # No card ever existed for the invalid op.
+    assert client.get('/ai/chat/approval?requestId=gate-invalid-1').json() == {'pending': False}
+
+
+def test_double_decision_rejected(edit_flag, monkeypatch):
+    _install(monkeypatch, [
+        _text_tool_call('config_edit', SET_ACCEL),
+        _final_reply('OK.'),
+    ])
+    payload = {
+        'messages': [{'role': 'user', 'content': 'set max_accel'}],
+        'apiKey': 'k', 'model': 'm',
+        'apiUrl': 'https://api.example.com/v1/chat/completions',
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(), 'editSkill': True,
+        'requestId': 'gate-double-1', 'autoApproveEdits': False,
+    }
+    t, result = _post_chat_bg(payload)
+    card = _wait_card('gate-double-1')
+    url = '/ai/chat/approval'
+    d1 = client.post(url, json={'approvalId': card['approvalId'], 'decision': 'decline'})
+    d2 = client.post(url, json={'approvalId': card['approvalId'], 'decision': 'approve'})
+    assert d1.json()['status'] == 'ok'
+    assert d2.json()['status'] == 'already_decided'
+    t.join(timeout=10)
+    assert not result['body']['pendingEdits']  # decline won; approve ignored
+
+
+def test_unknown_approval_id():
+    r = client.post('/ai/chat/approval', json={
+        'approvalId': 'nope', 'decision': 'approve'})
+    assert r.json()['status'] == 'not_found'
+
+
+def test_manual_edit_during_pending_invalidates_anchor(edit_flag, monkeypatch):
+    """Approve carries the frontend's LATEST files; if the anchor died,
+    the decision is NOT accepted and the card stays open for decline."""
+    _install(monkeypatch, [
+        _text_tool_call('config_edit', {'file': 'printer.cfg', 'op': 'patch_section',
+                                        'section': 'gcode_macro PARK',
+                                        'old_text': 'G1 Z5', 'new_text': 'G1 Z10'}),
+        _final_reply('Waiting on your review.'),
+    ])
+    payload = {
+        'messages': [{'role': 'user', 'content': 'raise PARK to Z10'}],
+        'apiKey': 'k', 'model': 'm',
+        'apiUrl': 'https://api.example.com/v1/chat/completions',
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(), 'editSkill': True,
+        'requestId': 'gate-stale-1', 'autoApproveEdits': False,
+    }
+    t, result = _post_chat_bg(payload)
+    card = _wait_card('gate-stale-1')
+
+    # User manually edits the macro body in the editor during the window.
+    edited = PRINTER_CFG.replace('G1 Z5', 'G1 Z7')
+    stale_ctx = {'printer.cfg': {'content': edited, 'label': 'printer.cfg'}}
+
+    dec = client.post('/ai/chat/approval', json={
+        'approvalId': card['approvalId'], 'decision': 'approve',
+        'contextFiles': stale_ctx,
+    })
+    body = dec.json()
+    assert body['status'] == 'invalidated'
+    # Card is STILL open (user can decline or fix and retry).
+    again = client.get('/ai/chat/approval?requestId=gate-stale-1').json()
+    assert again['pending'] is True
+    # Decline closes it honestly; nothing was staged.
+    dec2 = client.post('/ai/chat/approval', json={
+        'approvalId': card['approvalId'], 'decision': 'decline',
+        'reason': 'anchor moved', 'contextFiles': stale_ctx,
+    })
+    assert dec2.json()['status'] == 'ok'
+    t.join(timeout=10)
+    assert not result['body']['pendingEdits']
+
+
+def test_manual_edit_clean_reapply(edit_flag, monkeypatch):
+    """Same window, but the manual edit does NOT touch the anchor:
+    approve re-applies cleanly to the LATEST text (never clobbers)."""
+    scripted = _install(monkeypatch, [
+        _text_tool_call('config_edit', SET_ACCEL),
+        _final_reply('Done.'),
+    ])
+    payload = {
+        'messages': [{'role': 'user', 'content': 'set max_accel to 3000'}],
+        'apiKey': 'k', 'model': 'm',
+        'apiUrl': 'https://api.example.com/v1/chat/completions',
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(), 'editSkill': True,
+        'requestId': 'gate-merge-1', 'autoApproveEdits': False,
+    }
+    t, result = _post_chat_bg(payload)
+    card = _wait_card('gate-merge-1')
+    # Manual edit elsewhere in the file (velocity), anchor intact.
+    edited = PRINTER_CFG.replace('max_velocity: 200', 'max_velocity: 250')
+    dec = client.post('/ai/chat/approval', json={
+        'approvalId': card['approvalId'], 'decision': 'approve',
+        'contextFiles': {'printer.cfg': {'content': edited, 'label': 'printer.cfg'}},
+    })
+    assert dec.json()['status'] == 'ok'
+    t.join(timeout=10)
+    new_text = result['body']['pendingEdits'][0]['newText']
+    assert 'max_accel: 3000' in new_text      # approved op applied
+    assert 'max_velocity: 250' in new_text    # manual edit preserved
+
+
+def test_timeout_auto_declines(edit_flag, monkeypatch):
+    _install(monkeypatch, [
+        _text_tool_call('config_edit', SET_ACCEL),
+        _final_reply('No response received.'),
+    ])
+    monkeypatch.setattr(ai_routes, 'APPROVAL_TIMEOUT_SECONDS', 0.4)
+    payload = {
+        'messages': [{'role': 'user', 'content': 'set max_accel'}],
+        'apiKey': 'k', 'model': 'm',
+        'apiUrl': 'https://api.example.com/v1/chat/completions',
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(), 'editSkill': True,
+        'requestId': 'gate-timeout-1', 'autoApproveEdits': False,
+    }
+    resp = client.post('/ai/chat', json=payload, timeout=30)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert not body['pendingEdits']
+    assert 'did not respond' in json.dumps(body['toolCalls'])
+
+
+def test_multi_call_serializes_cards(edit_flag, monkeypatch):
+    """Two write calls in one assistant message: the second suspends
+    only after the first is decided (one pending card at a time)."""
+    _install(monkeypatch, [
+        {'choices': [{'message': {'content':
+            '```tool\n' + json.dumps({'name': 'config_edit', 'arguments': {
+                k: str(v) for k, v in SET_ACCEL.items()}}) + '\n```\n'
+            '```tool\n' + json.dumps({'name': 'config_edit', 'arguments': {
+                'file': 'printer.cfg', 'op': 'set_param', 'section': 'printer',
+                'key': 'max_velocity', 'value': '300'}}) + '\n```'}}]},
+        _final_reply('Both staged.'),
+    ])
+    payload = {
+        'messages': [{'role': 'user', 'content': 'accel 3000, velocity 300'}],
+        'apiKey': 'k', 'model': 'm',
+        'apiUrl': 'https://api.example.com/v1/chat/completions',
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(), 'editSkill': True,
+        'requestId': 'gate-multi-1', 'autoApproveEdits': False,
+    }
+    t, result = _post_chat_bg(payload)
+    card1 = _wait_card('gate-multi-1')
+    assert card1['summary']
+    # Only ONE unresolved card exists while card1 is pending.
+    from services.ai_edit_tools import _pending_approvals
+    only = [a for a in _pending_approvals.values()
+            if a.request_id == 'gate-multi-1']
+    assert len(only) == 1
+    client.post('/ai/chat/approval', json={
+        'approvalId': card1['approvalId'], 'decision': 'approve',
+        'contextFiles': _ctx()})
+    card2 = _wait_card('gate-multi-1')
+    assert card2['approvalId'] != card1['approvalId']
+    client.post('/ai/chat/approval', json={
+        'approvalId': card2['approvalId'], 'decision': 'approve',
+        'contextFiles': _ctx()})
+    t.join(timeout=10)
+    body = result['body']
+    edits = body['pendingEdits']
+    assert len(edits) == 1  # same file, cumulative
+    assert 'max_accel: 3000' in edits[0]['newText']
+    assert 'max_velocity: 300' in edits[0]['newText']
+
+
+def test_auto_approve_skips_wait_but_not_validation(edit_flag, monkeypatch):
+    """autoApproveEdits=True: no card ever appears, invalid ops still
+    kick back (the override bypasses ONLY the human wait)."""
+    _install(monkeypatch, [
+        _text_tool_call('config_edit', {'file': 'printer.cfg', 'op': 'set_param',
+                                        'section': 'ghost', 'key': 'x', 'value': '1'}),
+        _final_reply('Not found.'),
+    ])
+    payload = {
+        'messages': [{'role': 'user', 'content': 'set x in [ghost]'}],
+        'apiKey': 'k', 'model': 'm',
+        'apiUrl': 'https://api.example.com/v1/chat/completions',
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(), 'editSkill': True,
+        'requestId': 'gate-auto-1', 'autoApproveEdits': True,
+    }
+    resp = client.post('/ai/chat', json=payload, timeout=30)
+    assert resp.status_code == 200
+    assert not resp.json()['pendingEdits']
+    assert client.get('/ai/chat/approval?requestId=gate-auto-1').json() == {'pending': False}
+
+
+def test_poll_without_request_id_is_harmless():
+    assert client.get('/ai/chat/approval').json() == {'pending': False}
+
+
+# ── unit-level: no auto_approve default anywhere in the write path ──────
+
+def test_no_auto_approve_default_in_gate():
+    """Gate-2 audit: the production default is human-only. The ONLY
+    bypass is the explicit request-level harness field."""
+    import inspect
+    src = inspect.getsource(ai_routes.chat_proxy)
+    assert 'autoApproveEdits' in src
+    # The gate helper itself never consults an env default for approval.
+    gate_src = inspect.getsource(ai_routes._run_approval_gate)
+    assert 'environ' not in gate_src
+
+
+def test_duplicate_target_never_opens_second_card(edit_flag, monkeypatch):
+    """Live smoke evidence (2026-09-14): after the user APPROVED
+    set_param max_accel=3200, gemma copied the nudge example and re-sent
+    the SAME (file, section, key) with a hallucinated 12000 — opening
+    card #2, taxing the human another 90s. The guard blocks repeats of
+    an already-approved target with an honest kickback, no card."""
+    repeat = {'file': 'printer.cfg', 'op': 'set_param',
+              'section': 'printer', 'key': 'max_accel', 'value': '12000'}
+    _install(monkeypatch, [
+        _text_tool_call('config_edit', SET_ACCEL),
+        _text_tool_call('config_edit', repeat),
+        _final_reply('All set.'),
+    ])
+    payload = {
+        'messages': [{'role': 'user', 'content': 'set max_accel to 3200'}],
+        'apiKey': 'k', 'model': 'm',
+        'apiUrl': 'https://api.example.com/v1/chat/completions',
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(), 'editSkill': True,
+        'requestId': 'gate-dupe-1', 'autoApproveEdits': False,
+    }
+    t, result = _post_chat_bg(payload)
+    card = _wait_card('gate-dupe-1')
+    client.post('/ai/chat/approval', json={
+        'approvalId': card['approvalId'], 'decision': 'approve',
+        'contextFiles': _ctx()})
+    # The repeat must NOT open a card (2s window — scripted provider is
+    # instant, so a would-be card appears well within it).
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        assert not client.get(
+            '/ai/chat/approval?requestId=gate-dupe-1').json().get('pending')
+        time.sleep(0.05)
+    t.join(timeout=10)
+    assert result['status'] == 200
+    body = result['body']
+    staged = json.dumps(body['pendingEdits'])
+    assert 'max_accel: 3000' in staged
+    assert '12000' not in staged
+    from services.ai_edit_tools import _pending_approvals
+    assert not [a for a in _pending_approvals.values()
+                if a.request_id == 'gate-dupe-1' and not a.resolved]
+
+
+def test_decline_shields_cfg_block_nudge(edit_flag, monkeypatch):
+    """After a DECLINE the answer is user-gated: a trailing ```cfg block
+    must not pull the model into a nudge retry of the same target (the
+    r6 inert-draft rule yields to an explicit user decision)."""
+    _install(monkeypatch, [
+        _text_tool_call('config_edit', SET_ACCEL),
+        _final_reply('Leaving it. For reference:\n\n'
+                     '```cfg\n[printer]\nmax_accel: 1000\n```\n'),
+    ])
+    payload = {
+        'messages': [{'role': 'user', 'content': 'set max_accel to 3000'}],
+        'apiKey': 'k', 'model': 'm',
+        'apiUrl': 'https://api.example.com/v1/chat/completions',
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(), 'editSkill': True,
+        'requestId': 'gate-shield-1', 'autoApproveEdits': False,
+    }
+    t, result = _post_chat_bg(payload)
+    card = _wait_card('gate-shield-1')
+    client.post('/ai/chat/approval', json={
+        'approvalId': card['approvalId'], 'decision': 'decline',
+        'reason': 'keep stock'})
+    t.join(timeout=10)
+    assert result['status'] == 200
+    body = result['body']
+    # The declined-turn prose came back UN nudged: a fired nudge would
+    # have popped another scripted reply ('Done.') as the final content.
+    assert 'For reference' in body['content']
+    assert not body['pendingEdits']
+
+
+def test_approve_then_cfg_echo_not_nudged(edit_flag, monkeypatch):
+    """Native-mode traces 2026-09-17: right after an APPROVED write,
+    gemma re-quotes the staged section in a ```cfg block to show it.
+    That is a display echo, not an inert draft — the prose nudge must
+    NOT fire (it gaslit the model into 'which parameter would you like
+    to change?' after it had staged the only parameter)."""
+    scripted = _install(monkeypatch, [
+        _text_tool_call('config_edit', SET_ACCEL),
+        # post-approve summary quoting the STAGED value (structural echo:
+        # every config line already exists in the working state)
+        _final_reply('I have added the change to your printer.cfg. I used:\n\n'
+                     '```cfg\n# file: printer.cfg\n[printer]\nmax_accel: 3000\n```\n'),
+    ])
+    payload = {
+        'messages': [{'role': 'user', 'content': 'set max_accel to 3000'}],
+        'apiKey': 'k', 'model': 'm',
+        'apiUrl': 'https://api.example.com/v1/chat/completions',
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(), 'editSkill': True,
+        'requestId': 'gate-echo-1', 'autoApproveEdits': False,
+    }
+    t, result = _post_chat_bg(payload)
+    card = _wait_card('gate-echo-1')
+    client.post('/ai/chat/approval', json={
+        'approvalId': card['approvalId'], 'decision': 'approve'})
+    t.join(timeout=10)
+    assert result['status'] == 200
+    body = result['body']
+    # A fired nudge would have consumed another scripted reply and
+    # replaced this one; the echo must come back untouched.
+    assert 'I have added the change' in body['content']
+    assert body['pendingEdits']
+    # Branch-identity assert: NO nudge text entered any provider payload.
+    assert not any('Call the tool NOW' in str(p) for p in scripted.payloads)
+
+
+def test_multipart_giveup_after_staged_first_half_still_nudged(edit_flag, monkeypatch):
+    """Negative control for the echo guard: after a staged (approved)
+    first edit, a ```cfg block containing lines ABSENT from the project
+    is the r5 multi-part give-up shape — still inert, still nudged."""
+    ctx = {'printer.cfg': {'content': PRINTER_CFG + '\n[fan]\npin: PA0\ncycle_time: 0.01\n'}}
+    scripted = _install(monkeypatch, [
+        _text_tool_call('config_edit', SET_ACCEL),
+        # first half staged; second half drafted as prose with a NEW value
+        _final_reply('max_accel staged. And for the fan:\n\n'
+                     '```cfg\n[fan]\ncycle_time: 0.02\n```\n'),
+        # after nudge: the model stages the second half properly
+        _text_tool_call('config_edit', {'file': 'printer.cfg', 'op': 'set_param',
+                                        'section': 'fan', 'key': 'cycle_time',
+                                        'value': '0.02'}),
+        _final_reply('Both changes staged.'),
+    ])
+    payload = {
+        'messages': [{'role': 'user',
+                      'content': 'set max_accel to 3000 and fan cycle_time to 0.02'}],
+        'apiKey': 'k', 'model': 'm',
+        'apiUrl': 'https://api.example.com/v1/chat/completions',
+        'apiProvider': 'chatgpt', 'contextFiles': ctx, 'editSkill': True,
+        'requestId': 'gate-echo-2', 'autoApproveEdits': False,
+    }
+    t, result = _post_chat_bg(payload)
+    card = _wait_card('gate-echo-2')
+    client.post('/ai/chat/approval', json={
+        'approvalId': card['approvalId'], 'decision': 'approve'})
+    # the nudge-driven second write opens its own card
+    card2 = _wait_card('gate-echo-2')
+    client.post('/ai/chat/approval', json={
+        'approvalId': card2['approvalId'], 'decision': 'approve'})
+    t.join(timeout=10)
+    assert result['status'] == 200
+    body = result['body']
+    assert body['pendingEdits']
+    assert any('cycle_time' in (e.get('newText') or '')
+               or e.get('summary', '').find('cycle_time') >= 0
+               for e in body['pendingEdits']), body['pendingEdits']
+
+
+# ── Decline-result wording (dogfood 2026-09-20: passive "DECLINED by the
+# user (no reason given)" + blanket confab note made gemma report a plain
+# decline as "the system declined it" and ramble without asking) ──────
+
+def test_decline_result_wording_and_user_gated_note(edit_flag, monkeypatch):
+    """Decline tool result names the human as decider, states NOT
+    staged, forbids retry, and demands a direct closing question; the
+    trace-truth note for a user-gated turn says 'user chose not to
+    apply', never the validation-conflating blanket text."""
+    _install(monkeypatch, [
+        _text_tool_call('config_edit', SET_ACCEL),
+        _final_reply('ok then'),
+    ])
+    payload = {
+        'messages': [{'role': 'user', 'content': 'set max_accel to 3000'}],
+        'apiKey': 'k', 'model': 'm',
+        'apiUrl': 'https://api.example.com/v1/chat/completions',
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(), 'editSkill': True,
+        'requestId': 'gate-wording-1', 'autoApproveEdits': False,
+    }
+    t, result = _post_chat_bg(payload)
+    card = _wait_card('gate-wording-1')
+    client.post('/ai/chat/approval', json={
+        'approvalId': card['approvalId'], 'decision': 'decline'})
+    t.join(timeout=10)
+    assert result['status'] == 200
+    body = result['body']
+    out = next(tc['output'] for tc in body['toolCalls']
+               if tc['name'] == 'config_edit')
+    assert 'NOT APPROVED' in out
+    assert 'the user reviewed the change and chose' in out
+    assert 'not an error on your' in out
+    assert 'END WITH A DIRECT QUESTION' in out
+    assert 'no reason given' not in out        # empty reason is silence, not noise
+    assert 'Reason given' not in out
+    # user-gated trace-truth note (blanket validation text must be gone)
+    assert 'the user chose not to apply' in body['content']
+    assert 'failed validation, was declined, or timed out' not in body['content']
+    assert not body['pendingEdits']
+
+
+def test_decline_reason_and_timeout_note_wording(edit_flag, monkeypatch):
+    """A supplied decline reason rides the result verbatim under a
+    neutral label; the timeout result keeps the honest 'did not respond'
+    phrasing."""
+    from services.ai_edit_tools import format_approval_result
+    content, details = format_approval_result('config_edit', {
+        'decision': 'declined', 'reason': 'too aggressive for my frame'})
+    assert details is None
+    assert 'Reason given: too aggressive for my frame.' in content
+    content, details = format_approval_result('config_edit',
+                                              {'decision': 'timeout'})
+    assert details is None
+    assert 'did not respond' in content
+    assert 'NOT APPROVED' in content
+
+
+# ── Empty-reprompt path dispatch (review fix 2026-09-26, CRITICAL) ─────
+# The no-tools empty-response re-prompt used to run extracted write
+# calls through edit_session.execute() directly, bypassing BOTH the
+# load_skill gate and the approval card: a text-protocol config_edit
+# on that path staged straight into pendingEdits with no human decision.
+
+
+def test_reprompt_write_respects_skill_gate(edit_flag, monkeypatch):
+    # Skill NOT loaded: a config_edit on the re-prompt must get the
+    # load_skill kickback, never execute.
+    scripted = _install(monkeypatch, [
+        {'choices': [{'message': {'content': None}}]},          # empty -> re-prompt
+        _text_tool_call('config_edit', SET_ACCEL),               # reprompt emits a write
+        _final_reply('I need to load the editing skill first.'),
+    ])
+    payload = {
+        'messages': [{'role': 'user', 'content': 'set max_accel to 3000'}],
+        'apiKey': 'k', 'model': 'm',
+        'apiUrl': 'https://api.example.com/v1/chat/completions',
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(),
+        'editSkill': False,
+        'requestId': 'gate-reprompt-skill', 'autoApproveEdits': False,
+    }
+    r = client.post('/ai/chat', json=payload)
+    assert r.status_code == 200
+    body = r.json()
+    assert not body.get('pendingEdits'), body
+    assert body.get('editAttempts') in (0, None), body
+    # The kickback TEXT (not just the word 'load_skill', which the
+    # gate-closed system prompt contains anyway) must be what re-entered
+    # the model context.
+    followup = json.dumps(scripted.payloads[-1])
+    assert 'is not available yet' in followup
+
+
+def test_reprompt_write_opens_approval_card(edit_flag, monkeypatch):
+    # Skill active + human approval ON: the reprompt write must SUSPEND
+    # on a card like any other write — and only land once approved.
+    scripted = _install(monkeypatch, [
+        {'choices': [{'message': {'content': None}}]},          # empty -> re-prompt
+        _text_tool_call('config_edit', SET_ACCEL),               # reprompt emits a write
+        _final_reply('Set max_accel to 3000.'),
+    ])
+    payload = {
+        'messages': [{'role': 'user', 'content': 'set max_accel to 3000'}],
+        'apiKey': 'k', 'model': 'm',
+        'apiUrl': 'https://api.example.com/v1/chat/completions',
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(), 'editSkill': True,
+        'requestId': 'gate-reprompt-card', 'autoApproveEdits': False,
+    }
+    t, result = _post_chat_bg(payload)
+    card = _wait_card('gate-reprompt-card')
+    assert card['op'] == 'set_param'
+    # Nothing staged before the decision.
+    dec = client.post('/ai/chat/approval', json={
+        'approvalId': card['approvalId'], 'decision': 'approve',
+        'contextFiles': _ctx(),
+    })
+    assert dec.json()['status'] == 'ok'
+    t.join(timeout=10)
+    # Fail if the request thread died (e.g. _wait_card raised because no
+    # card opened when the gate was bypassed) or never finished.
+    assert not t.is_alive(), 'chat request did not finish'
+    assert 'body' in result, 'chat request thread raised before completing'
+    assert result['status'] == 200
+    assert result['body']['pendingEdits'][0]['file'] == 'printer.cfg'
+
+
+# ── Runtime-failure advisory must survive the gate (2026-09-30) ─────────
+# Live bug: asked for "a macro that homes, travels in a 100mm circle three
+# times, then homes again", the model staged a G2/G3 macro and got
+# `gcode_command_section_missing`. In the auto-approve arm (eval harness)
+# the tool result carries the RUNTIME FAILURE escalation; on the PRODUCT
+# path _run_approval_gate threw prepare()'s content away and returned the
+# bare "The user APPROVED this change" line instead — so the model was
+# never told the staged macro cannot run, closed with "macro added", and
+# never staged [gcode_arcs]. Same shape as the 09-27 stale-caller miss.
+
+CIRCLE_MACRO = (
+    'gcode:\n'
+    '    G28\n'
+    '    G90\n'
+    '    G1 X100 Y100 Z50 F3000\n'
+    '    {% for i in range(3) %}\n'
+    '        G2 X100 Y100 I-50 J50 F3000\n'
+    '    {% endfor %}\n'
+    '    G28\n'
+)
+
+ADD_CIRCLE_MACRO = {'file': 'printer.cfg', 'op': 'add_section',
+                    'section': 'gcode_macro CIRCLE_HOME',
+                    'text': CIRCLE_MACRO}
+
+_RUNTIME_ADVISORY = {'severity': 'warning',
+                     'code': 'gcode_command_section_missing',
+                     'section': 'gcode_macro CIRCLE_HOME', 'param': 'gcode',
+                     'message': "'G2' needs a [gcode_arcs] section — it will "
+                                'error at runtime without one.'}
+
+
+def test_approved_runtime_advisory_reaches_the_model(edit_flag, monkeypatch):
+    """The product path: approve a G2 macro with no [gcode_arcs] and the
+    model's NEXT prompt must contain the advisory and the escalation."""
+    scripted = _install(monkeypatch, [
+        _text_tool_call('config_edit', ADD_CIRCLE_MACRO),
+        _final_reply('Macro added.'),
+    ])
+    payload = {
+        'messages': [{'role': 'user', 'content':
+                      'add a macro that homes, travels in a 100mm circle '
+                      'three times, then homes again'}],
+        'apiKey': 'k', 'model': 'm',
+        'apiUrl': 'https://api.example.com/v1/chat/completions',
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(), 'editSkill': True,
+        'requestId': 'gate-runtime-advisory', 'autoApproveEdits': False,
+    }
+    t, result = _post_chat_bg(payload)
+    card = _wait_card('gate-runtime-advisory')
+    assert [a.get('code') for a in card['advisories']] == [
+        'gcode_command_section_missing'], (
+        'precondition: the card carries the runtime advisory')
+
+    dec = client.post('/ai/chat/approval', json={
+        'approvalId': card['approvalId'], 'decision': 'approve',
+        'contextFiles': _ctx(),
+    })
+    assert dec.json()['status'] == 'ok'
+    t.join(timeout=10)
+    assert not t.is_alive(), 'chat request did not finish'
+    assert result['status'] == 200
+
+    followup = json.dumps(scripted.payloads[-1])
+    # The completed edit is still staged and still honest about it.
+    assert 'APPROVED' in followup
+    # ...and the model is told, in the same tool result, that it is not
+    # finished — the bug was this text being discarded by the gate.
+    assert 'gcode_command_section_missing' in followup or \
+        'gcode_arcs' in followup, 'the advisory itself must be shown'
+    assert '[gcode_arcs]' in followup
+    assert 'RUNTIME FAILURE' in followup
+    # Post-approval wording: the card was already answered, so the
+    # pre-approval "do not ask permission first" clause must not appear.
+    assert 'Do not ask permission first' not in followup
+
+
+def test_approved_result_carries_the_runtime_escalation():
+    from services.ai_edit_tools import format_approval_result
+    content, details = format_approval_result('config_edit', {
+        'decision': 'approved',
+        'summary': 'added section [gcode_macro CIRCLE_HOME] to printer.cfg',
+        'details': {'advisories': [_RUNTIME_ADVISORY]},
+    })
+    assert details is not None            # approval still returns the stack
+    assert 'APPROVED' in content
+    assert 'RUNTIME FAILURE' in content
+    assert '[gcode_arcs]' in content
+    # Post-approval tail: the card was already answered.
+    assert 'already approved' in content
+    assert 'Do not ask permission first' not in content
+
+
+def test_runtime_directive_default_tail_is_the_pre_approval_one():
+    """The auto-approve arm (execute()) must keep the original tail — the
+    ``approved`` switch changes only the post-approval sentence."""
+    from services.ai_edit_tools import _runtime_section_directive
+    pre = _runtime_section_directive({'advisories': [_RUNTIME_ADVISORY]})
+    assert 'Do not ask permission first' in pre
+    assert 'already approved' not in pre
+    post = _runtime_section_directive({'advisories': [_RUNTIME_ADVISORY]},
+                                      approved=True)
+    # Same escalation, only the closing sentence differs.
+    assert pre.split('. Do not')[0] == post.split('. The edit')[0]
+
+
+def test_approved_result_keeps_cosmetic_advisories_without_escalation():
+    """Control: the RUNTIME escalation is code-gated. A cosmetic advisory
+    is now SHOWN (arm parity) but earns no escalation."""
+    from services.ai_edit_tools import format_approval_result
+    content, _ = format_approval_result('config_edit', {
+        'decision': 'approved', 'summary': 'renamed a macro',
+        'advisories': [
+            {'severity': 'warning', 'code': 'duplicate_section',
+             'section': 'gcode_macro PARK', 'param': '',
+             'message': "'gcode_macro PARK' is defined more than once; "
+                        'the later definition wins.'}],
+    })
+    assert "'gcode_macro PARK' is defined more than once" in content
+    assert 'with 1 advisory' in content
+    assert 'RUNTIME FAILURE' not in content
+    assert 'APPROVED' in content
+
+
+def test_approved_rename_carries_the_stale_caller_directive():
+    """09-27 shape, product path: a rename's stranded callers must come
+    back with the ORDER to fix them, not just the advisory."""
+    from services.ai_edit_tools import format_approval_result
+    content, _ = format_approval_result('config_edit', {
+        'decision': 'approved',
+        'summary': 'renamed [gcode_macro Level_Bed] to [gcode_macro BED_LEVEL]',
+        'renamed_from': 'gcode_macro Level_Bed',
+        'renamed_to': 'gcode_macro BED_LEVEL',
+        'advisories': [
+            {'severity': 'warning', 'code': 'unknown_gcode_command',
+             'section': 'gcode_macro PRINT_START', 'param': 'gcode',
+             'message': "'Level_Bed' is not a Klipper command."}],
+    })
+    assert 'Level_Bed' in content                # the stale caller is named
+    assert 'PRINT_START' in content
+    assert "'Level_Bed'" in content
+    assert 'STALE' in content.upper()
+
+
+def test_approved_result_without_details_is_unchanged():
+    """Defensive: an approval with no details dict must not raise."""
+    from services.ai_edit_tools import format_approval_result
+    content, details = format_approval_result('config_edit', {
+        'decision': 'approved', 'summary': 'noop'})
+    assert details is None
+    assert 'RUNTIME FAILURE' not in content
+    assert 'APPROVED' in content

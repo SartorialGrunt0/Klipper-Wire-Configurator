@@ -36,7 +36,10 @@ SNIPPET_MARKERS = (
 )
 
 UNKNOWN_SECTION_RE = re.compile(r"Unknown section type '([^']+)'")
-UNKNOWN_PARAM_RE = re.compile(r"Unknown parameter '([^']+)' for section \[([^\]]+)\]\.")
+# Grounded findings carry an em-dash clause after the [section] token
+# (unknown-param escalation, 2026-09-30): don't require the message to END at
+# the bracket, or every escalated finding is misclassified as needs_review.
+UNKNOWN_PARAM_RE = re.compile(r"Unknown parameter '([^']+)' for section \[([^\]]+)\]")
 MISSING_REQUIRED_RE = re.compile(r"Required parameter '([^']+)' is missing\.")
 SECTION_HEADING_RE = re.compile(r"^### \[([^\]]+)\]", re.MULTILINE)
 

@@ -345,13 +345,13 @@ export default function Toolbar({
         <button
           onClick={() => setShowChat(true)}
           className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-            chatStatus === 'success'
+            chatStatus === 'success' || chatStatus === 'awaiting'
               ? 'bg-green-600 text-white hover:bg-green-700'
               : chatStatus === 'error'
                 ? 'bg-red-600 text-white hover:bg-red-700'
                 : 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)]'
           }`}
-          title={chatStatus === 'success' ? 'AI Chat — response ready' : chatStatus === 'error' ? 'AI Chat — last request failed' : 'AI Chat'}
+          title={chatStatus === 'success' ? 'AI Chat — response ready' : chatStatus === 'awaiting' ? 'AI Chat — an edit needs your decision' : chatStatus === 'error' ? 'AI Chat — last request failed' : 'AI Chat'}
         >
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
             <path d="M8 1a7 7 0 110 14A7 7 0 018 1z" stroke="currentColor" strokeWidth="1.5"/>

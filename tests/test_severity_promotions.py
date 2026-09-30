@@ -25,8 +25,15 @@ Ground truth:
      exempt (glob.has_magic) — matches KWC's existing glob skip.
 
 Explicitly NOT promoted (regression guards in the same file):
-  unknown_param, pin format/prefix, requires-missing (bed_mesh -> probe),
+  pin format/prefix, requires-missing (bed_mesh -> probe),
   sensorless-homing conflict all stay WARNING.
+
+UPDATE 2026-09-30: unknown_param was on the NOT-promoted list; it is now
+promoted CONDITIONALLY (only when KWC can ground the claim — see
+test_unknown_param_in_known_section_is_error and the guard tests below, and
+.hermes/plans/2026-09-29_230500-unknown-param-escalation.md). The premise of
+the old entry ("Klipper silently ignores unknown params") was false:
+configfile.py check_unused (424-441) fails the load on any unread option.
 """
 import sys
 from pathlib import Path
@@ -302,7 +309,13 @@ def test_single_file_mode_not_flagged():
 
 # --- non-promoted regressions: these stay warning ---------------------------
 
-def test_unknown_param_stays_warning():
+def test_unknown_param_in_known_section_is_error():
+    # 2026-09-30 flip: an unrecognized option in a section KWC GROUNDS (a
+    # coverage record derived from the bundled Klipper snapshot + docs) is a
+    # Klipper load failure — configfile.py check_unused (424-441), called at
+    # klippy.py:127 — and must be un-acknowledgeable. Warnings were being
+    # ignored in the editor AND applied by the AI chat edit path (warnings
+    # are advisory there), shipping configs klippy refuses to load.
     result = validate_config(parse_config(
         "[idle_timeout]\n"
         "timeout: 300\n"
@@ -311,7 +324,124 @@ def test_unknown_param_stays_warning():
         "printer.cfg"))
     findings = [e for e in result.errors if e.code == "unknown_param"]
     assert findings, "expected an unknown_param finding"
-    assert all(e.severity == "warning" for e in findings)
+    assert all(e.severity == "error" for e in findings), \
+        f"grounded unknown_param must be an error: {[(e.severity, e.message) for e in findings]}"
+
+
+def test_unknown_param_in_unmodeled_section_stays_warning():
+    # Guard 2: sdcard_loop's SectionDef has params=[] — KWC makes NO claim
+    # about the section, so it must not block on it even though klippy owns
+    # the type.
+    result = validate_config(parse_config(
+        "[sdcard_loop]\nlocation: 10\nheight: 0.2\nbogus_option: 1\n",
+        "printer.cfg"))
+    findings = [e for e in result.errors if e.code == "unknown_param"]
+    assert findings and all(e.severity == "warning" for e in findings)
+
+
+def test_unknown_param_in_section_without_coverage_record_stays_warning():
+    # Guard 3: update_manager is Moonraker-owned — no Klipper module and no
+    # Config_Reference.md record, so KWC has no ground truth to escalate on.
+    result = validate_config(parse_config(
+        "[update_manager my_ext]\npath: ~/kiauh\nbogus_option: 1\n",
+        "printer.cfg"))
+    findings = [e for e in result.errors if e.code == "unknown_param"]
+    # update_manager IS a modeled type, so the finding must exist — pin that
+    # too, or this test passes vacuously if emission ever breaks.
+    assert findings, "bogus_option in a modeled section must still be flagged"
+    assert all(e.severity == "warning" for e in findings), \
+        f"ungrounded section must not escalate: {[(e.severity, e.message) for e in findings]}"
+
+
+def test_param_in_record_but_not_section_def_stays_warning():
+    # Guard 4 inverse (review 2026-09-30): a param Klipper reads that KWC has
+    # NOT modeled is in the coverage record and unknown to _find_param_def —
+    # param_known must catch it and hold the warning tier. [heater_bed]
+    # 'heaters' is the canonical case (heaters.py reads it; the SectionDef
+    # does not model it). If param_known were mutated to always-False — the
+    # direction that BROADENS escalation — this test fails.
+    result = validate_config(parse_config(
+        "[heater_bed]\n"
+        "heater_pin: PA0\n"
+        "sensor_type: NTC 100k M3911\n"
+        "sensor_pin: PA1\n"
+        "min_temp: 0\n"
+        "max_temp: 120\n"
+        "heaters: heater\n",
+        "printer.cfg"))
+    findings = [e for e in result.errors
+                if e.code == "unknown_param" and e.param == "heaters"]
+    assert findings, "fixture moved: 'heaters' became modeled"
+    assert all(e.severity == "warning" for e in findings), \
+        f"record-known param must never escalate: {[(e.severity, e.message) for e in findings]}"
+
+
+def test_unknown_param_matching_wildcard_is_clean():
+    # Guard 4: keys matched by a SectionDef wildcard are known params, not
+    # findings at all. (Plan deviation, deliberate: the plan's fixture used
+    # [tmc2209] driver_custom, but the UART drivers deliberately enumerate
+    # every real register WITHOUT a driver_* wildcard — klipper reads only
+    # known field names (tmc.py:55), so a bogus register on tmc2209 is a
+    # genuine load failure and SHOULD escalate, see the next test.)
+    result = validate_config(parse_config(
+        "[gcode_macro X]\nvariable_whatever: 1\ngcode: G28\n",
+        "printer.cfg"))
+    assert not [e for e in result.errors if e.code == "unknown_param"]
+    # tmc2130 models driver_* (KWC's over-permissive SPI stance — kept as-is;
+    # wildcard match short-circuits before the escalation guard)
+    result = validate_config(parse_config(
+        "[tmc2130 stepper_x]\nrun_current: 0.8\nsense_resistor: 0.110\n"
+        "driver_who_knows: 1\n",
+        "printer.cfg"))
+    assert not [e for e in result.errors if e.code == "unknown_param"]
+
+
+def test_unknown_driver_register_on_uart_tmc_escalates():
+    # tmc2209 enumerates all real driver registers and has a coverage
+    # record: a hallucinated register the chip does not define is exactly
+    # the AI-chat-edit failure this flip exists to block.
+    result = validate_config(parse_config(
+        "[tmc2209 stepper_x]\nrun_current: 0.8\ndriver_custom: 1\n",
+        "printer.cfg"))
+    findings = [e for e in result.errors
+                if e.code == "unknown_param" and e.param == "driver_custom"]
+    assert findings and all(e.severity == "error" for e in findings)
+
+
+def test_unknown_section_params_stay_warning():
+    # Guard 1: unknown section types keep their own unknown_section warning
+    # and never reach the param loop — plugin sections load fine.
+    result = validate_config(parse_config(
+        "[my_plugin_thing]\nwhatever: 1\n",
+        "printer.cfg"))
+    assert not [e for e in result.errors if e.code == "unknown_param"]
+    assert [e for e in result.errors if e.code == "unknown_section"
+            and e.severity == "warning"]
+
+
+def test_bulk_ack_cannot_silence_escalated_unknown_param(monkeypatch, tmp_path):
+    # Errors are structurally outside the identity store
+    # (_suppress_acknowledged_warning_identities is warning-only), but pin
+    # it against the exact escalation shape: an ack written for the pre-flip
+    # warning must not hide the error.
+    monkeypatch.setenv("KWC_LAYOUT_DIR", str(tmp_path))
+    from services.warning_acknowledgments import (
+        acknowledge_warning_identities, finding_identity,
+    )
+    acknowledge_warning_identities([
+        finding_identity("printer.cfg", "unknown_param", "idle_timeout",
+                         "not_a_real_param"),
+    ])
+    result = validate_config(parse_config(
+        "[idle_timeout]\n"
+        "timeout: 300\n"
+        "gcode: G28\n"
+        "not_a_real_param: 1\n",
+        "printer.cfg"))
+    findings = [e for e in result.errors
+                if e.code == "unknown_param" and e.param == "not_a_real_param"]
+    assert findings and all(e.severity == "error" for e in findings), \
+        "an escalated unknown_param must survive a bulk ack of its old identity"
 
 
 def test_bed_mesh_requires_probe_stays_warning():

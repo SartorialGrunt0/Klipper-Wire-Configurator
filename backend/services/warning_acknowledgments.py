@@ -161,6 +161,7 @@ def acknowledge_duplicate_section_type(section_type: str) -> str:
 GCODE_FINDING_CODES = frozenset({
     "unknown_gcode_command",
     "gcode_command_section_missing",
+    "rename_existing_invalid",
 })
 
 

@@ -29,6 +29,12 @@ const PRINTER_MEMORY_KEY_MAP: Record<string, string> = {
   Kinematics: 'kinematics',
   probe: 'probe',
   Probe: 'probe',
+  'build volume': 'buildVolume',
+  'Build Volume': 'buildVolume',
+  buildvolume: 'buildVolume',
+  'extruder type': 'extruderType',
+  'Extruder Type': 'extruderType',
+  extrudertype: 'extruderType',
   'additional notes': 'additionalNotes',
   'Additional Notes': 'additionalNotes',
   additionalnotes: 'additionalNotes',
@@ -70,6 +76,20 @@ export function extractPrinterMemoryBlock(content: string): Record<string, strin
       const parsed = JSON.parse(jsonStr);
       if (parsed && typeof parsed === 'object') {
         const normalized = normalizePrinterMemoryKeys(parsed as Record<string, string>);
+        // Canonicalize accepted extruderType spellings ("Direct Drive" ->
+        // "direct"); out-of-set values pass through untouched so the
+        // validator reports them instead of silently dropping data.
+        if ('extruderType' in normalized) {
+          const canon = canonicalizeExtruderType(normalized.extruderType);
+          if (canon !== null) normalized.extruderType = canon;
+        }
+        // Kinematics is stored lowercase (Klipper parses it case-
+        // insensitively; the dialog select options are lowercase).
+        // "CoreXY" from the model must not render as Unknown.
+        if ('kinematics' in normalized) {
+          normalized.kinematics = String(normalized.kinematics || '')
+            .trim().toLowerCase();
+        }
         // Strip any keys not in the allowed set (safety net against AI adding extra fields)
         return stripPrinterMemoryExtraKeys(normalized);
       }
@@ -97,8 +117,27 @@ const ALLOWED_PRINTER_MEMORY_KEYS = new Set([
   'printerName',
   'kinematics',
   'probe',
+  'buildVolume',
+  'extruderType',
   'additionalNotes',
 ]);
+
+/** extruderType is a closed set (Sir's spec): direct | bowden. */
+export const EXTRUDER_TYPE_VALUES = ['direct', 'bowden'] as const;
+
+/** Canonicalize a proposed extruderType value; '' = unknown/absent.
+ *  Returns null for values outside the closed set (rejected). */
+export function canonicalizeExtruderType(
+  raw: unknown,
+): string | null {
+  const key = String(raw ?? '').trim().toLowerCase();
+  if (key === '') return '';
+  if (key === 'direct' || key === 'direct drive' || key === 'direct-drive'
+    || key === 'directdrive') return 'direct';
+  if (key === 'bowden' || key === 'bowden drive' || key === 'bowden-drive'
+    || key === 'bowdendrive') return 'bowden';
+  return null;
+}
 
 /**
  * Return any keys in the parsed object that are NOT in the allowed set.
@@ -129,7 +168,7 @@ export function stripPrinterMemoryExtraKeys(
 // ── Comprehensive Printer Memory Validation ────────────────────
 
 export interface PrinterMemoryValidationIssue {
-  type: 'parse_error' | 'extra_keys';
+  type: 'parse_error' | 'extra_keys' | 'bad_value';
   message: string;
   extraKeys?: string[];
 }
@@ -203,8 +242,19 @@ export function validatePrinterMemoryContent(
     if (extraKeys.length > 0) {
       issues.push({
         type: 'extra_keys',
-        message: `Unsupported fields: ${extraKeys.join(', ')}. Only the 7 defined fields are allowed.`,
+        message: `Unsupported fields: ${extraKeys.join(', ')}. Only the 9 defined fields are allowed.`,
         extraKeys,
+      });
+    }
+
+    // Closed-set value check: extruderType is direct|bowden only. The
+    // backend rejects anything else at PUT, so catch it here and give
+    // the model a chance to fix before the user sees a save failure.
+    if ('extruderType' in normalized
+      && canonicalizeExtruderType(normalized.extruderType) === null) {
+      issues.push({
+        type: 'bad_value',
+        message: `extruderType must be exactly "direct" or "bowden" (got "${normalized.extruderType}"). If unknown, omit the field.`,
       });
     }
 
@@ -231,16 +281,21 @@ export function buildPrinterMemoryValidationFeedback(
     } else if (issue.type === 'extra_keys') {
       parts.push('- The block contains fields that are not supported.');
       parts.push(`  ${issue.message}`);
+    } else {
+      parts.push('- A field value is not allowed.');
+      parts.push(`  ${issue.message}`);
     }
   }
   parts.push('');
-  parts.push('Only these 7 fields are allowed:');
+  parts.push('Only these 9 fields are allowed:');
   parts.push('  - mainboard');
   parts.push('  - toolheadBoard');
   parts.push('  - expanderBoards');
   parts.push('  - printerName');
   parts.push('  - kinematics');
   parts.push('  - probe');
+  parts.push('  - buildVolume');
+  parts.push('  - extruderType (only "direct" or "bowden")');
   parts.push('  - additionalNotes');
   parts.push('');
   parts.push('All values must be plain strings. Return a corrected printer-memory block.');

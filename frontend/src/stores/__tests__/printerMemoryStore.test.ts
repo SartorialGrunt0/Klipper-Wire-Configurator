@@ -14,6 +14,8 @@ const SAMPLE: PrinterMemory = {
   printerName: 'Voron Trident',
   kinematics: 'corexy',
   probe: 'Voron Tap',
+  buildVolume: '250x250x210',
+  extruderType: 'direct',
   additionalNotes: 'Uses host_mcu',
 };
 

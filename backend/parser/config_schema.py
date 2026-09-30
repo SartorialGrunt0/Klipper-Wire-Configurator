@@ -477,6 +477,8 @@ _register(SectionDef(
         _pin("heater_pin", "Heater GPIO pin", required=True),
         _enum("sensor_type", SENSOR_TYPE_ENUM, "Temperature sensor type", required=True),
         _pin("sensor_pin", "Sensor analog pin"),
+        _str("gcode_id", "ID for M105 temperature reporting"),  # heaters.py:309
+        _float("smooth_time", "Temperature smoothing window", default="1.0", unit="s", strict_above=0),  # heaters.py:42
         _enum("control", ["watermark", "pid"], "Control algorithm", default="pid"),
         _float("pid_Kp", "PID proportional"),
         _float("pid_Ki", "PID integral"),
@@ -538,6 +540,7 @@ _register(SectionDef(
         _pin("tx_pin", "UART TX pin (if separate)"),
         _str("select_pins", "Select pins for UART mux"),
         _int("uart_address", "UART address (0-7)", default="0", min_val=0, max_val=7),
+        _int("rref", "Resistance (ohms) of IREF to GND resistor", default="12000"),  # tmc2240.py:281
     ],
 ))
 
@@ -787,6 +790,10 @@ _register(SectionDef(
         _str("zero_reference_position", "Zero reference X,Y"),
         _float("adaptive_margin", "Adaptive mesh margin", unit="mm"),
         _float("scan_overshoot", "Rapid scan overshoot", unit="mm", min_val=1),
+        # bed_mesh.py:830/834 read "faulty_region_%d_min/max" % (i,) —
+        # wildcard pair, NOT literals (up to 99 regions).
+        _str("faulty_region_*_min", "Faulty region start X,Y (region 1..99)"),
+        _str("faulty_region_*_max", "Faulty region end X,Y (region 1..99)"),
     ],
 ))
 
@@ -1211,6 +1218,7 @@ _register(SectionDef(
     is_named=True,
     params=[
         _pin("pin", "Button pin", required=True),
+        _float("debounce_delay", "Debounce delay", default="0", unit="s", min_val=0),  # buttons.py:257
         _float("analog_pullup_resistor", "Analog pullup resistor", strict_above=0),
         _str("analog_range", "Analog range"),
         _ml("press_gcode", "G-code on press"),
@@ -1228,6 +1236,7 @@ _register(SectionDef(
     params=[
         _pin("switch_pin", "Switch pin", required=True),
         _float("pause_delay", "Pause delay", default="0.5", unit="s", strict_above=0),
+        _float("debounce_delay", "Debounce delay", default="0", unit="s", min_val=0),  # buttons.py:257 (shared Sensor base + ButtonHelper)
         _bool("pause_on_runout", "Pause on runout", default="True"),
         _ml("runout_gcode", "Runout G-code"),
         _ml("insert_gcode", "Insert G-code"),
@@ -1249,6 +1258,10 @@ _register(SectionDef(
         _ml("runout_gcode", "Runout G-code"),
         _ml("insert_gcode", "Insert G-code"),
         _float("event_delay", "Event delay", default="3"),
+        # filament_switch_sensor.py:27 (shared Sensor base reads pause_delay
+        # for motion sensors too); buttons.py:257 (debounce).
+        _float("pause_delay", "Pause delay", default="0.5", unit="s", strict_above=0),
+        _float("debounce_delay", "Debounce delay", default="0", unit="s", min_val=0),
     ],
 ))
 
@@ -1597,6 +1610,9 @@ _register(SectionDef(
         _pin("endstop_pin", "Endstop pin"),
         _float("velocity", "Max velocity", default="5", unit="mm/s", strict_above=0),
         _float("accel", "Max acceleration", default="0", min_val=0),
+        # manual_stepper.py:27/28 — kinematic limits on the manual rail.
+        _float("position_min", "Minimum position limit", unit="mm"),
+        _float("position_max", "Maximum position limit", unit="mm"),
     ],
 ))
 
@@ -1800,6 +1816,11 @@ _register(SectionDef(
         _float("smooth_time", "Smooth time", default="2.0", strict_above=0),
         _float("min_temp", "Min temp", default="0", min_val=-273.15),
         _float("max_temp", "Max temp", default="100"),
+        # z_thermal_adjust.py:23/24 (z_adjust_off_above, max_z_adjustment);
+        # heaters.py:309 (gcode_id via register_sensor).
+        _str("gcode_id", "ID for M105 temperature reporting"),
+        _float("max_z_adjustment", "Maximum absolute Z adjustment", default="99999999.0", unit="mm"),
+        _float("z_adjust_off_above", "Disable adjustments above this Z height", default="99999999.0", unit="mm"),
         # SPI sensor chips read their bus from this section (setup_sensor).
         *SPI_BUS_PARAMS,
         *RTD_TC_PARAMS,
@@ -1904,6 +1925,7 @@ _register(SectionDef(
     params=[
         _enum("sensor_type", ["a1333", "as5047d", "tle5012b"], "Sensor type", required=True),
         _str("sample_period", "Sample period", default="0.000400"),
+        _str("stepper", "Stepper section name for angle calibration"),  # angle.py:22,465
         _pin("cs_pin", "Chip select pin"),
         _str("spi_bus", "SPI bus"),
         _str("spi_speed", "SPI speed"),
@@ -2045,7 +2067,20 @@ _register(SectionDef(
     category="config_helper",
     component_group="hardware",
     is_named=True,
-    params=[],
+    params=[
+        # ads1x1x.py:177 (chip), :181 (address_pin), :186 (pga), :187
+        # (adc_voltage); bus.py:306/326 (i2c_mcu/i2c_bus via
+        # MCU_I2C_from_config). Was params=[] — real options warned.
+        _enum("chip", ["ADS1013", "ADS1014", "ADS1015", "ADS1113", "ADS1114", "ADS1115"],
+              "ADC chip type", required=True),
+        _enum("pga", ["6.144V", "4.096V", "2.048V", "1.024V", "0.512V", "0.256V"],
+              "Max voltage range (gain)", default="4.096V"),
+        _float("adc_voltage", "Supply voltage for additional scaling",
+               default="3.3", strict_above=0),
+        _enum("address_pin", ["GND", "VCC", "SDA", "SCL"],
+              "Address pin wiring (alternative to i2c_address)"),
+        *I2C_BUS_PARAMS,
+    ],
 ))
 
 _register(SectionDef(
@@ -2090,6 +2125,10 @@ for pca in ["pca9533", "pca9632"]:
             _float("initial_GREEN", "Initial green", default="0", min_val=0, max_val=1),
             _float("initial_BLUE", "Initial blue", default="0", min_val=0, max_val=1),
             _float("initial_WHITE", "Initial white", default="0", min_val=0, max_val=1),
+            # pca9632.py:29 reads color_order (pca9533 has no such option —
+            # model it on both for simplicity; a bogus value there is a
+            # no-op warning-free extra, not a blocked config).
+            _str("color_order", "Pixel colour order (RGBW permutation)", default="RGBW"),
         ],
     ))
 
@@ -2118,6 +2157,10 @@ _register(SectionDef(
         _int("calibrate_start_x", "Start X"),
         _int("calibrate_end_x", "End X"),
         _int("calibrate_y", "Y position"),
+        # axis_twist_compensation.py:39/41/42.
+        _float("calibrate_start_y", "Min Y for Y-axis twist calibration"),
+        _float("calibrate_end_y", "Max Y for Y-axis twist calibration"),
+        _float("calibrate_x", "X coordinate for Y-axis twist calibration"),
     ],
 ))
 
@@ -2386,6 +2429,20 @@ _register(SectionDef(
         _float("trigger_force", "Trigger force in grams", default="75"),
         _float("force_safety_limit", "Force safety limit in grams", default="2000"),
         _float("tare_time", "Time to average tare samples", default="0.067", unit="s"),
+        # load_cell.py:383/386/388 (tare/counts/orientation),
+        # load_cell_probe.py:194-208 (filter helpers), probe.py:551-554
+        # (activate/deactivate gcode templates).
+        _int("reference_tare_counts", "Tare reference counts"),
+        _float("counts_per_gram", "Calibration counts per gram"),
+        _enum("sensor_orientation", ["normal", "inverted"], "Sensor orientation", default="normal"),
+        _float("drift_filter_cutoff_frequency", "Drift filter cutoff (Hz)", min_val=0.1, max_val=20.0),
+        _int("drift_filter_delay", "Drift filter order", default="2", min_val=1, max_val=2),
+        _float("buzz_filter_cutoff_frequency", "Buzz filter cutoff (Hz)"),
+        _int("buzz_filter_delay", "Buzz filter order", default="2", min_val=1, max_val=2),
+        _str("notch_filter_frequencies", "Power line frequencies to notch (Hz)"),
+        _float("notch_filter_quality", "Notch filter quality", default="2.0", min_val=0.5, max_val=6.0),
+        _ml("activate_gcode", "G-code run when the probe activates"),
+        _ml("deactivate_gcode", "G-code run when the probe deactivates"),
     ],
 ))
 

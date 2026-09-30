@@ -26,10 +26,16 @@ BOARD_TYPE_DIRS = {
     "Other": BOARD_TYPE_OTHER,
 }
 
-# Board identification patterns from config filenames and MCU types
+# Board identification patterns from config filenames and MCU types.
+# ORDER IS SPECIFICITY: within a vendor family the model-specific
+# patterns MUST precede the family pattern — board_name takes the first
+# hit in list order (2026-09-21 audit: family-first ordering let
+# "BTT Octopus Pro" be named just "BigTreeTech").
 BOARD_PATTERNS = [
-    # BigTreeTech boards
-    (r"bigtreetech|btt", "BigTreeTech"),
+    # BigTreeTech models (family catch-all last in this group)
+    # Octopus Pro first: the Pro/non-Pro pin maps are NOT compatible
+    # (reference header warns a wrong-config mix can enable a heater).
+    (r"octopus[ _-]?pro", "BigTreeTech Octopus Pro"),
     (r"octopus", "BigTreeTech Octopus"),
     (r"skr[\s_-]?mini[\s_-]?e3", "BigTreeTech SKR Mini E3"),
     (r"skr[\s_-]?pro", "BigTreeTech SKR Pro"),
@@ -38,16 +44,17 @@ BOARD_PATTERNS = [
     (r"skr[\s_-]?pico", "BigTreeTech SKR Pico"),
     (r"manta", "BigTreeTech Manta"),
     (r"skr[\s_-]?e3", "BigTreeTech SKR E3"),
-    # Creality boards
+    (r"bigtreetech|btt", "BigTreeTech"),
+    # Creality models (family catch-all last)
     (r"creality[\s_-]?v4\.2\.[71]0?", "Creality v4.2.x"),
     (r"creality", "Creality"),
-    # FYSETC
+    # FYSETC models (family catch-all last)
     (r"fysetc[\s_-]?s6", "FYSETC S6"),
     (r"fysetc[\s_-]?cheetah", "FYSETC Cheetah"),
     (r"fysetc[\s_-]?f6", "FYSETC F6"),
     (r"fysetc[\s_-]?spider", "FYSETC Spider"),
     (r"fysetc", "FYSETC"),
-    # Duet
+    # Duet models (family catch-all last)
     (r"duet[\s_-]?3[\s_-]?6hc", "Duet 3 6HC"),
     (r"duet[\s_-]?3[\s_-]?mini", "Duet 3 Mini"),
     (r"duet[\s_-]?2[\s_-]?maestro", "Duet 2 Maestro"),
@@ -55,16 +62,16 @@ BOARD_PATTERNS = [
     (r"duet", "Duet"),
     # Einsy
     (r"einsy[\s_-]?rambo", "Einsy Rambo"),
-    # MKS boards
+    # MKS models (family catch-all last)
     (r"mks[\s_-]?robin[\s_-]?nano", "MKS Robin Nano"),
     (r"mks[\s_-]?robin", "MKS Robin"),
     (r"mks[\s_-]?gen[\s_-]?l", "MKS Gen L"),
     (r"mks[\s_-]?sgen", "MKS SGen"),
     (r"mks", "MKS"),
-    # Mellow
+    # Mellow models (family catch-all last)
     (r"mellow[\s_-]?fly", "Mellow Fly"),
     (r"mellow", "Mellow"),
-    # LDO
+    # LDO models (family catch-all last)
     (r"ldo[\s_-]?leviathan", "LDO Leviathan"),
     (r"ldo", "LDO"),
     # Generic
@@ -249,14 +256,18 @@ def detect_board_type_from_content(config: ConfigFile) -> tuple[str, float]:
     if has_accel and not has_printer and not has_extruder:
         return BOARD_TYPE_ACCELEROMETER, 0.8
 
-    # Expander: extra steppers but no printer section
-    if stepper_count > 0 and not has_printer and not has_extruder:
+    # Expander: MULTIPLE extra steppers but no printer section. One
+    # stepper alone proves nothing — fragments, includes-in-progress and
+    # truncated pastes all hit this shape, and a confident 'expander'
+    # guess on them misleads the model (2026-09-21 audit; kickback
+    # doctrine: never over-claim).
+    if stepper_count >= 2 and not has_printer and not has_extruder:
         return BOARD_TYPE_EXPANDER, 0.7
 
     return BOARD_TYPE_OTHER, 0.0
 
 
-def detect_board_from_config(config: ConfigFile) -> dict:
+def detect_board_from_config(config: ConfigFile, reference_dir: Optional[Path] = None) -> dict:
     """Attempt to detect the board type from a parsed config file.
 
     Returns a dict with:
@@ -277,8 +288,10 @@ def detect_board_from_config(config: ConfigFile) -> dict:
         "matches": [],
     }
 
-    # Gather text to search: comments, serial paths, all text
-    search_text = ""
+    # Gather text to search: filename, comments, serial paths, all text.
+    # The filename carries the board model for reference configs
+    # (generic-bigtreetech-octopus-*.cfg) whose contents don't.
+    search_text = config.filename.lower() + "\n"
     for comment in config.header_comments:
         search_text += comment.lower() + "\n"
 
@@ -293,13 +306,15 @@ def detect_board_from_config(config: ConfigFile) -> dict:
 
     search_text += config.raw_text.lower()
 
-    # Board detection
+    # Board detection: report EVERY match so the caller sees the full
+    # evidence chain; board_name is the first hit in list order, which is
+    # specificity-ordered (model patterns before family catch-alls).
     for pattern, name in BOARD_PATTERNS:
         if re.search(pattern, search_text, re.IGNORECASE):
-            result["board_name"] = name
+            if result["board_name"] == "Unknown":
+                result["board_name"] = name
             result["matches"].append(f"Board pattern: {name}")
             result["confidence"] = max(result["confidence"], 0.6)
-            break
 
     # MCU detection
     for pattern, chip in MCU_PATTERNS:
@@ -329,6 +344,48 @@ def detect_board_from_config(config: ConfigFile) -> dict:
         result["board_type_confidence"] = fname_conf
         if fname_conf > 0:
             result["matches"].append(f"Board type (filename): {fname_type}")
+
+    # ── Reference pin-layout cross-check (opt-in) ─────────────────
+    # Compare the config's pin fingerprint against the bundled
+    # reference library. A clear single winner (no near-twin within the
+    # tie window) can establish the board NAME even when the text never
+    # says it; weaker overlaps are surfaced as candidates for the model
+    # to read up, never adopted.
+    if reference_dir is not None:
+        type_pool = (
+            result["board_type"]
+            if result["board_type"] != BOARD_TYPE_OTHER
+            else None
+        )
+        ref_matches = match_reference_configs(
+            config.raw_text, reference_dir, board_type=type_pool
+        )
+        if ref_matches:
+            result["reference_matches"] = ref_matches
+            best = ref_matches[0]
+            runner_up = ref_matches[1]["score"] if len(ref_matches) > 1 else 0.0
+            ref_name = _name_from_reference_filename(best["filename"])
+            if (
+                best["score"] >= MATCH_ADOPT
+                and ref_name
+                and best["score"] - runner_up >= MATCH_TIE_WINDOW
+            ):
+                if result["board_name"] == "Unknown":
+                    result["board_name"] = ref_name
+                    # Pin layout identifies the board but not the chip
+                    # actually flashed on it — capped below name+chip.
+                    result["confidence"] = max(result["confidence"], 0.8)
+                result["matches"].append(
+                    f"Reference layout: {best['filename']} "
+                    f"(similarity {best['score']})"
+                )
+            else:
+                listed = ", ".join(
+                    f"{m['filename']} ({m['score']})" for m in ref_matches[:3]
+                )
+                result["matches"].append(
+                    f"Reference layout candidates (no clear winner): {listed}"
+                )
 
     return result
 
@@ -447,3 +504,137 @@ def fuzzy_match_examples(query: str, examples: list[dict], max_results: int = 20
 
     scored.sort(key=lambda x: -x[0])
     return [item[1] for item in scored[:max_results]]
+
+
+# ── Reference-config pin-layout matching ─────────────────────────────
+# The regex pass only sees boards whose NAME appears in the text. Most
+# real user configs never name their board, but their PIN LAYOUT is a
+# literal fingerprint of it: Klipper's reference configs under
+# reference/config/ pin every supported board, so comparing pin tokens
+# identifies the board even when nothing says its name (2026-09-21).
+# Calibrated on the real 280-file library: identical file = 1.0,
+# near-twin variants (Octopus vs Octopus Pro) = 0.95, anonymous
+# fragments of one real board = ~0.36 (top-up evidence only), unrelated
+# shapes < 0.15.
+
+# score >= MATCH_ADOPT -> adopt the layout-derived name (still reported
+# as a match, with evidence); MATCH_CANDIDATE..ADOPT -> name nothing,
+# list as candidates. Ties within MATCH_TIE_WINDOW never pick a single
+# model (near-twin boards must not be silently conflated).
+MATCH_ADOPT = 0.6
+MATCH_CANDIDATE = 0.3
+MATCH_TIE_WINDOW = 0.05
+
+_SIG_PIN_KEY_RE = re.compile(r"(^|_)pin$")
+_SIG_HEADER_RE = re.compile(r"^\[([^\]]+)\]")
+
+# path -> (mtime, signature); reference configs are immutable in
+# practice, so a plain mtime-keyed dict is enough.
+_sig_cache: dict[str, tuple[float, frozenset[str]]] = {}
+
+
+def _normalize_pin_value(value: str) -> str:
+    value = value.strip().lstrip("!~^").strip()
+    if ":" in value:
+        value = value.rsplit(":", 1)[-1]
+    return value.upper()
+
+
+def extract_pin_signature(text: str) -> frozenset[str]:
+    """Fingerprint pin assignments as 'sectionroot.key=VALUE' tokens.
+
+    Raw-text scan (not the parser) — the reference library is large and
+    mostly stock Klipper shapes; commented lines don't pin anything, so
+    they're skipped with the rest. Value normalization folds the
+    negation/pull flags and MCU-name prefix ('!PB15', 'EBBCan:PB12' ->
+    'PB12') because layouts, not wiring style, are what we identify.
+    """
+    sig: set[str] = set()
+    section_root = "mcu"
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        header = _SIG_HEADER_RE.match(line)
+        if header:
+            first = header.group(1).split()
+            section_root = first[0].split("_")[0] if first else "mcu"
+            continue
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        key = key.strip()
+        if _SIG_PIN_KEY_RE.search(key):
+            sig.add(f"{section_root}.{key}={_normalize_pin_value(value)}")
+    return frozenset(sig)
+
+
+def _file_signature(path: Path) -> frozenset[str]:
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return frozenset()
+    key = str(path)
+    cached = _sig_cache.get(key)
+    if cached is None or cached[0] != mtime:
+        try:
+            sig = extract_pin_signature(path.read_text(errors="replace"))
+        except OSError:
+            sig = frozenset()
+        _sig_cache[key] = (mtime, sig)
+        return sig
+    return cached[1]
+
+
+def _name_from_reference_filename(filename: str) -> str:
+    lowered = filename.lower()
+    for pattern, name in BOARD_PATTERNS:
+        if re.search(pattern, lowered, re.IGNORECASE):
+            return name
+    return ""
+
+
+def match_reference_configs(
+    text: str,
+    reference_dir: Path,
+    board_type: Optional[str] = None,
+    top: int = 3,
+) -> list[dict]:
+    """Rank reference configs by pin-layout similarity to ``text``.
+
+    Returns up to ``top`` dicts {filename, path, subdir, board_type,
+    score} with score > MATCH_CANDIDATE, best first. When ``board_type``
+    is a confident detection, only that type's directory is searched
+    (a toolhead snippet must not match mainboard layouts); otherwise
+    every typed directory is in the pool.
+    """
+    sig = extract_pin_signature(text)
+    if not sig:
+        return []
+
+    scored: list[tuple[float, dict]] = []
+    for subdir_name, subdir_type in BOARD_TYPE_DIRS.items():
+        if board_type and board_type != subdir_type:
+            continue
+        subdir = reference_dir / "config" / subdir_name
+        if not subdir.is_dir():
+            continue
+        for cfg_file in sorted(subdir.glob("*.cfg")):
+            ref_sig = _file_signature(cfg_file)
+            if not ref_sig:
+                continue
+            overlap = len(sig & ref_sig)
+            if overlap == 0:
+                continue
+            score = 2 * overlap / (len(sig) + len(ref_sig))
+            if score > MATCH_CANDIDATE:
+                scored.append((score, {
+                    "filename": cfg_file.name,
+                    "path": str(cfg_file),
+                    "subdir": subdir_name,
+                    "board_type": subdir_type,
+                    "score": round(score, 2),
+                }))
+
+    scored.sort(key=lambda item: -item[0])
+    return [item[1] for item in scored[:top]]

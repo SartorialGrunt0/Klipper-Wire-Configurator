@@ -42,6 +42,10 @@ ALWAYS_OK: frozenset[str] = frozenset({"M115", "HELP", "STATUS"})
 # Max suggestions attached to an unknown verdict.
 _SUGGEST_LIMIT = 3
 
+# Truthy spellings for boolean config params (config.getboolean accepts
+# 1/true/yes/on and their case variants).
+_TRUTHY: frozenset[str] = frozenset({"1", "true", "yes", "on"})
+
 
 @dataclass(frozen=True)
 class CommandVerdict:
@@ -51,6 +55,11 @@ class CommandVerdict:
     suggestions: tuple[str, ...] = ()
     source: str = "registry"  # "registry" | "user_macro"
     extra: str = ""
+    # Flag-gated commands ([force_move] enable_force_move): the section
+    # exists but the module still refuses to register the command. Entries
+    # are "section_type.param" strings, matching ProjectGcodeContext.
+    # flag_values.
+    requires_flags: tuple[str, ...] = ()
 
     @property
     def is_problem(self) -> bool:
@@ -63,6 +72,11 @@ class ProjectGcodeContext:
     section_types: frozenset[str]
     user_macros: frozenset[str]
     registry_alias_collisions: frozenset[str] = field(default_factory=frozenset)
+    # "section_type.param" for params set truthy in the project — the
+    # runtime gates a section's mere existence cannot express
+    # (force_move.py:42-57 registers FORCE_MOVE only when
+    # `enable_force_move` is true INSIDE [force_move]).
+    flag_values: frozenset[str] = field(default_factory=frozenset)
 
 
 @lru_cache(maxsize=1)
@@ -78,6 +92,33 @@ def normalize_name(name: str) -> str:
     """Klipper command names are matched case-insensitively and only the
     first whitespace-delimited token is the command."""
     return name.strip().split()[0].upper() if name.strip() else ""
+
+
+def is_traditional_gcode(cmd: str) -> bool:
+    """Klipper's traditional-command test, ported verbatim from
+    gcode.py:125-132 ('a letter followed by a number'). The bare except is
+    intentional (faithful port): empty/suffix-less names are False.
+    NOTE 'G29.1' IS traditional (float('.1') parses) — Klipper's own
+    docs example renames G29 -> G29.1."""
+    try:
+        cmd = cmd.upper().split()[0]
+        val = float(cmd[1:])  # noqa: F841 - presence check, like upstream
+        return cmd[0].isupper() and cmd[1].isdigit()
+    except Exception:
+        return False
+
+
+def is_valid_registration_name(cmd: str) -> bool:
+    """Whether Klipper's register_command would accept `cmd` as a
+    non-traditional command name (gcode.py:145-149). Checks the name
+    EXACTLY as written — Klipper registers rename_existing values without
+    stripping, so ' PROBE_ACCURACY ' and multi-line wraps are rejected at
+    connect with \"Can't register ... invalid name\"."""
+    if cmd.upper() != cmd or not cmd.replace("_", "A").isalnum():
+        return False
+    if cmd[0].isdigit() or cmd[1:2].isdigit():
+        return False
+    return True
 
 
 def _suggest(name: str, pool: list[str], limit: int = _SUGGEST_LIMIT,
@@ -148,6 +189,17 @@ def classify_command(
                 canonical, STATUS_CONDITIONAL_OUT,
                 required_sections=required,
                 source="registry", extra=entry.get("extra", ""))
+    flags = entry.get("requires_flags") or {}
+    if flags and context is not None:
+        missing = tuple(
+            f"{sec}.{param}" for sec, param in sorted(flags.items())
+            if f"{sec}.{param}".casefold() not in context.flag_values)
+        if missing:
+            return CommandVerdict(
+                canonical, STATUS_CONDITIONAL_OUT,
+                required_sections=required,
+                requires_flags=missing,
+                source="registry", extra=entry.get("extra", ""))
     return CommandVerdict(canonical, STATUS_VALID,
                           required_sections=required,
                           extra=entry.get("extra", ""))
@@ -173,11 +225,21 @@ def build_project_context(configs: dict) -> ProjectGcodeContext:
     """
     section_types: set[str] = set()
     user_macros: set[str] = set()
+    flag_values: set[str] = set()
     for config in configs.values():
         for section in getattr(config, "sections", []):
             if getattr(section, "is_commented_out", False):
                 continue
             section_types.add(section.section_type)
+            # Runtime flags a section's existence cannot express
+            # (force_move.py:42). Truthy spellings Klipper's
+            # config.getboolean accepts.
+            for param in getattr(section, "params", []) or []:
+                if getattr(param, "is_commented_out", False):
+                    continue
+                if str(getattr(param, "value", "")).strip().casefold() in _TRUTHY:
+                    flag_values.add(
+                        f"{section.section_type}.{param.key}".casefold())
             if section.section_type == "gcode_macro":
                 macro = section.section_name.strip().upper()
                 if macro:
@@ -190,7 +252,8 @@ def build_project_context(configs: dict) -> ProjectGcodeContext:
                     user_macros.add(rename.upper())
     return ProjectGcodeContext(
         section_types=frozenset(section_types),
-        user_macros=frozenset(user_macros))
+        user_macros=frozenset(user_macros),
+        flag_values=frozenset(flag_values))
 
 
 def available_commands(configs: dict) -> set[str]:
@@ -201,8 +264,13 @@ def available_commands(configs: dict) -> set[str]:
     names = set(ctx.user_macros) | set(ALWAYS_OK)
     for name, entry in reg["commands"].items():
         required = entry.get("requires_sections", [])
-        if not required or ctx.section_types.intersection(required):
-            names.add(name)
+        if required and not ctx.section_types.intersection(required):
+            continue
+        flags = entry.get("requires_flags") or {}
+        if any(f"{sec}.{param}".casefold() not in ctx.flag_values
+               for sec, param in flags.items()):
+            continue
+        names.add(name)
     return names
 
 

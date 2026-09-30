@@ -15,6 +15,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
+import pytest  # noqa: E402
+
 import mcp_server  # noqa: E402
 
 
@@ -331,3 +333,368 @@ def test_klippy_status_printing_warning(tmp_path, monkeypatch):
     assert "benchy.gcode" in out
     # Restart-safety note must appear whenever a print is active.
     assert "interrupt" in out.lower() or "active" in out.lower()
+
+
+# ── Working-state override (live bug report 2026-09-27) ────────────────
+# The edit session stages changes in a WORKING state (unsaved drafts +
+# approved edits), while the MCP user-config tools read DISK. After a
+# rename/draft, read_user_config handed the model the OLD content and it
+# chased ghosts ("search for level_bed after we changed it to level_bed1
+# in the draft — still finds the old macro"). The chat dispatch now
+# injects the session's working files; working content must win.
+
+WORKING = {
+    "printer.cfg": "[gcode_macro LEVEL_BED1]\ngcode:\n    BED_MESH_CALIBRATE\n",
+}
+
+
+@pytest.fixture(autouse=True)
+def _clean_overlay():
+    """The working-state overlay is a contextvar — reset around every test
+    so an override can never leak into unrelated tests."""
+    mcp_server.set_chat_working_files(None)
+    yield
+    mcp_server.set_chat_working_files(None)
+
+
+def _override_server(tmp_path):
+    """Server with the chat working-state overlay active (what the /ai/chat
+    dispatch installs around MCP calls when an EditSession exists)."""
+    server = mcp_server.McpServer()
+    mcp_server.set_chat_working_files(dict(WORKING))
+    return server
+
+
+def test_read_user_config_prefers_working_override(tmp_path, monkeypatch):
+    server = _override_server(tmp_path)
+    out = _call(server, "read_user_config",
+                {"filename": "printer.cfg", "whole_file": True})
+    assert "LEVEL_BED1" in out
+    assert "WORKING" in out.upper()  # honest source label
+
+
+def test_search_user_configs_sees_working_rename(tmp_path):
+    server = _override_server(tmp_path)
+    out = _call(server, "search_user_configs", {"query": "level_bed1"})
+    assert "LEVEL_BED1" in out
+
+
+def test_list_user_config_sections_working_override(tmp_path):
+    server = _override_server(tmp_path)
+    out = _call(server, "list_user_config_sections", {"filename": "printer.cfg"})
+    assert "gcode_macro LEVEL_BED1" in out
+
+
+def test_list_user_configs_includes_working_only_files(tmp_path):
+    server = mcp_server.McpServer()
+    mcp_server.set_chat_working_files({
+        **WORKING,
+        "park.cfg": "[gcode_macro PARK]\ngcode:\n    G1 Z5\n",
+    })
+    out = _call(server, "list_user_configs", {})
+    assert "printer.cfg" in out and "park.cfg" in out
+
+
+# ── Overlay dirtiness: "in the overlay" ≠ "unsaved" ────────────────────
+# Live report 2026-09-30: on a fresh load with no edits, EVERY file came
+# back "working copy (unsaved)". The chat request carried no contextFiles
+# (nothing checked in "Include Files"), so chat_proxy armed the edit
+# session from the backend's disk mirror — a pristine project lands in the
+# read overlay, and the label was applied on presence alone. Worse, it was
+# byte-identical whether or not anything was actually dirty, so the warning
+# could never flag the case it exists for (the 2026-09-27 mixed disk/draft
+# bug). The label must be EARNED: applied only when the working text
+# provably differs from the file on disk.
+
+DISK_FILES = {
+    "printer.cfg": "[mcu]\nserial: /dev/ttyACM0\n\n[include mainsail.cfg]\n",
+    "mainsail.cfg": "[virtual_sdcard]\npath: ~/printer_data/gcodes\n",
+    "clean.cfg": "[gcode_macro CLEAN_NOZZLE]\ngcode:\n    G28\n",
+}
+
+
+def _disk_server(tmp_path):
+    """Server over a synthetic config dir; returns (server, system_dir)."""
+    system_dir = tmp_path / "system_config"
+    system_dir.mkdir(parents=True, exist_ok=True)
+    for name, text in DISK_FILES.items():
+        (system_dir / name).write_text(text, encoding="utf-8")
+    server, _ = _server(tmp_path)
+    return server, system_dir
+
+
+def _mirror_overlay(system_dir):
+    """The disk-mirror seed chat_proxy installs when the client sends no
+    contextFiles — the fresh-load case that produced the live report."""
+    return {
+        f.relative_to(system_dir).as_posix(): f.read_bytes().decode("utf-8")
+        for f in sorted(system_dir.rglob("*.cfg"))
+    }
+
+
+def test_clean_mirror_seed_marks_nothing_unsaved(tmp_path):
+    """Fresh load, no drafts: the listing must read exactly like the
+    non-chat listing — no file may claim to be an unsaved working copy."""
+    server, system_dir = _disk_server(tmp_path)
+    mcp_server.set_chat_working_files(_mirror_overlay(system_dir))
+
+    out = _call(server, "list_user_configs", {})
+    assert "working copy (unsaved)" not in out
+    for name in DISK_FILES:
+        assert f"- {name}  (pi-native)" in out
+
+
+def test_only_dirty_overlay_files_are_unsaved(tmp_path):
+    """A real draft keeps the warning; its clean neighbours do not."""
+    server, system_dir = _disk_server(tmp_path)
+    overlay = _mirror_overlay(system_dir)
+    overlay["clean.cfg"] = DISK_FILES["clean.cfg"] + "[gcode_macro NEW]\ngcode:\n    G28\n"
+    mcp_server.set_chat_working_files(overlay)
+
+    out = _call(server, "list_user_configs", {})
+    assert "- clean.cfg  (working copy (unsaved))" in out
+    assert "- printer.cfg  (pi-native)" in out
+    assert "- mainsail.cfg  (pi-native)" in out
+
+
+def test_session_only_overlay_file_is_still_unsaved(tmp_path):
+    """Regression guard on the conservative rule: a file that exists only
+    in the session (config_write draft) has no disk twin to match."""
+    server, system_dir = _disk_server(tmp_path)
+    mcp_server.set_chat_working_files({
+        **_mirror_overlay(system_dir),
+        "park.cfg": "[gcode_macro PARK]\ngcode:\n    G1 Z5\n",
+    })
+
+    out = _call(server, "list_user_configs", {})
+    assert "- park.cfg  (working copy (unsaved))" in out
+    assert "- printer.cfg  (pi-native)" in out
+
+
+def test_line_ending_difference_is_not_dirty(tmp_path):
+    """CRLF on disk vs LF in the store is not an edit — the frontend's own
+    dirty test normalises the same way (utils/chatContext.ts)."""
+    server, system_dir = _disk_server(tmp_path)
+    (system_dir / "printer.cfg").write_bytes(
+        DISK_FILES["printer.cfg"].replace("\n", "\r\n").encode("utf-8"))
+    mcp_server.set_chat_working_files(_mirror_overlay(system_dir))
+
+    out = _call(server, "list_user_configs", {})
+    assert "- printer.cfg  (pi-native)" in out
+    assert "working copy (unsaved)" not in out
+
+
+def test_clean_overlay_read_has_no_working_label(tmp_path):
+    server, system_dir = _disk_server(tmp_path)
+    mcp_server.set_chat_working_files(_mirror_overlay(system_dir))
+
+    out = _call(server, "read_user_config",
+                {"filename": "printer.cfg", "whole_file": True})
+    assert "WORKING copy" not in out
+    assert "serial: /dev/ttyACM0" in out
+
+
+def test_dirty_overlay_read_keeps_working_label(tmp_path):
+    server, system_dir = _disk_server(tmp_path)
+    overlay = _mirror_overlay(system_dir)
+    overlay["printer.cfg"] = DISK_FILES["printer.cfg"].replace(
+        "/dev/ttyACM0", "/dev/ttyUSB0")
+    mcp_server.set_chat_working_files(overlay)
+
+    out = _call(server, "read_user_config",
+                {"filename": "printer.cfg", "whole_file": True})
+    assert "WORKING copy" in out
+    assert "/dev/ttyUSB0" in out
+
+
+def test_clean_overlay_section_listing_has_no_working_label(tmp_path):
+    server, system_dir = _disk_server(tmp_path)
+    mcp_server.set_chat_working_files(_mirror_overlay(system_dir))
+
+    out = _call(server, "list_user_config_sections", {"filename": "printer.cfg"})
+    assert "WORKING copy" not in out
+    assert "[mcu]" in out
+
+
+def test_clean_overlay_search_has_no_working_label(tmp_path):
+    server, system_dir = _disk_server(tmp_path)
+    mcp_server.set_chat_working_files(_mirror_overlay(system_dir))
+
+    out = _call(server, "search_user_configs", {"query": "clean_nozzle"})
+    assert "WORKING copy" not in out
+    assert "clean.cfg" in out
+
+
+def test_dirty_overlay_search_keeps_working_label(tmp_path):
+    server, system_dir = _disk_server(tmp_path)
+    overlay = _mirror_overlay(system_dir)
+    overlay["clean.cfg"] = DISK_FILES["clean.cfg"] + "[gcode_macro NEW]\ngcode:\n    G28\n"
+    mcp_server.set_chat_working_files(overlay)
+
+    out = _call(server, "search_user_configs", {"query": "clean_nozzle"})
+    assert "WORKING copy" in out
+
+
+# ── Bare-name section lookup (live report 2026-09-27) ──────────────────
+# The chat model habitually addresses a macro by its bare name
+# (section='Level_Bed') instead of the full header ('gcode_macro
+# Level_Bed'), then loops on 'Section "Level_Bed" not found'. A bare name
+# resolves when it maps to exactly ONE header in the file; ambiguous names
+# must still fail, naming the candidate headers instead of guessing.
+
+SECTIONS = (
+    "[gcode_macro Level_Bed]\n"
+    "gcode:\n"
+    "    BED_MESH_CALIBRATE\n"
+    "\n"
+    "[fan_generic My_Fan]\n"
+    "pin: PA1\n"
+    "\n"
+    "[gcode_macro Level]\n"
+    "gcode:\n"
+    "    G28\n"
+    "\n"
+    "[gcode_macro level]\n"
+    "gcode:\n"
+    "    G29\n"
+)
+
+
+def _sections_server(tmp_path):
+    """Server reading one on-disk printer.cfg that mixes bare-name-unique
+    and casefold-colliding headers."""
+    server = mcp_server.McpServer()
+    user_dir = tmp_path / "user_configs"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    (user_dir / "printer.cfg").write_text(SECTIONS, encoding="utf-8")
+    mcp_server.LOCAL_CONFIGS_DIR = user_dir
+    mcp_server._system_config_path = lambda: tmp_path / "system_config"
+    return server
+
+
+def _read_section(server, section):
+    return _call(server, "read_user_config",
+                 {"filename": "printer.cfg", "section": section})
+
+
+def test_bare_macro_name_resolves_section(tmp_path):
+    server = _sections_server(tmp_path)
+    out = _read_section(server, "Level_Bed")
+    assert "BED_MESH_CALIBRATE" in out      # the right section's body
+    assert "G28" not in out                 # not a neighbouring macro
+    assert "not found" not in out.lower()
+
+
+def test_bare_name_case_insensitive(tmp_path):
+    server = _sections_server(tmp_path)
+    out = _read_section(server, "level_bed")
+    assert "BED_MESH_CALIBRATE" in out
+
+
+def test_bare_fan_instance_name_resolves(tmp_path):
+    server = _sections_server(tmp_path)
+    out = _read_section(server, "My_Fan")
+    assert "pin: PA1" in out
+
+
+def test_full_header_still_resolves(tmp_path):
+    server = _sections_server(tmp_path)
+    out = _read_section(server, "gcode_macro Level_Bed")
+    assert "BED_MESH_CALIBRATE" in out
+    assert "not found" not in out.lower()
+
+
+def test_full_header_exact_case_wins_outright(tmp_path):
+    # An exact-spelling request is unambiguous intent: [gcode_macro Level]
+    # resolves even though a case-variant twin exists.
+    server = _sections_server(tmp_path)
+    out = _read_section(server, "gcode_macro Level")
+    assert "G28" in out
+    assert "G29" not in out
+
+
+def test_full_header_wrong_case_unique_still_resolves(tmp_path):
+    server = _sections_server(tmp_path)
+    out = _read_section(server, "GCODE_MACRO level_bed")
+    assert "BED_MESH_CALIBRATE" in out
+
+
+def test_full_header_casefold_collision_refuses_like_the_edit_side(tmp_path):
+    """Final-pass review 2026-09-29: the read side used to return the FIRST
+    case-insensitive full-header hit, silently. The edit side
+    (_resolve_section_ref) refuses the same identifier as ambiguous, and
+    read output is what the model quotes as patch anchors — the surfaces
+    must agree. 'gcode_macro LEVEL' now lists candidates like the bare-name
+    path always has."""
+    server = _sections_server(tmp_path)
+    out = _read_section(server, "gcode_macro LEVEL")
+    assert "Multiple sections match" in out
+    assert "[gcode_macro Level]" in out
+    assert "[gcode_macro level]" in out
+    assert "G28" not in out and "G29" not in out
+
+
+def test_exact_case_wins_when_the_twin_comes_first(tmp_path):
+    """Round-2 review 2026-09-29: the SECTIONS fixture happens to put the
+    exact-cased twin first, which made the old first-hit logic pass this
+    case by luck. Load-bearing version: wrong-case twin BEFORE the exact
+    spelling — the exact request must still win."""
+    server = mcp_server.McpServer()
+    user_dir = tmp_path / "user_configs"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    (user_dir / "printer.cfg").write_text(
+        "[gcode_macro level]\ngcode:\n    G29\n\n"
+        "[gcode_macro Level]\ngcode:\n    G28\n", encoding="utf-8")
+    mcp_server.LOCAL_CONFIGS_DIR = user_dir
+    mcp_server._system_config_path = lambda: tmp_path / "system_config"
+    out = _read_section(server, "gcode_macro Level")
+    assert "G28" in out
+    assert "G29" not in out
+
+
+def test_duplicate_identical_headers_resolve_like_the_edit_side(tmp_path):
+    """Round-2 review 2026-09-29: uniqueness must count distinct
+    SPELLINGS (like _resolve_section_ref), not line indices — two verbatim
+    identical headers are one spelling; the edit side resolves it."""
+    server = mcp_server.McpServer()
+    user_dir = tmp_path / "user_configs"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    (user_dir / "printer.cfg").write_text(
+        "[gcode_macro LEVEL]\ngcode:\n    G28\n\n"
+        "[gcode_macro LEVEL]\ngcode:\n    G29\n", encoding="utf-8")
+    mcp_server.LOCAL_CONFIGS_DIR = user_dir
+    mcp_server._system_config_path = lambda: tmp_path / "system_config"
+    out = _read_section(server, "gcode_macro level")
+    assert "Multiple sections match" not in out
+    assert "G28" in out
+
+
+def test_batch_read_reports_collision_as_ambiguous_not_absent(tmp_path):
+    """Round-2 review 2026-09-29: the batch path (sections=[...]) dropped
+    the resolver's candidate list and reported the collision under
+    'Sections not found' — the retry-loop shape the ambiguity message was
+    added to stop (live report 2026-09-27)."""
+    server = _sections_server(tmp_path)
+    out = _call(server, "read_user_config", {
+        "filename": "printer.cfg",
+        "sections": ["gcode_macro LEVEL", "fan_generic My_Fan"]})
+    assert "Multiple sections match" in out
+    assert "[gcode_macro Level]" in out and "[gcode_macro level]" in out
+    assert "pin: PA1" in out          # the good section still reads
+    assert "not found" not in out.lower()
+
+
+def test_ambiguous_bare_name_lists_candidates(tmp_path):
+    server = _sections_server(tmp_path)
+    out = _read_section(server, "Level")
+    assert "Multiple sections match" in out
+    assert "[gcode_macro Level]" in out
+    assert "[gcode_macro level]" in out
+    assert "G28" not in out and "G29" not in out
+
+
+def test_unknown_section_adds_macro_guidance(tmp_path):
+    server = _sections_server(tmp_path)
+    out = _read_section(server, "No_Such_Thing")
+    assert "not found" in out
+    assert "gcode_macro No_Such_Thing" in out

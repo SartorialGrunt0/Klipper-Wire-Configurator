@@ -423,6 +423,27 @@ def test_search_user_configs_section_annotation(tmp_path):
     assert "read_user_config" in out
 
 
+def test_search_user_configs_lists_all_matching_section_headers(tmp_path):
+    # Enumeration (2026-09-13 TRIDENT-15/16 finding): a query matching
+    # SECTION NAMES must surface EVERY matching header in the file, not
+    # just the enclosing section of the first hit. Before this, searching
+    # 'neopixel' labeled Hotkey.cfg at [gcode_macro _BUTTON_B5] and the
+    # [neopixel hotkey_leds] strip was invisible -> "all my LEDs" edits
+    # silently missed it.
+    server, root = _server(tmp_path)
+    user_dir = root / "user_configs"
+    user_dir.mkdir(parents=True)
+    (user_dir / "Hotkey.cfg").write_text(
+        "[gcode_macro _BUTTON_B5]\ngcode: M117 neopixel ping\n"
+        "[neopixel hotkey_leds]\npin: PA7\n"
+        "[neopixel hotkey_status]\npin: PA8\n",
+        encoding="utf-8",
+    )
+    out = _call_tool(server, "search_user_configs", {"query": "neopixel"})
+    assert "[neopixel hotkey_leds]" in out
+    assert "[neopixel hotkey_status]" in out
+
+
 def test_search_user_configs_top_of_file(tmp_path):
     # A match in the file preamble (before any [section]) must be labelled
     # "(top of file)" — includes are directives, not sections.

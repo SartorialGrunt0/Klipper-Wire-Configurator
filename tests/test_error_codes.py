@@ -48,6 +48,75 @@ def test_unknown_section_carries_code():
     assert all(e.code == 'unknown_section' for e in unknowns)
 
 
+# ── section_type_case (2026-09-29) ─────────────────────────────────
+
+
+def test_miscased_known_section_type_is_an_error():
+    # load_object resolves the type token to a module FILENAME
+    # (klippy.py:92-102: extras/<token>.py), so '[Gcode_Macro x]' raises
+    # "Unable to load module" while '[gcode_macro x]' loads. That is a hard
+    # fail, not an acknowledgeable typo.
+    result = _validate('[Gcode_Macro level_bed]\ngcode:\n    G28\n')
+    cases = _with_code(result.errors, 'section_type_case')
+    assert len(cases) == 1
+    err = cases[0]
+    assert err.severity == 'error'
+    assert "'Gcode_Macro'" in err.message
+    assert 'gcode_macro' in err.message
+    # Not double-reported as the generic warning.
+    assert not _with_code(result.errors, 'unknown_section')
+
+
+def test_miscased_known_type_flagged_for_every_capitalisation():
+    for token in ('Gcode_Macro', 'Gcode_macro', 'gcode_Macro', 'GCODE_MACRO'):
+        result = _validate(f'[{token} level_bed]\ngcode:\n    G28\n')
+        assert _with_code(result.errors, 'section_type_case'), token
+
+
+def test_correct_case_is_silent():
+    result = _validate('[gcode_macro level_bed]\ngcode:\n    G28\n')
+    assert not _with_code(result.errors, 'section_type_case')
+    assert not _with_code(result.errors, 'unknown_section')
+
+
+def test_miscased_plain_section_is_an_error():
+    result = _validate('[Printer]\nmax_accel: 1\n')
+    assert _with_code(result.errors, 'section_type_case')
+
+
+def test_miscased_include_directive_is_an_error():
+    # Klipper tests `header.startswith('include ')` literally, so
+    # '[Include x.cfg]' is not an include and cannot load.
+    result = _validate('[Include extra.cfg]\n')
+    assert _with_code(result.errors, 'section_type_case')
+
+
+def test_genuinely_unknown_type_stays_a_warning():
+    # A plugin-provided section is unknown to KWC but loads fine — it must
+    # NOT be escalated to the blocking case error, or we break those users.
+    for header in ('not_a_real_section', 'MyPlugin_Section'):
+        result = _validate(f'[{header}]\nfoo: 1\n')
+        assert _with_code(result.errors, 'unknown_section'), header
+        assert not _with_code(result.errors, 'section_type_case'), header
+
+
+def test_miscased_section_name_with_correct_type_is_silent():
+    # Only the TYPE token is case-sensitive. Klipper upper-cases the macro
+    # alias (gcode_macro.py:130), so a name difference is not a defect.
+    result = _validate('[gcode_macro LEVEL_BED]\ngcode:\n    G28\n')
+    assert not _with_code(result.errors, 'section_type_case')
+    assert not _with_code(result.errors, 'unknown_section')
+
+
+def test_section_type_case_reaches_the_project_validator():
+    results = _validate_project({
+        'printer.cfg': '[printer]\nkinematics: corexy\nmax_velocity: 300\n'
+                       'max_accel: 3000\n\n[Gcode_Macro x]\ngcode:\n    G28\n',
+    })
+    errors = list(chain.from_iterable(r.errors for r in results.values()))
+    assert _with_code(errors, 'section_type_case')
+
+
 # ── project_duplicate ──────────────────────────────────────────────
 
 def test_single_file_duplicate_carries_code():

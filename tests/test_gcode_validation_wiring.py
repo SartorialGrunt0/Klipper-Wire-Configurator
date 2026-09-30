@@ -155,3 +155,97 @@ def test_project_gcode_registry_false_suppresses_everywhere():
         {"printer.cfg": a, "b.cfg": b}, gcode_registry=False)
     assert _codes(results["printer.cfg"]) == []
     assert _codes(results["b.cfg"]) == []
+
+
+# ── schema-derived scan scope: executed-gcode params outside macros ───
+# (Sir 2026-09-19: hallucinated SET_LED_COLOR in [idle_timeout] gcode
+# was invisible because only gcode_macro/delayed_gcode were scanned.)
+
+
+def test_idle_timeout_gcode_is_scanned():
+    cfg = parse_config(
+        "[idle_timeout]\ntimeout: 1800\ngcode:\n"
+        "  SET_LED_COLOR LED=SB_LEDs RED=0\n",
+        "printer.cfg")
+    result = validate_config(cfg)
+    finding = next((e for e in result.errors
+                    if e.code == "unknown_gcode_command"), None)
+    assert finding is not None
+    assert finding.param == "gcode"
+    assert "SET_LED" in finding.message  # did-you-mean present
+
+
+def test_sensor_callback_gcode_is_scanned():
+    cfg = parse_config(
+        "[filament_switch_sensor fs]\nsensor_pin: ^PB0\n"
+        "runout_gcode:\n  SET_LED_COLOR LED=x RED=0\n",
+        "printer.cfg")
+    result = validate_config(cfg)
+    finding = next((e for e in result.errors
+                    if e.code == "unknown_gcode_command"), None)
+    assert finding is not None
+    assert finding.param == "runout_gcode"
+
+
+def test_gcode_id_is_not_scanned_as_body():
+    # gcode_id is an identifier STRING param (temperature_sensor), never
+    # executable body — deriving from MULTI_LINE params keeps it out.
+    cfg = parse_config(
+        "[temperature_sensor mcu_temp]\n"
+        "sensor_type: temperature_mcu\ngcode_id: T\n",
+        "printer.cfg")
+    result = validate_config(cfg)
+    assert _codes(result) == []
+
+
+def test_valid_command_in_idle_timeout_no_finding():
+    cfg = parse_config(
+        "[neopixel SB_LEDs]\npin: PB12\n\n"
+        "[idle_timeout]\ntimeout: 300\ngcode:\n"
+        "  SET_LED LED=SB_LEDs RED=0 GREEN=0 BLUE=0\n",
+        "printer.cfg")
+    result = validate_config(cfg)
+    assert _codes(result) == []
+
+
+def test_edit_session_surfaces_unknown_command_as_advisory():
+    # The chat edit gate validates with gcode_registry=True. Since
+    # 2026-09-20 (Sir), a NEW unknown command kicks the write back
+    # UNSTAGED once — the model gets the did-you-mean and a correction
+    # round before any card. The second identical send is the model's
+    # plugin claim: it stages with the advisory riding along (card badge
+    # remains the user's safety net).
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
+    from services.ai_edit_tools import EditSession
+    es = EditSession({'printer.cfg': {'content': '[idle_timeout]\ntimeout: 1800\n'}})
+    call = {
+        'name': 'config_edit',
+        'arguments': {'file': 'printer.cfg', 'op': 'replace_section',
+                      'section': 'idle_timeout',
+                      'text': 'timeout: 300\ngcode:\n'
+                              '  SET_LED_COLOR LED=x RED=0'}}
+    content, details = es.execute(call)
+    assert details is None              # first send: kicked back, not staged
+    assert 'SET_LED_COLOR' in content
+    assert 'SET_LED' in content         # did-you-mean reaches the model
+    content, details = es.execute(call)
+    assert details is not None          # resend: stages with advisory
+    assert 'advisory' in content.lower()
+    assert any(a['code'] == 'unknown_gcode_command'
+               for a in details['advisories'])
+
+
+def test_edit_session_baseline_unknowns_do_not_rewarn():
+    # A pre-existing unknown command in the user's own config is in the
+    # baseline and must not be blamed on an unrelated edit.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
+    from services.ai_edit_tools import EditSession
+    es = EditSession({'printer.cfg': {'content':
+        '[gcode_macro OLD]\ngcode:\n  SET_LED_COLOR LED=x RED=0\n'}})
+    content, details = es.execute({
+        'name': 'config_edit',
+        'arguments': {'file': 'printer.cfg', 'op': 'set_param',
+                      'section': 'gcode_macro OLD', 'key': 'variable_a',
+                      'value': '1'}})
+    assert details is not None
+    assert 'SET_LED_COLOR' not in content

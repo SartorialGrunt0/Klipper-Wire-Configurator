@@ -186,6 +186,68 @@ def test_tmc2660_driver_wildcard():
     _assert_no_dups("tmc2660")
 
 
+# ── unknown_param escalation prep (2026-09-30, Appendix A of the plan) ─────
+# Every param Config_Reference.md documents for these sections must be
+# modeled, or the escalation guard would block a documented option.
+# tests/test_param_coverage_dataset.py enforces the set relation; these are
+# the readable per-section pins.
+
+def test_ads1x1x_backfill():
+    # was params=[]; ads1x1x.py:177,181,186,187 + bus.py i2c reads
+    _present("ads1x1x", "chip", "pga", "adc_voltage", "address_pin",
+             "i2c_mcu", "i2c_bus", "i2c_address")
+    _assert_no_dups("ads1x1x")
+
+
+def test_load_cell_probe_backfill():
+    _present(
+        "load_cell_probe",
+        "counts_per_gram", "reference_tare_counts", "sensor_orientation",
+        "activate_gcode", "deactivate_gcode",
+        "drift_filter_cutoff_frequency", "drift_filter_delay",
+        "buzz_filter_cutoff_frequency", "buzz_filter_delay",
+        "notch_filter_frequencies", "notch_filter_quality",
+    )
+    _assert_no_dups("load_cell_probe")
+
+
+def test_z_thermal_adjust_backfill():
+    _present("z_thermal_adjust", "gcode_id", "max_z_adjustment", "z_adjust_off_above")
+    _assert_no_dups("z_thermal_adjust")
+
+
+def test_axis_twist_compensation_backfill():
+    _present("axis_twist_compensation",
+             "calibrate_start_y", "calibrate_end_y", "calibrate_x")
+    _assert_no_dups("axis_twist_compensation")
+
+
+def test_bed_mesh_faulty_region_wildcards():
+    # modelled as the wildcard pair Klipper actually reads (format string),
+    # not as faulty_region_1_* literals
+    _present("bed_mesh", "faulty_region_*_min", "faulty_region_*_max")
+    _assert_no_dups("bed_mesh")
+
+
+def test_manual_stepper_position_limits():
+    _present("manual_stepper", "position_min", "position_max")
+    _assert_no_dups("manual_stepper")
+
+
+def test_heater_generic_backfill():
+    _present("heater_generic", "gcode_id", "smooth_time")
+    _assert_no_dups("heater_generic")
+
+
+def test_escalation_prep_singles():
+    _present("tmc2240", "rref")
+    _present("pca9632", "color_order")
+    _present("angle", "stepper")
+    _present("filament_motion_sensor", "pause_delay", "debounce_delay")
+    _present("filament_switch_sensor", "debounce_delay")
+    _present("gcode_button", "debounce_delay")
+
+
 # ── global guard: no section defines a param twice ─────────────────────────
 def test_no_duplicate_params_anywhere():
     bad = {}
