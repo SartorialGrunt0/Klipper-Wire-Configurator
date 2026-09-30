@@ -58,6 +58,12 @@ The assistant sees your printer memory (mainboard, toolhead, expander boards, ki
 > - Errors carry exact reasons and name the working alternative (the file
 >   that actually holds the section, the actual include lines), so the
 >   model corrects itself instead of guessing.
+> - Only a hard validation ERROR refuses the change; warnings ride the
+>   card as advisories. Since the 2026-09-30 unknown-param escalation
+>   (`unknown_param` in a section KWC grounds against the bundled Klipper
+>   snapshot is an ERROR — Klipper refuses to load such a config), a
+>   hallucinated parameter in a known section is now refused at the tool
+>   call instead of slipping through as an ignorable advisory.
 > - File and section names resolve **case-insensitively to the project's
 >   real spelling** — `Printer.cfg` → `printer.cfg`, `Gcode_Macro level_bed`
 >   → `[gcode_macro Level_Bed]` — matching what the read tools have always
