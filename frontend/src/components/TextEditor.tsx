@@ -10,7 +10,7 @@ import { restoreLayoutAfterRebuild } from '../utils/layoutPersistence';
 import { acknowledgeableWarning } from '../utils/warningAcknowledgment';
 import { resolveIssueLine } from '../utils/issueLine';
 import { ISSUE_MARKER } from '../utils/issueMarker';
-import { filterFindings, filterValidationMap } from '../utils/validationVisibility';
+import { filterFindings } from '../utils/validationVisibility';
 import { indentCaret, indentSelection, outdentSelection } from '../utils/textIndent';
 import { autoScrollDelta } from '../utils/editorAutoScroll';
 import { buildHighlightedHtml, escapeHtml } from '../utils/editorHighlight';
@@ -18,6 +18,7 @@ import { lineSeverities, worstSeverity } from '../utils/issueSummary';
 import { readIssueStripCollapsed, writeIssueStripCollapsed } from '../utils/editorPrefs';
 import { findHits, replaceAll, replaceOne, countHits, type FindHit } from '../utils/findReplace';
 import EditorIssueStrip from './EditorIssueStrip';
+import ConfigTree from './ConfigTree';
 import type { TextIssue } from '../types/editor';
 import type { ExampleConfig, ConfigFile, ConfigSection, ValidationError } from '../types/config';
 
@@ -27,19 +28,6 @@ interface SearchResult {
   lineText: string;
   matchStart: number;
   matchEnd: number;
-}
-
-interface ConfigParamEntry {
-  key: string;
-  line: number;
-}
-
-interface ConfigSectionEntry {
-  id: string;
-  title: string;
-  line: number;
-  params: ConfigParamEntry[];
-  isCommented: boolean;
 }
 
 function TextEditor({ isActive = true }: { isActive?: boolean }) {
@@ -147,11 +135,9 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   } | null>(null);
   const [replaceNotice, setReplaceNotice] = useState<string | null>(null);
   const [showFileSidebar, setShowFileSidebar] = useState(true);
-  const [showSectionsSidebar, setShowSectionsSidebar] = useState(true);
   const [issueStripCollapsed, setIssueStripCollapsed] = useState(() => readIssueStripCollapsed());
   const [showReferenceViewer, setShowReferenceViewer] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({});
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const lineNumbersRef = useRef<HTMLDivElement>(null);
   const highlightRef = useRef<HTMLPreElement>(null);
@@ -428,6 +414,17 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     [matchCase, wholeWord],
   );
 
+  // Current text for every file — the navigation tree's outline source. Same
+  // rule as search: the active file's live textarea text wins over the
+  // debounced export.
+  const outlineTexts = useMemo((): Record<string, string> => {
+    const out: Record<string, string> = {};
+    for (const fn of Object.keys(configFiles)) {
+      out[fn] = fn === activeFile ? editText : configFiles[fn]?.raw_text ?? allFilesText[fn] ?? '';
+    }
+    return out;
+  }, [configFiles, activeFile, editText, allFilesText]);
+
   // Search results across the scope. Every occurrence on a line is its own row
   // (the previous implementation reported the first match per line only).
   const searchResults = useMemo((): SearchResult[] => {
@@ -449,42 +446,6 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     return results;
   }, [searchQuery, scopedTexts, findOptions]);
 
-  const sectionEntries = useMemo<ConfigSectionEntry[]>(() => {
-    const lines = editText.split('\n');
-    const sections: ConfigSectionEntry[] = [];
-    let currentSection: ConfigSectionEntry | null = null;
-
-    lines.forEach((line, idx) => {
-      const sectionMatch = line.match(/^\s*(#?)\[([^\]]+)\]\s*$/);
-      if (sectionMatch) {
-        const title = sectionMatch[2].trim();
-        if (title.toLowerCase().startsWith('include ')) {
-          currentSection = null;
-          return;
-        }
-        currentSection = {
-          id: `${idx + 1}:${title}`,
-          title,
-          line: idx + 1,
-          params: [],
-          isCommented: sectionMatch[1] === '#',
-        };
-        sections.push(currentSection);
-        return;
-      }
-
-      if (!currentSection || currentSection.isCommented) return;
-      const paramMatch = line.match(/^\s*(#?)([A-Za-z0-9_][A-Za-z0-9_\-]*)(\s*[:=]\s*)(.*)$/);
-      if (paramMatch && paramMatch[1] !== '#') {
-        currentSection.params.push({ key: paramMatch[2], line: idx + 1 });
-      }
-    });
-    return sections;
-  }, [editText]);
-
-  useEffect(() => {
-    setExpandedSections({});
-  }, [activeFile]);
 
   const highlightedHtml = useMemo(
     () => buildHighlightedHtml(editText, { lineSeverities: issueLineSeverities }),
@@ -753,13 +714,6 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     });
   };
 
-  const toggleSectionExpanded = useCallback((sectionId: string) => {
-    setExpandedSections((current) => ({
-      ...current,
-      [sectionId]: !current[sectionId],
-    }));
-  }, []);
-
   // Close context menu on outside click
   useEffect(() => {
     if (!contextMenu) return;
@@ -891,7 +845,6 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
 
   // Validation shown for a file: the store validation — text edits apply to
   // the model on every successful parse, so the store is always current.
-  const getFileValidation = (fn: string) => validation[fn];
 
   const handleAddConfigFromReference = async (example: ExampleConfig) => {
     try {
@@ -939,77 +892,21 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
 
   return (
     <div className="flex h-full bg-[var(--color-bg-primary)]">
-      {/* File list sidebar */}
-      {showFileSidebar && (
-      <div className="w-48 shrink-0 flex flex-col bg-[var(--color-bg-secondary)] border-r border-[var(--color-bg-tertiary)]">
-        <div className="px-3 py-2 shrink-0 border-b border-[var(--color-bg-tertiary)] flex items-center justify-between">
-          <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-secondary)]">Files</span>
-          <div className="flex items-center gap-1">
-            <button
-              onClick={() => { setShowAddConfig(true); setAddConfigStep('choose'); setFileError(''); }}
-              title="Add Configuration"
-              className="text-[var(--color-text-secondary)] hover:text-[var(--color-accent)] transition-colors"
-            >
-              <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-                <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
-              </svg>
-            </button>
-            <button
-              onClick={() => setShowFileSidebar(false)}
-              title="Collapse files"
-              className="rounded border border-[var(--color-bg-tertiary)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
-            >
-              {'<'}
-            </button>
-          </div>
-        </div>
-        <div className="flex-1 overflow-y-auto py-1">
-          {filenames.map((fn) => {
-            const v = getFileValidation(fn);
-            const visibleFindings = filterFindings(v?.errors ?? [], visibility);
-            const fileErrors = visibleFindings.filter((e) => e.severity === 'error');
-            const fileWarnings = visibleFindings.filter((e) => e.severity === 'warning');
-            return (
-              <button
-                key={fn}
-                onClick={() => handleFileSwitch(fn)}
-                onContextMenu={(e) => handleFileContextMenu(e, fn)}
-                title={fn}
-                className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs font-medium transition-colors ${
-                  fn === activeFile
-                    ? 'bg-[var(--color-accent)] text-[var(--color-bg-primary)]'
-                    : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text-primary)]'
-                }`}
-              >
-                <span className="min-w-0 flex-1 truncate">{fn}</span>
-                {fileErrors.length > 0 ? (
-                  <span
-                    className="w-2 h-2 rounded-full bg-[var(--color-error)] shrink-0"
-                    title={`${fileErrors.length} error${fileErrors.length > 1 ? 's' : ''}`}
-                  />
-                ) : fileWarnings.length > 0 ? (
-                  <span
-                    className="w-2 h-2 rounded-full bg-[var(--color-warning)] shrink-0"
-                    title={`${fileWarnings.length} warning${fileWarnings.length > 1 ? 's' : ''}`}
-                  />
-                ) : null}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-      )}
-      {!showFileSidebar && (
-        <div className="flex w-10 shrink-0 items-start justify-center border-r border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] pt-2">
-          <button
-            onClick={() => setShowFileSidebar(true)}
-            title="Show files"
-            className="rounded border border-[var(--color-bg-tertiary)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
-          >
-            {'>'}
-          </button>
-        </div>
-      )}
+      {/* One navigation tree: folder (when present) -> file -> section -> param.
+          Replaces the old files sidebar + right-hand sections sidebar. */}
+      <ConfigTree
+        filenames={filenames}
+        texts={outlineTexts}
+        activeFile={activeFile}
+        validation={validation}
+        visibility={visibility}
+        collapsed={!showFileSidebar}
+        onToggleCollapsed={() => setShowFileSidebar((prev) => !prev)}
+        onSelectFile={handleFileSwitch}
+        onFileContextMenu={handleFileContextMenu}
+        onJumpToLine={jumpToLine}
+        onAddConfig={() => { setShowAddConfig(true); setAddConfigStep('choose'); setFileError(''); }}
+      />
 
       {/* File context menu */}
       {contextMenu && (
@@ -1498,94 +1395,6 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
         )}
       </div>
 
-      {showSectionsSidebar ? (
-        <div className="w-64 shrink-0 flex flex-col bg-[var(--color-bg-secondary)] border-l border-[var(--color-bg-tertiary)]">
-          <div className="px-3 py-2 shrink-0 border-b border-[var(--color-bg-tertiary)] flex items-center justify-between gap-2">
-            <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-secondary)]">Sections</span>
-            <div className="flex items-center gap-2">
-              <span className="text-[10px] text-[var(--color-text-secondary)]">{sectionEntries.length}</span>
-              <button
-                onClick={() => setShowSectionsSidebar(false)}
-                title="Collapse sections"
-                className="rounded border border-[var(--color-bg-tertiary)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
-              >
-                {'>'}
-              </button>
-            </div>
-          </div>
-          <div className="flex-1 overflow-y-auto py-1">
-            {sectionEntries.map((entry) => {
-              const isExpanded = !!expandedSections[entry.id];
-              const hasParams = entry.params.length > 0;
-              const activeValidation = getFileValidation(activeFile);
-              // Same severity filter as the gutter/file list — a hidden
-              // finding must not keep a dot in this sidebar either.
-              const sectionIssues = filterFindings(activeValidation?.errors ?? [], visibility).filter((e) => e.section === entry.title);
-              const hasSecError = sectionIssues.some((e) => e.severity === 'error');
-              const hasSecWarning = !hasSecError && sectionIssues.some((e) => e.severity === 'warning');
-              const hasSecInfo = !hasSecError && !hasSecWarning && sectionIssues.some((e) => e.severity === 'info');
-              return (
-                <div key={entry.id} className="px-2 py-0.5">
-                  <div className="flex items-start gap-1">
-                    <button
-                      type="button"
-                      disabled={!hasParams}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        toggleSectionExpanded(entry.id);
-                      }}
-                      className={`mt-[1px] flex h-5 w-5 shrink-0 items-center justify-center rounded text-[10px] font-semibold ${hasParams ? 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text-primary)]' : 'cursor-default opacity-0'}`}
-                    >
-                      {isExpanded ? 'v' : '>'}
-                    </button>
-                    <button
-                      onClick={() => jumpToLine(entry.line)}
-                      className={`min-w-0 flex-1 flex items-center gap-2 rounded-md px-2 py-1 text-left text-xs hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text-primary)] ${entry.isCommented ? 'text-[var(--color-text-secondary)]/70' : 'text-[var(--color-text-secondary)]'}`}
-                    >
-                      <span className="shrink-0 font-mono text-[10px] text-[var(--color-accent)]">{entry.line}</span>
-                      <span className="min-w-0 flex-1 truncate">{entry.title}</span>
-                      {hasSecError ? (
-                        <span className="w-2 h-2 rounded-full bg-[var(--color-error)] shrink-0" title="This section has validation errors" />
-                      ) : hasSecWarning ? (
-                        <span className="w-2 h-2 rounded-full bg-[var(--color-warning)] shrink-0" title="This section has warnings" />
-                      ) : hasSecInfo ? (
-                        <span className={`${ISSUE_MARKER.info.dotClass} shrink-0`} title="This section has info notes (legal, no action required)" />
-                      ) : null}
-                    </button>
-                  </div>
-                  {isExpanded && hasParams && (
-                    <div className="ml-6 mt-1 space-y-0.5">
-                      {entry.params.map((param) => (
-                        <button
-                          key={`${entry.id}-${param.key}-${param.line}`}
-                          onClick={() => jumpToLine(param.line)}
-                          className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-[11px] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text-primary)]"
-                        >
-                          <span className="shrink-0 font-mono text-[10px] text-[var(--color-accent)]">{param.line}</span>
-                          <span className="truncate">{param.key}</span>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-            {sectionEntries.length === 0 && (
-              <div className="px-3 py-3 text-xs text-[var(--color-text-secondary)]">No sections found.</div>
-            )}
-          </div>
-        </div>
-      ) : (
-        <div className="flex w-10 shrink-0 items-start justify-center border-l border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] pt-2">
-          <button
-            onClick={() => setShowSectionsSidebar(true)}
-            title="Show sections"
-            className="rounded border border-[var(--color-bg-tertiary)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
-          >
-            {'<'}
-          </button>
-        </div>
-      )}
     </div>
   );
 }
