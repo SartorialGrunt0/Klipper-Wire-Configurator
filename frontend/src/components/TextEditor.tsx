@@ -12,6 +12,7 @@ import { resolveIssueLine } from '../utils/issueLine';
 import { ISSUE_MARKER } from '../utils/issueMarker';
 import { filterFindings, filterValidationMap } from '../utils/validationVisibility';
 import { indentCaret, indentSelection, outdentSelection } from '../utils/textIndent';
+import { autoScrollDelta } from '../utils/editorAutoScroll';
 import type { ExampleConfig, ConfigFile, ConfigSection, ValidationError } from '../types/config';
 
 interface SearchResult {
@@ -527,6 +528,67 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     textareaRef.current.scrollTop = Math.max(0, lineTop - viewportH * 0.2);
     syncLineNumbersScroll();
   }, [syncLineNumbersScroll]);
+
+  // --- Drag auto-scroll -----------------------------------------------------
+  // Chromium/Firefox move a selected block of text natively, but nothing
+  // scrolls the editor when the pointer leaves the visible area, so a block
+  // could only be dropped on a line that was already on screen. While a drag
+  // is in flight a rAF loop nudges scrollTop from the pointer's Y position.
+  const dragScrollRef = useRef<{ clientY: number; raf: number | null }>({ clientY: 0, raf: null });
+
+  const stopDragAutoScroll = useCallback(() => {
+    const { raf, clientY } = dragScrollRef.current;
+    if (raf != null) cancelAnimationFrame(raf);
+    dragScrollRef.current = { clientY, raf: null };
+  }, []);
+
+  const dragAutoScrollLoop = useCallback(function loop() {
+    const el = textareaRef.current;
+    if (!el || dragScrollRef.current.raf == null) return;
+    const rect = el.getBoundingClientRect();
+    const delta = autoScrollDelta(dragScrollRef.current.clientY, rect.top, rect.bottom);
+    if (delta !== 0) {
+      const before = el.scrollTop;
+      el.scrollTop = Math.max(0, before + delta);
+      // Keep the gutter + highlight overlay locked to the new scroll position.
+      if (el.scrollTop !== before) syncLineNumbersScroll();
+    }
+    dragScrollRef.current.raf = requestAnimationFrame(loop);
+  }, [syncLineNumbersScroll]);
+
+  const startDragAutoScroll = useCallback((e: React.DragEvent<HTMLTextAreaElement>) => {
+    if (dragScrollRef.current.raf != null) return; // already running
+    dragScrollRef.current = { clientY: e.clientY, raf: requestAnimationFrame(dragAutoScrollLoop) };
+  }, [dragAutoScrollLoop]);
+
+  // The pointer position is tracked from document-level drag events: during a
+  // native drag the pointer is captured by the drag operation and the
+  // interesting Y often sits outside the textarea (over the gutter, or past the
+  // window edge entirely). Deliberately no preventDefault on dragover — the
+  // textarea must stay a valid drop target for its own selection.
+  useEffect(() => {
+    const track = (e: DragEvent) => {
+      if (dragScrollRef.current.raf == null) return;
+      dragScrollRef.current.clientY = e.clientY;
+    };
+    const stop = () => stopDragAutoScroll();
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') stopDragAutoScroll();
+    };
+    document.addEventListener('dragover', track, true);
+    document.addEventListener('dragend', stop, true);
+    document.addEventListener('drop', stop, true);
+    window.addEventListener('blur', stop);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('dragover', track, true);
+      document.removeEventListener('dragend', stop, true);
+      document.removeEventListener('drop', stop, true);
+      window.removeEventListener('blur', stop);
+      window.removeEventListener('keydown', onKeyDown);
+      stopDragAutoScroll();
+    };
+  }, [stopDragAutoScroll]);
 
   // Consume one-shot line-jump requests (save dialog findings list → the
   // editor). The target file may need switching first; the switch re-exports
@@ -1169,6 +1231,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
                   value={editText}
                   onChange={(e) => handleTextChange(e.target.value)}
                   onKeyDown={handleEditorKeyDown}
+                  onDragStart={startDragAutoScroll}
                   onScroll={syncLineNumbersScroll}
                   spellCheck={false}
                   wrap="off"
