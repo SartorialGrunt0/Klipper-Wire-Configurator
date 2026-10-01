@@ -40,27 +40,18 @@ body {
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
 }
 
-/* Text-view overlay rows.
-   The overlay <pre> is stacked under a transparent <textarea>, so its text must
-   keep the textarea's EXACT line rhythm. That rules out per-row boxes (they
-   round independently of the textarea's continuous line boxes — 0d4cfb8 /
-   e482e63), so the code stays one text block and severity rows are painted by
-   an out-of-flow band layer instead. */
-.kl-code {
-  display: block;
+/* Text-view severity tints.
+   INLINE, deliberately: the tint is wrapped around the line's own markup, so it
+   is painted by the same line box that draws the characters and can never end
+   up on a different line. Never give these a display that creates a box per row
+   (block/inline-block) — that is the drift bug (0d4cfb8 / e482e63), and a
+   floating band layer is no safer: it computes the row's position outside the
+   text, so any layout difference moves the tint off its line. */
+.kl-line-error {
+  background-color: var(--color-error-tint);
 }
-.kl-tint-layer {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  pointer-events: none;
-}
-.kl-tint {
-  position: absolute;
-  left: 0;
-  right: 0;
-  height: 1.625em;
+.kl-line-warning {
+  background-color: var(--color-warning-tint);
 }
 
 /* Tree fold-out: newly revealed children fade in rather than popping into

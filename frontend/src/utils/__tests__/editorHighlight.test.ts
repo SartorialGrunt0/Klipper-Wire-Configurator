@@ -1,11 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import {
-  buildHighlightedHtml,
-  escapeHtml,
-  tintBands,
-  tintLayerHeight,
-  TINT_CAP,
-} from '../editorHighlight';
+import { buildHighlightedHtml, escapeHtml } from '../editorHighlight';
 import type { IssueSeverity } from '../issueSummary';
 
 const sev = (entries: Array<[number, IssueSeverity]>) => new Map(entries);
@@ -20,18 +14,18 @@ describe('escapeHtml', () => {
   });
 });
 
-describe('buildHighlightedHtml', () => {
-  it('renders a mixed file exactly as the original implementation did', () => {
-    const text = [
-      '# a comment',
-      '[stepper_x]',
-      'microsteps: 16',
-      '  # indented comment',
-      '[include macros.cfg]',
-      '',
-      'plain text',
-    ].join('\n');
+describe('buildHighlightedHtml — plain output', () => {
+  const text = [
+    '# a comment',
+    '[stepper_x]',
+    'microsteps: 16',
+    '  # indented comment',
+    '[include macros.cfg]',
+    '',
+    'plain text',
+  ].join('\n');
 
+  it('renders a mixed file exactly as the original implementation did', () => {
     expect(buildHighlightedHtml(text)).toBe(
       '<span style="color: var(--color-text-secondary)"># a comment</span>\n' +
         '<span style="color: #22d3ee">[stepper_x]</span>\n' +
@@ -68,61 +62,67 @@ describe('buildHighlightedHtml', () => {
 
   it('joins lines with newlines — ONE text block, never per-line boxes', () => {
     expect(buildHighlightedHtml('a\nb')).toBe('a\nb');
-    // Per-line block boxes are what makes the gutter drift (e482e63).
     expect(buildHighlightedHtml('a\nb')).not.toContain('display:block');
-    expect(buildHighlightedHtml('a\nb')).not.toContain('kl-line');
   });
 
   it('renders a trailing newline as an extra empty line, like the textarea', () => {
     expect(buildHighlightedHtml('a\n')).toBe('a\n ');
   });
+
+  it('does not wrap anything without severities', () => {
+    expect(buildHighlightedHtml(text)).not.toContain('kl-line');
+    expect(buildHighlightedHtml(text, { lineSeverities: new Map() })).toBe(buildHighlightedHtml(text));
+  });
 });
 
-describe('tintBands', () => {
-  it('returns nothing without findings', () => {
-    expect(tintBands(undefined)).toEqual([]);
-    expect(tintBands(new Map())).toEqual([]);
+describe('buildHighlightedHtml — inline tints', () => {
+  const text = 'alpha\nbroken\nwarned\nnoted\nlast';
+
+  it('wraps the tinted line’s own markup, inline', () => {
+    const html = buildHighlightedHtml(text, { lineSeverities: sev([[2, 'error']]) });
+    expect(html).toContain('<span class="kl-line-error">broken</span>');
+    // No box-creating display: the tint must ride the line's own line box.
+    expect(html).not.toContain('display:');
+    expect(html).not.toContain('position:');
   });
 
-  it('places the first line just below the code padding', () => {
-    expect(tintBands(sev([[1, 'error']]))).toEqual([
-      { line: 1, top: 'calc(16px + 0 * 1.625em)', background: 'var(--color-error-tint)' },
-    ]);
+  it('tints warnings and leaves info alone', () => {
+    const html = buildHighlightedHtml(text, { lineSeverities: sev([[3, 'warning'], [4, 'info']]) });
+    expect(html).toContain('<span class="kl-line-warning">warned</span>');
+    expect(html).toContain('\nnoted\n');
+    expect(html).not.toContain('kl-line-info');
   });
 
-  it('places line 584 at 583 line heights down', () => {
-    expect(tintBands(sev([[584, 'warning']]))[0].top).toBe('calc(16px + 583 * 1.625em)');
-    expect(tintBands(sev([[584, 'warning']]))[0].background).toBe('var(--color-warning-tint)');
+  it('wraps only the tinted lines, leaving the rest byte-identical', () => {
+    const html = buildHighlightedHtml(text, { lineSeverities: sev([[5, 'error']]) });
+    expect(html.match(/class="kl-line/g)).toHaveLength(1);
+    expect(html).toBe('alpha\nbroken\nwarned\nnoted\n<span class="kl-line-error">last</span>');
   });
 
-  it('gives info findings no band', () => {
-    expect(tintBands(sev([[4, 'info']]))).toEqual([]);
+  it('keeps the newline structure intact (line count is unchanged)', () => {
+    const html = buildHighlightedHtml(text, { lineSeverities: sev([[1, 'error'], [5, 'error']]) });
+    expect(html.split('\n')).toHaveLength(5);
   });
 
-  it('sorts bands by line', () => {
-    expect(tintBands(sev([[9, 'error'], [2, 'warning']])).map((band) => band.line)).toEqual([2, 9]);
-  });
-
-  it('ignores file-level lines', () => {
-    expect(tintBands(sev([[0, 'error']]))).toEqual([]);
-  });
-
-  it('caps the number of bands', () => {
-    const many = new Map<number, IssueSeverity>();
-    for (let i = 1; i <= TINT_CAP + 25; i += 1) many.set(i, 'error');
-    expect(tintBands(many)).toHaveLength(TINT_CAP);
-    expect(tintBands(many, { cap: 3 })).toHaveLength(3);
-  });
-
-  it('honours custom metrics', () => {
-    expect(tintBands(sev([[3, 'error']]), { paddingTopPx: 8, lineHeightEm: 1.2 })[0].top).toBe(
-      'calc(8px + 2 * 1.2em)',
+  it('keeps a line’s own syntax markup inside the tint wrapper', () => {
+    expect(buildHighlightedHtml('[stepper_x]\n', { lineSeverities: sev([[1, 'error']]) })).toBe(
+      '<span class="kl-line-error"><span style="color: #22d3ee">[stepper_x]</span></span>\n ',
     );
   });
-});
 
-describe('tintLayerHeight', () => {
-  it('covers the whole document plus the padding', () => {
-    expect(tintLayerHeight(723)).toBe('calc(723 * 1.625em + 32px)');
+  it('tints a line whose text is empty', () => {
+    expect(buildHighlightedHtml('a\n\nb', { lineSeverities: sev([[2, 'warning']]) })).toBe(
+      'a\n<span class="kl-line-warning"> </span>\nb',
+    );
+  });
+
+  it('ignores a tint for a line beyond the end of the text', () => {
+    expect(buildHighlightedHtml('a', { lineSeverities: sev([[99, 'error']]) })).toBe('a');
+  });
+
+  it('escapes once with a tint present', () => {
+    expect(buildHighlightedHtml('key: <v>', { lineSeverities: sev([[1, 'error']]) })).toBe(
+      '<span class="kl-line-error"><span style="color: #60a5fa">key</span><span style="color: var(--color-text-secondary)">: </span><span style="color: var(--color-text-primary)">&lt;v&gt;</span></span>',
+    );
   });
 });

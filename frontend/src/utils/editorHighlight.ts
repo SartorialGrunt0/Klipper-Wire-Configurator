@@ -3,36 +3,40 @@ import type { IssueSeverity } from './issueSummary';
 /**
  * Syntax highlighting for the text view's overlay `<pre>`.
  *
- * **The code must stay ONE continuous text block** (lines joined with `\n`,
- * one text node per run). Wrapping each line in its own block box — however
- * convenient for painting a full-width row tint — reintroduces the gutter drift
- * fixed in e482e63: per-line boxes round their offsets independently of the
- * textarea's continuous line boxes, so the numbers advance in increments
- * slightly smaller than the lines and the error grows with the document
- * length (invisible at device pixel ratio 1, obvious at Windows display
- * scaling / browser zoom).
+ * **The code is ONE continuous text block** (lines joined with `\n`). Wrapping
+ * lines in their own block boxes — however convenient for painting a
+ * full-width row tint — reintroduces the gutter drift fixed in e482e63:
+ * per-line boxes round their offsets independently of the textarea's
+ * continuous line boxes, so the numbers advance in increments slightly smaller
+ * than the lines and the error grows with the document length.
  *
- * Row tints are therefore painted by an out-of-flow band layer (see
- * `tintBands`) positioned from the font metrics, never by restructuring the
- * text.
+ * A floating band layer is no better: it computes a row's position from the
+ * font metrics in a layer that is NOT the text, so anything that makes that
+ * layer lay out differently (engine, zoom, display scaling) moves the tint off
+ * its line without moving the text.
+ *
+ * So a tint is an **inline span wrapped around the line's own markup**: an
+ * inline box adds no line box, the glyphs keep their exact positions, and the
+ * background is painted by the same boxes that draw the characters — it cannot
+ * end up on a different line than its text, in any engine, at any zoom.
+ *
+ * The trade-off is that the tint covers the line's text, not the full width of
+ * the editor.
  */
 
-/** Vertical padding of the code area (`p-4`), in px. */
-export const CODE_PADDING_TOP_PX = 16;
-/** `leading-relaxed` — the line height in em. */
-export const CODE_LINE_HEIGHT_EM = 1.625;
-/** Files with more findings than this keep their strip + dots, but only the
- *  first N rows are tinted (a band layer per row is not free). */
-export const TINT_CAP = 200;
-
-export interface TintBand {
-  /** 1-based line the band covers. */
-  line: number;
-  /** CSS `top` for the band, from the code area's content origin. */
-  top: string;
-  /** CSS colour (a `--color-*-tint` token). */
-  background: string;
+export interface HighlightOptions {
+  /**
+   * 1-based line → severity. `error` tints the line red, `warning` yellow.
+   * `info` is deliberately untinted: it is legal, order-dependent context, not
+   * an alarm.
+   */
+  lineSeverities?: ReadonlyMap<number, IssueSeverity>;
 }
+
+export const TINT_CLASS: Record<'error' | 'warning', string> = {
+  error: 'kl-line-error',
+  warning: 'kl-line-warning',
+};
 
 export function escapeHtml(value: string): string {
   return value
@@ -63,55 +67,15 @@ function renderLine(line: string): string {
   return escaped || ' ';
 }
 
-/**
- * Highlighted markup for the overlay. One text block, lines joined with `\n` —
- * deliberately unaffected by findings, so the overlay's line boxes are always
- * the same boxes the textarea lays out.
- */
-export function buildHighlightedHtml(text: string): string {
-  return text.split('\n').map(renderLine).join('\n');
-}
-
-/**
- * Row tints as out-of-flow bands: one entry per tinted line, `top` computed
- * from the code area's padding and the line height in `em`, so the band tracks
- * the font at any zoom and never participates in text layout.
- *
- * `info` gets no band: it is legal, order-dependent context, not an alarm.
- */
-export function tintBands(
-  severities: ReadonlyMap<number, IssueSeverity> | undefined,
-  options: {
-    paddingTopPx?: number;
-    lineHeightEm?: number;
-    cap?: number;
-  } = {},
-): TintBand[] {
-  if (!severities || severities.size === 0) return [];
-  const paddingTop = options.paddingTopPx ?? CODE_PADDING_TOP_PX;
-  const lineHeight = options.lineHeightEm ?? CODE_LINE_HEIGHT_EM;
-  const cap = options.cap ?? TINT_CAP;
-
-  const bands: TintBand[] = [];
-  for (const [line, severity] of Array.from(severities.entries()).sort((a, b) => a[0] - b[0])) {
-    if (line < 1) continue;
-    if (severity !== 'error' && severity !== 'warning') continue;
-    bands.push({
-      line,
-      top: `calc(${paddingTop}px + ${line - 1} * ${lineHeight}em)`,
-      background: severity === 'error' ? 'var(--color-error-tint)' : 'var(--color-warning-tint)',
-    });
-    if (bands.length >= cap) break;
-  }
-  return bands;
-}
-
-/** Explicit height for the band layer so it covers the whole document. */
-export function tintLayerHeight(
-  lineCount: number,
-  options: { paddingTopPx?: number; lineHeightEm?: number } = {},
-): string {
-  const paddingTop = options.paddingTopPx ?? CODE_PADDING_TOP_PX;
-  const lineHeight = options.lineHeightEm ?? CODE_LINE_HEIGHT_EM;
-  return `calc(${lineCount} * ${lineHeight}em + ${paddingTop * 2}px)`;
+export function buildHighlightedHtml(text: string, options: HighlightOptions = {}): string {
+  const severities = options.lineSeverities;
+  return text
+    .split('\n')
+    .map((line, idx) => {
+      const html = renderLine(line);
+      const severity = severities?.get(idx + 1);
+      if (severity !== 'error' && severity !== 'warning') return html;
+      return `<span class="${TINT_CLASS[severity]}">${html}</span>`;
+    })
+    .join('\n');
 }

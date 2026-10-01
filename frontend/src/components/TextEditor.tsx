@@ -13,12 +13,7 @@ import { ISSUE_MARKER } from '../utils/issueMarker';
 import { filterFindings } from '../utils/validationVisibility';
 import { indentCaret, indentSelection, outdentSelection } from '../utils/textIndent';
 import { autoScrollDelta } from '../utils/editorAutoScroll';
-import {
-  buildHighlightedHtml,
-  escapeHtml,
-  tintBands,
-  tintLayerHeight,
-} from '../utils/editorHighlight';
+import { buildHighlightedHtml, escapeHtml } from '../utils/editorHighlight';
 import { lineSeverities, worstSeverity } from '../utils/issueSummary';
 import { readIssueStripCollapsed, writeIssueStripCollapsed } from '../utils/editorPrefs';
 import { findHits, replaceAll, replaceOne, countHits, type FindHit } from '../utils/findReplace';
@@ -476,19 +471,13 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   }, [searchQuery, scopedTexts, findOptions]);
 
 
-  // Syntax markup only — findings never restructure the text (see
-  // editorHighlight: per-row boxes are what makes the gutter drift).
-  const highlightedHtml = useMemo(() => buildHighlightedHtml(editText), [editText]);
-
-  // Severity row tints, painted by an out-of-flow layer behind the code.
-  const tintLayer = useMemo(() => {
-    const bands = tintBands(issueLineSeverities);
-    if (bands.length === 0) return null;
-    return {
-      height: tintLayerHeight(editText.split('\n').length),
-      bands,
-    };
-  }, [issueLineSeverities, editText]);
+  // Syntax markup + inline severity tints. Findings never restructure the text
+  // (see editorHighlight): a tint is an inline span around the line's own
+  // markup, so it is painted by the same line box as the characters.
+  const highlightedHtml = useMemo(
+    () => buildHighlightedHtml(editText, { lineSeverities: issueLineSeverities }),
+    [editText, issueLineSeverities],
+  );
 
   // Focus search input when panel opens
   useEffect(() => {
@@ -1388,21 +1377,13 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
               </div>
               {/* Text area with syntax color parsing overlay */}
               <div className="relative flex-1 overflow-hidden">
-                {/* One <pre>, scrolled in lockstep with the textarea. No
-                    whitespace between the children: this is a `pre`, so any
-                    formatting newline would render as a blank line. */}
                 <pre
                   ref={highlightRef}
                   aria-hidden
                   className="pointer-events-none absolute inset-0 overflow-auto p-4 font-mono text-sm leading-relaxed"
                   style={{ margin: 0, tabSize: 4 }}
-                >{tintLayer && (
-                  <div className="kl-tint-layer" style={{ height: tintLayer.height }}>
-                    {tintLayer.bands.map((band) => (
-                      <div key={band.line} className="kl-tint" style={{ top: band.top, background: band.background }} />
-                    ))}
-                  </div>
-                )}<div className="kl-code" dangerouslySetInnerHTML={{ __html: highlightedHtml }} /></pre>
+                  dangerouslySetInnerHTML={{ __html: highlightedHtml }}
+                />
                 <textarea
                   ref={textareaRef}
                   aria-label="Configuration text editor with syntax highlighting overlay"
