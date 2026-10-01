@@ -264,6 +264,30 @@ describe('candidatesFor', () => {
     ...over,
   });
 
+  it('ranks section types the project already defines last', () => {
+    const candidates = rankCandidates(
+      candidatesFor(ctx({ kind: 'section-type' }), {
+        ...SOURCES,
+        usedSectionTypes: ['stepper_x'],
+      }),
+      'step',
+    );
+    // stepper_x is the only project section AND the only schema type matching
+    // 'step' here, so it survives — the demotion must not hide it.
+    expect(candidates.map((c) => c.label)).toEqual(['Stepper X']);
+    const withBoth = rankCandidates(
+      candidatesFor(ctx({ kind: 'section-type' }), {
+        ...SOURCES,
+        usedSectionTypes: ['stepper_x'],
+        schemas: { ...SCHEMAS, stepper_extra: section('stepper_extra') },
+      }),
+      'step',
+    );
+    // Unused types come first; a used one is still offered, just lower.
+    expect(withBoth[0].label).toBe('stepper_extra');
+    expect(withBoth.map((c) => c.label)).toContain('Stepper X');
+  });
+
   it('closes the bracket for a section type', () => {
     const [first] = candidatesFor(ctx({ kind: 'section-type' }), SOURCES);
     expect(first.insertText).toMatch(/\]$/);

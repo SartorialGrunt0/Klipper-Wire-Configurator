@@ -126,3 +126,54 @@ describe('buildHighlightedHtml — inline tints', () => {
     );
   });
 });
+
+describe('buildHighlightedHtml — inline ghost text', () => {
+  it('injects the ghost at the caret column, inline', () => {
+    const html = buildHighlightedHtml('rotation_di', { ghost: { line: 1, column: 11, text: 'stance: ' } });
+    // The text after the caret is empty, and an empty remainder renders as a
+    // space — the same rule that keeps an empty line a full line box.
+    expect(html).toBe('rotation_di<span class="kl-ghost">stance: </span> ');
+    expect(html).not.toContain('display:');
+    expect(html).not.toContain('position:');
+  });
+
+  it('places it on the right line only', () => {
+    const html = buildHighlightedHtml('a\nb\nc', { ghost: { line: 2, column: 1, text: 'XY' } });
+    expect(html).toBe('a\nb<span class="kl-ghost">XY</span> \nc');
+  });
+
+  it('escapes the ghost text', () => {
+    expect(buildHighlightedHtml('x', { ghost: { line: 1, column: 1, text: '<b>' } })).toBe(
+      'x<span class="kl-ghost">&lt;b&gt;</span> ',
+    );
+  });
+
+  it('keeps the newline structure (the ghost adds no line)', () => {
+    const html = buildHighlightedHtml('a\nb', { ghost: { line: 1, column: 1, text: 'Z' } });
+    expect(html.split('\n')).toHaveLength(2);
+  });
+
+  it('is a no-op for an empty suggestion or a line out of range', () => {
+    expect(buildHighlightedHtml('a', { ghost: { line: 1, column: 1, text: '' } })).toBe('a');
+    expect(buildHighlightedHtml('a', { ghost: { line: 9, column: 0, text: 'Z' } })).toBe('a');
+  });
+
+  it('sits inside the tint wrapper when the line is flagged', () => {
+    const html = buildHighlightedHtml('abc', {
+      lineSeverities: sev([[1, 'error']]),
+      ghost: { line: 1, column: 3, text: 'd' },
+    });
+    expect(html).toBe('<span class="kl-line-error">abc<span class="kl-ghost">d</span> </span>');
+  });
+
+  it('renders the line markup around the caret split', () => {
+    const html = buildHighlightedHtml('key: va', { ghost: { line: 1, column: 7, text: 'lue' } });
+    expect(html).toContain('<span class="kl-ghost">lue</span>');
+    expect(html).toContain('key');
+    expect(html).toContain('va');
+  });
+
+  it('leaves untinted, ghost-free output byte-identical', () => {
+    expect(buildHighlightedHtml('a\nb', { ghost: null })).toBe(buildHighlightedHtml('a\nb'));
+  });
+});

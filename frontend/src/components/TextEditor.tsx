@@ -17,6 +17,16 @@ import { buildHighlightedHtml, escapeHtml } from '../utils/editorHighlight';
 import { lineSeverities, worstSeverity } from '../utils/issueSummary';
 import { readIssueStripCollapsed, writeIssueStripCollapsed } from '../utils/editorPrefs';
 import { findHits, replaceAll, replaceOne, countHits, type FindHit } from '../utils/findReplace';
+import {
+  completionsAt,
+  applyCandidate,
+  type Candidate,
+  type CompletionContext,
+  type CompletionSources,
+} from '../utils/configCompletion';
+import { caretLineColumn, measureCaretRect } from '../utils/caretGeometry';
+import { useGcodeCommandStore } from '../stores/gcodeCommandStore';
+import { scanSections } from '../utils/configOutline';
 import EditorIssueStrip from './EditorIssueStrip';
 import ConfigTree from './ConfigTree';
 import type { TextIssue } from '../types/editor';
@@ -29,6 +39,9 @@ interface SearchResult {
   matchStart: number;
   matchEnd: number;
 }
+
+/** Idle delay before a suggestion appears. Local lookups only — no network. */
+const COMPLETION_DELAY_MS = 120;
 
 function TextEditor({ isActive = true }: { isActive?: boolean }) {
   const {
@@ -134,6 +147,17 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     hitCount: number;
   } | null>(null);
   const [replaceNotice, setReplaceNotice] = useState<string | null>(null);
+  // ── completion ──────────────────────────────────────────────────────────
+  const [completion, setCompletion] = useState<{
+    context: CompletionContext;
+    candidates: Candidate[];
+    index: number;
+  } | null>(null);
+  const [completionListOpen, setCompletionListOpen] = useState(false);
+  /** Caret offset the user dismissed with Esc; the ghost stays away until the
+   *  caret moves or the text changes. */
+  const [completionDismissedAt, setCompletionDismissedAt] = useState<number | null>(null);
+  const [caret, setCaret] = useState(0);
   const [showFileSidebar, setShowFileSidebar] = useState(true);
   const [issueStripCollapsed, setIssueStripCollapsed] = useState(() => readIssueStripCollapsed());
   const [showReferenceViewer, setShowReferenceViewer] = useState(false);
@@ -474,9 +498,23 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   // Syntax markup + inline severity tints. Findings never restructure the text
   // (see editorHighlight): a tint is an inline span around the line's own
   // markup, so it is painted by the same line box as the characters.
+  const activeCandidate = completion ? completion.candidates[completion.index] : null;
+
+  // The inline ghost shows the part of the candidate that is not typed yet.
+  const ghost = useMemo(() => {
+    if (!completion || !activeCandidate) return null;
+    const { lineIndex, column } = caretLineColumn(editText, caret);
+    const { prefix } = completion.context;
+    const remainder = activeCandidate.insertText.startsWith(prefix)
+      ? activeCandidate.insertText.slice(prefix.length)
+      : activeCandidate.insertText;
+    if (!remainder) return null;
+    return { line: lineIndex + 1, column, text: remainder };
+  }, [completion, activeCandidate, editText, caret]);
+
   const highlightedHtml = useMemo(
-    () => buildHighlightedHtml(editText, { lineSeverities: issueLineSeverities }),
-    [editText, issueLineSeverities],
+    () => buildHighlightedHtml(editText, { lineSeverities: issueLineSeverities, ghost }),
+    [editText, issueLineSeverities, ghost],
   );
 
   // Focus search input when panel opens
@@ -519,9 +557,167 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     syncLineNumbersScroll();
   }, [editText, syncLineNumbersScroll]);
 
+  // ── completion sources ──────────────────────────────────────────────────
+  const schemas = useConfigStore((s) => s.schemas);
+  const gcodeCommands = useGcodeCommandStore((s) => s.commands);
+  const loadGcodeCommands = useGcodeCommandStore((s) => s.load);
+  useEffect(() => {
+    void loadGcodeCommands();
+  }, [loadGcodeCommands]);
+
+  // Everything completion can offer, from the project as it is right now.
+  const completionSources = useMemo((): CompletionSources => {
+    const includePaths = new Set<string>();
+    const macroNames = new Set<string>();
+    const usedSectionTypes = new Set<string>();
+    for (const [filename, file] of Object.entries(configFiles)) {
+      includePaths.add(filename);
+      for (const include of file.includes ?? []) includePaths.add(include);
+      for (const section of file.sections ?? []) {
+        if (section.section_type) usedSectionTypes.add(section.section_type);
+        if (section.section_type === 'gcode_macro' && section.section_name) {
+          macroNames.add(section.section_name);
+        }
+      }
+    }
+    return {
+      schemas,
+      includePaths: Array.from(includePaths).sort(),
+      macroNames: Array.from(macroNames).sort(),
+      gcodeCommands,
+      usedSectionTypes: Array.from(usedSectionTypes),
+    };
+  }, [configFiles, schemas, gcodeCommands]);
+
+  // Params already present in the enclosing section rank last.
+  const usedParamKeys = useMemo((): string[] => {
+    const { lineIndex } = caretLineColumn(editText, caret);
+    const lines = editText.split('\n');
+    let header = -1;
+    for (let i = Math.min(lineIndex, lines.length - 1); i >= 0; i -= 1) {
+      if (/^\s*#?\s*\[[^\]]*\]\s*$/.test(lines[i])) {
+        header = i;
+        break;
+      }
+    }
+    if (header === -1) return [];
+    const title = /^\s*#?\s*\[([^\]]*)\]\s*$/.exec(lines[header])?.[1].trim();
+    if (!title) return [];
+    const section = scanSections(editText).find((entry) => entry.title === title);
+    return section ? section.params.map((param) => param.key) : [];
+  }, [editText, caret]);
+
+  // Detect a suggestion shortly after typing stops. Cheap (in-memory lookups),
+  // so the delay only exists to avoid recomputing on every keystroke.
+  useEffect(() => {
+    if (!isActive) {
+      setCompletion(null);
+      return;
+    }
+    const el = textareaRef.current;
+    if (!el || el.selectionStart !== el.selectionEnd) {
+      setCompletion(null);
+      return;
+    }
+    if (completionDismissedAt === caret) {
+      setCompletion(null);
+      return;
+    }
+    const timer = setTimeout(() => {
+      const result = completionsAt(editText, caret, { ...completionSources, usedParamKeys });
+      if (!result) {
+        setCompletion(null);
+        return;
+      }
+      const typed = result.candidates[0].insertText === result.context.prefix;
+      if (typed) {
+        // Nothing left to suggest — the token is already complete.
+        setCompletion(null);
+        return;
+      }
+      setCompletion({ context: result.context, candidates: result.candidates, index: 0 });
+    }, COMPLETION_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [editText, caret, isActive, completionSources, usedParamKeys, completionDismissedAt]);
+
+  // Clear suggestions when the file changes under us.
+  useEffect(() => {
+    setCompletion(null);
+    setCompletionListOpen(false);
+    setCompletionDismissedAt(null);
+  }, [activeFile]);
+
+  const acceptCompletion = useCallback((index?: number) => {
+    if (!completion) return;
+    const candidate = completion.candidates[index ?? completion.index];
+    if (!candidate) return;
+    const applied = applyCandidate(editText, completion.context, candidate);
+    applyTextEdit({ text: applied.text, start: applied.caret, end: applied.caret });
+    setCompletion(null);
+    setCompletionListOpen(false);
+    setCompletionDismissedAt(null);
+  }, [completion, editText, applyTextEdit]);
+
+  const dismissCompletion = useCallback(() => {
+    setCompletionDismissedAt(caret);
+    setCompletion(null);
+    setCompletionListOpen(false);
+  }, [caret]);
+
+  // Popup anchor, measured only while the list is open.
+  const completionAnchor = useMemo(() => {
+    if (!completionListOpen || !completion) return null;
+    const el = textareaRef.current;
+    return el ? measureCaretRect(el, caret) : null;
+  }, [completionListOpen, completion, caret, editText]);
+
   // Tab / Shift+Tab indentation. The textarea had no key handler at all, so Tab
   // moved focus out of the editor and there was no way to indent a block.
   const handleEditorKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // Completion first: Tab accepts a suggestion when one is showing, and only
+    // falls through to indentation when there is nothing to accept.
+    if (completion) {
+      if (e.key === 'Tab' && !e.shiftKey) {
+        e.preventDefault();
+        acceptCompletion();
+        return;
+      }
+      if (e.key === 'Enter' && completionListOpen) {
+        e.preventDefault();
+        acceptCompletion();
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        dismissCompletion();
+        return;
+      }
+      if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && completionListOpen) {
+        e.preventDefault();
+        setCompletion((current) => {
+          if (!current) return current;
+          const delta = e.key === 'ArrowDown' ? 1 : -1;
+          const count = current.candidates.length;
+          return { ...current, index: (current.index + delta + count) % count };
+        });
+        return;
+      }
+    }
+    if (e.ctrlKey && e.key === ' ') {
+      // Explicit request: compute now (past the idle delay and any Esc) and
+      // show the whole list rather than just the top ghost.
+      e.preventDefault();
+      const result = completionsAt(editText, caret, {
+        ...completionSources,
+        usedParamKeys,
+      });
+      if (result) {
+        setCompletion({ context: result.context, candidates: result.candidates, index: 0 });
+        setCompletionListOpen(true);
+        setCompletionDismissedAt(null);
+      }
+      return;
+    }
     if (e.key !== 'Tab' || e.ctrlKey || e.metaKey || e.altKey) return;
     const el = e.currentTarget;
     const { selectionStart, selectionEnd } = el;
@@ -1384,12 +1580,56 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
                   style={{ margin: 0, tabSize: 4 }}
                   dangerouslySetInnerHTML={{ __html: highlightedHtml }}
                 />
+                {/* Candidate list, anchored at the caret. Fixed positioning so
+                    the editor's overflow can't clip it; rows take their own
+                    index so a click accepts what it points at. */}
+                {completionListOpen && completion && completionAnchor && (
+                  <div
+                    className="fixed z-40 max-h-64 w-80 overflow-y-auto rounded-lg border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] shadow-2xl"
+                    style={{
+                      left: Math.max(8, completionAnchor.x),
+                      top: Math.min(
+                        completionAnchor.y + completionAnchor.height,
+                        Math.max(8, window.innerHeight - 280),
+                      ),
+                    }}
+                  >
+                    <div className="border-b border-[var(--color-bg-tertiary)] px-2 py-1 text-[10px] uppercase tracking-wider text-[var(--color-text-secondary)]">
+                      {completion.context.kind.replace('-', ' ')}
+                      {completion.context.prefix ? ` · ${completion.context.prefix}` : ''}
+                    </div>
+                    {completion.candidates.map((candidate, index) => (
+                      <button
+                        key={`${candidate.kind}-${candidate.label}`}
+                        onMouseDown={(event) => event.preventDefault()}
+                        onClick={() => acceptCompletion(index)}
+                        className={`flex w-full items-baseline gap-2 px-2 py-1 text-left text-xs transition-colors ${
+                          index === completion.index
+                            ? 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)]'
+                            : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)]'
+                        }`}
+                      >
+                        <span className="shrink-0 font-mono">{candidate.label}</span>
+                        {candidate.detail && (
+                          <span className="min-w-0 flex-1 truncate text-[10px] text-[var(--color-text-secondary)]">
+                            {candidate.detail}
+                          </span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
                 <textarea
                   ref={textareaRef}
                   aria-label="Configuration text editor with syntax highlighting overlay"
                   value={editText}
                   onChange={(e) => handleTextChange(e.target.value)}
                   onKeyDown={handleEditorKeyDown}
+                  onKeyUp={(e) => setCaret(e.currentTarget.selectionStart)}
+                  onClick={(e) => setCaret(e.currentTarget.selectionStart)}
+                  onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
+                  onBlur={() => { setCompletion(null); setCompletionListOpen(false); }}
                   onDragStart={startDragAutoScroll}
                   onScroll={syncLineNumbersScroll}
                   spellCheck={false}

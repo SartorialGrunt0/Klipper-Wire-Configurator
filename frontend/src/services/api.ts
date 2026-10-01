@@ -1156,3 +1156,30 @@ export async function saveAiHistory(history: AiHistoryFile): Promise<void> {
     // Best-effort — a failed save shouldn't break the chat UI.
   }
 }
+
+/** G-code registry projection for editor completion (same source as validation). */
+export interface GcodeCommandsPayload {
+  source_rev: string | null;
+  commands: Record<
+    string,
+    {
+      requires_sections: string[];
+      requires_mode: string | null;
+      requires_flags: Record<string, string>;
+      extra: string | null;
+      simulated: boolean;
+    }
+  >;
+}
+
+/** Load the G-code command registry once for completion. Returns null when the
+ *  backend is unreachable — completion then falls back to project symbols. */
+export async function getGcodeCommands(): Promise<GcodeCommandsPayload | null> {
+  try {
+    const res = await fetch('/api/gcode-commands');
+    if (!res.ok) return null;
+    return (await res.json()) as GcodeCommandsPayload;
+  } catch {
+    return null;
+  }
+}

@@ -31,6 +31,12 @@ export interface HighlightOptions {
    * an alarm.
    */
   lineSeverities?: ReadonlyMap<number, IssueSeverity>;
+  /**
+   * Inline ghost suggestion drawn at the caret. Same rule as the tints: an
+   * inline span inside the line's own markup, so it occupies the line box that
+   * already exists and cannot move the text.
+   */
+  ghost?: { line: number; column: number; text: string } | null;
 }
 
 export const TINT_CLASS: Record<'error' | 'warning', string> = {
@@ -67,13 +73,28 @@ function renderLine(line: string): string {
   return escaped || ' ';
 }
 
+/** Ghost span markup for a suggestion at `column` of the line. */
+export function ghostHtml(text: string): string {
+  return `<span class="kl-ghost">${escapeHtml(text)}</span>`;
+}
+
 export function buildHighlightedHtml(text: string, options: HighlightOptions = {}): string {
   const severities = options.lineSeverities;
+  const ghost = options.ghost;
   return text
     .split('\n')
     .map((line, idx) => {
-      const html = renderLine(line);
-      const severity = severities?.get(idx + 1);
+      const lineNumber = idx + 1;
+      // The ghost sits inside the line's markup at the caret column, so it
+      // shares the line box and cannot shift the text that follows it.
+      const atGhost = ghost && ghost.line === lineNumber && ghost.text.length > 0;
+      const html = atGhost
+        ? renderLine(line.slice(0, ghost.column)) +
+          ghostHtml(ghost.text) +
+          renderLine(line.slice(ghost.column))
+        : renderLine(line);
+
+      const severity = severities?.get(lineNumber);
       if (severity !== 'error' && severity !== 'warning') return html;
       return `<span class="${TINT_CLASS[severity]}">${html}</span>`;
     })

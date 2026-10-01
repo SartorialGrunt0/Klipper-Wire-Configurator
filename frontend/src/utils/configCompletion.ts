@@ -54,6 +54,9 @@ export interface CompletionSources {
   gcodeCommands: string[];
   /** Param keys already present in the enclosing section (ranked last). */
   usedParamKeys?: string[];
+  /** Section types the project already defines (single-instance types are
+   *  ranked last — adding a second one is rarely what is meant). */
+  usedSectionTypes?: string[];
 }
 
 const SECTION_HEADER_RE = /^\s*(#?)\s*\[([^\]]*)\]\s*$/;
@@ -257,8 +260,13 @@ export function candidatesFor(
 
   switch (context.kind) {
     case 'section-type': {
-      const used = new Set(Object.keys(sources.schemas));
-      return Object.values(sources.schemas).map((schema) => ({
+      // Ties break on SECTION_DEFS order (curated: stepper_x before stepper_a,
+      // not alphabetical), with types the project already defines pushed to the
+      // back — adding a second [stepper_x] is rarely the intent. This must key
+      // off the PROJECT's sections, not the schema map: keying off the schema
+      // made every type look used and collapsed the order to alphabetical.
+      const used = new Set(sources.usedSectionTypes ?? []);
+      return Object.values(sources.schemas).map((schema, index) => ({
         label: schema.display_name || schema.section_type,
         // Insert the real header text (the display name is for reading).
         insertText: close(schema.section_type, ']'),
@@ -267,7 +275,7 @@ export function candidatesFor(
           .join(' · '),
         kind: 'section-type' as const,
         score: 0,
-        rank: used.has(schema.section_type) ? 1 : 0,
+        rank: (used.has(schema.section_type) ? 1000 : 0) + index,
       }));
     }
 
