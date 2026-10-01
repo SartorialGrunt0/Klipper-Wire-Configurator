@@ -16,6 +16,7 @@ import { autoScrollDelta } from '../utils/editorAutoScroll';
 import { buildHighlightedHtml, escapeHtml } from '../utils/editorHighlight';
 import { lineSeverities, worstSeverity } from '../utils/issueSummary';
 import { readIssueStripCollapsed, writeIssueStripCollapsed } from '../utils/editorPrefs';
+import { findHits, replaceAll, replaceOne, countHits, type FindHit } from '../utils/findReplace';
 import EditorIssueStrip from './EditorIssueStrip';
 import type { TextIssue } from '../types/editor';
 import type { ExampleConfig, ConfigFile, ConfigSection, ValidationError } from '../types/config';
@@ -56,6 +57,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     setTextParseError,
     validation,
     revalidateFile,
+    revalidateAll,
     pendingLineJump,
   } = useConfigStore();
   const isDirty = useConfigStore((s) => s.isDirty);
@@ -133,6 +135,17 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   }, [isActive, activeFile, config, exportConfigText, markFallbackExport]);
 
   const [showSearch, setShowSearch] = useState(false);
+  const [showReplace, setShowReplace] = useState(false);
+  const [replaceQuery, setReplaceQuery] = useState('');
+  const [matchCase, setMatchCase] = useState(false);
+  const [wholeWord, setWholeWord] = useState(false);
+  const [replaceScope, setReplaceScope] = useState<'file' | 'all'>('file');
+  const [selectedResult, setSelectedResult] = useState<number | null>(null);
+  const [confirmReplace, setConfirmReplace] = useState<{
+    perFile: Array<{ file: string; count: number }>;
+    hitCount: number;
+  } | null>(null);
+  const [replaceNotice, setReplaceNotice] = useState<string | null>(null);
   const [showFileSidebar, setShowFileSidebar] = useState(true);
   const [showSectionsSidebar, setShowSectionsSidebar] = useState(true);
   const [issueStripCollapsed, setIssueStripCollapsed] = useState(() => readIssueStripCollapsed());
@@ -396,29 +409,45 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     return () => { cancelled = true; };
   }, [configFiles]);
 
-  // Search results across all files
+  // Text the search/replace acts on. The active file's live textarea text is
+  // the truth — `allFilesText` is the debounced export and lags typing, so
+  // replacing against it would rewrite stale content. Inactive files use their
+  // stored text, falling back to the export when a file has never been parsed.
+  const scopedTexts = useMemo((): Record<string, string> => {
+    const files = replaceScope === 'all' ? Object.keys(configFiles) : [activeFile];
+    const out: Record<string, string> = {};
+    for (const fn of files) {
+      if (!fn) continue;
+      out[fn] = fn === activeFile ? editText : configFiles[fn]?.raw_text ?? allFilesText[fn] ?? '';
+    }
+    return out;
+  }, [replaceScope, configFiles, activeFile, editText, allFilesText]);
+
+  const findOptions = useMemo(
+    () => ({ caseSensitive: matchCase, wholeWord }),
+    [matchCase, wholeWord],
+  );
+
+  // Search results across the scope. Every occurrence on a line is its own row
+  // (the previous implementation reported the first match per line only).
   const searchResults = useMemo((): SearchResult[] => {
     if (!searchQuery.trim()) return [];
-    const query = searchQuery.toLowerCase();
     const results: SearchResult[] = [];
-    for (const [fn, fileText] of Object.entries(allFilesText)) {
+    for (const [fn, fileText] of Object.entries(scopedTexts)) {
       const lines = fileText.split('\n');
-      lines.forEach((line, idx) => {
-        const lowerLine = line.toLowerCase();
-        const pos = lowerLine.indexOf(query);
-        if (pos !== -1) {
-          results.push({
-            file: fn,
-            line: idx + 1,
-            lineText: line,
-            matchStart: pos,
-            matchEnd: pos + query.length,
-          });
-        }
-      });
+      for (const hit of findHits(fileText, searchQuery, findOptions)) {
+        results.push({
+          file: fn,
+          line: hit.line,
+          lineText: lines[hit.line - 1] ?? '',
+          matchStart: hit.start,
+          matchEnd: hit.end,
+        });
+        if (results.length >= 200) return results;
+      }
     }
-    return results.slice(0, 200);
-  }, [searchQuery, allFilesText]);
+    return results;
+  }, [searchQuery, scopedTexts, findOptions]);
 
   const sectionEntries = useMemo<ConfigSectionEntry[]>(() => {
     const lines = editText.split('\n');
@@ -635,6 +664,86 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     setTimeout(() => {
       jumpToLine(line);
     }, 0);
+  };
+
+  // Write replaced text back through the same paths a normal edit takes: the
+  // active file rides the debounced parse → store → graph pipeline, other files
+  // are parsed up front and applied directly (never written blind).
+  const applyReplacedText = async (file: string, nextText: string): Promise<boolean> => {
+    if (file === activeFile) {
+      handleTextChange(nextText);
+      return true;
+    }
+    try {
+      const result = await api.parseConfigText(nextText, file);
+      updateConfigFile(file, { ...result.config, raw_text: nextText });
+      setTextParseError(file, null);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const handleReplaceCurrent = () => {
+    if (!searchQuery) return;
+    const target = searchResults[selectedResult ?? 0];
+    if (!target) return;
+    const source = scopedTexts[target.file] ?? '';
+    const result = replaceOne(source, searchQuery, replaceQuery, findOptions, {
+      line: target.line,
+      start: target.matchStart,
+      end: target.matchEnd,
+    });
+    if (result.count === 0) {
+      setReplaceNotice('That match moved — search again.');
+      return;
+    }
+    void applyReplacedText(target.file, result.text).then((ok) => {
+      setReplaceNotice(
+        ok
+          ? `Replaced 1 match in ${target.file}.`
+          : `Could not parse ${target.file} — nothing was changed.`,
+      );
+    });
+  };
+
+  const handleReplaceAllRequest = () => {
+    if (!searchQuery) return;
+    const perFile = Object.entries(scopedTexts)
+      .map(([file, text]) => ({ file, count: countHits(text, searchQuery, findOptions) }))
+      .filter((entry) => entry.count > 0);
+    const hitCount = perFile.reduce((sum, entry) => sum + entry.count, 0);
+    if (hitCount === 0) {
+      setReplaceNotice('No matches to replace.');
+      return;
+    }
+    setConfirmReplace({ perFile, hitCount });
+  };
+
+  const applyReplaceAll = async () => {
+    const plan = confirmReplace;
+    setConfirmReplace(null);
+    if (!plan || !searchQuery) return;
+
+    // One undo entry for the batch: Replace All is a single user action.
+    useGraphStore.getState().pushHistory();
+    let replaced = 0;
+    const failed: string[] = [];
+    for (const entry of plan.perFile) {
+      const source = scopedTexts[entry.file] ?? '';
+      const result = replaceAll(source, searchQuery, replaceQuery, findOptions);
+      replaced += result.count;
+      const ok = await applyReplacedText(entry.file, result.text);
+      if (!ok) failed.push(entry.file);
+    }
+    // Project-level revalidation so cross-file findings survive the rewrite.
+    void revalidateAll();
+    setSelectedResult(null);
+    setReplaceNotice(
+      `Replaced ${replaced} match${replaced === 1 ? '' : 'es'} in ${plan.perFile.length} file${
+        plan.perFile.length === 1 ? '' : 's'
+      }.${failed.length ? ` Could not parse: ${failed.join(', ')}.` : ''}`,
+    );
   };
 
   const toggleSearch = () => {
@@ -1157,7 +1266,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
           </div>
         )}
 
-        {/* Search panel */}
+        {/* Search / replace panel */}
         {showSearch && (
           <div className="shrink-0 bg-[var(--color-bg-secondary)] border-b border-[var(--color-bg-tertiary)]">
             <div className="flex items-center gap-2 px-3 py-2">
@@ -1170,7 +1279,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
                 type="text"
                 placeholder="Search all files…"
                 value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
+                onChange={(e) => { setSearchQuery(e.target.value); setSelectedResult(null); setReplaceNotice(null); }}
                 onKeyDown={(e) => { if (e.key === 'Escape') toggleSearch(); }}
                 className="flex-1 bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] text-xs font-mono px-2 py-1 rounded border border-[var(--color-bg-tertiary)] focus:outline-none focus:border-[var(--color-accent)]"
               />
@@ -1179,14 +1288,82 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
                   {searchResults.length}{searchResults.length === 200 ? '+' : ''} match{searchResults.length !== 1 ? 'es' : ''}
                 </span>
               )}
+              <button
+                onClick={() => setShowReplace((prev) => !prev)}
+                title="Show find and replace"
+                className={`shrink-0 px-2 py-1 rounded text-[10px] font-medium transition-colors ${
+                  showReplace
+                    ? 'bg-[var(--color-accent)] text-[var(--color-bg-primary)]'
+                    : 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
+                }`}
+              >
+                Replace
+              </button>
             </div>
+
+            {showReplace && (
+              <div className="flex flex-wrap items-center gap-2 px-3 pb-2">
+                <input
+                  type="text"
+                  placeholder="Replace with…"
+                  value={replaceQuery}
+                  onChange={(e) => setReplaceQuery(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') setShowReplace(false);
+                    if (e.key === 'Enter') handleReplaceAllRequest();
+                  }}
+                  className="flex-1 min-w-[10rem] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] text-xs font-mono px-2 py-1 rounded border border-[var(--color-bg-tertiary)] focus:outline-none focus:border-[var(--color-accent)]"
+                />
+                <button
+                  onClick={handleReplaceCurrent}
+                  disabled={!searchQuery || searchResults.length === 0}
+                  className="shrink-0 px-2 py-1 rounded text-[10px] font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  Replace
+                </button>
+                <button
+                  onClick={handleReplaceAllRequest}
+                  disabled={!searchQuery}
+                  className="shrink-0 px-2 py-1 rounded text-[10px] font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  Replace All
+                </button>
+                <label className="flex shrink-0 items-center gap-1 text-[10px] text-[var(--color-text-secondary)] cursor-pointer">
+                  <input type="checkbox" checked={matchCase} onChange={(e) => setMatchCase(e.target.checked)} />
+                  Match case
+                </label>
+                <label className="flex shrink-0 items-center gap-1 text-[10px] text-[var(--color-text-secondary)] cursor-pointer">
+                  <input type="checkbox" checked={wholeWord} onChange={(e) => setWholeWord(e.target.checked)} />
+                  Whole word
+                </label>
+                <select
+                  value={replaceScope}
+                  onChange={(e) => setReplaceScope(e.target.value as 'file' | 'all')}
+                  title="Which files the search and replace act on"
+                  className="shrink-0 bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] text-[10px] px-1 py-1 rounded border border-[var(--color-bg-tertiary)] focus:outline-none"
+                >
+                  <option value="file">This file</option>
+                  <option value="all">All files</option>
+                </select>
+              </div>
+            )}
+
+            {replaceNotice && (
+              <p className="px-3 pb-2 text-[10px] text-[var(--color-text-secondary)]">{replaceNotice}</p>
+            )}
+
             {searchResults.length > 0 && (
               <div className="max-h-52 overflow-y-auto border-t border-[var(--color-bg-tertiary)]">
                 {searchResults.map((r, i) => (
                   <button
                     key={i}
-                    onClick={() => handleSearchResultClick(r.file, r.line)}
-                    className="w-full text-left px-3 py-1.5 text-xs hover:bg-[var(--color-bg-tertiary)] flex items-baseline gap-2 transition-colors"
+                    onClick={() => {
+                      setSelectedResult(i);
+                      handleSearchResultClick(r.file, r.line);
+                    }}
+                    className={`w-full text-left px-3 py-1.5 text-xs flex items-baseline gap-2 transition-colors ${
+                      selectedResult === i ? 'bg-[var(--color-bg-tertiary)]' : 'hover:bg-[var(--color-bg-tertiary)]'
+                    }`}
                   >
                     <span className="text-[var(--color-accent)] shrink-0 font-medium">{r.file}</span>
                     <span className="text-[var(--color-text-secondary)] shrink-0">:{r.line}</span>
@@ -1206,6 +1383,47 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
                 No matches found.
               </p>
             )}
+          </div>
+        )}
+
+        {/* Replace All confirmation — a project-wide rewrite is destructive. */}
+        {confirmReplace && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setConfirmReplace(null)}>
+            <div
+              className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl p-5 w-96"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h3 className="text-sm font-semibold text-[var(--color-text-primary)] mb-2">Replace All</h3>
+              <p className="text-xs text-[var(--color-text-secondary)] mb-3">
+                Replace <span className="font-mono text-[var(--color-text-primary)]">{confirmReplace.hitCount}</span>{' '}
+                match{confirmReplace.hitCount === 1 ? '' : 'es'} of{' '}
+                <span className="font-mono text-[var(--color-text-primary)]">{searchQuery}</span> with{' '}
+                <span className="font-mono text-[var(--color-text-primary)]">{replaceQuery || '(nothing)'}</span>
+                {wholeWord ? ' (whole word)' : ''}{matchCase ? ' (match case)' : ''}?
+              </p>
+              <ul className="mb-4 max-h-40 overflow-y-auto text-xs text-[var(--color-text-secondary)]">
+                {confirmReplace.perFile.map((entry) => (
+                  <li key={entry.file} className="flex justify-between gap-3 py-0.5">
+                    <span className="font-mono truncate">{entry.file}</span>
+                    <span className="shrink-0">{entry.count}</span>
+                  </li>
+                ))}
+              </ul>
+              <div className="flex justify-end gap-2">
+                <button
+                  onClick={() => setConfirmReplace(null)}
+                  className="px-3 py-1.5 rounded text-xs bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)]"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => void applyReplaceAll()}
+                  className="px-3 py-1.5 rounded text-xs bg-[var(--color-accent)] text-[var(--color-bg-primary)]"
+                >
+                  Replace All
+                </button>
+              </div>
+            </div>
           </div>
         )}
 
