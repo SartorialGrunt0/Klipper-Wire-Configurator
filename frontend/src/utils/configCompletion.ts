@@ -383,12 +383,23 @@ export function caretAtLineEnd(text: string, caret: number): boolean {
   return caret >= lineEndOf(text, caret);
 }
 
-/** One call from the component: context → ranked suggestions. */
+/**
+ * One call from the component: context → ranked suggestions.
+ *
+ * Suggestions only exist for the END of a line. Anywhere else the caret is
+ * inside a token, and a suggestion would be a *replacement* of that token —
+ * accepting it would leave the tail behind (`max_vel|ocity: 100` would come out
+ * as `max_velocity: ocity: 100`, since the candidate carries its own `: `).
+ * Rather than splice the text, both the ghost and the accept key stay silent
+ * until the caret is past the last character, which is also the rule the right
+ * arrow follows.
+ */
 export function completionsAt(
   text: string,
   caret: number,
   sources: CompletionSources,
 ): { context: CompletionContext; candidates: Candidate[] } | null {
+  if (!caretAtLineEnd(text, caret)) return null;
   const context = detectCompletionContext(text, caret);
   if (!context) return null;
   const candidates = rankCandidates(candidatesFor(context, sources), context.prefix);

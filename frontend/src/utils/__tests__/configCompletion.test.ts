@@ -300,7 +300,7 @@ describe('candidatesFor', () => {
     expect(first.insertText).toMatch(/\]$/);
   });
 
-  it('does not double an existing bracket', () => {
+  it('does not double a bracket when the candidate list is built directly', () => {
     const found = candidatesFor(ctx({ kind: 'section-type', trailing: ']' }), SOURCES).find(
       (c) => c.label === 'Stepper X',
     );
@@ -473,12 +473,23 @@ describe('applyCandidate', () => {
     expect(applied.caret).toBe(applied.text.length);
   });
 
-  it('keeps the closing bracket already on the line', () => {
+  it('says nothing while the caret is mid-token (before the closing bracket)', () => {
+    // Accepting here would splice the suggestion into the middle of the header.
     const { text, caret } = at('[step|]');
-    const result = completionsAt(text, caret, SOURCES)!;
-    const applied = applyCandidate(text, result.context, result.candidates[0]);
-    expect(applied.text).toBe('[stepper_x]');
-    expect(applied.caret).toBe('[stepper_x'.length);
+    expect(completionsAt(text, caret, SOURCES)).toBeNull();
+  });
+
+  it('says nothing while the caret is inside a word', () => {
+    const text = '[printer]\nmax_vel: 100';
+    expect(completionsAt(text, text.indexOf('vel'), SOURCES)).toBeNull();
+    const mid = '[printer]\nmax_vel' + 'ocity: 100';
+    expect(completionsAt(mid, mid.indexOf('vel') + 1, SOURCES)).toBeNull();
+  });
+
+  it('still suggests at the end of a line that is not the last one', () => {
+    const text = '[stepper_x]\nmicro\n[printer]\nmax_velocity: 300';
+    const result = completionsAt(text, text.indexOf('\nmicro') + 6, SOURCES);
+    expect(result?.candidates[0].label).toBe('microsteps');
   });
 
   it('completes a gcode command in place', () => {
