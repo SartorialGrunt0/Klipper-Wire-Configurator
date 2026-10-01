@@ -11,6 +11,7 @@ import { acknowledgeableWarning } from '../utils/warningAcknowledgment';
 import { resolveIssueLine } from '../utils/issueLine';
 import { ISSUE_MARKER } from '../utils/issueMarker';
 import { filterFindings, filterValidationMap } from '../utils/validationVisibility';
+import { indentCaret, indentSelection, outdentSelection } from '../utils/textIndent';
 import type { ExampleConfig, ConfigFile, ConfigSection, ValidationError } from '../types/config';
 
 interface SearchResult {
@@ -460,6 +461,47 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   const handleTextChange = (newText: string) => {
     exportingRef.current = false;
     setEditText(newText);
+  };
+
+  // Caret/selection to restore after a programmatic text rewrite (indent,
+  // completion). React state is applied on the next render, so the selection
+  // has to be re-applied in an effect — setting it inline would be undone by
+  // the re-render overwriting `value`.
+  const pendingSelectionRef = useRef<[number, number] | null>(null);
+
+  const applyTextEdit = useCallback((edit: { text: string; start: number; end: number }) => {
+    exportingRef.current = false; // a real user edit, not a model export echo
+    pendingSelectionRef.current = [edit.start, edit.end];
+    setEditText(edit.text);
+  }, []);
+
+  useEffect(() => {
+    const pending = pendingSelectionRef.current;
+    const el = textareaRef.current;
+    if (!pending || !el) return;
+    pendingSelectionRef.current = null;
+    el.setSelectionRange(pending[0], pending[1]);
+    syncLineNumbersScroll();
+  }, [editText, syncLineNumbersScroll]);
+
+  // Tab / Shift+Tab indentation. The textarea had no key handler at all, so Tab
+  // moved focus out of the editor and there was no way to indent a block.
+  const handleEditorKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key !== 'Tab' || e.ctrlKey || e.metaKey || e.altKey) return;
+    const el = e.currentTarget;
+    const { selectionStart, selectionEnd } = el;
+    const value = el.value;
+    // Keep focus in the editor: preventDefault must happen before the edit.
+    e.preventDefault();
+    if (e.shiftKey) {
+      applyTextEdit(outdentSelection(value, selectionStart, selectionEnd));
+      return;
+    }
+    applyTextEdit(
+      selectionStart === selectionEnd
+        ? indentCaret(value, selectionStart)
+        : indentSelection(value, selectionStart, selectionEnd),
+    );
   };
 
   const jumpToLine = useCallback((line: number) => {
@@ -1126,6 +1168,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
                   aria-label="Configuration text editor with syntax highlighting overlay"
                   value={editText}
                   onChange={(e) => handleTextChange(e.target.value)}
+                  onKeyDown={handleEditorKeyDown}
                   onScroll={syncLineNumbersScroll}
                   spellCheck={false}
                   wrap="off"
