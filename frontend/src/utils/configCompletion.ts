@@ -170,6 +170,10 @@ export function detectCompletionContext(text: string, caret: number): Completion
     return null;
   }
 
+  // Inside a comment there is nothing to complete: the text is inert, and a
+  // suggestion there reads as if the commented line were live config.
+  if (/^\s*#/.test(lineUpToCaret)) return null;
+
   // `key: <caret>` → value completion (enums only; the source decides).
   const withValue = KEY_RE.exec(lineUpToCaret);
   const valueStart =
@@ -179,7 +183,7 @@ export function detectCompletionContext(text: string, caret: number): Completion
   if (
     withValue &&
     sectionType &&
-    withValue[1] !== '#' &&
+    withValue[2] !== '#' &&
     caret - lineStart >= valueStart &&
     // Only the value token: after the first space the value is already written.
     !withValue[5].includes(' ')
@@ -291,15 +295,19 @@ export function candidatesFor(
     case 'param-key': {
       const schema = context.sectionType ? sources.schemas[context.sectionType] : undefined;
       if (!schema) return [];
+      // Params the section already defines are not offered: you cannot set the
+      // same key twice, so suggesting it is noise.
       const already = new Set(sources.usedParamKeys ?? []);
-      return schema.params.map((param) => ({
-        label: param.name,
-        insertText: context.trailing.startsWith(':') ? param.name : `${param.name}: `,
-        detail: paramDetail(schema, param.name),
-        kind: 'param-key' as const,
-        score: 0,
-        rank: already.has(param.name) ? 1 : 0,
-      }));
+      return schema.params
+        .filter((param) => !already.has(param.name))
+        .map((param) => ({
+          label: param.name,
+          insertText: context.trailing.startsWith(':') ? param.name : `${param.name}: `,
+          detail: paramDetail(schema, param.name),
+          kind: 'param-key' as const,
+          score: 0,
+          rank: 0,
+        }));
     }
 
     case 'param-value': {

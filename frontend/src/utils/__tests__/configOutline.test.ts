@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { scanSections } from '../configOutline';
+import { scanSections, sectionAtLine } from '../configOutline';
 
 describe('scanSections', () => {
   it('collects sections with their line numbers and params', () => {
@@ -75,5 +75,46 @@ describe('scanSections', () => {
 
   it('returns nothing for empty text', () => {
     expect(scanSections('')).toEqual([]);
+  });
+});
+
+describe('sectionAtLine', () => {
+  const text = ['[a]', 'x: 1', 'y: 2', '', '[b]', 'z: 3', '', '[a]', 'x: 9'].join('\n');
+
+  it('finds the section a line sits in', () => {
+    expect(sectionAtLine(text, 1)?.title).toBe('a');
+    expect(sectionAtLine(text, 2)?.title).toBe('a');
+    expect(sectionAtLine(text, 5)?.title).toBe('b');
+  });
+
+  it('treats the header line itself as inside the section', () => {
+    expect(sectionAtLine(text, 4)?.title).toBe('b');
+  });
+
+  it('returns null above the first header', () => {
+    expect(sectionAtLine('orphan: 1\n[a]', 0)).toBeNull();
+  });
+
+  it('picks the LATER duplicate header for a line below it', () => {
+    // Looking the section up by title returns the first [a] and its wrong
+    // param list — the bug this helper exists to prevent.
+    expect(sectionAtLine(text, 8)?.params).toEqual([{ key: 'x', line: 9 }]);
+  });
+
+  it('returns null inside an include line (it opens no section)', () => {
+    expect(sectionAtLine('[a]\nx: 1\n[include b.cfg]\ny: 2', 3)).toBeNull();
+  });
+
+  it('treats a commented header as the enclosing header (matching the engine)', () => {
+    // The completion engine's own backward scan also stops at `#[b]`, and its
+    // section type is unknown, so nothing is offered under it either way.
+    const section = sectionAtLine('[a]\nx: 1\n#[b]\ny: 2', 3);
+    expect(section?.title).toBe('b');
+    expect(section?.isCommented).toBe(true);
+    expect(section?.params).toEqual([]);
+  });
+
+  it('clamps a line index past the end', () => {
+    expect(sectionAtLine(text, 99)?.title).toBe('a');
   });
 });

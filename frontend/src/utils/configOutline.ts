@@ -23,6 +23,31 @@ export interface OutlineSection {
   isCommented: boolean;
 }
 
+const HEADER_LINE_RE = /^\s*#?\s*\[([^\]]*)\]\s*$/;
+
+/**
+ * The section the caret is in: the nearest header at or above `lineIndex`
+ * (0-based), looked up **by line number**.
+ *
+ * Looking the section up by title is wrong in a real project: the same header
+ * can be defined twice (`[printer]` in printer.cfg and again elsewhere), and the
+ * first title match is then a different section with a different param list.
+ * An `[include ...]` line is a header syntactically but opens no section, so it
+ * yields null — the same rule `scanSections` uses to end the current section.
+ */
+export function sectionAtLine(text: string, lineIndex: number): OutlineSection | null {
+  const lines = text.split('\n');
+  let headerLine = -1;
+  for (let i = Math.min(lineIndex, lines.length - 1); i >= 0; i -= 1) {
+    if (HEADER_LINE_RE.test(lines[i])) {
+      headerLine = i;
+      break;
+    }
+  }
+  if (headerLine === -1) return null;
+  return scanSections(text).find((entry) => entry.line === headerLine + 1) ?? null;
+}
+
 export function scanSections(text: string): OutlineSection[] {
   const lines = text.split('\n');
   const sections: OutlineSection[] = [];

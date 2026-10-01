@@ -54,6 +54,14 @@ body {
   background-color: var(--color-warning-tint);
 }
 
+/* Ghost text: a suggestion, not content. Uses the comment colour so it reads
+   as "not really there" at a glance — without it the suggestion is the same
+   colour as the code and looks like text the user already typed. */
+.kl-ghost {
+  color: var(--color-text-secondary);
+  opacity: 0.75;
+}
+
 /* Tree fold-out: newly revealed children fade in rather than popping into
    place. Opacity only (composited, no layout work), and it runs once per mount,
    so a file switch does not re-animate rows that were already on screen. */

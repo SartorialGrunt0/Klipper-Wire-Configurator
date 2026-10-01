@@ -196,6 +196,12 @@ describe('detectCompletionContext — gcode blocks', () => {
     expect(detectCompletionContext(t, t.length)).toBeNull();
   });
 
+  it('stays out of comments', () => {
+    expect(detectCompletionContext('[stepper_x]\n#micro', 18)).toBeNull();
+    expect(detectCompletionContext('[stepper_x]\n  # micro', 20)).toBeNull();
+    expect(detectCompletionContext('[stepper_x]\n#max_velocity: 3', 25)).toBeNull();
+  });
+
   it('stays out of a comment inside a gcode block', () => {
     const t = '[gcode_macro X]\ngcode:\n  # note';
     const ctx = detectCompletionContext(t, t.length);
@@ -310,15 +316,17 @@ describe('candidatesFor', () => {
     expect(candidates[0].detail).toContain('required');
   });
 
-  it('ranks params already in the section last', () => {
-    const candidates = rankCandidates(
-      candidatesFor(ctx({ kind: 'param-key', sectionType: 'stepper_x' }), {
-        ...SOURCES,
-        usedParamKeys: ['microsteps'],
-      }),
-      '',
-    );
-    expect(candidates.map((c) => c.label)).toEqual(['rotation_distance', 'stepper_type', 'microsteps']);
+  it('does not offer params the section already defines', () => {
+    const candidates = candidatesFor(ctx({ kind: 'param-key', sectionType: 'stepper_x' }), {
+      ...SOURCES,
+      usedParamKeys: ['microsteps', 'stepper_type'],
+    });
+    expect(candidates.map((c) => c.label)).toEqual(['rotation_distance']);
+  });
+
+  it('offers everything when the section is empty', () => {
+    const candidates = candidatesFor(ctx({ kind: 'param-key', sectionType: 'stepper_x' }), SOURCES);
+    expect(candidates.map((c) => c.label)).toEqual(['microsteps', 'rotation_distance', 'stepper_type']);
   });
 
   it('offers nothing for an unknown section type', () => {

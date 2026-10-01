@@ -26,7 +26,7 @@ import {
 } from '../utils/configCompletion';
 import { caretLineColumn, measureCaretRect } from '../utils/caretGeometry';
 import { useGcodeCommandStore } from '../stores/gcodeCommandStore';
-import { scanSections } from '../utils/configOutline';
+import { sectionAtLine } from '../utils/configOutline';
 import EditorIssueStrip from './EditorIssueStrip';
 import ConfigTree from './ConfigTree';
 import type { TextIssue } from '../types/editor';
@@ -501,13 +501,17 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   const activeCandidate = completion ? completion.candidates[completion.index] : null;
 
   // The inline ghost shows the part of the candidate that is not typed yet.
+  // Nothing is suggested until something HAS been typed — an empty prefix would
+  // otherwise propose the first entry of the list on every blank line.
   const ghost = useMemo(() => {
     if (!completion || !activeCandidate) return null;
-    const { lineIndex, column } = caretLineColumn(editText, caret);
     const { prefix } = completion.context;
-    const remainder = activeCandidate.insertText.startsWith(prefix)
-      ? activeCandidate.insertText.slice(prefix.length)
-      : activeCandidate.insertText;
+    if (prefix.length === 0) return null;
+    const { lineIndex, column } = caretLineColumn(editText, caret);
+    // Slice by the typed length rather than checking the prefix: the ranking
+    // already guarantees the match, and a case-insensitive check would leave
+    // 'DEL' + 'delta_radius' rendered as a doubled word.
+    const remainder = activeCandidate.insertText.slice(prefix.length);
     if (!remainder) return null;
     return { line: lineIndex + 1, column, text: remainder };
   }, [completion, activeCandidate, editText, caret]);
@@ -589,21 +593,10 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     };
   }, [configFiles, schemas, gcodeCommands]);
 
-  // Params already present in the enclosing section rank last.
+  // Params the enclosing section already defines — those are not offered.
   const usedParamKeys = useMemo((): string[] => {
     const { lineIndex } = caretLineColumn(editText, caret);
-    const lines = editText.split('\n');
-    let header = -1;
-    for (let i = Math.min(lineIndex, lines.length - 1); i >= 0; i -= 1) {
-      if (/^\s*#?\s*\[[^\]]*\]\s*$/.test(lines[i])) {
-        header = i;
-        break;
-      }
-    }
-    if (header === -1) return [];
-    const title = /^\s*#?\s*\[([^\]]*)\]\s*$/.exec(lines[header])?.[1].trim();
-    if (!title) return [];
-    const section = scanSections(editText).find((entry) => entry.title === title);
+    const section = sectionAtLine(editText, lineIndex);
     return section ? section.params.map((param) => param.key) : [];
   }, [editText, caret]);
 
