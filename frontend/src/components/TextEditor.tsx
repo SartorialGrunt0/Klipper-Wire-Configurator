@@ -13,6 +13,11 @@ import { ISSUE_MARKER } from '../utils/issueMarker';
 import { filterFindings, filterValidationMap } from '../utils/validationVisibility';
 import { indentCaret, indentSelection, outdentSelection } from '../utils/textIndent';
 import { autoScrollDelta } from '../utils/editorAutoScroll';
+import { buildHighlightedHtml, escapeHtml } from '../utils/editorHighlight';
+import { lineSeverities, worstSeverity } from '../utils/issueSummary';
+import { readIssueStripCollapsed, writeIssueStripCollapsed } from '../utils/editorPrefs';
+import EditorIssueStrip from './EditorIssueStrip';
+import type { TextIssue } from '../types/editor';
 import type { ExampleConfig, ConfigFile, ConfigSection, ValidationError } from '../types/config';
 
 interface SearchResult {
@@ -21,21 +26,6 @@ interface SearchResult {
   lineText: string;
   matchStart: number;
   matchEnd: number;
-}
-
-interface TextIssue {
-  line: number;
-  text: string;
-  severity: 'error' | 'warning' | 'info';
-  section?: string;
-  param?: string;
-  acknowledgeSection?: ConfigSection;
-  acknowledgeKind?: 'unknown' | 'duplicate' | 'registry';
-  /** Registry acks need the finding identity (code + command name), not
-   *  the section: one ack per command, mirroring the server's identity
-   *  granularity. */
-  acknowledgeCode?: string;
-  acknowledgeExtra?: string;
 }
 
 interface ConfigParamEntry {
@@ -145,6 +135,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   const [showSearch, setShowSearch] = useState(false);
   const [showFileSidebar, setShowFileSidebar] = useState(true);
   const [showSectionsSidebar, setShowSectionsSidebar] = useState(true);
+  const [issueStripCollapsed, setIssueStripCollapsed] = useState(() => readIssueStripCollapsed());
   const [showReferenceViewer, setShowReferenceViewer] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({});
@@ -342,6 +333,33 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     return map;
   }, [inlineIssues]);
 
+  // Worst severity per line → the overlay's row tints (error red, warning
+  // yellow, info none).
+  const issueLineSeverities = useMemo(() => lineSeverities(inlineIssues), [inlineIssues]);
+
+  const toggleIssueStrip = useCallback(() => {
+    setIssueStripCollapsed((prev) => {
+      writeIssueStripCollapsed(!prev);
+      return !prev;
+    });
+  }, []);
+
+  const handleStripAcknowledge = useCallback((issue: TextIssue) => {
+    void handleAcknowledgeWarning(
+      issue.acknowledgeSection,
+      issue.acknowledgeKind ?? 'unknown',
+      issue.acknowledgeCode
+        ? {
+            file: activeFile,
+            code: issue.acknowledgeCode,
+            section: issue.section ?? '',
+            param: issue.param ?? '',
+            extra: issue.acknowledgeExtra ?? '',
+          }
+        : undefined,
+    );
+  }, [activeFile, handleAcknowledgeWarning]);
+
   // Gutter numbers as ONE text block (see the editor gutter comment): one
   // line per row, severity glyph + number, sharing the textarea's continuous
   // line rhythm so alignment holds at any zoom / device scaling. Inline
@@ -354,11 +372,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
         const lineNum = idx + 1;
         const lineIssues = issuesByLine.get(lineNum);
         if (!lineIssues?.length) return String(lineNum);
-        const severity = lineIssues.some((i) => i.severity === 'error')
-          ? 'error'
-          : lineIssues.some((i) => i.severity === 'warning')
-            ? 'warning'
-            : 'info';
+        const severity = worstSeverity(lineIssues.map((i) => i.severity)) ?? 'info';
         const spec = ISSUE_MARKER[severity];
         const title = escapeAttr(lineIssues.map((i) => i.text).join('\n'));
         return `<span title="${title}"><span style="color:${spec.color}">${spec.marker}</span> ${lineNum}</span>`;
@@ -443,7 +457,10 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     setExpandedSections({});
   }, [activeFile]);
 
-  const highlightedHtml = useMemo(() => buildHighlightedHtml(editText), [editText]);
+  const highlightedHtml = useMemo(
+    () => buildHighlightedHtml(editText, { lineSeverities: issueLineSeverities }),
+    [editText, issueLineSeverities],
+  );
 
   // Focus search input when panel opens
   useEffect(() => {
@@ -1241,52 +1258,16 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
                 />
               </div>
             </div>
-            {/* Inline issue messages below editor lines */}
-            {inlineIssues.filter((i) => i.line > 0).length > 0 && (
-              <div className="shrink-0 border-t border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] max-h-32 overflow-y-auto">
-                {inlineIssues.filter((i) => i.line > 0).map((issue, idx) => (
-                  <div
-                    key={idx}
-                    className="flex items-center gap-2 px-3 py-1 text-xs cursor-pointer hover:bg-[var(--color-bg-tertiary)]"
-                    style={{ color: ISSUE_MARKER[issue.severity].color }}
-                    onClick={() => {
-                      jumpToLine(issue.line);
-                    }}
-                  >
-                    <span>{ISSUE_MARKER[issue.severity].marker}</span>
-                    <span className="min-w-0 flex-1 truncate">Line {issue.line}: {issue.text}</span>
-                    {issue.acknowledgeKind && (
-                      <button
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          void handleAcknowledgeWarning(
-                            issue.acknowledgeSection,
-                            issue.acknowledgeKind ?? 'unknown',
-                            issue.acknowledgeCode
-                              ? {
-                                  file: activeFile,
-                                  code: issue.acknowledgeCode,
-                                  section: issue.section ?? '',
-                                  param: issue.param ?? '',
-                                  extra: issue.acknowledgeExtra ?? '',
-                                }
-                              : undefined,
-                          );
-                        }}
-                        className="shrink-0 rounded border border-[var(--color-warning)] px-2 py-0.5 text-[10px] font-medium text-[var(--color-warning)] hover:bg-[var(--color-warning)] hover:text-[var(--color-bg-primary)] transition-colors"
-                        title={issue.acknowledgeKind === 'duplicate'
-                          ? 'Acknowledge this duplicate section warning and stop flagging the save button'
-                          : issue.acknowledgeKind === 'registry'
-                            ? 'Acknowledge this command warning and hide it in future validations'
-                            : 'Acknowledge this unknown section and hide its warning in future validations'}
-                      >
-                        Acknowledge
-                      </button>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
+            {/* Findings strip. Collapsed to a severity summary by default —
+                hover a dot for its status messages; expanding lists every
+                finding with its Acknowledge action. */}
+            <EditorIssueStrip
+              issues={inlineIssues}
+              collapsed={issueStripCollapsed}
+              onToggleCollapsed={toggleIssueStrip}
+              onJump={jumpToLine}
+              onAcknowledge={handleStripAcknowledge}
+            />
           </div>
         </div>
 
@@ -1434,36 +1415,4 @@ function configToText(config: { header_comments: string[]; includes: string[]; s
   }
 
   return lines.join('\n');
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-}
-
-function buildHighlightedHtml(text: string): string {
-  const lines = text.split('\n');
-  return lines.map((line) => {
-    const escaped = escapeHtml(line);
-    if (/^\s*#/.test(line)) {
-      return `<span style="color: var(--color-text-secondary)">${escaped}</span>`;
-    }
-    const sectionMatch = line.match(/^\s*(#?)\[([^\]]+)\]\s*$/);
-    if (sectionMatch) {
-      const prefix = sectionMatch[1] ? '<span style="color: var(--color-text-secondary)">#</span>' : '';
-      return `${prefix}<span style="color: #22d3ee">[${escapeHtml(sectionMatch[2])}]</span>`;
-    }
-    const includeMatch = line.match(/^\s*\[include\s+([^\]]+)\]\s*$/i);
-    if (includeMatch) {
-      return `<span style="color: #a78bfa">[include ${escapeHtml(includeMatch[1])}]</span>`;
-    }
-    const paramMatch = line.match(/^(\s*)(#?)([A-Za-z0-9_][A-Za-z0-9_\-]*)(\s*[:=]\s*)(.*)$/);
-    if (paramMatch) {
-      const [, ws, hash, key, sep, rawValue] = paramMatch;
-      return `${escapeHtml(ws)}${hash ? '<span style="color: var(--color-text-secondary)">#</span>' : ''}<span style="color: #60a5fa">${escapeHtml(key)}</span><span style="color: var(--color-text-secondary)">${escapeHtml(sep)}</span><span style="color: var(--color-text-primary)">${escapeHtml(rawValue)}</span>`;
-    }
-    return escaped || ' ';
-  }).join('\n');
 }
