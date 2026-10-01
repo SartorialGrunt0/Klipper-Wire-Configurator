@@ -13,7 +13,12 @@ import { ISSUE_MARKER } from '../utils/issueMarker';
 import { filterFindings } from '../utils/validationVisibility';
 import { indentCaret, indentSelection, outdentSelection } from '../utils/textIndent';
 import { autoScrollDelta } from '../utils/editorAutoScroll';
-import { buildHighlightedHtml, escapeHtml } from '../utils/editorHighlight';
+import {
+  buildHighlightedHtml,
+  escapeHtml,
+  tintBands,
+  tintLayerHeight,
+} from '../utils/editorHighlight';
 import { lineSeverities, worstSeverity } from '../utils/issueSummary';
 import { readIssueStripCollapsed, writeIssueStripCollapsed } from '../utils/editorPrefs';
 import { findHits, replaceAll, replaceOne, countHits, type FindHit } from '../utils/findReplace';
@@ -165,6 +170,24 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
       highlightRef.current.scrollLeft = textareaRef.current.scrollLeft;
     }
   }, []);
+
+  // The gutter and the overlay are separate scrolled elements kept in step by
+  // copying the textarea's scrollTop on 'scroll'. Any layout change that resizes
+  // the editor — the findings strip folding/unfolding, the search panel or the
+  // parse banner appearing, a window resize, browser zoom — makes the browser
+  // CLAMP the textarea's scrollTop without emitting a scroll event, which leaves
+  // the gutter showing different line numbers than the code beside it. Re-sync
+  // whenever the textarea's box actually changes.
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => {
+      // After layout, not during it.
+      requestAnimationFrame(syncLineNumbersScroll);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [syncLineNumbersScroll]);
 
   // Debounced live sync: parse the current text as the user types and apply it
   // straight into the model (config store + graph). Parse succeeds with any
@@ -395,35 +418,41 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     return () => { cancelled = true; };
   }, [configFiles]);
 
-  // Text the search/replace acts on. The active file's live textarea text is
-  // the truth — `allFilesText` is the debounced export and lags typing, so
-  // replacing against it would rewrite stale content. Inactive files use their
-  // stored text, falling back to the export when a file has never been parsed.
+  // The textarea's text only becomes `activeFile`'s once the async export lands
+  // (editTextFile tracks the owner). Until then `editText` still holds the
+  // PREVIOUS file's content, so anything that means "the active file's text"
+  // must fall back to the stored/exported text — that fallback is what stops the
+  // tree and search from flashing the old file's sections during a switch.
+  const textForFile = useCallback((fn: string): string => {
+    if (fn === activeFile && editTextFile === activeFile) return editText;
+    return configFiles[fn]?.raw_text ?? allFilesText[fn] ?? '';
+  }, [activeFile, editTextFile, editText, configFiles, allFilesText]);
+
+  // Text the search/replace acts on (the active file's live textarea text once
+  // it belongs to that file, otherwise the stored text).
   const scopedTexts = useMemo((): Record<string, string> => {
     const files = replaceScope === 'all' ? Object.keys(configFiles) : [activeFile];
     const out: Record<string, string> = {};
     for (const fn of files) {
       if (!fn) continue;
-      out[fn] = fn === activeFile ? editText : configFiles[fn]?.raw_text ?? allFilesText[fn] ?? '';
+      out[fn] = textForFile(fn);
     }
     return out;
-  }, [replaceScope, configFiles, activeFile, editText, allFilesText]);
+  }, [replaceScope, configFiles, activeFile, textForFile]);
 
   const findOptions = useMemo(
     () => ({ caseSensitive: matchCase, wholeWord }),
     [matchCase, wholeWord],
   );
 
-  // Current text for every file — the navigation tree's outline source. Same
-  // rule as search: the active file's live textarea text wins over the
-  // debounced export.
+  // Current text for every file — the navigation tree's outline source.
   const outlineTexts = useMemo((): Record<string, string> => {
     const out: Record<string, string> = {};
     for (const fn of Object.keys(configFiles)) {
-      out[fn] = fn === activeFile ? editText : configFiles[fn]?.raw_text ?? allFilesText[fn] ?? '';
+      out[fn] = textForFile(fn);
     }
     return out;
-  }, [configFiles, activeFile, editText, allFilesText]);
+  }, [configFiles, textForFile]);
 
   // Search results across the scope. Every occurrence on a line is its own row
   // (the previous implementation reported the first match per line only).
@@ -447,10 +476,19 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   }, [searchQuery, scopedTexts, findOptions]);
 
 
-  const highlightedHtml = useMemo(
-    () => buildHighlightedHtml(editText, { lineSeverities: issueLineSeverities }),
-    [editText, issueLineSeverities],
-  );
+  // Syntax markup only — findings never restructure the text (see
+  // editorHighlight: per-row boxes are what makes the gutter drift).
+  const highlightedHtml = useMemo(() => buildHighlightedHtml(editText), [editText]);
+
+  // Severity row tints, painted by an out-of-flow layer behind the code.
+  const tintLayer = useMemo(() => {
+    const bands = tintBands(issueLineSeverities);
+    if (bands.length === 0) return null;
+    return {
+      height: tintLayerHeight(editText.split('\n').length),
+      bands,
+    };
+  }, [issueLineSeverities, editText]);
 
   // Focus search input when panel opens
   useEffect(() => {
@@ -1350,13 +1388,21 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
               </div>
               {/* Text area with syntax color parsing overlay */}
               <div className="relative flex-1 overflow-hidden">
+                {/* One <pre>, scrolled in lockstep with the textarea. No
+                    whitespace between the children: this is a `pre`, so any
+                    formatting newline would render as a blank line. */}
                 <pre
                   ref={highlightRef}
                   aria-hidden
                   className="pointer-events-none absolute inset-0 overflow-auto p-4 font-mono text-sm leading-relaxed"
                   style={{ margin: 0, tabSize: 4 }}
-                  dangerouslySetInnerHTML={{ __html: highlightedHtml }}
-                />
+                >{tintLayer && (
+                  <div className="kl-tint-layer" style={{ height: tintLayer.height }}>
+                    {tintLayer.bands.map((band) => (
+                      <div key={band.line} className="kl-tint" style={{ top: band.top, background: band.background }} />
+                    ))}
+                  </div>
+                )}<div className="kl-code" dangerouslySetInnerHTML={{ __html: highlightedHtml }} /></pre>
                 <textarea
                   ref={textareaRef}
                   aria-label="Configuration text editor with syntax highlighting overlay"

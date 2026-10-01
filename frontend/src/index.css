@@ -12,10 +12,12 @@
   --color-warning: #fbbf24;
   --color-success: #34d399;
 
-  /* Severity line tints for the text view's highlight overlay. Info gets no
-     tint on purpose: it is legal, order-dependent context, not an alarm. */
-  --color-error-tint: rgb(248 113 113 / 0.13);
-  --color-warning-tint: rgb(251 191 36 / 0.13);
+  /* Severity line tints for the text view's highlight overlay. Mixed from the
+     same tokens the severity dots use so the row colour always matches the dot
+     beside it. Info gets no tint on purpose: it is legal, order-dependent
+     context, not an alarm. */
+  --color-error-tint: color-mix(in srgb, var(--color-error) 26%, transparent);
+  --color-warning-tint: color-mix(in srgb, var(--color-warning) 26%, transparent);
 
   /* Component type colors */
   --color-sbc: #8b5cf6;
@@ -39,22 +41,46 @@ body {
 }
 
 /* Text-view overlay rows.
-   The overlay <pre> is stacked under a transparent <textarea>, so it must keep
-   the textarea's EXACT line rhythm (per-row boxes drift with zoom — see the
-   gutter comment in TextEditor). Severity tints therefore wrap each line in a
-   block-level span instead of a positioned box: block boxes stack with the same
-   line boxes a '\n'-joined text block produces, and `min-height: 1.625em` (the
-   value of `leading-relaxed`) keeps a blank line a full line tall so a tint on
-   an empty line is still visible. */
-.kl-line {
+   The overlay <pre> is stacked under a transparent <textarea>, so its text must
+   keep the textarea's EXACT line rhythm. That rules out per-row boxes (they
+   round independently of the textarea's continuous line boxes — 0d4cfb8 /
+   e482e63), so the code stays one text block and severity rows are painted by
+   an out-of-flow band layer instead. */
+.kl-code {
   display: block;
-  min-height: 1.625em;
 }
-.kl-line-error {
-  background-color: var(--color-error-tint);
+.kl-tint-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  pointer-events: none;
 }
-.kl-line-warning {
-  background-color: var(--color-warning-tint);
+.kl-tint {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1.625em;
+}
+
+/* Tree fold-out: newly revealed children fade in rather than popping into
+   place. Opacity only (composited, no layout work), and it runs once per mount,
+   so a file switch does not re-animate rows that were already on screen. */
+@keyframes kl-fold-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.kl-fold {
+  animation: kl-fold-in 120ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .kl-fold {
+    animation: none;
+  }
 }
 
 /* Scrollbar styling */

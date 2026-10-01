@@ -121,6 +121,20 @@ describe('buildConfigTree — severity dots', () => {
     expect(buildConfigTree(input())[0].severity).toBeNull();
   });
 
+  it('ignores info findings — those only appear on the line gutter', () => {
+    const tree = buildConfigTree(
+      input({
+        texts: { 'printer.cfg': '[stepper_x]\nx: 1\n[extruder]\ny: 2' },
+        validation: {
+          'printer.cfg': { errors: [err('info'), err('info', 'extruder'), err('warning', 'stepper_x')] },
+        },
+      }),
+    );
+    expect(tree[0].severity).toBe('warning');
+    expect(tree[0].children[0].severity).toBe('warning');
+    expect(tree[0].children[1].severity).toBeNull();
+  });
+
   it('respects the validation visibility settings', () => {
     const hidden = { enabled: true, showError: true, showWarning: false, showInfo: false };
     const tree = buildConfigTree(

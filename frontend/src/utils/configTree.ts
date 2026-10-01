@@ -44,9 +44,16 @@ export interface ConfigTreeInput {
 
 const SEVERITY_RANK: Record<NodeSeverity, number> = { error: 0, warning: 1, info: 2 };
 
+/**
+ * Dots in the tree are error/warning only. An `info` finding is legal,
+ * order-dependent context (duplicate section, etc.) and is surfaced on the
+ * line-number gutter alone — a grey dot beside a file or section reads as
+ * "something is wrong here" when nothing is.
+ */
 function worstOf(findings: ValidationError[]): NodeSeverity | null {
   let worst: NodeSeverity | null = null;
   for (const finding of findings) {
+    if (finding.severity === 'info') continue;
     if (worst === null || SEVERITY_RANK[finding.severity] < SEVERITY_RANK[worst]) {
       worst = finding.severity;
     }

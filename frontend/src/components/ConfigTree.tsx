@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ISSUE_MARKER } from '../utils/issueMarker';
 import { buildConfigTree, defaultExpansion, type ConfigTreeNode } from '../utils/configTree';
 import type { SeverityVisibility } from '../utils/validationVisibility';
@@ -51,10 +51,17 @@ function ConfigTree({
     defaultExpansion(tree, activeFile),
   );
 
-  // Auto-fold/unfold around the selected file.
+  // Auto-fold around the selected file. Deliberately depends on `activeFile`
+  // only: `tree` is rebuilt whenever any file's text or findings change (every
+  // keystroke lands here after the parse debounce), and resetting the fold state
+  // on each of those made the tree snap shut while typing and flash through an
+  // empty state while switching files. Merging the defaults in keeps whatever
+  // the user folded themselves.
+  const treeRef = useRef(tree);
+  treeRef.current = tree;
   useEffect(() => {
-    setExpansion(defaultExpansion(tree, activeFile));
-  }, [tree, activeFile]);
+    setExpansion((current) => ({ ...current, ...defaultExpansion(treeRef.current, activeFile) }));
+  }, [activeFile]);
 
   const toggle = useCallback((id: string) => {
     setExpansion((current) => ({ ...current, [id]: !current[id] }));
@@ -110,7 +117,11 @@ function ConfigTree({
               {severitySpec && <span className={`${severitySpec.dotClass ?? ''} shrink-0`} title={severitySpec.title} />}
             </button>
           </div>
-          {isExpanded && node.children.map((child) => renderNode(child, depth + 1))}
+          {isExpanded && (
+            <div className="kl-fold">
+              {node.children.map((child) => renderNode(child, depth + 1))}
+            </div>
+          )}
         </div>
       );
     }
@@ -127,7 +138,11 @@ function ConfigTree({
             <span className="text-[9px]">{isExpanded ? 'v' : '>'}</span>
             <span className="truncate">{node.label}</span>
           </button>
-          {isExpanded && node.children.map((child) => renderNode(child, depth + 1))}
+          {isExpanded && (
+            <div className="kl-fold">
+              {node.children.map((child) => renderNode(child, depth + 1))}
+            </div>
+          )}
         </div>
       );
     }
@@ -147,9 +162,9 @@ function ConfigTree({
             <span className="min-w-0 flex-1 truncate">{node.label}</span>
             {severitySpec && <span className={`${severitySpec.dotClass ?? ''} shrink-0`} title={severitySpec.title} />}
           </button>
-          {hasChildren &&
-            isExpanded &&
-            node.children.map((child) => renderNode(child, depth + 1))}
+          {hasChildren && isExpanded && (
+            <div className="kl-fold">{node.children.map((child) => renderNode(child, depth + 1))}</div>
+          )}
         </div>
       );
     }
