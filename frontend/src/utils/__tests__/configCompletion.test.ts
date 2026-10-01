@@ -6,8 +6,9 @@ import {
   rankCandidates,
   candidatesFor,
   completionsAt,
+  acceptAt,
   applyCandidate,
-  caretAtLineEnd,
+  ghostRemainder,
   type CompletionSources,
 } from '../configCompletion';
 import type { SectionSchema, ParamSchema } from '../../types/config';
@@ -252,7 +253,7 @@ describe('matchScore / rankCandidates', () => {
     expect(
       rankCandidates(
         candidatesFor(
-          { kind: 'include-file', replaceStart: 0, replaceEnd: 0, prefix: '', trailing: '' },
+          { kind: 'include-file', replaceStart: 0, replaceEnd: 0, prefix: '', trailing: '', tokenEnd: 0 },
           SOURCES,
         ),
         '',
@@ -268,8 +269,9 @@ describe('candidatesFor', () => {
     replaceEnd: 0,
     prefix: '',
     trailing: '',
+    tokenEnd: 0,
     ...over,
-  });
+  } as Parameters<typeof candidatesFor>[0]);
 
   it('ranks section types the project already defines last', () => {
     const candidates = rankCandidates(
@@ -421,28 +423,100 @@ describe('candidatesFor', () => {
   });
 });
 
-describe('caretAtLineEnd', () => {
-  it('is true at the end of a line', () => {
-    expect(caretAtLineEnd('abc', 3)).toBe(true);
-    expect(caretAtLineEnd('abc\ndef', 7)).toBe(true);
+describe('matchScore — tiers', () => {
+  it('scores exact > prefix > word boundary > substring', () => {
+    expect(matchScore('max_velocity', 'max_velocity')).toBe(100);
+    expect(matchScore('max_velocity', 'max_')).toBe(80);
+    expect(matchScore('max_velocity', 'velocity')).toBe(60);
+    expect(matchScore('max_velocity', 'locity')).toBe(40);
+    expect(matchScore('max_velocity', 'zzz')).toBe(0);
   });
 
-  it('is true right before a newline (nothing to move over on this line)', () => {
-    expect(caretAtLineEnd('abc\ndef', 3)).toBe(true);
+  it('matches a single character by prefix only', () => {
+    // The reported bug: 'r' is *inside* canbus_inte[R]face, and the substring
+    // tier offered it under [mcu] while the user was typing a param name.
+    expect(matchScore('canbus_interface', 'r')).toBe(0);
+    expect(matchScore('restart_method', 'r')).toBe(80);
+    expect(matchScore('max_velocity', 'v')).toBe(0);
+    expect(matchScore('rotation_distance', 'd')).toBe(0);
   });
 
-  it('is false when text follows the caret on the same line', () => {
-    expect(caretAtLineEnd('abc', 1)).toBe(false);
-    expect(caretAtLineEnd('max_vel: 100', 7)).toBe(false);
+  it('keeps the weaker tiers from two characters on', () => {
+    expect(matchScore('rotation_distance', 'distance')).toBe(60);
+    expect(matchScore('rotation_distance', 'tation')).toBe(40);
   });
 });
 
-describe('completionsAt', () => {
-  it('returns ranked suggestions with the replacement range', () => {
-    const { text, caret } = at('[stepper_x]\nmicro');
-    const result = completionsAt(text, caret, SOURCES);
-    expect(result?.context.kind).toBe('param-key');
-    expect(result?.candidates[0].label).toBe('microsteps');
+describe('ghostRemainder', () => {
+  it('strips the typed part, case-insensitively', () => {
+    expect(ghostRemainder('microsteps: ', 'mic')).toBe('rosteps: ');
+    expect(ghostRemainder('stepper_x', 'STEP')).toBe('per_x');
+  });
+
+  it('is the whole insertion for an empty prefix', () => {
+    expect(ghostRemainder('16', '')).toBe('16');
+  });
+
+  it('never doubles a word (the del + delta_radius report)', () => {
+    // The old ghost was insertText.slice(prefix.length) — correct only for a
+    // prefix match, which is exactly why only prefix matches may ghost.
+    expect(ghostRemainder('delta_radius', 'del')).toBe('ta_radius');
+    expect(ghostRemainder('delta_radius', 'tail')).toBe('delta_radius');
+  });
+});
+
+describe('completionsAt — the ghost follows the token, not the caret', () => {
+  it('offers the ghost with the caret at the end of the token', () => {
+    const { text, caret } = at('[stepper_x]\nmic');
+    const result = completionsAt(text, caret, SOURCES)!;
+    expect(result.context.kind).toBe('param-key');
+    expect(result.ghost?.label).toBe('microsteps');
+    expect(result.ghostText).toBe('rosteps: ');
+    expect(result.accepts).toBe(true);
+  });
+
+  it('still offers the ghost with the caret inside the token', () => {
+    const { text, caret } = at('[stepper_x]\nmi|c');
+    const result = completionsAt(text, caret, SOURCES)!;
+    expect(result.context.prefix).toBe('mic');
+    expect(result.ghostText).toBe('rosteps: ');
+  });
+
+  it('replaces the WHOLE token, so a mid-token accept cannot splice', () => {
+    const { text, caret } = at('[stepper_x]\nmi|c');
+    const result = completionsAt(text, caret, SOURCES)!;
+    expect(result.context.replaceStart).toBe(text.indexOf('mic'));
+    expect(result.context.replaceEnd).toBe(text.length);
+    const applied = applyCandidate(text, result.context, result.ghost!);
+    expect(applied.text).toBe('[stepper_x]\nmicrosteps: ');
+  });
+
+  it('draws the ghost at the end of the token, not at the caret', () => {
+    const { text, caret } = at('[stepper_x]\nmi|c');
+    expect(completionsAt(text, caret, SOURCES)!.context.tokenEnd).toBe(text.length);
+  });
+
+  it('keeps the ghost when text follows the caret on the line', () => {
+    const { text, caret } = at('[stepper_x]\nmic| ; note');
+    const result = completionsAt(text, caret, SOURCES)!;
+    expect(result.ghostText).toBe('rosteps: ');
+    expect(result.context.trailing).toBe(' ; note');
+  });
+
+  it('says nothing for a token that already matches a name', () => {
+    const { text, caret } = at('[stepper_x]\nmicrosteps');
+    // Nothing left to add beyond the separator on a key that is fully typed.
+    expect(completionsAt(text, caret, SOURCES)!.ghostText).toBe(': ');
+  });
+
+  it('fills nothing in on a blank line inside a section', () => {
+    const { text, caret } = at('[stepper_x]\n');
+    const result = completionsAt(text, caret, SOURCES)!;
+    // The list still exists for an explicit Ctrl+Space, but nothing is ghosted
+    // and the accept key must not fire.
+    expect(result.ghost).toBeNull();
+    expect(result.accepts).toBe(false);
+    expect(result.candidates.map((c) => c.label)).toContain('microsteps');
   });
 
   it('returns null when nothing matches', () => {
@@ -462,55 +536,89 @@ describe('completionsAt', () => {
     const { text, caret } = at('[gcode_macro X]\ngcode:\n  G');
     expect(completionsAt(text, caret, many)?.candidates.length).toBe(50);
   });
+
+  it('still suggests at the end of a line that is not the last one', () => {
+    const text = '[stepper_x]\nmicro\n[printer]\nmax_velocity: 300';
+    const result = completionsAt(text, text.indexOf('\nmicro') + 6, SOURCES);
+    expect(result?.ghost?.label).toBe('microsteps');
+  });
+});
+
+describe('acceptAt — the right arrow', () => {
+  it('accepts at the end of the token', () => {
+    const { text, caret } = at('[stepper_x]\nmic');
+    expect(acceptAt(text, caret, SOURCES)).toEqual({
+      text: '[stepper_x]\nmicrosteps: ',
+      caret: '[stepper_x]\nmicrosteps: '.length,
+    });
+  });
+
+  it('does not accept while the caret is inside the token', () => {
+    const { text, caret } = at('[stepper_x]\nmi|c');
+    expect(acceptAt(text, caret, SOURCES)).toBeNull();
+  });
+
+  it('does not accept when text follows the token on the line', () => {
+    const { text, caret } = at('[stepper_x]\nmic| ; note');
+    expect(acceptAt(text, caret, SOURCES)).toBeNull();
+  });
+
+  it('accepts a param and then its default value — two presses, no keystroke between', () => {
+    const { text, caret } = at('[stepper_x]\nmic');
+    const first = acceptAt(text, caret, SOURCES)!;
+    expect(first.text).toBe('[stepper_x]\nmicrosteps: ');
+    const second = acceptAt(first.text, first.caret, SOURCES)!;
+    expect(second.text).toBe('[stepper_x]\nmicrosteps: 16');
+  });
+
+  it('offers nothing on the second press when the param has no default', () => {
+    const schemas = {
+      ...SCHEMAS,
+      stepper_x: section('stepper_x', { params: [param('stepper_type')] }),
+    };
+    const { text, caret } = at('[stepper_x]\nstep');
+    const first = acceptAt(text, caret, { ...SOURCES, schemas })!;
+    expect(first.text).toBe('[stepper_x]\nstepper_type: ');
+    expect(acceptAt(first.text, first.caret, { ...SOURCES, schemas })).toBeNull();
+  });
 });
 
 describe('applyCandidate', () => {
   it('replaces the typed prefix and leaves the caret after the insertion', () => {
     const { text, caret } = at('[stepper_x]\nmicro');
     const result = completionsAt(text, caret, SOURCES)!;
-    const applied = applyCandidate(text, result.context, result.candidates[0]);
+    const applied = applyCandidate(text, result.context, result.ghost!);
     expect(applied.text).toBe('[stepper_x]\nmicrosteps: ');
     expect(applied.caret).toBe(applied.text.length);
   });
 
-  it('says nothing while the caret is mid-token (before the closing bracket)', () => {
-    // Accepting here would splice the suggestion into the middle of the header.
+  it('does not double the closing bracket on a header', () => {
     const { text, caret } = at('[step|]');
-    expect(completionsAt(text, caret, SOURCES)).toBeNull();
-  });
-
-  it('says nothing while the caret is inside a word', () => {
-    const text = '[printer]\nmax_vel: 100';
-    expect(completionsAt(text, text.indexOf('vel'), SOURCES)).toBeNull();
-    const mid = '[printer]\nmax_vel' + 'ocity: 100';
-    expect(completionsAt(mid, mid.indexOf('vel') + 1, SOURCES)).toBeNull();
-  });
-
-  it('still suggests at the end of a line that is not the last one', () => {
-    const text = '[stepper_x]\nmicro\n[printer]\nmax_velocity: 300';
-    const result = completionsAt(text, text.indexOf('\nmicro') + 6, SOURCES);
-    expect(result?.candidates[0].label).toBe('microsteps');
+    const result = completionsAt(text, caret, SOURCES)!;
+    expect(result.ghostText).toBe('per_x');
+    expect(result.context.trailing).toBe(']');
+    const applied = applyCandidate(text, result.context, result.ghost!);
+    expect(applied.text).toBe('[stepper_x]');
   });
 
   it('completes a gcode command in place', () => {
     const { text, caret } = at('[gcode_macro X]\ngcode:\n  G2');
     const result = completionsAt(text, caret, SOURCES)!;
-    const applied = applyCandidate(text, result.context, result.candidates[0]);
+    const applied = applyCandidate(text, result.context, result.ghost!);
     expect(applied.text).toBe('[gcode_macro X]\ngcode:\n  G28');
-    expect(applied.caret).toBe(applied.text.length);
   });
 
   it('completes an include path', () => {
     const { text, caret } = at('[include mac');
     const result = completionsAt(text, caret, SOURCES)!;
-    const applied = applyCandidate(text, result.context, result.candidates[0]);
+    const applied = applyCandidate(text, result.context, result.ghost!);
     expect(applied.text).toBe('[include macros/end.cfg]');
   });
 
   it('does not touch anything else in the document', () => {
     const text = '[stepper_x]\nmicro\n[printer]\nmax_velocity: 300';
     const result = completionsAt(text, text.indexOf('\nmicro') + 6, SOURCES)!;
-    const applied = applyCandidate(text, result.context, result.candidates[0]);
+    const applied = applyCandidate(text, result.context, result.ghost!);
     expect(applied.text.split('\n')[3]).toBe('max_velocity: 300');
     expect(applied.text.split('\n')[0]).toBe('[stepper_x]');
   });

@@ -12,6 +12,30 @@ import type { SectionSchema } from '../types/config';
  *  - include paths  ← the project's own filenames
  *  - G-code commands ← the validator's registry (so a suggestion can never be a
  *    command that then fails validation) + the project's macro names
+ *
+ * ## The token model (why the caret is not part of the context)
+ *
+ * A suggestion completes **the identifier the caret is in**, so what the user has
+ * typed is the whole token in the buffer — not the characters to the left of the
+ * caret. Keying the context to the caret is what made an earlier revision
+ * (`adeebf9`) stay silent anywhere but the end of a line: with `prefix` =
+ * "text before the caret", a mid-token caret produced a *fragment* prefix, and
+ * accepting that fragment splices the rest of the token back on
+ * (`max_vel|ocity` → `max_velocity: ocity`).
+ *
+ * Anchoring to the token instead gives all four cases one answer:
+ *
+ *   `mi|c`      prefix `mic`,  replacement `mic`,   ghost drawn at the token end
+ *   `mic|`      prefix `mic`,  replacement `mic`,   ghost drawn at the token end
+ *   `mic| ; x`  prefix `mic`,  replacement `mic`,   ghost still offered (arrow moves)
+ *   `` (empty)  no ghost, except a value's schema default
+ *
+ * Because the replacement always covers the whole token, accepting can never
+ * splice, whatever the caret does. Display and acceptance stay separate
+ * decisions: the ghost shows whenever a token is being typed, and the accept key
+ * fires only when the caret sits at the token end with nothing after it on the
+ * line — the rule zsh-autosuggestions states as "with the cursor at the end of
+ * the buffer".
  */
 
 export type CompletionKind =
@@ -23,18 +47,21 @@ export type CompletionKind =
 
 export interface CompletionContext {
   kind: CompletionKind;
-  /** Absolute offset the suggestion replaces from. */
+  /** Absolute offset the suggestion replaces from (the token start). */
   replaceStart: number;
-  /** Absolute offset the suggestion replaces to (the caret). */
+  /** Absolute offset the suggestion replaces to (the token end). */
   replaceEnd: number;
-  /** What the user has typed of the token so far. */
+  /** What the user has typed of the token so far — the WHOLE token. */
   prefix: string;
   /** Section type of the enclosing header, when there is one. */
   sectionType?: string;
   /** Param whose value is being typed (param-value only). */
   paramKey?: string;
-  /** Text from the caret to the end of the line — used to avoid doubling a `]`. */
+  /** Text from the token end to the end of the line — used to avoid doubling a
+   *  `]` or a `: `. Computed from the token, never from the caret. */
   trailing: string;
+  /** Absolute offset just past the token: where the ghost is drawn. */
+  tokenEnd: number;
 }
 
 export interface Candidate {
@@ -51,6 +78,13 @@ export interface Candidate {
   /** Already defined in this section. Listed (so the full param list stays
    *  browsable) but never ghosted, and ranked last. */
   alreadySet?: boolean;
+  /** An inline suggestion may extend this candidate (case-insensitive prefix
+   *  match only). Weaker matches are list-only: they are *replacements*, and the
+   *  ghost is an insertion at the token end. */
+  ghostable?: boolean;
+  /** Text to match against when it differs from the label — a section's display
+   *  name is `Stepper X` while the header that gets inserted is `stepper_x`. */
+  matchText?: string;
 }
 
 export interface CompletionSources {
@@ -72,11 +106,31 @@ const GCODE_BLOCK_KEYS = new Set(['gcode', 'gcode_on_error', 'gcode.py']);
 /** Section types whose body is G-code rather than settings. */
 const GCODE_SECTION_TYPES = new Set(['gcode_macro', 'delayed_gcode']);
 
+/** Token characters, per position — an identifier, a path, a command, a value. */
+const IDENT_CHARS = /[A-Za-z0-9_\-]/;
+const PATH_CHARS = /[A-Za-z0-9_\-/.]/;
+const COMMAND_CHARS = /[A-Za-z0-9_]/;
+const VALUE_CHARS = /[^\s]/;
+
 const lineStartOf = (text: string, pos: number): number => text.lastIndexOf('\n', pos - 1) + 1;
 const lineEndOf = (text: string, pos: number): number => {
   const nl = text.indexOf('\n', pos);
   return nl === -1 ? text.length : nl;
 };
+
+/** Bounds of the run of token characters touching `rel` in `line` (line-relative). */
+function tokenBounds(
+  line: string,
+  rel: number,
+  isTokenChar: (ch: string) => boolean,
+): { start: number; end: number } {
+  const at = Math.max(0, Math.min(rel, line.length));
+  let start = at;
+  let end = at;
+  while (start > 0 && isTokenChar(line[start - 1])) start -= 1;
+  while (end < line.length && isTokenChar(line[end])) end += 1;
+  return { start, end };
+}
 
 /** The header of the section containing `lineIndex`, or null above the first one. */
 function enclosingHeader(lines: string[], lineIndex: number): string | null {
@@ -124,35 +178,46 @@ export function detectCompletionContext(text: string, caret: number): Completion
   const lineEnd = lineEndOf(text, caret);
   const before = text.slice(lineStart, caret);
   const line = text.slice(lineStart, lineEnd);
-  const trailing = line.slice(caret - lineStart);
+  const caretRel = caret - lineStart;
+
+  /** Assemble a context for the token touching the caret on this line. */
+  const contextFor = (
+    kind: CompletionKind,
+    isTokenChar: (ch: string) => boolean,
+    minStartRel: number,
+    extra?: { sectionType?: string; paramKey?: string },
+  ): CompletionContext | null => {
+    const bounds = tokenBounds(line, caretRel, isTokenChar);
+    if (bounds.end < minStartRel) return null;
+    const start = Math.max(bounds.start, minStartRel);
+    const end = Math.max(bounds.end, start);
+    return {
+      kind,
+      replaceStart: lineStart + start,
+      replaceEnd: lineStart + end,
+      prefix: line.slice(start, end),
+      trailing: line.slice(end),
+      tokenEnd: lineStart + end,
+      ...extra,
+    };
+  };
 
   // Inside Jinja — a config-text completer has nothing useful to say there.
-  const lineUpToCaret = before;
-  if (/{%[^%]*$/.test(lineUpToCaret) || /{[^{]*$/.test(lineUpToCaret)) return null;
+  if (/{%[^%]*$/.test(before) || /{[^{]*$/.test(before)) return null;
 
   // `[` … caret before the closing `]` → a section header (or an include path).
-  const openHeader = OPEN_HEADER_RE.exec(lineUpToCaret);
+  const openHeader = OPEN_HEADER_RE.exec(before);
   if (openHeader && !before.slice(before.indexOf('[')).includes(']')) {
-    const inside = openHeader[1];
-    if (/^include\s/i.test(inside)) {
-      const prefix = inside.replace(/^include\s+/i, '');
-      return {
-        kind: 'include-file',
-        replaceStart: caret - prefix.length,
-        replaceEnd: caret,
-        prefix,
-        trailing,
-      };
+    const bracketRel = line.indexOf('[');
+    const insideStartRel = bracketRel + 1;
+    const insideText = line.slice(insideStartRel);
+    const include = /^include\s+/i.exec(insideText);
+    if (include && caretRel >= insideStartRel + include[0].length) {
+      return contextFor('include-file', (ch) => PATH_CHARS.test(ch), insideStartRel + include[0].length);
     }
-    // A comment marker or a space before the name is not part of the token.
-    const prefix = inside.replace(/^\s+/, '');
-    return {
-      kind: 'section-type',
-      replaceStart: caret - prefix.length,
-      replaceEnd: caret,
-      prefix,
-      trailing,
-    };
+    // A space before the name is not part of the token.
+    const leading = /^\s*/.exec(insideText)?.[0].length ?? 0;
+    return contextFor('section-type', (ch) => IDENT_CHARS.test(ch), insideStartRel + leading);
   }
 
   const lines = text.split('\n');
@@ -160,76 +225,66 @@ export function detectCompletionContext(text: string, caret: number): Completion
   const header = enclosingHeader(lines, lineIndex);
   const sectionType = sectionTypeOf(header);
 
-  // Inside a `gcode:` block: complete command names once the token has started.
+  // Inside a `gcode:` block: complete command names when the token opens the line.
   if (sectionType && GCODE_SECTION_TYPES.has(sectionType) && insideGcodeBlock(lines, lineIndex, line)) {
-    const token = /^(\s*)([A-Za-z0-9_]*)$/.exec(before);
-    if (token) {
-      return {
-        kind: 'gcode-command',
-        replaceStart: caret - token[2].length,
-        replaceEnd: caret,
-        prefix: token[2],
-        sectionType,
-        trailing,
-      };
-    }
+    const command = contextFor('gcode-command', (ch) => COMMAND_CHARS.test(ch), 0, { sectionType });
+    if (command && /^\s*$/.test(line.slice(0, command.replaceStart - lineStart))) return command;
     return null;
   }
 
   // Inside a comment there is nothing to complete: the text is inert, and a
   // suggestion there reads as if the commented line were live config.
-  if (/^\s*#/.test(lineUpToCaret)) return null;
+  if (/^\s*#/.test(before)) return null;
 
-  // `key: <caret>` → value completion (enums only; the source decides).
-  const withValue = KEY_RE.exec(lineUpToCaret);
-  const valueStart =
-    withValue === null
-      ? -1
-      : withValue[1].length + withValue[2].length + withValue[3].length + withValue[4].length;
-  if (
-    withValue &&
-    sectionType &&
-    withValue[2] !== '#' &&
-    caret - lineStart >= valueStart &&
-    // Only the value token: after the first space the value is already written.
-    !withValue[5].includes(' ')
-  ) {
-    const typed = withValue[5];
-    return {
-      kind: 'param-value',
-      replaceStart: caret - typed.length,
-      replaceEnd: caret,
-      prefix: typed,
-      sectionType,
-      paramKey: withValue[3],
-      trailing,
-    };
+  // Above the first section there is no schema to complete against.
+  if (!sectionType || !header) return null;
+
+  // `key: value` → the key token, or the first word of the value.
+  const keyMatch = KEY_RE.exec(line);
+  if (keyMatch && keyMatch[2] !== '#') {
+    const keyStartRel = keyMatch[1].length + keyMatch[2].length;
+    const keyEndRel = keyStartRel + keyMatch[3].length;
+    const valueStartRel = keyEndRel + keyMatch[4].length;
+    if (caretRel >= keyStartRel && caretRel <= keyEndRel) {
+      return contextFor('param-key', (ch) => IDENT_CHARS.test(ch), keyStartRel, { sectionType });
+    }
+    if (caretRel >= valueStartRel) {
+      // Only the first word of the value: past a space the rest is already
+      // written (enum values read `NTC 100K …`, so a second word is noise).
+      const bounds = tokenBounds(line, caretRel, (ch) => VALUE_CHARS.test(ch));
+      if (Math.max(bounds.start, valueStartRel) !== valueStartRel) return null;
+      return contextFor('param-value', (ch) => VALUE_CHARS.test(ch), valueStartRel, {
+        sectionType,
+        paramKey: keyMatch[3],
+      });
+    }
   }
 
-  // Start of a line inside a section → a parameter key.
-  const keyToken = /^(\s*)(#?)([A-Za-z0-9_\-]*)$/.exec(lineUpToCaret);
-  if (keyToken && sectionType && header) {
-    const prefix = keyToken[3];
-    return {
-      kind: 'param-key',
-      replaceStart: caret - prefix.length,
-      replaceEnd: caret,
-      prefix,
-      sectionType,
-      trailing,
-    };
+  // A bare key token opening a line inside a section (`mic` with no `:` yet).
+  const bare = tokenBounds(line, caretRel, (ch) => IDENT_CHARS.test(ch));
+  if (/^\s*$/.test(line.slice(0, bare.start))) {
+    return contextFor('param-key', (ch) => IDENT_CHARS.test(ch), 0, { sectionType });
   }
 
   return null;
 }
 
-/** Match quality: exact > starts-with > word-boundary > substring. */
+/**
+ * Match quality: exact > prefix > word-boundary > substring.
+ *
+ * Only `exact` and `prefix` are ghostable (see `Candidate.ghostable`). The two
+ * weaker tiers demand at least two typed characters: a single letter is a
+ * prefix or it is nothing — one character appears *inside* most identifiers
+ * (`r` in canbus_inte`r`face), and offering those is what made typing `r` under
+ * `[mcu]` propose an unrelated param.
+ */
 export function matchScore(label: string, prefix: string): number {
   if (!prefix) return 60;
   const lowerLabel = label.toLowerCase();
   const lowerPrefix = prefix.toLowerCase();
   if (lowerLabel === lowerPrefix) return 100;
   if (lowerLabel.startsWith(lowerPrefix)) return 80;
+  if (lowerPrefix.length < 2) return 0;
   const boundary = lowerLabel.split(/[\s_\-.]/).some((word) => word.startsWith(lowerPrefix));
   if (boundary) return 60;
   if (lowerLabel.includes(lowerPrefix)) return 40;
@@ -240,13 +295,24 @@ export function matchScore(label: string, prefix: string): number {
 export function rankCandidates(candidates: readonly Candidate[], prefix: string): Candidate[] {
   const scored: Candidate[] = [];
   for (const candidate of candidates) {
-    const score = matchScore(candidate.label, prefix);
+    const score = Math.max(
+      matchScore(candidate.label, prefix),
+      candidate.matchText ? matchScore(candidate.matchText, prefix) : 0,
+    );
     if (score === 0) continue;
     // `candidate.rank` is the SOURCE order (project macros before registry
     // commands, already-used params last) and must survive scoring.
-    scored.push({ ...candidate, score });
+    scored.push({ ...candidate, score, ghostable: score >= 80 });
   }
   return scored.sort((a, b) => b.score - a.score || a.rank - b.rank || a.label.localeCompare(b.label));
+}
+
+/** The text a candidate adds after `prefix` — never assumes the match was a prefix. */
+export function ghostRemainder(insertText: string, prefix: string): string {
+  const limit = Math.min(insertText.length, prefix.length);
+  let i = 0;
+  while (i < limit && insertText[i].toLowerCase() === prefix[i].toLowerCase()) i += 1;
+  return insertText.slice(i);
 }
 
 function paramDetail(schema: SectionSchema, name: string): string | undefined {
@@ -280,6 +346,9 @@ export function candidatesFor(
         label: schema.display_name || schema.section_type,
         // Insert the real header text (the display name is for reading).
         insertText: close(schema.section_type, ']'),
+        // Match on the header text too: the display name is `Stepper X`, so a
+        // typed `stepper_` would otherwise drop the candidate.
+        matchText: schema.section_type,
         detail: [schema.description, schema.max_instances === 1 ? 'one per project' : null]
           .filter(Boolean)
           .join(' · '),
@@ -374,37 +443,70 @@ export function candidatesFor(
   }
 }
 
+export interface CompletionResult {
+  context: CompletionContext;
+  candidates: Candidate[];
+  /** The candidate the inline ghost draws, if any. */
+  ghost: Candidate | null;
+  /** What the ghost adds at the token end ('' when there is nothing to add). */
+  ghostText: string;
+  /** True when the accept key should complete rather than move the caret. */
+  accepts: boolean;
+  /** Where `ghost` sits in `candidates` — the list's initial selection. */
+  index: number;
+}
+
 /**
- * True when nothing follows the caret on its line — the only case where the
- * right arrow has no text to move over, which is what makes it safe to accept
- * a suggestion with.
+ * The candidate the inline ghost draws.
+ *
+ * Never one the enclosing section already defines, and on an empty token only a
+ * value's schema default — an empty token would otherwise propose the first
+ * entry of the list on every blank line.
  */
-export function caretAtLineEnd(text: string, caret: number): boolean {
-  return caret >= lineEndOf(text, caret);
+function ghostCandidateFor(context: CompletionContext, candidates: Candidate[]): Candidate | null {
+  const usable = candidates.filter((candidate) => !candidate.alreadySet);
+  if (context.prefix === '') return usable.find((candidate) => candidate.isDefault) ?? null;
+  return usable.find((candidate) => candidate.ghostable) ?? null;
+}
+
+/** True when nothing but spaces follows the token on its line. */
+function nothingAfterToken(context: CompletionContext): boolean {
+  return context.trailing.trim() === '';
 }
 
 /**
  * One call from the component: context → ranked suggestions.
  *
- * Suggestions only exist for the END of a line. Anywhere else the caret is
- * inside a token, and a suggestion would be a *replacement* of that token —
- * accepting it would leave the tail behind (`max_vel|ocity: 100` would come out
- * as `max_velocity: ocity: 100`, since the candidate carries its own `: `).
- * Rather than splice the text, both the ghost and the accept key stay silent
- * until the caret is past the last character, which is also the rule the right
- * arrow follows.
+ * The ghost is offered whenever the caret is in or at the end of the token being
+ * typed; the right arrow separately requires the caret to sit exactly at the
+ * token end with nothing after it on the line, so the arrow never swallows a
+ * normal cursor move.
  */
 export function completionsAt(
   text: string,
   caret: number,
   sources: CompletionSources,
-): { context: CompletionContext; candidates: Candidate[] } | null {
-  if (!caretAtLineEnd(text, caret)) return null;
+): CompletionResult | null {
   const context = detectCompletionContext(text, caret);
   if (!context) return null;
+  if (caret < context.replaceStart || caret > context.tokenEnd) return null;
   const candidates = rankCandidates(candidatesFor(context, sources), context.prefix);
   if (candidates.length === 0) return null;
-  return { context, candidates: candidates.slice(0, 50) };
+  const ghost = ghostCandidateFor(context, candidates);
+  const ghostText = ghost ? ghostRemainder(ghost.insertText, context.prefix) : '';
+  const accepts =
+    !!ghost &&
+    ghostText !== '' &&
+    caret === context.tokenEnd &&
+    nothingAfterToken(context);
+  return {
+    context,
+    candidates: candidates.slice(0, 50),
+    ghost,
+    ghostText,
+    accepts,
+    index: ghost ? Math.max(0, candidates.indexOf(ghost)) : 0,
+  };
 }
 
 /** The text edit accepting a candidate produces. */
@@ -415,4 +517,20 @@ export function applyCandidate(
 ): { text: string; caret: number } {
   const next = text.slice(0, context.replaceStart) + candidate.insertText + text.slice(context.replaceEnd);
   return { text: next, caret: context.replaceStart + candidate.insertText.length };
+}
+
+/**
+ * What the accept key produces at `caret`, or null when it is a plain cursor
+ * move. Computed on demand rather than read from component state: after
+ * accepting a param the caret lands after `key: `, and the next press must see
+ * the value suggestion without a keystroke or a re-render in between.
+ */
+export function acceptAt(
+  text: string,
+  caret: number,
+  sources: CompletionSources,
+): { text: string; caret: number } | null {
+  const result = completionsAt(text, caret, sources);
+  if (!result || !result.accepts || !result.ghost) return null;
+  return applyCandidate(text, result.context, result.ghost);
 }

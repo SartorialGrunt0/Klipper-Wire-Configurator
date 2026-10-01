@@ -19,10 +19,9 @@ import { readIssueStripCollapsed, writeIssueStripCollapsed } from '../utils/edit
 import { findHits, replaceAll, replaceOne, countHits, type FindHit } from '../utils/findReplace';
 import {
   completionsAt,
+  acceptAt,
   applyCandidate,
-  caretAtLineEnd,
-  type Candidate,
-  type CompletionContext,
+  type CompletionResult,
   type CompletionSources,
 } from '../utils/configCompletion';
 import { caretLineColumn, measureCaretRect } from '../utils/caretGeometry';
@@ -41,8 +40,8 @@ interface SearchResult {
   matchEnd: number;
 }
 
-/** Idle delay before a suggestion appears. Local lookups only — no network. */
-const COMPLETION_DELAY_MS = 120;
+/** A pasted line is not something to complete. */
+const MAX_COMPLETION_LINE = 200;
 
 function TextEditor({ isActive = true }: { isActive?: boolean }) {
   const {
@@ -149,15 +148,17 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   } | null>(null);
   const [replaceNotice, setReplaceNotice] = useState<string | null>(null);
   // ── completion ──────────────────────────────────────────────────────────
-  const [completion, setCompletion] = useState<{
-    context: CompletionContext;
-    candidates: Candidate[];
-    index: number;
-  } | null>(null);
+  const [completion, setCompletion] = useState<CompletionResult | null>(null);
   const [completionListOpen, setCompletionListOpen] = useState(false);
-  /** Caret offset the user dismissed with Esc; the ghost stays away until the
-   *  caret moves or the text changes. */
-  const [completionDismissedAt, setCompletionDismissedAt] = useState<number | null>(null);
+  /** The token the user dismissed with Esc (line + the token's start column).
+   *  Keyed to the token rather than to the caret offset: moving inside the word
+   *  keeps it dismissed, typing or deleting in it brings the ghost back. */
+  const [completionDismissed, setCompletionDismissed] = useState<{
+    line: number;
+    column: number;
+  } | null>(null);
+  /** True while an IME candidate window owns the keyboard. */
+  const composingRef = useRef(false);
   const [caret, setCaret] = useState(0);
   const [showFileSidebar, setShowFileSidebar] = useState(true);
   const [issueStripCollapsed, setIssueStripCollapsed] = useState(() => readIssueStripCollapsed());
@@ -499,31 +500,16 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   // Syntax markup + inline severity tints. Findings never restructure the text
   // (see editorHighlight): a tint is an inline span around the line's own
   // markup, so it is painted by the same line box as the characters.
-  const activeCandidate = completion ? completion.candidates[completion.index] : null;
-  /** The candidate the ghost suggests: never one the section already defines. */
-  const ghostCandidate = useMemo(
-    () => completion?.candidates.find((candidate) => !candidate.alreadySet) ?? null,
-    [completion],
-  );
-
-  // The inline ghost shows the part of the candidate that is not typed yet.
-  // Nothing is suggested until something HAS been typed — an empty prefix would
-  // otherwise propose the first entry of the list on every blank line.
+  // The inline ghost draws what the candidate adds to the token. It is anchored
+  // to the END OF THE TOKEN, not to the caret, so the suggestion shows while the
+  // word is still being typed — `mi|c` offers `microsteps` exactly as `mic|`
+  // does, the way Konsole offers `pwd` with the cursor between `p` and `w`.
+  // Which token, and what it adds, is decided in the pure layer.
   const ghost = useMemo(() => {
-    if (!completion || !ghostCandidate) return null;
-    const { prefix } = completion.context;
-    // Nothing to add until something is typed — EXCEPT in a value position,
-    // where the param's default is a specific answer rather than an arbitrary
-    // first entry.
-    if (prefix.length === 0 && !ghostCandidate.isDefault) return null;
-    const { lineIndex, column } = caretLineColumn(editText, caret);
-    // Slice by the typed length rather than checking the prefix: the ranking
-    // already guarantees the match, and a case-insensitive check would leave
-    // 'DEL' + 'delta_radius' rendered as a doubled word.
-    const remainder = ghostCandidate.insertText.slice(prefix.length);
-    if (!remainder) return null;
-    return { line: lineIndex + 1, column, text: remainder };
-  }, [completion, ghostCandidate, editText, caret]);
+    if (!completion || !completion.ghostText) return null;
+    const { lineIndex, column } = caretLineColumn(editText, completion.context.tokenEnd);
+    return { line: lineIndex + 1, column, text: completion.ghostText };
+  }, [completion, editText]);
 
   const highlightedHtml = useMemo(
     () => buildHighlightedHtml(editText, { lineSeverities: issueLineSeverities, ghost }),
@@ -546,34 +532,10 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
 
   const handleTextChange = (newText: string) => {
     exportingRef.current = false;
+    // Editing the token revives a suggestion that Esc dismissed.
+    setCompletionDismissed(null);
     setEditText(newText);
   };
-
-  // Caret/selection to restore after a programmatic text rewrite (indent,
-  // completion). React state is applied on the next render, so the selection
-  // has to be re-applied in an effect — setting it inline would be undone by
-  // the re-render overwriting `value`.
-  const pendingSelectionRef = useRef<[number, number] | null>(null);
-
-  const applyTextEdit = useCallback((edit: { text: string; start: number; end: number }) => {
-    exportingRef.current = false; // a real user edit, not a model export echo
-    pendingSelectionRef.current = [edit.start, edit.end];
-    // Keep the completion's caret in step with the programmatic edit: a
-    // setSelectionRange fires no `select` event, so without this the next
-    // suggestion is computed for the old caret position (which is why nothing
-    // followed an accepted name until you typed or clicked again).
-    setCaret(edit.start);
-    setEditText(edit.text);
-  }, []);
-
-  useEffect(() => {
-    const pending = pendingSelectionRef.current;
-    const el = textareaRef.current;
-    if (!pending || !el) return;
-    pendingSelectionRef.current = null;
-    el.setSelectionRange(pending[0], pending[1]);
-    syncLineNumbersScroll();
-  }, [editText, syncLineNumbersScroll]);
 
   // ── completion sources ──────────────────────────────────────────────────
   const schemas = useConfigStore((s) => s.schemas);
@@ -607,56 +569,103 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     };
   }, [configFiles, schemas, gcodeCommands]);
 
-  // Params the enclosing section already defines — those are not offered.
-  const usedParamKeys = useMemo((): string[] => {
-    const { lineIndex } = caretLineColumn(editText, caret);
-    const section = sectionAtLine(editText, lineIndex);
+  // Params the enclosing section already defines — listed, ranked last, never
+  // ghosted. Resolved from the text at the caret each time rather than memoized:
+  // completion now runs on the keystroke, so it must see the text as it is at
+  // that instant (0.7ms on a 723-line file).
+  const usedParamKeysAt = useCallback((text: string, at: number): string[] => {
+    const { lineIndex } = caretLineColumn(text, at);
+    const section = sectionAtLine(text, lineIndex);
     return section ? section.params.map((param) => param.key) : [];
-  }, [editText, caret]);
+  }, []);
 
-  // Detect a suggestion shortly after typing stops. Cheap (in-memory lookups),
-  // so the delay only exists to avoid recomputing on every keystroke.
+  /**
+   * Compute the suggestion for the caret as the DOM has it right now.
+   *
+   * There is deliberately no idle delay. The whole lookup costs ~0.5µs on a
+   * 723-line file, and debouncing it made the ghost lag the typing: measured at
+   * a 150ms cadence the ghost trailed ~2 keystrokes behind, and at a 60ms
+   * cadence it never appeared at all until the typing stopped.
+   */
+  const updateCompletion = useCallback((el: HTMLTextAreaElement | null) => {
+    if (!isActive || !el || composingRef.current || el.selectionStart !== el.selectionEnd) {
+      setCompletion(null);
+      return;
+    }
+    const at = el.selectionStart;
+    const lineStart = el.value.lastIndexOf('\n', at - 1) + 1;
+    const newline = el.value.indexOf('\n', at);
+    const lineEnd = newline === -1 ? el.value.length : newline;
+    if (lineEnd - lineStart > MAX_COMPLETION_LINE) {
+      setCompletion(null);
+      return;
+    }
+    const result = completionsAt(el.value, at, {
+      ...completionSources,
+      usedParamKeys: usedParamKeysAt(el.value, at),
+    });
+    if (!result) {
+      setCompletion(null);
+      return;
+    }
+    const dismissed = caretLineColumn(el.value, result.context.replaceStart);
+    if (completionDismissed?.line === dismissed.lineIndex && completionDismissed?.column === dismissed.column) {
+      setCompletion(null);
+      return;
+    }
+    setCompletion(result);
+  }, [isActive, completionSources, usedParamKeysAt, completionDismissed]);
+
+  /** Caret bookkeeping shared by the textarea's key/click/select handlers. */
+  const syncCaret = useCallback((el: HTMLTextAreaElement) => {
+    setCaret(el.selectionStart);
+    updateCompletion(el);
+  }, [updateCompletion]);
+
+  // Any change to the text — typing, an accepted suggestion, undo/redo, or the
+  // model's own export landing after the debounced parse — invalidates what was
+  // computed for the previous text. A programmatic replacement moves the caret
+  // without firing a key or select event, so without this the ghost could stay
+  // on screen for a line that no longer exists.
   useEffect(() => {
-    if (!isActive) {
-      setCompletion(null);
-      return;
-    }
+    updateCompletion(textareaRef.current);
+  }, [editText, updateCompletion]);
+
+  // Caret/selection to restore after a programmatic text rewrite (indent,
+  // completion). React state is applied on the next render, so the selection
+  // has to be re-applied in an effect — setting it inline would be undone by
+  // the re-render overwriting `value`.
+  const pendingSelectionRef = useRef<[number, number] | null>(null);
+
+  const applyTextEdit = useCallback((edit: { text: string; start: number; end: number }) => {
+    exportingRef.current = false; // a real user edit, not a model export echo
+    pendingSelectionRef.current = [edit.start, edit.end];
+    // Keep the completion's caret in step with the programmatic edit: a
+    // setSelectionRange fires no `select` event, so without this the next
+    // suggestion is computed for the old caret position (which is why nothing
+    // followed an accepted name until you typed or clicked again).
+    setCaret(edit.start);
+    setEditText(edit.text);
+  }, []);
+
+  useEffect(() => {
+    const pending = pendingSelectionRef.current;
     const el = textareaRef.current;
-    if (!el || el.selectionStart !== el.selectionEnd) {
-      setCompletion(null);
-      return;
-    }
-    if (completionDismissedAt === caret) {
-      setCompletion(null);
-      return;
-    }
-    const timer = setTimeout(() => {
-      const result = completionsAt(editText, caret, { ...completionSources, usedParamKeys });
-      if (!result) {
-        setCompletion(null);
-        return;
-      }
-      const typed = result.candidates[0].insertText === result.context.prefix;
-      if (typed) {
-        // Nothing left to suggest — the token is already complete.
-        setCompletion(null);
-        return;
-      }
-      const firstGhostable = result.candidates.findIndex((candidate) => !candidate.alreadySet);
-      setCompletion({
-        context: result.context,
-        candidates: result.candidates,
-        index: firstGhostable === -1 ? 0 : firstGhostable,
-      });
-    }, COMPLETION_DELAY_MS);
-    return () => clearTimeout(timer);
-  }, [editText, caret, isActive, completionSources, usedParamKeys, completionDismissedAt]);
+    if (!pending || !el) return;
+    pendingSelectionRef.current = null;
+    el.setSelectionRange(pending[0], pending[1]);
+    syncLineNumbersScroll();
+    // The caret moved by the accepted suggestion: show what is next (accepting a
+    // param leaves the caret after `key: `, where the value default belongs).
+    updateCompletion(el);
+  }, [editText, syncLineNumbersScroll, updateCompletion]);
+
 
   // Clear suggestions when the file changes under us.
   useEffect(() => {
     setCompletion(null);
     setCompletionListOpen(false);
-    setCompletionDismissedAt(null);
+    setCompletionDismissed(null);
   }, [activeFile]);
 
   const acceptCompletion = useCallback((index?: number) => {
@@ -667,34 +676,56 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     applyTextEdit({ text: applied.text, start: applied.caret, end: applied.caret });
     setCompletion(null);
     setCompletionListOpen(false);
-    setCompletionDismissedAt(null);
+    setCompletionDismissed(null);
   }, [completion, editText, applyTextEdit]);
 
   const dismissCompletion = useCallback(() => {
-    setCompletionDismissedAt(caret);
+    if (completion) {
+      const { lineIndex, column } = caretLineColumn(editText, completion.context.replaceStart);
+      setCompletionDismissed({ line: lineIndex, column });
+    }
     setCompletion(null);
     setCompletionListOpen(false);
-  }, [caret]);
+  }, [completion, editText]);
 
   // Popup anchor, measured only while the list is open.
   const completionAnchor = useMemo(() => {
     if (!completionListOpen || !completion) return null;
     const el = textareaRef.current;
-    return el ? measureCaretRect(el, caret) : null;
+    // The DOM caret, not the `caret` state: that lags a render behind while typing.
+    return el ? measureCaretRect(el, el.selectionStart) : null;
   }, [completionListOpen, completion, caret, editText]);
 
   // Tab / Shift+Tab indentation. The textarea had no key handler at all, so Tab
   // moved focus out of the editor and there was no way to indent a block.
   const handleEditorKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    // Completion first. Accepting is the RIGHT ARROW (Tab keeps its single
-    // meaning: indent), and only when nothing follows the caret on the line, so
-    // the arrow never swallows a normal cursor move.
-    if (completion) {
-      if (e.key === 'ArrowRight' && !e.shiftKey && !e.ctrlKey && caretAtLineEnd(editText, caret)) {
+    // Accepting is the RIGHT ARROW or End (Tab keeps its single meaning: indent),
+    // and only when the caret sits at the end of the token with nothing after it
+    // on the line, so the arrow never swallows a normal cursor move.
+    //
+    // Computed at the key press rather than read from state: accepting a param
+    // leaves the caret after `key: `, and the next press has to see the value
+    // suggestion with no keystroke, re-render or delay in between.
+    if (
+      (e.key === 'ArrowRight' || e.key === 'End') &&
+      !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey
+    ) {
+      const el = e.currentTarget;
+      const applied = acceptAt(el.value, el.selectionStart, {
+        ...completionSources,
+        usedParamKeys: usedParamKeysAt(el.value, el.selectionStart),
+      });
+      if (applied) {
         e.preventDefault();
-        acceptCompletion();
+        applyTextEdit({ text: applied.text, start: applied.caret, end: applied.caret });
+        setCompletion(null);
+        setCompletionListOpen(false);
+        setCompletionDismissed(null);
+        setCaret(applied.caret);
         return;
       }
+    }
+    if (completion) {
       if (e.key === 'Enter' && completionListOpen) {
         e.preventDefault();
         acceptCompletion();
@@ -722,17 +753,12 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
       e.preventDefault();
       const result = completionsAt(editText, caret, {
         ...completionSources,
-        usedParamKeys,
+        usedParamKeys: usedParamKeysAt(editText, caret),
       });
       if (result) {
-        const firstGhostable = result.candidates.findIndex((candidate) => !candidate.alreadySet);
-        setCompletion({
-          context: result.context,
-          candidates: result.candidates,
-          index: firstGhostable === -1 ? 0 : firstGhostable,
-        });
+        setCompletion(result);
         setCompletionListOpen(true);
-        setCompletionDismissedAt(null);
+        setCompletionDismissed(null);
       }
       return;
     }
@@ -1617,7 +1643,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
                       {completion.context.kind.replace('-', ' ')}
                       {completion.context.prefix ? ` · ${completion.context.prefix}` : ''}
                       <span className="float-right normal-case tracking-normal opacity-70">
-                        → or Enter · Esc
+                        → / End or Enter · Esc
                       </span>
                     </div>
                     {completion.candidates.map((candidate, index) => (
@@ -1648,9 +1674,11 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
                   value={editText}
                   onChange={(e) => handleTextChange(e.target.value)}
                   onKeyDown={handleEditorKeyDown}
-                  onKeyUp={(e) => setCaret(e.currentTarget.selectionStart)}
-                  onClick={(e) => setCaret(e.currentTarget.selectionStart)}
-                  onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
+                  onKeyUp={(e) => syncCaret(e.currentTarget)}
+                  onClick={(e) => syncCaret(e.currentTarget)}
+                  onSelect={(e) => syncCaret(e.currentTarget)}
+                  onCompositionStart={() => { composingRef.current = true; }}
+                  onCompositionEnd={(e) => { composingRef.current = false; syncCaret(e.currentTarget); }}
                   onBlur={() => { setCompletion(null); setCompletionListOpen(false); }}
                   onDragStart={startDragAutoScroll}
                   onScroll={syncLineNumbersScroll}
