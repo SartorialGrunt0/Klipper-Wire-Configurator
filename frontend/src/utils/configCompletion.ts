@@ -45,6 +45,12 @@ export interface Candidate {
   score: number;
   /** Stable order for equal scores. */
   rank: number;
+  /** The param's schema default — the one candidate allowed to ghost on an
+   *  empty value prefix (you just typed `key: ` and the default is the answer). */
+  isDefault?: boolean;
+  /** Already defined in this section. Listed (so the full param list stays
+   *  browsable) but never ghosted, and ranked last. */
+  alreadySet?: boolean;
 }
 
 export interface CompletionSources {
@@ -295,33 +301,52 @@ export function candidatesFor(
     case 'param-key': {
       const schema = context.sectionType ? sources.schemas[context.sectionType] : undefined;
       if (!schema) return [];
-      // Params the section already defines are not offered: you cannot set the
-      // same key twice, so suggesting it is noise.
+      // Already-defined params stay in the list (the full param list is worth
+      // browsing) but are marked and ranked last, and the ghost never uses them.
       const already = new Set(sources.usedParamKeys ?? []);
-      return schema.params
-        .filter((param) => !already.has(param.name))
-        .map((param) => ({
-          label: param.name,
-          insertText: context.trailing.startsWith(':') ? param.name : `${param.name}: `,
-          detail: paramDetail(schema, param.name),
-          kind: 'param-key' as const,
-          score: 0,
-          rank: 0,
-        }));
+      return schema.params.map((param) => ({
+        label: param.name,
+        insertText: context.trailing.startsWith(':') ? param.name : `${param.name}: `,
+        detail: [paramDetail(schema, param.name), already.has(param.name) ? 'already set' : null]
+          .filter(Boolean)
+          .join(' · '),
+        kind: 'param-key' as const,
+        score: 0,
+        rank: already.has(param.name) ? 1000 : 0,
+        alreadySet: already.has(param.name),
+      }));
     }
 
     case 'param-value': {
       const schema = context.sectionType ? sources.schemas[context.sectionType] : undefined;
       const param = schema?.params.find((p) => p.name === context.paramKey);
-      if (!param || param.enum_values.length === 0) return [];
-      return param.enum_values.map((value) => ({
-        label: value,
-        insertText: value,
-        detail: param.description,
-        kind: 'param-value' as const,
-        score: 0,
-        rank: 0,
-      }));
+      if (!param) return [];
+
+      const candidates: Candidate[] = [];
+      const defaultValue = (param.default ?? '').trim();
+      if (defaultValue) {
+        candidates.push({
+          label: defaultValue,
+          insertText: defaultValue,
+          detail: ['default', param.description].filter(Boolean).join(' · '),
+          kind: 'param-value',
+          score: 0,
+          rank: 0,
+          isDefault: true,
+        });
+      }
+      for (const value of param.enum_values) {
+        if (value === defaultValue) continue;
+        candidates.push({
+          label: value,
+          insertText: value,
+          detail: param.description,
+          kind: 'param-value',
+          score: 0,
+          rank: 1,
+        });
+      }
+      return candidates;
     }
 
     case 'gcode-command': {
@@ -347,6 +372,15 @@ export function candidatesFor(
     default:
       return [];
   }
+}
+
+/**
+ * True when nothing follows the caret on its line — the only case where the
+ * right arrow has no text to move over, which is what makes it safe to accept
+ * a suggestion with.
+ */
+export function caretAtLineEnd(text: string, caret: number): boolean {
+  return caret >= lineEndOf(text, caret);
 }
 
 /** One call from the component: context → ranked suggestions. */

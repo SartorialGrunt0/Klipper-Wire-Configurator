@@ -7,6 +7,7 @@ import {
   candidatesFor,
   completionsAt,
   applyCandidate,
+  caretAtLineEnd,
   type CompletionSources,
 } from '../configCompletion';
 import type { SectionSchema, ParamSchema } from '../../types/config';
@@ -316,12 +317,30 @@ describe('candidatesFor', () => {
     expect(candidates[0].detail).toContain('required');
   });
 
-  it('does not offer params the section already defines', () => {
-    const candidates = candidatesFor(ctx({ kind: 'param-key', sectionType: 'stepper_x' }), {
-      ...SOURCES,
-      usedParamKeys: ['microsteps', 'stepper_type'],
-    });
-    expect(candidates.map((c) => c.label)).toEqual(['rotation_distance']);
+  it('marks params the section already defines and ranks them last', () => {
+    const candidates = rankCandidates(
+      candidatesFor(ctx({ kind: 'param-key', sectionType: 'stepper_x' }), {
+        ...SOURCES,
+        usedParamKeys: ['microsteps', 'stepper_type'],
+      }),
+      '',
+    );
+    expect(candidates.map((c) => c.label)).toEqual(['rotation_distance', 'microsteps', 'stepper_type']);
+    expect(candidates.find((c) => c.label === 'microsteps')?.alreadySet).toBe(true);
+    expect(candidates.find((c) => c.label === 'rotation_distance')?.alreadySet).toBe(false);
+    expect(candidates.find((c) => c.label === 'microsteps')?.detail).toContain('already set');
+  });
+
+  it('leaves the ghost a param to suggest even when some are set', () => {
+    const candidates = rankCandidates(
+      candidatesFor(ctx({ kind: 'param-key', sectionType: 'stepper_x' }), {
+        ...SOURCES,
+        usedParamKeys: ['microsteps'],
+      }),
+      'micro',
+    );
+    // Only the set param matches 'micro' — the ghost has nothing to offer it.
+    expect(candidates.every((c) => c.alreadySet)).toBe(true);
   });
 
   it('offers everything when the section is empty', () => {
@@ -333,12 +352,64 @@ describe('candidatesFor', () => {
     expect(candidatesFor(ctx({ kind: 'param-key', sectionType: 'nope' }), SOURCES)).toEqual([]);
   });
 
-  it('offers enum values only when the param has them', () => {
+  it('offers enum values for an enum param', () => {
+    const candidates = candidatesFor(
+      ctx({ kind: 'param-value', sectionType: 'sensor', paramKey: 'sensor_type' }),
+      SOURCES,
+    );
+    expect(candidates.map((c) => c.label)).toEqual([
+      'EPCOS 100K B57560G104F',
+      'NTC 100K MGB18-104F39050L32',
+    ]);
+  });
+
+  it('offers the schema default for a param with one', () => {
+    const candidates = candidatesFor(
+      ctx({ kind: 'param-value', sectionType: 'stepper_x', paramKey: 'microsteps' }),
+      SOURCES,
+    );
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({ label: '16', insertText: '16', isDefault: true });
+  });
+
+  it('ranks the default above the enum values', () => {
+    const schemas = {
+      ...SCHEMAS,
+      sensor: section('sensor', {
+        params: [param('sensor_type', { type: 'enum', default: 'NTC 100K MGB18-104F39050L32', enum_values: ['EPCOS 100K B57560G104F', 'NTC 100K MGB18-104F39050L32'] })],
+      }),
+    };
+    const candidates = rankCandidates(
+      candidatesFor(ctx({ kind: 'param-value', sectionType: 'sensor', paramKey: 'sensor_type' }), {
+        ...SOURCES,
+        schemas,
+      }),
+      '',
+    );
+    expect(candidates.map((c) => c.label)).toEqual([
+      'NTC 100K MGB18-104F39050L32',
+      'EPCOS 100K B57560G104F',
+    ]);
+  });
+
+  it('does not duplicate the default when it is also an enum value', () => {
+    const schemas = {
+      ...SCHEMAS,
+      mcu: section('mcu', {
+        params: [param('restart_method', { type: 'enum', default: 'arduino', enum_values: ['arduino', 'command'] })],
+      }),
+    };
+    const candidates = candidatesFor(ctx({ kind: 'param-value', sectionType: 'mcu', paramKey: 'restart_method' }), {
+      ...SOURCES,
+      schemas,
+    });
+    expect(candidates.map((c) => c.label)).toEqual(['arduino', 'command']);
+    expect(candidates.filter((c) => c.isDefault)).toHaveLength(1);
+  });
+
+  it('offers nothing for a param with neither default nor enum', () => {
     expect(
-      candidatesFor(ctx({ kind: 'param-value', sectionType: 'sensor', paramKey: 'sensor_type' }), SOURCES),
-    ).toHaveLength(2);
-    expect(
-      candidatesFor(ctx({ kind: 'param-value', sectionType: 'stepper_x', paramKey: 'microsteps' }), SOURCES),
+      candidatesFor(ctx({ kind: 'param-value', sectionType: 'stepper_x', paramKey: 'stepper_type' }), SOURCES),
     ).toEqual([]);
   });
 
@@ -347,6 +418,22 @@ describe('candidatesFor', () => {
     expect(candidates[0].label).toBe('CLEAN_NOZZLE');
     expect(candidates[0].detail).toContain('gcode_macro');
     expect(candidates.map((c) => c.label)).toContain('G28');
+  });
+});
+
+describe('caretAtLineEnd', () => {
+  it('is true at the end of a line', () => {
+    expect(caretAtLineEnd('abc', 3)).toBe(true);
+    expect(caretAtLineEnd('abc\ndef', 7)).toBe(true);
+  });
+
+  it('is true right before a newline (nothing to move over on this line)', () => {
+    expect(caretAtLineEnd('abc\ndef', 3)).toBe(true);
+  });
+
+  it('is false when text follows the caret on the same line', () => {
+    expect(caretAtLineEnd('abc', 1)).toBe(false);
+    expect(caretAtLineEnd('max_vel: 100', 7)).toBe(false);
   });
 });
 

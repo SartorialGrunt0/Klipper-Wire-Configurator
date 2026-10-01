@@ -20,6 +20,7 @@ import { findHits, replaceAll, replaceOne, countHits, type FindHit } from '../ut
 import {
   completionsAt,
   applyCandidate,
+  caretAtLineEnd,
   type Candidate,
   type CompletionContext,
   type CompletionSources,
@@ -499,22 +500,30 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   // (see editorHighlight): a tint is an inline span around the line's own
   // markup, so it is painted by the same line box as the characters.
   const activeCandidate = completion ? completion.candidates[completion.index] : null;
+  /** The candidate the ghost suggests: never one the section already defines. */
+  const ghostCandidate = useMemo(
+    () => completion?.candidates.find((candidate) => !candidate.alreadySet) ?? null,
+    [completion],
+  );
 
   // The inline ghost shows the part of the candidate that is not typed yet.
   // Nothing is suggested until something HAS been typed — an empty prefix would
   // otherwise propose the first entry of the list on every blank line.
   const ghost = useMemo(() => {
-    if (!completion || !activeCandidate) return null;
+    if (!completion || !ghostCandidate) return null;
     const { prefix } = completion.context;
-    if (prefix.length === 0) return null;
+    // Nothing to add until something is typed — EXCEPT in a value position,
+    // where the param's default is a specific answer rather than an arbitrary
+    // first entry.
+    if (prefix.length === 0 && !ghostCandidate.isDefault) return null;
     const { lineIndex, column } = caretLineColumn(editText, caret);
     // Slice by the typed length rather than checking the prefix: the ranking
     // already guarantees the match, and a case-insensitive check would leave
     // 'DEL' + 'delta_radius' rendered as a doubled word.
-    const remainder = activeCandidate.insertText.slice(prefix.length);
+    const remainder = ghostCandidate.insertText.slice(prefix.length);
     if (!remainder) return null;
     return { line: lineIndex + 1, column, text: remainder };
-  }, [completion, activeCandidate, editText, caret]);
+  }, [completion, ghostCandidate, editText, caret]);
 
   const highlightedHtml = useMemo(
     () => buildHighlightedHtml(editText, { lineSeverities: issueLineSeverities, ghost }),
@@ -549,6 +558,11 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   const applyTextEdit = useCallback((edit: { text: string; start: number; end: number }) => {
     exportingRef.current = false; // a real user edit, not a model export echo
     pendingSelectionRef.current = [edit.start, edit.end];
+    // Keep the completion's caret in step with the programmatic edit: a
+    // setSelectionRange fires no `select` event, so without this the next
+    // suggestion is computed for the old caret position (which is why nothing
+    // followed an accepted name until you typed or clicked again).
+    setCaret(edit.start);
     setEditText(edit.text);
   }, []);
 
@@ -628,7 +642,12 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
         setCompletion(null);
         return;
       }
-      setCompletion({ context: result.context, candidates: result.candidates, index: 0 });
+      const firstGhostable = result.candidates.findIndex((candidate) => !candidate.alreadySet);
+      setCompletion({
+        context: result.context,
+        candidates: result.candidates,
+        index: firstGhostable === -1 ? 0 : firstGhostable,
+      });
     }, COMPLETION_DELAY_MS);
     return () => clearTimeout(timer);
   }, [editText, caret, isActive, completionSources, usedParamKeys, completionDismissedAt]);
@@ -667,10 +686,11 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   // Tab / Shift+Tab indentation. The textarea had no key handler at all, so Tab
   // moved focus out of the editor and there was no way to indent a block.
   const handleEditorKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    // Completion first: Tab accepts a suggestion when one is showing, and only
-    // falls through to indentation when there is nothing to accept.
+    // Completion first. Accepting is the RIGHT ARROW (Tab keeps its single
+    // meaning: indent), and only when nothing follows the caret on the line, so
+    // the arrow never swallows a normal cursor move.
     if (completion) {
-      if (e.key === 'Tab' && !e.shiftKey) {
+      if (e.key === 'ArrowRight' && !e.shiftKey && !e.ctrlKey && caretAtLineEnd(editText, caret)) {
         e.preventDefault();
         acceptCompletion();
         return;
@@ -705,13 +725,19 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
         usedParamKeys,
       });
       if (result) {
-        setCompletion({ context: result.context, candidates: result.candidates, index: 0 });
+        const firstGhostable = result.candidates.findIndex((candidate) => !candidate.alreadySet);
+        setCompletion({
+          context: result.context,
+          candidates: result.candidates,
+          index: firstGhostable === -1 ? 0 : firstGhostable,
+        });
         setCompletionListOpen(true);
         setCompletionDismissedAt(null);
       }
       return;
     }
     if (e.key !== 'Tab' || e.ctrlKey || e.metaKey || e.altKey) return;
+    setCompletionListOpen(false);
     const el = e.currentTarget;
     const { selectionStart, selectionEnd } = el;
     const value = el.value;
@@ -1590,6 +1616,9 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
                     <div className="border-b border-[var(--color-bg-tertiary)] px-2 py-1 text-[10px] uppercase tracking-wider text-[var(--color-text-secondary)]">
                       {completion.context.kind.replace('-', ' ')}
                       {completion.context.prefix ? ` · ${completion.context.prefix}` : ''}
+                      <span className="float-right normal-case tracking-normal opacity-70">
+                        → or Enter · Esc
+                      </span>
                     </div>
                     {completion.candidates.map((candidate, index) => (
                       <button
