@@ -34,6 +34,9 @@ LOG_DIR="${TMPDIR:-/tmp}"
 LOG_FILE="${LOG_FILE:-${LOG_DIR}/klipper-wire-configurator-install-$(date +%Y%m%d-%H%M%S).log}"
 SYSTEM_SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 LEGACY_USER_SERVICE_FILE="$HOME/.config/systemd/user/${SERVICE_NAME}.service"
+# Path to meminfo for the low-memory Node heap guard. Overridable so the guard
+# can be exercised without a small host (mirrored in scripts/run-service.sh).
+MEMINFO_FILE="${KWC_MEMINFO_FILE:-/proc/meminfo}"
 
 # --- Colors ---
 RED='\033[0;31m'
@@ -143,6 +146,33 @@ resolve_moonraker_config_dir() {
     return 1
 }
 
+# Locate Moonraker's service allow-list ("<data folder>/moonraker.asvc").
+# Moonraker reads that file at startup and refuses to start/stop/restart any
+# service it does not list — including the `managed_services` entry below, so
+# without an entry here an update_manager update pulls the repo and then fails
+# to restart KWC, leaving the previous code running with no visible error.
+# Only an EXISTING file is used: Moonraker writes its defaults into the file
+# on first start, and creating it ourselves would drop those defaults.
+resolve_moonraker_asvc() {
+    local config_dir candidate
+    for candidate in \
+        "$HOME/printer_data/moonraker.asvc" \
+        "$HOME/moonraker.asvc"; do
+        if [ -f "$candidate" ]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    if config_dir="$(resolve_moonraker_config_dir)"; then
+        candidate="$(dirname "$config_dir")/moonraker.asvc"
+        if [ -f "$candidate" ]; then
+            echo "$candidate"
+            return 0
+        fi
+    fi
+    return 1
+}
+
 # Write a file, escalating to sudo when the current user lacks write access
 # (the Moonraker config dir is sometimes root-owned). Ownership is returned
 # to the invoking user so moonraker/Mainsail can keep managing the file.
@@ -187,6 +217,22 @@ restart_moonraker() {
     fi
 }
 
+# Moonraker reads moonraker.conf and moonraker.asvc once at startup, so every
+# writer below only marks the change and the caller applies the single restart
+# once, at the end (one restart covers both edits on a fresh install).
+MOONRAKER_RESTART_NEEDED=0
+
+mark_moonraker_restart_needed() {
+    MOONRAKER_RESTART_NEEDED=1
+}
+
+apply_moonraker_changes() {
+    if [ "$MOONRAKER_RESTART_NEEDED" -eq 1 ]; then
+        restart_moonraker
+        MOONRAKER_RESTART_NEEDED=0
+    fi
+}
+
 # Add KWC to Moonraker's update manager so updates show up in Mainsail /
 # Fluidd. Writes a dedicated include file (same pattern as obico's
 # moonraker-obico-update.cfg) and adds a single [include] line to
@@ -228,7 +274,7 @@ install_moonraker_updater() {
         changed=1
     fi
     if [ "$changed" -eq 1 ]; then
-        restart_moonraker
+        mark_moonraker_restart_needed
     fi
     return 0
 }
@@ -260,7 +306,53 @@ remove_moonraker_updater() {
         fi
     fi
     if [ "$changed" -eq 1 ]; then
-        restart_moonraker
+        mark_moonraker_restart_needed
+    fi
+    return 0
+}
+
+# Terminate a file's last line so an appended entry starts on its own line.
+# (A hand-edited file without a trailing newline would otherwise merge the new
+# entry into the previous one, and the entry would never be found again.)
+ensure_trailing_newline() {
+    local file="$1"
+    [ -s "$file" ] || return 0
+    if [ -n "$(tail -c 1 "$file" 2>/dev/null)" ]; then
+        printf '\n' >> "$file" 2>/dev/null || true
+    fi
+}
+
+# Add (install) or remove (uninstall) KWC in Moonraker's service allow-list, so
+# Moonraker is permitted to restart the service after an update_manager update.
+# Best-effort and idempotent: never aborts the install, never duplicates an
+# entry, and leaves every other line of the user's file untouched.
+edit_moonraker_allowed_services() {
+    local action="$1" asvc changed=0
+    asvc="$(resolve_moonraker_asvc)" || {
+        warn "Could not find moonraker.asvc; Moonraker will not be able to restart ${SERVICE_NAME} after an update."
+        warn "Add '${SERVICE_NAME}' to the allow-list (usually ~/printer_data/moonraker.asvc) and restart Moonraker."
+        return 0
+    }
+
+    # Moonraker strips a trailing ".service" from every entry, so treat both
+    # spellings as already listed.
+    if [ "$action" = "remove" ]; then
+        if grep -qxE "${SERVICE_NAME}(\.service)?" "$asvc"; then
+            changed=1
+            if ! sed -i "/^${SERVICE_NAME}\(\.service\)\?$/d" "$asvc" 2>/dev/null; then
+                sudo sed -i "/^${SERVICE_NAME}\(\.service\)\?$/d" "$asvc" 2>/dev/null || true
+            fi
+        fi
+    elif ! grep -qxE "${SERVICE_NAME}(\.service)?" "$asvc"; then
+        ensure_trailing_newline "$asvc"
+        if append_line_elevated "$asvc" "$SERVICE_NAME"; then
+            changed=1
+            info "Added ${SERVICE_NAME} to Moonraker's service allow-list."
+        fi
+    fi
+
+    if [ "$changed" -eq 1 ]; then
+        mark_moonraker_restart_needed
     fi
     return 0
 }
@@ -467,8 +559,11 @@ if [ "${1:-}" = "--uninstall" ]; then
         edit_mainsail_navi remove
     fi
 
-    # Remove the Moonraker update_manager include (file + include line).
+    # Remove the Moonraker update_manager include (file + include line) and
+    # drop KWC from Moonraker's service allow-list.
     remove_moonraker_updater
+    edit_moonraker_allowed_services remove
+    apply_moonraker_changes
 
     ok "Klipper Wire Configurator has been uninstalled."
     echo ""
@@ -676,14 +771,15 @@ ok "Python dependencies installed."
 deactivate
 
 # --- Build frontend ---
-# Low-memory guard: Node's default V8 old-space is tiny on 32-bit ARM
-# (~128 MB) and the process ABORTS at that ceiling long before the
-# system's swap is used (swap is invisible to a self-imposed heap limit).
-# On devices with < 2 GB combined RAM+swap, size the heap to ~half of
-# that total so npm/Vite page into swap instead of aborting. Verified on
-# a Pi Zero 2 W (424 MB RAM + 1 GB swap): npm ci died at ~130 MB with
-# "Reached heap limit" until this was set (2026-09-06).
-total_mem_mb=$(awk '/MemTotal/ {m=$2} /SwapTotal/ {s=$2} END {printf "%d", (m+s)/1024}' /proc/meminfo 2>/dev/null || echo 0)
+# Low-memory guard: Node's default V8 old-space is sized from physical memory
+# and on 32-bit ARM is far too small for this bundle (~123 MB observed) — the
+# process ABORTS at that ceiling long before the system's swap is used (swap
+# is invisible to a self-imposed heap limit). On devices with < 2 GB combined
+# RAM+swap, size the heap to ~half of that total so npm/Vite page into swap
+# instead of aborting. Verified on a Pi Zero 2 W (424 MB RAM + 1 GB swap):
+# npm ci died at ~130 MB with "Reached heap limit" until this was set
+# (2026-09-06). Mirrored in scripts/run-service.sh — keep the two in sync.
+total_mem_mb=$(awk '/MemTotal/ {m=$2} /SwapTotal/ {s=$2} END {printf "%d", (m+s)/1024}' "$MEMINFO_FILE" 2>/dev/null || echo 0)
 if [ "${total_mem_mb:-0}" -lt 2048 ]; then
     node_heap_mb=$(( total_mem_mb / 2 ))
     [ "$node_heap_mb" -lt 384 ] && node_heap_mb=384
@@ -691,20 +787,75 @@ if [ "${total_mem_mb:-0}" -lt 2048 ]; then
     info "Low-memory device (${total_mem_mb} MB RAM+swap): Node heap raised to ${node_heap_mb} MB."
 fi
 
-info "Installing frontend dependencies..."
 cd "$INSTALL_DIR/frontend"
-if ! npm ci; then
+
+# Build into a staging directory and swap it into place — the same pattern as
+# scripts/run-service.sh, keep the two in sync. Vite empties its output
+# directory first, so building straight into dist/ would destroy the bundle
+# the running service is still serving whenever a build fails.
+build_frontend_staged() {
+    rm -rf dist.next
+    if ! npm run build -- --outDir dist.next; then
+        rm -rf dist.next
+        return 1
+    fi
+    if [ ! -f dist.next/index.html ]; then
+        rm -rf dist.next
+        return 1
+    fi
+    rm -rf dist.previous
+    if [ -d dist ]; then
+        mv dist dist.previous
+    fi
+    mv dist.next dist
+    return 0
+}
+
+# Recovery path for npm optional-dependency / native-binding failures: rebuild
+# node_modules from scratch, then build again. The lock file is restored from
+# git afterwards so the checkout stays clean for the next installer run.
+recover_frontend_build() {
+    rm -rf node_modules package-lock.json
+    npm install || return 1
+    build_frontend_staged || return 1
+    git checkout -- package-lock.json 2>/dev/null || true
+    return 0
+}
+
+# Take the same lock as the service's own rebuild-on-start: two concurrent
+# Vite builds OOM each other on a small host (observed 2026-10-01).
+with_frontend_build_lock() {
+    if ! command -v flock >/dev/null 2>&1; then
+        "$@"
+        return $?
+    fi
+    local lock_fd rc=0
+    # No 2>/dev/null here: `exec` with only redirections applies them to the
+    # SHELL, so silencing it would swallow every later installer diagnostic.
+    if ! exec {lock_fd}>>"$INSTALL_DIR/frontend/.kwc-build.lock"; then
+        "$@"
+        return $?
+    fi
+    flock "$lock_fd"
+    "$@" || rc=$?
+    flock -u "$lock_fd" 2>/dev/null || true
+    exec {lock_fd}>&-
+    return "$rc"
+}
+
+info "Installing frontend dependencies..."
+if ! with_frontend_build_lock npm ci; then
     warn "npm ci failed, falling back to npm install"
-    npm install
+    with_frontend_build_lock npm install
 fi
 ok "Frontend dependencies installed."
 
 info "Building frontend (this may take a few minutes on Raspberry Pi)..."
-if ! npm run build; then
+if ! with_frontend_build_lock build_frontend_staged; then
     warn "Frontend build failed. Attempting recovery for npm optional dependency/native binding issues..."
-    rm -rf node_modules package-lock.json
-    npm install
-    npm run build
+    if ! with_frontend_build_lock recover_frontend_build; then
+        error "Frontend build failed. Any previously built bundle was left untouched; the service keeps serving it."
+    fi
 fi
 ok "Frontend built successfully."
 
@@ -817,6 +968,11 @@ fi
 if resolve_moonraker_config_dir > /dev/null && [ -f "$(resolve_moonraker_config_dir)/moonraker.conf" ]; then
     info "Adding KWC to Moonraker update_manager..."
     install_moonraker_updater
+    # Moonraker also needs KWC in its service allow-list: without it the
+    # update it offers cannot restart the service it just updated.
+    info "Allowing Moonraker to restart the KWC service..."
+    edit_moonraker_allowed_services add
+    apply_moonraker_changes
     ok "Moonraker update_manager configured."
 fi
 
