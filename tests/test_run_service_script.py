@@ -208,3 +208,60 @@ def test_roomy_host_leaves_the_node_heap_alone(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "Low-memory device" not in proc.stdout
     assert "NODE_OPTIONS=<unset>" in npm_log
+
+
+def test_a_failed_swap_reports_failure_and_keeps_the_old_bundle(tmp_path: Path) -> None:
+    """Regression 2026-10-01: the swap was unchecked.
+
+    build_frontend runs inside `if ! ensure_frontend_build`, where bash suspends
+    errexit for the whole call, so an unchecked `mv` fell through to
+    `log "Frontend bundle updated."` and `return 0` while dist/ still held the
+    old bundle and the new one sat stranded in dist.next. The caller believed a
+    bundle that was never installed.
+    """
+    repo = make_checkout(tmp_path)
+    frontend = repo / "frontend"
+    # A staging dir the fake npm can still write into, inside a frontend dir
+    # that can no longer be modified — so `mv dist dist.previous` fails.
+    staging = frontend / "dist.next"
+    (staging / "assets").mkdir(parents=True)
+    (staging / "index.html").write_text("STALE")
+    frontend.chmod(0o555)
+    try:
+        proc, _ = run_service(repo, tmp_path)
+        output = proc.stdout + proc.stderr
+    finally:
+        frontend.chmod(0o755)
+
+    # Fail-open is preserved: the app still starts on the existing bundle.
+    assert proc.returncode == 0, output
+    assert "UVICORN STARTED" in proc.stdout
+    # ...but the failure is reported rather than swallowed.
+    assert "Frontend bundle updated." not in output
+    assert "Could not move the current bundle aside" in output
+
+    assert (frontend / "dist" / "index.html").read_text() == "OLD BUNDLE"
+    assert (staging / "index.html").read_text() == "NEW BUNDLE"
+
+
+def test_a_stranded_previous_bundle_is_restored_rather_than_serving_nothing(
+    tmp_path: Path,
+) -> None:
+    """An interrupted swap leaves dist/ absent and the good bundle in
+    dist.previous. Rebuilding into that state and failing must not leave the UI
+    dead while a usable bundle sits on disk."""
+    repo = make_checkout(tmp_path)
+    frontend = repo / "frontend"
+    (frontend / "dist").rename(frontend / "dist.previous")  # torn swap
+    (frontend / "dist.next" / "assets").mkdir(parents=True)
+    (frontend / "dist.next" / "index.html").write_text("NEW BUNDLE")
+
+    proc, _ = run_service(repo, tmp_path, FAKE_NPM_BUILD_EXIT="1")
+    output = proc.stdout + proc.stderr
+
+    assert proc.returncode == 0, output
+    assert "UVICORN STARTED" in proc.stdout
+    assert "the web UI will be unavailable" not in output
+    assert "No bundle in" in output
+    assert (frontend / "dist" / "index.html").read_text() == "OLD BUNDLE"
+    assert not (frontend / "dist.previous").exists()

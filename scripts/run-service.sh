@@ -105,6 +105,66 @@ with_build_lock() {
     return "$rc"
 }
 
+# Swap a freshly built staging bundle into place, checking EVERY step.
+#
+# This runs inside `if ! ...`, where bash suspends errexit for the whole call
+# (Shell Functions, POSIX: "if a compound command or shell function executes
+# in a context where -e is being ignored, none of the commands executed
+# within ... will be affected by the -e setting"). An unchecked `mv` therefore
+# fails silently and control falls through to the success path — observed
+# 2026-10-01: every rename was denied, the log still said "Frontend bundle
+# updated." and the caller returned 0 with dist/ holding the old bundle and
+# the new one stranded in dist.next.
+#
+# Two renames cannot be atomic, so dist/ is never left absent: if the second
+# rename fails, the first is undone.
+#
+# Kept byte-identical in scripts/install.sh and scripts/run-service.sh —
+# change both or neither.
+swap_staged_bundle() {
+    local dir="${1:?frontend directory required}"
+    local dist="$dir/dist" staging="$dir/dist.next" previous="$dir/dist.previous"
+
+    if [ -e "$previous" ] && ! rm -rf "$previous"; then
+        warn "Could not clear $previous; keeping the current bundle."
+        return 1
+    fi
+    if [ -e "$dist" ] && ! mv "$dist" "$previous"; then
+        warn "Could not move the current bundle aside; keeping it in place."
+        return 1
+    fi
+    if ! mv "$staging" "$dist"; then
+        warn "Could not put the new bundle in place; restoring the previous one."
+        if [ -e "$previous" ]; then
+            mv "$previous" "$dist" 2>/dev/null || \
+                warn "Could not restore $previous — it is still there for a manual move."
+        fi
+        return 1
+    fi
+    return 0
+}
+
+# A bundle sitting in dist.previous is still perfectly good: an interrupted
+# swap, or a failed build after the old bundle was moved aside, leaves the UI
+# dead while a usable bundle is on disk. Put it back rather than serve nothing.
+#
+# Kept byte-identical in scripts/install.sh and scripts/run-service.sh —
+# change both or neither.
+restore_previous_bundle_if_needed() {
+    local dir="${1:?frontend directory required}"
+    local dist="$dir/dist" previous="$dir/dist.previous"
+
+    if [ ! -f "$dist/index.html" ] && [ -f "$previous/index.html" ]; then
+        warn "No bundle in $dist; restoring the previous one from $previous."
+        rm -rf "$dist"
+        if mv "$previous" "$dist"; then
+            return 0
+        fi
+        warn "Could not restore the previous bundle; the web UI will be unavailable."
+    fi
+    return 0
+}
+
 # Build into a staging directory and swap it into place. Vite empties its
 # output directory first, so building straight into dist/ would leave a
 # running server serving a half-written bundle, and a build that dies part-way
@@ -122,11 +182,7 @@ build_frontend() {
         rm -rf "$STAGING_DIR"
         return 1
     fi
-    rm -rf "$PREVIOUS_DIR"
-    if [ -d "$DIST_DIR" ]; then
-        mv "$DIST_DIR" "$PREVIOUS_DIR"
-    fi
-    mv "$STAGING_DIR" "$DIST_DIR"
+    swap_staged_bundle "$FRONTEND_DIR" || return 1
     log "Frontend bundle updated."
     return 0
 }
@@ -152,7 +208,12 @@ _ensure_frontend_build_locked() {
 
 ensure_frontend_build() {
     apply_node_heap_guard
-    with_build_lock _ensure_frontend_build_locked
+    local rc=0
+    with_build_lock _ensure_frontend_build_locked || rc=$?
+    # A failed or interrupted swap can leave the only usable bundle in
+    # dist.previous; put it back rather than start with no UI at all.
+    restore_previous_bundle_if_needed "$FRONTEND_DIR"
+    return "$rc"
 }
 
 if ! ensure_frontend_build; then
