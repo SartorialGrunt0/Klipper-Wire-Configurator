@@ -14,6 +14,7 @@ import React, { useState, useRef, useEffect, useLayoutEffect, useCallback, useMe
 import { useAiStore, AiProvider, providerRequiresApiKey, type ChatMessage } from '../../stores/aiStore';
 import { useChatHistoryStore } from '../../stores/chatHistoryStore';
 import { useConfigStore } from '../../stores/configStore';
+import { usePendingEditStore } from '../../stores/pendingEditStore';
 import { usePrinterMemoryStore, DEFAULT_PRINTER_MEMORY, type PrinterMemory } from '../../stores/printerMemoryStore';
 import * as api from '../../services/api';
 import { extractPrinterMemoryBlock } from '../../utils/printerMemory';
@@ -478,6 +479,9 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       approvalCardRef.current = null;
       setApprovalInvalidation(null);
       setApprovalBusy(false);
+      // The text view's pending-diff pane follows the same slot: a new
+      // request starts with nothing pending.
+      usePendingEditStore.getState().clearPending();
 
       const userMsg = { role: 'user' as const, content: trimmedMessage, hiddenFromUser: options?.hiddenFromUser === true };
       const previousMessages = options?.hiddenFromUser ? [] : messages;
@@ -723,6 +727,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           setApprovalCard(poll);
           setApprovalNow(Date.now());
           setApprovalInvalidation(null);
+          // Mirror the card into the text view's pending-diff pane. Keyed on
+          // this same "new approvalId" moment so the pane and the card can
+          // never disagree about which change is waiting.
+          usePendingEditStore.getState().setPending(poll);
           // A NEW card is a fresh decision: busy is per-card, never
           // inherited. Without this, approving op 1 strands approvalBusy
           // (the ok path clears the card, not the flag) and op 2's card
@@ -756,9 +764,13 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         // Card resolved/closed server-side (e.g. timeout auto-decline):
         // drop it. A decision POST in flight keeps it visible until the
         // main request completes and loading clears.
+        const resolvedId = approvalCardRef.current.approvalId;
         approvalCardRef.current = null;
         setApprovalCard(null);
         setApprovalAnchor(null);
+        // The pane mirrors the card slot, so it drops with it — keyed on the
+        // card we are dropping so a late poll cannot clear a NEWER one.
+        usePendingEditStore.getState().clearPending(resolvedId);
         // The decision is no longer actionable — a lingering green
         // 'awaiting' would keep hailing the user for nothing. Return to
         // grey (only if WE raised the flag; never clobber an 'error').
@@ -867,6 +879,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         setApprovalCard(null);
         setApprovalAnchor(null);
         setApprovalBusy(false);
+        usePendingEditStore.getState().clearPending(card.approvalId);
       } else {
         setApprovalInvalidation(
           result.status === 'already_decided'
@@ -876,6 +889,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         approvalCardRef.current = null;
         setApprovalCard(null);
         setApprovalAnchor(null);
+        usePendingEditStore.getState().clearPending(card.approvalId);
       }
     } catch {
       if (approvalCardRef.current?.approvalId === card.approvalId) {

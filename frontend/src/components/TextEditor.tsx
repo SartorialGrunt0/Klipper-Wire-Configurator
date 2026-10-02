@@ -30,9 +30,12 @@ import { sectionAtLine } from '../utils/configOutline';
 import EditorIssueStrip from './EditorIssueStrip';
 import ConfigTree from './ConfigTree';
 import ChatDock from './ChatDock';
+import PendingDiffPane, { PendingDiffChip } from './PendingDiffPane';
 import { useUiStore } from '../stores/uiStore';
 import { useAiStore } from '../stores/aiStore';
 import { useChatReferenceStore } from '../stores/chatReferenceStore';
+import { usePendingEditStore } from '../stores/pendingEditStore';
+import { paneModeFor } from '../utils/pendingDiff';
 import { selectionToReference } from '../utils/chatReferences';
 import { useMediaQuery, WIDE_VIEWPORT_QUERY } from '../hooks/useMediaQuery';
 import type { TextIssue } from '../types/editor';
@@ -96,6 +99,24 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   const dockAvailable = isActive && wideViewport;
   // Which tree row is currently the dock's preview, so it can highlight it.
   const previewReferenceId = useChatReferenceStore((s) => s.preview?.id ?? null);
+
+  // ── Pending AI change (approve/decline in flight) ────────────────
+  // The pane shows the SAME rows as the approval card while an edit waits on a
+  // decision. What it renders is decided by `paneModeFor` (pure, tested):
+  // another view never gets taken over, and a highlight over the very lines
+  // being changed earns the header chip instead of the takeover.
+  const pendingEdit = usePendingEditStore((s) => s.pending);
+  const pendingTakeover = usePendingEditStore((s) => s.takeover);
+  const selectionReference = useChatReferenceStore((s) => s.selection);
+  const pendingPane = useMemo(
+    () => paneModeFor({
+      model: pendingEdit,
+      takeover: pendingTakeover,
+      isActive,
+      selection: selectionReference,
+    }),
+    [pendingEdit, pendingTakeover, isActive, selectionReference],
+  );
 
   // Helper: export config text via backend (preserves comments, whitespace, #*# markers).
   // Falls back to offline re-serialization when the backend is unreachable; callers use
@@ -908,6 +929,17 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     };
   }, [stopDragAutoScroll]);
 
+  // Follow a pending change to its file, so "Back to editing" lands where the
+  // change is. A file that is not loaded (new_file / delete_file) is left
+  // alone: the diff pane renders from the card, and there is nothing to switch
+  // the editor TO.
+  useEffect(() => {
+    if (pendingPane !== 'diff' || !pendingEdit) return;
+    if (pendingEdit.file === activeFile) return;
+    if (!configFiles[pendingEdit.file]) return;
+    setActiveFile(pendingEdit.file);
+  }, [pendingPane, pendingEdit, activeFile, configFiles, setActiveFile]);
+
   // Consume one-shot line-jump requests (save dialog findings list → the
   // editor). The target file may need switching first; the switch re-exports
   // the file's text asynchronously, so re-attempt until the target file's
@@ -1637,7 +1669,24 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
           </div>
         )}
 
+        {/* Pending AI change: the chip when the takeover was suppressed (the
+            user is pointing at the changed lines, or asked to keep editing),
+            the diff pane when it was not. The card in the chat remains the
+            only decision surface — this surface shows and jumps, never decides. */}
+        {pendingPane === 'chip' && pendingEdit && (
+          <PendingDiffChip
+            model={pendingEdit}
+            onShow={() => usePendingEditStore.getState().showDiff()}
+          />
+        )}
+
         {/* Editor with line numbers and inline issues */}
+        {pendingPane === 'diff' && pendingEdit ? (
+          <PendingDiffPane
+            model={pendingEdit}
+            onHide={() => usePendingEditStore.getState().hideDiff()}
+          />
+        ) : (
         <div className="flex-1 flex overflow-hidden">
           <div className="flex flex-col flex-1 min-w-0 relative">
             <div className="flex-1 flex overflow-hidden" ref={editorScrollRef}>
@@ -1747,6 +1796,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
             />
           </div>
         </div>
+        )}
 
         {/* Apply warning dialog */}
         {/* Removed — text edits apply to the model directly; validation rides

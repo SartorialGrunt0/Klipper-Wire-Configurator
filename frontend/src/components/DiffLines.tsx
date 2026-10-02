@@ -1,0 +1,55 @@
+import type { DiffLine } from '../utils/configDiff';
+import type React from 'react';
+
+/**
+ * The mini-diff rows, in one place.
+ *
+ * The approval card and the text view's pending-change pane BOTH render
+ * through this component on purpose: the pane must show the same diff the card
+ * shows, not a lookalike that can drift away from it. Keep the row chrome here
+ * and nowhere else, and pass only the surrounding chrome (font size, scrolling,
+ * max height) through `className`.
+ *
+ * `w-max min-w-full` keeps a row's tint spanning the visible width while still
+ * growing for a long line, so the colour reads as a row band rather than as
+ * text highlighting. Header rows (`@@ … @@`) deliberately carry no +/- mark.
+ */
+const ROW_CLASS: Record<DiffLine['type'], string> = {
+  added: 'w-max min-w-full bg-green-500/15 text-green-400 px-2',
+  removed: 'w-max min-w-full bg-red-500/15 text-red-400 px-2',
+  header: 'w-max min-w-full bg-blue-500/10 text-blue-400 px-2',
+  context: 'w-max min-w-full text-[var(--color-text-secondary)] px-2',
+};
+
+const ROW_MARK: Record<DiffLine['type'], string> = {
+  added: '+',
+  removed: '-',
+  header: ' ',
+  context: ' ',
+};
+
+interface Props {
+  lines: DiffLine[];
+  /** Layout only — never colours. Those belong to `ROW_CLASS`. */
+  className?: string;
+  /**
+   * The scrolling element, so a caller can bring a specific row into view
+   * (the pending-change pane lands on the first changed row). An explicit prop
+   * rather than `forwardRef`: the rows are a list, and only some callers need
+   * to scroll it.
+   */
+  containerRef?: React.Ref<HTMLPreElement>;
+}
+
+export default function DiffLines({ lines, className = '', containerRef }: Props) {
+  return (
+    <pre ref={containerRef} className={`m-0 font-mono overflow-x-auto ${className}`}>
+      {lines.map((line, i) => (
+        <div key={i} className={ROW_CLASS[line.type]}>
+          <span className="select-none opacity-50 mr-1.5">{ROW_MARK[line.type]}</span>
+          {line.content || '\u00A0'}
+        </div>
+      ))}
+    </pre>
+  );
+}
