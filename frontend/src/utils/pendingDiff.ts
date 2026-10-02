@@ -6,9 +6,14 @@
  * is deliberately pure (no React, no store, no DOM) so the two things that can
  * silently rot are pinned by tests:
  *
- *  1. **1:1 with the card.** The rows come from `buildApprovalDiffLines` — the
+ *  1. **Same rows as the card.** The rows come from `buildApprovalDiffLines` — the
  *     card's own builder — so the pane cannot drift into a lookalike. Same
  *     server data (`card.diff.before/after`), same classification, same order.
+ *     Two deliberate differences (Cliff, 2026-10-02): the pane is uncapped where
+ *     the card stops at `APPROVAL_DIFF_MAX_LINES`, and it diffs with the WHOLE
+ *     FILE as context instead of the card's 2 lines — the pane is standing in
+ *     for the buffer, so it shows all of it with the changed lines marked, not
+ *     just the neighbourhood of the change.
  *  2. **Where the change lands.** The rows are diff rows; the editor's
  *     selection is in *file line numbers*. `changedLines` bridges the two, so
  *     the takeover rule can ask a real question ("is the user highlighting the
@@ -43,6 +48,13 @@ export interface PendingDiffModel {
 }
 
 const HUNK_HEADER_RE = /^@@ -(\d+)(?:,\d+)? \+\d+(?:,\d+)? @@/;
+
+/**
+ * Context for the pane's diff: the whole file. Large rather than Infinity so
+ * `createPatch` compares numbers normally; one hunk then spans the document and
+ * every unchanged line comes back as a context row.
+ */
+export const PANE_DIFF_CONTEXT = 1_000_000;
 
 /**
  * Walk the diff rows and report the BEFORE-file line numbers the change touches.
@@ -94,7 +106,7 @@ export function buildPendingDiffModel(card: ApprovalCard | null): PendingDiffMod
   const diff = card?.diff;
   if (!card || !diff) return null;
   const lines = buildApprovalDiffLines(
-    diff.file, diff.before, diff.after, Number.POSITIVE_INFINITY,
+    diff.file, diff.before, diff.after, Number.POSITIVE_INFINITY, PANE_DIFF_CONTEXT,
   );
   let added = 0;
   let removed = 0;

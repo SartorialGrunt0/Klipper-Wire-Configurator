@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  PANE_DIFF_CONTEXT,
   buildPendingDiffModel,
   paneModeFor,
   selectionOverlapsChange,
@@ -42,12 +43,43 @@ const lines = (startLine: number, endLine: number): ChatReference => ({
 });
 
 describe('buildPendingDiffModel', () => {
-  it('renders the SAME rows the approval card renders (1:1 lock)', () => {
+  it('uses the card\'s builder, with the whole file as context', () => {
     const model = buildPendingDiffModel(card());
     expect(model).not.toBeNull();
+    // Same builder + renderer as the card; the pane just widens the context
+    // from the card's 2 lines to the entire file.
     expect(model!.lines).toEqual(
-      parsePatch(createConfigPatch('printer.cfg', BEFORE, AFTER, 'before', 'after', 2)),
+      parsePatch(createConfigPatch(
+        'printer.cfg', BEFORE, AFTER, 'before', 'after', PANE_DIFF_CONTEXT,
+      )),
     );
+    expect(PANE_DIFF_CONTEXT).toBeGreaterThan(2);
+  });
+
+  it('shows the WHOLE file — untouched lines far from the change are present', () => {
+    const before = [
+      '# top of the file',
+      '[printer]',
+      'kinematics: corexy',
+      ...Array.from({ length: 60 }, (_, i) => `filler_${i}: ${i}`),
+      'max_accel: 8000',
+      ...Array.from({ length: 20 }, (_, i) => `tail_${i}: ${i}`),
+      '',
+    ].join('\n');
+    const after = before.replace('max_accel: 8000', 'max_accel: 12000');
+    const model = buildPendingDiffModel(
+      card({ diff: { file: 'printer.cfg', before, after } }),
+    )!;
+    const contents = model.lines.map((l) => l.content);
+    const body = model.lines.filter((l) => l.type !== 'header').map((l) => l.content);
+    expect(body[0]).toBe('# top of the file');
+    expect(body[body.length - 1]).toBe('tail_19: 19');
+    expect(contents).toContain('filler_0: 0');
+    expect(contents).toContain('tail_19: 19');
+    expect(model.added).toBe(1);
+    expect(model.removed).toBe(1);
+    // Every line of the file is represented (no hunk collapsing).
+    expect(model.lines.filter((l) => l.type === 'header').length).toBe(1);
   });
 
   it('counts added/removed rows and finds the first changed row', () => {
