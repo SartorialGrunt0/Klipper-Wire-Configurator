@@ -114,6 +114,22 @@ def slice_keepalive_block() -> str:
     return "\n".join(lines[start:end])
 
 
+def slice_dependency_install_block() -> str:
+    """The top-level `npm ci` -> `npm install` fallback."""
+    lines = _lines(INSTALL_SH)
+    start = next(
+        i
+        for i, line in enumerate(lines)
+        if line.startswith('info "Installing frontend dependencies..."')
+    )
+    end = next(
+        i
+        for i, line in enumerate(lines)
+        if line.startswith('info "Building frontend (this may take')
+    )
+    return "\n".join(lines[start:end])
+
+
 def slice_helper_block() -> str:
     """install.sh's function definitions, up to on_error() and no further."""
     lines = _lines(INSTALL_SH)
@@ -283,6 +299,93 @@ def test_build_failure_leaves_an_existing_bundle_untouched(tmp_path: Path) -> No
 
     assert "rc=1" in proc.stdout, output
     assert (frontend / "dist" / "index.html").read_text() == "OLD BUNDLE"
+
+
+def test_a_double_dependency_failure_does_not_abort_the_install(tmp_path: Path) -> None:
+    """Only the `if` CONDITION is errexit-exempt, not its then-block.
+
+    When `npm ci` and the `npm install` fallback both failed, the unguarded
+    fallback call ran with errexit active and aborted the installer before the
+    systemd service was installed — the same red line the build stage was fixed
+    for. A network outage on the Pi is enough to reach it.
+    """
+    home = tmp_path / "home"
+    (home / "kwc" / "frontend").mkdir(parents=True)
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    npm = bindir / "npm"
+    npm.write_text('#!/usr/bin/env bash\necho "fake npm: FAIL $*" >&2\nexit 1\n')
+    npm.chmod(0o755)
+
+    script = tmp_path / "harness.sh"
+    script.write_text(
+        HEADER
+        + slice_swap_block()
+        + slice_dependency_install_block()
+        + '\necho "REACHED-END"\n'
+    )
+
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env["PATH"] = f"{bindir}:{env['PATH']}"
+    proc = subprocess.run(
+        ["bash", str(script)], capture_output=True, text=True, env=env, timeout=60
+    )
+
+    output = proc.stdout + proc.stderr
+    assert proc.returncode == 0, output
+    assert "REACHED-END" in proc.stdout, f"the install aborted early:\n{output}"
+    assert "Could not install the frontend dependencies." in output
+
+
+def test_sigterm_still_kills_the_installer_promptly(tmp_path: Path) -> None:
+    """The keepalive must not install an INT/TERM trap.
+
+    Bash defers a trapped signal until the running foreground command finishes,
+    so trapping TERM would make a 20-minute apt/pip/npm run ignore SIGTERM
+    entirely — strictly worse than no trap, which kills the shell at once. An
+    orphaned keepalive is instead bounded by the loop's parent check.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    sudo = bindir / "sudo"
+    sudo.write_text("#!/usr/bin/env bash\nexit 0\n")
+    sudo.chmod(0o755)
+
+    script = tmp_path / "keepalive.sh"
+    script.write_text(
+        HEADER + slice_keepalive_block() + "\nstart_sudo_keepalive\nsleep 30\n"
+    )
+
+    env = dict(os.environ)
+    env["PATH"] = f"{bindir}:{env['PATH']}"
+    env["KWC_SUDO_KEEPALIVE_INTERVAL"] = "30"
+
+    proc = subprocess.Popen(
+        ["bash", str(script)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    try:
+        time.sleep(1.0)
+        proc.terminate()
+        started = time.monotonic()
+        try:
+            proc.wait(timeout=6)
+            exited = True
+        except subprocess.TimeoutExpired:
+            exited = False
+        elapsed = time.monotonic() - started
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+    assert exited, "the installer ignored SIGTERM while a foreground command was running"
+    assert elapsed < 5, f"SIGTERM took {elapsed:.1f}s to take effect"
 
 
 def test_the_sudo_keepalive_does_not_delay_the_exit_path(tmp_path: Path) -> None:

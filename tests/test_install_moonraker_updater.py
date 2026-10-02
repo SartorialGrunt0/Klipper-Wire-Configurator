@@ -179,9 +179,13 @@ def test_a_removal_that_cannot_happen_warns_and_does_not_restart(tmp_path: Path)
 
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    sudo = bindir / "sudo"          # unavailable/refusing, like a locked-down host
-    sudo.write_text("#!/usr/bin/env bash\nexit 1\n")
-    sudo.chmod(0o755)
+    # Fail the tools rather than the permissions: a read-only directory is only
+    # read-only for an unprivileged uid, so a chmod-based barrier would silently
+    # stop testing anything if this ever ran as root.
+    for name in ("sudo", "rm", "sed"):
+        stub = bindir / name
+        stub.write_text("#!/usr/bin/env bash\nexit 1\n")
+        stub.chmod(0o755)
 
     script = tmp_path / "harness.sh"
     script.write_text(
@@ -201,13 +205,9 @@ def test_a_removal_that_cannot_happen_warns_and_does_not_restart(tmp_path: Path)
     env["HOME"] = str(home)
     env["PATH"] = f"{bindir}:{env['PATH']}"
 
-    config_dir.chmod(0o555)          # nothing here can be unlinked or rewritten
-    try:
-        proc = subprocess.run(
-            ["bash", str(script)], capture_output=True, text=True, env=env, timeout=60
-        )
-    finally:
-        config_dir.chmod(0o755)
+    proc = subprocess.run(
+        ["bash", str(script)], capture_output=True, text=True, env=env, timeout=60
+    )
 
     output = proc.stdout + proc.stderr
     assert proc.returncode == 0, output

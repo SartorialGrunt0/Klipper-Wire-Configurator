@@ -125,18 +125,29 @@ swap_staged_bundle() {
     local dir="${1:?frontend directory required}"
     local dist="$dir/dist" staging="$dir/dist.next" previous="$dir/dist.previous"
 
-    # Only clear the old rollback copy when there is a current bundle to take
-    # its place. In the torn-swap state (dist absent) the bundle in
+    # Only clear the old rollback copy when there is a USABLE current bundle to
+    # take its place. In the torn-swap state (dist absent) the bundle in
     # dist.previous is the ONLY usable copy, and deleting it here would destroy
-    # the last good bundle before the new one is secured — defeating the reason
-    # this helper exists.
-    if [ -e "$dist" ]; then
+    # the last good bundle before the new one is secured.
+    #
+    # The test is `dist/index.html`, not `dist`, matching
+    # restore_previous_bundle_if_needed. An empty or corrupt dist/ is not a
+    # bundle worth preserving, but discarding it must not cost us dist.previous.
+    if [ -f "$dist/index.html" ]; then
         if [ -e "$previous" ] && ! rm -rf "$previous"; then
             warn "Could not clear $previous; keeping the current bundle."
             return 1
         fi
         if ! mv "$dist" "$previous"; then
             warn "Could not move the current bundle aside; keeping it in place."
+            return 1
+        fi
+    elif [ -e "$dist" ]; then
+        # dist/ exists but holds no bundle: discard it — otherwise the final
+        # `mv` below would nest dist.next inside it — while leaving
+        # dist.previous, which may be the only good copy, alone.
+        if ! rm -rf "$dist"; then
+            warn "Could not clear the unusable $dist; keeping the current bundle."
             return 1
         fi
     fi

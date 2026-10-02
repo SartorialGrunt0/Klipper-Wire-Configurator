@@ -73,7 +73,8 @@ if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root"
     # child still somehow sees EUID 0. Supported KWC_* env vars are passed
     # explicitly because sudo's -E preservation needs sudoers `setenv` and
     # fails open otherwise.
-    kwc_env=("KWC_PORT=${KWC_PORT:-8099}" "KWC_GIT_REF=${KWC_GIT_REF:-}" "LOG_FILE=$LOG_FILE")
+    kwc_env=("KWC_PORT=${KWC_PORT:-8099}" "KWC_GIT_REF=${KWC_GIT_REF:-}" "LOG_FILE=$LOG_FILE" \
+             "KWC_SUDO_KEEPALIVE_INTERVAL=${KWC_SUDO_KEEPALIVE_INTERVAL:-}")
     [ -n "${KWC_PROJECTS_DIR:-}" ] && kwc_env+=("KWC_PROJECTS_DIR=$KWC_PROJECTS_DIR")
     exec env -u SUDO_USER sudo -u "$SUDO_USER" \
         env "HOME=$real_home" "USER=$SUDO_USER" "${kwc_env[@]}" \
@@ -491,7 +492,17 @@ trap 'on_error "$LINENO" "$?"' ERR
 SUDO_KEEPALIVE_PID=""
 
 start_sudo_keepalive() {
-    local interval="${KWC_SUDO_KEEPALIVE_INTERVAL:-60}"
+    local interval="${KWC_SUDO_KEEPALIVE_INTERVAL:-60}" parent_pid=$$
+    # Validate the knob. `sleep 0` would spin the loop (one sudo call per
+    # iteration — measured ~1000 in 2s), and a non-numeric value makes `sleep`
+    # fail, which under `set -e` kills the background subshell silently, with
+    # stderr already sent to /dev/null. Either way the credential quietly stops
+    # being refreshed, which is the prompt this exists to prevent.
+    case "$interval" in
+        ''|*[!0-9]*) interval=60 ;;
+    esac
+    [ "$interval" -gt 0 ] || interval=60
+
     info "Administrator access is needed for the apt packages and the systemd service."
     if ! sudo -v; then
         error "This installer needs sudo (apt packages and the systemd service)."
@@ -500,20 +511,27 @@ start_sudo_keepalive() {
     # the timestamp can no longer be refreshed (sudoers changed, timeout raised).
     # Also fine on NOPASSWD hosts, where `sudo -v` is a silent no-op.
     #
-    # The stdio redirect is load-bearing, not cosmetic. This script's stdout is
-    # the `exec > >(tee -a "$LOG_FILE")` pipe, and the loop's `sleep` inherits
-    # it: killing the subshell leaves that `sleep` holding the write end, so tee
-    # never sees EOF and EVERY run is delayed by up to a whole interval at exit
-    # (measured 60.0s with the pipe inherited, 3.0s without).
-    ( while true; do sudo -n true 2>/dev/null || exit; sleep "$interval"; done ) >/dev/null 2>&1 &
+    # Two deliberate details:
+    #
+    # 1. The stdio redirect keeps the loop off the `exec > >(tee -a "$LOG_FILE")`
+    #    pipe. The loop's `sleep` inherits that pipe otherwise, so killing the
+    #    subshell leaves the `sleep` holding the write end, tee never sees EOF,
+    #    and EVERY run is delayed by up to a whole interval at exit (measured
+    #    60.0s inherited, 3.0s detached).
+    #
+    # 2. The loop watches its parent instead of relying on a signal trap. Bash
+    #    defers a trapped INT/TERM until the running foreground command finishes,
+    #    so `trap ... TERM` makes a 20-minute apt/pip/npm run IGNORE SIGTERM —
+    #    strictly worse than no trap, which kills the shell immediately. A
+    #    liveness check bounds the orphan to one interval (the subshell only dies
+    #    with the shell if it happens to be idle when the signal lands) without
+    #    changing how the installer responds to signals.
+    ( while kill -0 "$parent_pid" 2>/dev/null; do
+          sudo -n true 2>/dev/null || exit
+          sleep "$interval"
+      done ) >/dev/null 2>&1 &
     SUDO_KEEPALIVE_PID=$!
     trap stop_sudo_keepalive EXIT
-    # bash does not run the EXIT trap for an untrapped signal, so an interrupt
-    # would otherwise leak the loop (observed: an orphaned `sleep` reparented to
-    # init, still refreshing the credential). Clean up, then exit as the shell
-    # convention says for the signal we caught.
-    trap 'stop_sudo_keepalive; exit 130' INT
-    trap 'stop_sudo_keepalive; exit 143' TERM
 }
 
 stop_sudo_keepalive() {
@@ -829,18 +847,29 @@ swap_staged_bundle() {
     local dir="${1:?frontend directory required}"
     local dist="$dir/dist" staging="$dir/dist.next" previous="$dir/dist.previous"
 
-    # Only clear the old rollback copy when there is a current bundle to take
-    # its place. In the torn-swap state (dist absent) the bundle in
+    # Only clear the old rollback copy when there is a USABLE current bundle to
+    # take its place. In the torn-swap state (dist absent) the bundle in
     # dist.previous is the ONLY usable copy, and deleting it here would destroy
-    # the last good bundle before the new one is secured — defeating the reason
-    # this helper exists.
-    if [ -e "$dist" ]; then
+    # the last good bundle before the new one is secured.
+    #
+    # The test is `dist/index.html`, not `dist`, matching
+    # restore_previous_bundle_if_needed. An empty or corrupt dist/ is not a
+    # bundle worth preserving, but discarding it must not cost us dist.previous.
+    if [ -f "$dist/index.html" ]; then
         if [ -e "$previous" ] && ! rm -rf "$previous"; then
             warn "Could not clear $previous; keeping the current bundle."
             return 1
         fi
         if ! mv "$dist" "$previous"; then
             warn "Could not move the current bundle aside; keeping it in place."
+            return 1
+        fi
+    elif [ -e "$dist" ]; then
+        # dist/ exists but holds no bundle: discard it — otherwise the final
+        # `mv` below would nest dist.next inside it — while leaving
+        # dist.previous, which may be the only good copy, alone.
+        if ! rm -rf "$dist"; then
+            warn "Could not clear the unusable $dist; keeping the current bundle."
             return 1
         fi
     fi
@@ -960,11 +989,20 @@ with_frontend_build_lock() {
 }
 
 info "Installing frontend dependencies..."
-if ! with_frontend_build_lock npm ci; then
-    warn "npm ci failed, falling back to npm install"
-    with_frontend_build_lock npm install
+# Every branch is guarded. Only the `if` CONDITION is errexit-exempt, so the
+# then-block used to run with errexit active: when `npm ci` and the `npm
+# install` fallback both failed (a network outage on the Pi is enough) the
+# installer aborted right here — before the service was installed, which is the
+# same red line the build/swap stage was fixed for.
+if with_frontend_build_lock npm ci; then
+    ok "Frontend dependencies installed."
+elif with_frontend_build_lock npm install; then
+    ok "Frontend dependencies installed (via npm install)."
+else
+    warn "Could not install the frontend dependencies."
+    warn "Continuing so the service is still installed — scripts/run-service.sh retries the"
+    warn "install on start, and KWC should recover once the dependencies can be fetched."
 fi
-ok "Frontend dependencies installed."
 
 info "Building frontend (this may take a few minutes on Raspberry Pi)..."
 FRONTEND_BUILD_OK=1

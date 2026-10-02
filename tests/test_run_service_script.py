@@ -248,6 +248,21 @@ def test_a_failed_swap_reports_failure_and_keeps_the_old_bundle(tmp_path: Path) 
     assert (staging / "index.html").read_text() == "NEW BUNDLE"
 
 
+def refusing_mv_for(target_suffix: str) -> str:
+    """A fake `mv` that refuses to move one specific path, passing the rest on."""
+    real_mv = shutil.which("mv")
+    assert real_mv, "mv not found on PATH"
+    return (
+        "#!/usr/bin/env bash\n"
+        'for arg in "$@"; do\n'
+        '    case "$arg" in\n'
+        f'        *{target_suffix}) echo "fake mv: refusing to move $arg" >&2; exit 1 ;;\n'
+        '    esac\n'
+        'done\n'
+        f'exec {real_mv} "$@"\n'
+    )
+
+
 def test_a_failed_swap_does_not_destroy_the_only_good_bundle(tmp_path: Path) -> None:
     """The swap must not clear dist.previous before the new bundle is secured.
 
@@ -259,25 +274,38 @@ def test_a_failed_swap_does_not_destroy_the_only_good_bundle(tmp_path: Path) -> 
     repo = make_checkout(tmp_path)
     frontend = repo / "frontend"
     (frontend / "dist").rename(frontend / "dist.previous")  # torn swap
-    real_mv = shutil.which("mv")
-    assert real_mv, "mv not found on PATH"
-    refusing_mv = (
-        "#!/usr/bin/env bash\n"
-        'for arg in "$@"; do\n'
-        '    case "$arg" in\n'
-        '        */dist.next) echo "fake mv: refusing to move $arg" >&2; exit 1 ;;\n'
-        '    esac\n'
-        'done\n'
-        f'exec {real_mv} "$@"\n'
+    proc, _ = run_service(
+        repo, tmp_path, extra_bins={"mv": refusing_mv_for("/dist.next")}
     )
-
-    proc, _ = run_service(repo, tmp_path, extra_bins={"mv": refusing_mv})
     output = proc.stdout + proc.stderr
 
     assert proc.returncode == 0, output
     assert "Could not put the new bundle in place" in output
     assert (frontend / "dist" / "index.html").read_text() == "OLD BUNDLE", (
         "the only good bundle was destroyed by a failed swap"
+    )
+
+
+def test_an_empty_dist_does_not_cost_us_the_rollback_bundle(tmp_path: Path) -> None:
+    """dist/ can exist without being a bundle.
+
+    The swap must discard a dist/ that holds no index.html — leaving it would
+    make `mv dist.next dist` nest the new bundle inside it — without clearing
+    dist.previous, which may be the only good copy left.
+    """
+    repo = make_checkout(tmp_path)
+    frontend = repo / "frontend"
+    (frontend / "dist").rename(frontend / "dist.previous")
+    (frontend / "dist").mkdir()  # exists, but holds no bundle
+
+    proc, _ = run_service(
+        repo, tmp_path, extra_bins={"mv": refusing_mv_for("/dist.next")}
+    )
+    output = proc.stdout + proc.stderr
+
+    assert proc.returncode == 0, output
+    assert (frontend / "dist" / "index.html").read_text() == "OLD BUNDLE", (
+        "an empty dist/ cost us the rollback bundle"
     )
 
 
