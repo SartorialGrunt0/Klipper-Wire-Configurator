@@ -3,6 +3,7 @@ import {
   CHUNK_RELOAD_GUARD_MS,
   CHUNK_RELOAD_STORAGE_KEY,
   handleChunkLoadError,
+  installChunkReloadGuard,
   shouldReloadForChunkError,
 } from '../chunkReload';
 
@@ -71,5 +72,120 @@ describe('handleChunkLoadError', () => {
 
     expect(handleChunkLoadError(storage, reload, () => 5_000)).toBe(true);
     expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('still reloads when reading the stamp throws (blocked storage)', () => {
+    const storage = {
+      getItem: () => {
+        throw new Error('storage blocked');
+      },
+      setItem: vi.fn(),
+    };
+    const reload = vi.fn();
+
+    expect(handleChunkLoadError(storage, reload, () => 5_000)).toBe(true);
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('still reloads when writing the stamp throws (quota / private mode)', () => {
+    const storage = {
+      getItem: () => null,
+      setItem: () => {
+        throw new Error('quota exceeded');
+      },
+    };
+    const reload = vi.fn();
+
+    expect(handleChunkLoadError(storage, reload, () => 5_000)).toBe(true);
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('shouldReloadForChunkError under clock skew', () => {
+  it('treats a stamp in the future as stale (the clock stepped backwards)', () => {
+    // Without this, `now - last >= guard` stays false for the whole skew and
+    // recovery is silently disabled until real time catches up.
+    expect(shouldReloadForChunkError(10_000_000, 1_000)).toBe(true);
+  });
+});
+
+// A minimal Window. `sessionStorage` is defined as a getter so it can throw
+// the way a storage-blocked browser does.
+type Listener = (event: { preventDefault: () => void }) => void;
+
+function createFakeWindow(options: { sessionStorageThrows?: boolean; name?: string } = {}) {
+  const listeners = new Map<string, Listener[]>();
+  const reload = vi.fn();
+  const data = new Map<string, string>();
+  const storage = {
+    getItem: (key: string) => (data.has(key) ? (data.get(key) as string) : null),
+    setItem: (key: string, value: string) => void data.set(key, value),
+  };
+  const win = {
+    name: options.name ?? '',
+    location: { reload },
+    addEventListener(type: string, listener: Listener) {
+      listeners.set(type, [...(listeners.get(type) ?? []), listener]);
+    },
+  } as unknown as Window;
+
+  Object.defineProperty(win, 'sessionStorage', {
+    get() {
+      if (options.sessionStorageThrows) {
+        throw new Error('storage is not available in this context');
+      }
+      return storage;
+    },
+  });
+
+  return {
+    win,
+    reload,
+    fire(type: string) {
+      for (const listener of listeners.get(type) ?? []) {
+        listener({ preventDefault: vi.fn() });
+      }
+    },
+  };
+}
+
+describe('installChunkReloadGuard', () => {
+  it('reloads on a preload error, then suppresses a second one', () => {
+    const page = createFakeWindow();
+    installChunkReloadGuard(page.win);
+
+    page.fire('vite:preloadError');
+    expect(page.reload).toHaveBeenCalledTimes(1);
+
+    page.fire('vite:preloadError');
+    expect(page.reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('installs without throwing when sessionStorage is blocked', () => {
+    // The regression this guards: a throw here escapes main.tsx module
+    // evaluation, createRoot() is never reached, and the SPA renders nothing.
+    const page = createFakeWindow({ sessionStorageThrows: true });
+
+    expect(() => installChunkReloadGuard(page.win)).not.toThrow();
+
+    page.fire('vite:preloadError');
+    expect(page.reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the loop guard across a reload when sessionStorage is blocked', () => {
+    const first = createFakeWindow({ sessionStorageThrows: true });
+    installChunkReloadGuard(first.win);
+    first.fire('vite:preloadError');
+    expect(first.reload).toHaveBeenCalledTimes(1);
+
+    // The reloaded page gets a fresh Window; only `name` carries over. A
+    // purely in-memory fallback would reset here and loop forever.
+    const second = createFakeWindow({
+      sessionStorageThrows: true,
+      name: first.win.name,
+    });
+    installChunkReloadGuard(second.win);
+    second.fire('vite:preloadError');
+    expect(second.reload).not.toHaveBeenCalled();
   });
 });
