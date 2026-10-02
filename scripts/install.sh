@@ -491,6 +491,7 @@ trap 'on_error "$LINENO" "$?"' ERR
 SUDO_KEEPALIVE_PID=""
 
 start_sudo_keepalive() {
+    local interval="${KWC_SUDO_KEEPALIVE_INTERVAL:-60}"
     info "Administrator access is needed for the apt packages and the systemd service."
     if ! sudo -v; then
         error "This installer needs sudo (apt packages and the systemd service)."
@@ -498,14 +499,26 @@ start_sudo_keepalive() {
     # -n inside the loop: never prompt from the background, and exit quietly if
     # the timestamp can no longer be refreshed (sudoers changed, timeout raised).
     # Also fine on NOPASSWD hosts, where `sudo -v` is a silent no-op.
-    ( while true; do sudo -n true 2>/dev/null || exit; sleep 60; done ) &
+    #
+    # The stdio redirect is load-bearing, not cosmetic. This script's stdout is
+    # the `exec > >(tee -a "$LOG_FILE")` pipe, and the loop's `sleep` inherits
+    # it: killing the subshell leaves that `sleep` holding the write end, so tee
+    # never sees EOF and EVERY run is delayed by up to a whole interval at exit
+    # (measured 60.0s with the pipe inherited, 3.0s without).
+    ( while true; do sudo -n true 2>/dev/null || exit; sleep "$interval"; done ) >/dev/null 2>&1 &
     SUDO_KEEPALIVE_PID=$!
     trap stop_sudo_keepalive EXIT
+    # bash does not run the EXIT trap for an untrapped signal, so an interrupt
+    # would otherwise leak the loop (observed: an orphaned `sleep` reparented to
+    # init, still refreshing the credential). Clean up, then exit as the shell
+    # convention says for the signal we caught.
+    trap 'stop_sudo_keepalive; exit 130' INT
+    trap 'stop_sudo_keepalive; exit 143' TERM
 }
 
 stop_sudo_keepalive() {
-    # Deliberately no `wait`: waiting on a subshell parked in `sleep` can hang
-    # the exit path. Kill it and move on.
+    # No `wait`: it can block on the loop's own `sleep`, and with the stdio
+    # redirect above an orphaned `sleep` no longer delays our exit anyway.
     if [ -n "${SUDO_KEEPALIVE_PID:-}" ]; then
         kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
     fi
@@ -816,13 +829,20 @@ swap_staged_bundle() {
     local dir="${1:?frontend directory required}"
     local dist="$dir/dist" staging="$dir/dist.next" previous="$dir/dist.previous"
 
-    if [ -e "$previous" ] && ! rm -rf "$previous"; then
-        warn "Could not clear $previous; keeping the current bundle."
-        return 1
-    fi
-    if [ -e "$dist" ] && ! mv "$dist" "$previous"; then
-        warn "Could not move the current bundle aside; keeping it in place."
-        return 1
+    # Only clear the old rollback copy when there is a current bundle to take
+    # its place. In the torn-swap state (dist absent) the bundle in
+    # dist.previous is the ONLY usable copy, and deleting it here would destroy
+    # the last good bundle before the new one is secured — defeating the reason
+    # this helper exists.
+    if [ -e "$dist" ]; then
+        if [ -e "$previous" ] && ! rm -rf "$previous"; then
+            warn "Could not clear $previous; keeping the current bundle."
+            return 1
+        fi
+        if ! mv "$dist" "$previous"; then
+            warn "Could not move the current bundle aside; keeping it in place."
+            return 1
+        fi
     fi
     if ! mv "$staging" "$dist"; then
         warn "Could not put the new bundle in place; restoring the previous one."
@@ -899,6 +919,25 @@ recover_frontend_build() {
     return "$rc"
 }
 
+# Build the frontend, falling back to a full recovery — and never abort the
+# install over it. The service can be installed regardless, and
+# scripts/run-service.sh rebuilds the bundle on its first start, so a machine
+# with a service that finishes the job on boot beats a machine with no service
+# at all after a 20-minute build.
+build_frontend_or_recover() {
+    if with_frontend_build_lock build_frontend_staged; then
+        return 0
+    fi
+    warn "Frontend build failed. Attempting recovery for npm optional dependency/native binding issues..."
+    if with_frontend_build_lock recover_frontend_build; then
+        return 0
+    fi
+    # A usable bundle may still be on disk — an interrupted swap leaves one in
+    # dist.previous. Put it back so the service has something to serve.
+    restore_previous_bundle_if_needed "$INSTALL_DIR/frontend"
+    return 1
+}
+
 # Take the same lock as the service's own rebuild-on-start: two concurrent
 # Vite builds OOM each other on a small host (observed 2026-10-01).
 with_frontend_build_lock() {
@@ -928,17 +967,16 @@ fi
 ok "Frontend dependencies installed."
 
 info "Building frontend (this may take a few minutes on Raspberry Pi)..."
-if ! with_frontend_build_lock build_frontend_staged; then
-    warn "Frontend build failed. Attempting recovery for npm optional dependency/native binding issues..."
-    if ! with_frontend_build_lock recover_frontend_build; then
-        # A usable bundle may still be on disk — an interrupted swap leaves one
-        # in dist.previous. Put it back before aborting, so the service has
-        # something to serve rather than starting with no UI at all.
-        restore_previous_bundle_if_needed "$INSTALL_DIR/frontend"
-        error "Frontend build failed. Any previously built bundle was left untouched; the service keeps serving it."
-    fi
+FRONTEND_BUILD_OK=1
+if build_frontend_or_recover; then
+    ok "Frontend built successfully."
+else
+    FRONTEND_BUILD_OK=0
+    warn "Could not build the frontend bundle."
+    warn "Continuing so the service is still installed — scripts/run-service.sh rebuilds the"
+    warn "bundle on start, so KWC should recover on first boot."
+    warn "To build it by hand: cd $INSTALL_DIR/frontend && npm ci && npm run build"
 fi
-ok "Frontend built successfully."
 
 cd "$INSTALL_DIR"
 
@@ -1067,6 +1105,11 @@ fi
 
 # --- Done! ---
 echo ""
+if [ "${FRONTEND_BUILD_OK:-1}" -eq 0 ]; then
+    warn "The frontend bundle could not be built during this install — see the warnings above."
+    warn "The service will attempt the build itself on first start."
+    echo ""
+fi
 echo -e "${GREEN}╔══════════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║     Installation Complete!                        ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════════╝${NC}"

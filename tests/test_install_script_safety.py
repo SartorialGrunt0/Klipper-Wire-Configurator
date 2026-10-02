@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import subprocess
 import textwrap
+import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -77,10 +78,15 @@ def extract_function(path: Path, name: str) -> str:
     fn_start = next(
         i for i, line in enumerate(lines) if line.startswith(f"{name}()")
     )
-    # Count braces from the FUNCTION line: the comments above it contain none,
-    # so starting the count there would end the block immediately.
+    # The opening brace may be on the header line or the next one; count from
+    # whichever line actually carries it, so a restyle cannot truncate the
+    # block to its comment header (which would make the parity test compare two
+    # comment blocks and pass forever).
+    header = fn_start
+    if "{" not in lines[header]:
+        header += 1
     depth = 0
-    end = fn_start
+    end = header
     while True:
         depth += lines[end].count("{") - lines[end].count("}")
         end += 1
@@ -89,6 +95,22 @@ def extract_function(path: Path, name: str) -> str:
     start = fn_start
     while start > 0 and lines[start - 1].startswith("#"):
         start -= 1
+    block = "\n".join(lines[start:end])
+    # Refuse to compare something that cannot be a function body: a slicer that
+    # silently returns a fragment turns every assertion built on it into a
+    # tautology.
+    assert len(block.splitlines()) > 5, f"extraction of {name}() is too small: {block!r}"
+    assert block.rstrip().endswith("}"), f"extraction of {name}() is unterminated"
+    return block
+
+
+def slice_keepalive_block() -> str:
+    """The sudo-keepalive definitions, which sit below on_error()."""
+    lines = _lines(INSTALL_SH)
+    start = next(
+        i for i, line in enumerate(lines) if line.startswith('SUDO_KEEPALIVE_PID=""')
+    )
+    end = next(i for i, line in enumerate(lines) if line.startswith("SCRIPT_DIR="))
     return "\n".join(lines[start:end])
 
 
@@ -191,3 +213,109 @@ def test_recover_frontend_build_restores_the_lock_file_when_it_succeeds(tmp_path
 
     assert "rc=0" in proc.stdout, output
     assert (frontend / "package-lock.json").exists()
+
+
+def run_or_recover_case(tmp_path: Path, *, torn: bool) -> tuple[subprocess.CompletedProcess[str], Path]:
+    """build_frontend_or_recover with a build that always fails."""
+    home = tmp_path / "home"
+    repo = home / "kwc"
+    frontend = repo / "frontend"
+    frontend.mkdir(parents=True)
+    (frontend / "package.json").write_text('{"name": "kwc"}')
+    (frontend / "package-lock.json").write_text('{"lockfileVersion": 3}')
+
+    if torn:
+        # A torn swap: dist is gone and the only good bundle is in dist.previous.
+        (frontend / "dist.previous").mkdir()
+        (frontend / "dist.previous" / "index.html").write_text("OLD BUNDLE")
+    else:
+        (frontend / "dist").mkdir()
+        (frontend / "dist" / "index.html").write_text("OLD BUNDLE")
+
+    for args in (
+        ["git", "init", "-q"],
+        ["git", "add", "-A"],
+        ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t",
+         "commit", "-qm", "init"],
+    ):
+        subprocess.run(args, cwd=repo, check=True, capture_output=True)
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    npm = bindir / "npm"
+    npm.write_text(FAKE_NPM)
+    npm.chmod(0o755)
+
+    script = tmp_path / "harness.sh"
+    script.write_text(
+        HEADER
+        + slice_swap_block()
+        + "\nrc=0\nbuild_frontend_or_recover || rc=$?\necho \"rc=$rc\"\n"
+    )
+
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env["PATH"] = f"{bindir}:{env['PATH']}"
+    env["FAKE_NPM_BUILD_EXIT"] = "1"
+    proc = subprocess.run(
+        ["bash", str(script)], capture_output=True, text=True, env=env, timeout=60
+    )
+    return proc, frontend
+
+
+def test_build_failure_leaves_a_working_bundle_when_the_swap_had_torn(tmp_path: Path) -> None:
+    """The install-time half of the stranded-bundle fix.
+
+    install.sh's recovery path must put back a bundle stranded in dist.previous
+    before it reports failure, so the service has something to serve.
+    """
+    proc, frontend = run_or_recover_case(tmp_path, torn=True)
+    output = proc.stdout + proc.stderr
+
+    assert "rc=1" in proc.stdout, output
+    assert (frontend / "dist" / "index.html").read_text() == "OLD BUNDLE"
+    assert not (frontend / "dist.previous").exists()
+
+
+def test_build_failure_leaves_an_existing_bundle_untouched(tmp_path: Path) -> None:
+    proc, frontend = run_or_recover_case(tmp_path, torn=False)
+    output = proc.stdout + proc.stderr
+
+    assert "rc=1" in proc.stdout, output
+    assert (frontend / "dist" / "index.html").read_text() == "OLD BUNDLE"
+
+
+def test_the_sudo_keepalive_does_not_delay_the_exit_path(tmp_path: Path) -> None:
+    """The keepalive loop must not hold the logging pipe open.
+
+    install.sh's stdout is an `exec > >(tee ...)` pipe. If the loop's `sleep`
+    inherits it, killing the loop leaves that `sleep` holding the write end, tee
+    never sees EOF, and every run is delayed by up to a full interval at exit
+    (measured 60.0s before the redirect, 3.0s after). stdout here is a pipe too,
+    exactly as under `curl | bash`.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    sudo = bindir / "sudo"
+    sudo.write_text("#!/usr/bin/env bash\nexit 0\n")
+    sudo.chmod(0o755)
+
+    script = tmp_path / "keepalive.sh"
+    script.write_text(
+        HEADER + slice_keepalive_block() + "\nstart_sudo_keepalive\nsleep 1\n"
+    )
+
+    env = dict(os.environ)
+    env["PATH"] = f"{bindir}:{env['PATH']}"
+    # Short enough to keep the test fast, long enough that an inherited pipe
+    # would still be held open well past the assertion below.
+    env["KWC_SUDO_KEEPALIVE_INTERVAL"] = "30"
+
+    started = time.monotonic()
+    proc = subprocess.run(
+        ["bash", str(script)], capture_output=True, text=True, env=env, timeout=120
+    )
+    elapsed = time.monotonic() - started
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert elapsed < 15, f"the exit path was delayed by {elapsed:.1f}s"

@@ -160,3 +160,59 @@ def test_a_config_that_already_ends_with_a_newline_is_untouched(tmp_path: Path) 
     proc, conf, _ = run_case(tmp_path, CONF_NO_NEWLINE + "\n")
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert conf.read_text().splitlines() == EXPECTED_LINES
+
+
+def test_a_removal_that_cannot_happen_warns_and_does_not_restart(tmp_path: Path) -> None:
+    """`changed=1` must mean "we changed something", not "we tried".
+
+    Regression: the flag was set before the write was attempted, so a removal
+    that could not happen still restarted Moonraker and --uninstall reported a
+    cleanup it never performed.
+    """
+    home = tmp_path / "home"
+    config_dir = home / "printer_data" / "config"
+    config_dir.mkdir(parents=True)
+    conf = config_dir / "moonraker.conf"
+    conf.write_text("[server]\nhost: 0.0.0.0\n" + INCLUDE_LINE + "\n")
+    include_file = config_dir / INCLUDE_FILE
+    include_file.write_text("[update_manager klipper-wire-configurator]\n")
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    sudo = bindir / "sudo"          # unavailable/refusing, like a locked-down host
+    sudo.write_text("#!/usr/bin/env bash\nexit 1\n")
+    sudo.chmod(0o755)
+
+    script = tmp_path / "harness.sh"
+    script.write_text(
+        HEADER
+        + slice_installer_functions()
+        + textwrap.dedent(
+            """\
+
+            restart_moonraker() { echo "[RESTART] moonraker"; }
+            remove_moonraker_updater
+            apply_moonraker_changes
+            """
+        )
+    )
+
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env["PATH"] = f"{bindir}:{env['PATH']}"
+
+    config_dir.chmod(0o555)          # nothing here can be unlinked or rewritten
+    try:
+        proc = subprocess.run(
+            ["bash", str(script)], capture_output=True, text=True, env=env, timeout=60
+        )
+    finally:
+        config_dir.chmod(0o755)
+
+    output = proc.stdout + proc.stderr
+    assert proc.returncode == 0, output
+    assert "[RESTART] moonraker" not in output, "restarted for a removal that never happened"
+    assert "Could not remove" in output
+    assert "Could not remove the include line" in output
+    assert include_file.exists()
+    assert INCLUDE_LINE in conf.read_text()
