@@ -228,11 +228,10 @@ describe('window.name is shared state and must not be clobbered', () => {
 
     page.fire('vite:preloadError');
 
-    expect(page.reload).toHaveBeenCalledTimes(1);
     expect(page.win.name).toBe(name);
   });
 
-  it('still guards the loop in-page when a foreign name blocks the fallback', () => {
+  it('installs no guard at all when nothing survives a reload', () => {
     const page = createFakeWindow({
       sessionStorageThrows: true,
       name: 'some-other-frame-name',
@@ -242,9 +241,10 @@ describe('window.name is shared state and must not be clobbered', () => {
     page.fire('vite:preloadError');
     page.fire('vite:preloadError');
 
-    // Degraded to one reload per page load, which is the honest trade: the
-    // foreign value is preserved and the loop is still bounded within a load.
-    expect(page.reload).toHaveBeenCalledTimes(1);
+    // Neither window.name nor sessionStorage is available, so a reload could
+    // not be distinguished from the first failure: the guard stands down and
+    // the failure surfaces instead of looping.
+    expect(page.reload).not.toHaveBeenCalled();
     expect(page.win.name).toBe('some-other-frame-name');
   });
 

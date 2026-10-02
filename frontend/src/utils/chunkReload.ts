@@ -83,18 +83,6 @@ export function handleChunkLoadError(
   return true;
 }
 
-/** A store that lasts one page load. The last resort, not the preference. */
-function memoryStore(): StampStore {
-  const data = new Map<string, string>();
-  return {
-    getItem: (key: string): string | null =>
-      data.has(key) ? (data.get(key) as string) : null,
-    setItem: (key: string, value: string): void => {
-      data.set(key, value);
-    },
-  };
-}
-
 /** Our bucket inside `window.name`, or null when the name is someone else's. */
 function readOwnBucket(win: Window): Record<string, string> | null {
   const raw = win.name;
@@ -164,11 +152,11 @@ function windowNameStore(win: Window): StampStore | null {
 }
 
 /**
- * Resolve a usable stamp store, preferring sessionStorage. Never throws:
- * merely reading `window.sessionStorage` can throw when storage is blocked,
- * and this runs at module load.
+ * Resolve a store that survives a reload, preferring sessionStorage. Never
+ * throws (merely reading `window.sessionStorage` can, and this runs at module
+ * load), and returns null when nothing immune to a reload is available.
  */
-export function resolveStampStore(win: Window): StampStore {
+export function resolveStampStore(win: Window): StampStore | null {
   try {
     const storage = win.sessionStorage;
     const probeKey = `${CHUNK_RELOAD_STORAGE_KEY}:probe`;
@@ -179,18 +167,31 @@ export function resolveStampStore(win: Window): StampStore {
     if (typeof storage.removeItem === 'function') {
       storage.removeItem(probeKey);
     }
-    return usable ? storage : (windowNameStore(win) ?? memoryStore());
+    if (usable) {
+      return storage;
+    }
   } catch {
-    return windowNameStore(win) ?? memoryStore();
+    // fall through to the window.name store
   }
+  return windowNameStore(win);
 }
 
-/** Wire the handler up for the lifetime of the document. */
+/**
+ * Wire the handler up for the lifetime of the document.
+ *
+ * Does nothing when no store survives a reload. A store that resets on reload
+ * cannot tell "this is the first failure" from "we already reloaded", so the
+ * guard would reload forever on a genuinely broken deployment — an infinite
+ * loop is worse than the manual refresh it would cost.
+ */
 export function installChunkReloadGuard(
   win: Window = window,
   storage?: StampStore,
 ): void {
   const store = storage ?? resolveStampStore(win);
+  if (!store) {
+    return;
+  }
   win.addEventListener('vite:preloadError', (event) => {
     event.preventDefault();
     handleChunkLoadError(store, () => win.location.reload());
