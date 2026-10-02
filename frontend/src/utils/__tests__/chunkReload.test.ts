@@ -248,6 +248,21 @@ describe('window.name is shared state and must not be clobbered', () => {
     expect(page.win.name).toBe('some-other-frame-name');
   });
 
+  it('stands down when its own marker holds an array', () => {
+    // An array cannot carry our stamp: `setItem` would set a string property on
+    // it, JSON.stringify drops non-index properties, and window.name would come
+    // back byte-identical — so every page load would reload again. The store
+    // must refuse the name rather than install a guard that cannot persist.
+    const name = JSON.stringify({ 'kwc:chunk-reload': [] });
+    const page = createFakeWindow({ sessionStorageThrows: true, name });
+    installChunkReloadGuard(page.win);
+
+    page.fire('vite:preloadError');
+
+    expect(page.reload).not.toHaveBeenCalled();
+    expect(page.win.name).toBe(name);
+  });
+
   it('ignores a non-string value left under its own key', () => {
     // The fixture must be a value that would OTHERWISE look like a fresh
     // timestamp. With the typeof-string guard the number is rejected and the

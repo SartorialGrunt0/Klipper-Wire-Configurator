@@ -522,10 +522,12 @@ start_sudo_keepalive() {
     # 2. The loop watches its parent instead of relying on a signal trap. Bash
     #    defers a trapped INT/TERM until the running foreground command finishes,
     #    so `trap ... TERM` makes a 20-minute apt/pip/npm run IGNORE SIGTERM —
-    #    strictly worse than no trap, which kills the shell immediately. A
-    #    liveness check bounds the orphan to one interval (the subshell only dies
-    #    with the shell if it happens to be idle when the signal lands) without
-    #    changing how the installer responds to signals.
+    #    strictly worse than no trap, which kills the shell at once. Untrapping
+    #    restores that, and bash still runs the EXIT trap on an untrapped
+    #    SIGTERM/SIGINT (verified), so stop_sudo_keepalive reaps the loop in the
+    #    ordinary case. The liveness check covers what the EXIT trap cannot:
+    #    SIGKILL, a crash, or a shell reaped without running traps — those would
+    #    otherwise leave the loop refreshing the credential indefinitely.
     ( while kill -0 "$parent_pid" 2>/dev/null; do
           sudo -n true 2>/dev/null || exit
           sleep "$interval"
@@ -582,8 +584,8 @@ if [ "${1:-}" = "--uninstall" ]; then
     fi
     if [ -f "$LEGACY_USER_SERVICE_FILE" ]; then
         info "Removing legacy user service file..."
-        rm -f "$LEGACY_USER_SERVICE_FILE"
-        systemctl --user daemon-reload
+        rm -f "$LEGACY_USER_SERVICE_FILE" 2>/dev/null || true
+        systemctl --user daemon-reload 2>/dev/null || true
     fi
 
     if [ -d "$INSTALL_DIR" ]; then
@@ -1028,7 +1030,9 @@ if [ -f "$LEGACY_USER_SERVICE_FILE" ]; then
     info "Removing legacy systemd user service so Moonraker can manage the system service..."
     systemctl --user stop "$SERVICE_NAME" 2>/dev/null || true
     systemctl --user disable "$SERVICE_NAME" 2>/dev/null || true
-    rm -f "$LEGACY_USER_SERVICE_FILE"
+    # Guarded: this runs BEFORE the system service is written, so an unguarded
+    # failure here is the "installer aborts half-way with no service" shape.
+    rm -f "$LEGACY_USER_SERVICE_FILE" 2>/dev/null || true
     systemctl --user daemon-reload 2>/dev/null || true
 fi
 

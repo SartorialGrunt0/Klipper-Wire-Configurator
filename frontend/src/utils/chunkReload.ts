@@ -103,7 +103,13 @@ function readOwnBucket(win: Window): Record<string, string> | null {
   if (bucket === undefined) {
     return null;
   }
-  if (typeof bucket !== 'object' || bucket === null) {
+  // `Array.isArray` is load-bearing here, not defensive. An array is a valid
+  // `typeof 'object'`, so without this it is returned as OUR bucket; setItem
+  // then sets a string property on it, and JSON.stringify drops non-index
+  // properties, so the stamp is never persisted and the guard reloads on every
+  // page load — the reload loop this module exists to prevent. (The equivalent
+  // test on `parsed` above is genuinely redundant and was removed.)
+  if (typeof bucket !== 'object' || bucket === null || Array.isArray(bucket)) {
     return null;
   }
   return bucket as Record<string, string>;
