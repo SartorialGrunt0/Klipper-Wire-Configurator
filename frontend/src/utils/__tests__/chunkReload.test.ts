@@ -249,9 +249,16 @@ describe('window.name is shared state and must not be clobbered', () => {
   });
 
   it('ignores a non-string value left under its own key', () => {
+    // The fixture must be a value that would OTHERWISE look like a fresh
+    // timestamp. With the typeof-string guard the number is rejected and the
+    // failure reloads; without it, Number(Date.now()) reads as "we reloaded
+    // moments ago" and the reload is suppressed. A small literal like 42 would
+    // coerce to a stale value and reload either way, making this test inert.
     const page = createFakeWindow({
       sessionStorageThrows: true,
-      name: JSON.stringify({ 'kwc:chunk-reload': { [CHUNK_RELOAD_STORAGE_KEY]: 42 } }),
+      name: JSON.stringify({
+        'kwc:chunk-reload': { [CHUNK_RELOAD_STORAGE_KEY]: Date.now() },
+      }),
     });
     installChunkReloadGuard(page.win);
 

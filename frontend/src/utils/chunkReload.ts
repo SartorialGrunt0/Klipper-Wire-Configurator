@@ -96,15 +96,14 @@ function readOwnBucket(win: Window): Record<string, string> | null {
     // A plain string name ('some-frame') belongs to another script.
     return null;
   }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+  if (typeof parsed !== 'object' || parsed === null) {
     return null;
   }
   const bucket = (parsed as Record<string, unknown>)[WINDOW_NAME_MARKER];
   if (bucket === undefined) {
-    // A JSON object we did not write — someone else's, so leave it alone.
     return null;
   }
-  if (typeof bucket !== 'object' || bucket === null || Array.isArray(bucket)) {
+  if (typeof bucket !== 'object' || bucket === null) {
     return null;
   }
   return bucket as Record<string, string>;
@@ -124,6 +123,12 @@ function windowNameStore(win: Window): StampStore | null {
     return null;
   }
   const write = (bucket: Record<string, string>): void => {
+    // Re-check immediately before writing. Another script can replace
+    // window.name between the read above and this write, and taking over the
+    // new value would break the one promise this store makes.
+    if (readOwnBucket(win) === null) {
+      return;
+    }
     let existing: Record<string, unknown> = {};
     try {
       const parsed: unknown = JSON.parse(win.name || '{}');
@@ -163,9 +168,15 @@ export function resolveStampStore(win: Window): StampStore | null {
     storage.setItem(probeKey, '1');
     const usable = storage.getItem(probeKey) === '1';
     // Remove the probe: this runs on every page load, so leaving it behind
-    // would leak one permanent sessionStorage entry per origin.
+    // would leak one permanent sessionStorage entry per origin. A probe that
+    // cannot be cleaned up is not a reason to abandon otherwise usable storage,
+    // so this failure is contained rather than falling through to the fallback.
     if (typeof storage.removeItem === 'function') {
-      storage.removeItem(probeKey);
+      try {
+        storage.removeItem(probeKey);
+      } catch {
+        // Ignored on purpose — see above.
+      }
     }
     if (usable) {
       return storage;
