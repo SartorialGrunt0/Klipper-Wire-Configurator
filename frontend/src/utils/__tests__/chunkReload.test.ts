@@ -120,6 +120,7 @@ function createFakeWindow(options: { sessionStorageThrows?: boolean; name?: stri
   const storage = {
     getItem: (key: string) => (data.has(key) ? (data.get(key) as string) : null),
     setItem: (key: string, value: string) => void data.set(key, value),
+    removeItem: (key: string) => void data.delete(key),
   };
   const win = {
     name: options.name ?? '',
@@ -141,6 +142,7 @@ function createFakeWindow(options: { sessionStorageThrows?: boolean; name?: stri
   return {
     win,
     reload,
+    data,
     fire(type: string) {
       for (const listener of listeners.get(type) ?? []) {
         listener({ preventDefault: vi.fn() });
@@ -187,5 +189,73 @@ describe('installChunkReloadGuard', () => {
     installChunkReloadGuard(second.win);
     second.fire('vite:preloadError');
     expect(second.reload).not.toHaveBeenCalled();
+  });
+
+  it('uses a caller-supplied store instead of probing for one', () => {
+    const page = createFakeWindow({ sessionStorageThrows: true });
+    const store = fakeStorage();
+    page.win.name = 'left-alone';   // must not be touched: a store was supplied
+
+    installChunkReloadGuard(page.win, store);
+    page.fire('vite:preloadError');
+
+    expect(page.reload).toHaveBeenCalledTimes(1);
+    expect(store.getItem(CHUNK_RELOAD_STORAGE_KEY)).not.toBeNull();
+    expect(page.win.name).toBe('left-alone');
+  });
+
+  it('removes its capability probe from sessionStorage', () => {
+    const page = createFakeWindow();
+    installChunkReloadGuard(page.win);
+
+    expect([...page.data.keys()]).toEqual([]);
+  });
+});
+
+describe('window.name is shared state and must not be clobbered', () => {
+  // sessionStorage is unavailable in all of these, so the window.name fallback
+  // is the store that would be used if the name were ours to take.
+  const foreignNames = [
+    'some-other-frame-name',
+    '[1,2,3]',
+    '{"other":"app-data"}',
+    '{"kwc:chunk-reload-not-ours":{}}',
+  ];
+
+  it.each(foreignNames)('leaves a foreign window.name untouched: %s', (name) => {
+    const page = createFakeWindow({ sessionStorageThrows: true, name });
+    installChunkReloadGuard(page.win);
+
+    page.fire('vite:preloadError');
+
+    expect(page.reload).toHaveBeenCalledTimes(1);
+    expect(page.win.name).toBe(name);
+  });
+
+  it('still guards the loop in-page when a foreign name blocks the fallback', () => {
+    const page = createFakeWindow({
+      sessionStorageThrows: true,
+      name: 'some-other-frame-name',
+    });
+    installChunkReloadGuard(page.win);
+
+    page.fire('vite:preloadError');
+    page.fire('vite:preloadError');
+
+    // Degraded to one reload per page load, which is the honest trade: the
+    // foreign value is preserved and the loop is still bounded within a load.
+    expect(page.reload).toHaveBeenCalledTimes(1);
+    expect(page.win.name).toBe('some-other-frame-name');
+  });
+
+  it('ignores a non-string value left under its own key', () => {
+    const page = createFakeWindow({
+      sessionStorageThrows: true,
+      name: JSON.stringify({ 'kwc:chunk-reload': { [CHUNK_RELOAD_STORAGE_KEY]: 42 } }),
+    });
+    installChunkReloadGuard(page.win);
+
+    expect(() => page.fire('vite:preloadError')).not.toThrow();
+    expect(page.reload).toHaveBeenCalledTimes(1);
   });
 });

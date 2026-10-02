@@ -22,6 +22,9 @@
 export const CHUNK_RELOAD_GUARD_MS = 30_000;
 export const CHUNK_RELOAD_STORAGE_KEY = 'kwc:chunk-reload-at';
 
+/** Namespaces our data inside `window.name`, which other code may also use. */
+const WINDOW_NAME_MARKER = 'kwc:chunk-reload';
+
 /** The slice of Storage this module needs. */
 export type StampStore = Pick<Storage, 'getItem' | 'setItem'>;
 
@@ -80,35 +83,82 @@ export function handleChunkLoadError(
   return true;
 }
 
+/** A store that lasts one page load. The last resort, not the preference. */
+function memoryStore(): StampStore {
+  const data = new Map<string, string>();
+  return {
+    getItem: (key: string): string | null =>
+      data.has(key) ? (data.get(key) as string) : null,
+    setItem: (key: string, value: string): void => {
+      data.set(key, value);
+    },
+  };
+}
+
+/** Our bucket inside `window.name`, or null when the name is someone else's. */
+function readOwnBucket(win: Window): Record<string, string> | null {
+  const raw = win.name;
+  if (!raw) {
+    return {};
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    // A plain string name ('some-frame') belongs to another script.
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return null;
+  }
+  const bucket = (parsed as Record<string, unknown>)[WINDOW_NAME_MARKER];
+  if (bucket === undefined) {
+    // A JSON object we did not write — someone else's, so leave it alone.
+    return null;
+  }
+  if (typeof bucket !== 'object' || bucket === null || Array.isArray(bucket)) {
+    return null;
+  }
+  return bucket as Record<string, string>;
+}
+
 /**
  * A stamp store that survives reloads when sessionStorage is unusable.
  *
  * `window.name` is a per-tab string preserved across same-tab navigations,
- * which is exactly the lifetime a reload-loop guard needs. A purely in-memory
- * fallback would be useless here: it resets on every reload, so the guard
- * would never fire twice and a broken deploy would loop forever.
+ * which is exactly the lifetime a reload-loop guard needs. It is also shared,
+ * legacy state that other code may own, so it is only used when it is empty or
+ * already carries our marker; overwriting a foreign value would destroy it.
+ * Returns null when the name is not ours to take.
  */
-function windowNameStore(win: Window): StampStore {
-  const read = (): Record<string, string> => {
+function windowNameStore(win: Window): StampStore | null {
+  if (readOwnBucket(win) === null) {
+    return null;
+  }
+  const write = (bucket: Record<string, string>): void => {
+    let existing: Record<string, unknown> = {};
     try {
       const parsed: unknown = JSON.parse(win.name || '{}');
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        return parsed as Record<string, string>;
+        existing = parsed as Record<string, unknown>;
       }
     } catch {
-      // A non-JSON window.name (some third-party script) is not ours.
+      existing = {};
     }
-    return {};
+    existing[WINDOW_NAME_MARKER] = bucket;
+    win.name = JSON.stringify(existing);
   };
   return {
     getItem(key: string): string | null {
-      const all = read();
-      return Object.prototype.hasOwnProperty.call(all, key) ? all[key] : null;
+      const bucket = readOwnBucket(win);
+      const value = bucket === null ? undefined : bucket[key];
+      // Only strings are ours; anything else is a foreign value under our key.
+      return typeof value === 'string' ? value : null;
     },
     setItem(key: string, value: string): void {
-      const all = read();
-      all[key] = value;
-      win.name = JSON.stringify(all);
+      const bucket = readOwnBucket(win) ?? {};
+      bucket[key] = value;
+      write(bucket);
     },
   };
 }
@@ -123,12 +173,15 @@ export function resolveStampStore(win: Window): StampStore {
     const storage = win.sessionStorage;
     const probeKey = `${CHUNK_RELOAD_STORAGE_KEY}:probe`;
     storage.setItem(probeKey, '1');
-    if (storage.getItem(probeKey) !== '1') {
-      return windowNameStore(win);
+    const usable = storage.getItem(probeKey) === '1';
+    // Remove the probe: this runs on every page load, so leaving it behind
+    // would leak one permanent sessionStorage entry per origin.
+    if (typeof storage.removeItem === 'function') {
+      storage.removeItem(probeKey);
     }
-    return storage;
+    return usable ? storage : (windowNameStore(win) ?? memoryStore());
   } catch {
-    return windowNameStore(win);
+    return windowNameStore(win) ?? memoryStore();
   }
 }
 
