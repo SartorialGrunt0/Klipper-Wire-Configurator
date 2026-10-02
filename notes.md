@@ -24,15 +24,9 @@ If your installation actually lives at `~/klipper-wire-configurator`, use that e
 
 Klipper Wire Configurator installs a systemd service at `/etc/systemd/system/klipper-wire-configurator.service`, running as your Linux user. Moonraker can restart that service through `managed_services` after updates.
 
-Moonraker also needs permission to restart the service. Add this line to your `moonraker.asvc` allow-list file, which is typically located at `~/printer_data/moonraker.asvc`:
+No `moonraker.asvc` entry is needed. Moonraker's allow-list is consulted by `is_service_allowed()` (`moonraker/components/machine.py`), which unconditionally permits any service whose name begins with `klipper` or `moonraker` — the exemption exists to support multi-instance setups — regardless of what the file contains. `klipper-wire-configurator` matches it, so Moonraker can already start, stop and restart this service out of the box. Confirmed against Moonraker 0.11.0: restarting this service through `/machine/services/restart` succeeds with no allow-list entry, and the exemption has been present since the allow-list was introduced (2022-12-29, commit `690f841`).
 
-```text
-klipper-wire-configurator
-```
-
-Then restart Moonraker.
-
-Once the system service is installed and Moonraker has been restarted, Mainsail's Service Control menu can list `klipper-wire-configurator` and send start, stop, and restart actions through Moonraker.
+Once the system service is installed, Mainsail's Service Control menu can list `klipper-wire-configurator` and send start, stop, and restart actions through Moonraker.
 
 Moonraker's `git_repo` updater does not run this repository's installer script. It pulls the repo, updates Python requirements from `backend/requirements.txt`, and restarts the configured managed service.
 

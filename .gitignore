@@ -8,6 +8,9 @@ frontend/node_modules/
 
 # Build output
 frontend/dist/
+frontend/dist.next/
+frontend/dist.previous/
+frontend/.kwc-build.lock
 frontend/.vite/
 frontend/coverage/
 .coverage

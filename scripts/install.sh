@@ -34,6 +34,9 @@ LOG_DIR="${TMPDIR:-/tmp}"
 LOG_FILE="${LOG_FILE:-${LOG_DIR}/klipper-wire-configurator-install-$(date +%Y%m%d-%H%M%S).log}"
 SYSTEM_SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 LEGACY_USER_SERVICE_FILE="$HOME/.config/systemd/user/${SERVICE_NAME}.service"
+# Path to meminfo for the low-memory Node heap guard. Overridable so the guard
+# can be exercised without a small host (mirrored in scripts/run-service.sh).
+MEMINFO_FILE="${KWC_MEMINFO_FILE:-/proc/meminfo}"
 
 # --- Colors ---
 RED='\033[0;31m'
@@ -70,7 +73,8 @@ if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root"
     # child still somehow sees EUID 0. Supported KWC_* env vars are passed
     # explicitly because sudo's -E preservation needs sudoers `setenv` and
     # fails open otherwise.
-    kwc_env=("KWC_PORT=${KWC_PORT:-8099}" "KWC_GIT_REF=${KWC_GIT_REF:-}" "LOG_FILE=$LOG_FILE")
+    kwc_env=("KWC_PORT=${KWC_PORT:-8099}" "KWC_GIT_REF=${KWC_GIT_REF:-}" "LOG_FILE=$LOG_FILE" \
+             "KWC_SUDO_KEEPALIVE_INTERVAL=${KWC_SUDO_KEEPALIVE_INTERVAL:-}")
     [ -n "${KWC_PROJECTS_DIR:-}" ] && kwc_env+=("KWC_PROJECTS_DIR=$KWC_PROJECTS_DIR")
     exec env -u SUDO_USER sudo -u "$SUDO_USER" \
         env "HOME=$real_home" "USER=$SUDO_USER" "${kwc_env[@]}" \
@@ -143,6 +147,16 @@ resolve_moonraker_config_dir() {
     return 1
 }
 
+# NOTE: there is deliberately no moonraker.asvc handling here. Moonraker's
+# is_service_allowed() (machine.py) unconditionally permits any service whose
+# name matches ^klipper[_-]?\d* or ^moonraker[_-]?\d*, independently of the
+# allow-list file, and this service is named klipper-wire-configurator. The
+# exemption shipped in the same commit that introduced the allow-list
+# (Moonraker 690f841, 2022-12-29), so an entry has never been required.
+# Verified live 2026-10-01: with no entry in moonraker.asvc, Moonraker's
+# /machine/services/restart?service=klipper-wire-configurator returned ok and
+# the unit's MainPID changed.
+
 # Write a file, escalating to sudo when the current user lacks write access
 # (the Moonraker config dir is sometimes root-owned). Ownership is returned
 # to the invoking user so moonraker/Mainsail can keep managing the file.
@@ -187,6 +201,21 @@ restart_moonraker() {
     fi
 }
 
+# Moonraker reads moonraker.conf once at startup, so every writer below only
+# marks the change and the caller applies a single restart at the end.
+MOONRAKER_RESTART_NEEDED=0
+
+mark_moonraker_restart_needed() {
+    MOONRAKER_RESTART_NEEDED=1
+}
+
+apply_moonraker_changes() {
+    if [ "$MOONRAKER_RESTART_NEEDED" -eq 1 ]; then
+        restart_moonraker
+        MOONRAKER_RESTART_NEEDED=0
+    fi
+}
+
 # Add KWC to Moonraker's update manager so updates show up in Mainsail /
 # Fluidd. Writes a dedicated include file (same pattern as obico's
 # moonraker-obico-update.cfg) and adds a single [include] line to
@@ -224,11 +253,20 @@ install_moonraker_updater() {
     fi
 
     if ! grep -q '^\[include klipper-wire-configurator-update\.cfg\]' "$moonraker_conf"; then
-        append_line_elevated "$moonraker_conf" "[include klipper-wire-configurator-update.cfg]" || true
-        changed=1
+        # Terminate the user's last line first. Appending to a config with no
+        # trailing newline merges the directive into it — corrupting a file we
+        # do not own, and producing text the removal above can never match, so
+        # --uninstall could not undo it.
+        ensure_trailing_newline "$moonraker_conf"
+        if append_line_elevated "$moonraker_conf" "[include klipper-wire-configurator-update.cfg]"; then
+            changed=1
+        else
+            warn "Could not add the include line to $moonraker_conf — add it manually:"
+            warn "  [include klipper-wire-configurator-update.cfg]"
+        fi
     fi
     if [ "$changed" -eq 1 ]; then
-        restart_moonraker
+        mark_moonraker_restart_needed
     fi
     return 0
 }
@@ -242,10 +280,17 @@ remove_moonraker_updater() {
     include_file="$config_dir/klipper-wire-configurator-update.cfg"
 
     if [ -e "$include_file" ]; then
+        # Only claim a change when the file is actually gone: setting changed=1
+        # unconditionally restarted Moonraker for a removal that never
+        # happened (a failed rm with no usable sudo).
         if ! rm -f "$include_file" 2>/dev/null; then
             sudo rm -f "$include_file" 2>/dev/null || true
         fi
-        changed=1
+        if [ ! -e "$include_file" ]; then
+            changed=1
+        else
+            warn "Could not remove $include_file — remove it manually."
+        fi
     fi
     if [ -f "$moonraker_conf" ]; then
         local had_line=0
@@ -256,13 +301,38 @@ remove_moonraker_updater() {
             sudo sed -i '/^\[include klipper-wire-configurator-update\.cfg\]$/d' "$moonraker_conf" 2>/dev/null || true
         fi
         if [ "$had_line" -eq 1 ]; then
-            changed=1
+            if grep -q '^\[include klipper-wire-configurator-update\.cfg\]' "$moonraker_conf"; then
+                warn "Could not remove the include line from $moonraker_conf — remove it manually."
+            else
+                changed=1
+            fi
         fi
     fi
     if [ "$changed" -eq 1 ]; then
-        restart_moonraker
+        mark_moonraker_restart_needed
     fi
     return 0
+}
+
+# Terminate a file's last line so an appended entry starts on its own line.
+# Without this, a hand-edited file with no trailing newline merges the new
+# entry into the previous line — corrupting a config the installer does not
+# own, and making the added text unfindable, so --uninstall can never remove it.
+#
+# Escalates like the append helpers: a file that needs `sudo tee -a` to append
+# also needs elevation to add the newline, and silently doing nothing here would
+# reintroduce exactly the merge this exists to prevent.
+ensure_trailing_newline() {
+    local file="$1"
+    [ -s "$file" ] || return 0
+    # Command substitution strips trailing newlines, so an empty result means
+    # the file already ends with one.
+    [ -n "$(tail -c 1 "$file" 2>/dev/null)" ] || return 0
+    if printf '\n' >> "$file" 2>/dev/null; then
+        return 0
+    fi
+    warn "No write access to $file, retrying with sudo..."
+    printf '\n' | sudo tee -a "$file" > /dev/null 2>&1 || true
 }
 
 # Merge (or remove) the KWC entry in Mainsail's navi.json. Keeps any other
@@ -411,6 +481,69 @@ chmod 666 "$LOG_FILE" 2>/dev/null || true
 exec > >(tee -a "$LOG_FILE") 2>&1
 trap 'on_error "$LINENO" "$?"' ERR
 
+# --- Sudo credential lifetime ---
+# sudo caches credentials for timestamp_timeout (15 minutes by default, per
+# tty). This installer's two sudo-requiring phases — apt at the start and the
+# systemd service at the end — straddle the pip install, `npm ci` and the Vite
+# build, which is 15-40 minutes on a Pi Zero 2 W. Without this the password is
+# requested a second time mid-install with no explanation (field report
+# 2026-10-01, V2.7.0), which under `curl | bash` reads as a hang. Ask once and
+# keep the timestamp warm for the whole run.
+SUDO_KEEPALIVE_PID=""
+
+start_sudo_keepalive() {
+    local interval="${KWC_SUDO_KEEPALIVE_INTERVAL:-60}" parent_pid=$$
+    # Validate the knob. `sleep 0` would spin the loop (one sudo call per
+    # iteration — measured ~1000 in 2s), and a non-numeric value makes `sleep`
+    # fail, which under `set -e` kills the background subshell silently, with
+    # stderr already sent to /dev/null. Either way the credential quietly stops
+    # being refreshed, which is the prompt this exists to prevent.
+    case "$interval" in
+        ''|*[!0-9]*) interval=60 ;;
+    esac
+    [ "$interval" -gt 0 ] || interval=60
+
+    info "Administrator access is needed for the apt packages and the systemd service."
+    if ! sudo -v; then
+        error "This installer needs sudo (apt packages and the systemd service)."
+    fi
+    # -n inside the loop: never prompt from the background, and exit quietly if
+    # the timestamp can no longer be refreshed (sudoers changed, timeout raised).
+    # Also fine on NOPASSWD hosts, where `sudo -v` is a silent no-op.
+    #
+    # Two deliberate details:
+    #
+    # 1. The stdio redirect keeps the loop off the `exec > >(tee -a "$LOG_FILE")`
+    #    pipe. The loop's `sleep` inherits that pipe otherwise, so killing the
+    #    subshell leaves the `sleep` holding the write end, tee never sees EOF,
+    #    and EVERY run is delayed by up to a whole interval at exit (measured
+    #    60.0s inherited, 3.0s detached).
+    #
+    # 2. The loop watches its parent instead of relying on a signal trap. Bash
+    #    defers a trapped INT/TERM until the running foreground command finishes,
+    #    so `trap ... TERM` makes a 20-minute apt/pip/npm run IGNORE SIGTERM —
+    #    strictly worse than no trap, which kills the shell at once. Untrapping
+    #    restores that, and bash still runs the EXIT trap on an untrapped
+    #    SIGTERM/SIGINT (verified), so stop_sudo_keepalive reaps the loop in the
+    #    ordinary case. The liveness check covers what the EXIT trap cannot:
+    #    SIGKILL, a crash, or a shell reaped without running traps — those would
+    #    otherwise leave the loop refreshing the credential indefinitely.
+    ( while kill -0 "$parent_pid" 2>/dev/null; do
+          sudo -n true 2>/dev/null || exit
+          sleep "$interval"
+      done ) >/dev/null 2>&1 &
+    SUDO_KEEPALIVE_PID=$!
+    trap stop_sudo_keepalive EXIT
+}
+
+stop_sudo_keepalive() {
+    # No `wait`: it can block on the loop's own `sleep`, and with the stdio
+    # redirect above an orphaned `sleep` no longer delays our exit anyway.
+    if [ -n "${SUDO_KEEPALIVE_PID:-}" ]; then
+        kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
+    fi
+}
+
 # Detect if we're already running from inside a valid clone of this repo.
 # This avoids creating a duplicate when the local directory name differs in
 # case from INSTALL_DIR (e.g. Klipper-Wire-Configurator vs klipper-wire-configurator).
@@ -451,8 +584,8 @@ if [ "${1:-}" = "--uninstall" ]; then
     fi
     if [ -f "$LEGACY_USER_SERVICE_FILE" ]; then
         info "Removing legacy user service file..."
-        rm -f "$LEGACY_USER_SERVICE_FILE"
-        systemctl --user daemon-reload
+        rm -f "$LEGACY_USER_SERVICE_FILE" 2>/dev/null || true
+        systemctl --user daemon-reload 2>/dev/null || true
     fi
 
     if [ -d "$INSTALL_DIR" ]; then
@@ -469,6 +602,7 @@ if [ "${1:-}" = "--uninstall" ]; then
 
     # Remove the Moonraker update_manager include (file + include line).
     remove_moonraker_updater
+    apply_moonraker_changes
 
     ok "Klipper Wire Configurator has been uninstalled."
     echo ""
@@ -505,6 +639,7 @@ else
 fi
 
 # --- Install system dependencies ---
+start_sudo_keepalive
 info "Updating package lists..."
 sudo apt-get update
 
@@ -676,14 +811,15 @@ ok "Python dependencies installed."
 deactivate
 
 # --- Build frontend ---
-# Low-memory guard: Node's default V8 old-space is tiny on 32-bit ARM
-# (~128 MB) and the process ABORTS at that ceiling long before the
-# system's swap is used (swap is invisible to a self-imposed heap limit).
-# On devices with < 2 GB combined RAM+swap, size the heap to ~half of
-# that total so npm/Vite page into swap instead of aborting. Verified on
-# a Pi Zero 2 W (424 MB RAM + 1 GB swap): npm ci died at ~130 MB with
-# "Reached heap limit" until this was set (2026-09-06).
-total_mem_mb=$(awk '/MemTotal/ {m=$2} /SwapTotal/ {s=$2} END {printf "%d", (m+s)/1024}' /proc/meminfo 2>/dev/null || echo 0)
+# Low-memory guard: Node's default V8 old-space is sized from physical memory
+# and on 32-bit ARM is far too small for this bundle (~123 MB observed) — the
+# process ABORTS at that ceiling long before the system's swap is used (swap
+# is invisible to a self-imposed heap limit). On devices with < 2 GB combined
+# RAM+swap, size the heap to ~half of that total so npm/Vite page into swap
+# instead of aborting. Verified on a Pi Zero 2 W (424 MB RAM + 1 GB swap):
+# npm ci died at ~130 MB with "Reached heap limit" until this was set
+# (2026-09-06). Mirrored in scripts/run-service.sh — keep the two in sync.
+total_mem_mb=$(awk '/MemTotal/ {m=$2} /SwapTotal/ {s=$2} END {printf "%d", (m+s)/1024}' "$MEMINFO_FILE" 2>/dev/null || echo 0)
 if [ "${total_mem_mb:-0}" -lt 2048 ]; then
     node_heap_mb=$(( total_mem_mb / 2 ))
     [ "$node_heap_mb" -lt 384 ] && node_heap_mb=384
@@ -691,22 +827,196 @@ if [ "${total_mem_mb:-0}" -lt 2048 ]; then
     info "Low-memory device (${total_mem_mb} MB RAM+swap): Node heap raised to ${node_heap_mb} MB."
 fi
 
-info "Installing frontend dependencies..."
 cd "$INSTALL_DIR/frontend"
-if ! npm ci; then
-    warn "npm ci failed, falling back to npm install"
-    npm install
+
+# Swap a freshly built staging bundle into place, checking EVERY step.
+#
+# This runs inside `if ! ...`, where bash suspends errexit for the whole call
+# (Shell Functions, POSIX: "if a compound command or shell function executes
+# in a context where -e is being ignored, none of the commands executed
+# within ... will be affected by the -e setting"). An unchecked `mv` therefore
+# fails silently and control falls through to the success path — observed
+# 2026-10-01: every rename was denied, the log still said "Frontend bundle
+# updated." and the caller returned 0 with dist/ holding the old bundle and
+# the new one stranded in dist.next.
+#
+# Two renames cannot be atomic, so dist/ is never left absent: if the second
+# rename fails, the first is undone.
+#
+# Kept byte-identical in scripts/install.sh and scripts/run-service.sh —
+# change both or neither.
+swap_staged_bundle() {
+    local dir="${1:?frontend directory required}"
+    local dist="$dir/dist" staging="$dir/dist.next" previous="$dir/dist.previous"
+
+    # Only clear the old rollback copy when there is a USABLE current bundle to
+    # take its place. In the torn-swap state (dist absent) the bundle in
+    # dist.previous is the ONLY usable copy, and deleting it here would destroy
+    # the last good bundle before the new one is secured.
+    #
+    # The test is `dist/index.html`, not `dist`, matching
+    # restore_previous_bundle_if_needed. An empty or corrupt dist/ is not a
+    # bundle worth preserving, but discarding it must not cost us dist.previous.
+    if [ -f "$dist/index.html" ]; then
+        if [ -e "$previous" ] && ! rm -rf "$previous"; then
+            warn "Could not clear $previous; keeping the current bundle."
+            return 1
+        fi
+        if ! mv "$dist" "$previous"; then
+            warn "Could not move the current bundle aside; keeping it in place."
+            return 1
+        fi
+    elif [ -e "$dist" ]; then
+        # dist/ exists but holds no bundle: discard it — otherwise the final
+        # `mv` below would nest dist.next inside it — while leaving
+        # dist.previous, which may be the only good copy, alone.
+        if ! rm -rf "$dist"; then
+            warn "Could not clear the unusable $dist; keeping the current bundle."
+            return 1
+        fi
+    fi
+    if ! mv "$staging" "$dist"; then
+        warn "Could not put the new bundle in place; restoring the previous one."
+        if [ -e "$previous" ]; then
+            mv "$previous" "$dist" 2>/dev/null || \
+                warn "Could not restore $previous — it is still there for a manual move."
+        fi
+        return 1
+    fi
+    return 0
+}
+
+# A bundle sitting in dist.previous is still perfectly good: an interrupted
+# swap, or a failed build after the old bundle was moved aside, leaves the UI
+# dead while a usable bundle is on disk. Put it back rather than serve nothing.
+#
+# Kept byte-identical in scripts/install.sh and scripts/run-service.sh —
+# change both or neither.
+restore_previous_bundle_if_needed() {
+    local dir="${1:?frontend directory required}"
+    local dist="$dir/dist" previous="$dir/dist.previous"
+
+    if [ ! -f "$dist/index.html" ] && [ -f "$previous/index.html" ]; then
+        warn "No bundle in $dist; restoring the previous one from $previous."
+        rm -rf "$dist"
+        if mv "$previous" "$dist"; then
+            return 0
+        fi
+        warn "Could not restore the previous bundle; the web UI will be unavailable."
+    fi
+    return 0
+}
+
+# Build into a staging directory and swap it into place. Vite empties its
+# output directory first, so building straight into dist/ would destroy the
+# bundle the running service is still serving whenever a build fails.
+#
+# Explicit paths rather than relying on the caller's cwd: this is called from
+# the main install body and from the recovery path, and an unnoticed `cd`
+# between the two would silently build the wrong directory.
+build_frontend_staged() {
+    local frontend_dir="$INSTALL_DIR/frontend"
+    rm -rf "$frontend_dir/dist.next"
+    if ! ( cd "$frontend_dir" && npm run build -- --outDir dist.next ); then
+        rm -rf "$frontend_dir/dist.next"
+        return 1
+    fi
+    if [ ! -f "$frontend_dir/dist.next/index.html" ]; then
+        rm -rf "$frontend_dir/dist.next"
+        return 1
+    fi
+    swap_staged_bundle "$frontend_dir" || return 1
+    return 0
+}
+
+# Recovery path for npm optional-dependency / native-binding failures: rebuild
+# node_modules from scratch, then build again.
+#
+# package-lock.json is TRACKED and this path deliberately deletes it, so it is
+# restored from git on EVERY exit, not only on success. Returning early with
+# the lock file missing dirties the checkout, which (a) aborts every later
+# installer run at the clean-tree gate below and (b) breaks `npm ci` in
+# run-service.sh's rebuild-on-start, permanently degrading that path to
+# fail-open warnings.
+recover_frontend_build() {
+    local frontend_dir="$INSTALL_DIR/frontend" rc=0
+    rm -rf "$frontend_dir/node_modules" "$frontend_dir/package-lock.json"
+    if ! ( cd "$frontend_dir" && npm install ); then
+        rc=1
+    elif ! build_frontend_staged; then
+        rc=1
+    fi
+    ( cd "$frontend_dir" && git checkout -- package-lock.json ) 2>/dev/null || true
+    return "$rc"
+}
+
+# Build the frontend, falling back to a full recovery — and never abort the
+# install over it. The service can be installed regardless, and
+# scripts/run-service.sh rebuilds the bundle on its first start, so a machine
+# with a service that finishes the job on boot beats a machine with no service
+# at all after a 20-minute build.
+build_frontend_or_recover() {
+    if with_frontend_build_lock build_frontend_staged; then
+        return 0
+    fi
+    warn "Frontend build failed. Attempting recovery for npm optional dependency/native binding issues..."
+    if with_frontend_build_lock recover_frontend_build; then
+        return 0
+    fi
+    # A usable bundle may still be on disk — an interrupted swap leaves one in
+    # dist.previous. Put it back so the service has something to serve.
+    restore_previous_bundle_if_needed "$INSTALL_DIR/frontend"
+    return 1
+}
+
+# Take the same lock as the service's own rebuild-on-start: two concurrent
+# Vite builds OOM each other on a small host (observed 2026-10-01).
+with_frontend_build_lock() {
+    if ! command -v flock >/dev/null 2>&1; then
+        "$@"
+        return $?
+    fi
+    local lock_fd rc=0
+    # No 2>/dev/null here: `exec` with only redirections applies them to the
+    # SHELL, so silencing it would swallow every later installer diagnostic.
+    if ! exec {lock_fd}>>"$INSTALL_DIR/frontend/.kwc-build.lock"; then
+        "$@"
+        return $?
+    fi
+    flock "$lock_fd"
+    "$@" || rc=$?
+    flock -u "$lock_fd" 2>/dev/null || true
+    exec {lock_fd}>&-
+    return "$rc"
+}
+
+info "Installing frontend dependencies..."
+# Every branch is guarded. Only the `if` CONDITION is errexit-exempt, so the
+# then-block used to run with errexit active: when `npm ci` and the `npm
+# install` fallback both failed (a network outage on the Pi is enough) the
+# installer aborted right here — before the service was installed, which is the
+# same red line the build/swap stage was fixed for.
+if with_frontend_build_lock npm ci; then
+    ok "Frontend dependencies installed."
+elif with_frontend_build_lock npm install; then
+    ok "Frontend dependencies installed (via npm install)."
+else
+    warn "Could not install the frontend dependencies."
+    warn "Continuing so the service is still installed — scripts/run-service.sh retries the"
+    warn "install on start, and KWC should recover once the dependencies can be fetched."
 fi
-ok "Frontend dependencies installed."
 
 info "Building frontend (this may take a few minutes on Raspberry Pi)..."
-if ! npm run build; then
-    warn "Frontend build failed. Attempting recovery for npm optional dependency/native binding issues..."
-    rm -rf node_modules package-lock.json
-    npm install
-    npm run build
+FRONTEND_BUILD_OK=1
+if build_frontend_or_recover; then
+    ok "Frontend built successfully."
+else
+    FRONTEND_BUILD_OK=0
+    warn "Could not build the frontend bundle."
+    warn "Continuing so the service is still installed — scripts/run-service.sh rebuilds the"
+    warn "bundle on start, so KWC should recover on first boot."
+    warn "To build it by hand: cd $INSTALL_DIR/frontend && npm ci && npm run build"
 fi
-ok "Frontend built successfully."
 
 cd "$INSTALL_DIR"
 
@@ -720,7 +1030,9 @@ if [ -f "$LEGACY_USER_SERVICE_FILE" ]; then
     info "Removing legacy systemd user service so Moonraker can manage the system service..."
     systemctl --user stop "$SERVICE_NAME" 2>/dev/null || true
     systemctl --user disable "$SERVICE_NAME" 2>/dev/null || true
-    rm -f "$LEGACY_USER_SERVICE_FILE"
+    # Guarded: this runs BEFORE the system service is written, so an unguarded
+    # failure here is the "installer aborts half-way with no service" shape.
+    rm -f "$LEGACY_USER_SERVICE_FILE" 2>/dev/null || true
     systemctl --user daemon-reload 2>/dev/null || true
 fi
 
@@ -784,7 +1096,19 @@ else
 fi
 
 # --- Get IP address ---
-IP_ADDR="$(hostname -I 2>/dev/null | awk '{print $1}')"
+# Never let this abort the install. `hostname` is not guaranteed to exist, and
+# under `set -o pipefail` a failing command inside the substitution fails the
+# assignment, trips the ERR trap, and exits — after the service is installed but
+# BEFORE the Moonraker registration below, making the explicit empty-value
+# fallback dead code in exactly the case it was written for.
+#
+# Prefer the address of the interface that actually routes: `hostname -I`
+# returns the first address on any interface, which can be a WireGuard or
+# secondary NIC that nothing else can reach.
+IP_ADDR="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit }}' || true)"
+if [ -z "$IP_ADDR" ]; then
+    IP_ADDR="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+fi
 if [ -z "$IP_ADDR" ]; then
     IP_ADDR="<your-pi-ip>"
 fi
@@ -817,11 +1141,17 @@ fi
 if resolve_moonraker_config_dir > /dev/null && [ -f "$(resolve_moonraker_config_dir)/moonraker.conf" ]; then
     info "Adding KWC to Moonraker update_manager..."
     install_moonraker_updater
+    apply_moonraker_changes
     ok "Moonraker update_manager configured."
 fi
 
 # --- Done! ---
 echo ""
+if [ "${FRONTEND_BUILD_OK:-1}" -eq 0 ]; then
+    warn "The frontend bundle could not be built during this install — see the warnings above."
+    warn "The service will attempt the build itself on first start."
+    echo ""
+fi
 echo -e "${GREEN}╔══════════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║     Installation Complete!                        ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════════╝${NC}"
