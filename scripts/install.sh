@@ -146,32 +146,15 @@ resolve_moonraker_config_dir() {
     return 1
 }
 
-# Locate Moonraker's service allow-list ("<data folder>/moonraker.asvc").
-# Moonraker reads that file at startup and refuses to start/stop/restart any
-# service it does not list — including the `managed_services` entry below, so
-# without an entry here an update_manager update pulls the repo and then fails
-# to restart KWC, leaving the previous code running with no visible error.
-# Only an EXISTING file is used: Moonraker writes its defaults into the file
-# on first start, and creating it ourselves would drop those defaults.
-resolve_moonraker_asvc() {
-    local config_dir candidate
-    for candidate in \
-        "$HOME/printer_data/moonraker.asvc" \
-        "$HOME/moonraker.asvc"; do
-        if [ -f "$candidate" ]; then
-            echo "$candidate"
-            return 0
-        fi
-    done
-    if config_dir="$(resolve_moonraker_config_dir)"; then
-        candidate="$(dirname "$config_dir")/moonraker.asvc"
-        if [ -f "$candidate" ]; then
-            echo "$candidate"
-            return 0
-        fi
-    fi
-    return 1
-}
+# NOTE: there is deliberately no moonraker.asvc handling here. Moonraker's
+# is_service_allowed() (machine.py) unconditionally permits any service whose
+# name matches ^klipper[_-]?\d* or ^moonraker[_-]?\d*, independently of the
+# allow-list file, and this service is named klipper-wire-configurator. The
+# exemption shipped in the same commit that introduced the allow-list
+# (Moonraker 690f841, 2022-12-29), so an entry has never been required.
+# Verified live 2026-10-01: with no entry in moonraker.asvc, Moonraker's
+# /machine/services/restart?service=klipper-wire-configurator returned ok and
+# the unit's MainPID changed.
 
 # Write a file, escalating to sudo when the current user lacks write access
 # (the Moonraker config dir is sometimes root-owned). Ownership is returned
@@ -217,9 +200,8 @@ restart_moonraker() {
     fi
 }
 
-# Moonraker reads moonraker.conf and moonraker.asvc once at startup, so every
-# writer below only marks the change and the caller applies the single restart
-# once, at the end (one restart covers both edits on a fresh install).
+# Moonraker reads moonraker.conf once at startup, so every writer below only
+# marks the change and the caller applies a single restart at the end.
 MOONRAKER_RESTART_NEEDED=0
 
 mark_moonraker_restart_needed() {
@@ -270,8 +252,17 @@ install_moonraker_updater() {
     fi
 
     if ! grep -q '^\[include klipper-wire-configurator-update\.cfg\]' "$moonraker_conf"; then
-        append_line_elevated "$moonraker_conf" "[include klipper-wire-configurator-update.cfg]" || true
-        changed=1
+        # Terminate the user's last line first. Appending to a config with no
+        # trailing newline merges the directive into it — corrupting a file we
+        # do not own, and producing text the removal above can never match, so
+        # --uninstall could not undo it.
+        ensure_trailing_newline "$moonraker_conf"
+        if append_line_elevated "$moonraker_conf" "[include klipper-wire-configurator-update.cfg]"; then
+            changed=1
+        else
+            warn "Could not add the include line to $moonraker_conf — add it manually:"
+            warn "  [include klipper-wire-configurator-update.cfg]"
+        fi
     fi
     if [ "$changed" -eq 1 ]; then
         mark_moonraker_restart_needed
@@ -288,10 +279,17 @@ remove_moonraker_updater() {
     include_file="$config_dir/klipper-wire-configurator-update.cfg"
 
     if [ -e "$include_file" ]; then
+        # Only claim a change when the file is actually gone: setting changed=1
+        # unconditionally restarted Moonraker for a removal that never
+        # happened (a failed rm with no usable sudo).
         if ! rm -f "$include_file" 2>/dev/null; then
             sudo rm -f "$include_file" 2>/dev/null || true
         fi
-        changed=1
+        if [ ! -e "$include_file" ]; then
+            changed=1
+        else
+            warn "Could not remove $include_file — remove it manually."
+        fi
     fi
     if [ -f "$moonraker_conf" ]; then
         local had_line=0
@@ -302,7 +300,11 @@ remove_moonraker_updater() {
             sudo sed -i '/^\[include klipper-wire-configurator-update\.cfg\]$/d' "$moonraker_conf" 2>/dev/null || true
         fi
         if [ "$had_line" -eq 1 ]; then
-            changed=1
+            if grep -q '^\[include klipper-wire-configurator-update\.cfg\]' "$moonraker_conf"; then
+                warn "Could not remove the include line from $moonraker_conf — remove it manually."
+            else
+                changed=1
+            fi
         fi
     fi
     if [ "$changed" -eq 1 ]; then
@@ -312,49 +314,24 @@ remove_moonraker_updater() {
 }
 
 # Terminate a file's last line so an appended entry starts on its own line.
-# (A hand-edited file without a trailing newline would otherwise merge the new
-# entry into the previous one, and the entry would never be found again.)
+# Without this, a hand-edited file with no trailing newline merges the new
+# entry into the previous line — corrupting a config the installer does not
+# own, and making the added text unfindable, so --uninstall can never remove it.
+#
+# Escalates like the append helpers: a file that needs `sudo tee -a` to append
+# also needs elevation to add the newline, and silently doing nothing here would
+# reintroduce exactly the merge this exists to prevent.
 ensure_trailing_newline() {
     local file="$1"
     [ -s "$file" ] || return 0
-    if [ -n "$(tail -c 1 "$file" 2>/dev/null)" ]; then
-        printf '\n' >> "$file" 2>/dev/null || true
-    fi
-}
-
-# Add (install) or remove (uninstall) KWC in Moonraker's service allow-list, so
-# Moonraker is permitted to restart the service after an update_manager update.
-# Best-effort and idempotent: never aborts the install, never duplicates an
-# entry, and leaves every other line of the user's file untouched.
-edit_moonraker_allowed_services() {
-    local action="$1" asvc changed=0
-    asvc="$(resolve_moonraker_asvc)" || {
-        warn "Could not find moonraker.asvc; Moonraker will not be able to restart ${SERVICE_NAME} after an update."
-        warn "Add '${SERVICE_NAME}' to the allow-list (usually ~/printer_data/moonraker.asvc) and restart Moonraker."
+    # Command substitution strips trailing newlines, so an empty result means
+    # the file already ends with one.
+    [ -n "$(tail -c 1 "$file" 2>/dev/null)" ] || return 0
+    if printf '\n' >> "$file" 2>/dev/null; then
         return 0
-    }
-
-    # Moonraker strips a trailing ".service" from every entry, so treat both
-    # spellings as already listed.
-    if [ "$action" = "remove" ]; then
-        if grep -qxE "${SERVICE_NAME}(\.service)?" "$asvc"; then
-            changed=1
-            if ! sed -i "/^${SERVICE_NAME}\(\.service\)\?$/d" "$asvc" 2>/dev/null; then
-                sudo sed -i "/^${SERVICE_NAME}\(\.service\)\?$/d" "$asvc" 2>/dev/null || true
-            fi
-        fi
-    elif ! grep -qxE "${SERVICE_NAME}(\.service)?" "$asvc"; then
-        ensure_trailing_newline "$asvc"
-        if append_line_elevated "$asvc" "$SERVICE_NAME"; then
-            changed=1
-            info "Added ${SERVICE_NAME} to Moonraker's service allow-list."
-        fi
     fi
-
-    if [ "$changed" -eq 1 ]; then
-        mark_moonraker_restart_needed
-    fi
-    return 0
+    warn "No write access to $file, retrying with sudo..."
+    printf '\n' | sudo tee -a "$file" > /dev/null 2>&1 || true
 }
 
 # Merge (or remove) the KWC entry in Mainsail's navi.json. Keeps any other
@@ -503,6 +480,37 @@ chmod 666 "$LOG_FILE" 2>/dev/null || true
 exec > >(tee -a "$LOG_FILE") 2>&1
 trap 'on_error "$LINENO" "$?"' ERR
 
+# --- Sudo credential lifetime ---
+# sudo caches credentials for timestamp_timeout (15 minutes by default, per
+# tty). This installer's two sudo-requiring phases — apt at the start and the
+# systemd service at the end — straddle the pip install, `npm ci` and the Vite
+# build, which is 15-40 minutes on a Pi Zero 2 W. Without this the password is
+# requested a second time mid-install with no explanation (field report
+# 2026-10-01, V2.7.0), which under `curl | bash` reads as a hang. Ask once and
+# keep the timestamp warm for the whole run.
+SUDO_KEEPALIVE_PID=""
+
+start_sudo_keepalive() {
+    info "Administrator access is needed for the apt packages and the systemd service."
+    if ! sudo -v; then
+        error "This installer needs sudo (apt packages and the systemd service)."
+    fi
+    # -n inside the loop: never prompt from the background, and exit quietly if
+    # the timestamp can no longer be refreshed (sudoers changed, timeout raised).
+    # Also fine on NOPASSWD hosts, where `sudo -v` is a silent no-op.
+    ( while true; do sudo -n true 2>/dev/null || exit; sleep 60; done ) &
+    SUDO_KEEPALIVE_PID=$!
+    trap stop_sudo_keepalive EXIT
+}
+
+stop_sudo_keepalive() {
+    # Deliberately no `wait`: waiting on a subshell parked in `sleep` can hang
+    # the exit path. Kill it and move on.
+    if [ -n "${SUDO_KEEPALIVE_PID:-}" ]; then
+        kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
+    fi
+}
+
 # Detect if we're already running from inside a valid clone of this repo.
 # This avoids creating a duplicate when the local directory name differs in
 # case from INSTALL_DIR (e.g. Klipper-Wire-Configurator vs klipper-wire-configurator).
@@ -559,10 +567,8 @@ if [ "${1:-}" = "--uninstall" ]; then
         edit_mainsail_navi remove
     fi
 
-    # Remove the Moonraker update_manager include (file + include line) and
-    # drop KWC from Moonraker's service allow-list.
+    # Remove the Moonraker update_manager include (file + include line).
     remove_moonraker_updater
-    edit_moonraker_allowed_services remove
     apply_moonraker_changes
 
     ok "Klipper Wire Configurator has been uninstalled."
@@ -600,6 +606,7 @@ else
 fi
 
 # --- Install system dependencies ---
+start_sudo_keepalive
 info "Updating package lists..."
 sudo apt-get update
 
@@ -789,37 +796,107 @@ fi
 
 cd "$INSTALL_DIR/frontend"
 
-# Build into a staging directory and swap it into place — the same pattern as
-# scripts/run-service.sh, keep the two in sync. Vite empties its output
-# directory first, so building straight into dist/ would destroy the bundle
-# the running service is still serving whenever a build fails.
+# Swap a freshly built staging bundle into place, checking EVERY step.
+#
+# This runs inside `if ! ...`, where bash suspends errexit for the whole call
+# (Shell Functions, POSIX: "if a compound command or shell function executes
+# in a context where -e is being ignored, none of the commands executed
+# within ... will be affected by the -e setting"). An unchecked `mv` therefore
+# fails silently and control falls through to the success path — observed
+# 2026-10-01: every rename was denied, the log still said "Frontend bundle
+# updated." and the caller returned 0 with dist/ holding the old bundle and
+# the new one stranded in dist.next.
+#
+# Two renames cannot be atomic, so dist/ is never left absent: if the second
+# rename fails, the first is undone.
+#
+# Kept byte-identical in scripts/install.sh and scripts/run-service.sh —
+# change both or neither.
+swap_staged_bundle() {
+    local dir="${1:?frontend directory required}"
+    local dist="$dir/dist" staging="$dir/dist.next" previous="$dir/dist.previous"
+
+    if [ -e "$previous" ] && ! rm -rf "$previous"; then
+        warn "Could not clear $previous; keeping the current bundle."
+        return 1
+    fi
+    if [ -e "$dist" ] && ! mv "$dist" "$previous"; then
+        warn "Could not move the current bundle aside; keeping it in place."
+        return 1
+    fi
+    if ! mv "$staging" "$dist"; then
+        warn "Could not put the new bundle in place; restoring the previous one."
+        if [ -e "$previous" ]; then
+            mv "$previous" "$dist" 2>/dev/null || \
+                warn "Could not restore $previous — it is still there for a manual move."
+        fi
+        return 1
+    fi
+    return 0
+}
+
+# A bundle sitting in dist.previous is still perfectly good: an interrupted
+# swap, or a failed build after the old bundle was moved aside, leaves the UI
+# dead while a usable bundle is on disk. Put it back rather than serve nothing.
+#
+# Kept byte-identical in scripts/install.sh and scripts/run-service.sh —
+# change both or neither.
+restore_previous_bundle_if_needed() {
+    local dir="${1:?frontend directory required}"
+    local dist="$dir/dist" previous="$dir/dist.previous"
+
+    if [ ! -f "$dist/index.html" ] && [ -f "$previous/index.html" ]; then
+        warn "No bundle in $dist; restoring the previous one from $previous."
+        rm -rf "$dist"
+        if mv "$previous" "$dist"; then
+            return 0
+        fi
+        warn "Could not restore the previous bundle; the web UI will be unavailable."
+    fi
+    return 0
+}
+
+# Build into a staging directory and swap it into place. Vite empties its
+# output directory first, so building straight into dist/ would destroy the
+# bundle the running service is still serving whenever a build fails.
+#
+# Explicit paths rather than relying on the caller's cwd: this is called from
+# the main install body and from the recovery path, and an unnoticed `cd`
+# between the two would silently build the wrong directory.
 build_frontend_staged() {
-    rm -rf dist.next
-    if ! npm run build -- --outDir dist.next; then
-        rm -rf dist.next
+    local frontend_dir="$INSTALL_DIR/frontend"
+    rm -rf "$frontend_dir/dist.next"
+    if ! ( cd "$frontend_dir" && npm run build -- --outDir dist.next ); then
+        rm -rf "$frontend_dir/dist.next"
         return 1
     fi
-    if [ ! -f dist.next/index.html ]; then
-        rm -rf dist.next
+    if [ ! -f "$frontend_dir/dist.next/index.html" ]; then
+        rm -rf "$frontend_dir/dist.next"
         return 1
     fi
-    rm -rf dist.previous
-    if [ -d dist ]; then
-        mv dist dist.previous
-    fi
-    mv dist.next dist
+    swap_staged_bundle "$frontend_dir" || return 1
     return 0
 }
 
 # Recovery path for npm optional-dependency / native-binding failures: rebuild
-# node_modules from scratch, then build again. The lock file is restored from
-# git afterwards so the checkout stays clean for the next installer run.
+# node_modules from scratch, then build again.
+#
+# package-lock.json is TRACKED and this path deliberately deletes it, so it is
+# restored from git on EVERY exit, not only on success. Returning early with
+# the lock file missing dirties the checkout, which (a) aborts every later
+# installer run at the clean-tree gate below and (b) breaks `npm ci` in
+# run-service.sh's rebuild-on-start, permanently degrading that path to
+# fail-open warnings.
 recover_frontend_build() {
-    rm -rf node_modules package-lock.json
-    npm install || return 1
-    build_frontend_staged || return 1
-    git checkout -- package-lock.json 2>/dev/null || true
-    return 0
+    local frontend_dir="$INSTALL_DIR/frontend" rc=0
+    rm -rf "$frontend_dir/node_modules" "$frontend_dir/package-lock.json"
+    if ! ( cd "$frontend_dir" && npm install ); then
+        rc=1
+    elif ! build_frontend_staged; then
+        rc=1
+    fi
+    ( cd "$frontend_dir" && git checkout -- package-lock.json ) 2>/dev/null || true
+    return "$rc"
 }
 
 # Take the same lock as the service's own rebuild-on-start: two concurrent
@@ -854,6 +931,10 @@ info "Building frontend (this may take a few minutes on Raspberry Pi)..."
 if ! with_frontend_build_lock build_frontend_staged; then
     warn "Frontend build failed. Attempting recovery for npm optional dependency/native binding issues..."
     if ! with_frontend_build_lock recover_frontend_build; then
+        # A usable bundle may still be on disk — an interrupted swap leaves one
+        # in dist.previous. Put it back before aborting, so the service has
+        # something to serve rather than starting with no UI at all.
+        restore_previous_bundle_if_needed "$INSTALL_DIR/frontend"
         error "Frontend build failed. Any previously built bundle was left untouched; the service keeps serving it."
     fi
 fi
@@ -935,7 +1016,19 @@ else
 fi
 
 # --- Get IP address ---
-IP_ADDR="$(hostname -I 2>/dev/null | awk '{print $1}')"
+# Never let this abort the install. `hostname` is not guaranteed to exist, and
+# under `set -o pipefail` a failing command inside the substitution fails the
+# assignment, trips the ERR trap, and exits — after the service is installed but
+# BEFORE the Moonraker registration below, making the explicit empty-value
+# fallback dead code in exactly the case it was written for.
+#
+# Prefer the address of the interface that actually routes: `hostname -I`
+# returns the first address on any interface, which can be a WireGuard or
+# secondary NIC that nothing else can reach.
+IP_ADDR="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit }}' || true)"
+if [ -z "$IP_ADDR" ]; then
+    IP_ADDR="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+fi
 if [ -z "$IP_ADDR" ]; then
     IP_ADDR="<your-pi-ip>"
 fi
@@ -968,10 +1061,6 @@ fi
 if resolve_moonraker_config_dir > /dev/null && [ -f "$(resolve_moonraker_config_dir)/moonraker.conf" ]; then
     info "Adding KWC to Moonraker update_manager..."
     install_moonraker_updater
-    # Moonraker also needs KWC in its service allow-list: without it the
-    # update it offers cannot restart the service it just updated.
-    info "Allowing Moonraker to restart the KWC service..."
-    edit_moonraker_allowed_services add
     apply_moonraker_changes
     ok "Moonraker update_manager configured."
 fi
