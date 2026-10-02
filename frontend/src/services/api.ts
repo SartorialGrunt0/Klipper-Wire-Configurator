@@ -6,6 +6,7 @@ import type {
   ExampleConfig,
   SectionSchema,
 } from '../types/config';
+import type { ChatReference } from '../utils/chatReferences';
 
 const BASE_URL = (import.meta.env.VITE_API_URL as string | undefined) || '/api';
 
@@ -893,6 +894,13 @@ export interface AiChatRequest {
    * question without calling any tool.
    */
   contextFiles?: Record<string, { content: string; label: string }>;
+  /**
+   * Context the user attached explicitly in the docked panel — highlighted
+   * line ranges, pinned tree rows. Sent structured; the backend renders them
+   * into one trailing system message (omitted entirely when empty, so an
+   * ordinary turn's prompt is byte-identical to before this feature).
+   */
+  context_references?: ChatReference[];
 }
 
 export interface AiToolCallDetail {

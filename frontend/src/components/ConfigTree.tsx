@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ISSUE_MARKER } from '../utils/issueMarker';
 import { buildConfigTree, defaultExpansion, type ConfigTreeNode } from '../utils/configTree';
+import { nodeToReference, type ChatReference } from '../utils/chatReferences';
 import type { SeverityVisibility } from '../utils/validationVisibility';
 import type { ValidationResult } from '../types/config';
 
@@ -17,6 +18,15 @@ interface ConfigTreeProps {
   onFileContextMenu: (event: React.MouseEvent, file: string) => void;
   onJumpToLine: (line: number) => void;
   onAddConfig: () => void;
+  /**
+   * Clicking a row jumps — and, because pointing at a section is also how a
+   * user says "this is what I'm asking about", offers it to the dock's single
+   * transient preview. Sections and params only: a file row has no line to
+   * jump to and a whole-file preview would be noise.
+   */
+  onReferenceNode?: (reference: ChatReference) => void;
+  /** Reference id currently held in the preview slot; that row highlights. */
+  previewReferenceId?: string | null;
 }
 
 const INDENT_PX = 12;
@@ -41,6 +51,8 @@ function ConfigTree({
   onFileContextMenu,
   onJumpToLine,
   onAddConfig,
+  onReferenceNode,
+  previewReferenceId = null,
 }: ConfigTreeProps) {
   const tree = useMemo(
     () => buildConfigTree({ filenames, texts, activeFile, validation, visibility }),
@@ -81,10 +93,16 @@ function ConfigTree({
     );
   }
 
-  const renderNode = (node: ConfigTreeNode, depth: number): React.ReactNode => {
+  const renderNode = (node: ConfigTreeNode, depth: number, parentSection?: string): React.ReactNode => {
     const isExpanded = !!expansion[node.id];
     const hasChildren = node.children.length > 0;
     const severitySpec = node.severity ? ISSUE_MARKER[node.severity] : null;
+    // The row's reference id, so a row can tell whether IT is the preview.
+    const reference = node.kind === 'section' || node.kind === 'param'
+      ? nodeToReference({ ...node, section: parentSection })
+      : null;
+    const isPreview = reference != null && reference.id === previewReferenceId;
+    const rowPreviewClass = isPreview ? ' bg-[var(--color-bg-tertiary)] ring-1 ring-inset ring-[var(--color-accent)]' : '';
 
     if (node.kind === 'file') {
       const isActive = node.file === activeFile;
@@ -151,11 +169,14 @@ function ConfigTree({
       return (
         <div key={node.id}>
           <button
-            onClick={() => onJumpToLine(node.line!)}
+            onClick={() => {
+              onJumpToLine(node.line!);
+              if (reference) onReferenceNode?.(reference);
+            }}
             title={node.label}
-            className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left text-[11px] hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text-primary)] ${
-              node.isCommented ? 'text-[var(--color-text-secondary)]/70' : 'text-[var(--color-text-secondary)]'
-            }`}
+            className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left text-[11px] hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text-primary)]${
+              node.isCommented ? ' text-[var(--color-text-secondary)]/70' : ' text-[var(--color-text-secondary)]'
+            }${rowPreviewClass}`}
             style={{ paddingLeft: 8 + depth * INDENT_PX }}
           >
             <span className="shrink-0 font-mono text-[10px] text-[var(--color-accent)]">{node.line}</span>
@@ -163,7 +184,9 @@ function ConfigTree({
             {severitySpec && <span className={`${severitySpec.dotClass ?? ''} shrink-0`} title={severitySpec.title} />}
           </button>
           {hasChildren && isExpanded && (
-            <div className="kl-fold">{node.children.map((child) => renderNode(child, depth + 1))}</div>
+            <div className="kl-fold">
+              {node.children.map((child) => renderNode(child, depth + 1, node.label))}
+            </div>
           )}
         </div>
       );
@@ -172,9 +195,12 @@ function ConfigTree({
     return (
       <button
         key={node.id}
-        onClick={() => onJumpToLine(node.line!)}
+        onClick={() => {
+          onJumpToLine(node.line!);
+          if (reference) onReferenceNode?.(reference);
+        }}
         title={`${node.label} (line ${node.line})`}
-        className="flex w-full items-center gap-2 rounded px-2 py-0.5 text-left text-[10px] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text-primary)]"
+        className={`flex w-full items-center gap-2 rounded px-2 py-0.5 text-left text-[10px] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text-primary)]${rowPreviewClass}`}
         style={{ paddingLeft: 8 + depth * INDENT_PX }}
       >
         <span className="shrink-0 font-mono text-[10px] text-[var(--color-accent)]">{node.line}</span>

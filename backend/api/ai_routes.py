@@ -361,6 +361,15 @@ class ChatRequest(BaseModel):
     # accepts. Set False explicitly only for A/B testing the trailing
     # task-anchor position.
     mergeSystemMessages: bool = True
+    # Explicitly attached context from the docked text-view panel: highlighted
+    # line ranges and pinned tree rows, each with the findings in its scope as
+    # the FRONTEND resolved them (severity visibility is frontend state, so the
+    # server cannot re-derive which tiers the user wants to see).
+    #
+    # Rendered server-side into one extra system message. Empty (the default)
+    # adds nothing at all, so an ordinary turn's prompt is byte-identical to
+    # what it was before this feature existed.
+    context_references: list[dict] = []
     # Prose-draft machinery (the fullRewriteGuard request field, server-side
     # draft validation/audit, and the KWC_SERVER_DRAFT_VALIDATION /
     # KWC_POST_APPLY_AUDIT env switches) was removed with the Phase-4 ratchet
@@ -584,11 +593,97 @@ def _get_openai_compatible_default_url(provider: str) -> str:
     return defaults.get(provider, "")
 
 
+CONTEXT_REFERENCE_FINDING_CAP = 20
+
+
+def _reference_basename(path: str) -> str:
+    return path.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def _reference_label(ref: dict) -> str:
+    """One-line heading for a reference — mirrors the panel's chip label."""
+    name = _reference_basename(str(ref.get("file") or ""))
+    kind = str(ref.get("kind") or "")
+    if kind == "lines":
+        start = ref.get("startLine")
+        end = ref.get("endLine")
+        if start == end:
+            return f"{name}:{start}"
+        return f"{name}:{start}-{end}"
+    if kind == "section":
+        return f"{name}:[{ref.get('section') or ''}]"
+    if kind == "param":
+        return f"{name}:[{ref.get('section') or ''}] {ref.get('param') or ''}".rstrip()
+    if kind == "finding":
+        return f"{ref.get('severity') or 'info'} · line {ref.get('line') or '?'}"
+    return name
+
+
+def render_context_references(references: list | None) -> str | None:
+    """Render user-attached context as ONE trailing system message.
+
+    Returns None when nothing usable is attached, so an ordinary turn's prompt
+    is byte-identical to what it was before this feature existed.
+
+    Rendered HERE rather than on the client on purpose: the block is prompt
+    content, and this is where every other prompt element is built. Keeping a
+    second formatter in TypeScript would mean two sources of truth for one
+    format, drifting the moment either side is reworded. The client sends
+    structured references — findings included, already filtered through the
+    user's severity-visibility settings, which is frontend state the server
+    cannot see.
+    """
+    if not references:
+        return None
+
+    parts = [
+        "CONTEXT THE USER ATTACHED TO THIS MESSAGE",
+        "These are the exact regions of the user's project they pointed at. "
+        "Treat them as the subject of the question — do not ask which part of "
+        "the config they mean.",
+    ]
+
+    rendered = 0
+    for ref in references:
+        if not isinstance(ref, dict):
+            continue
+        rendered += 1
+        body = [f"[{rendered}] {_reference_label(ref)}"]
+
+        text = ref.get("text")
+        if isinstance(text, str) and text.strip():
+            start = ref.get("startLine")
+            if not isinstance(start, int) or start < 1:
+                start = 1
+            body.append("\n".join(
+                f"{start + offset}| {line}"
+                for offset, line in enumerate(text.splitlines())
+            ))
+
+        findings = ref.get("findings")
+        if isinstance(findings, list) and findings:
+            body.append(f"findings in [{rendered}]:")
+            for finding in findings[:CONTEXT_REFERENCE_FINDING_CAP]:
+                if not isinstance(finding, dict):
+                    continue
+                body.append(
+                    f"  - {finding.get('severity') or 'info'} · "
+                    f"line {finding.get('line_number')}: {finding.get('message') or ''}"
+                )
+
+        parts.append("\n".join(body))
+
+    if rendered == 0:
+        return None
+    return "\n\n".join(parts)
+
+
 def _prepare_messages(messages: list[dict],
                       edit_capable: bool = False, *,
                       skill_active: bool = False,
                       native_mode: bool = False,
-                      context_files: dict | None = None) -> list[dict]:
+                      context_files: dict | None = None,
+                      context_references: list | None = None) -> list[dict]:
     """Build a clean system prompt with MCP tool descriptions, printer memory,
     and user messages.
     """
@@ -735,11 +830,24 @@ def _prepare_messages(messages: list[dict],
         "Your current task is the user's latest (last) message in this conversation. "
         "Earlier messages are history and context only."
     )
+
+    # User-attached context (the docked panel's chips) rides LAST as its own
+    # system message. Appending rather than splicing into the system prompt
+    # keeps the entire prefix — system prompt, tool context, memory, history —
+    # byte-identical to the no-reference case, so the local model's KV cache
+    # stays warm. Gated with the task anchor: `minimal` / `no_system` are
+    # prompt-ablation instruments and are never run with references attached.
+    references_text = render_context_references(context_references)
+    reference_messages = (
+        [{"role": "system", "content": references_text}] if references_text else []
+    )
+
     if prepared:
         return [
             *([] if no_system else [{"role": "system", "content": system_text}]),
             *prepared,
             *([] if (minimal or no_system) else [{"role": "system", "content": task_anchor}]),
+            *([] if (minimal or no_system) else reference_messages),
         ]
     return ([] if no_system else [{"role": "system", "content": system_text}]) + prepared
 
@@ -3113,6 +3221,7 @@ async def chat_proxy(req: ChatRequest):
                                  edit_capable=edit_capable,
                                  skill_active=_skill_state['active'],
                                  context_files=req.contextFiles,
+                                 context_references=req.context_references,
                                  native_mode=_resolve_native_tools(
                                      req.apiProvider, req.apiUrl, req.toolProtocol,
                                      edit_capable=edit_capable,

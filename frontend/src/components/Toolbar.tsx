@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { useConfigStore } from '../stores/configStore';
 import { useNativeStore } from '../stores/nativeStore';
 import { useAiStore } from '../stores/aiStore';
+import { useUiStore } from '../stores/uiStore';
+import { useMediaQuery, WIDE_VIEWPORT_QUERY } from '../hooks/useMediaQuery';
 import { useValidationSettingsStore, useVisibility } from '../stores/validationSettingsStore';
 import { getSaveButtonClass } from '../utils/saveButtonClass';
 import { filterValidationMap } from '../utils/validationVisibility';
@@ -120,6 +122,14 @@ export default function Toolbar({
   const visibility = useVisibility();
   const aiConfigured = useAiStore((s) => s.isConfigured());
   const chatStatus = useAiStore((s) => s.chatStatus);
+  // The docked panel is reachable only from the text view, only with AI
+  // configured, and only when the column won't squeeze the editor past
+  // usefulness. Anywhere else the Chat control keeps its old meaning.
+  const showChatDock = useUiStore((s) => s.showChatDock);
+  const setShowChatDock = useUiStore((s) => s.setShowChatDock);
+  const requestComposerFocus = useUiStore((s) => s.requestComposerFocus);
+  const wideViewport = useMediaQuery(WIDE_VIEWPORT_QUERY);
+  const dockUsable = showTextView && wideViewport && aiConfigured;
   const [showFlash, setShowFlash] = useState(false);
   const hasOriginals = Object.keys(useConfigStore((s) => s.originalTexts)).length > 0;
   const isNative = useNativeStore((s) => s.isNative);
@@ -161,6 +171,23 @@ export default function Toolbar({
       prompt,
       hiddenFromUser: true,
     });
+    // Same rule as the Chat button: in the text view the request lands in the
+    // panel; anywhere else it opens the modal.
+    if (dockUsable) setShowChatDock(true);
+    else setShowChat(true);
+  };
+
+  /**
+   * One Chat control per surface. In the text view it means "the panel":
+   * folded → fold it out; already out → put the caret in the composer.
+   * Everywhere else it is the modal it has always been.
+   */
+  const handleOpenChat = () => {
+    if (dockUsable) {
+      if (showChatDock) requestComposerFocus();
+      else setShowChatDock(true);
+      return;
+    }
     setShowChat(true);
   };
 
@@ -343,7 +370,7 @@ export default function Toolbar({
       {/* AI Chat */}
       {showAiChatButton && (
         <button
-          onClick={() => setShowChat(true)}
+          onClick={handleOpenChat}
           className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
             chatStatus === 'success' || chatStatus === 'awaiting'
               ? 'bg-green-600 text-white hover:bg-green-700'
@@ -613,9 +640,11 @@ export default function Toolbar({
       {showRevert && <RevertDialog onClose={() => setShowRevert(false)} />}
       {showAcknowledgements && <AcknowledgementsDialog onClose={() => setShowAcknowledgements(false)} />}
       {/* ChatDialog stays mounted when closed so an in-flight request keeps
-          running; `open` hides/shows the overlay. */}
+          running; `open` hides/shows the overlay. In the text view the same
+          instance renders as the docked column instead of an overlay. */}
       <ChatDialog
         open={showChat}
+        variant={dockUsable ? 'dock' : 'modal'}
         onClose={() => {
           setShowChat(false);
           setPendingAiRequest(null);

@@ -29,6 +29,12 @@ import { useGcodeCommandStore } from '../stores/gcodeCommandStore';
 import { sectionAtLine } from '../utils/configOutline';
 import EditorIssueStrip from './EditorIssueStrip';
 import ConfigTree from './ConfigTree';
+import ChatDock from './ChatDock';
+import { useUiStore } from '../stores/uiStore';
+import { useAiStore } from '../stores/aiStore';
+import { useChatReferenceStore } from '../stores/chatReferenceStore';
+import { selectionToReference } from '../utils/chatReferences';
+import { useMediaQuery, WIDE_VIEWPORT_QUERY } from '../hooks/useMediaQuery';
 import type { TextIssue } from '../types/editor';
 import type { ExampleConfig, ConfigFile, ConfigSection, ValidationError } from '../types/config';
 
@@ -76,6 +82,20 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   // export effect (sets it when a file's text lands) and the switch reset
   // (clears it so a stale jump re-attempts after the new text arrives).
   const [editTextFile, setEditTextFile] = useState(activeFile);
+
+  // ── Docked chat panel ───────────────────────────────────────────
+  // A real flex column on the right that pushes the editor's width — not an
+  // overlay. Text view only, and only when there is room: below `lg` the
+  // toolbar button opens the modal instead. The fold flag is remembered
+  // either way.
+  const showChatDock = useUiStore((s) => s.showChatDock);
+  const setShowChatDock = useUiStore((s) => s.setShowChatDock);
+  const registerDockHost = useUiStore((s) => s.setDockHost);
+  const aiConfigured = useAiStore((s) => s.isConfigured());
+  const wideViewport = useMediaQuery(WIDE_VIEWPORT_QUERY);
+  const dockAvailable = isActive && wideViewport;
+  // Which tree row is currently the dock's preview, so it can highlight it.
+  const previewReferenceId = useChatReferenceStore((s) => s.preview?.id ?? null);
 
   // Helper: export config text via backend (preserves comments, whitespace, #*# markers).
   // Falls back to offline re-serialization when the backend is unreachable; callers use
@@ -621,6 +641,29 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     setCaret(el.selectionStart);
     updateCompletion(el);
   }, [updateCompletion]);
+
+  // ── Editor selection → chat reference ───────────────────────────
+  // Highlighting lines IS the act of pointing at them, so the dock's
+  // selection slot is fed straight from the textarea rather than asking the
+  // user to attach what they already selected. The store no-ops on an
+  // unchanged value, so publishing on every click/keyup is cheap.
+  const publishSelectionReference = useCallback((el: HTMLTextAreaElement) => {
+    const { selectionStart, selectionEnd } = el;
+    if (selectionStart === selectionEnd) {
+      useChatReferenceStore.getState().setSelection(null);
+      return;
+    }
+    const value = el.value;
+    const startLine = value.slice(0, selectionStart).split('\n').length;
+    // A selection ending exactly on a newline stops at the end of the
+    // PREVIOUS line — counting the character after it would over-claim a
+    // line the user never highlighted.
+    const endsOnBoundary = value[selectionEnd - 1] === '\n';
+    const endLine = value.slice(0, selectionEnd).split('\n').length - (endsOnBoundary ? 1 : 0);
+    useChatReferenceStore.getState().setSelection(
+      selectionToReference(value, editTextFile, startLine, endLine),
+    );
+  }, [editTextFile]);
 
   // Any change to the text — typing, an accepted suggestion, undo/redo, or the
   // model's own export landing after the debounced parse — invalidates what was
@@ -1174,6 +1217,8 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
         onFileContextMenu={handleFileContextMenu}
         onJumpToLine={jumpToLine}
         onAddConfig={() => { setShowAddConfig(true); setAddConfigStep('choose'); setFileError(''); }}
+        onReferenceNode={(reference) => useChatReferenceStore.getState().setPreview(reference)}
+        previewReferenceId={previewReferenceId}
       />
 
       {/* File context menu */}
@@ -1674,9 +1719,9 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
                   value={editText}
                   onChange={(e) => handleTextChange(e.target.value)}
                   onKeyDown={handleEditorKeyDown}
-                  onKeyUp={(e) => syncCaret(e.currentTarget)}
-                  onClick={(e) => syncCaret(e.currentTarget)}
-                  onSelect={(e) => syncCaret(e.currentTarget)}
+                  onKeyUp={(e) => { syncCaret(e.currentTarget); publishSelectionReference(e.currentTarget); }}
+                  onClick={(e) => { syncCaret(e.currentTarget); publishSelectionReference(e.currentTarget); }}
+                  onSelect={(e) => { syncCaret(e.currentTarget); publishSelectionReference(e.currentTarget); }}
                   onCompositionStart={() => { composingRef.current = true; }}
                   onCompositionEnd={(e) => { composingRef.current = false; syncCaret(e.currentTarget); }}
                   onBlur={() => { setCompletion(null); setCompletionListOpen(false); }}
@@ -1712,6 +1757,18 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
         )}
       </div>
 
+      {/* Docked AI chat — the third column in this row. `Toolbar` owns the
+          single ChatDialog instance and portals its content into the host
+          element published here, so folding the panel never disturbs an
+          in-flight request. */}
+      {dockAvailable && (
+        <ChatDock
+          collapsed={!showChatDock}
+          configured={aiConfigured}
+          onToggle={() => setShowChatDock(!showChatDock)}
+          onRegisterHost={registerDockHost}
+        />
+      )}
     </div>
   );
 }

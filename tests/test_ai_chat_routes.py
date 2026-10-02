@@ -249,6 +249,158 @@ def test_prepare_messages_keeps_custom_system_message(monkeypatch):
     assert 'Custom instruction.' in prepared[0]['content']
 
 
+# ── context_references ──────────────────────────────────────────────────
+
+
+def _lines_reference(**over):
+    ref = {
+        'id': 'lines:printer.cfg:120-122',
+        'kind': 'lines',
+        'file': 'printer.cfg',
+        'startLine': 120,
+        'endLine': 122,
+        'text': 'max_accel: 3000\nsquare_corner_velocity: 5\nmax_velocity: 200',
+    }
+    ref.update(over)
+    return ref
+
+
+def test_render_context_references_returns_none_when_empty():
+    assert ai_routes.render_context_references(None) is None
+    assert ai_routes.render_context_references([]) is None
+    # Junk-only payloads must not produce an empty scaffold either.
+    assert ai_routes.render_context_references(['nope', 7]) is None
+
+
+def test_render_context_references_names_file_and_numbers_the_excerpt():
+    block = ai_routes.render_context_references([_lines_reference()])
+    assert 'printer.cfg:120-122' in block
+    assert '120| max_accel: 3000' in block
+    assert '122| max_velocity: 200' in block
+
+
+def test_render_context_references_labels_each_kind():
+    block = ai_routes.render_context_references([
+        {'kind': 'section', 'file': 'macros.cfg', 'section': 'gcode_macro CLEAN_NOZZLE'},
+        {'kind': 'param', 'file': 'printer.cfg', 'section': 'stepper_x', 'param': 'enable_pin'},
+        {'kind': 'file', 'file': 'sub/printer.cfg'},
+        {'kind': 'finding', 'file': 'printer.cfg', 'severity': 'error', 'line': 42},
+    ])
+    assert '[1] macros.cfg:[gcode_macro CLEAN_NOZZLE]' in block
+    assert '[2] printer.cfg:[stepper_x] enable_pin' in block
+    # Paths are shown by basename — the model never needs the folder prefix.
+    assert '[3] printer.cfg' in block
+    assert '[4] error · line 42' in block
+
+
+def test_render_context_references_renders_findings():
+    block = ai_routes.render_context_references([
+        _lines_reference(findings=[
+            {'severity': 'error', 'line_number': 121, 'message': 'enable_pin is not inverted'},
+        ]),
+    ])
+    assert 'findings in [1]:' in block
+    assert 'error · line 121: enable_pin is not inverted' in block
+
+
+def test_render_context_references_caps_findings():
+    findings = [
+        {'severity': 'info', 'line_number': i + 1, 'message': f'finding {i + 1}'}
+        for i in range(60)
+    ]
+    block = ai_routes.render_context_references([_lines_reference(findings=findings)])
+    assert block.count('  - ') == ai_routes.CONTEXT_REFERENCE_FINDING_CAP
+    assert 'finding 20' in block
+    assert 'finding 21' not in block
+
+
+def test_prepare_messages_omits_the_reference_block_when_nothing_is_attached(monkeypatch):
+    _blank_memory(monkeypatch)
+    conversation = [{'role': 'user', 'content': 'hi'}]
+    without = ai_routes._prepare_messages(conversation)
+    empty = ai_routes._prepare_messages(conversation, context_references=[])
+    # Byte-identical: an ordinary turn cannot be perturbed by the feature.
+    assert empty == without
+    # ...and nothing resembling the block is present at all. Without this the
+    # assertion above is vacuous — both arms go through the same code path.
+    assert all(
+        'CONTEXT THE USER ATTACHED' not in str(msg.get('content'))
+        for msg in empty
+    )
+
+
+def test_prepare_messages_appends_the_reference_block_last(monkeypatch):
+    _blank_memory(monkeypatch)
+    prepared = ai_routes._prepare_messages(
+        [{'role': 'user', 'content': 'What is wrong with these lines?'}],
+        context_references=[_lines_reference()],
+    )
+    assert prepared[-1]['role'] == 'system'
+    assert 'printer.cfg:120-122' in prepared[-1]['content']
+    # ...and it sits AFTER the task anchor, so the anchor still points at the
+    # last user message rather than at the attached context.
+    assert 'latest (last) message' in prepared[-2]['content']
+
+
+def test_prepare_messages_reference_block_is_gated_with_the_task_anchor(monkeypatch):
+    _blank_memory(monkeypatch)
+    monkeypatch.setenv('KWC_MINIMAL_PROMPT', '1')
+    prepared = ai_routes._prepare_messages(
+        [{'role': 'user', 'content': 'hi'}],
+        context_references=[_lines_reference()],
+    )
+    assert all('printer.cfg:120-122' not in str(m['content']) for m in prepared)
+
+
+def _capture_chat_payload(monkeypatch, request_body):
+    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
+    captured = {}
+
+    def fake_post(url, headers, payload):
+        captured['payload'] = payload
+        return DummyResponse({'choices': [{'message': {'content': 'ok'}}]}, url=url)
+
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda *args, **kwargs: FakeAsyncClient(post_handler=fake_post))
+    response = client.post('/ai/chat', json={
+        'messages': [{'role': 'user', 'content': 'Explain these lines.'}],
+        'apiKey': '',
+        'model': 'gemma-4-12b',
+        'apiUrl': 'http://192.168.1.133:8080/v1/chat/completions',
+        'apiProvider': 'openai-compatible',
+        **request_body,
+    })
+    assert response.status_code == 200
+    return captured['payload']
+
+
+def test_chat_route_carries_references_into_the_prompt(monkeypatch):
+    payload = _capture_chat_payload(monkeypatch, {
+        'mergeSystemMessages': False,
+        'context_references': [
+            _lines_reference(findings=[
+                {'severity': 'error', 'line_number': 121, 'message': 'enable_pin is not inverted'},
+            ]),
+        ],
+    })
+    messages = payload['messages']
+    assert messages[-1]['role'] == 'system'
+    assert 'printer.cfg:120-122' in messages[-1]['content']
+    assert 'enable_pin is not inverted' in messages[-1]['content']
+    # Order is [.., user, task anchor, references] — the anchor still points
+    # at the last user message, and the attached context follows it.
+    assert 'latest (last) message' in messages[-2]['content']
+    assert messages[-3]['role'] == 'user'
+
+
+def test_chat_route_is_unchanged_when_no_references_are_attached(monkeypatch):
+    payload = _capture_chat_payload(monkeypatch, {'mergeSystemMessages': False})
+    system_text = '\n'.join(
+        str(m.get('content', '')) for m in payload['messages'] if m.get('role') == 'system'
+    )
+    assert 'CONTEXT THE USER ATTACHED' not in system_text
+    assert 'printer.cfg:120-122' not in system_text
+
+
 # ── _build_provider_payload ─────────────────────────────────────────────
 
 

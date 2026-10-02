@@ -10,7 +10,7 @@
  * Single source of truth for settings editing state lives here,
  * passed down to ChatSettingsPanel as props.
  */
-import React, { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from 'react';
 import { useAiStore, AiProvider, providerRequiresApiKey, type ChatMessage } from '../../stores/aiStore';
 import { useChatHistoryStore } from '../../stores/chatHistoryStore';
 import { useConfigStore } from '../../stores/configStore';
@@ -24,6 +24,7 @@ import {
 } from '../../utils/approvalDiff';
 import { buildChatRequestCredentials } from '../../utils/chatRequestBase';
 import { selectUnsavedDrafts } from '../../utils/chatContext';
+import { buildReferenceContext, findingsForScope, mentionMatches, nodeToReference, referenceLabel, type ChatReference, type MentionSource } from '../../utils/chatReferences';
 import { isNearBottom, nextStickToBottom } from '../../utils/chatScroll';
 import {
   EMPTY_PROGRESS,
@@ -31,6 +32,7 @@ import {
   type ProgressDisplay,
 } from '../../utils/chatProgress';
 import {
+  PROVIDER_OPTIONS,
   PROVIDER_DEFAULTS,
   isLocalProvider,
   resolveProviderApiUrl,
@@ -38,6 +40,10 @@ import {
 } from '../../utils/chatProviders';
 import { runReplyValidationPipeline, createPrinterMemoryReplyValidator } from '../../utils/replyValidation';
 import { useAssistantDraft } from '../../hooks/useAssistantDraft';
+import { createPortal } from 'react-dom';
+import { useUiStore } from '../../stores/uiStore';
+import { useChatReferenceStore } from '../../stores/chatReferenceStore';
+import { useVisibility } from '../../stores/validationSettingsStore';
 import ChatSettingsPanel from './ChatSettingsPanel';
 import ChatHistoryDialog from './ChatHistoryDialog';
 import PrinterMemoryDialog from './PrinterMemoryDialog';
@@ -45,7 +51,7 @@ import ChatMessageList from './ChatMessageList';
 import ChatApprovalCard from './ChatApprovalCard';
 import ApprovalDiffPreview from './ApprovalDiffPreview';
 import type { ApprovalCard } from '../../services/api';
-import ChatInputBar from './ChatInputBar';
+import ChatInputBar, { type ChatReferenceChip } from './ChatInputBar';
 import type { PendingAiChatRequest } from '../../types/ai';
 import type { AiChatRole } from '../../services/api';
 import type { SavedConversation } from '../../stores/chatHistoryStore';
@@ -68,6 +74,18 @@ interface ChatDialogProps {
   onClose: () => void;
   pendingRequest?: PendingAiChatRequest | null;
   onPendingRequestHandled?: () => void;
+  /**
+   * `'modal'` (default) is the overlay the toolbar opens. `'dock'` renders
+   * the SAME content tree as a narrow column, portalled into the host
+   * element `TextEditor` publishes in the text view's flex row.
+   *
+   * This is a shell-level switch ONLY. The dialog is deliberately a single
+   * mounted instance (`Toolbar` never unmounts it) so that one conversation,
+   * one draft and one in-flight request survive folding and view switches;
+   * giving the dock its own component would mean two drafts, two approval
+   * cards, and an "which instance owns the request?" bug on the first switch.
+   */
+  variant?: 'modal' | 'dock';
 }
 
 interface AttachedConfigFile {
@@ -93,9 +111,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   onClose,
   pendingRequest = null,
   onPendingRequestHandled,
+  variant = 'modal',
 }) => {
   // ── Stores ──────────────────────────────────────────────────────
-  const { settings, setSettings, isConfigured, messages, setMessages, clearMessages } = useAiStore();
+  const { settings, setSettings, isConfigured, messages, setMessages, clearMessages, chatStatus } = useAiStore();
   const {
     configFiles,
     activeFile,
@@ -107,6 +126,24 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     removeConfigFile,
     markDirty,
   } = useConfigStore();
+
+  // ── Docked panel (text view) ────────────────────────────────────
+  // The dock is this same instance rendered into a host element that the
+  // editor's flex row publishes, instead of into a full-screen overlay.
+  // `docked` is false when the rail is collapsed or the text view is
+  // unmounted — the component stays MOUNTED either way, so an in-flight
+  // request keeps running and the reply is there when the panel reopens.
+  const dockHost = useUiStore((s) => s.dockHost);
+  const showChatDock = useUiStore((s) => s.showChatDock);
+  const setShowChatDock = useUiStore((s) => s.setShowChatDock);
+  const composerFocusNonce = useUiStore((s) => s.composerFocusNonce);
+  const docked = variant === 'dock' && dockHost !== null && showChatDock && isConfigured();
+
+  // ── Attached context references ─────────────────────────────────
+  const visibility = useVisibility();
+  const pinnedReferences = useChatReferenceStore((s) => s.pinned);
+  const selectionReference = useChatReferenceStore((s) => s.selection);
+  const previewReference = useChatReferenceStore((s) => s.preview);
 
   // ── Draft Hook (request helper) ─────────────────────────────────
   const {
@@ -194,7 +231,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   // Live open state for async completions: the toolbar button only flashes
   // green/red when the dialog is closed at the moment the request finishes.
   const openRef = useRef(open);
-  openRef.current = open;
+  // "The user is looking at the chat right now" — true for the modal and for
+  // a folded-out dock. Used only to decide whether a background event needs
+  // to hail the toolbar status dot; when the panel is on screen it doesn't.
+  openRef.current = open || docked;
   // Stop button: AbortController cancels the client fetch immediately;
   // the backend /ai/chat/stop endpoint (via requestId) cancels the work.
   const stopControllerRef = useRef<AbortController | null>(null);
@@ -453,6 +493,17 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       } else {
         newMessages = options?.retry ? messages : [...previousMessages, userMsg];
       }
+      // Take the attached context for this message and empty the slots in ONE
+      // step. Reading the store and clearing it separately is how the first
+      // live build sent an empty list — see takeAttachedReferences. Findings
+      // are resolved here because severity visibility is frontend state: a
+      // tier the user has hidden must never be sent silently.
+      const contextReferences = buildReferenceContext(
+        useChatReferenceStore.getState().takeAttachedReferences(),
+        validation,
+        visibility,
+      );
+
       setMessages(newMessages);
       setInput('');
       if (inputRef.current) inputRef.current.textContent = '';
@@ -544,7 +595,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
 
         // First request
         const assistantAttempt = await draftRequestMessage(
-          { ...chatRequestBase, contextFiles: contextFilesPayload },
+          { ...chatRequestBase, contextFiles: contextFilesPayload, context_references: contextReferences },
           requestConversation,
           undefined,
           { signal: stopController.signal },
@@ -557,7 +608,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         // prose draft to validate or retry.
         const pipelineResult = await runReplyValidationPipeline({
           requestFn: (conversation) => draftRequestMessage(
-            { ...chatRequestBase, contextFiles: contextFilesPayload },
+            { ...chatRequestBase, contextFiles: contextFilesPayload, context_references: contextReferences },
             conversation,
             undefined,
             { signal: stopController.signal },
@@ -896,6 +947,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   // the Phase-4 ratchet — there is no prose draft to drop.)
   const handleStartNewChat = useCallback(() => {
     clearMessages();
+    useChatReferenceStore.getState().clear();
   }, [clearMessages]);
 
   const handleNewChatWithSave = useCallback(() => {
@@ -988,14 +1040,24 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   );
 
   // ── Pending Request Handling ────────────────────────────────────
+  // A queued request (Save → "Analyze with AI") runs whether the surface
+  // showing it is the modal or the docked panel.
   useEffect(() => {
-    if (!open || !pendingRequest || loading || !isConfigured()) return;
+    if ((!open && !docked) || !pendingRequest || loading || !isConfigured()) return;
     if (handledPendingRequestIdRef.current === pendingRequest.id) return;
     handledPendingRequestIdRef.current = pendingRequest.id;
     onPendingRequestHandled?.();
     void submitMessage(pendingRequest.prompt, { hiddenFromUser: pendingRequest.hiddenFromUser });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isConfigured, loading, onPendingRequestHandled, open, pendingRequest]);
+  }, [isConfigured, loading, onPendingRequestHandled, open, docked, pendingRequest]);
+
+  // ── Composer focus requests ─────────────────────────────────────
+  // The toolbar's Chat button means "take me to the input" when the panel is
+  // already showing; a counter state flag is how that reaches across.
+  useEffect(() => {
+    if (composerFocusNonce === 0 || !docked) return;
+    inputRef.current?.focus();
+  }, [composerFocusNonce, docked]);
 
   // ── Shared settings panel props ─────────────────────────────────
   const settingsPanelProps = {
@@ -1017,6 +1079,82 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     onSaveSettings: handleSaveSettings,
   };
 
+  // ── Composer reference chips ────────────────────────────────────
+  // Three sources, in a fixed order: pinned (sent), the single transient
+  // preview (NOT sent until `+` promotes it), and the live editor selection
+  // (sent). Findings ride along as a coloured badge so the chip shows what
+  // the model will also be told.
+  const chipFor = useCallback(
+    (reference: ChatReference, role: ChatReferenceChip['role']): ChatReferenceChip => {
+      const findings = findingsForScope(reference, validation, visibility);
+      return {
+        id: reference.id,
+        label: referenceLabel(reference),
+        kind: reference.kind,
+        role,
+        findingsCount: findings.length,
+        // findingsForScope returns worst-first.
+        findingsSeverity: findings.length > 0 ? findings[0].severity : null,
+      };
+    },
+    [validation, visibility],
+  );
+
+  const attachedReferenceChips = useMemo<ChatReferenceChip[]>(() => {
+    const chips = pinnedReferences.map((reference) => chipFor(reference, 'pinned'));
+    if (previewReference) chips.push(chipFor(previewReference, 'preview'));
+    if (selectionReference) chips.push(chipFor(selectionReference, 'selection'));
+    return chips;
+  }, [pinnedReferences, previewReference, selectionReference, chipFor]);
+
+  // ── @-mention sources ───────────────────────────────────────────
+  // Project files first, then the active file's sections and their params —
+  // the three things a Klipper question is ever about.
+  const mentionSources = useMemo<MentionSource[]>(() => {
+    const sources: MentionSource[] = loadedConfigFilenames.map((file) => ({
+      kind: 'file' as const,
+      file,
+      label: file,
+    }));
+    const active = activeFile ? configFiles[activeFile] : undefined;
+    if (activeFile && active) {
+      for (const section of active.sections) {
+        sources.push({
+          kind: 'section',
+          file: activeFile,
+          label: section.full_header,
+          section: section.full_header,
+          line: section.line_number,
+        });
+        for (const param of section.params) {
+          sources.push({
+            kind: 'param',
+            file: activeFile,
+            label: param.key,
+            section: section.full_header,
+          });
+        }
+      }
+    }
+    return sources;
+  }, [loadedConfigFilenames, configFiles, activeFile]);
+
+  const mentionSourceMatches = useCallback(
+    (query: string) => mentionMatches(query, mentionSources),
+    [mentionSources],
+  );
+
+  const acceptMention = useCallback((source: MentionSource) => {
+    const reference = nodeToReference({
+      kind: source.kind,
+      id: `${source.kind}:${source.file}:${source.label}`,
+      label: source.label,
+      file: source.file,
+      section: source.section,
+      line: source.line,
+    });
+    if (reference) useChatReferenceStore.getState().addPinned(reference);
+  }, []);
   // ═════════════════════════════════════════════════════════════════
   // RENDER
   // ═════════════════════════════════════════════════════════════════
@@ -1024,11 +1162,17 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   // The dialog stays MOUNTED when closed so an in-flight request keeps
   // running (validation retries, connection-recovery listener, WIP state).
   // Closing only hides the overlay; reopening shows the finished reply.
-  if (!open) {
+  // Folding the dock behaves the same way: `docked` going false renders
+  // nothing, but the instance — and therefore the streaming request, the
+  // draft and any pending approval card — survives untouched.
+  if (!open && !docked) {
     return null;
   }
 
   // ── Unconfigured State ──────────────────────────────────────────
+  // Modal only. With no provider there is no panel to dock: `ChatDock`
+  // renders its disabled rail and never publishes a host element, so
+  // `docked` is false and this stays the one configuration entry point.
   if (!isConfigured()) {
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
@@ -1055,130 +1199,251 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   }
 
   // ── Configured State ────────────────────────────────────────────
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
-      <div
-        className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[620px] overflow-hidden flex flex-col"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Title bar */}
-        <div className="flex items-center justify-between p-4 border-b border-[var(--color-bg-tertiary)]">
-          <div className="flex items-center gap-2">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" className="text-[var(--color-text-secondary)]">
-              <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2v10z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+  // One content tree, two shells. `docked` swaps the wrapper (overlay vs.
+  // column) and the header's density; nothing below this line knows or
+  // cares which shell it is in.
+
+  const providerLabel = PROVIDER_OPTIONS.find((option) => option.value === settings.apiProvider)?.label
+    ?? String(settings.apiProvider);
+  const modelLabel = settings.model || 'default model';
+  const statusTitle =
+    chatStatus === 'success' ? 'Last response is ready'
+      : chatStatus === 'awaiting' ? 'An edit is waiting for your decision'
+        : chatStatus === 'error' ? 'The last request failed'
+          : 'Idle';
+  const statusDotClass =
+    chatStatus === 'success' || chatStatus === 'awaiting' ? 'bg-green-500'
+      : chatStatus === 'error' ? 'bg-red-500'
+        : 'bg-[var(--color-bg-tertiary)]';
+  const iconButtonClass =
+    'rounded p-1 text-[var(--color-text-secondary)] transition-colors hover:text-[var(--color-text-primary)] disabled:opacity-40 disabled:cursor-not-allowed';
+
+  const header = docked ? (
+    // Mirrors ConfigTree's header so the two side panels read as a pair:
+    // label + status on the left, controls on the right, `>` to fold.
+    <div className="shrink-0 border-b border-[var(--color-bg-tertiary)]">
+      <div className="flex items-center justify-between gap-2 px-3 py-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className={`h-2 w-2 shrink-0 rounded-full ${statusDotClass}`} title={statusTitle} />
+          <h2 className="truncate text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-secondary)]">
+            AI Chat
+          </h2>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          <button
+            onClick={handleNewChatWithSave}
+            disabled={loading || messages.length === 0}
+            className={iconButtonClass}
+            title="Start a new chat"
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+              <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
             </svg>
-            <h2 className="text-sm font-semibold">AI Chat</h2>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => {
-                setShowPrinterMemory(true);
-                // Clear any stale proposal when opening manually
-                setProposedMemory(null);
-              }}
-              className="px-2 py-1 rounded text-[10px] font-medium bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
-              title="View and edit printer memory"
-            >
-              Printer Memory
-            </button>
-            <button
-              onClick={() => setShowChatHistory(true)}
-              className="px-2 py-1 rounded text-[10px] font-medium bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
-              title="View and load past conversations"
-            >
-              Chat History
-            </button>
-            <button
-              onClick={handleNewChatWithSave}
-              disabled={loading || messages.length === 0}
-              className="px-2 py-1 rounded text-[10px] font-medium bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] disabled:opacity-40 disabled:cursor-not-allowed"
-              title="Start a new chat"
-            >
-              New Chat
-            </button>
-            <button
-              onClick={() => setShowSettings(!showSettings)}
-              className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
-              title="AI Settings"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
-                <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.5"/>
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-              </svg>
-            </button>
-            <button onClick={onClose} className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]">
-              ✕
-            </button>
-          </div>
+          </button>
+          <button
+            onClick={() => setShowChatHistory(true)}
+            className={iconButtonClass}
+            title="View and load past conversations"
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+              <circle cx="8" cy="8" r="5.5" stroke="currentColor" strokeWidth="1.5" />
+              <path d="M8 5v3.2l2 1.3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+          <button
+            onClick={() => {
+              setShowPrinterMemory(true);
+              // Clear any stale proposal when opening manually
+              setProposedMemory(null);
+            }}
+            className={iconButtonClass}
+            title="View and edit printer memory"
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+              <rect x="4.5" y="4.5" width="7" height="7" rx="1" stroke="currentColor" strokeWidth="1.5" />
+              <path d="M6.5 4.5v-2h3v2M6.5 11.5v2h3v-2M2.5 6.5h2M11.5 6.5h2M2.5 9.5h2M11.5 9.5h2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+            </svg>
+          </button>
+          <button
+            onClick={() => setShowSettings(!showSettings)}
+            className={iconButtonClass}
+            title="AI Settings"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+              <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.5" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+          <button
+            onClick={() => setShowChatDock(false)}
+            className="rounded border border-[var(--color-bg-tertiary)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+            title="Collapse AI chat"
+          >
+            {'>'}
+          </button>
         </div>
-
-        {/* Inline Settings Panel */}
-        {showSettings && (
-          <ChatSettingsPanel standalone={false} {...settingsPanelProps} />
-        )}
-
-        {/* Messages area */}
-        <div
-          ref={messagesScrollRef}
-          onScroll={handleMessagesScroll}
-          className="flex-1 overflow-y-auto p-4"
-          style={{ minHeight: 350, maxHeight: 450 }}
+      </div>
+      {/* "Which model answered this?" is the recurring question — answer it
+          where the answer is needed, without a trip to Settings. */}
+      <div
+        className="truncate px-3 pb-2 text-[10px] text-[var(--color-text-secondary)]"
+        title={`${providerLabel} · ${modelLabel}`}
+      >
+        {providerLabel} · {modelLabel}
+      </div>
+    </div>
+  ) : (
+    <div className="flex items-center justify-between p-4 border-b border-[var(--color-bg-tertiary)]">
+      <div className="flex items-center gap-2">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" className="text-[var(--color-text-secondary)]">
+          <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2v10z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+        </svg>
+        <h2 className="text-sm font-semibold">AI Chat</h2>
+      </div>
+      <div className="flex items-center gap-2">
+        <button
+          onClick={() => {
+            setShowPrinterMemory(true);
+            // Clear any stale proposal when opening manually
+            setProposedMemory(null);
+          }}
+          className="px-2 py-1 rounded text-[10px] font-medium bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
+          title="View and edit printer memory"
         >
-          <ChatMessageList
-            messages={messages}
-            loading={loading}
-            progress={progress}
-            error={connectionLost ? 'Connection lost — the last question will resend automatically when the network returns.' : error}
-            onRetry={handleRetry}
-            activeFile={activeFile}
-            onReviewPrinterMemory={handleReviewPrinterMemory}
-            onEditMessage={handleEditMessage}
-            messagesEndRef={messagesEndRef}
-          />
-          {approvalCard && (
-            <ChatApprovalCard
-              card={approvalCard}
-              receivedAtMs={approvalAnchor?.receivedAtMs ?? approvalNow}
-              nowMs={approvalNow}
-              busy={approvalBusy}
-              invalidation={approvalInvalidation}
-              onApprove={() => { void handleApprovalDecision('approve'); }}
-              onDecline={() => { void handleApprovalDecision('decline'); }}
-              onShowFullDiff={() => { if (approvalCard) setApprovalDiffPreview(approvalCard); }}
-            />
-          )}
-        </div>
+          Printer Memory
+        </button>
+        <button
+          onClick={() => setShowChatHistory(true)}
+          className="px-2 py-1 rounded text-[10px] font-medium bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
+          title="View and load past conversations"
+        >
+          Chat History
+        </button>
+        <button
+          onClick={handleNewChatWithSave}
+          disabled={loading || messages.length === 0}
+          className="px-2 py-1 rounded text-[10px] font-medium bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] disabled:opacity-40 disabled:cursor-not-allowed"
+          title="Start a new chat"
+        >
+          New Chat
+        </button>
+        <button
+          onClick={() => setShowSettings(!showSettings)}
+          className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
+          title="AI Settings"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+            <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.5"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+        </button>
+        <button onClick={onClose} className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]">
+          ✕
+        </button>
+      </div>
+    </div>
+  );
 
-        {/* File input (hidden) */}
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".cfg,text/plain"
-          multiple
-          className="hidden"
-          onChange={handleAttachConfigFiles}
-        />
+  const body = (
+    <>
+      {header}
 
-        {/* Input bar */}
-        <ChatInputBar
-          input={input}
+      {/* Inline Settings Panel */}
+      {showSettings && (
+        <ChatSettingsPanel standalone={false} {...settingsPanelProps} />
+      )}
+
+      {/* Messages area */}
+      <div
+        ref={messagesScrollRef}
+        onScroll={handleMessagesScroll}
+        className={docked ? 'flex-1 overflow-y-auto p-3' : 'flex-1 overflow-y-auto p-4'}
+        // The dock is a full-height column, so the modal's fixed height band
+        // is dropped rather than translated into a shorter window.
+        style={docked ? undefined : { minHeight: 350, maxHeight: 450 }}
+      >
+        <ChatMessageList
+          messages={messages}
           loading={loading}
-          selectedConfigContextFiles={selectedConfigContextFiles}
-          loadedConfigFilenames={loadedConfigFilenames}
+          progress={progress}
+          error={connectionLost ? 'Connection lost — the last question will resend automatically when the network returns.' : error}
+          onRetry={handleRetry}
           activeFile={activeFile}
-          attachedConfigFiles={attachedConfigFiles}
-          onInputChange={setInput}
-          onSend={handleSend}
-          onStop={handleStop}
-          onKeyDown={handleKeyDown}
-          onAttachFiles={handleAttachConfigFiles}
-          onRemoveAttachedFile={handleRemoveAttachedFile}
-          onSelectedContextFilesChange={setSelectedConfigContextFiles}
-          inputRef={inputRef}
-          fileInputRef={fileInputRef}
+          onReviewPrinterMemory={handleReviewPrinterMemory}
+          onEditMessage={handleEditMessage}
+          messagesEndRef={messagesEndRef}
         />
+        {approvalCard && (
+          <ChatApprovalCard
+            card={approvalCard}
+            receivedAtMs={approvalAnchor?.receivedAtMs ?? approvalNow}
+            nowMs={approvalNow}
+            busy={approvalBusy}
+            invalidation={approvalInvalidation}
+            onApprove={() => { void handleApprovalDecision('approve'); }}
+            onDecline={() => { void handleApprovalDecision('decline'); }}
+            onShowFullDiff={() => { if (approvalCard) setApprovalDiffPreview(approvalCard); }}
+          />
+        )}
       </div>
 
+      {/* File input (hidden) */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".cfg,text/plain"
+        multiple
+        className="hidden"
+        onChange={handleAttachConfigFiles}
+      />
+
+      {/* Input bar */}
+      <ChatInputBar
+        input={input}
+        loading={loading}
+        selectedConfigContextFiles={selectedConfigContextFiles}
+        loadedConfigFilenames={loadedConfigFilenames}
+        activeFile={activeFile}
+        attachedConfigFiles={attachedConfigFiles}
+        onInputChange={setInput}
+        onSend={handleSend}
+        onStop={handleStop}
+        onKeyDown={handleKeyDown}
+        onAttachFiles={handleAttachConfigFiles}
+        onRemoveAttachedFile={handleRemoveAttachedFile}
+        onSelectedContextFilesChange={setSelectedConfigContextFiles}
+        inputRef={inputRef}
+        fileInputRef={fileInputRef}
+        compact={docked}
+        references={docked ? attachedReferenceChips : undefined}
+        onRemoveReference={(id) => {
+          const store = useChatReferenceStore.getState();
+          if (store.preview?.id === id) store.setPreview(null);
+          else if (store.selection?.id === id) store.dismissSelection();
+          else store.removePinned(id);
+        }}
+        onPromoteReference={() => useChatReferenceStore.getState().promotePreview()}
+        onMentionQuery={mentionSourceMatches}
+        onMentionAccept={acceptMention}
+        onReferenceJump={(id) => {
+          const all = [
+            ...pinnedReferences,
+            ...(previewReference ? [previewReference] : []),
+            ...(selectionReference ? [selectionReference] : []),
+          ];
+          const reference = all.find((candidate) => candidate.id === id);
+          if (!reference) return;
+          // A lines reference carries its own range; everything else points
+          // at the line of the section/param it names.
+          const line = reference.startLine ?? reference.line;
+          if (line != null) useConfigStore.getState().requestLineJump(reference.file, line);
+        }}
+      />
+    </>
+  );
+
+  const overlays = (
+    <>
       {/* Chat History Dialog */}
       {showChatHistory && (
         <ChatHistoryDialog
@@ -1236,6 +1501,39 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           </div>
         </div>
       )}
+    </>
+  );
+
+  // ── Docked shell ────────────────────────────────────────────────
+  // The panel is a real panel: it occupies its own flex column in the text
+  // view and pushes the editor's width. Dialogs it opens (history, printer
+  // memory, the diff preview, the carry-over prompt) stay full-screen
+  // overlays — they are modal decisions, not part of the column.
+  if (docked && dockHost) {
+    return (
+      <>
+        {createPortal(
+          <div className="flex h-full w-full flex-col overflow-hidden bg-[var(--color-bg-secondary)]">
+            {body}
+          </div>,
+          dockHost,
+        )}
+        {overlays}
+      </>
+    );
+  }
+
+  // ── Modal shell (unchanged) ─────────────────────────────────────
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
+      <div
+        className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[620px] overflow-hidden flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {body}
+      </div>
+
+      {overlays}
     </div>
   );
 };
