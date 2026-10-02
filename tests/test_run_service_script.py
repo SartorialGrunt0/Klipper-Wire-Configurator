@@ -84,13 +84,17 @@ def make_checkout(tmp_path: Path, *, bundle_age_s: int = 3600) -> Path:
 
 
 def run_service(
-    repo: Path, tmp_path: Path, **env_overrides: str
+    repo: Path, tmp_path: Path, *, extra_bins: dict[str, str] | None = None, **env_overrides: str
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
     npm = bindir / "npm"
     npm.write_text(FAKE_NPM)
     npm.chmod(0o755)
+    for name, body in (extra_bins or {}).items():
+        stub = bindir / name
+        stub.write_text(body)
+        stub.chmod(0o755)
 
     npm_log = tmp_path / "npm.log"
     npm_log.write_text("")
@@ -242,6 +246,39 @@ def test_a_failed_swap_reports_failure_and_keeps_the_old_bundle(tmp_path: Path) 
 
     assert (frontend / "dist" / "index.html").read_text() == "OLD BUNDLE"
     assert (staging / "index.html").read_text() == "NEW BUNDLE"
+
+
+def test_a_failed_swap_does_not_destroy_the_only_good_bundle(tmp_path: Path) -> None:
+    """The swap must not clear dist.previous before the new bundle is secured.
+
+    In the torn-swap state dist/ is gone and the bundle in dist.previous is the
+    ONLY usable copy. Clearing it first — as the initial version of this helper
+    did — destroys the last good bundle, and the restore below then has nothing
+    to put back.
+    """
+    repo = make_checkout(tmp_path)
+    frontend = repo / "frontend"
+    (frontend / "dist").rename(frontend / "dist.previous")  # torn swap
+    real_mv = shutil.which("mv")
+    assert real_mv, "mv not found on PATH"
+    refusing_mv = (
+        "#!/usr/bin/env bash\n"
+        'for arg in "$@"; do\n'
+        '    case "$arg" in\n'
+        '        */dist.next) echo "fake mv: refusing to move $arg" >&2; exit 1 ;;\n'
+        '    esac\n'
+        'done\n'
+        f'exec {real_mv} "$@"\n'
+    )
+
+    proc, _ = run_service(repo, tmp_path, extra_bins={"mv": refusing_mv})
+    output = proc.stdout + proc.stderr
+
+    assert proc.returncode == 0, output
+    assert "Could not put the new bundle in place" in output
+    assert (frontend / "dist" / "index.html").read_text() == "OLD BUNDLE", (
+        "the only good bundle was destroyed by a failed swap"
+    )
 
 
 def test_a_stranded_previous_bundle_is_restored_rather_than_serving_nothing(
