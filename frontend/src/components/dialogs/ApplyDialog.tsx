@@ -190,7 +190,7 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
   // Post-hoc review: how many AI-chat changes nobody has kept or undone yet.
   // Derived in the selector so this banner re-renders when a decision lands.
   const unreviewedChanges = useChangeSetStore((s) =>
-    s.view ? unreviewedIds(s.view, s.decided).length : 0);
+    s.view ? unreviewedIds(s.view, [...s.kept, ...s.undone]).length : 0);
   // saveButtonClass is computed AFTER gateIssues below — the dialog's Save
   // button turns red only when a SELECTED file is blocked (the toolbar keeps
   // the project-wide red; a deselected broken file doesn't block this save).

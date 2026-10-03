@@ -24,6 +24,8 @@ interface Props {
   expanded: readonly string[];
   /** Row ids the user has undone (shown as such, still in the record). */
   undone: readonly string[];
+  /** Row ids the user has kept (decided; the row stays as the record). */
+  kept: readonly string[];
   onToggle: (id: string) => void;
 }
 
@@ -43,8 +45,9 @@ const EditRow: React.FC<{
   row: ChangeSetView['rows'][number];
   open: boolean;
   undone: boolean;
+  kept: boolean;
   onToggle: (id: string) => void;
-}> = ({ row, open, undone, onToggle }) => {
+}> = ({ row, open, undone, kept, onToggle }) => {
   const lines = useMemo(() => (open ? parsePatch(row.diffText) : []), [open, row.diffText]);
   const badge = row.badge;
 
@@ -72,6 +75,9 @@ const EditRow: React.FC<{
         )}
         {undone && !row.superseded && (
           <span className="shrink-0 italic text-[var(--color-text-secondary)]">undone</span>
+        )}
+        {kept && !undone && !row.superseded && (
+          <span className="shrink-0 text-[var(--color-text-secondary)]">kept</span>
         )}
       </button>
       {open && (
@@ -111,9 +117,10 @@ const EditRow: React.FC<{
   );
 };
 
-const ChatEditRows: React.FC<Props> = ({ view, expanded, undone, onToggle }) => {
+const ChatEditRows: React.FC<Props> = ({ view, expanded, undone, kept, onToggle }) => {
   if (view.rows.length === 0) return null;
   const gone = new Set(undone);
+  const decided = new Set(kept);
   return (
     <div className="mb-3 space-y-1" aria-label="Changes made in this reply">
       {view.rows.map((row) => (
@@ -122,6 +129,7 @@ const ChatEditRows: React.FC<Props> = ({ view, expanded, undone, onToggle }) => 
           row={row}
           open={expanded.includes(row.id)}
           undone={gone.has(row.id)}
+          kept={decided.has(row.id)}
           onToggle={onToggle}
         />
       ))}

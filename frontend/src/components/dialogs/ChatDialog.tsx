@@ -199,6 +199,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   const changeSetView = useChangeSetStore((state) => state.view);
   const changeSetExpanded = useChangeSetStore((state) => state.expanded);
   const changeSetUndone = useChangeSetStore((state) => state.undone);
+  const changeSetKept = useChangeSetStore((state) => state.kept);
   const changeSet = useChangeSetStore((state) => state);
   const appliedStagedRef = useRef<string>('');
   const [changeSetBusy, setChangeSetBusy] = useState(false);
@@ -937,20 +938,33 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
 
   const handleUndoAll = useCallback(() => {
     useChangeSetStore.getState().undoAll();
-    void resolveChangeSet([]);
+    void resolveChangeSet(useChangeSetStore.getState().keptIds());
   }, [resolveChangeSet]);
 
+  const handleKeepSection = useCallback(
+    (_file: string, _section: string, ids: string[]) => {
+      useChangeSetStore.getState().keepSection(_file, _section, ids);
+      setChangeSetNote(null);
+    },
+    [],
+  );
+
   const handleUndoSection = useCallback(
-    (file: string, section: string) => {
-      useChangeSetStore.getState().undoSection(file, section);
+    (_file: string, _section: string, ids: string[]) => {
+      useChangeSetStore.getState().undoSection(_file, _section, ids);
       void resolveChangeSet(useChangeSetStore.getState().keptIds());
     },
     [resolveChangeSet],
   );
 
+  const handleKeepFile = useCallback((_file: string, ids: string[]) => {
+    useChangeSetStore.getState().keepFile(_file, ids);
+    setChangeSetNote(null);
+  }, []);
+
   const handleUndoFile = useCallback(
-    (file: string) => {
-      useChangeSetStore.getState().undoFile(file);
+    (_file: string, ids: string[]) => {
+      useChangeSetStore.getState().undoFile(_file, ids);
       void resolveChangeSet(useChangeSetStore.getState().keptIds());
     },
     [resolveChangeSet],
@@ -1526,17 +1540,20 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           onReviewPrinterMemory={handleReviewPrinterMemory}
           onEditMessage={handleEditMessage}
           messagesEndRef={messagesEndRef}
+          editRows={changeSetView ? (
+            /* One row per edit, streaming in as the model makes them.
+               Read-only; the decision lives in the footer summary. Rendered
+               inside the list so they sit between the user's message and the
+               reply — the edits happen before the reply does. */
+            <ChatEditRows
+              view={changeSetView}
+              expanded={changeSetExpanded}
+              undone={changeSetUndone}
+              kept={changeSetKept}
+              onToggle={(id) => useChangeSetStore.getState().toggleExpanded(id)}
+            />
+          ) : null}
         />
-        {/* Post-hoc review: one row per edit the model made, streaming in as
-            it makes them. Read-only — the decision lives in the footer bar. */}
-        {changeSetView && (
-          <ChatEditRows
-            view={changeSetView}
-            expanded={changeSetExpanded}
-            undone={changeSetUndone}
-            onToggle={(id) => useChangeSetStore.getState().toggleExpanded(id)}
-          />
-        )}
         {approvalCard && (
           <ChatApprovalCard
             card={approvalCard}
@@ -1562,20 +1579,20 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       />
 
       {/* Input bar */}
-      {/* Post-hoc review footer: totals, keep-all / reject-all, per-file and
-          per-section keep/undo, and the "N unreviewed" state that stays
-          visible until every edit has been decided (including at Save). */}
+      {/* Post-hoc review summary: only what still needs a decision — keep or
+          undo a change here and it leaves the list; when nothing is left the
+          whole summary goes away. */}
       {changeSetView && (
         <ChangeSetBar
-          view={changeSetView}
+          groups={changeSet.pendingGroups()}
           totals={changeSetTotals(changeSet)}
-          unreviewed={changeSet.unreviewedCount()}
-          undone={changeSetUndone}
           busy={changeSetBusy}
           note={changeSetNote}
           onKeepAll={handleKeepAll}
           onUndoAll={handleUndoAll}
+          onKeepSection={handleKeepSection}
           onUndoSection={handleUndoSection}
+          onKeepFile={handleKeepFile}
           onUndoFile={handleUndoFile}
           onOpenFile={(file) => {
             const config = configFiles[file];

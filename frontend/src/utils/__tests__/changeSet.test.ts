@@ -6,9 +6,10 @@ import {
   changeRowLabel,
   fileEditIds,
   keptIdsAfterUndo,
-  remainingTotals,
+  pendingGroups,
   sectionEditIds,
   supersededNote,
+  totalsForIds,
   unreviewedIds,
 } from '@/utils/changeSet';
 
@@ -148,20 +149,86 @@ describe('decisions', () => {
     expect(fileEditIds(view, 'other.cfg')).toEqual([]);
   });
 
-  it('reports totals over what the user still holds', () => {
+  it('a per-group decision only covers what is still undecided', () => {
     const view = buildChangeSetView(payload())!;
-    expect(remainingTotals(view, [])).toEqual({ added: 3, removed: 3 });
-    expect(remainingTotals(view, ['e0', 'e1'])).toEqual({ added: 1, removed: 1 });
-    expect(remainingTotals(view, ['e0', 'e1', 'e2'])).toEqual({ added: 0, removed: 0 });
+    expect(sectionEditIds(view, 'printer.cfg', 'printer', ['e0'])).toEqual(['e1']);
+    expect(fileEditIds(view, 'printer.cfg', ['e0', 'e2'])).toEqual(['e1']);
+    expect(sectionEditIds(view, 'printer.cfg', 'printer', ['e0', 'e1'])).toEqual([]);
+  });
+});
+
+describe('totals reflect only what still needs a decision', () => {
+  it('counts just the given ids', () => {
+    const view = buildChangeSetView(payload())!;
+    expect(totalsForIds(view, ['e0', 'e1', 'e2'])).toEqual({ added: 3, removed: 3 });
+    expect(totalsForIds(view, [])).toEqual({ added: 0, removed: 0 });
+    expect(totalsForIds(view, ['e2'])).toEqual({ added: 1, removed: 1 });
   });
 
-  it('never counts a superseded row, even when it is not undone', () => {
+  it('never counts a superseded row', () => {
     const view = buildChangeSetView(payload({
       edits: [
         edit({ id: 'e0', superseded: true, added: 1, removed: 1 }),
         edit({ id: 'e1', added: 1, removed: 1 }),
       ],
     }))!;
-    expect(remainingTotals(view, [])).toEqual({ added: 1, removed: 1 });
+    expect(totalsForIds(view, ['e0', 'e1'])).toEqual({ added: 1, removed: 1 });
+  });
+});
+
+describe('pendingGroups', () => {
+  it('lists every undecided edit, grouped by file and section', () => {
+    const view = buildChangeSetView(payload())!;
+    const groups = pendingGroups(view, []);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].file).toBe('printer.cfg');
+    expect(groups[0].added).toBe(3);
+    expect(groups[0].sections.map((section) => section.section))
+      .toEqual(['printer', 'stepper_x']);
+    expect(groups[0].sections[0].ids).toEqual(['e0', 'e1']);
+    expect(groups[0].sections[1].ids).toEqual(['e2']);
+  });
+
+  it('drops a decided section, and a file with nothing left', () => {
+    const view = buildChangeSetView(payload())!;
+    const afterSection = pendingGroups(view, ['e0', 'e1']);
+    expect(afterSection).toHaveLength(1);
+    expect(afterSection[0].sections.map((section) => section.section)).toEqual(['stepper_x']);
+    expect(afterSection[0].added).toBe(1);
+
+    expect(pendingGroups(view, ['e0', 'e1', 'e2'])).toEqual([]);
+  });
+
+  it('counts a group from its own rows, so a decision shrinks the numbers', () => {
+    const view = buildChangeSetView(payload())!;
+    const groups = pendingGroups(view, ['e1']);
+    expect(groups[0].sections[0].ids).toEqual(['e0']);
+    expect(groups[0].sections[0].added).toBe(1);
+    expect(groups[0].added).toBe(2);          // e0 + e2
+  });
+
+  it('never lists a superseded row', () => {
+    const view = buildChangeSetView(payload({
+      edits: [
+        edit({ id: 'e0', superseded: true }),
+        edit({ id: 'e1' }),
+      ],
+    }))!;
+    const groups = pendingGroups(view, []);
+    expect(groups[0].sections[0].ids).toEqual(['e1']);
+  });
+
+  it('carries each section its own advisory counts', () => {
+    const view = buildChangeSetView(payload({
+      edits: [
+        edit({ id: 'e0', advisories: [
+          { severity: 'warning', message: 'w' },
+          { severity: 'error', message: 'e' },
+        ] }),
+        edit({ id: 'e1', advisories: [{ severity: 'warning', message: 'w' }] }),
+      ],
+    }))!;
+    const section = pendingGroups(view, [])[0].sections[0];
+    expect(section.advisories).toEqual({ error: 1, warning: 2, other: 0 });
   });
 });

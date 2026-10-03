@@ -1,91 +1,117 @@
 /**
- * The post-hoc review action bar, shown above the composer.
+ * The post-hoc review summary, shown above the composer.
  *
  * This is the decision surface for a change set (the transcript rows are the
- * record). It carries the totals, keep-all / reject-all, per-file and
- * per-section keep/undo, and the `N unreviewed` state — the state that must
- * stay visible until every edit has been kept or undone, including at Save.
+ * record). It shows ONLY what still needs a decision: keeping or undoing an
+ * edit removes it from here, the counters count only the remainder, and when
+ * nothing is left undecided the whole summary goes away.
  *
- * Undo is expressed as a KEEP LIST, never as a text edit: the backend
- * replays the kept ops onto the request's baseline, so dropping an edit
- * cannot leave residue behind.
+ * The header folds the per-file/section list out (▸/▾) — the same gesture as
+ * the progress strip, rather than a separate "review" button.
+ *
+ * Undo is expressed as a KEEP LIST and replayed server-side; keep changes
+ * nothing in the text (the edit is already applied) and only ends the
+ * decision.
  */
 import { useState } from 'react';
 import type React from 'react';
 
-import type { ChangeSetView } from '../../utils/changeSet';
+import type { PendingFile } from '../../utils/changeSet';
 
 export interface ChangeSetBarProps {
-  view: ChangeSetView;
+  /** Undecided edits, grouped by file and section (decided ones are gone). */
+  groups: PendingFile[];
   totals: { added: number; removed: number };
-  unreviewed: number;
-  undone: readonly string[];
-  /** A resolve request is in flight — the bar is not re-clickable. */
+  /** A resolve request is in flight — the row is not re-clickable. */
   busy: boolean;
   /** Honest note from the last resolution (stale ops, failures). */
   note?: string | null;
   onKeepAll: () => void;
   onUndoAll: () => void;
-  onUndoSection: (file: string, section: string) => void;
-  onUndoFile: (file: string) => void;
+  onKeepSection: (file: string, section: string, ids: string[]) => void;
+  onUndoSection: (file: string, section: string, ids: string[]) => void;
+  onKeepFile: (file: string, ids: string[]) => void;
+  onUndoFile: (file: string, ids: string[]) => void;
   /** Jump the editor to a file (navigation only). */
   onOpenFile?: (file: string) => void;
 }
 
+const GroupButtons: React.FC<{
+  busy: boolean;
+  onKeep: () => void;
+  onUndo: () => void;
+  keepLabel: string;
+  undoLabel: string;
+  keepTitle: string;
+  undoTitle: string;
+}> = ({ busy, onKeep, onUndo, keepLabel, undoLabel, keepTitle, undoTitle }) => (
+  <span className="flex shrink-0 items-center gap-1">
+    <button
+      type="button"
+      onClick={onUndo}
+      disabled={busy}
+      className="rounded border border-[var(--color-bg-tertiary)] px-1.5 text-[9px] text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-error)] hover:text-[var(--color-error)] disabled:opacity-40"
+      title={undoTitle}
+    >
+      {undoLabel}
+    </button>
+    <button
+      type="button"
+      onClick={onKeep}
+      disabled={busy}
+      className="rounded border border-[var(--color-bg-tertiary)] px-1.5 text-[9px] text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:opacity-40"
+      title={keepTitle}
+    >
+      {keepLabel}
+    </button>
+  </span>
+);
+
 const ChangeSetBar: React.FC<ChangeSetBarProps> = ({
-  view,
+  groups,
   totals,
-  unreviewed,
-  undone,
   busy,
   note,
   onKeepAll,
   onUndoAll,
+  onKeepSection,
   onUndoSection,
+  onKeepFile,
   onUndoFile,
   onOpenFile,
 }) => {
   const [open, setOpen] = useState(false);
-  const gone = new Set(undone);
-  const undoneCount = view.rows.filter((row) => gone.has(row.id)).length;
+  const pending = groups.reduce(
+    (sum, file) => sum + file.sections.reduce((n, section) => n + section.ids.length, 0),
+    0,
+  );
+  if (pending === 0) return null;
 
   return (
     <div className="border-t border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-3 py-2 text-[10px]">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="font-semibold uppercase tracking-wider text-[var(--color-text-secondary)]">
-          Changes
-        </span>
-        <span className="text-[var(--color-text-primary)]">
-          {view.liveIds.length}
-        </span>
-        {totals.added > 0 && <span className="text-green-400">+{totals.added}</span>}
-        {totals.removed > 0 && <span className="text-red-400">−{totals.removed}</span>}
-        {undoneCount > 0 && (
-          <span className="italic text-[var(--color-text-secondary)]">
-            {undoneCount} undone
-          </span>
-        )}
-        {unreviewed > 0 && (
-          <span className="rounded-full bg-[var(--color-warning)]/20 px-2 py-0.5 font-medium text-[var(--color-warning)]">
-            {unreviewed} unreviewed
-          </span>
-        )}
-        <div className="flex-1" />
         <button
           type="button"
           onClick={() => setOpen((prev) => !prev)}
-          className="rounded border border-[var(--color-bg-tertiary)] px-2 py-0.5 font-medium text-[var(--color-text-secondary)] transition-colors hover:text-[var(--color-text-primary)]"
-          title="Review each change"
+          className="flex items-center gap-1.5 font-semibold uppercase tracking-wider text-[var(--color-text-secondary)] transition-colors hover:text-[var(--color-text-primary)]"
           aria-expanded={open}
+          title={open ? 'Hide the list of changes' : 'Show the list of changes'}
         >
-          {open ? 'Hide list' : 'Review'}
+          <span className="select-none opacity-60">{open ? '▾' : '▸'}</span>
+          Changes
+          <span className="rounded-full bg-[var(--color-warning)]/20 px-2 py-0.5 font-medium normal-case tracking-normal text-[var(--color-warning)]">
+            {pending} unreviewed
+          </span>
+          {totals.added > 0 && <span className="normal-case text-green-400">+{totals.added}</span>}
+          {totals.removed > 0 && <span className="normal-case text-red-400">−{totals.removed}</span>}
         </button>
+        <div className="flex-1" />
         <button
           type="button"
           onClick={onUndoAll}
           disabled={busy}
           className="rounded border border-[var(--color-bg-tertiary)] px-2 py-0.5 font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-error)] hover:text-[var(--color-error)] disabled:opacity-40"
-          title="Drop every change from this reply"
+          title="Drop every unreviewed change from this reply"
         >
           Reject all
         </button>
@@ -94,7 +120,7 @@ const ChangeSetBar: React.FC<ChangeSetBarProps> = ({
           onClick={onKeepAll}
           disabled={busy}
           className="rounded bg-[var(--color-accent)] px-2 py-0.5 font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
-          title="Keep every change from this reply"
+          title="Keep every unreviewed change from this reply"
         >
           Keep all
         </button>
@@ -104,7 +130,7 @@ const ChangeSetBar: React.FC<ChangeSetBarProps> = ({
 
       {open && (
         <div className="mt-2 max-h-56 space-y-2 overflow-y-auto">
-          {view.files.map((file) => (
+          {groups.map((file) => (
             <div key={file.file} className="rounded border border-[var(--color-bg-tertiary)]">
               <div className="flex items-center gap-2 border-b border-[var(--color-bg-tertiary)] px-2 py-1">
                 <button
@@ -117,15 +143,15 @@ const ChangeSetBar: React.FC<ChangeSetBarProps> = ({
                 </button>
                 {file.added > 0 && <span className="text-green-400">+{file.added}</span>}
                 {file.removed > 0 && <span className="text-red-400">−{file.removed}</span>}
-                <button
-                  type="button"
-                  onClick={() => onUndoFile(file.file)}
-                  disabled={busy}
-                  className="rounded border border-[var(--color-bg-tertiary)] px-1.5 text-[9px] text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-error)] hover:text-[var(--color-error)] disabled:opacity-40"
-                  title={`Drop every change to ${file.file}`}
-                >
-                  Undo file
-                </button>
+                <GroupButtons
+                  busy={busy}
+                  keepLabel="Keep file"
+                  undoLabel="Undo file"
+                  keepTitle={`Keep every change to ${file.file}`}
+                  undoTitle={`Drop every change to ${file.file}`}
+                  onKeep={() => onKeepFile(file.file, file.sections.flatMap((s) => s.ids))}
+                  onUndo={() => onUndoFile(file.file, file.sections.flatMap((s) => s.ids))}
+                />
               </div>
               {file.sections.map((section) => (
                 <div
@@ -143,24 +169,23 @@ const ChangeSetBar: React.FC<ChangeSetBarProps> = ({
                   )}
                   {section.added > 0 && <span className="text-green-400">+{section.added}</span>}
                   {section.removed > 0 && <span className="text-red-400">−{section.removed}</span>}
-                  <button
-                    type="button"
-                    onClick={() => onUndoSection(file.file, section.section)}
-                    disabled={busy || section.edits.every((id) => gone.has(id))}
-                    className="rounded border border-[var(--color-bg-tertiary)] px-1.5 text-[9px] text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-error)] hover:text-[var(--color-error)] disabled:opacity-40"
-                    title={`Drop the changes to [${section.section}]`}
-                  >
-                    Undo
-                  </button>
+                  <GroupButtons
+                    busy={busy}
+                    keepLabel="Keep"
+                    undoLabel="Undo"
+                    keepTitle={`Keep the changes to [${section.section}]`}
+                    undoTitle={`Drop the changes to [${section.section}]`}
+                    onKeep={() => onKeepSection(file.file, section.section, section.ids)}
+                    onUndo={() => onUndoSection(file.file, section.section, section.ids)}
+                  />
                 </div>
               ))}
             </div>
           ))}
-          {view.createdFiles.length > 0 && (
-            <p className="text-[var(--color-text-secondary)]">
-              Creates {view.createdFiles.join(', ')} — undoing removes the file.
-            </p>
-          )}
+          <p className="text-[var(--color-text-secondary)]">
+            Keeping leaves the change in the editor; undoing takes it out.
+            Undoing a file the model created removes the file.
+          </p>
         </div>
       )}
     </div>

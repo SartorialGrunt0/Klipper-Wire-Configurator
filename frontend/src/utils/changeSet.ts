@@ -1,21 +1,23 @@
 /**
  * Post-hoc edit review — the pure model behind the transcript rows and the
- * footer bar.
+ * footer summary.
  *
  * The backend's change set is the request's whole edit history: rows in the
  * order the model made them, plus a summary grouped by file and section.
- * Two rules from the plan live HERE, where they can be tested without a DOM:
+ * The rules from the plan live HERE, where they can be tested without a DOM:
  *
  *  1. **The transcript is history; the summary is a decision surface.** Rows
  *     are flat and chronological (a superseded row stays visible and says so);
- *     the totals and the keep/undo groups are the net surviving set.
+ *     the summary lists what is still UNDECIDED and counts only that.
  *  2. **Identity is file + section (+ key), never a line number.** Line
  *     numbers are navigation plumbing, and a row that displayed one would
  *     invite the user to reason in a coordinate space the change set does not
  *     use.
+ *  3. **A decided edit leaves the summary.** Keep and undo both end a
+ *     decision; what stays on screen is exactly what still needs one.
  *
  * Nothing here talks to the network or to React. `changeSetStore` owns the
- * decisions; `ChatDialog` performs the replay the decisions imply.
+ * decisions; `ChatDialog` performs the replay the undos imply.
  */
 import type { ChangeSetEdit, ChangeSetFile, ChangeSetPayload } from '../services/api';
 import { summarizeAdvisorySeverities, type AdvisorySeverityCounts } from './approvalDiff';
@@ -39,6 +41,25 @@ export interface ChangeSetView {
   liveIds: string[];
 }
 
+/** One section's still-undecided edits, with a per-section decision. */
+export interface PendingSection {
+  file: string;
+  section: string;
+  added: number;
+  removed: number;
+  /** Ids still awaiting a decision in this section. */
+  ids: string[];
+  advisories: { error: number; warning: number; other: number };
+}
+
+/** One file's still-undecided edits, grouped for the summary. */
+export interface PendingFile {
+  file: string;
+  added: number;
+  removed: number;
+  sections: PendingSection[];
+}
+
 /** `printer.cfg / [stepper_x] microsteps` — the row's collapsed label. */
 export function changeRowLabel(row: {
   file: string;
@@ -55,7 +76,7 @@ export function changeRowLabel(row: {
  * Build the review model, or null when there is nothing to review.
  *
  * A change set with no edits is null rather than an empty view: an empty
- * footer bar is a claim that something changed.
+ * summary is a claim that something changed.
  */
 export function buildChangeSetView(set: ChangeSetPayload | null | undefined): ChangeSetView | null {
   if (!set || !set.edits || set.edits.length === 0) return null;
@@ -84,7 +105,7 @@ export function allEditIds(view: ChangeSetView): string[] {
   return view.rows.map((row) => row.id);
 }
 
-/** Rows the user still has to look at: surviving, and not yet decided. */
+/** Rows the user still has to decide about: surviving, and not yet decided. */
 export function unreviewedIds(
   view: ChangeSetView,
   decided: readonly string[],
@@ -93,20 +114,62 @@ export function unreviewedIds(
   return view.liveIds.filter((id) => !seen.has(id));
 }
 
-/** Totals over the edits the user still holds (undone ones do not count). */
-export function remainingTotals(
+/** `+A −R` over a chosen set of edit ids (superseded rows never count). */
+export function totalsForIds(
   view: ChangeSetView,
-  undone: readonly string[],
+  ids: readonly string[],
 ): { added: number; removed: number } {
-  const gone = new Set(undone);
+  const wanted = new Set(ids);
   let added = 0;
   let removed = 0;
   for (const row of view.rows) {
-    if (row.superseded || gone.has(row.id)) continue;
+    if (row.superseded || !wanted.has(row.id)) continue;
     added += row.added;
     removed += row.removed;
   }
   return { added, removed };
+}
+
+/**
+ * The summary's rows: only what is still undecided, grouped by file and
+ * section. A fully decided section (or file) disappears — the summary is a
+ * to-do list, not a receipt.
+ */
+export function pendingGroups(
+  view: ChangeSetView,
+  decided: readonly string[],
+): PendingFile[] {
+  const seen = new Set(decided);
+  const byFile = new Map<string, PendingFile>();
+  for (const row of view.rows) {
+    if (row.superseded || seen.has(row.id)) continue;
+    let file = byFile.get(row.file);
+    if (!file) {
+      file = { file: row.file, added: 0, removed: 0, sections: [] };
+      byFile.set(row.file, file);
+    }
+    let section = file.sections.find((candidate) => candidate.section === row.section);
+    if (!section) {
+      section = {
+        file: row.file,
+        section: row.section,
+        added: 0,
+        removed: 0,
+        ids: [],
+        advisories: { error: 0, warning: 0, other: 0 },
+      };
+      file.sections.push(section);
+    }
+    section.added += row.added;
+    section.removed += row.removed;
+    section.ids.push(row.id);
+    section.advisories.error += row.badge.error;
+    section.advisories.warning += row.badge.warning;
+    section.advisories.other += row.badge.other;
+    file.added += row.added;
+    file.removed += row.removed;
+  }
+  return [...byFile.values()];
 }
 
 /**
@@ -123,21 +186,28 @@ export function keptIdsAfterUndo(
   return allEditIds(view).filter((id) => !gone.has(id));
 }
 
-/** Ids of one section group (what a per-section undo drops). */
+/** Ids of one section group (what a per-section decision covers). */
 export function sectionEditIds(
   view: ChangeSetView,
   file: string,
   section: string,
+  decided: readonly string[] = [],
 ): string[] {
-  const group = view.files
-    .find((entry) => entry.file === file)
-    ?.sections.find((entry) => entry.section === section);
-  return group ? [...group.edits] : [];
+  const seen = new Set(decided);
+  return view.rows
+    .filter((row) => !row.superseded && !seen.has(row.id)
+      && row.file === file && row.section === section)
+    .map((row) => row.id);
 }
 
-/** Ids of every surviving edit in one file (what a per-file undo drops). */
-export function fileEditIds(view: ChangeSetView, file: string): string[] {
-  const entry = view.files.find((candidate) => candidate.file === file);
-  if (!entry) return [];
-  return entry.sections.flatMap((section) => section.edits);
+/** Ids of every undecided edit in one file (a per-file decision). */
+export function fileEditIds(
+  view: ChangeSetView,
+  file: string,
+  decided: readonly string[] = [],
+): string[] {
+  const seen = new Set(decided);
+  return view.rows
+    .filter((row) => !row.superseded && !seen.has(row.id) && row.file === file)
+    .map((row) => row.id);
 }
