@@ -126,12 +126,16 @@ export interface ChatMessageListProps {
   /** Replace the user message at `index` with `newText` and regenerate. */
   onEditMessage?: (index: number, newText: string) => void;
   /**
-   * Post-hoc edit review rows, rendered between the last user message and the
-   * reply it produced. The model makes its edits BEFORE it writes the reply,
-   * so the rows belong there in the transcript — below the reply they would
-   * read as an afterthought to an answer that has already accounted for them.
+   * Post-hoc edit review rows for ONE assistant message (the edits its own
+   * request staged), rendered immediately BEFORE the reply.
+   *
+   * The model makes its edits before it writes the reply, so the rows belong
+   * there in the transcript — below the reply they would read as an
+   * afterthought to an answer that has already accounted for them.
    */
-  editRows?: React.ReactNode;
+  editRowsFor?: (message: ChatMessage) => React.ReactNode;
+  /** The same, for the reply that is still streaming. */
+  streamingEditRows?: React.ReactNode;
   messagesEndRef: React.RefObject<HTMLDivElement | null>;
 }
 
@@ -238,7 +242,8 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
   activeFile,
   onReviewPrinterMemory,
   onEditMessage,
-  editRows,
+  editRowsFor,
+  streamingEditRows,
   messagesEndRef,
 }) => {
   const [toolDetailsMessageIndex, setToolDetailsMessageIndex] = useState<number | null>(null);
@@ -253,15 +258,6 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
   const activeToolDetails = toolDetailsMessageIndex !== null
     ? (messages[toolDetailsMessageIndex]?.toolCalls ?? null)
     : null;
-  // Where the review rows land: straight after the last thing the user said,
-  // i.e. before the reply those edits are part of.
-  const lastUserIndex = (() => {
-    for (let i = messages.length - 1; i >= 0; i -= 1) {
-      const msg = messages[i];
-      if (msg.role === 'user' && !msg.hiddenFromUser) return i;
-    }
-    return -1;
-  })();
   if (messages.length === 0 && !loading && !error) {
     return (
       <div className="flex items-center justify-center h-full text-[var(--color-text-secondary)]">
@@ -281,6 +277,8 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
 
         return (
           <React.Fragment key={i}>
+          {/* This reply's edits, before the reply itself. */}
+          {msg.role === 'assistant' && editRowsFor ? editRowsFor(msg) : null}
           <div className={`mb-2 ${msg.role === 'user' ? 'text-right' : 'text-left'}`}>
             <div
               className={`inline-block max-w-[80%] px-3 py-2 rounded-lg text-xs leading-6 ${
@@ -499,10 +497,12 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
               )}
             </div>
           </div>
-          {editRows && i === lastUserIndex ? editRows : null}
           </React.Fragment>
         );
       })}
+
+      {/* The reply still in flight: its edits, before the pending bubble. */}
+      {loading ? streamingEditRows : null}
 
       {/* Loading indicator + mid-loop progress strip (Phase 6.5.4).
           The strip is visually subordinate (smaller, secondary text):

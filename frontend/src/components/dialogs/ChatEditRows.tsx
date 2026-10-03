@@ -15,11 +15,12 @@ import { useMemo } from 'react';
 import type React from 'react';
 
 import DiffLines from '../DiffLines';
-import type { ChangeSetView } from '../../utils/changeSet';
+import type { ChangeSetRow } from '../../utils/changeSet';
 import { parsePatch } from '../../utils/configDiff';
 
 interface Props {
-  view: ChangeSetView;
+  /** This request's rows, namespaced ids — empty renders nothing. */
+  rows: readonly ChangeSetRow[];
   /** Row ids currently unfolded. */
   expanded: readonly string[];
   /** Row ids the user has undone (shown as such, still in the record). */
@@ -42,7 +43,7 @@ const Badge: React.FC<{ count: number; glyph: string; className: string; title: 
 };
 
 const EditRow: React.FC<{
-  row: ChangeSetView['rows'][number];
+  row: ChangeSetRow;
   open: boolean;
   undone: boolean;
   kept: boolean;
@@ -117,13 +118,13 @@ const EditRow: React.FC<{
   );
 };
 
-const ChatEditRows: React.FC<Props> = ({ view, expanded, undone, kept, onToggle }) => {
-  if (view.rows.length === 0) return null;
+const ChatEditRows: React.FC<Props> = ({ rows, expanded, undone, kept, onToggle }) => {
+  if (rows.length === 0) return null;
   const gone = new Set(undone);
   const decided = new Set(kept);
   return (
     <div className="mb-3 space-y-1" aria-label="Changes made in this reply">
-      {view.rows.map((row) => (
+      {rows.map((row) => (
         <EditRow
           key={row.id}
           row={row}

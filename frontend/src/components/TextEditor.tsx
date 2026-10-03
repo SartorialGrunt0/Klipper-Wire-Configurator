@@ -31,11 +31,12 @@ import EditorIssueStrip from './EditorIssueStrip';
 import ConfigTree from './ConfigTree';
 import ChatDock from './ChatDock';
 import PendingDiffPane, { PendingDiffChip } from './PendingDiffPane';
+import { useChangeSetStore } from '../stores/changeSetStore';
 import { useUiStore } from '../stores/uiStore';
 import { useAiStore } from '../stores/aiStore';
 import { useChatReferenceStore } from '../stores/chatReferenceStore';
 import { usePendingEditStore } from '../stores/pendingEditStore';
-import { paneModeFor } from '../utils/pendingDiff';
+import { paneModeFor, buildUnreviewedDiffModel } from '../utils/pendingDiff';
 import { selectionToReference } from '../utils/chatReferences';
 import { useMediaQuery, WIDE_VIEWPORT_QUERY } from '../hooks/useMediaQuery';
 import type { TextIssue } from '../types/editor';
@@ -108,14 +109,30 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   const pendingEdit = usePendingEditStore((s) => s.pending);
   const pendingTakeover = usePendingEditStore((s) => s.takeover);
   const selectionReference = useChatReferenceStore((s) => s.selection);
+  // The unreviewed change set is the LIVE source for this pane: whichever
+  // chat made the edits (the top-bar AI Chat dialog or the docked panel),
+  // the unreviewed red/green lines show here. The approval card model stays
+  // as the fallback for the dormant gate's first irreversible tool.
+  const changeSetView = useChangeSetStore((s) => s.view);
+  const changeSetKept = useChangeSetStore((s) => s.kept);
+  const changeSetUndone = useChangeSetStore((s) => s.undone);
+  const changeSetPane = useMemo(() => {
+    if (!changeSetView) return null;
+    const decided = new Set([...changeSetKept, ...changeSetUndone]);
+    const rows = changeSetView.rows.filter(
+      (row) => !row.superseded && !decided.has(row.id) && row.file === activeFile,
+    );
+    return buildUnreviewedDiffModel(rows, activeFile);
+  }, [changeSetView, changeSetKept, changeSetUndone, activeFile]);
+  const paneModel = changeSetPane ?? pendingEdit;
   const pendingPane = useMemo(
     () => paneModeFor({
-      model: pendingEdit,
+      model: paneModel,
       takeover: pendingTakeover,
       isActive,
       selection: selectionReference,
     }),
-    [pendingEdit, pendingTakeover, isActive, selectionReference],
+    [paneModel, pendingTakeover, isActive, selectionReference],
   );
 
   // Helper: export config text via backend (preserves comments, whitespace, #*# markers).
@@ -932,13 +949,14 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   // Follow a pending change to its file, so "Back to editing" lands where the
   // change is. A file that is not loaded (new_file / delete_file) is left
   // alone: the diff pane renders from the card, and there is nothing to switch
-  // the editor TO.
+  // the editor TO. (The change-set pane is already per active file, so this
+  // only ever fires for the dormant approval card.)
   useEffect(() => {
-    if (pendingPane !== 'diff' || !pendingEdit) return;
-    if (pendingEdit.file === activeFile) return;
-    if (!configFiles[pendingEdit.file]) return;
-    setActiveFile(pendingEdit.file);
-  }, [pendingPane, pendingEdit, activeFile, configFiles, setActiveFile]);
+    if (pendingPane !== 'diff' || !paneModel) return;
+    if (paneModel.file === activeFile) return;
+    if (!configFiles[paneModel.file]) return;
+    setActiveFile(paneModel.file);
+  }, [pendingPane, paneModel, activeFile, configFiles, setActiveFile]);
 
   // Consume one-shot line-jump requests (save dialog findings list → the
   // editor). The target file may need switching first; the switch re-exports
@@ -1673,17 +1691,17 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
             user is pointing at the changed lines, or asked to keep editing),
             the diff pane when it was not. The card in the chat remains the
             only decision surface — this surface shows and jumps, never decides. */}
-        {pendingPane === 'chip' && pendingEdit && (
+        {pendingPane === 'chip' && paneModel && (
           <PendingDiffChip
-            model={pendingEdit}
+            model={paneModel}
             onShow={() => usePendingEditStore.getState().showDiff()}
           />
         )}
 
         {/* Editor with line numbers and inline issues */}
-        {pendingPane === 'diff' && pendingEdit ? (
+        {pendingPane === 'diff' && paneModel ? (
           <PendingDiffPane
-            model={pendingEdit}
+            model={paneModel}
             onHide={() => usePendingEditStore.getState().hideDiff()}
           />
         ) : (

@@ -27,6 +27,12 @@ export interface ChangeSetRow extends ChangeSetEdit {
   badge: AdvisorySeverityCounts;
   /** `file / [section]` (plus the param for a set_param). */
   label: string;
+  /**
+   * Which request staged this edit, once several are merged into the running
+   * total. Row ids are only unique within a request, so a merged row's id is
+   * namespaced (see `namespacedId`).
+   */
+  requestId?: string;
 }
 
 export interface ChangeSetView {
@@ -140,9 +146,14 @@ export function pendingGroups(
   decided: readonly string[],
 ): PendingFile[] {
   const seen = new Set(decided);
+  return groupRows(view.rows.filter((row) => !row.superseded && !seen.has(row.id)));
+}
+
+/** Group rows by file and section, summing their counts and advisories. */
+export function groupRows(rows: readonly ChangeSetRow[]): PendingFile[] {
   const byFile = new Map<string, PendingFile>();
-  for (const row of view.rows) {
-    if (row.superseded || seen.has(row.id)) continue;
+  for (const row of rows) {
+    if (row.superseded) continue;
     let file = byFile.get(row.file);
     if (!file) {
       file = { file: row.file, added: 0, removed: 0, sections: [] };
@@ -210,4 +221,89 @@ export function fileEditIds(
   return view.rows
     .filter((row) => !row.superseded && !seen.has(row.id) && row.file === file)
     .map((row) => row.id);
+}
+
+// ── The running total (several requests' change sets) ──────────────────
+
+/** A row id is only unique within its request; the merged set namespaces it. */
+export function namespacedId(requestId: string, id: string): string {
+  return `${requestId}:${id}`;
+}
+
+export interface ChangeSetSegmentView {
+  requestId: string;
+  view: ChangeSetView;
+}
+
+/**
+ * The rows belonging to ONE request, oldest-first ordering preserved.
+ *
+ * `requestId === null` means "the newest segment" — what is streaming right
+ * now, before any reply message exists to hang the rows on.
+ */
+export function rowsForRequest(
+  segments: readonly ChangeSetSegmentView[],
+  requestId: string | null,
+): ChangeSetRow[] {
+  const segment = requestId === null
+    ? segments[segments.length - 1]
+    : segments.find((candidate) => candidate.requestId === requestId);
+  if (!segment) return [];
+  return segment.view.rows.map((row) => ({
+    ...row,
+    id: namespacedId(segment.requestId, row.id),
+    requestId: segment.requestId,
+  }));
+}
+
+/**
+ * Fold several requests' change sets into ONE review set, oldest first.
+ *
+ * The change set is a running total (Sir, 2026-10-02): sending another message
+ * must not clear the edits the last one staged, so the summary spans requests
+ * and a single decision can cover edits from several of them. Ids are
+ * namespaced because each request numbers its edits from `e0` again.
+ *
+ * Rows stay in the order they were made — the transcript is history — and a
+ * re-edit of the same target in a LATER request is a separate row on purpose:
+ * the two are independent decisions (keeping the first and dropping the second
+ * is a real state), so nothing is silently collapsed across requests.
+ */
+export function mergeChangeSetViews(
+  segments: readonly ChangeSetSegmentView[],
+): ChangeSetView | null {
+  const kept = segments.filter((segment) => segment.view.rows.length > 0);
+  if (kept.length === 0) return null;
+  const rows: ChangeSetRow[] = [];
+  const createdFiles = new Set<string>();
+  let totalAdded = 0;
+  let totalRemoved = 0;
+  for (const segment of kept) {
+    for (const row of segment.view.rows) {
+      rows.push({ ...row, id: namespacedId(segment.requestId, row.id), requestId: segment.requestId });
+    }
+    totalAdded += segment.view.totalAdded;
+    totalRemoved += segment.view.totalRemoved;
+    for (const file of segment.view.createdFiles) createdFiles.add(file);
+  }
+  return {
+    rows,
+    files: groupRows(rows).map((file) => ({
+      file: file.file,
+      added: file.added,
+      removed: file.removed,
+      sections: file.sections.map((section) => ({
+        file: section.file,
+        section: section.section,
+        added: section.added,
+        removed: section.removed,
+        edits: section.ids,
+        advisories: section.advisories,
+      })),
+    })),
+    totalAdded,
+    totalRemoved,
+    createdFiles: [...createdFiles],
+    liveIds: rows.filter((row) => !row.superseded).map((row) => row.id),
+  };
 }

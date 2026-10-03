@@ -8,6 +8,8 @@ import {
 } from '../pendingDiff';
 import { APPROVAL_DIFF_MAX_LINES, buildApprovalDiffLines } from '../approvalDiff';
 import { createConfigPatch, parsePatch } from '../configDiff';
+import { buildUnreviewedDiffModel } from '../pendingDiff';
+import type { ChangeSetRow } from '../changeSet';
 import type { ApprovalCard } from '../../services/api';
 import type { ChatReference } from '../chatReferences';
 
@@ -187,5 +189,67 @@ describe('model ↔ card agreement on non-op payloads', () => {
     })) as PendingDiffModel;
     expect(model.removed).toBe(0);
     expect(model.changedLines).toEqual([1]);
+  });
+});
+
+describe('buildUnreviewedDiffModel (post-hoc review rows)', () => {
+  const row = (over: Partial<ChangeSetRow> = {}): ChangeSetRow => ({
+    id: 'req-1:e0',
+    file: 'printer.cfg',
+    section: 'printer',
+    key: 'max_accel',
+    op: 'set_param',
+    summary: 'set max_accel to 12000',
+    added: 1,
+    removed: 1,
+    diffText: '-max_accel: 8000\n+max_accel: 12000',
+    advisories: [],
+    superseded: false,
+    supersededBy: '',
+    badge: { error: 0, warning: 0, other: 0 },
+    label: 'printer.cfg / [printer] max_accel',
+    requestId: 'req-1',
+    ...over,
+  });
+
+  it('renders the rows as red/green lines, whichever chat made them', () => {
+    const model = buildUnreviewedDiffModel([row()], 'printer.cfg');
+    expect(model).not.toBeNull();
+    expect(model?.lines.map((line) => line.type)).toEqual(['removed', 'added']);
+    expect(model?.lines[0].content).toBe('max_accel: 8000');
+    expect(model?.added).toBe(1);
+    expect(model?.removed).toBe(1);
+    expect(model?.firstChangedRow).toBe(0);
+    expect(model?.op).toBe('[printer] max_accel');
+  });
+
+  it('is null when there is nothing pending for that file', () => {
+    expect(buildUnreviewedDiffModel([], 'printer.cfg')).toBeNull();
+    expect(buildUnreviewedDiffModel([row()], '')).toBeNull();
+  });
+
+  it('concatenates every pending op of the file, in order', () => {
+    const model = buildUnreviewedDiffModel([
+      row(),
+      row({ id: 'req-1:e1', section: 'stepper_x', key: 'microsteps',
+        diffText: '-microsteps: 16\n+microsteps: 32' }),
+    ], 'printer.cfg');
+    expect(model?.lines).toHaveLength(4);
+    expect(model?.added).toBe(2);
+    expect(model?.op).toBe('[printer] max_accel, [stepper_x] microsteps');
+  });
+
+  it('keeps a stable identity per file so a decision does not re-take the pane', () => {
+    const before = buildUnreviewedDiffModel([row()], 'printer.cfg');
+    const after = buildUnreviewedDiffModel([row({ id: 'req-1:e1' })], 'printer.cfg');
+    expect(before?.approvalId).toBe(after?.approvalId);
+    expect(before?.approvalId).toBe('changeset:printer.cfg');
+  });
+
+  it('reports the lines the change touches (the highlight-overlap guard)', () => {
+    const model = buildUnreviewedDiffModel([
+      row({ diffText: '@@ -4,3 +4,3 @@\n context\n-max_accel: 8000\n+max_accel: 12000' }),
+    ], 'printer.cfg');
+    expect(model?.changedLines).toEqual([5]);
   });
 });

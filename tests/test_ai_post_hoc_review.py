@@ -285,7 +285,69 @@ def test_resolve_deletes_a_file_the_request_created_when_it_is_rejected(
 def test_resolve_unknown_request_is_not_found():
     out = client.post('/ai/chat/changes/resolve', json={
         'requestId': 'nope', 'keptEditIds': []}).json()
-    assert out == {'status': 'not_found'}
+    assert out == {'status': 'not_found', 'missing': ['nope']}
+    # No segment at all is not_found too (nothing to replay).
+    assert client.post('/ai/chat/changes/resolve', json={}).json() == {
+        'status': 'not_found'}
+
+
+def test_a_decision_can_span_several_requests(monkeypatch):
+    """The change set is a RUNNING TOTAL (Sir, 2026-10-02): a second message
+    does not discard the first message's unreviewed edits, so one undo has to
+    replay the whole chain — oldest first, each request's ops onto the state
+    the previous one left."""
+    _run(monkeypatch, [
+        _tool_call('config_edit', SET_ACCEL),
+        _final_reply('Set max_accel.'),
+    ], 'chain-1')
+    # The second message starts from the text the first one produced.
+    after_first = PRINTER_CFG.replace('max_accel: 1000', 'max_accel: 3000')
+    _run(monkeypatch, [
+        _tool_call('config_edit', SET_VELOCITY),
+        _final_reply('Set max_velocity.'),
+    ], 'chain-2', contextFiles=_ctx(after_first))
+    after_second = after_first.replace('max_velocity: 200', 'max_velocity: 300')
+
+    # Drop the FIRST request's edit: the second's survives, because the chain
+    # replays it onto the oldest baseline.
+    out = client.post('/ai/chat/changes/resolve', json={
+        'segments': [
+            {'requestId': 'chain-1', 'keptEditIds': []},
+            {'requestId': 'chain-2', 'keptEditIds': ['e0']},
+        ],
+        'contextFiles': {'printer.cfg': {'content': after_second}},
+    }).json()
+    assert out['status'] == 'ok'
+    text = out['files']['printer.cfg']['content']
+    assert 'max_accel: 1000' in text        # dropped, back to the baseline
+    assert 'max_velocity: 300' in text      # kept
+    assert out['stale'] == []
+
+    # Keeping only the first drops the second's edit, even though it sits on
+    # top: replay order is what makes that possible. The client now holds the
+    # text the previous decision produced, and sends that back — which is what
+    # tells the server nobody edited by hand in between.
+    out2 = client.post('/ai/chat/changes/resolve', json={
+        'segments': [
+            {'requestId': 'chain-1', 'keptEditIds': ['e0']},
+            {'requestId': 'chain-2', 'keptEditIds': []},
+        ],
+        'contextFiles': {'printer.cfg': {'content': text}},
+    }).json()
+    text2 = out2['files']['printer.cfg']['content']
+    assert out2['clientEdited'] == []
+    assert 'max_accel: 3000' in text2
+    assert 'max_velocity: 200' in text2
+
+    # A missing segment fails the whole call rather than replaying a partial
+    # chain (that would silently drop a request's edits).
+    out3 = client.post('/ai/chat/changes/resolve', json={
+        'segments': [
+            {'requestId': 'chain-1', 'keptEditIds': []},
+            {'requestId': 'gone-request', 'keptEditIds': []},
+        ],
+    }).json()
+    assert out3 == {'status': 'not_found', 'missing': ['gone-request']}
 
 
 def test_change_set_is_resolvable_while_the_request_is_still_running(

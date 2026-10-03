@@ -36,6 +36,12 @@ export interface ChatMessage {
    * in the transcript at the point it landed (the user's own words).
    */
   steer?: boolean;
+  /**
+   * The request that produced this reply. The post-hoc review's rows are
+   * looked up by it, so a reply's edits stay with that reply in the
+   * transcript even after later messages join the running total.
+   */
+  requestId?: string;
 }
 
 export interface AiSettings {

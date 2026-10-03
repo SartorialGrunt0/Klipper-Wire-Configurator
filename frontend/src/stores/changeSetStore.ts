@@ -1,33 +1,30 @@
 /**
- * The live change set of the request being reviewed (post-hoc edit review).
+ * The live change set under review (post-hoc edit review).
  *
- * A store, not component state: the transcript rows, the footer summary and
- * the save gate all read the SAME set, and the set outlives any one of them
- * (the rows render inside the message list, the summary sits above the
- * composer, and the text view's pane is a third reader). `pendingEditStore`
- * set the precedent — one dumb holder, pure logic in `utils/changeSet`.
+ * A store, not component state: the transcript rows, the footer summary, the
+ * text view's diff pane and the save gate all read the SAME set.
  *
- * Decisions are tracked as ids, never as text: undoing is a REPLAY of the
- * kept ops on the backend (`POST /ai/chat/changes/resolve`), so this store
- * only records which edits survive and lets the server produce the text.
+ * **It is a running total, not a per-reply set** (Sir, 2026-10-02). Sending
+ * another message must not clear the edits the last one staged: segments
+ * accumulate, oldest first, and a decision can cover edits from several
+ * requests. That is also why decisions are tracked as ids, never as text —
+ * undoing is a REPLAY of the kept ops on the backend
+ * (`POST /ai/chat/changes/resolve`, which takes the whole chain), so the
+ * server produces the text and the client only says what survives.
  *
- * Decision semantics (Sir, 2026-10-02): keep and undo both END a decision,
- * and a decided edit leaves the summary — the summary is a to-do list.
- * Keeping changes nothing in the text (it is already applied); undoing
- * removes the edit, and its effect with it.
- *
- * Lifecycle: a NEW request replaces the set and clears the decisions (the
- * previous set has been decided by then — the save gate keeps it in front of
- * the user until it is).
+ * Decision semantics: keep and undo both END a decision, and a decided edit
+ * leaves the summary — the summary is a to-do list. Keeping changes nothing in
+ * the text (it is already applied); undoing removes the edit and its effect.
  */
 import { create } from 'zustand';
 
 import type { ChangeSetPayload } from '../services/api';
 import {
-  allEditIds,
   buildChangeSetView,
   fileEditIds,
-  pendingGroups,
+  groupRows,
+  mergeChangeSetViews,
+  namespacedId,
   sectionEditIds,
   totalsForIds,
   unreviewedIds,
@@ -35,17 +32,25 @@ import {
   type PendingFile,
 } from '../utils/changeSet';
 
+/** One request's share of the running total. */
+export interface ChangeSetSegment {
+  requestId: string;
+  view: ChangeSetView;
+}
+
 export interface ChangeSetState {
-  requestId: string | null;
+  /** Oldest first: the order the requests were made in. */
+  segments: ChangeSetSegment[];
+  /** The merged review view over every segment (null when nothing is staged). */
   view: ChangeSetView | null;
-  /** Ids the user KEPT (decided: the edit stays, the row leaves the summary). */
+  /** Namespaced ids the user KEPT (`requestId:rowId`). */
   kept: string[];
-  /** Ids the user UNDID: their effect is gone from the working state. */
+  /** Namespaced ids the user UNDID: their effect is gone from the text. */
   undone: string[];
-  /** Rows the user has unfolded (display only, per row id). */
+  /** Rows the user has unfolded (display only, per namespaced id). */
   expanded: string[];
 
-  /** Fold a payload from the progress rail or the finished reply. */
+  /** Upsert one request's change set (progress rail or the finished reply). */
   setFromStream: (requestId: string | null, payload: ChangeSetPayload | null | undefined) => void;
   toggleExpanded: (id: string) => void;
 
@@ -57,49 +62,67 @@ export interface ChangeSetState {
   undoSection: (file: string, section: string, ids?: readonly string[]) => void;
   keepFile: (file: string, ids?: readonly string[]) => void;
   undoFile: (file: string, ids?: readonly string[]) => void;
+  /** Forget everything — a new chat, or loading another conversation. */
   clear: () => void;
 
   /** Every id the user has decided on (kept or undone). */
   decidedIds: () => string[];
-  /** Ids to send as `keptEditIds` for the current decisions. */
-  keptIds: () => string[];
   /** Edits still awaiting a decision. */
   pendingIds: () => string[];
   /** The summary's rows: undecided edits, grouped, with decided ones gone. */
   pendingGroups: () => PendingFile[];
+  /** Undecided edits for ONE file (what the text view's pane shows). */
+  pendingRowsForFile: (file: string) => ChangeSetView['rows'];
   /** `+A −R` over what is still undecided. */
   pendingTotals: () => { added: number; removed: number };
   /** How many edits still need a decision. */
   unreviewedCount: () => number;
+  /** The local ids one request may keep (its row ids minus the undone ones). */
+  keptIdsFor: (requestId: string) => string[];
+  /** The whole chain's keep lists, oldest first, for the resolve call. */
+  resolveSegments: () => Array<{ requestId: string; keptEditIds: string[] }>;
 }
 
 const EMPTY = {
+  segments: [] as ChangeSetSegment[],
   view: null as ChangeSetView | null,
   kept: [] as string[],
   undone: [] as string[],
   expanded: [] as string[],
 };
 
+function mergedView(segments: ChangeSetSegment[]): ChangeSetView | null {
+  return mergeChangeSetViews(segments);
+}
+
 export const useChangeSetStore = create<ChangeSetState>((set, get) => ({
-  requestId: null,
   ...EMPTY,
 
   setFromStream: (requestId, payload) => {
+    if (!requestId) return;
     const view = buildChangeSetView(payload);
-    const current = get();
-    if (current.requestId !== requestId) {
-      // A new request: its change set is unreviewed from scratch.
-      set({ requestId, view, kept: [], undone: [], expanded: [] });
-      return;
+    const { segments } = get();
+    const index = segments.findIndex((segment) => segment.requestId === requestId);
+    let next: ChangeSetSegment[];
+    if (view === null) {
+      // Nothing staged (or the payload was cleared): the segment goes away.
+      if (index < 0) return;
+      next = segments.filter((segment) => segment.requestId !== requestId);
+    } else if (index < 0) {
+      next = [...segments, { requestId, view }];
+    } else {
+      next = segments.map((segment, i) => (i === index ? { requestId, view } : segment));
     }
-    // Same request, refreshed by the poll: keep every decision the user has
-    // already made, and drop decisions about rows that no longer exist.
-    const live = new Set(view ? allEditIds(view) : []);
+    // Decisions survive the refresh, but only for rows that still exist —
+    // a segment that shrank must not leave orphan decisions behind.
+    const merged = mergedView(next);
+    const live = new Set(merged?.rows.map((row) => row.id) ?? []);
     set({
-      view,
-      kept: current.kept.filter((id) => live.has(id)),
-      undone: current.undone.filter((id) => live.has(id)),
-      expanded: current.expanded.filter((id) => live.has(id)),
+      segments: next,
+      view: merged,
+      kept: get().kept.filter((id) => live.has(id)),
+      undone: get().undone.filter((id) => live.has(id)),
+      expanded: get().expanded.filter((id) => live.has(id)),
     });
   },
 
@@ -113,14 +136,13 @@ export const useChangeSetStore = create<ChangeSetState>((set, get) => ({
   },
 
   keepAll: () => {
-    const { view, kept } = get();
-    if (!view) return;
-    set({ kept: [...new Set([...kept, ...get().pendingIds()])] });
+    if (!get().view) return;
+    set({ kept: [...new Set([...get().kept, ...get().pendingIds()])] });
   },
 
   undoAll: () => {
-    const { undone } = get();
-    set({ undone: [...new Set([...undone, ...get().pendingIds()])] });
+    if (!get().view) return;
+    set({ undone: [...new Set([...get().undone, ...get().pendingIds()])] });
   },
 
   keepSection: (file, section, ids) => {
@@ -155,18 +177,11 @@ export const useChangeSetStore = create<ChangeSetState>((set, get) => ({
     set({ undone: [...new Set([...state.undone, ...target])] });
   },
 
-  clear: () => set({ requestId: null, ...EMPTY }),
+  clear: () => set({ ...EMPTY }),
 
   decidedIds: () => {
     const { kept, undone } = get();
     return [...new Set([...kept, ...undone])];
-  },
-
-  keptIds: () => {
-    const { view, undone } = get();
-    if (!view) return [];
-    const gone = new Set(undone);
-    return allEditIds(view).filter((id) => !gone.has(id));
   },
 
   pendingIds: () => {
@@ -176,7 +191,18 @@ export const useChangeSetStore = create<ChangeSetState>((set, get) => ({
 
   pendingGroups: () => {
     const { view } = get();
-    return view ? pendingGroups(view, get().decidedIds()) : [];
+    if (!view) return [];
+    const decided = new Set(get().decidedIds());
+    return groupRows(view.rows.filter((row) => !row.superseded && !decided.has(row.id)));
+  },
+
+  pendingRowsForFile: (file) => {
+    const { view } = get();
+    if (!view) return [];
+    const decided = new Set(get().decidedIds());
+    return view.rows.filter(
+      (row) => !row.superseded && !decided.has(row.id) && row.file === file,
+    );
   },
 
   pendingTotals: () => {
@@ -186,6 +212,21 @@ export const useChangeSetStore = create<ChangeSetState>((set, get) => ({
   },
 
   unreviewedCount: () => get().pendingIds().length,
+
+  keptIdsFor: (requestId) => {
+    const { segments, undone } = get();
+    const segment = segments.find((candidate) => candidate.requestId === requestId);
+    if (!segment) return [];
+    const gone = new Set(undone);
+    return segment.view.rows
+      .map((row) => row.id)
+      .filter((localId) => !gone.has(namespacedId(requestId, localId)));
+  },
+
+  resolveSegments: () => get().segments.map((segment) => ({
+    requestId: segment.requestId,
+    keptEditIds: get().keptIdsFor(segment.requestId),
+  })),
 }));
 
 /** Summary totals over the edits the user still has to decide. */

@@ -494,6 +494,138 @@ def diff_text(file_name: str, before: str, after: str) -> str:
     return "\n".join(_unified_diff_lines(file_name, before, after))
 
 
+def resolve_change_chain(chain, context_files: dict | None = None) -> dict:
+    """Replay the KEPT ops of a whole CHAIN of requests, oldest first.
+
+    Post-hoc review's single mutation (plan hard rule 4): undo is
+    ``replay(kept ops, baseline)``, never a text revert — dropping a rejected
+    op therefore cannot leave any of its residue behind, including residue a
+    later op built on.
+
+    The change set is a RUNNING TOTAL (Sir, 2026-10-02): sending a second
+    message must not discard the first message's unreviewed edits, so one
+    decision can cover edits staged by several requests. Each request's ops
+    replay onto the state the previous request left, starting from the OLDEST
+    request's pre-op baseline — which is what makes dropping an op from
+    request 1 also drop request 2's residue that was built on it.
+
+    ``chain`` is ``[(session, kept_ids, request_id), ...]`` in chronological
+    order; ``kept_ids`` of None means "keep everything this request staged".
+
+    Base text per file is that oldest baseline unless the client's current
+    text no longer matches the last text we pushed for it — that means the
+    human edited the file, and their text wins (hard rule 6). Ops whose
+    anchors no longer resolve are reported in ``stale`` rather than forced.
+
+    Returns ``{status, files: {name: {content, deleted}}, stale,
+    clientEdited}``. The caller feeds ``files`` to the same apply path the
+    staged edits use, so keep/undo and stage share one mutation surface.
+    """
+    entries = [(session, kept_ids, request_id)
+               for session, kept_ids, request_id in chain if session is not None]
+    if not entries:
+        return {"status": "not_found"}
+
+    current: dict[str, str] = {}
+    for file_name, meta in (context_files or {}).items():
+        content = (meta or {}).get("content", "")
+        current[str(file_name)] = content if isinstance(content, str) else ""
+
+    touched: list[str] = []
+    owners: dict[str, list] = {}
+    created: set[str] = set()
+    for session, _kept, _rid in entries:
+        for rec in session.edit_records:
+            file_name = rec["file"]
+            if not file_name:
+                continue
+            if file_name not in touched:
+                touched.append(file_name)
+            owners.setdefault(file_name, []).append(session)
+            if rec["op"] == "new_file":
+                created.add(file_name)
+
+    base_files: dict[str, str] = {}
+    client_edited: list[str] = []
+    for file_name in touched:
+        sessions = owners[file_name]
+        first, newest = sessions[0], sessions[-1]
+        if file_name in created and file_name not in first.baseline_files:
+            # Did not exist before the chain started: the new_file op has
+            # to be able to create it, so it is not seeded.
+            continue
+        cur = current.get(file_name)
+        last_pushed = newest.pushed_files.get(file_name)
+        if cur is None:
+            base_files[file_name] = first.baseline_files.get(file_name, "")
+        elif last_pushed is not None and cur == last_pushed:
+            base_files[file_name] = first.baseline_files.get(file_name, cur)
+        else:
+            base_files[file_name] = cur
+            client_edited.append(file_name)
+
+    state = ProjectState(files=dict(base_files))
+    stale: list[dict] = []
+    kept_ok: set[tuple] = set()
+    for session, kept_ids, request_id in entries:
+        kept_set = None if kept_ids is None else {str(i) for i in kept_ids}
+        for rec in session.edit_records:
+            if kept_set is not None and rec["id"] not in kept_set:
+                continue
+            raw_op = rec.get("_raw_op") or {}
+            if not raw_op:
+                stale.append({"id": rec["id"], "requestId": request_id or "",
+                              "file": rec["file"],
+                              "reason": "no replayable operation recorded"})
+                continue
+            # Fresh delta baseline per op: each op is validated against the
+            # state the previous one actually produced.
+            new_state, result = state.apply(state.validate(), raw_op)
+            if result["status"] == "error":
+                stale.append({
+                    "id": rec["id"],
+                    "requestId": request_id or "",
+                    "file": rec["file"],
+                    "reason": result.get("error")
+                    or "an earlier approved edit no longer applies",
+                })
+                continue
+            state = new_state
+            kept_ok.add((id(session), rec["id"]))
+
+    files: dict[str, dict] = {}
+    for file_name, text in state.files.items():
+        if file_name in touched:
+            files[file_name] = {"content": text, "deleted": False}
+    for file_name in created:
+        kept_creator = any(
+            (id(session), rec["id"]) in kept_ok
+            for session, _kept, _rid in entries
+            for rec in session.edit_records
+            if rec["op"] == "new_file" and rec["file"] == file_name)
+        if not kept_creator:
+            files[file_name] = {"content": "", "deleted": True}
+
+    # Every session in the chain now knows what the client holds for the
+    # files it touched, so the next decision's staleness check is honest.
+    for session, _kept, _rid in entries:
+        for file_name in owners_of(session, touched, entries):
+            entry = files.get(file_name)
+            if entry is None:
+                continue
+            if entry["deleted"]:
+                session.pushed_files.pop(file_name, None)
+            else:
+                session.pushed_files[file_name] = entry["content"]
+    return {"status": "ok", "files": files, "stale": stale,
+            "clientEdited": client_edited}
+
+
+def owners_of(session, touched, entries) -> list[str]:
+    """Files this session staged edits to (its own view of the chain)."""
+    owned = {rec["file"] for rec in session.edit_records if rec["file"]}
+    return [name for name in touched if name in owned]
+
 
 class EditSession:
     """Request-scoped edit session: live state + baseline + staged edits."""
@@ -1236,93 +1368,8 @@ class EditSession:
 
     def resolve_change_set(self, kept_ids, context_files: dict | None = None,
                            ) -> dict:
-        """Replay the KEPT ops onto each touched file's base text.
-
-        Post-hoc review's single mutation (plan hard rule 4): undo is
-        ``replay(kept ops, baseline)``, never a text revert — dropping a
-        rejected op therefore cannot leave any of its residue behind,
-        including residue a later op built on.
-
-        Base text per file is the request's PRE-OP baseline unless the
-        client's current text no longer matches the last text we pushed
-        for it — that means the human edited the file mid-loop, and their
-        text wins (hard rule 6). In that case an op whose anchor no longer
-        resolves is reported in ``stale`` rather than forced through.
-
-        Returns ``{status, files: {name: {content, deleted}}, stale}``.
-        The caller feeds ``files`` to the same apply path the staged edits
-        use, so keep/undo and stage share one mutation surface.
-        """
-        kept_set = None if kept_ids is None else {str(i) for i in kept_ids}
-        kept = [r for r in self.edit_records
-                if kept_set is None or r["id"] in kept_set]
-
-        current: dict[str, str] = {}
-        for file_name, meta in (context_files or {}).items():
-            content = (meta or {}).get("content", "")
-            current[str(file_name)] = content if isinstance(content, str) else ""
-
-        created = {r["file"] for r in self.edit_records
-                   if r["op"] == "new_file"}
-        touched: list[str] = []
-        for rec in self.edit_records:
-            if rec["file"] and rec["file"] not in touched:
-                touched.append(rec["file"])
-
-        base_files: dict[str, str] = {}
-        client_edited: list[str] = []
-        for file_name in touched:
-            cur = current.get(file_name)
-            pushed = self.pushed_files.get(file_name)
-            if file_name in created and file_name not in self.baseline_files:
-                # Did not exist before this request: the new_file op has
-                # to be able to create it, so it is not seeded.
-                continue
-            if cur is None:
-                base_files[file_name] = self.baseline_files.get(file_name, "")
-            elif pushed is not None and cur == pushed:
-                base_files[file_name] = self.baseline_files.get(file_name, cur)
-            else:
-                base_files[file_name] = cur
-                client_edited.append(file_name)
-
-        state = ProjectState(files=dict(base_files))
-        state_baseline = state.validate()
-        stale: list[dict] = []
-        kept_ok: set[str] = set()
-        for rec in kept:
-            raw_op = rec.get("_raw_op") or {}
-            if not raw_op:
-                stale.append({"id": rec["id"], "file": rec["file"],
-                              "reason": "no replayable operation recorded"})
-                continue
-            new_state, result = state.apply(state_baseline, raw_op)
-            if result["status"] == "error":
-                stale.append({
-                    "id": rec["id"],
-                    "file": rec["file"],
-                    "reason": result.get("error")
-                    or "an earlier approved edit no longer applies",
-                })
-                continue
-            state = new_state
-            kept_ok.add(rec["id"])
-
-        files: dict[str, dict] = {}
-        for file_name, text in state.files.items():
-            if file_name in touched:
-                files[file_name] = {"content": text, "deleted": False}
-        for file_name in created:
-            kept_creator = any(rec["id"] in kept_ok for rec in kept
-                               if rec["op"] == "new_file"
-                               and rec["file"] == file_name)
-            if not kept_creator:
-                files[file_name] = {"content": "", "deleted": True}
-        self.pushed_files = {
-            name: entry["content"] for name, entry in files.items()
-            if not entry["deleted"]}
-        return {"status": "ok", "files": files, "stale": stale,
-                "clientEdited": client_edited}
+        """Replay ONE request's KEPT ops (see :func:`resolve_change_chain`)."""
+        return resolve_change_chain([(self, kept_ids, None)], context_files)
 
     def has_inert_draft(self, blocks: list[str]) -> bool:
         """True when a ```cfg block contains config substance that is NOT

@@ -26,6 +26,8 @@ import type { ApprovalCard } from '../services/api';
 import type { DiffLine } from './configDiff';
 import type { ChatReference } from './chatReferences';
 import { buildApprovalDiffLines } from './approvalDiff';
+import { parsePatch } from './configDiff';
+import type { ChangeSetRow } from './changeSet';
 
 export interface PendingDiffModel {
   /** Identity of the card this came from (stale-response guard). */
@@ -123,6 +125,50 @@ export function buildPendingDiffModel(card: ApprovalCard | null): PendingDiffMod
     added,
     removed,
     firstChangedRow: lines.findIndex((l) => l.type === 'added' || l.type === 'removed'),
+    changedLines: changedBeforeLines(lines),
+  };
+}
+
+/**
+ * The pane's view of the UNREVIEWED change set for one file.
+ *
+ * Same surface as `buildPendingDiffModel`, different source: the post-hoc
+ * review's rows (each carrying its op's own unified diff) instead of an
+ * approval card. That is what makes the pane behave identically whichever
+ * chat made the edits — the top-bar AI Chat dialog and the docked text-view
+ * panel both write into the same change set, so switching to the text view
+ * shows the red and green lines either way (Sir, 2026-10-02).
+ *
+ * `approvalId` is deliberately stable per file: deciding one edit must not
+ * re-take the pane over after the user asked to keep editing.
+ */
+export function buildUnreviewedDiffModel(
+  rows: readonly ChangeSetRow[],
+  file: string,
+): PendingDiffModel | null {
+  if (!file || rows.length === 0) return null;
+  const lines: DiffLine[] = [];
+  const labels: string[] = [];
+  let added = 0;
+  let removed = 0;
+  for (const row of rows) {
+    lines.push(...parsePatch(row.diffText));
+    added += row.added;
+    removed += row.removed;
+    const label = row.section
+      ? `[${row.section}]${row.key ? ` ${row.key}` : ''}`
+      : row.file;
+    if (!labels.includes(label)) labels.push(label);
+  }
+  return {
+    approvalId: `changeset:${file}`,
+    file,
+    op: labels.join(', '),
+    summary: `${rows.length} unreviewed change${rows.length === 1 ? '' : 's'}`,
+    lines,
+    added,
+    removed,
+    firstChangedRow: lines.findIndex((line) => line.type === 'added' || line.type === 'removed'),
     changedLines: changedBeforeLines(lines),
   };
 }

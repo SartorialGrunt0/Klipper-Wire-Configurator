@@ -56,6 +56,7 @@ import ChatInputBar, { type ChatReferenceChip } from './ChatInputBar';
 import ChatEditRows from './ChatEditRows';
 import ChangeSetBar from './ChangeSetBar';
 import { useChangeSetStore, changeSetTotals } from '../../stores/changeSetStore';
+import { buildChangeSetView, rowsForRequest, type ChangeSetRow } from '../../utils/changeSet';
 import type { PendingAiChatRequest } from '../../types/ai';
 import type { AiChatRole } from '../../services/api';
 import type { SavedConversation } from '../../stores/chatHistoryStore';
@@ -197,6 +198,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   // every keep/undo. `appliedStagedRef` dedupes the poll's per-file
   // snapshots so the same text is not re-parsed every 1.5s.
   const changeSetView = useChangeSetStore((state) => state.view);
+  const changeSetSegments = useChangeSetStore((state) => state.segments);
   const changeSetExpanded = useChangeSetStore((state) => state.expanded);
   const changeSetUndone = useChangeSetStore((state) => state.undone);
   const changeSetKept = useChangeSetStore((state) => state.kept);
@@ -499,9 +501,9 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       // The text view's pending-diff pane follows the same slot: a new
       // request starts with nothing pending.
       usePendingEditStore.getState().clearPending();
-      // Post-hoc review: the previous reply's change set is replaced by
-      // this request's, and the live-staging dedupe starts over.
-      useChangeSetStore.getState().clear();
+      // Post-hoc review: the change set is a RUNNING TOTAL — a new message
+      // does NOT clear the edits an earlier one staged. Those stay in the
+      // review summary until they are kept or undone.
       appliedStagedRef.current = '';
       setChangeSetNote(null);
 
@@ -648,21 +650,28 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         });
 
         if (pipelineResult.warnings) setError(pipelineResult.warnings);
-        setMessages([...newMessages, pipelineResult.finalMessage]);
+        // Stamp the request id on the reply: the review rows are looked up by
+        // it, so this reply's edits stay with this reply.
+        const finalMessage: ChatMessage = {
+          ...pipelineResult.finalMessage,
+          requestId: stopRequestId,
+        };
+        setMessages([...newMessages, finalMessage]);
         // Approved tool edits (Phase 2 gate): the resuming loop's final
         // reply carries the staged writes — put them into the editor draft
         // (dirty, save-gated). Declines/timeouts arrive with no staged
         // edits, so plain Q&A and declined flows are untouched.
-        const stagedEdits = pipelineResult.finalMessage.pendingEdits;
+        const stagedEdits = finalMessage.pendingEdits;
         if (stagedEdits && stagedEdits.length > 0) {
           await applyApprovedToolEdits(stagedEdits);
         }
         // The reply's change set is authoritative — it is what the resolve
         // endpoint replays — so it replaces whatever the poll last showed
-        // (a final edit may have landed after the last poll tick).
+        // (a final edit may have landed after the last poll tick). It joins
+        // the running total rather than replacing it.
         useChangeSetStore.getState().setFromStream(
           stopRequestId,
-          pipelineResult.finalMessage.changeSet ?? null,
+          finalMessage.changeSet ?? null,
         );
         // Background completion signal: if the dialog is closed when the reply
         // lands, flag the toolbar button so the user knows it's ready.
@@ -891,14 +900,15 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   // texts go through the same apply path the staged edits use, so keep/undo
   // and stage share one mutation surface.
   const resolveChangeSet = useCallback(
-    async (keptIds: string[]) => {
-      const requestId = useChangeSetStore.getState().requestId;
-      if (!requestId) return;
+    async () => {
+      const store = useChangeSetStore.getState();
+      const segments = store.resolveSegments();
+      if (segments.length === 0) return;
       setChangeSetBusy(true);
       setChangeSetNote(null);
       try {
         const contextFiles = await buildDecisionContext();
-        const out = await api.resolveChangeSet({ requestId, keptEditIds: keptIds, contextFiles });
+        const out = await api.resolveChangeSet({ segments, contextFiles });
         if (out.status !== 'ok' || !out.files) {
           setChangeSetNote('This change set is no longer available — the changes in the editor stand as they are.');
           return;
@@ -936,9 +946,52 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     setChangeSetNote(null);
   }, []);
 
+  // ── Transcript rows ─────────────────────────────────────────────
+  // One row per edit, read-only, hung on the reply that made them: the model
+  // edits before it answers, so the rows sit immediately before its bubble.
+  // They are looked up per request, so earlier replies keep their own rows
+  // while a later message joins the running total.
+  const renderEditRows = useCallback(
+    (rows: ChangeSetRow[]) => {
+      if (rows.length === 0) return null;
+      return (
+        <ChatEditRows
+          rows={rows}
+          expanded={changeSetExpanded}
+          undone={changeSetUndone}
+          kept={changeSetKept}
+          onToggle={(id) => useChangeSetStore.getState().toggleExpanded(id)}
+        />
+      );
+    },
+    [changeSetExpanded, changeSetUndone, changeSetKept],
+  );
+
+  const editRowsFor = useCallback(
+    (message: ChatMessage) => {
+      if (message.requestId) {
+        const rows = rowsForRequest(changeSetSegments, message.requestId);
+        if (rows.length > 0) return renderEditRows(rows);
+      }
+      // A conversation restored from the backend carries its own change set
+      // and no live segment; show it so the reply still explains itself.
+      const restored = buildChangeSetView(message.changeSet ?? null);
+      return renderEditRows(restored?.rows ?? []);
+    },
+    [changeSetSegments, renderEditRows],
+  );
+
+  // While the reply is still streaming there is no message to hang the rows
+  // on, so show the rows of the request actually in flight. Looking up "the
+  // newest segment" instead showed the PREVIOUS reply's rows again under the
+  // new message, until the in-flight request staged its first edit.
+  const streamingEditRows = renderEditRows(
+    stopRequestId ? rowsForRequest(changeSetSegments, stopRequestId) : [],
+  );
+
   const handleUndoAll = useCallback(() => {
     useChangeSetStore.getState().undoAll();
-    void resolveChangeSet(useChangeSetStore.getState().keptIds());
+    void resolveChangeSet();
   }, [resolveChangeSet]);
 
   const handleKeepSection = useCallback(
@@ -952,7 +1005,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   const handleUndoSection = useCallback(
     (_file: string, _section: string, ids: string[]) => {
       useChangeSetStore.getState().undoSection(_file, _section, ids);
-      void resolveChangeSet(useChangeSetStore.getState().keptIds());
+      void resolveChangeSet();
     },
     [resolveChangeSet],
   );
@@ -965,7 +1018,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   const handleUndoFile = useCallback(
     (_file: string, ids: string[]) => {
       useChangeSetStore.getState().undoFile(_file, ids);
-      void resolveChangeSet(useChangeSetStore.getState().keptIds());
+      void resolveChangeSet();
     },
     [resolveChangeSet],
   );
@@ -1540,19 +1593,8 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           onReviewPrinterMemory={handleReviewPrinterMemory}
           onEditMessage={handleEditMessage}
           messagesEndRef={messagesEndRef}
-          editRows={changeSetView ? (
-            /* One row per edit, streaming in as the model makes them.
-               Read-only; the decision lives in the footer summary. Rendered
-               inside the list so they sit between the user's message and the
-               reply — the edits happen before the reply does. */
-            <ChatEditRows
-              view={changeSetView}
-              expanded={changeSetExpanded}
-              undone={changeSetUndone}
-              kept={changeSetKept}
-              onToggle={(id) => useChangeSetStore.getState().toggleExpanded(id)}
-            />
-          ) : null}
+          editRowsFor={editRowsFor}
+          streamingEditRows={streamingEditRows}
         />
         {approvalCard && (
           <ChatApprovalCard

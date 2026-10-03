@@ -37,6 +37,7 @@ from services.ai_edit_tools import (
     format_approval_result,
     get_approval,
     remove_approval,
+    resolve_change_chain,
     was_decided,
 )
 
@@ -635,8 +636,12 @@ async def chat_progress_poll(requestId: str = ""):
 # file texts plus the op records, and only the most recent conversations
 # can still be on screen. Registered only when the request actually
 # staged something, so a pure Q&A turn keeps nothing alive.
+#
+# The bound is generous because the change set is a RUNNING TOTAL: a
+# decision can span edits staged across many messages, so every request
+# still carrying unreviewed edits has to stay resolvable.
 _edit_sessions: "OrderedDict[str, EditSession]" = OrderedDict()
-_EDIT_SESSIONS_MAX = 8
+_EDIT_SESSIONS_MAX = 32
 
 
 def register_edit_session(request_id: str | None, session) -> None:
@@ -684,15 +689,24 @@ def _publish_staged_edits(request_id: str | None, session) -> None:
     entry["changeSet"] = session.change_set_payload()
 
 
-class ChangeSetResolveRequest(BaseModel):
+class ChangeSetSegment(BaseModel):
+    """One request's share of a change set, in the order it was made."""
     requestId: str
-    # The edit ids the user KEPT. Everything else is dropped and its
-    # effect disappears, because the result is a replay of this list —
-    # not a revert of the dropped ones.
+    # The edit ids this request KEPT. Everything else it staged is dropped.
     keptEditIds: list[str] = []
+
+
+class ChangeSetResolveRequest(BaseModel):
+    # Single-request form (kept for the harness + older clients).
+    requestId: str = ""
+    keptEditIds: list[str] = []
+    # Multi-request form: the change set is a RUNNING TOTAL, so a decision can
+    # cover edits staged by several requests. Chronological order matters —
+    # each request's ops replay onto the state the previous one left.
+    segments: list[ChangeSetSegment] = []
     # The frontend's current working text ({file: {content, label}}). Used
-    # only to detect a file the human edited mid-loop (hard rule 6): their
-    # text wins and stale anchors are reported instead of clobbered.
+    # only to detect a file the human edited (hard rule 6): their text wins
+    # and stale anchors are reported instead of clobbered.
     contextFiles: dict[str, dict[str, str]] = {}
 
 
@@ -707,22 +721,42 @@ async def chat_changes(requestId: str = ""):
 
 @router.post("/ai/chat/changes/resolve")
 async def chat_changes_resolve(req: ChangeSetResolveRequest):
-    """Keep/undo a change set: replay the kept ops, return the file texts.
+    """Keep/undo a change set (or a chain of them): replay the kept ops.
 
     Undo is ``replay(kept ops, baseline)`` — never a text revert — so a
     rejected op cannot leave residue behind, including residue a later op
     depended on. Ops whose anchors no longer apply come back in ``stale``
     with an honest reason; nothing is forced through.
+
+    A segment whose session is gone (server restart, LRU eviction) fails the
+    whole call rather than replaying a partial chain: the text that would come
+    back silently drops the missing request's edits.
     """
-    session = get_edit_session(req.requestId)
-    if session is None:
+    specs = list(req.segments)
+    if not specs and req.requestId:
+        specs = [ChangeSetSegment(requestId=req.requestId,
+                                  keptEditIds=req.keptEditIds)]
+    if not specs:
         return {"status": "not_found"}
-    outcome = session.resolve_change_set(
-        req.keptEditIds, req.contextFiles or None)
+
+    chain = []
+    missing: list[str] = []
+    for spec in specs:
+        session = get_edit_session(spec.requestId)
+        if session is None:
+            missing.append(spec.requestId)
+            continue
+        chain.append((session, spec.keptEditIds, spec.requestId))
+    if missing:
+        logger.warning(
+            "Change set resolve | missing sessions requestIds=%s", missing)
+        return {"status": "not_found", "missing": missing}
+
+    outcome = resolve_change_chain(chain, req.contextFiles or None)
     logger.info(
-        "Change set resolved | requestId=%s kept=%d files=%d stale=%d",
-        req.requestId, len(req.keptEditIds or []), len(outcome["files"]),
-        len(outcome["stale"]),
+        "Change set resolved | segments=%d files=%d stale=%d",
+        len(chain), len(outcome.get("files", {})),
+        len(outcome.get("stale", [])),
     )
     return outcome
 

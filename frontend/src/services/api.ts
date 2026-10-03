@@ -1162,9 +1162,13 @@ export async function steerChat(requestId: string, message: string): Promise<Ste
 // ── Change-set resolution (keep / undo) ──────────────────────────────
 
 export interface ChangeSetResolveRequest {
-  requestId: string;
-  keptEditIds: string[];
-  /** The editor's current text, so a human edit mid-loop is never clobbered. */
+  /**
+   * The whole chain, oldest first: the change set is a running total, so one
+   * decision can cover edits staged by several requests. Each request's ops
+   * replay onto the state the previous one left.
+   */
+  segments: Array<{ requestId: string; keptEditIds: string[] }>;
+  /** The editor's current text, so a human edit is never clobbered. */
   contextFiles?: Record<string, { content: string; label?: string }>;
 }
 

@@ -50,16 +50,18 @@ const GroupButtons: React.FC<{
       type="button"
       onClick={onUndo}
       disabled={busy}
-      className="rounded border border-[var(--color-bg-tertiary)] px-1.5 text-[9px] text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-error)] hover:text-[var(--color-error)] disabled:opacity-40"
+      className="rounded border border-[var(--color-bg-tertiary)] px-1.5 py-0.5 text-[9px] font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-error)] hover:text-[var(--color-error)] disabled:opacity-40"
       title={undoTitle}
     >
       {undoLabel}
     </button>
+    {/* Same blue as "Keep all" — keeping is the affirmative action wherever
+        it appears. */}
     <button
       type="button"
       onClick={onKeep}
       disabled={busy}
-      className="rounded border border-[var(--color-bg-tertiary)] px-1.5 text-[9px] text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:opacity-40"
+      className="rounded bg-[var(--color-accent)] px-1.5 py-0.5 text-[9px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
       title={keepTitle}
     >
       {keepLabel}
