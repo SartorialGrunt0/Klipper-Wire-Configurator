@@ -2,29 +2,20 @@
  * Chat Input Bar
  *
  * Contains:
- * - "Include Files" menu for selecting which loaded configs to send as context
  * - The attached-context chip row (pinned / preview / editor selection)
- * - Imported .cfg file attachments (with remove)
  * - ContentEditable input for composing messages, with `@`-mention completion
  * - Send button
  *
- * `compact` is the docked panel's density: at 360px the labelled "Include
- * Files" button becomes an icon plus a count badge (its menu already opens
- * upward, so nothing about the menu changes), and the chip row wraps.
+ * There is no context-file picker: a request carries the editor's unsaved
+ * drafts and nothing else, and the model finds what it needs with its own
+ * tools (`list_user_configs` / `read_user_config`). Explicit direction is the
+ * chip row's job (`@`-mention, or a reference attached from the text view).
+ *
+ * `compact` is the docked panel's density: the chip row wraps.
  */
-import React, { useState, useEffect, useRef } from 'react';
-import KeyboardArrowDownRounded from '@mui/icons-material/KeyboardArrowDownRounded';
-import UploadFileRounded from '@mui/icons-material/UploadFileRounded';
+import React, { useState, useEffect } from 'react';
 import { extractMentionedConfigFilenames } from '../../utils/chatUtils';
 import { mentionQuery, type ChatReferenceKind, type MentionSource } from '../../utils/chatReferences';
-
-// ── Attached Config File ───────────────────────────────────────────
-
-export interface AttachedConfigFile {
-  id: string;
-  name: string;
-  content: string;
-}
 
 // ── Reference chips ────────────────────────────────────────────────
 
@@ -59,10 +50,6 @@ const SEVERITY_DOT: Record<'error' | 'warning' | 'info', string> = {
 export interface ChatInputBarProps {
   input: string;
   loading: boolean;
-  selectedConfigContextFiles: string[];
-  loadedConfigFilenames: string[];
-  activeFile: string | null;
-  attachedConfigFiles: AttachedConfigFile[];
   onInputChange: (text: string) => void;
   onSend: () => void;
   onStop: () => void;
@@ -74,11 +61,7 @@ export interface ChatInputBarProps {
    */
   onSteer?: () => void;
   onKeyDown: (e: React.KeyboardEvent) => void;
-  onAttachFiles: (e: React.ChangeEvent<HTMLInputElement>) => void;
-  onRemoveAttachedFile: (id: string) => void;
-  onSelectedContextFilesChange: (filenames: string[]) => void;
   inputRef: React.RefObject<HTMLDivElement | null>;
-  fileInputRef: React.RefObject<HTMLInputElement | null>;
   /** Docked-panel density. */
   compact?: boolean;
   /** Attached-context chips, in pinned → preview → selection order. */
@@ -121,20 +104,12 @@ function caretOffsetIn(root: HTMLElement): number {
 const ChatInputBar: React.FC<ChatInputBarProps> = ({
   input,
   loading,
-  selectedConfigContextFiles,
-  loadedConfigFilenames,
-  activeFile,
-  attachedConfigFiles,
   onInputChange,
   onSend,
   onStop,
   onSteer,
   onKeyDown,
-  onAttachFiles,
-  onRemoveAttachedFile,
-  onSelectedContextFilesChange,
   inputRef,
-  fileInputRef,
   compact = false,
   references = [],
   onRemoveReference,
@@ -143,24 +118,10 @@ const ChatInputBar: React.FC<ChatInputBarProps> = ({
   onMentionQuery,
   onMentionAccept,
 }) => {
-  const [includeFilesMenuOpen, setIncludeFilesMenuOpen] = useState(false);
-  const includeFilesMenuRef = useRef<HTMLDivElement>(null);
-
   // ── @-mention popup ─────────────────────────────────────────────
   // Anchored above the composer, so no caret geometry is needed to place
   // it — only to decide whether the caret sits inside a mention token.
   const [mention, setMention] = useState<{ query: string; items: MentionSource[]; index: number } | null>(null);
-
-  // Close menu on outside click
-  useEffect(() => {
-    if (!includeFilesMenuOpen) return;
-    const handlePointerDown = (event: MouseEvent) => {
-      if (includeFilesMenuRef.current?.contains(event.target as Node)) return;
-      setIncludeFilesMenuOpen(false);
-    };
-    document.addEventListener('mousedown', handlePointerDown);
-    return () => document.removeEventListener('mousedown', handlePointerDown);
-  }, [includeFilesMenuOpen]);
 
   const refreshMention = (text: string, root: HTMLElement) => {
     if (!onMentionQuery) {
@@ -212,100 +173,6 @@ const ChatInputBar: React.FC<ChatInputBarProps> = ({
 
   return (
     <div className="border-t border-[var(--color-bg-tertiary)]">
-      {/* Include files bar */}
-      <div className={`flex flex-wrap items-center gap-2 ${compact ? 'px-3 pt-2 pb-1' : 'px-4 pt-3 pb-2'} text-[10px] text-[var(--color-text-secondary)]`}>
-        <div className="relative" ref={includeFilesMenuRef}>
-          <button
-            type="button"
-            onClick={() => setIncludeFilesMenuOpen((prev) => !prev)}
-            className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 font-medium transition-colors ${
-              includeFilesMenuOpen
-                ? 'border-[var(--color-accent)] text-[var(--color-accent)]'
-                : 'border-[var(--color-bg-tertiary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]'
-            }`}
-            title="Choose which loaded config files to include in chat context"
-          >
-            {compact ? (
-              <>
-                <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-                  <path d="M3 2.5h6l4 4v7a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-10a1 1 0 0 1 1-1z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
-                  <path d="M9 2.5v4h4" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
-                </svg>
-                {selectedConfigContextFiles.length > 0 && (
-                  <span className="rounded-full bg-[var(--color-bg-tertiary)] px-1.5 text-[9px] font-semibold text-[var(--color-text-primary)]">
-                    {selectedConfigContextFiles.length}
-                  </span>
-                )}
-              </>
-            ) : (
-              <>
-                Include Files
-                <KeyboardArrowDownRounded
-                  sx={{ fontSize: 16 }}
-                  className={`transition-transform ${includeFilesMenuOpen ? 'rotate-180' : ''}`}
-                />
-              </>
-            )}
-          </button>
-          {includeFilesMenuOpen && (
-            <div className={`absolute bottom-full left-0 z-20 mb-2 ${compact ? 'w-64' : 'w-72'} rounded-lg border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] p-2 shadow-2xl`}>
-              <div className="mb-2 flex items-center justify-between gap-2 border-b border-[var(--color-bg-tertiary)] pb-2">
-                <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-secondary)]">
-                  Loaded .cfg files
-                </span>
-                <button
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  className="rounded-md border border-[var(--color-bg-tertiary)] p-1 text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
-                  title="Import local .cfg files"
-                >
-                  <UploadFileRounded sx={{ fontSize: 16 }} />
-                </button>
-              </div>
-              {loadedConfigFilenames.length > 0 ? (
-                <div className="max-h-56 space-y-1 overflow-y-auto pr-1">
-                  {loadedConfigFilenames.map((filename) => {
-                    const checked = selectedConfigContextFiles.includes(filename);
-                    const isActiveSelection = filename === activeFile;
-                    return (
-                      <label
-                        key={filename}
-                        className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-[var(--color-bg-primary)]"
-                      >
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={(e) => {
-                            onSelectedContextFilesChange(
-                              e.target.checked
-                                ? [...selectedConfigContextFiles, filename]
-                                : selectedConfigContextFiles.filter((v) => v !== filename),
-                            );
-                          }}
-                          className="rounded border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)]"
-                        />
-                        <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--color-text-primary)]">
-                          {filename}
-                        </span>
-                        {isActiveSelection && (
-                          <span className="rounded-full bg-[var(--color-bg-primary)] px-1.5 py-0.5 text-[9px] font-medium text-[var(--color-text-secondary)]">
-                            Active
-                          </span>
-                        )}
-                      </label>
-                    );
-                  })}
-                </div>
-              ) : (
-                <p className="px-2 py-3 text-[10px] text-[var(--color-text-secondary)]">
-                  No loaded .cfg files. Use the import button to attach local files.
-                </p>
-              )}
-            </div>
-          )}
-        </div>
-      </div>
-
       {/* Attached context references */}
       {references.length > 0 && (
         <div className={`flex flex-wrap gap-1 ${compact ? 'px-3 pb-1' : 'px-4 pb-2'}`}>
@@ -361,22 +228,6 @@ const ChatInputBar: React.FC<ChatInputBarProps> = ({
                 </button>
               )}
             </span>
-          ))}
-        </div>
-      )}
-
-      {/* Attached files */}
-      {attachedConfigFiles.length > 0 && (
-        <div className={`flex flex-wrap gap-2 ${compact ? 'px-3 pb-1' : 'px-4 pb-2'}`}>
-          {attachedConfigFiles.map((file) => (
-            <button
-              key={file.id}
-              onClick={() => onRemoveAttachedFile(file.id)}
-              className="rounded-full border border-[var(--color-bg-tertiary)] px-2 py-1 text-[10px] text-[var(--color-text-secondary)] hover:border-[var(--color-error)] hover:text-[var(--color-error)] transition-colors"
-              title="Remove imported file from chat context"
-            >
-              {file.name} ×
-            </button>
           ))}
         </div>
       )}

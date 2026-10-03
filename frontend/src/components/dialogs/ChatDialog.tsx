@@ -93,12 +93,6 @@ interface ChatDialogProps {
   variant?: 'modal' | 'dock';
 }
 
-interface AttachedConfigFile {
-  id: string;
-  name: string;
-  content: string;
-}
-
 // ── Constants ───────────────────────────────────────────────────────
 
 // Parse the temperature edit field into a clamped sampling value.
@@ -207,10 +201,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   const [changeSetBusy, setChangeSetBusy] = useState(false);
   const [changeSetNote, setChangeSetNote] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
-  // EXPERIMENT (auto-attach off): don't auto-select the active file.
-  // Context only includes files the user explicitly checks in "Include Files".
-  const [selectedConfigContextFiles, setSelectedConfigContextFiles] = useState<string[]>([]);
-  const [attachedConfigFiles, setAttachedConfigFiles] = useState<AttachedConfigFile[]>([]);
   const [showChatHistory, setShowChatHistory] = useState(false);
   const [showCarryOverPrompt, setShowCarryOverPrompt] = useState(false);
   const [showPrinterMemory, setShowPrinterMemory] = useState(false);
@@ -246,7 +236,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   const stickToBottomRef = useRef(true);
   const lastScrollTopRef = useRef(0);
   const inputRef = useRef<HTMLDivElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const handledPendingRequestIdRef = useRef<string | null>(null);
   // Live open state for async completions: the toolbar button only flashes
   // green/red when the dialog is closed at the moment the request finishes.
@@ -291,20 +280,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       useAiStore.getState().setChatStatus('awaiting');
     }
   }, [open, settings]);
-
-  // ── EXPERIMENT (auto-attach off) ───────────────────────────────
-  // Removed the old "seed the active file into the selection when the
-  // dialog opens" effect. Context now only includes files the user
-  // explicitly checks in "Include Files" (or manually attaches).
-
-  // ── Prune config context files when files are removed ───────────
-  useEffect(() => {
-    const availableFiles = new Set(Object.keys(configFiles));
-    setSelectedConfigContextFiles((prev) => {
-      const next = prev.filter((f) => availableFiles.has(f));
-      return next.length === prev.length ? prev : next;
-    });
-  }, [configFiles]);
 
   // ── Auto-scroll to bottom (sticky) ──────────────────────────────
   // Follows new messages AND content growth (approval cards, progress
@@ -390,30 +365,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     resolvedEditApiUrl,
     setSettings,
   ]);
-
-  // ── File Attach ─────────────────────────────────────────────────
-  const handleAttachConfigFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || []);
-    if (files.length === 0) return;
-    try {
-      const loadedFiles = await Promise.all(
-        files.map(async (file, index) => ({
-          id: `${file.name}-${file.lastModified}-${index}`,
-          name: file.name,
-          content: await file.text(),
-        })),
-      );
-      setAttachedConfigFiles((prev) => [...prev, ...loadedFiles]);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to import config file.');
-    } finally {
-      e.target.value = '';
-    }
-  };
-
-  const handleRemoveAttachedFile = (id: string) => {
-    setAttachedConfigFiles((prev) => prev.filter((file) => file.id !== id));
-  };
 
   // ── Helper: get config text (draft or saved) ────────────────────
   const getConfigText = useCallback(
@@ -554,34 +505,13 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           stopRequestId,
         );
 
-        // EXPERIMENT (auto-attach off): mentioned files are NOT auto-injected.
-        // Only files the user explicitly checks in "Include Files" are sent
-        // as context.
-        const contextTargets = Array.from(new Set(selectedConfigContextFiles));
-
-        // Phase 4: collect the candidate files (checked in "Include Files" +
-        // manually attached) with their content and labels. Content is sent
-        // to the backend as contextFiles for the edit session's working state
-        // — nothing is dumped into the prompt; the model fetches via
-        // read_user_config.
-        const candidateFiles = new Map<string, { text: string; label: string }>();
-        for (const filename of contextTargets) {
-          const fileText = await getConfigText(filename);
-          if (fileText != null) {
-            candidateFiles.set(filename, { text: fileText, label: getConfigContextLabel(filename) });
-          }
-        }
-        for (const file of attachedConfigFiles) {
-          candidateFiles.set(file.name, { text: file.content, label: 'User-attached local Klipper config file' });
-        }
-
-        // Context files sent to the backend for the edit session / approval
-        // re-validation (content never lands in the prompt here — the model
-        // must fetch).
+        // No context-file picker (2026-10-03): a request carries the editor's
+        // UNSAVED DRAFTS and nothing else. Files the user has not touched are
+        // not shipped — the backend arms the edit session from its own
+        // user-config mirror (`_mirror_user_config_files`), and the model
+        // finds what it needs with list_user_configs / read_user_config,
+        // directed by the user's message or a reference chip.
         const contextFilesPayload: Record<string, { content: string; label: string }> = {};
-        for (const [filename, candidate] of candidateFiles) {
-          contextFilesPayload[filename] = { content: candidate.text, label: candidate.label };
-        }
 
         // Unsaved-delta carry-over (live report 2026-09-25): files edited in
         // the editor but not yet saved — INCLUDING files the AI created and
@@ -716,7 +646,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     [
       activeFile,
       applyApprovedToolEdits,
-      attachedConfigFiles,
       configFiles,
       draftRequestMessage,
       getConfigContextLabel,
@@ -726,7 +655,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       loading,
       messages,
       originalTexts,
-      selectedConfigContextFiles,
       setMessages,
     ],
   );
@@ -880,18 +808,17 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   }, [approvalCard]);
 
   const buildDecisionContext = useCallback(async (): Promise<Record<string, { content: string; label: string }>> => {
-    // Latest working content for re-validation: all loaded files (drafts
-    // win over saved), plus anything attached to this conversation.
+    // Latest working content for re-validation: every loaded file (drafts win
+    // over saved). This is the "the human edited this file" evidence the
+    // server replays against — it must be the whole editor state, not a
+    // subset someone remembered to tick.
     const ctx: Record<string, { content: string; label: string }> = {};
     for (const filename of Object.keys(configFiles)) {
       const text = await getConfigText(filename);
       if (text != null) ctx[filename] = { content: text, label: getConfigContextLabel(filename) };
     }
-    for (const file of attachedConfigFiles) {
-      ctx[file.name] = { content: file.content, label: 'User-attached local Klipper config file' };
-    }
     return ctx;
-  }, [configFiles, getConfigText, getConfigContextLabel, attachedConfigFiles]);
+  }, [configFiles, getConfigText, getConfigContextLabel]);
 
   // ── Keep/undo a change set (post-hoc review) ────────────────────
   // Undo is expressed as a KEEP LIST and resolved on the server by REPLAYING
@@ -1156,13 +1083,9 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   const saveCurrentConversation = useCallback(() => {
     const { settings, messages } = useAiStore.getState();
     if (messages.length > 0) {
-      useChatHistoryStore.getState().saveConversation(
-        messages,
-        settings,
-        attachedConfigFiles.map(({ name, content }) => ({ name, content })),
-      );
+      useChatHistoryStore.getState().saveConversation(messages, settings);
     }
-  }, [attachedConfigFiles]);
+  }, []);
 
   // Start a fresh conversation. (The old draft-preview reset retired with
   // the Phase-4 ratchet — there is no prose draft to drop.)
@@ -1183,14 +1106,12 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     }
     saveCurrentConversation();
     handleStartNewChat();
-    setAttachedConfigFiles([]);
   }, [saveCurrentConversation, handleStartNewChat]);
 
   // Carry the existing conversation into the "new" chat so the next prompt
   // appends to it — the model keeps all prior context.
   const handleCarryOverContext = useCallback(() => {
     saveCurrentConversation();
-    setAttachedConfigFiles([]);
     setError(null);
     setShowCarryOverPrompt(false);
   }, [saveCurrentConversation]);
@@ -1198,7 +1119,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   const handleStartFreshChat = useCallback(() => {
     saveCurrentConversation();
     handleStartNewChat();
-    setAttachedConfigFiles([]);
     setError(null);
     setShowCarryOverPrompt(false);
   }, [saveCurrentConversation, handleStartNewChat]);
@@ -1209,15 +1129,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       saveCurrentConversation();
       setMessages(conversation.messages);
       setSettings(conversation.settings);
-      // Restore config files that were attached during the original chat so
-      // continuing the conversation keeps the same file context.
-      setAttachedConfigFiles(
-        (conversation.attachedConfigFiles ?? []).map((file, index) => ({
-          id: `${file.name}-${index}`,
-          name: file.name,
-          content: file.content,
-        })),
-      );
     },
     [saveCurrentConversation, setMessages, setSettings],
   );
@@ -1610,16 +1521,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         )}
       </div>
 
-      {/* File input (hidden) */}
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept=".cfg,text/plain"
-        multiple
-        className="hidden"
-        onChange={handleAttachConfigFiles}
-      />
-
       {/* Input bar */}
       {/* Post-hoc review summary: only what still needs a decision — keep or
           undo a change here and it leaves the list; when nothing is left the
@@ -1646,19 +1547,11 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         input={input}
         loading={loading}
         onSteer={() => { void handleSteer(); }}
-        selectedConfigContextFiles={selectedConfigContextFiles}
-        loadedConfigFilenames={loadedConfigFilenames}
-        activeFile={activeFile}
-        attachedConfigFiles={attachedConfigFiles}
         onInputChange={setInput}
         onSend={handleSend}
         onStop={handleStop}
         onKeyDown={handleKeyDown}
-        onAttachFiles={handleAttachConfigFiles}
-        onRemoveAttachedFile={handleRemoveAttachedFile}
-        onSelectedContextFilesChange={setSelectedConfigContextFiles}
         inputRef={inputRef}
-        fileInputRef={fileInputRef}
         compact={docked}
         references={docked ? attachedReferenceChips : undefined}
         onRemoveReference={(id) => {
