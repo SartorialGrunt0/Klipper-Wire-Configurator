@@ -263,9 +263,13 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
 
   const loadedConfigFilenames = Object.keys(configFiles);
 
-  // ── Sync settings to edit state when dialog opens ───────────────
+  // ── Sync settings to edit state when the panel is VISIBLE ───────
+  // `open` is the modal flag; the docked panel renders while it is false
+  // (`docked`, line ~148). Gating this on `open` alone left the mirror
+  // unhydrated the first time Settings was opened from the dock — a fresh
+  // page → text view → Settings showed values that had never been copied in.
   useEffect(() => {
-    if (open) {
+    if (open || docked) {
       setEditApiKey(settings.apiKey);
       setEditProviderModels(settings.providerModels);
       setEditModel(getProviderModel(settings.apiProvider, settings.providerModels, settings.model, settings.apiProvider));
@@ -282,16 +286,18 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       // the conversation now).
       useAiStore.getState().setChatStatus('idle');
     } else if (
+      !docked &&
       approvalCardRef.current &&
       !approvalBusy &&
       useAiStore.getState().chatStatus === 'idle'
     ) {
       // Re-raising: an unresolved approval card is still waiting on a
       // decision — closing the dialog (e.g. after peeking at it) should
-      // turn the button green again.
+      // turn the button green again. NOT in the dock: the panel is on
+      // screen, so the user is already looking at the card.
       useAiStore.getState().setChatStatus('awaiting');
     }
-  }, [open, settings]);
+  }, [open, docked, settings]);
 
   // ── Auto-scroll to bottom (sticky) ──────────────────────────────
   // Follows new messages AND content growth (approval cards, progress
@@ -456,6 +462,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         useChatReferenceStore.getState().takeAttachedReferences(),
         validation,
         visibility,
+        // The live buffer, not what the reference looked like when it was
+        // attached: a file/section/param reference carries the text it points
+        // at, and the user may have edited since.
+        (file) => useConfigStore.getState().configFiles[file]?.raw_text,
       );
 
       setMessages(newMessages);
@@ -1233,9 +1243,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   // column) and the header's density; nothing below this line knows or
   // cares which shell it is in.
 
-  const providerLabel = PROVIDER_OPTIONS.find((option) => option.value === settings.apiProvider)?.label
-    ?? String(settings.apiProvider);
-  const modelLabel = settings.model || 'default model';
   const statusTitle =
     chatStatus === 'success' ? 'Last response is ready'
       : chatStatus === 'awaiting' ? 'An edit is waiting for your decision'
@@ -1312,14 +1319,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
             {'>'}
           </button>
         </div>
-      </div>
-      {/* "Which model answered this?" is the recurring question — answer it
-          where the answer is needed, without a trip to Settings. */}
-      <div
-        className="truncate px-3 pb-2 text-[10px] text-[var(--color-text-secondary)]"
-        title={`${providerLabel} · ${modelLabel}`}
-      >
-        {providerLabel} · {modelLabel}
       </div>
     </div>
   ) : (

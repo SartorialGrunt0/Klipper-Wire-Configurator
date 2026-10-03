@@ -46,6 +46,15 @@ const NAV_BUTTON_CLASS =
   + 'text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] '
   + 'hover:text-[var(--color-accent)] disabled:opacity-30 disabled:hover:border-[var(--color-bg-tertiary)]';
 
+/** Per-change pair, anchored in the diff. Small, but never taller than a row. */
+const ROW_KEEP_CLASS =
+  'text-[10px] px-1.5 rounded bg-[var(--color-accent)] text-white hover:opacity-90 disabled:opacity-40';
+
+const ROW_UNDO_CLASS =
+  'text-[10px] px-1.5 rounded border border-[var(--color-bg-tertiary)] '
+  + 'text-[var(--color-text-secondary)] hover:border-[var(--color-error)] '
+  + 'hover:text-[var(--color-error)] disabled:opacity-40';
+
 export interface PendingDiffPaneProps {
   model: PendingDiffModel;
   /** Where the changes are, in reading order. */
@@ -100,6 +109,44 @@ export default function PendingDiffPane({
 
   const ids = stop?.ids ?? [];
 
+  // One Keep/Undo pair per change, anchored at the change's FIRST row, so the
+  // decision is next to the edit it acts on instead of only up in the strip.
+  // Both exist on purpose: the strip is where the reader is walking through the
+  // file, the row is where the reader has stopped.
+  const actionsByRow = useMemo(() => {
+    const map = new Map<number, React.ReactNode>();
+    stops.forEach((entry, stopIndex) => {
+      if (entry.ids.length === 0) return;
+      const currentStop = stopIndex === index;
+      map.set(entry.row, (
+        <span className="flex items-center gap-1 rounded bg-[var(--color-bg-primary)]/85 pl-1">
+          <button
+            type="button"
+            className={ROW_UNDO_CLASS}
+            disabled={busy}
+            onClick={() => onUndoEdits(model.file, entry.ids)}
+            title="Drop this change"
+          >
+            Undo
+          </button>
+          <button
+            type="button"
+            className={ROW_KEEP_CLASS}
+            disabled={busy}
+            onClick={() => onKeepEdits(model.file, entry.ids)}
+            title="Keep this change"
+          >
+            Keep
+          </button>
+          {currentStop && (
+            <span className="w-1 self-stretch rounded-full bg-[var(--color-accent)]/60" aria-hidden />
+          )}
+        </span>
+      ));
+    });
+    return map;
+  }, [stops, index, busy, model.file, onKeepEdits, onUndoEdits]);
+
   return (
     <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
       <div className="flex items-center gap-2 px-3 py-1 border-b border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)]">
@@ -110,7 +157,7 @@ export default function PendingDiffPane({
           disabled={index <= 0}
           title="Previous change"
         >
-          ‹
+          ↑
         </button>
         <button
           type="button"
@@ -119,7 +166,7 @@ export default function PendingDiffPane({
           disabled={index >= stops.length - 1}
           title="Next change"
         >
-          ›
+          ↓
         </button>
         <span className="text-[10px] text-[var(--color-text-secondary)] truncate">
           {stops.length === 0 ? 'no unreviewed change in this file' : current}
@@ -159,6 +206,7 @@ export default function PendingDiffPane({
         <DiffLines
           lines={model.lines}
           containerRef={rowsRef}
+          rowExtras={(rowIndex) => actionsByRow.get(rowIndex) ?? null}
           className="h-full text-xs leading-relaxed overflow-auto py-2"
         />
       </div>

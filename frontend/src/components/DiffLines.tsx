@@ -39,17 +39,35 @@ interface Props {
    * to scroll it.
    */
   containerRef?: React.Ref<HTMLPreElement>;
+  /**
+   * Row-anchored affordances (the review pane's per-change Keep/Undo), rendered
+   * right-aligned INSIDE the row so an action sits next to the edit it acts on.
+   *
+   * Rows are `w-max min-w-full` — they grow with a long line — so on a line
+   * wider than the pane the extras land at that row's right edge rather than
+   * the pane's. Fine for config files, and the alternative (positioning against
+   * the scroller) would need a measurement pass on every scroll.
+   */
+  rowExtras?: (rowIndex: number) => React.ReactNode;
 }
 
-export default function DiffLines({ lines, className = '', containerRef }: Props) {
+export default function DiffLines({ lines, className = '', containerRef, rowExtras }: Props) {
   return (
     <pre ref={containerRef} className={`m-0 font-mono overflow-x-auto ${className}`}>
-      {lines.map((line, i) => (
-        <div key={i} className={ROW_CLASS[line.type]}>
-          <span className="select-none opacity-50 mr-1.5">{ROW_MARK[line.type]}</span>
-          {line.content || '\u00A0'}
-        </div>
-      ))}
+      {lines.map((line, i) => {
+        const extras = rowExtras?.(i);
+        return (
+          <div key={i} className={`relative ${ROW_CLASS[line.type]}`}>
+            <span className="select-none opacity-50 mr-1.5">{ROW_MARK[line.type]}</span>
+            {line.content || '\u00A0'}
+            {extras && (
+              <span className="absolute inset-y-0 right-2 flex items-center gap-1">
+                {extras}
+              </span>
+            )}
+          </div>
+        );
+      })}
     </pre>
   );
 }

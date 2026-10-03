@@ -1,9 +1,103 @@
 import { describe, expect, it } from 'vitest';
 
+describe('referenceExcerpt', () => {
+  const CFG = [
+    '[printer]',                    // 1
+    'max_accel: 15500',             // 2
+    'max_velocity: 300',            // 3
+    '',                             // 4
+    '[stepper_x]',                  // 5
+    'step_pin: PE11',               // 6
+    'microsteps: 16',               // 7
+    '',                             // 8
+    '[gcode_macro START_PRINT]',    // 9
+    'gcode:',                       // 10
+    '  SET_FAN_SPEED FAN=nevermore',// 11
+  ].join('\n');
+
+  it('hands a section reference the section body, header to the next header', () => {
+    const excerpt = referenceExcerpt(
+      { id: 's', kind: 'section', file: 'printer.cfg', section: 'stepper_x', line: 5 },
+      CFG,
+    );
+    expect(excerpt).toBe('[stepper_x]\nstep_pin: PE11\nmicrosteps: 16');
+  });
+
+  it('finds the section by name when the reference carries no line', () => {
+    const excerpt = referenceExcerpt(
+      { id: 's', kind: 'section', file: 'printer.cfg', section: 'gcode_macro START_PRINT' },
+      CFG,
+    );
+    expect(excerpt?.startsWith('[gcode_macro START_PRINT]')).toBe(true);
+    expect(excerpt).toContain('SET_FAN_SPEED FAN=nevermore');
+  });
+
+  it('hands a param reference its own line under the header it lives in', () => {
+    const excerpt = referenceExcerpt(
+      { id: 'p', kind: 'param', file: 'printer.cfg', section: 'stepper_x', param: 'microsteps', line: 7 },
+      CFG,
+    );
+    expect(excerpt).toBe('[stepper_x]\nmicrosteps: 16');
+  });
+
+  it('hands a short file reference the whole file', () => {
+    const excerpt = referenceExcerpt({ id: 'f', kind: 'file', file: 'printer.cfg' }, CFG);
+    expect(excerpt).toBe(CFG);
+  });
+
+  it('hands a long file reference its section index instead, and says to fetch', () => {
+    const long = Array.from({ length: 1200 }, (_, i) => `# filler ${i}`).join('\n')
+      + '\n[printer]\nmax_accel: 15500\n[stepper_x]\nmicrosteps: 16\n';
+    const excerpt = referenceExcerpt({ id: 'f', kind: 'file', file: 'big.cfg' }, long);
+    expect(excerpt).toContain('too long to attach whole');
+    expect(excerpt).toContain('1201| [printer]');
+    expect(excerpt).toContain('1203| [stepper_x]');
+    expect(excerpt).toContain("read_user_config(filename='big.cfg'");
+    // The content itself is NOT shipped — that is the point of the index.
+    expect(excerpt).not.toContain('max_accel: 15500');
+  });
+
+  it('keeps a lines reference exactly as it was', () => {
+    const excerpt = referenceExcerpt(
+      { id: 'l', kind: 'lines', file: 'printer.cfg', startLine: 2, endLine: 2, text: 'max_accel: 15500' },
+      CFG,
+    );
+    expect(excerpt).toBe('max_accel: 15500');
+  });
+
+  it('caps an over-long excerpt and says so', () => {
+    const huge = `[printer]\n${'x'.repeat(MAX_REFERENCE_EXCERPT_CHARS + 500)}`;
+    const excerpt = referenceExcerpt(
+      { id: 's', kind: 'section', file: 'printer.cfg', section: 'printer', line: 1 },
+      huge,
+    );
+    expect(excerpt?.length).toBeLessThan(huge.length);
+    expect(excerpt).toContain('truncated');
+    expect(excerpt).toContain('read_user_config');
+  });
+
+  it('says nothing when the file text is not available', () => {
+    expect(referenceExcerpt({ id: 'f', kind: 'file', file: 'gone.cfg' }, undefined)).toBeUndefined();
+  });
+
+  it('is what the send path attaches, on top of the findings', () => {
+    const out = buildReferenceContext(
+      [{ id: 's', kind: 'section', file: FILE, section: 'printer', line: 1 }],
+      { [FILE]: { errors: [finding({ section: 'printer', line_number: 2 })] } },
+      ALL_VISIBLE,
+      () => CFG,
+    );
+    expect(out[0]?.text).toContain('max_accel: 15500');
+    expect(out[0]?.findings).toHaveLength(1);
+  });
+});
+
+
 import type { ValidationError } from '../../types/config';
 import type { SeverityVisibility } from '../validationVisibility';
 import { ALL_VISIBLE } from '../validationVisibility';
 import {
+  MAX_REFERENCE_EXCERPT_CHARS,
   MAX_REFERENCE_FINDINGS,
   addReference,
   buildReferenceContext,
@@ -12,6 +106,7 @@ import {
   mentionMatches,
   mentionQuery,
   nodeToReference,
+  referenceExcerpt,
   referenceLabel,
   selectionToReference,
   worstFindings,

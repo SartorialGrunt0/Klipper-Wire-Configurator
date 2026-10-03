@@ -19,6 +19,11 @@ import { mentionQuery, type ChatReferenceKind, type MentionSource } from '../../
 
 // ── Reference chips ────────────────────────────────────────────────
 
+/** A chip's `+` / `×`: a real target, not a 10px text node. */
+const CHIP_ACTION_CLASS =
+  'inline-flex h-4 w-4 items-center justify-center rounded text-[12px] leading-none '
+  + 'transition-colors hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text-primary)]';
+
 /** One chip in the composer's attached-context row. */
 export interface ChatReferenceChip {
   id: string;
@@ -175,39 +180,35 @@ const ChatInputBar: React.FC<ChatInputBarProps> = ({
     <div className="border-t border-[var(--color-bg-tertiary)]">
       {/* Attached context references */}
       {references.length > 0 && (
-        <div className={`flex flex-wrap gap-1 ${compact ? 'px-3 pb-1' : 'px-4 pb-2'}`}>
+        <div className={`flex flex-wrap gap-1 pt-2 ${compact ? 'px-3 pb-1.5' : 'px-4 pb-2.5'}`}>
           {references.map((chip) => (
             <span
               key={chip.id}
-              className={`inline-flex max-w-full items-center gap-1 rounded-full border px-2 py-0.5 font-mono text-[10px] ${
+              className={`inline-flex max-w-full items-center gap-1.5 rounded-full border py-1 pl-2.5 pr-1.5 font-mono text-[10px] ${
                 chip.role === 'preview'
                   ? 'border-dashed border-[var(--color-accent)] text-[var(--color-accent)]'
                   : 'border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]'
               }`}
               title={
                 chip.role === 'preview'
-                  ? 'Suggested context — press + to attach it'
+                  ? 'Suggested context — click to attach it to the message'
                   : chip.role === 'selection'
                     ? 'Your current editor selection is attached'
                     : 'Attached context'
               }
             >
-              {chip.role === 'preview' && (
-                <button
-                  type="button"
-                  onClick={() => onPromoteReference?.()}
-                  className="shrink-0 font-semibold hover:text-[var(--color-text-primary)]"
-                  title="Attach this context to the message"
-                >
-                  +
-                </button>
-              )}
               <span className="shrink-0 opacity-60">{KIND_GLYPH[chip.kind]}</span>
               <button
                 type="button"
-                onClick={() => onReferenceJump?.(chip.id)}
+                // A suggested chip (`preview`) is one click from attached: the
+                // chip IS the affordance, not just the glyph inside it.
+                onClick={() => (chip.role === 'preview'
+                  ? onPromoteReference?.()
+                  : onReferenceJump?.(chip.id))}
                 className="min-w-0 truncate hover:text-[var(--color-text-primary)]"
-                title="Jump to this part of the config"
+                title={chip.role === 'preview'
+                  ? 'Attach this context to the message'
+                  : 'Jump to this part of the config'}
               >
                 {chip.label}
               </button>
@@ -217,16 +218,32 @@ const ChatInputBar: React.FC<ChatInputBarProps> = ({
                   {chip.findingsCount}
                 </span>
               )}
-              {chip.role !== 'preview' && (
+              {/* Both glyphs live on the same side, and both are a real hit
+                  target — they were a 10px text node before. */}
+              <span className="flex shrink-0 items-center">
+                {chip.role === 'preview' && (
+                  <button
+                    type="button"
+                    onClick={() => onPromoteReference?.()}
+                    className={CHIP_ACTION_CLASS}
+                    title="Attach this context to the message"
+                  >
+                    +
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => onRemoveReference?.(chip.id)}
-                  className="shrink-0 hover:text-[var(--color-error)]"
-                  title={chip.role === 'selection' ? 'Detach this selection' : 'Remove this context'}
+                  className={`${CHIP_ACTION_CLASS} hover:text-[var(--color-error)]`}
+                  title={chip.role === 'preview'
+                    ? 'Dismiss this suggestion'
+                    : chip.role === 'selection'
+                      ? 'Detach this selection'
+                      : 'Remove this context'}
                 >
                   ×
                 </button>
-              )}
+              </span>
             </span>
           ))}
         </div>

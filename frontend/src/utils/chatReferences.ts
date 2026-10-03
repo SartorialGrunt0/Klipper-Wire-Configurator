@@ -176,6 +176,121 @@ export function nodeToReference(node: ReferenceNodeInput): ChatReference | null 
   return null;
 }
 
+// ── Excerpts ────────────────────────────────────────────────────────
+//
+// A reference is only useful to the model if it CARRIES the text it points at.
+// `lines` references always did (`selectionToReference` fills `text`); file,
+// section and param references used to go out as a bare label — the model was
+// told "the user pointed at printer.cfg" and handed nothing, so it answered
+// "sure, but I can't see anything specific" (Sir's dogfood, 2026-10-03).
+//
+// Filled at SEND time, not when the chip is attached: a reference survives
+// keystrokes, so the text it carries has to be read from the buffer as the
+// message goes out.
+
+/** A file reference rides whole up to this size. Past it, its section index
+ *  goes instead — a 5000-line bundle would swamp the request, and the model
+ *  can fetch any section it actually needs. */
+export const FILE_WHOLE_MAX_LINES = 1000;
+
+/** A Klipper header sits at column 0 and is never commented. */
+const SECTION_HEADER_RE = /^\[[^\]]+\]/;
+
+/** The nearest section header at or above `line`, or null. */
+function headerLineAt(lines: string[], line: number): number | null {
+  for (let i = Math.min(line, lines.length) - 1; i >= 0; i -= 1) {
+    if (SECTION_HEADER_RE.test(lines[i])) return i + 1;
+  }
+  return null;
+}
+
+/** The section's text: its header through the line before the next header. */
+export function sectionBodyAt(rawText: string, headerLine: number): string {
+  const lines = splitLines(rawText);
+  if (headerLine < 1 || headerLine > lines.length) return '';
+  const body: string[] = [];
+  for (let i = headerLine - 1; i < lines.length; i += 1) {
+    if (i > headerLine - 1 && SECTION_HEADER_RE.test(lines[i])) break;
+    body.push(lines[i]);
+  }
+  return body.join('\n').trimEnd();
+}
+
+/** The header line whose section name matches, or null. */
+function headerLineFor(rawText: string, section: string | undefined): number | null {
+  if (!section) return null;
+  const lines = splitLines(rawText);
+  const wanted = `[${section.trim()}]`.toLowerCase();
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].trim().toLowerCase() === wanted) return i + 1;
+  }
+  return null;
+}
+
+/** `12| [stepper_x]` per section — what a file too long to attach gets. */
+export function sectionIndex(rawText: string): string {
+  return splitLines(rawText)
+    .map((line, i) => (SECTION_HEADER_RE.test(line) ? `${i + 1}| ${line.trim()}` : null))
+    .filter((entry): entry is string => entry !== null)
+    .join('\n');
+}
+
+/** Trim to the excerpt budget, saying so when it bites. */
+function capExcerpt(text: string): string {
+  if (text.length <= MAX_REFERENCE_EXCERPT_CHARS) return text;
+  const droppedLines = text.slice(MAX_REFERENCE_EXCERPT_CHARS).split('\n').length;
+  return `${text.slice(0, MAX_REFERENCE_EXCERPT_CHARS)}\n`
+    + `… [truncated — about ${droppedLines} more lines; use read_user_config for the rest]`;
+}
+
+/**
+ * The text a reference carries to the model. `lines` references already have
+ * theirs; the rest are read out of `rawText` (the live buffer for that file).
+ */
+export function referenceExcerpt(
+  reference: ChatReference,
+  rawText: string | undefined,
+): string | undefined {
+  if (reference.text) return reference.text;
+  if (!rawText) return undefined;
+
+  switch (reference.kind) {
+    case 'section': {
+      const header = reference.line != null && reference.line >= 1
+        ? reference.line
+        : headerLineFor(rawText, reference.section);
+      const body = header ? sectionBodyAt(rawText, header) : '';
+      return body ? capExcerpt(body) : undefined;
+    }
+    case 'param': {
+      const lines = splitLines(rawText);
+      const at = reference.line != null && reference.line >= 1
+        ? lines[reference.line - 1]
+        : undefined;
+      if (at != null) {
+        // The param's own line, under the header it lives in: the model gets
+        // the value AND the section it belongs to.
+        const header = headerLineAt(lines, reference.line as number);
+        const head = header ? [lines[header - 1].trim()] : [];
+        return capExcerpt([...head, at.trim()].join('\n'));
+      }
+      const header = headerLineFor(rawText, reference.section);
+      const body = header ? sectionBodyAt(rawText, header) : '';
+      return body ? capExcerpt(body) : undefined;
+    }
+    case 'file':
+    default: {
+      const lines = splitLines(rawText);
+      if (lines.length <= FILE_WHOLE_MAX_LINES) return capExcerpt(rawText.trimEnd());
+      return [
+        `${lines.length} lines — too long to attach whole. Its sections:`,
+        sectionIndex(rawText),
+        `Fetch any of them with read_user_config(filename='${reference.file}', section='...').`,
+      ].join('\n');
+    }
+  }
+}
+
 // ── Scoping ─────────────────────────────────────────────────────────
 
 /**
@@ -217,16 +332,26 @@ export function findingsForScope(
 }
 
 /** Resolve a reference list against the current validation map, attaching
- *  each reference's in-scope findings (undefined when it has none). */
+ *  each reference's in-scope findings (undefined when it has none) AND the
+ *  excerpt it carries to the model.
+ *
+ *  `rawTextFor` is the live buffer for a file — the caller is the send path,
+ *  where the editor's text is the truth. Omitted, the references go out exactly
+ *  as they came in (what the pure tests and the retry path see). */
 export function buildReferenceContext(
   references: readonly ChatReference[],
   validation: Record<string, { errors: ValidationError[] } | undefined>,
   visibility: SeverityVisibility,
+  rawTextFor?: (file: string) => string | undefined,
   max: number = MAX_REFERENCE_FINDINGS,
 ): ChatReference[] {
   return references.map((reference) => {
     const findings = findingsForScope(reference, validation, visibility, max);
-    return findings.length > 0 ? { ...reference, findings } : { ...reference };
+    const excerpt = rawTextFor ? referenceExcerpt(reference, rawTextFor(reference.file)) : undefined;
+    const next = excerpt && excerpt !== reference.text
+      ? { ...reference, text: excerpt }
+      : { ...reference };
+    return findings.length > 0 ? { ...next, findings } : next;
   });
 }
 
