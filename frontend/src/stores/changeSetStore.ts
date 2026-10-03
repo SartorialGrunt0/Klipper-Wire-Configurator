@@ -49,6 +49,16 @@ export interface ChangeSetState {
   undone: string[];
   /** Rows the user has unfolded (display only, per namespaced id). */
   expanded: string[];
+  /**
+   * A decision is being replayed right now.
+   *
+   * Shared, not per-surface: the chat's footer bar and the text view's pane
+   * are two views of ONE review, so a button in either must be disabled while
+   * the other's request is in flight (2026-10-03).
+   */
+  busy: boolean;
+  /** Honest note from the last resolution (stale ops, failures, a gone set). */
+  note: string | null;
 
   /** Upsert one request's change set (progress rail or the finished reply). */
   setFromStream: (requestId: string | null, payload: ChangeSetPayload | null | undefined) => void;
@@ -89,6 +99,8 @@ const EMPTY = {
   kept: [] as string[],
   undone: [] as string[],
   expanded: [] as string[],
+  busy: false,
+  note: null as string | null,
 };
 
 function mergedView(segments: ChangeSetSegment[]): ChangeSetView | null {

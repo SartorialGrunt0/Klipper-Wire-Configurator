@@ -18,7 +18,6 @@ import { usePendingEditStore } from '../../stores/pendingEditStore';
 import { usePrinterMemoryStore, DEFAULT_PRINTER_MEMORY, type PrinterMemory } from '../../stores/printerMemoryStore';
 import * as api from '../../services/api';
 import { extractPrinterMemoryBlock } from '../../utils/printerMemory';
-import { planApprovedEditApply } from '../../utils/approvalApply';
 import {
   foldApprovalCountdown,
   type ApprovalCountdownAnchor,
@@ -56,6 +55,16 @@ import ChatInputBar, { type ChatReferenceChip } from './ChatInputBar';
 import ChatEditRows from './ChatEditRows';
 import ChangeSetBar from './ChangeSetBar';
 import { useChangeSetStore, changeSetTotals } from '../../stores/changeSetStore';
+import {
+  applyStagedEdits,
+  buildDecisionContext,
+  keepAll as keepAllEdits,
+  keepFile as keepFileEdits,
+  keepSection as keepSectionEdits,
+  undoAll as undoAllEdits,
+  undoFile as undoFileEdits,
+  undoSection as undoSectionEdits,
+} from '../../services/changeSetReview';
 import { buildChangeSetView, rowsForRequest, type ChangeSetRow } from '../../utils/changeSet';
 import type { PendingAiChatRequest } from '../../types/ai';
 import type { AiChatRole } from '../../services/api';
@@ -198,8 +207,11 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   const changeSetKept = useChangeSetStore((state) => state.kept);
   const changeSet = useChangeSetStore((state) => state);
   const appliedStagedRef = useRef<string>('');
-  const [changeSetBusy, setChangeSetBusy] = useState(false);
-  const [changeSetNote, setChangeSetNote] = useState<string | null>(null);
+  // Keep/undo state lives in the change-set store, not here: the text view's
+  // pane makes the same decisions, and the two surfaces must show one status
+  // (`busy`) and one note.
+  const changeSetBusy = useChangeSetStore((state) => state.busy);
+  const changeSetNote = useChangeSetStore((state) => state.note);
   const [showSettings, setShowSettings] = useState(false);
   const [showChatHistory, setShowChatHistory] = useState(false);
   const [showCarryOverPrompt, setShowCarryOverPrompt] = useState(false);
@@ -385,48 +397,11 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     [activeFile],
   );
 
-  // ── Approved tool edits → editor draft ──────────────────────────
-  // The approval card gate (Phase 2) stages validated writes SERVER-side;
-  // once the user approves, the resuming backend loop returns the final
-  // assistant message carrying `pendingEdits` (full post-apply file text,
-  // backend truth — never model prose). Applying them here marks the
-  // editor dirty like any other edit: approved ≠ saved, the Save flow
-  // (and its validation gate) remains the only path to disk.
-  const applyApprovedToolEdits = useCallback(
-    async (edits: NonNullable<ChatMessage['pendingEdits']>): Promise<void> => {
-      const { upserts, deletes } = planApprovedEditApply(edits);
-      if (upserts.length === 0 && deletes.length === 0) return;
-      for (const { file, newText } of upserts) {
-        try {
-          const parsed = await api.parseConfigText(newText, file);
-          const config = { ...parsed.config, raw_text: newText };
-          // updateConfigFile (NOT setConfigFile + single-file validateConfig):
-          // the store's debounced revalidation validates the WHOLE project,
-          // so include-graph-aware findings (gcode registry macros defined in
-          // included files, cross-file dups/pins) re-derive correctly. A
-          // single-file result written here flags every included-file macro
-          // as unknown_gcode_command (live report 2026-09-20: CLEAN_NOZZLE,
-          // AUX_FAN_ON/OFF from clean.cfg / aux_fan.cfg).
-          updateConfigFile(file, config);
-        } catch (err: unknown) {
-          // Should not happen: newText comes from the backend's own
-          // writer. Surface rather than silently drop the approved change.
-          console.error('[Approval] Failed to apply approved edit to', file, err);
-          setError(`Approved change to ${file} could not be applied to the editor — check the diff before saving.`);
-        }
-      }
-      deletes.forEach((file) => removeConfigFile(file));
-      if (upserts.length > 0 || deletes.length > 0) markDirty();
-      if (deletes.length > 0) {
-        // Deletion alone schedules nothing (removeConfigFile only drops the
-        // file's own entry) — re-derive the OTHER files' findings (e.g. a
-        // dangling include) against the surviving project now. Upsert-only
-        // flows are already covered by updateConfigFile's debounced pass.
-        void useConfigStore.getState().revalidateAll();
-      }
-    },
-    [updateConfigFile, removeConfigFile, markDirty],
-  );
+  // ── Backend edits → editor draft ────────────────────────────────
+  // Staged edits and the resolve replay share ONE apply path
+  // (`services/changeSetReview.applyStagedEdits`), so stage / keep / undo
+  // cannot drift: approved ≠ saved, the Save flow stays the only path to
+  // disk.
 
   // ── Submit Message ──────────────────────────────────────────────
   const submitMessage = useCallback(
@@ -456,7 +431,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       // does NOT clear the edits an earlier one staged. Those stay in the
       // review summary until they are kept or undone.
       appliedStagedRef.current = '';
-      setChangeSetNote(null);
+      useChangeSetStore.setState({ note: null });
 
       const userMsg = { role: 'user' as const, content: trimmedMessage, hiddenFromUser: options?.hiddenFromUser === true };
       const previousMessages = options?.hiddenFromUser ? [] : messages;
@@ -593,7 +568,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         // edits, so plain Q&A and declined flows are untouched.
         const stagedEdits = finalMessage.pendingEdits;
         if (stagedEdits && stagedEdits.length > 0) {
-          await applyApprovedToolEdits(stagedEdits);
+          const failed = await applyStagedEdits(stagedEdits);
+          if (failed.length > 0) {
+            setError(`The AI's change to ${failed.join(', ')} could not be applied to the editor — check the file before saving.`);
+          }
         }
         // The reply's change set is authoritative — it is what the resolve
         // endpoint replays — so it replaces whatever the poll last showed
@@ -645,7 +623,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     },
     [
       activeFile,
-      applyApprovedToolEdits,
       configFiles,
       draftRequestMessage,
       getConfigContextLabel,
@@ -784,7 +761,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         const signature = JSON.stringify(poll.stagedEdits);
         if (signature !== appliedStagedRef.current) {
           appliedStagedRef.current = signature;
-          void applyApprovedToolEdits(poll.stagedEdits);
+          void applyStagedEdits(poll.stagedEdits);
         }
       }
       if (poll.changeSet) {
@@ -797,7 +774,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [loading, stopRequestId, applyApprovedToolEdits]);
+  }, [loading, stopRequestId]);
 
   // Countdown tick while a card is visible (display only; the backend
   // timer auto-declines authoritatively).
@@ -807,71 +784,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     return () => window.clearInterval(interval);
   }, [approvalCard]);
 
-  const buildDecisionContext = useCallback(async (): Promise<Record<string, { content: string; label: string }>> => {
-    // Latest working content for re-validation: every loaded file (drafts win
-    // over saved). This is the "the human edited this file" evidence the
-    // server replays against — it must be the whole editor state, not a
-    // subset someone remembered to tick.
-    const ctx: Record<string, { content: string; label: string }> = {};
-    for (const filename of Object.keys(configFiles)) {
-      const text = await getConfigText(filename);
-      if (text != null) ctx[filename] = { content: text, label: getConfigContextLabel(filename) };
-    }
-    return ctx;
-  }, [configFiles, getConfigText, getConfigContextLabel]);
-
   // ── Keep/undo a change set (post-hoc review) ────────────────────
-  // Undo is expressed as a KEEP LIST and resolved on the server by REPLAYING
-  // the kept ops onto the request's baseline — never by reverting text here,
-  // which would leave the residue of a dropped op behind. The returned file
-  // texts go through the same apply path the staged edits use, so keep/undo
-  // and stage share one mutation surface.
-  const resolveChangeSet = useCallback(
-    async () => {
-      const store = useChangeSetStore.getState();
-      const segments = store.resolveSegments();
-      if (segments.length === 0) return;
-      setChangeSetBusy(true);
-      setChangeSetNote(null);
-      try {
-        const contextFiles = await buildDecisionContext();
-        const out = await api.resolveChangeSet({ segments, contextFiles });
-        if (out.status !== 'ok' || !out.files) {
-          setChangeSetNote('This change set is no longer available — the changes in the editor stand as they are.');
-          return;
-        }
-        const resolved = Object.entries(out.files).map(([file, entry]) => ({
-          file,
-          op: entry.deleted ? 'delete_file' : 'update',
-          summary: '',
-          newText: entry.content,
-        }));
-        await applyApprovedToolEdits(resolved);
-        // A rejected change set leaves the text exactly as it was on disk;
-        // the dirty flag must say so rather than flag a project for saving
-        // nothing changed.
-        useConfigStore.getState().markCleanIfMatchesDisk();
-        if (out.stale && out.stale.length > 0) {
-          setChangeSetNote(
-            `${out.stale.length} change(s) could not be re-applied: `
-            + out.stale.map((entry) => entry.reason).join('; '),
-          );
-        }
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : 'resolve failed';
-        setChangeSetNote(`Could not resolve the change set: ${message}`);
-      } finally {
-        setChangeSetBusy(false);
-      }
-    },
-    [applyApprovedToolEdits, buildDecisionContext],
-  );
-
-  const handleKeepAll = useCallback(() => {
-    // Nothing to replay: the working state already holds every kept edit.
-    useChangeSetStore.getState().keepAll();
-    setChangeSetNote(null);
-  }, []);
+  // The engine is `services/changeSetReview`: the text view's pane makes the
+  // same decisions, and there must be exactly one implementation of a replay
+  // (never a text revert) for both surfaces to call.
 
   // ── Transcript rows ─────────────────────────────────────────────
   // One row per edit, read-only, hung on the reply that made them: the model
@@ -916,38 +832,20 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     stopRequestId ? rowsForRequest(changeSetSegments, stopRequestId) : [],
   );
 
-  const handleUndoAll = useCallback(() => {
-    useChangeSetStore.getState().undoAll();
-    void resolveChangeSet();
-  }, [resolveChangeSet]);
-
+  const handleKeepAll = useCallback(() => keepAllEdits(), []);
+  const handleUndoAll = useCallback(() => { void undoAllEdits(); }, []);
   const handleKeepSection = useCallback(
-    (_file: string, _section: string, ids: string[]) => {
-      useChangeSetStore.getState().keepSection(_file, _section, ids);
-      setChangeSetNote(null);
-    },
+    (file: string, section: string, ids: string[]) => keepSectionEdits(file, section, ids),
     [],
   );
-
   const handleUndoSection = useCallback(
-    (_file: string, _section: string, ids: string[]) => {
-      useChangeSetStore.getState().undoSection(_file, _section, ids);
-      void resolveChangeSet();
-    },
-    [resolveChangeSet],
+    (file: string, section: string, ids: string[]) => { void undoSectionEdits(file, section, ids); },
+    [],
   );
-
-  const handleKeepFile = useCallback((_file: string, ids: string[]) => {
-    useChangeSetStore.getState().keepFile(_file, ids);
-    setChangeSetNote(null);
-  }, []);
-
+  const handleKeepFile = useCallback((file: string, ids: string[]) => keepFileEdits(file, ids), []);
   const handleUndoFile = useCallback(
-    (_file: string, ids: string[]) => {
-      useChangeSetStore.getState().undoFile(_file, ids);
-      void resolveChangeSet();
-    },
-    [resolveChangeSet],
+    (file: string, ids: string[]) => { void undoFileEdits(file, ids); },
+    [],
   );
 
   // ── Mid-loop steering ───────────────────────────────────────────
