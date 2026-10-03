@@ -180,6 +180,34 @@ describe('changeSetStore', () => {
     expect(changeSetTotals(state())).toEqual({ added: 0, removed: 0 });
   });
 
+  it('decides exactly the ids the text view hands it, and no more', () => {
+    state().setFromStream('req-1', payload());
+    const rows = state().pendingRowsForFile('printer.cfg');
+    expect(rows.map((row) => row.id)).toEqual(['req-1:e0', 'req-1:e1']);
+
+    // The pane's Keep acts on the change it is showing, so the unit here is
+    // the stop's ids — never "the file".
+    state().keepFile('printer.cfg', ['req-1:e0']);
+
+    expect(state().kept).toEqual(['req-1:e0']);
+    expect(state().pendingIds()).toEqual(['req-1:e1']);
+    expect(state().pendingRowsForFile('printer.cfg').map((row) => row.id)).toEqual(['req-1:e1']);
+  });
+
+  it('undoes exactly those ids', () => {
+    state().setFromStream('req-1', payload());
+    state().undoFile('printer.cfg', ['req-1:e1']);
+    expect(state().undone).toEqual(['req-1:e1']);
+    expect(state().pendingIds()).toEqual(['req-1:e0']);
+  });
+
+  it('ignores an empty id list rather than falling back to the whole file', () => {
+    state().setFromStream('req-1', payload());
+    state().keepFile('printer.cfg', []);
+    expect(state().kept).toEqual([]);
+    expect(state().pendingIds()).toEqual(['req-1:e0', 'req-1:e1']);
+  });
+
   it('groups a section that two requests both touched under one entry', () => {
     state().setFromStream('req-1', payload());
     state().setFromStream('req-2', secondPayload());

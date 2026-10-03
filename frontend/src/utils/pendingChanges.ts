@@ -150,11 +150,19 @@ export function changeStops(
   return stops.map(({ added: _added, removed: _removed, ...stop }) => stop);
 }
 
-/** The stop a row index belongs to, or -1. */
-export function stopIndexAtRow(stops: readonly ChangeStop[], row: number): number {
-  let found = -1;
-  stops.forEach((stop, index) => {
-    if (stop.row <= row) found = index;
-  });
-  return found;
+/**
+ * Where the cursor should land after a decision moved the marks under it.
+ *
+ * `lastLineStart` is the line the reader was on before the file was re-diffed.
+ * Reviewing downward should stay downward: take the first change at or below
+ * it, and fall back to the last change when the decided one was at the end of
+ * the file. An empty list has no index to give, so callers get -1.
+ */
+export function stopIndexAfterChange(
+  stops: readonly ChangeStop[],
+  lastLineStart: number,
+): number {
+  if (stops.length === 0) return -1;
+  const next = stops.findIndex((stop) => stop.lineStart >= lastLineStart);
+  return next === -1 ? stops.length - 1 : next;
 }

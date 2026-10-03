@@ -149,6 +149,10 @@ export async function resolveChangeSet(): Promise<void> {
 // Keep changes no text, but it DOES change the pane's frame: the marks are
 // defined by the DECIDED set (design B), so a keep replays too. Both verbs
 // therefore go through the same call — one path, one status, one note.
+//
+// `keepEdits`/`undoEdits` decide an EXPLICIT set of ids: that is the text
+// view's per-change decision (one stop in the diff). The file- and
+// section-level entry points below are the chat's summary bar.
 
 export async function keepAll(): Promise<void> {
   useChangeSetStore.setState({ note: null });
@@ -158,6 +162,17 @@ export async function keepAll(): Promise<void> {
 
 export async function undoAll(): Promise<void> {
   useChangeSetStore.getState().undoAll();
+  await resolveChangeSet();
+}
+
+export async function keepEdits(file: string, ids: string[]): Promise<void> {
+  useChangeSetStore.setState({ note: null });
+  useChangeSetStore.getState().keepFile(file, ids);
+  await resolveChangeSet();
+}
+
+export async function undoEdits(file: string, ids: string[]): Promise<void> {
+  useChangeSetStore.getState().undoFile(file, ids);
   await resolveChangeSet();
 }
 

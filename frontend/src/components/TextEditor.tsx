@@ -33,10 +33,8 @@ import ChatDock from './ChatDock';
 import PendingDiffPane, { PendingDiffChip } from './PendingDiffPane';
 import { changeStops } from '../utils/pendingChanges';
 import {
-  keepFile as keepFileDecision,
-  keepSection as keepSectionDecision,
-  undoFile as undoFileDecision,
-  undoSection as undoSectionDecision,
+  keepEdits as keepEditsDecision,
+  undoEdits as undoEditsDecision,
 } from '../services/changeSetReview';
 import { useChangeSetStore } from '../stores/changeSetStore';
 import { useUiStore } from '../stores/uiStore';
@@ -534,24 +532,12 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
       before === undefined || !loaded ? null : { before, after: textForFile(activeFile) },
     );
     if (!model) return null;
-    return { model, rows, stops: changeStops(model, rows) };
+    return { model, stops: changeStops(model, rows) };
   }, [
     changeSetView, changeSetKept, changeSetUndone, changeSetFrames,
     activeFile, configFiles, textForFile,
   ]);
   const paneModel = changeSetPane?.model ?? pendingEdit;
-  // Files still waiting on a decision, so the pane can offer to switch to them
-  // instead of looking empty for whichever file happens to be open.
-  const otherPendingFiles = useMemo(() => {
-    if (!changeSetView) return [];
-    const decided = new Set([...changeSetKept, ...changeSetUndone]);
-    const counts = new Map<string, number>();
-    for (const row of changeSetView.rows) {
-      if (row.superseded || decided.has(row.id) || row.file === activeFile) continue;
-      counts.set(row.file, (counts.get(row.file) ?? 0) + 1);
-    }
-    return [...counts].map(([file, count]) => ({ file, count }));
-  }, [changeSetView, changeSetKept, changeSetUndone, activeFile]);
   const pendingPane = useMemo(
     () => paneModeFor({
       model: paneModel,
@@ -1757,16 +1743,11 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
         {pendingPane === 'diff' && paneModel && changeSetPane ? (
           <PendingDiffPane
             model={paneModel}
-            rows={changeSetPane.rows}
             stops={changeSetPane.stops}
-            otherFiles={otherPendingFiles}
             busy={changeSetBusy}
             note={changeSetNote}
-            onKeepSection={keepSectionDecision}
-            onUndoSection={(file, section, ids) => { void undoSectionDecision(file, section, ids); }}
-            onKeepFile={keepFileDecision}
-            onUndoFile={(file, ids) => { void undoFileDecision(file, ids); }}
-            onOpenFile={setActiveFile}
+            onKeepEdits={(file, ids) => { void keepEditsDecision(file, ids); }}
+            onUndoEdits={(file, ids) => { void undoEditsDecision(file, ids); }}
             onHide={() => usePendingEditStore.getState().hideDiff()}
           />
         ) : (

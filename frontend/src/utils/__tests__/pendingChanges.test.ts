@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { changeStops, stopIndexAtRow } from '../pendingChanges';
+import { changeStops, stopIndexAfterChange } from '../pendingChanges';
 import { buildUnreviewedDiffModel } from '../pendingDiff';
 import { changeRowLabel, sectionLabel, type ChangeSetRow } from '../changeSet';
 
@@ -136,14 +136,42 @@ describe('changeStops', () => {
   });
 });
 
-describe('stopIndexAtRow', () => {
-  it('answers which stop a rendered row belongs to', () => {
-    const rows = [row()];
-    const model = modelFor(rows, afterChanging('max_accel: 1000', 'max_accel: 3000'));
-    const stops = changeStops(model, rows);
-    expect(stopIndexAtRow(stops, 0)).toBe(-1);
-    expect(stopIndexAtRow(stops, stops[0].row)).toBe(0);
-    expect(stopIndexAtRow(stops, model.lines.length - 1)).toBe(0);
+describe('stopIndexAfterChange', () => {
+  const twoStops = () => {
+    const rows = [
+      row({ id: 'req-1:e0' }),
+      row({
+        id: 'req-1:e1',
+        section: 'stepper_z',
+        key: 'microsteps',
+        diffText: '@@ -100,1 +100,1 @@\n-microsteps: 16\n+microsteps: 32\n',
+      }),
+    ];
+    const model = modelFor(rows, afterChanging('max_accel: 1000', 'max_accel: 3000')
+      .replace('microsteps: 16', 'microsteps: 32'));
+    return changeStops(model, rows);
+  };
+
+  it('stays on the change the reader was at when it survives the decision', () => {
+    const stops = twoStops();
+    expect(stops).toHaveLength(2);
+    expect(stopIndexAfterChange(stops, stops[1].lineStart)).toBe(1);
+  });
+
+  it('moves down to the next change when the decided one is gone', () => {
+    const stops = twoStops();
+    // The reader was on the first change; it has just been decided away, so
+    // the cursor belongs on the one below it — not back at the top.
+    expect(stopIndexAfterChange(stops.slice(1), stops[0].lineStart)).toBe(0);
+  });
+
+  it('falls back to the last change when the decided one was at the end', () => {
+    const stops = twoStops();
+    expect(stopIndexAfterChange(stops.slice(0, 1), stops[1].lineStart)).toBe(0);
+  });
+
+  it('has no index to give when nothing is left', () => {
+    expect(stopIndexAfterChange([], 12)).toBe(-1);
   });
 });
 
