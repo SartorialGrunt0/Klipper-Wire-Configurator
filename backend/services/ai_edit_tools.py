@@ -1323,6 +1323,16 @@ class EditSession:
         with ``superseded: true`` and contributes nothing to a total.
         Line numbers are deliberately absent: a change's identity is its
         file and section, never its line range.
+
+        Each file ALSO carries ``beforeText`` — the file as it stood before
+        this request's first edit to it. That is the FRAME the text view's
+        pane diffs against (Sir, 2026-10-03: the pane shows the WHOLE
+        document with the changed lines marked, not the neighbourhood of
+        each hunk). It is the one text the client cannot derive: the
+        current text it already holds (it is the buffer), the pre-review
+        text only ever existed here. Shipped once per FILE per request —
+        never once per edit, which is what the per-row ``diffText`` exists
+        to avoid.
         """
         edits = [{k: r.get(k) for k in self._RECORD_KEYS}
                  for r in self.edit_records]
@@ -1352,7 +1362,8 @@ class EditSession:
             entry = files.get(group["file"])
             if entry is None:
                 entry = {"file": group["file"], "added": 0, "removed": 0,
-                         "sections": []}
+                         "sections": [],
+                         "beforeText": self.baseline_files.get(group["file"], "")}
                 files[group["file"]] = entry
             entry["added"] += group["added"]
             entry["removed"] += group["removed"]

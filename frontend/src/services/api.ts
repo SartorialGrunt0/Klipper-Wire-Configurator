@@ -978,6 +978,18 @@ export interface ChangeSetFile {
   added: number;
   removed: number;
   sections: ChangeSetSection[];
+  /**
+   * The file as it stood BEFORE this request's first edit to it — the frame
+   * the text view's pane diffs against, so it can show the WHOLE document
+   * with the changed lines marked instead of the neighbourhood of each hunk
+   * (SIR 2026-10-03). The client already holds the current text (it is the
+   * buffer); this half only ever existed server-side. Shipped once per FILE,
+   * never once per edit — that is what `ChangeSetEdit.diffText` is for.
+   *
+   * Absent on a payload from a server that predates it; the pane then falls
+   * back to rendering the rows' own diffs.
+   */
+  beforeText?: string;
 }
 
 export interface ChangeSetPayload {

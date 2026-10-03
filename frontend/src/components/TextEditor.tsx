@@ -116,24 +116,9 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   const changeSetView = useChangeSetStore((s) => s.view);
   const changeSetKept = useChangeSetStore((s) => s.kept);
   const changeSetUndone = useChangeSetStore((s) => s.undone);
-  const changeSetPane = useMemo(() => {
-    if (!changeSetView) return null;
-    const decided = new Set([...changeSetKept, ...changeSetUndone]);
-    const rows = changeSetView.rows.filter(
-      (row) => !row.superseded && !decided.has(row.id) && row.file === activeFile,
-    );
-    return buildUnreviewedDiffModel(rows, activeFile);
-  }, [changeSetView, changeSetKept, changeSetUndone, activeFile]);
-  const paneModel = changeSetPane ?? pendingEdit;
-  const pendingPane = useMemo(
-    () => paneModeFor({
-      model: paneModel,
-      takeover: pendingTakeover,
-      isActive,
-      selection: selectionReference,
-    }),
-    [paneModel, pendingTakeover, isActive, selectionReference],
-  );
+  // The pane's model is derived BELOW, once `textForFile` exists: the frame
+  // it diffs against needs the editor's current text for the active file.
+  // (Declaring it here would read that callback before it is initialised.)
 
   // Helper: export config text via backend (preserves comments, whitespace, #*# markers).
   // Falls back to offline re-serialization when the backend is unreachable; callers use
@@ -506,6 +491,41 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     if (fn === activeFile && editTextFile === activeFile) return editText;
     return configFiles[fn]?.raw_text ?? allFilesText[fn] ?? '';
   }, [activeFile, editTextFile, editText, configFiles, allFilesText]);
+
+  // ── Pending AI change (the text view's diff pane) ────────────────
+  // The pane renders the WHOLE DOCUMENT with the unreviewed changes marked,
+  // not the neighbourhood of each hunk: it stands in for the buffer, so it
+  // shows all of it. The frame is the file's pre-review text (server truth,
+  // carried on the change set) against the text the editor holds right now —
+  // which is what makes an undo appear here without a round trip. Without
+  // both halves (an unloaded file, or a payload from an older server) the
+  // model falls back to the rows' own diffs. What gets rendered is decided
+  // by `paneModeFor` (pure, tested): another view is never taken over, and a
+  // highlight over the very lines being changed earns the header chip.
+  const changeSetPane = useMemo(() => {
+    if (!changeSetView) return null;
+    const decided = new Set([...changeSetKept, ...changeSetUndone]);
+    const rows = changeSetView.rows.filter(
+      (row) => !row.superseded && !decided.has(row.id) && row.file === activeFile,
+    );
+    const before = changeSetView.frames[activeFile];
+    const loaded = !!configFiles[activeFile];
+    return buildUnreviewedDiffModel(
+      rows,
+      activeFile,
+      before === undefined || !loaded ? null : { before, after: textForFile(activeFile) },
+    );
+  }, [changeSetView, changeSetKept, changeSetUndone, activeFile, configFiles, textForFile]);
+  const paneModel = changeSetPane ?? pendingEdit;
+  const pendingPane = useMemo(
+    () => paneModeFor({
+      model: paneModel,
+      takeover: pendingTakeover,
+      isActive,
+      selection: selectionReference,
+    }),
+    [paneModel, pendingTakeover, isActive, selectionReference],
+  );
 
   // Text the search/replace acts on (the active file's live textarea text once
   // it belongs to that file, otherwise the stored text).

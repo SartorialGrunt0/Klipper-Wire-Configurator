@@ -171,6 +171,36 @@ def test_change_set_groups_by_file_and_section(monkeypatch):
     assert 'line' not in json.dumps(change_set['edits'][0]).lower()
 
 
+def test_change_set_file_carries_the_pre_review_frame(monkeypatch):
+    """The whole-document pane's frame.
+
+    Each file ships the text it had BEFORE this request's first edit to it
+    (Sir, 2026-10-03). It is the one text the client cannot derive: the
+    current text it already holds — it is the buffer — while the pre-review
+    text only ever existed here.
+    """
+    body = _run(monkeypatch, [
+        _tool_call('config_edit', SET_ACCEL),
+        _tool_call('config_edit', SET_MICROSTEPS),
+        _final_reply('Both set.'),
+    ], 'cs-frame-1')
+    entry = body['changeSet']['files'][0]
+    # The WHOLE file, exactly — not the neighbourhood of the hunks.
+    assert entry['beforeText'] == PRINTER_CFG
+    assert 'max_accel: 1000' in entry['beforeText']    # pre-edit value
+    assert 'microsteps: 16' in entry['beforeText']     # untouched section too
+
+    # Per REQUEST, not per file history: the next message's frame is the text
+    # the previous one left. That is what lets a two-request running total
+    # diff against one baseline (the pane takes the OLDEST segment's frame).
+    after_first = PRINTER_CFG.replace('max_accel: 1000', 'max_accel: 3000')
+    body2 = _run(monkeypatch, [
+        _tool_call('config_edit', SET_VELOCITY),
+        _final_reply('Set max_velocity.'),
+    ], 'cs-frame-2', contextFiles=_ctx(after_first))
+    assert body2['changeSet']['files'][0]['beforeText'] == after_first
+
+
 def test_change_set_rows_carry_their_own_mini_diff(monkeypatch):
     # A file long enough that "compact" is a real claim: the unfold payload
     # must be the changed neighbourhood, not the whole file.
@@ -186,10 +216,39 @@ def test_change_set_rows_carry_their_own_mini_diff(monkeypatch):
     assert '+max_accel: 3000' in diff_text
     assert len(diff_text.splitlines()) < 15
     assert 'M117 hello 19' not in diff_text       # not the whole file
-    # The before/after pair is NOT shipped per edit — that is why a row
-    # carries a unified diff in the first place.
-    assert len(json.dumps(body['changeSet'])) < len(long_cfg)
+    # The before/after pair is still NOT shipped per ROW — that is why a row
+    # carries a unified diff in the first place. What does ship, once, is the
+    # FILE's pre-review text: the pane's whole-document frame (Sir,
+    # 2026-10-03). The lean-payload law therefore reads "one copy per FILE",
+    # not "smaller than the file" (see the scaling lock below).
+    assert json.dumps(body['changeSet']).count('"beforeText"') == 1
     assert body['changeSet']['edits'][0]['key'] == 'max_accel'
+
+
+def test_the_frame_is_one_copy_per_file_not_per_edit(monkeypatch):
+    """Adding an edit costs a row, never another copy of the file.
+
+    The whole-document pane needs the file's pre-review text (design A,
+    Sir 2026-10-03) — that cost is one text per FILE per request. What must
+    NOT come back is the per-edit before/after pair the change set was
+    deliberately built to avoid shipping.
+    """
+    long_cfg = PRINTER_CFG + '\n'.join(
+        f'[gcode_macro M{i:02d}]\ngcode:\n    M117 hello {i}\n'
+        for i in range(20))
+    body = _run(monkeypatch, [
+        _tool_call('config_edit', SET_ACCEL),
+        _tool_call('config_edit', SET_VELOCITY),
+        _tool_call('config_edit', SET_MICROSTEPS),
+        _final_reply('Done.'),
+    ], 'frame-scale-1', contextFiles=_ctx(long_cfg))
+    payload = json.dumps(body['changeSet'])
+    # Three edits, one frame: the pre-review text appears exactly once.
+    assert len(payload.split('"beforeText"')) - 1 == 1
+    assert payload.count(json.dumps(long_cfg)[1:-1]) == 1
+    # And the whole payload is still smaller than three copies of the file
+    # the old law compared against — the rows stayed compact.
+    assert len(payload) < 3 * len(long_cfg)
 
 
 def test_changes_endpoint_serves_the_same_set(monkeypatch):

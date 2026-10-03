@@ -95,6 +95,20 @@ describe('changeSetStore', () => {
     expect(state().pendingIds()).toEqual(['req-1:e1', 'req-2:e0']);
   });
 
+  it('the pane frame is the OLDEST request\'s pre-edit text', () => {
+    // The pane shows the document before the REVIEW, not before the latest
+    // message: a later request's frame already contains the earlier one's
+    // edits, so it must not win.
+    state().setFromStream('req-1', payload({
+      files: [{ ...payload().files[0], beforeText: 'BEFORE THE REVIEW' }],
+    }));
+    state().setFromStream('req-2', secondPayload());
+    state().setFromStream('req-3', payload({
+      files: [{ ...payload().files[0], beforeText: 'AFTER REQUEST 1' }],
+    }));
+    expect(state().view?.frames['printer.cfg']).toBe('BEFORE THE REVIEW');
+  });
+
   it('re-publishing the SAME request refreshes it without duplicating', () => {
     state().setFromStream('req-1', payload());
     state().setFromStream('req-1', payload());

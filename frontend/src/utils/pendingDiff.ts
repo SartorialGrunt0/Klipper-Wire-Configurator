@@ -130,6 +130,20 @@ export function buildPendingDiffModel(card: ApprovalCard | null): PendingDiffMod
 }
 
 /**
+ * The two halves of one file the pane diffs to draw the document.
+ *
+ * `before` is server truth — the file as it stood before the review's first
+ * edit (shipped per file on the change-set payload). `after` is the text the
+ * editor is holding right now: it is the buffer, so it is current by
+ * construction, which is also what makes an UNDO show up here without a
+ * round trip.
+ */
+export interface PendingFrame {
+  before: string;
+  after: string;
+}
+
+/**
  * The pane's view of the UNREVIEWED change set for one file.
  *
  * Same surface as `buildPendingDiffModel`, different source: the post-hoc
@@ -139,26 +153,45 @@ export function buildPendingDiffModel(card: ApprovalCard | null): PendingDiffMod
  * panel both write into the same change set, so switching to the text view
  * shows the red and green lines either way (Sir, 2026-10-02).
  *
+ * **With a frame, the pane renders the WHOLE DOCUMENT** — every unchanged
+ * line as context, the changed ones marked — through the same uncapped,
+ * whole-file-context builder the approval card path uses. That is the law
+ * (Sir 2026-10-02, re-affirmed 2026-10-03 after the pane was repointed at
+ * the change set and silently went back to showing a hunk window): standing
+ * in for the buffer means showing all of it.
+ *
+ * Without a frame — a payload from a server that predates it — it falls back
+ * to concatenating the rows' own compact unified diffs, which renders the
+ * neighbourhood of each change rather than the document.
+ *
  * `approvalId` is deliberately stable per file: deciding one edit must not
  * re-take the pane over after the user asked to keep editing.
  */
 export function buildUnreviewedDiffModel(
   rows: readonly ChangeSetRow[],
   file: string,
+  frame?: PendingFrame | null,
 ): PendingDiffModel | null {
   if (!file || rows.length === 0) return null;
-  const lines: DiffLine[] = [];
   const labels: string[] = [];
-  let added = 0;
-  let removed = 0;
   for (const row of rows) {
-    lines.push(...parsePatch(row.diffText));
-    added += row.added;
-    removed += row.removed;
     const label = row.section
       ? `[${row.section}]${row.key ? ` ${row.key}` : ''}`
       : row.file;
     if (!labels.includes(label)) labels.push(label);
+  }
+  const lines: DiffLine[] = frame
+    ? buildApprovalDiffLines(
+      file, frame.before, frame.after, Number.POSITIVE_INFINITY, PANE_DIFF_CONTEXT,
+    )
+    : rows.flatMap((row) => parsePatch(row.diffText));
+  // Counted from the rows actually rendered, so the header's `+A −R` always
+  // describes what is on screen.
+  let added = 0;
+  let removed = 0;
+  for (const line of lines) {
+    if (line.type === 'added') added += 1;
+    else if (line.type === 'removed') removed += 1;
   }
   return {
     approvalId: `changeset:${file}`,

@@ -120,6 +120,21 @@ describe('buildChangeSetView', () => {
     expect(supersededNote(view.rows[0])).toBe('replaced by a later edit');
     expect(supersededNote(view.rows[1])).toBe('');
   });
+
+  it('carries the file\'s pre-review text as the pane\'s frame', () => {
+    const before = '[printer]\nmax_accel: 1000\n';
+    const view = buildChangeSetView(payload({
+      files: [{ ...payload().files[0], beforeText: before }],
+    }))!;
+    expect(view.frames).toEqual({ 'printer.cfg': before });
+  });
+
+  it('has no frame for a file the server did not send one for', () => {
+    // A payload from a server that predates the frame: the pane falls back to
+    // the rows' own diffs, and must not claim to be showing the document.
+    const view = buildChangeSetView(payload())!;
+    expect(view.frames).toEqual({});
+  });
 });
 
 describe('decisions', () => {

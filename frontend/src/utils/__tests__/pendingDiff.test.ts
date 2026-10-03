@@ -228,6 +228,57 @@ describe('buildUnreviewedDiffModel (post-hoc review rows)', () => {
     expect(buildUnreviewedDiffModel([row()], '')).toBeNull();
   });
 
+  // ── The frame: the WHOLE document (Sir, 2026-10-03) ──────────────
+  // The pane stands in for the buffer, so it shows all of the file with the
+  // changes marked — not the neighbourhood of each hunk. `before` is the
+  // server's pre-review text; `after` is the text the editor is holding.
+  const DOC_BEFORE = `[printer]
+kinematics: corexy
+max_velocity: 300
+max_accel: 8000
+
+[stepper_x]
+microsteps: 16
+`;
+  const DOC_AFTER = DOC_BEFORE.replace('max_accel: 8000', 'max_accel: 12000');
+
+  it('renders the WHOLE document when a frame is supplied', () => {
+    const model = buildUnreviewedDiffModel([row()], 'printer.cfg', {
+      before: DOC_BEFORE, after: DOC_AFTER,
+    }) as PendingDiffModel;
+    const contents = model.lines.map((line) => line.content);
+    expect(contents[0]).toMatch(/^@@/);           // one hunk spanning the file
+    expect(contents[1]).toBe('[printer]');        // the file's first line
+    expect(contents[contents.length - 1]).toBe('microsteps: 16');  // and its last
+    // Lines the change never touched are on screen too — the whole reason the
+    // row's own diffText cannot be what the pane renders.
+    expect(contents).toContain('kinematics: corexy');
+    expect(contents).toContain('[stepper_x]');
+    expect(model.lines.filter((line) => line.type === 'context')).toHaveLength(6);
+    expect(model.added).toBe(1);
+    expect(model.removed).toBe(1);
+    expect(model.changedLines).toEqual([4]);      // before-file line space
+  });
+
+  it('counts what it draws, so a decided-but-unsaved edit stays in the header', () => {
+    // Design A (Sir, 2026-10-03): the frame is the document before the review,
+    // so an edit that was KEPT (the text does not change on keep) is still a
+    // mark on screen while it is unsaved. The badge counts the rows rendered.
+    const after = DOC_AFTER.replace('microsteps: 16', 'microsteps: 32');
+    const model = buildUnreviewedDiffModel([row()], 'printer.cfg', {
+      before: DOC_BEFORE, after,
+    }) as PendingDiffModel;
+    expect(model.added).toBe(2);   // both edits are in the document…
+    expect(model.removed).toBe(2);
+    expect(row().added).toBe(1);   // …though one row is no longer undecided
+  });
+
+  it('keeps the rows\' own diffs as the path when no frame is supplied', () => {
+    // A payload from a server that predates the frame still renders.
+    const model = buildUnreviewedDiffModel([row()], 'printer.cfg') as PendingDiffModel;
+    expect(model.lines.map((line) => line.type)).toEqual(['removed', 'added']);
+  });
+
   it('concatenates every pending op of the file, in order', () => {
     const model = buildUnreviewedDiffModel([
       row(),

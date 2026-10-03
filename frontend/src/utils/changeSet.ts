@@ -45,6 +45,16 @@ export interface ChangeSetView {
   createdFiles: string[];
   /** Ids of the edits that still count (superseded rows excluded). */
   liveIds: string[];
+  /**
+   * file → the text that file had BEFORE the review's first edit to it.
+   *
+   * The text view's pane needs both halves of the document to show the WHOLE
+   * file with the changed lines marked (SIR 2026-10-03); the current half it
+   * already holds (it is the buffer), so only this one is carried. Merged
+   * across requests the OLDEST segment wins: the pane's frame is "before the
+   * review started", not "before the latest message".
+   */
+  frames: Record<string, string>;
 }
 
 /** One section's still-undecided edits, with a per-section decision. */
@@ -91,6 +101,12 @@ export function buildChangeSetView(set: ChangeSetPayload | null | undefined): Ch
     badge: summarizeAdvisorySeverities(edit.advisories ?? []),
     label: changeRowLabel(edit),
   }));
+  const frames: Record<string, string> = {};
+  for (const file of set.files ?? []) {
+    // A payload from before the frame existed simply has no entry: the pane
+    // then falls back to the rows' own diffs rather than claiming a document.
+    if (typeof file.beforeText === 'string') frames[file.file] = file.beforeText;
+  }
   return {
     rows,
     files: set.files ?? [],
@@ -98,6 +114,7 @@ export function buildChangeSetView(set: ChangeSetPayload | null | undefined): Ch
     totalRemoved: set.totalRemoved ?? 0,
     createdFiles: set.createdFiles ?? [],
     liveIds: rows.filter((row) => !row.superseded).map((row) => row.id),
+    frames,
   };
 }
 
@@ -276,11 +293,18 @@ export function mergeChangeSetViews(
   if (kept.length === 0) return null;
   const rows: ChangeSetRow[] = [];
   const createdFiles = new Set<string>();
+  // Oldest first wins: the pane's frame is the document before the REVIEW,
+  // so an earlier request's pre-edit text beats a later one's (which already
+  // contains the earlier request's edits).
+  const frames: Record<string, string> = {};
   let totalAdded = 0;
   let totalRemoved = 0;
   for (const segment of kept) {
     for (const row of segment.view.rows) {
       rows.push({ ...row, id: namespacedId(segment.requestId, row.id), requestId: segment.requestId });
+    }
+    for (const [file, text] of Object.entries(segment.view.frames)) {
+      if (!(file in frames)) frames[file] = text;
     }
     totalAdded += segment.view.totalAdded;
     totalRemoved += segment.view.totalRemoved;
@@ -305,5 +329,6 @@ export function mergeChangeSetViews(
     totalRemoved,
     createdFiles: [...createdFiles],
     liveIds: rows.filter((row) => !row.superseded).map((row) => row.id),
+    frames,
   };
 }
