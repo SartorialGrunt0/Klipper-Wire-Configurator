@@ -931,6 +931,78 @@ export interface AiChatResponse {
   pendingEdits?: PendingConfigEdit[] | null;
   /** Write-tool call count for this reply (Gate 1 oscillation telemetry). */
   editAttempts?: number | null;
+  /**
+   * Post-hoc edit review: the request's whole change set — one record per
+   * edit the model made, in order, plus the summary grouped by file and
+   * section. Null when nothing was staged.
+   */
+  changeSet?: ChangeSetPayload | null;
+  /** Mid-loop steers the user sent while this request ran ({turn, text}). */
+  steers?: Array<{ turn: number; text: string }>;
+}
+
+/**
+ * One edit the model made (backend: EditSession._record_edit). Identity is
+ * its file and section — never a line number, which is navigation plumbing.
+ */
+export interface ChangeSetEdit {
+  id: string;
+  file: string;
+  section: string;
+  /** set_param only; '' for body ops. */
+  key: string;
+  op: string;
+  summary: string;
+  added: number;
+  removed: number;
+  /** Compact unified diff of this op alone — what a collapsed row unfolds. */
+  diffText: string;
+  advisories?: Array<{ severity?: string; section?: string; param?: string; message?: string }>;
+  /** A later edit rewrote this same target: shown, but not counted. */
+  superseded: boolean;
+  supersededBy: string;
+}
+
+export interface ChangeSetSection {
+  file: string;
+  section: string;
+  added: number;
+  removed: number;
+  /** Ids of the surviving edits in this section, in order. */
+  edits: string[];
+  advisories: { error: number; warning: number; other: number };
+}
+
+export interface ChangeSetFile {
+  file: string;
+  added: number;
+  removed: number;
+  sections: ChangeSetSection[];
+}
+
+export interface ChangeSetPayload {
+  /** Chronological — the transcript is history, so order carries meaning. */
+  edits: ChangeSetEdit[];
+  /** Grouped — the decision surface, so identity is what matters. */
+  files: ChangeSetFile[];
+  totalAdded: number;
+  totalRemoved: number;
+  createdFiles: string[];
+}
+
+/** One file's text after a keep/undo replay. */
+export interface ResolvedChangeSetFile {
+  content: string;
+  deleted: boolean;
+}
+
+export interface ResolvedChangeSet {
+  status: 'ok' | 'not_found';
+  files?: Record<string, ResolvedChangeSetFile>;
+  /** Kept ops whose anchor no longer applies (never forced through). */
+  stale?: Array<{ id: string; file: string; reason: string }>;
+  /** Files the human edited mid-loop: their text is the replay base. */
+  clientEdited?: string[];
 }
 
 /** One staged write-tool change (backend services/ai_edit_tools.py). */
@@ -1037,6 +1109,13 @@ export interface ChatProgressPoll {
   narration?: string;
   toolNames?: string[];
   elapsedMs?: number;
+  /**
+   * The change set as it accumulates (post-hoc review): per-file NET text,
+   * the same shape the finished reply carries, so the client applies
+   * snapshots idempotently instead of replaying deltas.
+   */
+  stagedEdits?: PendingConfigEdit[];
+  changeSet?: ChangeSetPayload | null;
 }
 
 /** Poll mid-loop progress for an in-flight /ai/chat request. Best-effort:
@@ -1050,6 +1129,60 @@ export async function pollChatProgress(requestId: string): Promise<ChatProgressP
   } catch {
     return { pending: false };
   }
+}
+
+// ── Mid-loop steering (post-hoc review, 2026-10-02) ──────────────────
+
+export interface SteerResult {
+  accepted: boolean;
+  queued?: number;
+  reason?: string;
+}
+
+/**
+ * Send a mid-request steer: the user's message is queued and injected as a
+ * real user turn at the next tool-turn boundary of the in-flight request.
+ * `accepted: false` means there is nothing in flight — the caller should
+ * treat the message as an ordinary new turn instead.
+ */
+export async function steerChat(requestId: string, message: string): Promise<SteerResult> {
+  try {
+    const res = await fetch('/ai/chat/steer', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requestId, message }),
+    });
+    if (!res.ok) return { accepted: false };
+    return (await res.json()) as SteerResult;
+  } catch {
+    return { accepted: false };
+  }
+}
+
+// ── Change-set resolution (keep / undo) ──────────────────────────────
+
+export interface ChangeSetResolveRequest {
+  requestId: string;
+  keptEditIds: string[];
+  /** The editor's current text, so a human edit mid-loop is never clobbered. */
+  contextFiles?: Record<string, { content: string; label?: string }>;
+}
+
+/**
+ * Keep/undo a change set. The backend REPLAYS the kept ops onto the
+ * pre-request baseline (never a text revert), so a dropped op leaves no
+ * residue; stale ops come back in `stale` with an honest reason.
+ */
+export async function resolveChangeSet(
+  req: ChangeSetResolveRequest,
+): Promise<ResolvedChangeSet> {
+  const res = await fetch('/ai/chat/changes/resolve', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) throw new Error(`Change set resolve failed: ${res.statusText}`);
+  return (await res.json()) as ResolvedChangeSet;
 }
 
 // ── Approval gate (tool-mediated edits, Phase 2) ─────────────────────

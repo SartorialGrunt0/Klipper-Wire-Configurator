@@ -926,7 +926,9 @@ def test_chat_proxy_local_openai_compatible_allows_missing_key(monkeypatch):
         'repromptCount': 0,
         'narrationTurns': [],
         'pendingEdits': None,
+        'changeSet': None,
         'editAttempts': None,
+        'steers': [],
         'usage': {
             'completionTokens': 0,
             'reasoningTokens': 0,
@@ -1050,7 +1052,9 @@ def test_chat_proxy_returns_plain_content(monkeypatch):
         'repromptCount': 0,
         'narrationTurns': [],
         'pendingEdits': None,
+        'changeSet': None,
         'editAttempts': None,
+        'steers': [],
         'usage': {
             'completionTokens': 0,
             'reasoningTokens': 0,
