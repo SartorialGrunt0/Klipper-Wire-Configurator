@@ -596,3 +596,35 @@ describe('approved tool edits land dirty and clear on save', () => {
     expect(useConfigStore.getState().isDirty).toBe(true);
   });
 });
+
+describe('configStore.markCleanIfMatchesDisk (post-hoc undo)', () => {
+  it('clears the flag when every file matches the text on disk', () => {
+    const store = useConfigStore.getState();
+    store.setConfigFile('printer.cfg', { ...makeConfigFile(), raw_text: 'a: 1\n' });
+    useConfigStore.setState({ originalTexts: { 'printer.cfg': 'a: 1\n' }, isDirty: true });
+
+    useConfigStore.getState().markCleanIfMatchesDisk();
+    expect(useConfigStore.getState().isDirty).toBe(false);
+  });
+
+  it('keeps the flag while any file still differs from disk', () => {
+    const store = useConfigStore.getState();
+    store.setConfigFile('printer.cfg', { ...makeConfigFile(), raw_text: 'a: 2\n' });
+    useConfigStore.setState({ originalTexts: { 'printer.cfg': 'a: 1\n' }, isDirty: true });
+
+    useConfigStore.getState().markCleanIfMatchesDisk();
+    expect(useConfigStore.getState().isDirty).toBe(true);
+  });
+
+  it('keeps the flag when a file was deleted from the project', () => {
+    const store = useConfigStore.getState();
+    store.setConfigFile('printer.cfg', { ...makeConfigFile(), raw_text: 'a: 1\n' });
+    useConfigStore.setState({
+      originalTexts: { 'printer.cfg': 'a: 1\n', 'macros.cfg': 'b: 1\n' },
+      isDirty: true,
+    });
+
+    useConfigStore.getState().markCleanIfMatchesDisk();
+    expect(useConfigStore.getState().isDirty).toBe(true);
+  });
+});

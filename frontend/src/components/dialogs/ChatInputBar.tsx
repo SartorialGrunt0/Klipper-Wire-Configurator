@@ -66,6 +66,13 @@ export interface ChatInputBarProps {
   onInputChange: (text: string) => void;
   onSend: () => void;
   onStop: () => void;
+  /**
+   * Send the composed text into the IN-FLIGHT request as a steer (a real
+   * user turn injected at the next tool-turn boundary). Only offered while
+   * `loading` and the composer is non-empty — with nothing in flight the
+   * same text is an ordinary message and goes through `onSend`.
+   */
+  onSteer?: () => void;
   onKeyDown: (e: React.KeyboardEvent) => void;
   onAttachFiles: (e: React.ChangeEvent<HTMLInputElement>) => void;
   onRemoveAttachedFile: (id: string) => void;
@@ -121,6 +128,7 @@ const ChatInputBar: React.FC<ChatInputBarProps> = ({
   onInputChange,
   onSend,
   onStop,
+  onSteer,
   onKeyDown,
   onAttachFiles,
   onRemoveAttachedFile,
@@ -418,14 +426,36 @@ const ChatInputBar: React.FC<ChatInputBarProps> = ({
             style={{ minHeight: 36, maxHeight: 120, overflow: 'auto' }}
           />
         </div>
-        <button
-          onClick={loading ? onStop : onSend}
-          disabled={!loading && !input.trim()}
-          className="px-4 py-2 rounded-lg text-xs font-medium bg-[var(--color-accent)] text-white hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
-          title={loading ? 'Stop the AI from processing' : 'Send message'}
-        >
-          {loading ? 'Stop' : 'Send'}
-        </button>
+        {loading && input.trim() && onSteer ? (
+          // Two actions are genuinely different while a request runs: steer
+          // it, or stop it. One button that flips meaning depending on
+          // whether the composer happens to be non-empty is a coin flip.
+          <>
+            <button
+              onClick={onSteer}
+              className="px-3 py-2 rounded-lg text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)] transition-colors"
+              title="Send this into the running request — the model sees it as your next message"
+            >
+              Steer
+            </button>
+            <button
+              onClick={onStop}
+              className="px-4 py-2 rounded-lg text-xs font-medium bg-[var(--color-accent)] text-white hover:opacity-90 transition-opacity"
+              title="Stop the AI from processing"
+            >
+              Stop
+            </button>
+          </>
+        ) : (
+          <button
+            onClick={loading ? onStop : onSend}
+            disabled={!loading && !input.trim()}
+            className="px-4 py-2 rounded-lg text-xs font-medium bg-[var(--color-accent)] text-white hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
+            title={loading ? 'Stop the AI from processing' : 'Send message'}
+          >
+            {loading ? 'Stop' : 'Send'}
+          </button>
+        )}
       </div>
     </div>
   );

@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { createTwoFilesPatch } from 'diff';
 import { useConfigStore } from '../../stores/configStore';
+import { useChangeSetStore } from '../../stores/changeSetStore';
+import { unreviewedIds } from '../../utils/changeSet';
 import { useNativeStore } from '../../stores/nativeStore';
 import { useVisibility } from '../../stores/validationSettingsStore';
 import { getSaveButtonClass } from '../../utils/saveButtonClass';
@@ -185,6 +187,10 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
   const { configPath } = useNativeStore();
   const isDirty = useConfigStore((s) => s.isDirty);
   const validation = useConfigStore((s) => s.validation);
+  // Post-hoc review: how many AI-chat changes nobody has kept or undone yet.
+  // Derived in the selector so this banner re-renders when a decision lands.
+  const unreviewedChanges = useChangeSetStore((s) =>
+    s.view ? unreviewedIds(s.view, s.decided).length : 0);
   // saveButtonClass is computed AFTER gateIssues below — the dialog's Save
   // button turns red only when a SELECTED file is blocked (the toolbar keeps
   // the project-wide red; a deselected broken file doesn't block this save).
@@ -730,6 +736,20 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
             }
           </p>
         </div>
+
+        {/* Unreviewed AI changes (post-hoc review, 2026-10-02): the chat's
+            change set is reviewed there, not here, but a save that silently
+            carried edits nobody looked at is the one thing this architecture
+            can get wrong — so say it, right where the saving happens. */}
+        {unreviewedChanges > 0 && (
+          <div className="mx-4 mt-2 px-3 py-2 rounded-lg bg-[var(--color-warning)]/10 border border-[var(--color-warning)]/30">
+            <p className="text-xs text-[var(--color-warning)]">
+              {unreviewedChanges} change{unreviewedChanges === 1 ? '' : 's'} from the AI chat
+              {unreviewedChanges === 1 ? ' has' : ' have'} not been reviewed yet.
+              Keep or undo them in the chat before saving.
+            </p>
+          </div>
+        )}
 
         {/* Body */}
         <div className="flex flex-1 overflow-hidden">

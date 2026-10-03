@@ -165,6 +165,8 @@ interface ConfigState {
   /* Dirty tracking */
   markDirty: () => void;
   markClean: () => void;
+  /** Clear the dirty flag only when every file matches its on-disk text. */
+  markCleanIfMatchesDisk: () => void;
   setTextParseError: (filename: string, message: string | null) => void;
 
   /* Helpers */
@@ -681,6 +683,28 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     set((s) => (s.isDirty ? s : { isDirty: true })),
 
   markClean: () => set({ isDirty: false }),
+
+  /**
+   * Clear the dirty flag only when nothing actually differs from disk.
+   *
+   * The undo path (post-hoc edit review) needs this: rejecting every change
+   * puts the text back exactly as it was on disk, and leaving the project
+   * flagged "Unsaved changes" would be a lie the Save button then acts on.
+   * Any file still differing — including one the user edited by hand — keeps
+   * the flag, so this can never hide real work.
+   */
+  markCleanIfMatchesDisk: () => set((s) => {
+    const names = new Set([
+      ...Object.keys(s.configFiles),
+      ...Object.keys(s.originalTexts),
+    ]);
+    for (const name of names) {
+      const current = s.configFiles[name]?.raw_text ?? null;
+      const original = s.originalTexts[name] ?? null;
+      if (current !== original) return s;
+    }
+    return s.isDirty ? { isDirty: false } : s;
+  }),
 
   setTextParseError: (filename, message) =>
     set((s) => {

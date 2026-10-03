@@ -640,7 +640,16 @@ _EDIT_SESSIONS_MAX = 8
 
 
 def register_edit_session(request_id: str | None, session) -> None:
-    if not request_id or session is None or not session.edit_records:
+    """Make a request's session (and so its change set) reachable by id.
+
+    Called when the request STARTS, not when it ends: the user reviews and
+    undoes while the model is still working — a group of staged edits can be
+    thrown away long before the reply lands — so a session that only became
+    resolvable at the end made every mid-loop decision answer 'not_found'
+    (live UI find, 2026-10-02). The session object is shared by reference,
+    so the registry always sees the live, growing change set.
+    """
+    if not request_id or session is None:
         return
     _edit_sessions[request_id] = session
     _edit_sessions.move_to_end(request_id)
@@ -3426,6 +3435,9 @@ async def chat_proxy(req: ChatRequest):
     if req.requestId:
         stop_event = asyncio.Event()
         _chat_stop_events[req.requestId] = stop_event
+        # The change set is reachable by request id from the first moment:
+        # keep/undo happens DURING the loop as often as after it.
+        register_edit_session(req.requestId, edit_session)
         # Progress registry (Phase 6.5.1/6.5.3): same lifecycle as the stop
         # event. startedAt drives elapsedMs; turns accumulate the per-turn
         # narration for harness grading (narrationTurns in the final

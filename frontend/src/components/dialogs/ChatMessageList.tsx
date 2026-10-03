@@ -272,6 +272,11 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
               }`}
               style={{ wordBreak: 'break-word' }}
             >
+              {msg.steer && (
+                <div className="mb-1 text-[9px] uppercase tracking-[0.14em] text-white/70">
+                  steered the running reply
+                </div>
+              )}
               {editMessageIndex === i ? (
                 <div>
                   <textarea

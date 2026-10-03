@@ -53,6 +53,9 @@ import ChatApprovalCard from './ChatApprovalCard';
 import ApprovalDiffPreview from './ApprovalDiffPreview';
 import type { ApprovalCard } from '../../services/api';
 import ChatInputBar, { type ChatReferenceChip } from './ChatInputBar';
+import ChatEditRows from './ChatEditRows';
+import ChangeSetBar from './ChangeSetBar';
+import { useChangeSetStore, changeSetTotals } from '../../stores/changeSetStore';
 import type { PendingAiChatRequest } from '../../types/ai';
 import type { AiChatRole } from '../../services/api';
 import type { SavedConversation } from '../../stores/chatHistoryStore';
@@ -187,6 +190,19 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   // only: narration is the model's own tool-turn text, visually
   // subordinate; it never substitutes for the answer (never-final law).
   const [progress, setProgress] = useState<ProgressDisplay>(EMPTY_PROGRESS);
+  // ── Post-hoc edit review (2026-10-02) ──
+  // The change set is applied to the editor as it accumulates and reviewed
+  // here after the reply: rows in the transcript (from the store, so the
+  // transcript and the footer can never disagree) plus a resolve call for
+  // every keep/undo. `appliedStagedRef` dedupes the poll's per-file
+  // snapshots so the same text is not re-parsed every 1.5s.
+  const changeSetView = useChangeSetStore((state) => state.view);
+  const changeSetExpanded = useChangeSetStore((state) => state.expanded);
+  const changeSetUndone = useChangeSetStore((state) => state.undone);
+  const changeSet = useChangeSetStore((state) => state);
+  const appliedStagedRef = useRef<string>('');
+  const [changeSetBusy, setChangeSetBusy] = useState(false);
+  const [changeSetNote, setChangeSetNote] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   // EXPERIMENT (auto-attach off): don't auto-select the active file.
   // Context only includes files the user explicitly checks in "Include Files".
@@ -482,6 +498,11 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       // The text view's pending-diff pane follows the same slot: a new
       // request starts with nothing pending.
       usePendingEditStore.getState().clearPending();
+      // Post-hoc review: the previous reply's change set is replaced by
+      // this request's, and the live-staging dedupe starts over.
+      useChangeSetStore.getState().clear();
+      appliedStagedRef.current = '';
+      setChangeSetNote(null);
 
       const userMsg = { role: 'user' as const, content: trimmedMessage, hiddenFromUser: options?.hiddenFromUser === true };
       const previousMessages = options?.hiddenFromUser ? [] : messages;
@@ -635,6 +656,13 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         if (stagedEdits && stagedEdits.length > 0) {
           await applyApprovedToolEdits(stagedEdits);
         }
+        // The reply's change set is authoritative — it is what the resolve
+        // endpoint replays — so it replaces whatever the poll last showed
+        // (a final edit may have landed after the last poll tick).
+        useChangeSetStore.getState().setFromStream(
+          stopRequestId,
+          pipelineResult.finalMessage.changeSet ?? null,
+        );
         // Background completion signal: if the dialog is closed when the reply
         // lands, flag the toolbar button so the user knows it's ready.
         if (!openRef.current) {
@@ -809,6 +837,21 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         toolNames: poll.toolNames ?? [],
         elapsedMs: poll.elapsedMs ?? 0,
       }));
+      // ── Live staging (post-hoc review) ──
+      // The edit lands in the editor as the model makes it, and the rows in
+      // the transcript are the live view of the same accumulating set. The
+      // payload is per-file NET text, so applying it repeatedly is a no-op;
+      // the signature check keeps the ~1.5s poll from re-parsing every tick.
+      if (poll.stagedEdits && poll.stagedEdits.length > 0) {
+        const signature = JSON.stringify(poll.stagedEdits);
+        if (signature !== appliedStagedRef.current) {
+          appliedStagedRef.current = signature;
+          void applyApprovedToolEdits(poll.stagedEdits);
+        }
+      }
+      if (poll.changeSet) {
+        useChangeSetStore.getState().setFromStream(stopRequestId, poll.changeSet);
+      }
     };
     void tick();
     const interval = window.setInterval(() => { void tick(); }, 1500);
@@ -816,7 +859,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [loading, stopRequestId]);
+  }, [loading, stopRequestId, applyApprovedToolEdits]);
 
   // Countdown tick while a card is visible (display only; the backend
   // timer auto-declines authoritatively).
@@ -839,6 +882,103 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     }
     return ctx;
   }, [configFiles, getConfigText, getConfigContextLabel, attachedConfigFiles]);
+
+  // ── Keep/undo a change set (post-hoc review) ────────────────────
+  // Undo is expressed as a KEEP LIST and resolved on the server by REPLAYING
+  // the kept ops onto the request's baseline — never by reverting text here,
+  // which would leave the residue of a dropped op behind. The returned file
+  // texts go through the same apply path the staged edits use, so keep/undo
+  // and stage share one mutation surface.
+  const resolveChangeSet = useCallback(
+    async (keptIds: string[]) => {
+      const requestId = useChangeSetStore.getState().requestId;
+      if (!requestId) return;
+      setChangeSetBusy(true);
+      setChangeSetNote(null);
+      try {
+        const contextFiles = await buildDecisionContext();
+        const out = await api.resolveChangeSet({ requestId, keptEditIds: keptIds, contextFiles });
+        if (out.status !== 'ok' || !out.files) {
+          setChangeSetNote('This change set is no longer available — the changes in the editor stand as they are.');
+          return;
+        }
+        const resolved = Object.entries(out.files).map(([file, entry]) => ({
+          file,
+          op: entry.deleted ? 'delete_file' : 'update',
+          summary: '',
+          newText: entry.content,
+        }));
+        await applyApprovedToolEdits(resolved);
+        // A rejected change set leaves the text exactly as it was on disk;
+        // the dirty flag must say so rather than flag a project for saving
+        // nothing changed.
+        useConfigStore.getState().markCleanIfMatchesDisk();
+        if (out.stale && out.stale.length > 0) {
+          setChangeSetNote(
+            `${out.stale.length} change(s) could not be re-applied: `
+            + out.stale.map((entry) => entry.reason).join('; '),
+          );
+        }
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'resolve failed';
+        setChangeSetNote(`Could not resolve the change set: ${message}`);
+      } finally {
+        setChangeSetBusy(false);
+      }
+    },
+    [applyApprovedToolEdits, buildDecisionContext],
+  );
+
+  const handleKeepAll = useCallback(() => {
+    // Nothing to replay: the working state already holds every kept edit.
+    useChangeSetStore.getState().keepAll();
+    setChangeSetNote(null);
+  }, []);
+
+  const handleUndoAll = useCallback(() => {
+    useChangeSetStore.getState().undoAll();
+    void resolveChangeSet([]);
+  }, [resolveChangeSet]);
+
+  const handleUndoSection = useCallback(
+    (file: string, section: string) => {
+      useChangeSetStore.getState().undoSection(file, section);
+      void resolveChangeSet(useChangeSetStore.getState().keptIds());
+    },
+    [resolveChangeSet],
+  );
+
+  const handleUndoFile = useCallback(
+    (file: string) => {
+      useChangeSetStore.getState().undoFile(file);
+      void resolveChangeSet(useChangeSetStore.getState().keptIds());
+    },
+    [resolveChangeSet],
+  );
+
+  // ── Mid-loop steering ───────────────────────────────────────────
+  // While a request is in flight the composer steers it: the message is
+  // queued and injected as a real user turn at the next tool-turn boundary,
+  // and it is shown in the transcript at the point it landed (the user's own
+  // words — never a tool result, never a system nudge).
+  const handleSteer = useCallback(async () => {
+    const text = input.trim();
+    if (!text || !loading) return;
+    const requestId = stopRequestIdRef.current;
+    if (!requestId) return;
+    setInput('');
+    if (inputRef.current) inputRef.current.textContent = '';
+    const result = await api.steerChat(requestId, text);
+    if (!result.accepted) {
+      // The reply landed first: the words are still the user's, so do not
+      // swallow them — put them back in the composer as a new message.
+      setInput(text);
+      if (inputRef.current) inputRef.current.textContent = text;
+      setError('The reply had already finished — send that as a new message.');
+      return;
+    }
+    setMessages([...messages, { role: 'user', content: text, steer: true }]);
+  }, [input, loading, messages, setMessages]);
 
   const handleApprovalDecision = useCallback(async (decision: 'approve' | 'decline') => {
     const card = approvalCardRef.current;
@@ -1387,6 +1527,16 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           onEditMessage={handleEditMessage}
           messagesEndRef={messagesEndRef}
         />
+        {/* Post-hoc review: one row per edit the model made, streaming in as
+            it makes them. Read-only — the decision lives in the footer bar. */}
+        {changeSetView && (
+          <ChatEditRows
+            view={changeSetView}
+            expanded={changeSetExpanded}
+            undone={changeSetUndone}
+            onToggle={(id) => useChangeSetStore.getState().toggleExpanded(id)}
+          />
+        )}
         {approvalCard && (
           <ChatApprovalCard
             card={approvalCard}
@@ -1412,9 +1562,31 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       />
 
       {/* Input bar */}
+      {/* Post-hoc review footer: totals, keep-all / reject-all, per-file and
+          per-section keep/undo, and the "N unreviewed" state that stays
+          visible until every edit has been decided (including at Save). */}
+      {changeSetView && (
+        <ChangeSetBar
+          view={changeSetView}
+          totals={changeSetTotals(changeSet)}
+          unreviewed={changeSet.unreviewedCount()}
+          undone={changeSetUndone}
+          busy={changeSetBusy}
+          note={changeSetNote}
+          onKeepAll={handleKeepAll}
+          onUndoAll={handleUndoAll}
+          onUndoSection={handleUndoSection}
+          onUndoFile={handleUndoFile}
+          onOpenFile={(file) => {
+            const config = configFiles[file];
+            if (config) useConfigStore.getState().setActiveFile(file);
+          }}
+        />
+      )}
       <ChatInputBar
         input={input}
         loading={loading}
+        onSteer={() => { void handleSteer(); }}
         selectedConfigContextFiles={selectedConfigContextFiles}
         loadedConfigFilenames={loadedConfigFilenames}
         activeFile={activeFile}

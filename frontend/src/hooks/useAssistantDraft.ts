@@ -74,6 +74,11 @@ export function useAssistantDraft() {
         toolCalls: response.toolCalls,
         repromptCount: response.repromptCount,
         pendingEdits: response.pendingEdits ?? undefined,
+        // Post-hoc review: the change set rides the message exactly like
+        // pendingEdits does, so a reloaded conversation keeps the set the
+        // reply produced (never re-derived from prose).
+        changeSet: response.changeSet ?? null,
+        steers: response.steers ?? [],
       };
       // Clone the assistant message (not just content) so pendingEdits
       // survive into the validation trail.

@@ -124,6 +124,20 @@ def _run(monkeypatch, replies, request_id, on_call=None, **overrides):
     return resp.json()
 
 
+def _post_chat_bg(payload_holder):
+    """Run one in-flight chat request in a thread; return (thread, result)."""
+    result = {}
+
+    def run():
+        r = client.post('/ai/chat', json=payload_holder)
+        result['body'] = r.json() if r.status_code == 200 else r.text
+        result['status'] = r.status_code
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    return t, result
+
+
 SET_ACCEL = {'file': 'printer.cfg', 'op': 'set_param', 'section': 'printer',
              'key': 'max_accel', 'value': '3000'}
 SET_VELOCITY = {'file': 'printer.cfg', 'op': 'set_param', 'section': 'printer',
@@ -272,6 +286,49 @@ def test_resolve_unknown_request_is_not_found():
     out = client.post('/ai/chat/changes/resolve', json={
         'requestId': 'nope', 'keptEditIds': []}).json()
     assert out == {'status': 'not_found'}
+
+
+def test_change_set_is_resolvable_while_the_request_is_still_running(
+        monkeypatch):
+    """Live UI find (2026-10-02): review happens DURING the loop as often as
+    after it — 'Reject all' on a change that is still streaming must replay,
+    not answer not_found because the reply has not landed yet."""
+    import asyncio
+
+    class _HoldingClient(_ScriptedClient):
+        """Holds the follow-up provider call open so the request is
+        demonstrably still in flight when the decision is posted."""
+
+        async def post(self, url, headers=None, json=None):
+            if self.payloads:
+                await asyncio.sleep(1.0)
+            return await super().post(url, headers=headers, json=json)
+
+    from api.printer_memory_routes import PrinterMemory
+    holding = _HoldingClient([
+        _tool_call('config_edit', SET_ACCEL),
+        _final_reply('Set max_accel to 3000.'),
+    ])
+    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
+    monkeypatch.setattr(ai_routes.httpx, 'AsyncClient', lambda *a, **k: holding)
+
+    t, result = _post_chat_bg(_payload('resolve-midloop-1'))
+    session = None
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        session = ai_routes._edit_sessions.get('resolve-midloop-1')
+        if session is not None and session.edit_records:
+            break
+        time.sleep(0.02)
+    assert session is not None and session.edit_records, 'no staged edit seen'
+    assert t.is_alive(), 'precondition: the request must still be running'
+
+    out = client.post('/ai/chat/changes/resolve', json={
+        'requestId': 'resolve-midloop-1', 'keptEditIds': []}).json()
+    assert out['status'] == 'ok'
+    assert 'max_accel: 1000' in out['files']['printer.cfg']['content']
+    t.join(timeout=20)
+    assert result['status'] == 200
 
 
 # ══ Steering ════════════════════════════════════════════════════════════
