@@ -84,8 +84,18 @@ export function changeRowLabel(row: {
 }): string {
   const file = row.file || '(unknown file)';
   if (!row.section) return file;
-  const section = `[${row.section}]`;
-  return row.key ? `${file} / ${section} ${row.key}` : `${file} / ${section}`;
+  return `${file} / ${sectionLabel(row)}`;
+}
+
+/**
+ * `[stepper_x] microsteps` — the row's identity without the file.
+ *
+ * Used wherever the file is already on screen (the pane's header and its
+ * navigation stops), so the two can never word the same change differently.
+ */
+export function sectionLabel(row: { section: string; key?: string; file?: string }): string {
+  if (!row.section) return row.file ?? '';
+  return row.key ? `[${row.section}] ${row.key}` : `[${row.section}]`;
 }
 
 /**

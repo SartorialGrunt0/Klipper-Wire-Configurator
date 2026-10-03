@@ -694,6 +694,11 @@ class ChangeSetSegment(BaseModel):
     requestId: str
     # The edit ids this request KEPT. Everything else it staged is dropped.
     keptEditIds: list[str] = []
+    # The ids the user has DECIDED to keep (undecided ones excluded): the
+    # frame the text view's pane diffs against, so its marks follow the
+    # decisions. Empty means "nothing decided" — the pane falls back to the
+    # file's pre-review text.
+    frameKeptEditIds: list[str] = []
 
 
 class ChangeSetResolveRequest(BaseModel):
@@ -758,6 +763,25 @@ async def chat_changes_resolve(req: ChangeSetResolveRequest):
         len(chain), len(outcome.get("files", {})),
         len(outcome.get("stale", [])),
     )
+
+    # The pane's FRAME (Sir, 2026-10-03): the same chain replayed with only
+    # the ops the user has DECIDED to keep, so the text view can diff "the
+    # document as far as the decisions go" against the document now and mark
+    # exactly what is still awaiting a decision. With nothing decided the
+    # frame IS the baseline, which the change-set payload already carries, so
+    # this pass is skipped — no work, no field, and the client falls back to
+    # the pre-review text it was given.
+    if any(spec.frameKeptEditIds for spec in specs):
+        frame_chain = [
+            (session, spec.frameKeptEditIds, spec.requestId)
+            for spec, (session, _kept, _rid) in zip(specs, chain)
+        ]
+        frame = resolve_change_chain(frame_chain, None, update_pushed=False)
+        outcome["frames"] = {
+            file_name: entry.get("content", "")
+            for file_name, entry in (frame.get("files") or {}).items()
+            if not entry.get("deleted")
+        }
     return outcome
 
 

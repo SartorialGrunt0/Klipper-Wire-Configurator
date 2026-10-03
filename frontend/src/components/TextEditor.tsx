@@ -31,6 +31,13 @@ import EditorIssueStrip from './EditorIssueStrip';
 import ConfigTree from './ConfigTree';
 import ChatDock from './ChatDock';
 import PendingDiffPane, { PendingDiffChip } from './PendingDiffPane';
+import { changeStops } from '../utils/pendingChanges';
+import {
+  keepFile as keepFileDecision,
+  keepSection as keepSectionDecision,
+  undoFile as undoFileDecision,
+  undoSection as undoSectionDecision,
+} from '../services/changeSetReview';
 import { useChangeSetStore } from '../stores/changeSetStore';
 import { useUiStore } from '../stores/uiStore';
 import { useAiStore } from '../stores/aiStore';
@@ -116,6 +123,11 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   const changeSetView = useChangeSetStore((s) => s.view);
   const changeSetKept = useChangeSetStore((s) => s.kept);
   const changeSetUndone = useChangeSetStore((s) => s.undone);
+  // The frame after the last decision (design B), the shared busy/note the
+  // chat's footer reads, and the decision actions the pane calls.
+  const changeSetFrames = useChangeSetStore((s) => s.frames);
+  const changeSetBusy = useChangeSetStore((s) => s.busy);
+  const changeSetNote = useChangeSetStore((s) => s.note);
   // The pane's model is derived BELOW, once `textForFile` exists: the frame
   // it diffs against needs the editor's current text for the active file.
   // (Declaring it here would read that callback before it is initialised.)
@@ -495,28 +507,51 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   // ── Pending AI change (the text view's diff pane) ────────────────
   // The pane renders the WHOLE DOCUMENT with the unreviewed changes marked,
   // not the neighbourhood of each hunk: it stands in for the buffer, so it
-  // shows all of it. The frame is the file's pre-review text (server truth,
-  // carried on the change set) against the text the editor holds right now —
-  // which is what makes an undo appear here without a round trip. Without
-  // both halves (an unloaded file, or a payload from an older server) the
-  // model falls back to the rows' own diffs. What gets rendered is decided
-  // by `paneModeFor` (pure, tested): another view is never taken over, and a
-  // highlight over the very lines being changed earns the header chip.
+  // shows all of it — and it is a REVIEW surface, so it also moves between the
+  // changes and decides them (through `services/changeSetReview`, the same
+  // engine the chat's footer bar calls).
+  //
+  // The frame is the document with only the DECIDED-kept edits applied: the
+  // backend replays it after every decision (design B), so a kept edit stops
+  // being marked. While nothing is decided that is exactly the file's
+  // pre-review text, which the change set itself carries — the fallback, and
+  // the only source after a reload. Without both halves (an unloaded file, or
+  // a payload from an older server) the model falls back to the rows' own
+  // diffs. What gets rendered is decided by `paneModeFor` (pure, tested):
+  // another view is never taken over, and a highlight over the very lines
+  // being changed earns the header chip.
   const changeSetPane = useMemo(() => {
     if (!changeSetView) return null;
     const decided = new Set([...changeSetKept, ...changeSetUndone]);
     const rows = changeSetView.rows.filter(
       (row) => !row.superseded && !decided.has(row.id) && row.file === activeFile,
     );
-    const before = changeSetView.frames[activeFile];
+    const before = changeSetFrames[activeFile] ?? changeSetView.frames[activeFile];
     const loaded = !!configFiles[activeFile];
-    return buildUnreviewedDiffModel(
+    const model = buildUnreviewedDiffModel(
       rows,
       activeFile,
       before === undefined || !loaded ? null : { before, after: textForFile(activeFile) },
     );
-  }, [changeSetView, changeSetKept, changeSetUndone, activeFile, configFiles, textForFile]);
-  const paneModel = changeSetPane ?? pendingEdit;
+    if (!model) return null;
+    return { model, rows, stops: changeStops(model, rows) };
+  }, [
+    changeSetView, changeSetKept, changeSetUndone, changeSetFrames,
+    activeFile, configFiles, textForFile,
+  ]);
+  const paneModel = changeSetPane?.model ?? pendingEdit;
+  // Files still waiting on a decision, so the pane can offer to switch to them
+  // instead of looking empty for whichever file happens to be open.
+  const otherPendingFiles = useMemo(() => {
+    if (!changeSetView) return [];
+    const decided = new Set([...changeSetKept, ...changeSetUndone]);
+    const counts = new Map<string, number>();
+    for (const row of changeSetView.rows) {
+      if (row.superseded || decided.has(row.id) || row.file === activeFile) continue;
+      counts.set(row.file, (counts.get(row.file) ?? 0) + 1);
+    }
+    return [...counts].map(([file, count]) => ({ file, count }));
+  }, [changeSetView, changeSetKept, changeSetUndone, activeFile]);
   const pendingPane = useMemo(
     () => paneModeFor({
       model: paneModel,
@@ -1709,8 +1744,8 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
 
         {/* Pending AI change: the chip when the takeover was suppressed (the
             user is pointing at the changed lines, or asked to keep editing),
-            the diff pane when it was not. The card in the chat remains the
-            only decision surface — this surface shows and jumps, never decides. */}
+            the diff pane when it was not. The pane reviews from here — its
+            keep/undo go through the same engine as the chat's footer bar. */}
         {pendingPane === 'chip' && paneModel && (
           <PendingDiffChip
             model={paneModel}
@@ -1719,9 +1754,19 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
         )}
 
         {/* Editor with line numbers and inline issues */}
-        {pendingPane === 'diff' && paneModel ? (
+        {pendingPane === 'diff' && paneModel && changeSetPane ? (
           <PendingDiffPane
             model={paneModel}
+            rows={changeSetPane.rows}
+            stops={changeSetPane.stops}
+            otherFiles={otherPendingFiles}
+            busy={changeSetBusy}
+            note={changeSetNote}
+            onKeepSection={keepSectionDecision}
+            onUndoSection={(file, section, ids) => { void undoSectionDecision(file, section, ids); }}
+            onKeepFile={keepFileDecision}
+            onUndoFile={(file, ids) => { void undoFileDecision(file, ids); }}
+            onOpenFile={setActiveFile}
             onHide={() => usePendingEditStore.getState().hideDiff()}
           />
         ) : (

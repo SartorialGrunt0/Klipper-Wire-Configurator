@@ -85,10 +85,22 @@ beforeEach(() => {
 });
 
 describe('keep', () => {
-  it('decides locally and never touches the network', () => {
-    keepSection('printer.cfg', 'printer', ['req-1:e0']);
+  it('decides and replays too — the marks are defined by the DECIDED set', async () => {
+    vi.mocked(api.resolveChangeSet).mockResolvedValue({
+      ...resolvedOk('[printer]\nmax_accel: 3000\n'),
+      frames: { 'printer.cfg': 'FRAME-WITH-KEPT-ONLY' },
+    });
+    await keepSection('printer.cfg', 'printer', ['req-1:e0']);
+
     expect(useChangeSetStore.getState().kept).toEqual(['req-1:e0']);
-    expect(api.resolveChangeSet).not.toHaveBeenCalled();
+    expect(api.resolveChangeSet).toHaveBeenCalledTimes(1);
+    const sent = vi.mocked(api.resolveChangeSet).mock.calls[0][0];
+    // The TEXT keeps everything (a keep drops nothing) …
+    expect(sent.segments[0].keptEditIds).toEqual(['e0', 'e1']);
+    // … while the FRAME holds only what has been decided, which is what
+    // stops the kept edit being marked.
+    expect(sent.segments[0].frameKeptEditIds).toEqual(['e0']);
+    expect(useChangeSetStore.getState().frames).toEqual({ 'printer.cfg': 'FRAME-WITH-KEPT-ONLY' });
     expect(useChangeSetStore.getState().busy).toBe(false);
   });
 });
@@ -101,7 +113,9 @@ describe('undo', () => {
     // The chain is the KEEP list: everything except what was undone.
     expect(api.resolveChangeSet).toHaveBeenCalledTimes(1);
     const sent = vi.mocked(api.resolveChangeSet).mock.calls[0][0];
-    expect(sent.segments).toEqual([{ requestId: 'req-1', keptEditIds: ['e0'] }]);
+    expect(sent.segments).toEqual([
+      { requestId: 'req-1', keptEditIds: ['e0'], frameKeptEditIds: [] },
+    ]);
     // The client's working text rides along — it is what stops a replay from
     // clobbering a hand edit.
     expect(Object.keys(sent.contextFiles ?? {})).toContain('printer.cfg');
@@ -140,6 +154,22 @@ describe('undo', () => {
     release(resolvedOk('[printer]\nmax_accel: 3000\n'));
     await inFlight;
     expect(useChangeSetStore.getState().busy).toBe(false);
+  });
+
+  it('stores the frame the server replayed for the decided set', async () => {
+    vi.mocked(api.resolveChangeSet).mockResolvedValue({
+      ...resolvedOk('[printer]\nmax_accel: 3000\n'),
+      frames: { 'printer.cfg': 'FRAME-WITH-KEPT-ONLY' },
+    });
+    await undoSection('printer.cfg', 'stepper_x', ['req-1:e1']);
+    expect(useChangeSetStore.getState().frames).toEqual({ 'printer.cfg': 'FRAME-WITH-KEPT-ONLY' });
+  });
+
+  it('clears the frame when nothing is decided, so the pane uses the pre-review text', async () => {
+    useChangeSetStore.setState({ frames: { 'printer.cfg': 'STALE' } });
+    vi.mocked(api.resolveChangeSet).mockResolvedValue(resolvedOk('[printer]\nmax_accel: 3000\n'));
+    await resolveChangeSet();
+    expect(useChangeSetStore.getState().frames).toEqual({});
   });
 
   it('says so when the server text cannot be applied to the editor', async () => {

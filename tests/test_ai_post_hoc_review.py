@@ -299,6 +299,86 @@ def test_resolve_with_nothing_kept_restores_the_baseline(monkeypatch):
     assert out['files']['printer.cfg']['content'].strip() == PRINTER_CFG.strip()
 
 
+# ══ The pane's frame: marks follow the decisions (design B) ════════════
+
+
+def test_resolve_returns_the_frame_for_the_still_unreviewed_edits(monkeypatch):
+    """Design B (Sir, 2026-10-03): the frame is baseline + the ops the user
+    has DECIDED to keep, so an edit that was kept stops being marked and the
+    undecided one is exactly what is left."""
+    _run(monkeypatch, [
+        _tool_call('config_edit', SET_ACCEL),
+        _tool_call('config_edit', SET_VELOCITY),
+        _final_reply('Both set.'),
+    ], 'frame-resolve-1')
+    edited = PRINTER_CFG.replace('max_accel: 1000', 'max_accel: 3000') \
+                        .replace('max_velocity: 200', 'max_velocity: 300')
+
+    out = client.post('/ai/chat/changes/resolve', json={
+        'segments': [{
+            'requestId': 'frame-resolve-1',
+            'keptEditIds': ['e0', 'e1'],       # what the text keeps
+            'frameKeptEditIds': ['e0'],        # what has been DECIDED
+        }],
+        'contextFiles': {'printer.cfg': {'content': edited}},
+    }).json()
+
+    assert out['status'] == 'ok'
+    assert 'max_accel: 3000' in out['files']['printer.cfg']['content']
+    assert 'max_velocity: 300' in out['files']['printer.cfg']['content']
+    frame = out['frames']['printer.cfg']
+    assert 'max_accel: 3000' in frame            # decided: in the frame
+    assert 'max_velocity: 200' in frame          # undecided: still the old text
+    assert 'max_velocity: 300' not in frame
+
+
+def test_resolve_with_nothing_decided_carries_no_frame(monkeypatch):
+    """With nothing decided the frame IS the baseline, which the change-set
+    payload already ships — no second replay, and the client falls back."""
+    _run(monkeypatch, [
+        _tool_call('config_edit', SET_ACCEL),
+        _final_reply('Set.'),
+    ], 'frame-resolve-2')
+    out = client.post('/ai/chat/changes/resolve', json={
+        'segments': [{'requestId': 'frame-resolve-2',
+                      'keptEditIds': ['e0'], 'frameKeptEditIds': []}],
+    }).json()
+    assert out['status'] == 'ok'
+    assert 'frames' not in out
+
+
+def test_the_frame_pass_never_rewrites_what_the_client_holds(monkeypatch):
+    """The frame replay is read-only. If it wrote back the file it computed,
+    the next decision would think the client holds a text it has never seen
+    and silently stop reporting hand edits (hard rule 6)."""
+    _run(monkeypatch, [
+        _tool_call('config_edit', SET_ACCEL),
+        _tool_call('config_edit', SET_VELOCITY),
+        _final_reply('Both set.'),
+    ], 'frame-resolve-3')
+    edited = PRINTER_CFG.replace('max_accel: 1000', 'max_accel: 3000') \
+                        .replace('max_velocity: 200', 'max_velocity: 300')
+    first = client.post('/ai/chat/changes/resolve', json={
+        'segments': [{'requestId': 'frame-resolve-3',
+                      'keptEditIds': ['e0', 'e1'], 'frameKeptEditIds': ['e0']}],
+        'contextFiles': {'printer.cfg': {'content': edited}},
+    }).json()
+    assert first['frames']                       # the frame pass ran
+
+    # The client now holds exactly what that resolve returned. The session
+    # must agree — otherwise this second call reports a hand edit that never
+    # happened.
+    second = client.post('/ai/chat/changes/resolve', json={
+        'segments': [{'requestId': 'frame-resolve-3',
+                      'keptEditIds': ['e0', 'e1']}],
+        'contextFiles': {
+            'printer.cfg': {'content': first['files']['printer.cfg']['content']},
+        },
+    }).json()
+    assert second['clientEdited'] == []
+    assert second['stale'] == []
+
+
 def test_resolve_reports_a_stale_op_instead_of_clobbering_a_manual_edit(
         monkeypatch):
     """The user edited the anchor mid-loop: their text wins, and the op that

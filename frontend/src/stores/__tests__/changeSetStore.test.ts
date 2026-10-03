@@ -139,8 +139,10 @@ describe('changeSetStore', () => {
     state().setFromStream('req-2', secondPayload());
     state().undoSection('printer.cfg', 'stepper_x');   // drops req-1:e1
     expect(state().resolveSegments()).toEqual([
-      { requestId: 'req-1', keptEditIds: ['e0'] },
-      { requestId: 'req-2', keptEditIds: ['e0'] },
+      // The frame list is the DECIDED keeps only — nothing has been decided
+      // here, which is what keeps both changes marked in the pane.
+      { requestId: 'req-1', keptEditIds: ['e0'], frameKeptEditIds: [] },
+      { requestId: 'req-2', keptEditIds: ['e0'], frameKeptEditIds: [] },
     ]);
   });
 
@@ -159,7 +161,7 @@ describe('changeSetStore', () => {
     state().undoAll();
     expect(state().undone).toEqual(['req-1:e1']);
     expect(state().resolveSegments()).toEqual([
-      { requestId: 'req-1', keptEditIds: ['e0'] },
+      { requestId: 'req-1', keptEditIds: ['e0'], frameKeptEditIds: ['e0'] },
     ]);
     expect(state().unreviewedCount()).toBe(0);
     expect(changeSetTotals(state())).toEqual({ added: 0, removed: 0 });

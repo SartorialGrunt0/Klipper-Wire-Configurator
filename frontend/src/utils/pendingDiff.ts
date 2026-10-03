@@ -28,6 +28,7 @@ import type { ChatReference } from './chatReferences';
 import { buildApprovalDiffLines } from './approvalDiff';
 import { parsePatch } from './configDiff';
 import type { ChangeSetRow } from './changeSet';
+import { sectionLabel } from './changeSet';
 
 export interface PendingDiffModel {
   /** Identity of the card this came from (stale-response guard). */
@@ -175,9 +176,7 @@ export function buildUnreviewedDiffModel(
   if (!file || rows.length === 0) return null;
   const labels: string[] = [];
   for (const row of rows) {
-    const label = row.section
-      ? `[${row.section}]${row.key ? ` ${row.key}` : ''}`
-      : row.file;
+    const label = sectionLabel(row);
     if (!labels.includes(label)) labels.push(label);
   }
   const lines: DiffLine[] = frame

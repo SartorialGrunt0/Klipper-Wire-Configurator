@@ -494,7 +494,8 @@ def diff_text(file_name: str, before: str, after: str) -> str:
     return "\n".join(_unified_diff_lines(file_name, before, after))
 
 
-def resolve_change_chain(chain, context_files: dict | None = None) -> dict:
+def resolve_change_chain(chain, context_files: dict | None = None,
+                         update_pushed: bool = True) -> dict:
     """Replay the KEPT ops of a whole CHAIN of requests, oldest first.
 
     Post-hoc review's single mutation (plan hard rule 4): undo is
@@ -608,15 +609,21 @@ def resolve_change_chain(chain, context_files: dict | None = None) -> dict:
 
     # Every session in the chain now knows what the client holds for the
     # files it touched, so the next decision's staleness check is honest.
-    for session, _kept, _rid in entries:
-        for file_name in owners_of(session, touched, entries):
-            entry = files.get(file_name)
-            if entry is None:
-                continue
-            if entry["deleted"]:
-                session.pushed_files.pop(file_name, None)
-            else:
-                session.pushed_files[file_name] = entry["content"]
+    #
+    # NOT for a FRAME pass (`update_pushed=False`): that call is a read-only
+    # "what would the file look like without the undecided ops", and letting
+    # it write back would tell the next decision the client holds a text it
+    # has never seen — silently disabling the hand-edit check (hard rule 6).
+    if update_pushed:
+        for session, _kept, _rid in entries:
+            for file_name in owners_of(session, touched, entries):
+                entry = files.get(file_name)
+                if entry is None:
+                    continue
+                if entry["deleted"]:
+                    session.pushed_files.pop(file_name, None)
+                else:
+                    session.pushed_files[file_name] = entry["content"]
     return {"status": "ok", "files": files, "stale": stale,
             "clientEdited": client_edited}
 

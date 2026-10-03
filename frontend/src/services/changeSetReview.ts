@@ -9,8 +9,9 @@
  *
  * The laws this file exists to keep:
  *
- *  1. **Keep changes no text.** The edit is already applied; keeping only ends
- *     the decision, so a keep never touches the network.
+ *  1. **Keep changes no text.** The edit is already applied; keeping ends the
+ *     decision. It does still refresh the pane's FRAME (the marks are defined
+ *     by the decided set), so both verbs make the same call.
  *  2. **Undo is `replay(kept ops)`**, never a text revert here — reverting in
  *     the client would leave the residue of a dropped op behind. The server
  *     replays each request's kept ops onto the state the previous one left.
@@ -111,6 +112,11 @@ export async function resolveChangeSet(): Promise<void> {
       useChangeSetStore.setState({ note: GONE_NOTE });
       return;
     }
+    // The pane's frame follows the decisions (design B): the backend replays
+    // the DECIDED-kept ops into it, so a kept edit stops being marked while
+    // an undecided one stays. An empty map means nothing has been decided —
+    // the pane then uses the file's pre-review text from the change set.
+    useChangeSetStore.setState({ frames: out.frames ?? {} });
     const resolved: PendingConfigEdit[] = Object.entries(out.files).map(([file, entry]) => ({
       file,
       op: entry.deleted ? 'delete_file' : 'update',
@@ -140,11 +146,14 @@ export async function resolveChangeSet(): Promise<void> {
 }
 
 // ── The decisions themselves ─────────────────────────────────────────
-// Keep is local (it touches no text); undo decides and then replays.
+// Keep changes no text, but it DOES change the pane's frame: the marks are
+// defined by the DECIDED set (design B), so a keep replays too. Both verbs
+// therefore go through the same call — one path, one status, one note.
 
-export function keepAll(): void {
+export async function keepAll(): Promise<void> {
   useChangeSetStore.setState({ note: null });
   useChangeSetStore.getState().keepAll();
+  await resolveChangeSet();
 }
 
 export async function undoAll(): Promise<void> {
@@ -152,9 +161,10 @@ export async function undoAll(): Promise<void> {
   await resolveChangeSet();
 }
 
-export function keepSection(file: string, section: string, ids: string[]): void {
+export async function keepSection(file: string, section: string, ids: string[]): Promise<void> {
   useChangeSetStore.setState({ note: null });
   useChangeSetStore.getState().keepSection(file, section, ids);
+  await resolveChangeSet();
 }
 
 export async function undoSection(file: string, section: string, ids: string[]): Promise<void> {
@@ -162,9 +172,10 @@ export async function undoSection(file: string, section: string, ids: string[]):
   await resolveChangeSet();
 }
 
-export function keepFile(file: string, ids: string[]): void {
+export async function keepFile(file: string, ids: string[]): Promise<void> {
   useChangeSetStore.setState({ note: null });
   useChangeSetStore.getState().keepFile(file, ids);
+  await resolveChangeSet();
 }
 
 export async function undoFile(file: string, ids: string[]): Promise<void> {

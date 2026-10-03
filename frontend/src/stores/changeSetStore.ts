@@ -59,6 +59,13 @@ export interface ChangeSetState {
   busy: boolean;
   /** Honest note from the last resolution (stale ops, failures, a gone set). */
   note: string | null;
+  /**
+   * file → the pane's FRAME after the last decision: the document with only
+   * the decided-kept edits applied (design B, Sir 2026-10-03). Empty when
+   * nothing has been decided — the frame is then the pre-review text the
+   * change-set payload carries, and the pane falls back to it.
+   */
+  frames: Record<string, string>;
 
   /** Upsert one request's change set (progress rail or the finished reply). */
   setFromStream: (requestId: string | null, payload: ChangeSetPayload | null | undefined) => void;
@@ -89,8 +96,14 @@ export interface ChangeSetState {
   unreviewedCount: () => number;
   /** The local ids one request may keep (its row ids minus the undone ones). */
   keptIdsFor: (requestId: string) => string[];
+  /** The local ids one request has DECIDED to keep (undecided excluded). */
+  frameKeptIdsFor: (requestId: string) => string[];
   /** The whole chain's keep lists, oldest first, for the resolve call. */
-  resolveSegments: () => Array<{ requestId: string; keptEditIds: string[] }>;
+  resolveSegments: () => Array<{
+    requestId: string;
+    keptEditIds: string[];
+    frameKeptEditIds: string[];
+  }>;
 }
 
 const EMPTY = {
@@ -101,6 +114,7 @@ const EMPTY = {
   expanded: [] as string[],
   busy: false,
   note: null as string | null,
+  frames: {} as Record<string, string>,
 };
 
 function mergedView(segments: ChangeSetSegment[]): ChangeSetView | null {
@@ -126,15 +140,21 @@ export const useChangeSetStore = create<ChangeSetState>((set, get) => ({
       next = segments.map((segment, i) => (i === index ? { requestId, view } : segment));
     }
     // Decisions survive the refresh, but only for rows that still exist —
-    // a segment that shrank must not leave orphan decisions behind.
+    // a segment that shrank must not leave orphan decisions behind. When one
+    // IS dropped the pane's frame is stale (it was replayed for a different
+    // decision set), so it goes too: the pane falls back to the file's
+    // pre-review text, which is exact while nothing is decided.
     const merged = mergedView(next);
     const live = new Set(merged?.rows.map((row) => row.id) ?? []);
+    const kept = get().kept.filter((id) => live.has(id));
+    const decisionsDropped = kept.length !== get().kept.length;
     set({
       segments: next,
       view: merged,
-      kept: get().kept.filter((id) => live.has(id)),
+      kept,
       undone: get().undone.filter((id) => live.has(id)),
       expanded: get().expanded.filter((id) => live.has(id)),
+      frames: decisionsDropped ? {} : get().frames,
     });
   },
 
@@ -235,9 +255,22 @@ export const useChangeSetStore = create<ChangeSetState>((set, get) => ({
       .filter((localId) => !gone.has(namespacedId(requestId, localId)));
   },
 
+  frameKeptIdsFor: (requestId) => {
+    // Only the DECIDED keeps: an undecided edit is not in the frame yet, which
+    // is exactly what keeps it marked in the pane (design B).
+    const { segments, kept } = get();
+    const segment = segments.find((candidate) => candidate.requestId === requestId);
+    if (!segment) return [];
+    const decided = new Set(kept);
+    return segment.view.rows
+      .map((row) => row.id)
+      .filter((localId) => decided.has(namespacedId(requestId, localId)));
+  },
+
   resolveSegments: () => get().segments.map((segment) => ({
     requestId: segment.requestId,
     keptEditIds: get().keptIdsFor(segment.requestId),
+    frameKeptEditIds: get().frameKeptIdsFor(segment.requestId),
   })),
 }));
 

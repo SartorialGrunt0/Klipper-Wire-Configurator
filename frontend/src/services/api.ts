@@ -1015,6 +1015,15 @@ export interface ResolvedChangeSet {
   stale?: Array<{ id: string; file: string; reason: string }>;
   /** Files the human edited mid-loop: their text is the replay base. */
   clientEdited?: string[];
+  /**
+   * file → the document with only the DECIDED-kept ops applied: the frame the
+   * text view's pane diffs the file against, so a kept edit stops being
+   * marked and the marks are exactly what still needs a decision.
+   *
+   * Absent when nothing has been decided (the frame is then the pre-review
+   * text the change-set payload ships).
+   */
+  frames?: Record<string, string>;
 }
 
 /** One staged write-tool change (backend services/ai_edit_tools.py). */
@@ -1179,7 +1188,18 @@ export interface ChangeSetResolveRequest {
    * decision can cover edits staged by several requests. Each request's ops
    * replay onto the state the previous one left.
    */
-  segments: Array<{ requestId: string; keptEditIds: string[] }>;
+  segments: Array<{
+    requestId: string;
+    keptEditIds: string[];
+    /**
+     * The ids that have been DECIDED (kept) — undecided ones excluded. The
+     * backend replays this second list into the pane's FRAME, so the text
+     * view's marks follow the decisions (design B). Omit when nothing has
+     * been decided: the frame is then the pre-review text the change set
+     * already carries.
+     */
+    frameKeptEditIds?: string[];
+  }>;
   /** The editor's current text, so a human edit is never clobbered. */
   contextFiles?: Record<string, { content: string; label?: string }>;
 }
