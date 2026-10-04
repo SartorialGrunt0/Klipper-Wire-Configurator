@@ -80,10 +80,12 @@ def _chat_payload(messages, **over):
         'apiUrl': 'https://api.example.com/v1/chat/completions',
         'apiProvider': 'chatgpt',
         'contextFiles': _ctx(),
-        # Phase 2: validated writes now suspend for a human card. These
-        # tests exercise the tool LOOP, not the gate; the gate has its own
-        # suite (test_ai_approval_gate.py). Tests that want the real gate
-        # pass autoApproveEdits=False explicitly.
+        # Sent as a no-op. The edit path gates nothing since the post-hoc
+        # review change (2026-10-02), so this field is inert and the gate
+        # has no caller. It stays on the payload because the field is the
+        # reserved bypass hook for the dormant gate (see the REVIVAL note
+        # on _run_approval_gate); the gate's own contract is pinned in
+        # test_ai_approval_gate.py.
         'autoApproveEdits': True,
         # The model-triggered skill gate is product behavior since the
         # Phase-6 flag removal: the write tools stay hidden until

@@ -346,9 +346,24 @@ class ChatRequest(BaseModel):
     # tools.
     editSkill: bool | None = None
     # Approval-gate override (harness A/B runs ONLY; the frontend never
-    # sends it). INERT since the post-hoc review change (2026-10-02): the
-    # edit path no longer suspends on anything, so there is no wait to
-    # skip. Kept so existing harness runs don't 422 on the field.
+    # sends it). INERT since the post-hoc review change (2026-10-02):
+    # nothing in the edit path suspends, so there is no wait to skip and
+    # nothing reads this field today — this declaration is its only
+    # occurrence in the backend.
+    #
+    # KEPT ON PURPOSE as the bypass hook for the DORMANT gate. When the
+    # first IRREVERSIBLE tool lands (a disk write, a firmware restart, a
+    # command sent to the printer) the gate gets a caller back, and a
+    # bank question covering that tool needs this flag to run past the
+    # card. See the REVIVAL note on _run_approval_gate for the wiring.
+    #
+    # It never guarded against a 422 — pydantic ignores unknown request
+    # fields (ChatRequest sets no extra="forbid"), so a stale sender
+    # cannot fail here either way. The hook is the only reason to keep it.
+    #
+    # Do NOT point this at an IRREVERSIBLE tool without deciding that
+    # deliberately: a blanket harness auto-approve on the irreversible
+    # class is exactly what the gate exists to prevent.
     autoApproveEdits: bool = False
     # Merge every system message into a single leading system message.
     # Default off: most OpenAI-compatible servers accept multiple system
@@ -2694,6 +2709,35 @@ async def _run_approval_gate(
     against the latest frontend state before committing), and a 90s
     non-response auto-declines with an honest reason. The model loop never
     sees a fabricated user intent.
+
+    REVIVAL — when the first irreversible tool lands, three steps:
+
+    1. Restore the caller at BOTH dispatch sites (the main tool loop and
+       the empty-reprompt path). main's shape, which is the one to
+       recover, was::
+
+           if req.autoApproveEdits:
+               result_text, details = edit_session.execute(tool_call)
+           else:
+               result_text, details = await _run_approval_gate(...)
+
+       Scope the branch to the IRREVERSIBLE tool only — reversible
+       staging stays post-hoc reviewed, so do not route every write back
+       through here.
+
+    2. ChatRequest.autoApproveEdits is still declared on the request
+       model: that is the hook step 1 branches on. It is inert until
+       step 1 lands, and it is kept for exactly this.
+
+    3. The harness re-adds ONE line in
+       scripts/ai_chat_accuracy_test.py::chat_request()::
+
+           if effective_edit:
+               payload["autoApproveEdits"] = True
+
+       It was removed 2026-10-03 (commit 3b2cb23) because with no gate in
+       the path there was nothing left to bypass. A bank question for the
+       gated tool is what brings it back.
     """
     name = tool_call.get("name", "")
     content, result, _preview_state = session.prepare(tool_call)

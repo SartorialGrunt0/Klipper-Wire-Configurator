@@ -382,6 +382,27 @@ def test_dormant_gate_has_no_env_default_within_it():
     assert '_run_approval_gate' not in edit_path
 
 
+def test_auto_approve_bypass_hook_is_kept_while_the_gate_is_dormant():
+    """The harness bypass field survives the dormant-gate cleanup on purpose.
+
+    Deleting it reads like dead-code removal, but it is the hook the gate's
+    revival branches on (see the REVIVAL note on _run_approval_gate): a
+    future bank question covering the first IRREVERSIBLE tool needs it back
+    on the payload. This pins the HOOK only -- nothing reads the field while
+    the gate has no caller, which is asserted just above.
+    """
+    base = dict(
+        messages=[{'role': 'user', 'content': 'hi'}],
+        apiKey='', model='m', apiUrl='http://127.0.0.1:8080',
+        apiProvider='openai-compatible')
+    assert 'autoApproveEdits' in ai_routes.ChatRequest.model_fields
+    # Still accepted on the wire, so a harness can send it again unchanged.
+    assert ai_routes.ChatRequest(
+        **base, autoApproveEdits=True).autoApproveEdits is True
+    # And it stays default-False: nothing auto-approves unless asked.
+    assert ai_routes.ChatRequest(**base).autoApproveEdits is False
+
+
 def test_create_approval_requires_a_running_loop():
     """ApprovalRequest binds to the loop that owns the suspension; creating
     one off-loop is a programming error, not a supported state."""
