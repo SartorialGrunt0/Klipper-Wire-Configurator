@@ -1542,7 +1542,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
       {/* Editor area */}
       <div className="flex flex-col flex-1 min-w-0">
         {/* Editor toolbar */}
-        <div className="flex items-center justify-between px-3 py-1.5 bg-[var(--color-bg-secondary)] border-b border-[var(--color-bg-tertiary)] shrink-0">
+        <div className="flex h-9 items-center justify-between px-3 bg-[var(--color-bg-secondary)] border-b border-[var(--color-bg-tertiary)] shrink-0">
           <div className="flex min-w-0 items-center gap-2">
             {/* The file tree's fold toggle. It lives HERE, at the left end of
                 the editor toolbar, rather than in a collapsed rail: a rail is
@@ -1553,10 +1553,10 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
               onClick={() => setShowFileSidebar((prev) => !prev)}
               title={showFileSidebar ? 'Hide the file tree' : 'Show the file tree'}
               aria-pressed={showFileSidebar}
-              className={`shrink-0 rounded p-1 transition-colors ${
+              className={`flex shrink-0 items-center rounded border px-1.5 py-0.5 transition-colors ${
                 showFileSidebar
-                  ? 'text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10'
-                  : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text-primary)]'
+                  ? 'border-[var(--color-accent)]/40 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10'
+                  : 'border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]'
               }`}
             >
               <FileTreeIcon />
@@ -1596,12 +1596,12 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
                   ? (showChatDock ? 'Hide the AI chat' : 'Show the AI chat')
                   : 'Configure an AI provider in AI Chat → Settings to enable the panel'}
                 aria-pressed={showChatDock && aiConfigured}
-                className={`shrink-0 rounded p-1 transition-colors ${
+                className={`flex shrink-0 items-center rounded border px-1.5 py-0.5 transition-colors ${
                   !aiConfigured
-                    ? 'cursor-not-allowed text-[var(--color-text-secondary)] opacity-40'
+                    ? 'cursor-not-allowed border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] opacity-40'
                     : showChatDock
-                      ? 'text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10'
-                      : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text-primary)]'
+                      ? 'border-[var(--color-accent)]/40 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10'
+                      : 'border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]'
                 }`}
               >
                 <ChatBubbleIcon />

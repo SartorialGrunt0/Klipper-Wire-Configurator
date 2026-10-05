@@ -60,11 +60,14 @@ interface Props {
    * Draw the editor's running line-number gutter down the rows.
    *
    * The pane takes the place of the buffer while a review is open, so the
-   * numbers the reader was just looking at must not vanish with it (Cliff,
-   * 2026-10-04). Numbers count the document the diff's AFTER side describes —
-   * the text the buffer holds — and a removed row, which is not in that
-   * document, shows a blank. The number is `sticky left-0` so it stays put
-   * while a long line scrolls sideways under it.
+   * numbers the reader was just looking at must not vanish with it — and they
+   * must look like the SAME gutter, not a lookalike: the editor draws its
+   * numbers at `text-sm` in the secondary text colour, right-aligned in a
+   * 3rem column with a `border-r` and the panel background (`TextEditor`'s
+   * `lineNumbersRef` block). Numbers count the document the diff's AFTER side
+   * describes — the text the buffer holds — and a removed row, which is not in
+   * that document, shows a blank. The number is `sticky left-0` so it stays
+   * put while a long line scrolls sideways under it.
    */
   lineNumbers?: boolean;
 }
@@ -82,7 +85,7 @@ export default function DiffLines({
             {numbers && (
               <span
                 aria-hidden
-                className="sticky left-0 mr-2 inline-block w-9 select-none border-r border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] pr-1.5 text-right text-[10px] leading-5 text-[var(--color-text-secondary)] opacity-70"
+                className="sticky left-0 mr-2 inline-block w-12 shrink-0 border-r border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] pl-2 pr-2 text-right text-sm leading-relaxed text-[var(--color-text-secondary)]"
               >
                 {numbers[i] ?? ''}
               </span>

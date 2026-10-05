@@ -47,7 +47,7 @@ import { useVisibility } from '../../stores/validationSettingsStore';
 import ChatSettingsPanel from './ChatSettingsPanel';
 import ChatHistoryDialog from './ChatHistoryDialog';
 import PrinterMemoryDialog from './PrinterMemoryDialog';
-import { ChatBubbleIcon } from '../icons';
+import { ChatBubbleIcon, BookIcon } from '../icons';
 import ChatMessageList from './ChatMessageList';
 import ChatApprovalCard from './ChatApprovalCard';
 import ApprovalDiffPreview from './ApprovalDiffPreview';
@@ -1259,7 +1259,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     // Mirrors ConfigTree's header so the two side panels read as a pair:
     // label + status on the left, controls on the right, `>` to fold.
     <div className="shrink-0 border-b border-[var(--color-bg-tertiary)]">
-      <div className="flex items-center justify-between gap-2 px-3 py-2">
+      <div className="flex h-9 items-center justify-between gap-2 px-3">
         <div className="flex min-w-0 items-center gap-2">
           <span className={`h-2 w-2 shrink-0 rounded-full ${statusDotClass}`} title={statusTitle} />
           <h2 className="truncate text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-secondary)]">
@@ -1296,12 +1296,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
             className={iconButtonClass}
             title="View and edit printer memory"
           >
-            {/* A book, not a chip: printer memory is the notes we keep about
-                this machine, not a component on the board (Cliff, 2026-10-04). */}
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-              <path d="M3.5 3.2A1.7 1.7 0 0 1 5.2 1.5H12a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H5.2a1.7 1.7 0 0 1-1.7-1.7z" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
-              <path d="M6.3 1.5v13" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-            </svg>
+            <BookIcon />
           </button>
           <button
             onClick={() => setShowSettings(!showSettings)}
@@ -1448,7 +1443,9 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           const store = useChatReferenceStore.getState();
           if (store.preview?.id === id) store.setPreview(null);
           else if (store.selection?.id === id) store.dismissSelection();
-          else store.removePinned(id);
+          // Detaching a pinned reference hands it back as the suggestion it
+          // came from, so the pill survives the click as a dashed grey `+`.
+          else store.unpinToPreview(id);
         }}
         onPromoteReference={() => useChatReferenceStore.getState().promotePreview()}
         onMentionQuery={mentionSourceMatches}

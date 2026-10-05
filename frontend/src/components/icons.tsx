@@ -38,3 +38,25 @@ export function FileTreeIcon({ size = 14 }: { size?: number }) {
     </svg>
   );
 }
+
+/**
+ * Printer memory: an OPEN book — two pages meeting at a spine.
+ *
+ * A closed book's cover and spine collapse into two near-parallel lines at
+ * 14px and read as a rectangle (Cliff, 2026-10-04: "doesn't look like a
+ * book"). The open book is the shape everyone already reads as one, and the
+ * centre spine is a single unambiguous stroke.
+ */
+export function BookIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path
+        d="M8 3.4C6.9 2.5 5.4 2 3.4 2a.6.6 0 0 0-.6.6v8.6c0 .33.27.6.6.6 1.9 0 3.3.5 4.6 1.6 1.3-1.1 2.7-1.6 4.6-1.6a.6.6 0 0 0 .6-.6V2.6a.6.6 0 0 0-.6-.6C10.6 2 9.1 2.5 8 3.4Z"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinejoin="round"
+      />
+      <path d="M8 3.4v10" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+    </svg>
+  );
+}

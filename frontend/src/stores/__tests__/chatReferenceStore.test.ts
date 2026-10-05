@@ -205,6 +205,35 @@ describe('clear', () => {
   });
 });
 
+describe('unpinToPreview', () => {
+  // Detaching is one click of the pill's toggle, so the pill has to survive
+  // it: the reference goes back to the suggestion slot instead of vanishing
+  // (Cliff, 2026-10-04).
+  it('hands a detached reference back as the suggestion it came from', () => {
+    const store = useChatReferenceStore.getState();
+    store.addPinned(PINNED);
+    store.unpinToPreview(PINNED.id);
+
+    const after = useChatReferenceStore.getState();
+    expect(after.pinned).toEqual([]);
+    expect(after.preview?.id).toBe(PINNED.id);
+    // Nothing is sent while it is only a suggestion …
+    expect(after.attachedReferences()).toEqual([]);
+    // … and one more click re-attaches it.
+    after.promotePreview();
+    expect(useChatReferenceStore.getState().pinned.map((r) => r.id)).toEqual([PINNED.id]);
+    expect(useChatReferenceStore.getState().preview).toBeNull();
+  });
+
+  it('ignores an id that is not pinned', () => {
+    const store = useChatReferenceStore.getState();
+    store.addPinned(PINNED);
+    store.unpinToPreview('section:printer.cfg:[stepper_x]');
+    expect(useChatReferenceStore.getState().pinned.map((r) => r.id)).toEqual([PINNED.id]);
+    expect(useChatReferenceStore.getState().preview).toBeNull();
+  });
+});
+
 describe('takeAttachedReferences', () => {
   // Regression: the first live build read the store and cleared it as two
   // separate statements, in the wrong order, and sent an empty list.

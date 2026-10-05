@@ -133,20 +133,20 @@ function ConfigTree({
             <button
               onClick={() => {
                 onSelectFile(node.file!);
-                // Selecting a file is navigation, so it FOLDS the sections up
-                // instead of unfolding them: the auto-expansion here meant
-                // that choosing a file from anywhere (the tree, a search hit,
-                // the change bar, the pane's cross-file arrows) opened its
-                // section list and pushed the rest of the tree off screen
-                // (Cliff, 2026-10-04). The chevron is how they open.
-                setExpansion((current) => ({ ...current, [node.id]: false }));
+                // Clicking a file is navigation AND a fold toggle: the row
+                // selects the file, offers it to the chat, and opens or closes
+                // its section list. Selecting from anywhere ELSE (a search
+                // hit, the change bar, the pane's arrows) must not touch the
+                // fold — that auto-expansion is what pushed the rest of the
+                // tree off screen (Cliff, 2026-10-04).
+                setExpansion((current) => ({ ...current, [node.id]: !current[node.id] }));
                 if (reference) onReferenceNode?.(reference);
               }}
               onContextMenu={(event) => onFileContextMenu(event, node.file!)}
               title={node.file}
-              className={`flex min-w-0 flex-1 items-center gap-2 px-2 py-1 text-xs font-medium transition-colors ${
+              className={`flex min-w-0 flex-1 items-center gap-2 rounded px-2 py-1 text-xs font-medium transition-colors ${
                 isActive
-                  ? 'bg-[var(--color-accent)] text-[var(--color-bg-primary)]'
+                  ? 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] ring-1 ring-inset ring-[var(--color-accent)]'
                   : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text-primary)]'
               }${rowPreviewClass}`}
             >
@@ -230,7 +230,7 @@ function ConfigTree({
 
   return (
     <div className="flex w-64 shrink-0 flex-col border-r border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)]">
-      <div className="flex shrink-0 items-center justify-between border-b border-[var(--color-bg-tertiary)] px-3 py-2">
+      <div className="flex h-9 shrink-0 items-center justify-between border-b border-[var(--color-bg-tertiary)] px-3">
         <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-secondary)]">
           Files &amp; Sections
         </span>

@@ -34,6 +34,15 @@ export interface ChatReferenceState {
   promotePreview: () => ChatReference | null;
   addPinned: (reference: ChatReference) => void;
   removePinned: (id: string) => void;
+  /**
+   * Detach a PINNED reference and hand it back as a suggestion.
+   *
+   * Detaching is the pill's other click, and a pill that simply vanished would
+   * leave nothing to re-attach: the reference returns to the preview slot, so
+   * the pill stays put as a dashed grey box (`+`) and one more click attaches
+   * it again (Cliff, 2026-10-04).
+   */
+  unpinToPreview: (id: string) => void;
   /** Replace the selection slot (dismissal-aware). `null` clears it. */
   setSelection: (reference: ChatReference | null) => void;
   dismissSelection: () => void;
@@ -76,6 +85,16 @@ export const useChatReferenceStore = create<ChatReferenceState>((set, get) => ({
 
   removePinned: (id) =>
     set((state) => ({ pinned: state.pinned.filter((reference) => reference.id !== id) })),
+
+  unpinToPreview: (id) => {
+    const { pinned } = get();
+    const reference = pinned.find((candidate) => candidate.id === id);
+    if (!reference) return;
+    set({
+      pinned: pinned.filter((candidate) => candidate.id !== id),
+      preview: reference,
+    });
+  },
 
   setSelection: (reference) => {
     const state = get();

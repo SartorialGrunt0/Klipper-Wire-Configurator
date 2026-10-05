@@ -199,8 +199,8 @@ const ChatInputBar: React.FC<ChatInputBarProps> = ({
                 }
                 className={`group inline-flex max-w-full items-center gap-1.5 rounded-full border py-1 pl-2.5 pr-1.5 font-mono text-[10px] transition-colors ${
                   suggested
-                    ? 'border-dashed border-[var(--color-accent)] text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10'
-                    : 'border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
+                    ? 'border-dashed border-[var(--color-text-secondary)]/50 text-[var(--color-text-secondary)] hover:border-green-500 hover:text-green-400'
+                    : 'border-green-500/60 text-green-400 hover:border-[var(--color-error)] hover:text-[var(--color-error)]'
                 }`}
               >
                 <span className="shrink-0 opacity-60">{KIND_GLYPH[chip.kind]}</span>
@@ -217,8 +217,8 @@ const ChatInputBar: React.FC<ChatInputBarProps> = ({
                   aria-hidden
                   className={`${CHIP_ACTION_CLASS} shrink-0 ${
                     suggested
-                      ? 'group-hover:bg-[var(--color-accent)]/20'
-                      : 'group-hover:bg-[var(--color-error)]/15 group-hover:text-[var(--color-error)]'
+                      ? 'group-hover:bg-green-500/15'
+                      : 'group-hover:bg-[var(--color-error)]/15 text-[var(--color-error)]'
                   }`}
                 >
                   {suggested ? '+' : '×'}
