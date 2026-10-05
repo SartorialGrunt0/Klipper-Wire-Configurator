@@ -565,7 +565,7 @@ def resolve_change_chain(chain, context_files: dict | None = None,
             base_files[file_name] = cur
             client_edited.append(file_name)
 
-    state = ProjectState(files=dict(base_files))
+    state = ProjectState(files=_replay_files(entries, current, base_files, created))
     stale: list[dict] = []
     kept_ok: set[tuple] = set()
     for session, kept_ids, request_id in entries:
@@ -632,6 +632,40 @@ def owners_of(session, touched, entries) -> list[str]:
     """Files this session staged edits to (its own view of the chain)."""
     owned = {rec["file"] for rec in session.edit_records if rec["file"]}
     return [name for name in touched if name in owned]
+
+
+def _replay_files(entries, current: dict[str, str], base_files: dict[str, str],
+                  created: set[str]) -> dict[str, str]:
+    """The file set a replay VALIDATES in — the same world the ops were staged in.
+
+    Validation is file-set dependent, and not only in the obvious way: the
+    gcode-command passes re-derive cross-file, a ``rename_existing`` anywhere in
+    the include closure satisfies a shadow collision everywhere, and the
+    project-wide passes only run above one file. Seeding the replay with JUST
+    the files the chain touched therefore judged ops in a smaller world than
+    the one that accepted them, and a legitimate rename came back "failed
+    validation after merging" while its follow-up ops failed on the section the
+    rename never created (live report 2026-10-04: "2 changes could not be
+    re-applied").
+
+    So: every file the chain's sessions knew about, plus everything the client
+    currently holds (its text is the present truth for files this chain does not
+    edit), with each touched file at its REPLAY BASE so dropping an op still
+    reverts it. Files a request created are left out when the chain's oldest
+    baseline did not have them — the ``new_file`` op has to be able to create
+    them.
+    """
+    files: dict[str, str] = {}
+    for session, _kept, _rid in entries:
+        for name, text in session.baseline_files.items():
+            files.setdefault(name, text)
+    files.update(current)
+    files.update(base_files)
+    first_baseline = entries[0][0].baseline_files
+    for name in created:
+        if name not in first_baseline:
+            files.pop(name, None)
+    return files
 
 
 class EditSession:

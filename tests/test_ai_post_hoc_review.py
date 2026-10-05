@@ -421,6 +421,49 @@ def test_resolve_deletes_a_file_the_request_created_when_it_is_rejected(
     assert 'gcode_macro HI' in out2['files']['macros.cfg']['content']
 
 
+def test_the_replay_validates_against_the_whole_project(monkeypatch):
+    """A replay must judge an op in the same world it was staged in.
+
+    Live report 2026-10-04 (Cliff): renaming a macro to a registered command
+    validated clean at staging — the project has the rest of the config, and a
+    `rename_existing` ANYWHERE in the active files satisfies a shadow collision
+    — but came back "failed validation after merging" on Keep, because
+    `resolve_change_chain` seeded its `ProjectState` with ONLY the files the
+    chain touched. A multi-file project then validated as a one-file one, and
+    the verdict genuinely differs (the cross-file passes only run with >1
+    file). Follow-up ops on the section the failed rename never created then
+    failed too: "2 changes could not be re-applied".
+    """
+    printer = ('[include kamp.cfg]\n\n[bed_mesh]\nspeed: 200\n\n'
+               '[gcode_macro Level_Bed]\n'
+               '#rename_existing: _BED_MESH_CALIBRATE\n'
+               'gcode:\n    G28\n')
+    kamp = ('[gcode_macro BED_MESH_CALIBRATE]\n'
+            'rename_existing: _BED_MESH_CALIBRATE\n'
+            'gcode:\n    G28\n')
+    context = {
+        'printer.cfg': {'content': printer, 'label': 'printer.cfg'},
+        'kamp.cfg': {'content': kamp, 'label': 'kamp.cfg'},
+    }
+    _run(monkeypatch, [
+        _tool_call('config_edit', {
+            'file': 'printer.cfg', 'op': 'rename_section',
+            'section': 'gcode_macro Level_Bed',
+            'new_section': 'gcode_macro bed_mesh_calibrate'}),
+        _final_reply('Renamed.'),
+    ], 'replay-world-1', contextFiles=context)
+
+    out = client.post('/ai/chat/changes/resolve', json={
+        'segments': [{'requestId': 'replay-world-1', 'keptEditIds': ['e0']}],
+        'contextFiles': context,
+    }).json()
+    assert out['status'] == 'ok'
+    assert out['stale'] == []
+    assert '[gcode_macro bed_mesh_calibrate]' in out['files']['printer.cfg']['content']
+    # The file the chain never touched is context, never a result.
+    assert 'kamp.cfg' not in out['files']
+
+
 def test_resolve_unknown_request_is_not_found():
     out = client.post('/ai/chat/changes/resolve', json={
         'requestId': 'nope', 'keptEditIds': []}).json()
