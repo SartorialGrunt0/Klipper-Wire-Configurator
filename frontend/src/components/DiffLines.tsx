@@ -47,6 +47,12 @@ interface Props {
    * wider than the pane the extras land at that row's right edge rather than
    * the pane's. Fine for config files, and the alternative (positioning against
    * the scroller) would need a measurement pass on every scroll.
+   *
+   * The extras are a FLOATING layer (`z-10`): they ride on top of the row's
+   * tint and may overhang the row's height, so the decision reads as sitting
+   * over the red/green band rather than being a notch cut out of it. The verbs
+   * are the app's one Keep/Undo (`EditDecisionPair`); the pane frames them in
+   * its own boxed, filled container.
    */
   rowExtras?: (rowIndex: number) => React.ReactNode;
 }
@@ -61,7 +67,7 @@ export default function DiffLines({ lines, className = '', containerRef, rowExtr
             <span className="select-none opacity-50 mr-1.5">{ROW_MARK[line.type]}</span>
             {line.content || '\u00A0'}
             {extras && (
-              <span className="absolute inset-y-0 right-2 flex items-center gap-1">
+              <span className="absolute inset-y-0 right-2 z-10 flex items-center gap-1">
                 {extras}
               </span>
             )}

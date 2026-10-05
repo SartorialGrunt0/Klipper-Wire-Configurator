@@ -22,6 +22,32 @@ export function normalizeDiffText(text: string): string {
   return normalized.join('\n');
 }
 
+/**
+ * Normalize ONE SIDE of a change — a run of added or removed lines — by the
+ * same rules `normalizeDiffText` applies to a whole document: trailing
+ * whitespace dropped, runs of blank lines collapsed to one.
+ *
+ * Row ownership is matched by CONTENT, and the two contents are produced by
+ * two different diff engines: the backend's raw `difflib` row text and this
+ * client's `createConfigPatch` frame, which normalizes. Comparing them raw
+ * means a line the model typed with a trailing space — or a doubled blank
+ * inside an added section — makes the pane's change own no row at all: no
+ * per-change Keep/Undo in the diff, and a dead pair in the strip (reported
+ * 2026-10-04). Both sides get read in the same space instead.
+ */
+export function normalizeChangeLines(lines: readonly string[]): string[] {
+  const out: string[] = [];
+  let previousBlank = false;
+  for (const raw of lines) {
+    const line = raw.replace(/[ \t\r]+$/, '');
+    const isBlank = line.trim().length === 0;
+    if (isBlank && previousBlank) continue;
+    out.push(line);
+    previousBlank = isBlank;
+  }
+  return out;
+}
+
 export function parsePatch(patch: string): DiffLine[] {
   const lines: DiffLine[] = [];
 

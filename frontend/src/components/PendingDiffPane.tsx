@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import DiffLines from './DiffLines';
+import EditDecisionPair from './EditDecisionPair';
 import type { PendingDiffModel } from '../utils/pendingDiff';
-import type { ChangeStop } from '../utils/pendingChanges';
-import { stopIndexAfterChange } from '../utils/pendingChanges';
+import { stopIndexForAnchor, type PendingStop } from '../utils/pendingChanges';
 
 /**
  * The text view's pending-change surface.
@@ -11,12 +11,17 @@ import { stopIndexAfterChange } from '../utils/pendingChanges';
  * Two shapes over one model, so the pane and the card can never disagree about
  * which change is waiting:
  *
- *  - `PendingDiffPane` — the takeover. It renders the WHOLE file with the
+ *  - `PendingDiffPane` — the takeover. It renders the WHOLE document with the
  *    still-undecided changes marked (`buildUnreviewedDiffModel`), and its top
- *    strip reviews them: prev/next, `change 2 of 5 · [stepper_x] microsteps`,
- *    and Keep/Undo **for the change it is showing**. Whole-file and per-section
- *    decisions, and the `+N −M` totals, live in the chat's summary bar — this
- *    strip keeps one job.
+ *    strip reviews them: prev/next, `change 2 of 5 · printer.cfg ·
+ *    [stepper_x] microsteps`, and Keep/Undo **for the change it is showing**.
+ *    Whole-file and per-section decisions, and the `+N −M` totals, live in the
+ *    chat's summary bar — this strip keeps one job.
+ *
+ *    The count and the arrows span EVERY file in the review (Sir, 2026-10-04),
+ *    so the arrows cross files: moving to a change that lives elsewhere asks
+ *    the text view to switch to that file, and the strip names the file it is
+ *    about to show.
  *  - `PendingDiffChip` — the header strip shown when the takeover was
  *    suppressed (the user is highlighting the very lines being changed) or
  *    declined ("Back to editing").
@@ -32,115 +37,129 @@ const BUTTON_CLASS =
   'text-[10px] px-2 py-0.5 rounded border border-[var(--color-accent)]/40 '
   + 'text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10 transition-colors';
 
-const KEEP_BUTTON_CLASS =
-  'text-[10px] px-2.5 py-1 rounded bg-[var(--color-accent)] text-white '
-  + 'transition-opacity hover:opacity-90 disabled:opacity-40';
-
-const UNDO_BUTTON_CLASS =
-  'text-[10px] px-2.5 py-1 rounded border border-[var(--color-bg-tertiary)] '
-  + 'text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-error)] '
-  + 'hover:text-[var(--color-error)] disabled:opacity-40';
-
 const NAV_BUTTON_CLASS =
   'text-[10px] w-5 h-5 rounded border border-[var(--color-bg-tertiary)] '
   + 'text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] '
   + 'hover:text-[var(--color-accent)] disabled:opacity-30 disabled:hover:border-[var(--color-bg-tertiary)]';
 
-/** Per-change pair, anchored in the diff. Small, but never taller than a row. */
-const ROW_KEEP_CLASS =
-  'text-[10px] px-1.5 rounded bg-[var(--color-accent)] text-white hover:opacity-90 disabled:opacity-40';
-
-const ROW_UNDO_CLASS =
-  'text-[10px] px-1.5 rounded border border-[var(--color-bg-tertiary)] '
-  + 'text-[var(--color-text-secondary)] hover:border-[var(--color-error)] '
-  + 'hover:text-[var(--color-error)] disabled:opacity-40';
+/**
+ * The frame the per-change pair sits in, in the diff row: a rectangular box
+ * with a rim and a FILLED background (Sir, 2026-10-04) — the floating
+ * treatment, in the app's standard shape. The fill is what keeps the green/red
+ * band from showing through the gap between the two verbs and reading as a
+ * notch cut out of the band; the rim and shadow make it a surface on top of
+ * it. The verbs themselves are `EditDecisionPair` — never a local copy.
+ */
+const ROW_PAIR_CLASS =
+  'flex items-center rounded border border-[var(--color-bg-tertiary)] '
+  + 'bg-[var(--color-bg-secondary)] p-0.5 shadow-lg';
 
 export interface PendingDiffPaneProps {
   model: PendingDiffModel;
-  /** Where the changes are, in reading order. */
-  stops: ChangeStop[];
+  /**
+   * Every undecided change in the review, across EVERY file, in walk order.
+   * The one the cursor names may live in another file — see `onOpenFile`.
+   */
+  stops: PendingStop[];
   busy: boolean;
   note: string | null;
   /** Keep / undo the change currently shown. */
   onKeepEdits: (file: string, ids: string[]) => void;
   onUndoEdits: (file: string, ids: string[]) => void;
+  /**
+   * The change the arrow moved to lives in another file, so the text view has
+   * to show it: the cursor's file and the rendered document must agree.
+   */
+  onOpenFile: (file: string) => void;
   /** User asked to keep editing — the pane returns to the buffer. */
   onHide: () => void;
 }
 
 export default function PendingDiffPane({
-  model, stops, busy, note, onKeepEdits, onUndoEdits, onHide,
+  model, stops, busy, note, onKeepEdits, onUndoEdits, onOpenFile, onHide,
 }: PendingDiffPaneProps) {
   const rowsRef = useRef<HTMLPreElement>(null);
-  const [index, setIndex] = useState(0);
-  // Where the cursor was, so a decision doesn't throw the reader back to the
-  // top of the file: after a keep/undo the marks move and the cursor lands on
-  // the next change at or below the one just decided.
-  const lastLineStart = useRef<number | null>(null);
+  // The cursor is an index into the WHOLE review, not into this file. It opens
+  // on this file's first change — the review never opens pointing at a change
+  // the reader cannot see.
+  const firstHere = stops.findIndex((entry) => entry.file === model.file);
+  const [index, setIndex] = useState(() => (firstHere >= 0 ? firstHere : 0));
+  // The change the cursor is on, by IDENTITY: ids survive a rebuild of the
+  // list, so a decision made elsewhere cannot drag the reader off this change.
+  const anchorIds = useRef<string[]>([]);
   const stop = stops[index];
-  const current = stop?.label ? `change ${index + 1} of ${stops.length} · ${stop.label}`
-    : `change ${index + 1} of ${stops.length}`;
+  const ids = stop?.ids ?? [];
+  const where = stop ? (stop.label ? `${stop.file} · ${stop.label}` : stop.file) : '';
+  const current = `change ${index + 1} of ${stops.length}${where ? ` · ${where}` : ''}`;
 
-  const scrollToStop = (stopIndex: number) => {
-    const container = rowsRef.current;
-    const target = stops[stopIndex];
-    if (!container || !target) return;
-    lastLineStart.current = target.lineStart;
-    const row = container.children[target.row] as HTMLElement | undefined;
-    if (!row) return;
-    container.scrollTop = Math.max(0, row.offsetTop - container.clientHeight * 0.2);
+  /** Move the cursor, and record what it landed on. */
+  const land = (next: number) => {
+    setIndex(next);
+    anchorIds.current = stops[next]?.ids ?? [];
   };
 
-  // Land on the first change when the model arrives, and stay in place across
-  // decisions (the model is rebuilt every time the marks move).
+  // The review moved under the cursor (a decision, a fresh request): stay on
+  // the change the reader was on, else take whatever replaced it.
   useEffect(() => {
-    const next = lastLineStart.current === null
-      ? 0
-      : stopIndexAfterChange(stops, lastLineStart.current);
-    setIndex(next);
-    const container = rowsRef.current;
-    if (!container) return;
-    const target = stops[next] ?? stops[0];
-    const row = container.children[target ? target.row : model.firstChangedRow] as HTMLElement | undefined;
-    if (!row) return;
-    container.scrollTop = Math.max(0, row.offsetTop - container.clientHeight * 0.2);
+    if (stops.length === 0) return;
+    setIndex((currentIndex) => {
+      const next = stopIndexForAnchor(stops, anchorIds.current, currentIndex);
+      return next < 0 ? 0 : next;
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [model, stops]);
+  }, [stops]);
 
-  const ids = stop?.ids ?? [];
+  // The editor is showing a different file (the tree, a jump, the strip's own
+  // request): the cursor belongs to the file on screen.
+  useEffect(() => {
+    if (firstHere < 0) return;
+    if (stops[index]?.file === model.file) return;
+    land(firstHere);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [model.file, stops, firstHere, index]);
+
+  // Keep the change on screen. Scrolling waits for the cursor's file to BE the
+  // rendered document, which is why a cross-file move renders first and scrolls
+  // on the render after the switch.
+  useEffect(() => {
+    const container = rowsRef.current;
+    const target = stops[index];
+    if (!container || !target || target.file !== model.file) return;
+    const row = container.children[target.row] as HTMLElement | undefined;
+    if (!row) return;
+    anchorIds.current = target.ids;
+    container.scrollTop = Math.max(0, row.offsetTop - container.clientHeight * 0.2);
+  }, [index, stops, model]);
+
+  /** The arrows: one step through the whole review, switching files if need be. */
+  const stepTo = (next: number) => {
+    const target = stops[next];
+    if (!target) return;
+    land(next);
+    if (target.file !== model.file) onOpenFile(target.file);
+  };
 
   // One Keep/Undo pair per change, anchored at the change's FIRST row, so the
   // decision is next to the edit it acts on instead of only up in the strip.
   // Both exist on purpose: the strip is where the reader is walking through the
-  // file, the row is where the reader has stopped.
+  // review, the row is where the reader has stopped. Only the rendered file's
+  // stops have rows here — a row index means nothing in another document.
   const actionsByRow = useMemo(() => {
     const map = new Map<number, React.ReactNode>();
     stops.forEach((entry, stopIndex) => {
-      if (entry.ids.length === 0) return;
+      if (entry.file !== model.file || entry.ids.length === 0) return;
       const currentStop = stopIndex === index;
       map.set(entry.row, (
-        <span className="flex items-center gap-1 rounded bg-[var(--color-bg-primary)]/85 pl-1">
-          <button
-            type="button"
-            className={ROW_UNDO_CLASS}
-            disabled={busy}
-            onClick={() => onUndoEdits(model.file, entry.ids)}
-            title="Drop this change"
+        <span className={ROW_PAIR_CLASS}>
+          <EditDecisionPair
+            busy={busy}
+            onUndo={() => onUndoEdits(entry.file, entry.ids)}
+            onKeep={() => onKeepEdits(entry.file, entry.ids)}
           >
-            Undo
-          </button>
-          <button
-            type="button"
-            className={ROW_KEEP_CLASS}
-            disabled={busy}
-            onClick={() => onKeepEdits(model.file, entry.ids)}
-            title="Keep this change"
-          >
-            Keep
-          </button>
-          {currentStop && (
-            <span className="w-1 self-stretch rounded-full bg-[var(--color-accent)]/60" aria-hidden />
-          )}
+            {currentStop && (
+              <span className="w-1 self-stretch rounded-full bg-[var(--color-accent)]/60" aria-hidden />
+            )}
+          </EditDecisionPair>
         </span>
       ));
     });
@@ -153,7 +172,7 @@ export default function PendingDiffPane({
         <button
           type="button"
           className={NAV_BUTTON_CLASS}
-          onClick={() => { const next = Math.max(0, index - 1); setIndex(next); scrollToStop(next); }}
+          onClick={() => stepTo(Math.max(0, index - 1))}
           disabled={index <= 0}
           title="Previous change"
         >
@@ -162,37 +181,26 @@ export default function PendingDiffPane({
         <button
           type="button"
           className={NAV_BUTTON_CLASS}
-          onClick={() => { const next = Math.min(stops.length - 1, index + 1); setIndex(next); scrollToStop(next); }}
+          onClick={() => stepTo(Math.min(stops.length - 1, index + 1))}
           disabled={index >= stops.length - 1}
           title="Next change"
         >
           ↓
         </button>
         <span className="text-[10px] text-[var(--color-text-secondary)] truncate">
-          {stops.length === 0 ? 'no unreviewed change in this file' : current}
+          {stops.length === 0 ? 'no unreviewed change' : current}
         </span>
         <span className="ml-auto flex items-center gap-2 shrink-0">
           <button type="button" onClick={onHide} className={BUTTON_CLASS}>
             Back to editing
           </button>
-          <button
-            type="button"
-            className={UNDO_BUTTON_CLASS}
-            disabled={busy || ids.length === 0}
-            onClick={() => onUndoEdits(model.file, ids)}
-            title="Drop this change"
-          >
-            Undo
-          </button>
-          <button
-            type="button"
-            className={KEEP_BUTTON_CLASS}
-            disabled={busy || ids.length === 0}
-            onClick={() => onKeepEdits(model.file, ids)}
-            title="Keep this change"
-          >
-            Keep
-          </button>
+          <EditDecisionPair
+            busy={busy}
+            disabled={ids.length === 0}
+            size="md"
+            onUndo={() => onUndoEdits(stop?.file ?? model.file, ids)}
+            onKeep={() => onKeepEdits(stop?.file ?? model.file, ids)}
+          />
         </span>
       </div>
 

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   normalizeDiffText,
+  normalizeChangeLines,
   parsePatch,
   countChangedLines,
   createConfigPatch,
@@ -17,6 +18,31 @@ describe('normalizeDiffText', () => {
 
   it('collapses consecutive blank lines to a single blank line', () => {
     expect(normalizeDiffText('a\n\n\n\nb')).toBe('a\n\nb');
+  });
+});
+
+describe('normalizeChangeLines', () => {
+  // One SIDE of a change, put into the same space `normalizeDiffText` puts a
+  // document in: the pane's frame diff is normalized, the row's own diff is
+  // raw, and ownership is matched by content between the two.
+  it('strips trailing whitespace and a stray CR per line', () => {
+    expect(normalizeChangeLines(['step_pin: PA0 ', 'gcode:\t', 'x\r']))
+      .toEqual(['step_pin: PA0', 'gcode:', 'x']);
+  });
+
+  it('collapses a run of blank lines to one', () => {
+    expect(normalizeChangeLines(['a', '', '', '', 'b'])).toEqual(['a', '', 'b']);
+  });
+
+  it('keeps a single blank line and is idempotent', () => {
+    const once = normalizeChangeLines(['a', '', 'b', '']);
+    expect(once).toEqual(['a', '', 'b', '']);
+    expect(normalizeChangeLines(once)).toEqual(once);
+  });
+
+  it('leaves content untouched when there is nothing to normalize', () => {
+    expect(normalizeChangeLines(['[stepper_x]', 'microsteps: 32']))
+      .toEqual(['[stepper_x]', 'microsteps: 32']);
   });
 });
 

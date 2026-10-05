@@ -31,7 +31,8 @@ import EditorIssueStrip from './EditorIssueStrip';
 import ConfigTree from './ConfigTree';
 import ChatDock from './ChatDock';
 import PendingDiffPane, { PendingDiffChip } from './PendingDiffPane';
-import { changeStops } from '../utils/pendingChanges';
+import { buildReviewStops, type ReviewFileInput } from '../utils/pendingChanges';
+import type { ChangeSetRow } from '../utils/changeSet';
 import {
   keepEdits as keepEditsDecision,
   undoEdits as undoEditsDecision,
@@ -41,7 +42,7 @@ import { useUiStore } from '../stores/uiStore';
 import { useAiStore } from '../stores/aiStore';
 import { useChatReferenceStore } from '../stores/chatReferenceStore';
 import { usePendingEditStore } from '../stores/pendingEditStore';
-import { paneModeFor, buildUnreviewedDiffModel } from '../utils/pendingDiff';
+import { paneModeFor } from '../utils/pendingDiff';
 import { selectionToReference } from '../utils/chatReferences';
 import { useMediaQuery, WIDE_VIEWPORT_QUERY } from '../hooks/useMediaQuery';
 import type { TextIssue } from '../types/editor';
@@ -509,6 +510,12 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   // changes and decides them (through `services/changeSetReview`, the same
   // engine the chat's footer bar calls).
   //
+  // The review is ONE list across EVERY file (Sir, 2026-10-04): the strip's
+  // `change i of n` counts every undecided change the model made, and the
+  // arrows walk from one file into the next, switching the text view as they
+  // go. So the documents are built per file here — each with its own frame —
+  // and `buildReviewStops` concatenates their stops in walk order.
+  //
   // The frame is the document with only the DECIDED-kept edits applied: the
   // backend replays it after every decision (design B), so a kept edit stops
   // being marked. While nothing is decided that is exactly the file's
@@ -518,26 +525,38 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   // diffs. What gets rendered is decided by `paneModeFor` (pure, tested):
   // another view is never taken over, and a highlight over the very lines
   // being changed earns the header chip.
-  const changeSetPane = useMemo(() => {
+  const changeSetReview = useMemo(() => {
     if (!changeSetView) return null;
     const decided = new Set([...changeSetKept, ...changeSetUndone]);
-    const rows = changeSetView.rows.filter(
-      (row) => !row.superseded && !decided.has(row.id) && row.file === activeFile,
-    );
-    const before = changeSetFrames[activeFile] ?? changeSetView.frames[activeFile];
-    const loaded = !!configFiles[activeFile];
-    const model = buildUnreviewedDiffModel(
+    // Grouped in the change set's own order: the walk visits the files in the
+    // order the model first touched them, which is the order the chat lists.
+    const byFile = new Map<string, ChangeSetRow[]>();
+    for (const row of changeSetView.rows) {
+      if (row.superseded || decided.has(row.id)) continue;
+      const rows = byFile.get(row.file);
+      if (rows) rows.push(row);
+      else byFile.set(row.file, [row]);
+    }
+    const inputs: ReviewFileInput[] = [...byFile].map(([file, rows]) => ({
+      file,
       rows,
-      activeFile,
-      before === undefined || !loaded ? null : { before, after: textForFile(activeFile) },
-    );
-    if (!model) return null;
-    return { model, stops: changeStops(model, rows) };
+      // A file the editor does not hold has no current text to diff: the pane
+      // then falls back to the rows' own diffs rather than claiming a document.
+      before: changeSetFrames[file] ?? changeSetView.frames[file],
+      after: configFiles[file] ? textForFile(file) : null,
+    }));
+    const { models, stops } = buildReviewStops(inputs);
+    if (stops.length === 0) return null;
+    // The document to show: the file being edited when it has changes, else
+    // the first change of the walk — the review opens on a change, never on a
+    // file that happens to have none.
+    const file = models[activeFile] ? activeFile : stops[0].file;
+    return { model: models[file], stops };
   }, [
     changeSetView, changeSetKept, changeSetUndone, changeSetFrames,
     activeFile, configFiles, textForFile,
   ]);
-  const paneModel = changeSetPane?.model ?? pendingEdit;
+  const paneModel = changeSetReview?.model ?? pendingEdit;
   const pendingPane = useMemo(
     () => paneModeFor({
       model: paneModel,
@@ -1740,14 +1759,15 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
         )}
 
         {/* Editor with line numbers and inline issues */}
-        {pendingPane === 'diff' && paneModel && changeSetPane ? (
+        {pendingPane === 'diff' && paneModel && changeSetReview ? (
           <PendingDiffPane
             model={paneModel}
-            stops={changeSetPane.stops}
+            stops={changeSetReview.stops}
             busy={changeSetBusy}
             note={changeSetNote}
             onKeepEdits={(file, ids) => { void keepEditsDecision(file, ids); }}
             onUndoEdits={(file, ids) => { void undoEditsDecision(file, ids); }}
+            onOpenFile={setActiveFile}
             onHide={() => usePendingEditStore.getState().hideDiff()}
           />
         ) : (

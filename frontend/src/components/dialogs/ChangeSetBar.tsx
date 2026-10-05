@@ -14,8 +14,8 @@
  * decision.
  */
 import { useState } from 'react';
-import type React from 'react';
 
+import EditDecisionPair from '../EditDecisionPair';
 import type { PendingFile } from '../../utils/changeSet';
 
 export interface ChangeSetBarProps {
@@ -35,39 +35,6 @@ export interface ChangeSetBarProps {
   /** Jump the editor to a file (navigation only). */
   onOpenFile?: (file: string) => void;
 }
-
-const GroupButtons: React.FC<{
-  busy: boolean;
-  onKeep: () => void;
-  onUndo: () => void;
-  keepLabel: string;
-  undoLabel: string;
-  keepTitle: string;
-  undoTitle: string;
-}> = ({ busy, onKeep, onUndo, keepLabel, undoLabel, keepTitle, undoTitle }) => (
-  <span className="flex shrink-0 items-center gap-1">
-    <button
-      type="button"
-      onClick={onUndo}
-      disabled={busy}
-      className="rounded border border-[var(--color-bg-tertiary)] px-1.5 py-0.5 text-[9px] font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-error)] hover:text-[var(--color-error)] disabled:opacity-40"
-      title={undoTitle}
-    >
-      {undoLabel}
-    </button>
-    {/* Same blue as "Keep all" — keeping is the affirmative action wherever
-        it appears. */}
-    <button
-      type="button"
-      onClick={onKeep}
-      disabled={busy}
-      className="rounded bg-[var(--color-accent)] px-1.5 py-0.5 text-[9px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
-      title={keepTitle}
-    >
-      {keepLabel}
-    </button>
-  </span>
-);
 
 const ChangeSetBar: React.FC<ChangeSetBarProps> = ({
   groups,
@@ -145,7 +112,7 @@ const ChangeSetBar: React.FC<ChangeSetBarProps> = ({
                 </button>
                 {file.added > 0 && <span className="text-green-400">+{file.added}</span>}
                 {file.removed > 0 && <span className="text-red-400">−{file.removed}</span>}
-                <GroupButtons
+                <EditDecisionPair
                   busy={busy}
                   keepLabel="Keep file"
                   undoLabel="Undo file"
@@ -171,7 +138,7 @@ const ChangeSetBar: React.FC<ChangeSetBarProps> = ({
                   )}
                   {section.added > 0 && <span className="text-green-400">+{section.added}</span>}
                   {section.removed > 0 && <span className="text-red-400">−{section.removed}</span>}
-                  <GroupButtons
+                  <EditDecisionPair
                     busy={busy}
                     keepLabel="Keep"
                     undoLabel="Undo"

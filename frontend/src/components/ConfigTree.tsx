@@ -79,6 +79,22 @@ function ConfigTree({
     setExpansion((current) => ({ ...current, [id]: !current[id] }));
   }, []);
 
+  // Section count for the header. Deliberately ABOVE the collapsed early
+  // return: a hook below a return statement is skipped on the collapsed
+  // render, and React throws "Rendered fewer hooks than expected" — which
+  // takes the whole app down with it (blank frontend, reported 2026-10-04).
+  const sectionCount = useMemo(() => {
+    let total = 0;
+    const walk = (nodes: ConfigTreeNode[]) => {
+      for (const node of nodes) {
+        if (node.kind === 'section') total += 1;
+        walk(node.children);
+      }
+    };
+    walk(tree);
+    return total;
+  }, [tree]);
+
   if (collapsed) {
     return (
       <div className="flex w-10 shrink-0 items-start justify-center border-r border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] pt-2">
@@ -208,18 +224,6 @@ function ConfigTree({
       </button>
     );
   };
-
-  const sectionCount = useMemo(() => {
-    let total = 0;
-    const walk = (nodes: ConfigTreeNode[]) => {
-      for (const node of nodes) {
-        if (node.kind === 'section') total += 1;
-        walk(node.children);
-      }
-    };
-    walk(tree);
-    return total;
-  }, [tree]);
 
   return (
     <div className="flex w-64 shrink-0 flex-col border-r border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)]">
