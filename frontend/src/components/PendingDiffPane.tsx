@@ -214,6 +214,7 @@ export default function PendingDiffPane({
         <DiffLines
           lines={model.lines}
           containerRef={rowsRef}
+          lineNumbers
           rowExtras={(rowIndex) => actionsByRow.get(rowIndex) ?? null}
           className="h-full text-xs leading-relaxed overflow-auto py-2"
         />

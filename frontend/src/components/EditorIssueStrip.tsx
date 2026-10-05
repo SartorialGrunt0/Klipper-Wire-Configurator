@@ -41,22 +41,23 @@ function EditorIssueStrip({
   const visible = severityFilter
     ? rowIssues.filter((issue) => issue.severity === severityFilter)
     : rowIssues;
-  const worst = summaries[0];
 
   return (
     <div className="shrink-0 border-t border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)]">
-      <div className="flex items-center gap-3 px-3 py-1">
-        <button
-          onClick={onToggleCollapsed}
-          className="flex shrink-0 items-center gap-1 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
-          title={collapsed ? 'Show every finding below the editor' : 'Collapse the findings list'}
-          aria-expanded={!collapsed}
-        >
+      {/* The whole bar is the toggle (Cliff, 2026-10-04): the chevron is the
+          affordance, not the only hit target. The severity dots keep their own
+          click, so they stop the event rather than folding the list. */}
+      <div
+        className="flex cursor-pointer items-center gap-3 px-3 py-1"
+        onClick={onToggleCollapsed}
+        title={collapsed ? 'Show every finding below the editor' : 'Collapse the findings list'}
+      >
+        <span className="flex shrink-0 items-center gap-1 text-xs text-[var(--color-text-secondary)]">
           <span className="text-[9px]">{collapsed ? '▲' : '▼'}</span>
           <span>
             {rowIssues.length} finding{rowIssues.length === 1 ? '' : 's'}
           </span>
-        </button>
+        </span>
 
         <div className="flex shrink-0 items-center gap-3">
           {summaries.map((summary) => {
@@ -65,7 +66,10 @@ function EditorIssueStrip({
             return (
               <button
                 key={summary.severity}
-                onClick={() => setSeverityFilter(active ? null : summary.severity)}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setSeverityFilter(active ? null : summary.severity);
+                }}
                 // Hovering the dot shows the status messages themselves.
                 title={summary.title}
                 aria-label={spec.title}
@@ -82,14 +86,15 @@ function EditorIssueStrip({
           })}
         </div>
 
-        <span className="min-w-0 flex-1 truncate text-right text-[10px] text-[var(--color-text-secondary)]">
-          {collapsed && worst ? (worst.title.split('\n')[1] ?? '') : ''}
-          {!collapsed && severityFilter ? `showing ${severityFilter} only` : ''}
-        </span>
+        {!collapsed && severityFilter && (
+          <span className="min-w-0 flex-1 truncate text-right text-[10px] text-[var(--color-text-secondary)]">
+            showing {severityFilter} only
+          </span>
+        )}
       </div>
 
       {!collapsed && (
-        <div className="max-h-32 overflow-y-auto">
+        <div className="max-h-32 overflow-y-auto border-t border-[var(--color-bg-tertiary)]">
           {visible.map((issue, idx) => (
             <div
               key={`${issue.line}-${issue.severity}-${idx}`}

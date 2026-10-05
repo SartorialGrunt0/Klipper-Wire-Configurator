@@ -108,7 +108,7 @@ const EditRow: React.FC<{
             </ul>
           )}
           {lines.length > 0 ? (
-            <DiffLines lines={lines} className="max-h-48 overflow-y-auto rounded bg-[var(--color-bg-secondary)] text-[10px] leading-5" />
+            <DiffLines lines={lines} lineNumbers className="max-h-48 overflow-y-auto rounded bg-[var(--color-bg-secondary)] text-[10px] leading-5" />
           ) : (
             <p className="text-[var(--color-text-secondary)]">No diff recorded for this change.</p>
           )}

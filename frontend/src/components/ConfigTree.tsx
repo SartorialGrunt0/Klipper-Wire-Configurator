@@ -13,16 +13,17 @@ interface ConfigTreeProps {
   validation: Record<string, ValidationResult>;
   visibility: SeverityVisibility;
   collapsed: boolean;
-  onToggleCollapsed: () => void;
   onSelectFile: (file: string) => void;
   onFileContextMenu: (event: React.MouseEvent, file: string) => void;
   onJumpToLine: (line: number) => void;
   onAddConfig: () => void;
   /**
-   * Clicking a row jumps — and, because pointing at a section is also how a
+   * Clicking a row jumps — and, because pointing at something is also how a
    * user says "this is what I'm asking about", offers it to the dock's single
-   * transient preview. Sections and params only: a file row has no line to
-   * jump to and a whole-file preview would be noise.
+   * transient preview. Files, sections and params: a file row used to raise
+   * nothing, which left "attach this whole file" with no gesture at all
+   * (Cliff, 2026-10-04). Folders still raise nothing — they are not a thing to
+   * attach.
    */
   onReferenceNode?: (reference: ChatReference) => void;
   /** Reference id currently held in the preview slot; that row highlights. */
@@ -46,7 +47,6 @@ function ConfigTree({
   validation,
   visibility,
   collapsed,
-  onToggleCollapsed,
   onSelectFile,
   onFileContextMenu,
   onJumpToLine,
@@ -96,17 +96,10 @@ function ConfigTree({
   }, [tree]);
 
   if (collapsed) {
-    return (
-      <div className="flex w-10 shrink-0 items-start justify-center border-r border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] pt-2">
-        <button
-          onClick={onToggleCollapsed}
-          title="Show files and sections"
-          className="rounded border border-[var(--color-bg-tertiary)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
-        >
-          {'>'}
-        </button>
-      </div>
-    );
+    // No rail: a folded panel costs NOTHING horizontally. The toggle is the
+    // editor toolbar's page icon — right where this panel's own fold control
+    // sits when it is open (Cliff, 2026-10-04).
+    return null;
   }
 
   const renderNode = (node: ConfigTreeNode, depth: number, parentSection?: string): React.ReactNode => {
@@ -114,9 +107,9 @@ function ConfigTree({
     const hasChildren = node.children.length > 0;
     const severitySpec = node.severity ? ISSUE_MARKER[node.severity] : null;
     // The row's reference id, so a row can tell whether IT is the preview.
-    const reference = node.kind === 'section' || node.kind === 'param'
-      ? nodeToReference({ ...node, section: parentSection })
-      : null;
+    const reference = node.kind === 'folder'
+      ? null
+      : nodeToReference({ ...node, section: parentSection });
     const isPreview = reference != null && reference.id === previewReferenceId;
     const rowPreviewClass = isPreview ? ' bg-[var(--color-bg-tertiary)] ring-1 ring-inset ring-[var(--color-accent)]' : '';
 
@@ -138,14 +131,24 @@ function ConfigTree({
               {isExpanded ? 'v' : '>'}
             </button>
             <button
-              onClick={() => onSelectFile(node.file!)}
+              onClick={() => {
+                onSelectFile(node.file!);
+                // Selecting a file is navigation, so it FOLDS the sections up
+                // instead of unfolding them: the auto-expansion here meant
+                // that choosing a file from anywhere (the tree, a search hit,
+                // the change bar, the pane's cross-file arrows) opened its
+                // section list and pushed the rest of the tree off screen
+                // (Cliff, 2026-10-04). The chevron is how they open.
+                setExpansion((current) => ({ ...current, [node.id]: false }));
+                if (reference) onReferenceNode?.(reference);
+              }}
               onContextMenu={(event) => onFileContextMenu(event, node.file!)}
               title={node.file}
               className={`flex min-w-0 flex-1 items-center gap-2 px-2 py-1 text-xs font-medium transition-colors ${
                 isActive
                   ? 'bg-[var(--color-accent)] text-[var(--color-bg-primary)]'
                   : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text-primary)]'
-              }`}
+              }${rowPreviewClass}`}
             >
               <span className="min-w-0 flex-1 truncate text-left">{node.label}</span>
               {severitySpec && <span className={`${severitySpec.dotClass ?? ''} shrink-0`} title={severitySpec.title} />}
@@ -243,13 +246,6 @@ function ConfigTree({
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
               <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
             </svg>
-          </button>
-          <button
-            onClick={onToggleCollapsed}
-            title="Collapse"
-            className="rounded border border-[var(--color-bg-tertiary)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
-          >
-            {'<'}
           </button>
         </div>
       </div>

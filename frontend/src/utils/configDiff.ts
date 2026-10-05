@@ -66,6 +66,40 @@ export function parsePatch(patch: string): DiffLine[] {
   return lines;
 }
 
+/** `@@ -a,b +c,d @@` — the AFTER start is what a running gutter counts from. */
+const HUNK_AFTER_START_RE = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
+
+/**
+ * The running line number of each diff row, in the document the diff's AFTER
+ * side describes.
+ *
+ * The pane stands in for the buffer, so its gutter has to be the editor's
+ * gutter: numbered continuously down the DOCUMENT, not per hunk. A header
+ * restarts the count at its own `+` start — which also makes several
+ * concatenated hunks (the no-frame fallback) keep counting, since each one
+ * carries its true start. A removed row is not in the document at all, so it
+ * carries NO number rather than a second numbering system (Cliff, 2026-10-04).
+ */
+export function documentLineNumbers(lines: readonly DiffLine[]): (number | null)[] {
+  const out: (number | null)[] = [];
+  let next = 1;
+  for (const line of lines) {
+    if (line.type === 'header') {
+      const match = line.content.match(HUNK_AFTER_START_RE);
+      if (match) next = Number(match[1]);
+      out.push(null);
+      continue;
+    }
+    if (line.type === 'removed') {
+      out.push(null);
+      continue;
+    }
+    out.push(next);
+    next += 1;
+  }
+  return out;
+}
+
 export function countChangedLines(patch: string): number {
   let count = 0;
 

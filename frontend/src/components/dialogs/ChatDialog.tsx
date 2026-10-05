@@ -47,6 +47,7 @@ import { useVisibility } from '../../stores/validationSettingsStore';
 import ChatSettingsPanel from './ChatSettingsPanel';
 import ChatHistoryDialog from './ChatHistoryDialog';
 import PrinterMemoryDialog from './PrinterMemoryDialog';
+import { ChatBubbleIcon } from '../icons';
 import ChatMessageList from './ChatMessageList';
 import ChatApprovalCard from './ChatApprovalCard';
 import ApprovalDiffPreview from './ApprovalDiffPreview';
@@ -143,7 +144,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   // request keeps running and the reply is there when the panel reopens.
   const dockHost = useUiStore((s) => s.dockHost);
   const showChatDock = useUiStore((s) => s.showChatDock);
-  const setShowChatDock = useUiStore((s) => s.setShowChatDock);
   const composerFocusNonce = useUiStore((s) => s.composerFocusNonce);
   const docked = variant === 'dock' && dockHost !== null && showChatDock && isConfigured();
 
@@ -1296,9 +1296,11 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
             className={iconButtonClass}
             title="View and edit printer memory"
           >
+            {/* A book, not a chip: printer memory is the notes we keep about
+                this machine, not a component on the board (Cliff, 2026-10-04). */}
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-              <rect x="4.5" y="4.5" width="7" height="7" rx="1" stroke="currentColor" strokeWidth="1.5" />
-              <path d="M6.5 4.5v-2h3v2M6.5 11.5v2h3v-2M2.5 6.5h2M11.5 6.5h2M2.5 9.5h2M11.5 9.5h2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+              <path d="M3.5 3.2A1.7 1.7 0 0 1 5.2 1.5H12a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H5.2a1.7 1.7 0 0 1-1.7-1.7z" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+              <path d="M6.3 1.5v13" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
             </svg>
           </button>
           <button
@@ -1311,22 +1313,13 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
               <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           </button>
-          <button
-            onClick={() => setShowChatDock(false)}
-            className="rounded border border-[var(--color-bg-tertiary)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
-            title="Collapse AI chat"
-          >
-            {'>'}
-          </button>
         </div>
       </div>
     </div>
   ) : (
     <div className="flex items-center justify-between p-4 border-b border-[var(--color-bg-tertiary)]">
       <div className="flex items-center gap-2">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" className="text-[var(--color-text-secondary)]">
-          <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2v10z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-        </svg>
+        <span className="text-[var(--color-text-secondary)]"><ChatBubbleIcon size={16} /></span>
         <h2 className="text-sm font-semibold">AI Chat</h2>
       </div>
       <div className="flex items-center gap-2">
@@ -1460,19 +1453,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         onPromoteReference={() => useChatReferenceStore.getState().promotePreview()}
         onMentionQuery={mentionSourceMatches}
         onMentionAccept={acceptMention}
-        onReferenceJump={(id) => {
-          const all = [
-            ...pinnedReferences,
-            ...(previewReference ? [previewReference] : []),
-            ...(selectionReference ? [selectionReference] : []),
-          ];
-          const reference = all.find((candidate) => candidate.id === id);
-          if (!reference) return;
-          // A lines reference carries its own range; everything else points
-          // at the line of the section/param it names.
-          const line = reference.startLine ?? reference.line;
-          if (line != null) useConfigStore.getState().requestLineJump(reference.file, line);
-        }}
       />
     </>
   );

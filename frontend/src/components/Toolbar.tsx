@@ -12,6 +12,7 @@ import ImportDialog from './dialogs/ImportDialog';
 import ExportDialog from './dialogs/ExportDialog';
 import DiffDialog from './dialogs/DiffDialog';
 import OpenFromPiDialog from './dialogs/OpenFromPiDialog';
+import { ChatBubbleIcon } from './icons';
 import ApplyDialog from './dialogs/ApplyDialog';
 import RevertDialog from './dialogs/RevertDialog';
 import ChatDialog from './dialogs/ChatDialog';
@@ -380,10 +381,7 @@ export default function Toolbar({
           }`}
           title={chatStatus === 'success' ? 'AI Chat — response ready' : chatStatus === 'awaiting' ? 'AI Chat — an edit needs your decision' : chatStatus === 'error' ? 'AI Chat — last request failed' : 'AI Chat'}
         >
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-            <path d="M8 1a7 7 0 110 14A7 7 0 018 1z" stroke="currentColor" strokeWidth="1.5"/>
-            <path d="M5.5 7.5l2 2 3-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-          </svg>
+          <ChatBubbleIcon />
           AI Chat
         </button>
       )}

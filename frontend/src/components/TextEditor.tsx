@@ -30,6 +30,7 @@ import { sectionAtLine } from '../utils/configOutline';
 import EditorIssueStrip from './EditorIssueStrip';
 import ConfigTree from './ConfigTree';
 import ChatDock from './ChatDock';
+import { ChatBubbleIcon, FileTreeIcon } from './icons';
 import PendingDiffPane, { PendingDiffChip } from './PendingDiffPane';
 import { buildReviewStops, type ReviewFileInput } from '../utils/pendingChanges';
 import type { ChangeSetRow } from '../utils/changeSet';
@@ -928,9 +929,18 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     for (let i = 0; i < line - 1 && i < lines.length; i++) {
       charPos += lines[i].length + 1;
     }
-    const lineLen = lines[line - 1]?.length ?? 0;
     textareaRef.current.focus();
-    textareaRef.current.setSelectionRange(charPos, charPos + lineLen);
+    // A jump is NAVIGATION, never a highlight: the caret lands collapsed on
+    // the line's first column. Selecting the whole line (what this did) fires
+    // the textarea's own select handler, which publishes a `lines` reference —
+    // so clicking a section in the tree attached the section AND the line, and
+    // the message carried the same text twice (Cliff, 2026-10-04). A real
+    // drag/highlight still publishes: that is a user pointing at lines.
+    textareaRef.current.setSelectionRange(charPos, charPos);
+    // Clearing the published slot here rather than relying on the textarea to
+    // fire an event: a programmatic move does not always fire one, and a stale
+    // chip would keep riding along with the next message.
+    useChatReferenceStore.getState().setSelection(null);
     // Scroll the target line into view using the textarea's ACTUAL metrics.
     // The previous hardcoded 21px under-shot the real 22.75px line rhythm
     // (14px font, leading-relaxed) plus the 16px top padding, so every jump
@@ -1322,7 +1332,6 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
         validation={validation}
         visibility={visibility}
         collapsed={!showFileSidebar}
-        onToggleCollapsed={() => setShowFileSidebar((prev) => !prev)}
         onSelectFile={handleFileSwitch}
         onFileContextMenu={handleFileContextMenu}
         onJumpToLine={jumpToLine}
@@ -1534,9 +1543,28 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
       <div className="flex flex-col flex-1 min-w-0">
         {/* Editor toolbar */}
         <div className="flex items-center justify-between px-3 py-1.5 bg-[var(--color-bg-secondary)] border-b border-[var(--color-bg-tertiary)] shrink-0">
-          <span className="text-xs text-[var(--color-text-secondary)] truncate mr-2">
-            {isDirty ? '● Unsaved changes' : 'Editing ' + activeFile}
-          </span>
+          <div className="flex min-w-0 items-center gap-2">
+            {/* The file tree's fold toggle. It lives HERE, at the left end of
+                the editor toolbar, rather than in a collapsed rail: a rail is
+                40px of horizontal space doing nothing, and this is the same
+                spot the tree's own fold control occupies when it is open.
+                Accent blue while the tree is out, grey while it is folded. */}
+            <button
+              onClick={() => setShowFileSidebar((prev) => !prev)}
+              title={showFileSidebar ? 'Hide the file tree' : 'Show the file tree'}
+              aria-pressed={showFileSidebar}
+              className={`shrink-0 rounded p-1 transition-colors ${
+                showFileSidebar
+                  ? 'text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10'
+                  : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text-primary)]'
+              }`}
+            >
+              <FileTreeIcon />
+            </button>
+            <span className="truncate text-xs text-[var(--color-text-secondary)]">
+              {isDirty ? '● Unsaved changes' : 'Editing ' + activeFile}
+            </span>
+          </div>
           <div className="flex items-center gap-2 shrink-0">
             <button
               onClick={() => setShowReferenceViewer(true)}
@@ -1558,6 +1586,27 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
               </svg>
               Search
             </button>
+            {/* The docked chat's fold toggle — same idea, other side. Disabled
+                while no provider is configured: the panel has nothing to show. */}
+            {dockAvailable && (
+              <button
+                onClick={() => setShowChatDock(!showChatDock)}
+                disabled={!aiConfigured}
+                title={aiConfigured
+                  ? (showChatDock ? 'Hide the AI chat' : 'Show the AI chat')
+                  : 'Configure an AI provider in AI Chat → Settings to enable the panel'}
+                aria-pressed={showChatDock && aiConfigured}
+                className={`shrink-0 rounded p-1 transition-colors ${
+                  !aiConfigured
+                    ? 'cursor-not-allowed text-[var(--color-text-secondary)] opacity-40'
+                    : showChatDock
+                      ? 'text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10'
+                      : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text-primary)]'
+                }`}
+              >
+                <ChatBubbleIcon />
+              </button>
+            )}
           </div>
         </div>
 
@@ -1899,7 +1948,6 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
         <ChatDock
           collapsed={!showChatDock}
           configured={aiConfigured}
-          onToggle={() => setShowChatDock(!showChatDock)}
           onRegisterHost={registerDockHost}
         />
       )}

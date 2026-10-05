@@ -158,12 +158,16 @@ export function ancestorIds(tree: readonly ConfigTreeNode[], file: string): stri
 }
 
 /**
- * Which nodes start expanded: the active file (so its sections are visible) and
- * every folder on the way to it. Everything else starts folded.
+ * Which nodes start expanded: every folder on the way to the active file, so
+ * the file itself is on screen.
+ *
+ * The active file's OWN sections deliberately stay folded. Expanding them here
+ * meant every selection — the tree, a search hit, the change bar, the pane's
+ * cross-file arrows — pushed the rest of the tree off screen; the file row and
+ * its chevron are how the sections open (Cliff, 2026-10-04).
  */
 export function defaultExpansion(tree: readonly ConfigTreeNode[], activeFile: string): Record<string, boolean> {
   const expanded: Record<string, boolean> = {};
   for (const id of ancestorIds(tree, activeFile)) expanded[id] = true;
-  expanded[`file:${activeFile}`] = true;
   return expanded;
 }

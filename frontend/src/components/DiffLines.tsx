@@ -1,4 +1,5 @@
 import type { DiffLine } from '../utils/configDiff';
+import { documentLineNumbers } from '../utils/configDiff';
 import type React from 'react';
 
 /**
@@ -55,15 +56,37 @@ interface Props {
    * its own boxed, filled container.
    */
   rowExtras?: (rowIndex: number) => React.ReactNode;
+  /**
+   * Draw the editor's running line-number gutter down the rows.
+   *
+   * The pane takes the place of the buffer while a review is open, so the
+   * numbers the reader was just looking at must not vanish with it (Cliff,
+   * 2026-10-04). Numbers count the document the diff's AFTER side describes —
+   * the text the buffer holds — and a removed row, which is not in that
+   * document, shows a blank. The number is `sticky left-0` so it stays put
+   * while a long line scrolls sideways under it.
+   */
+  lineNumbers?: boolean;
 }
 
-export default function DiffLines({ lines, className = '', containerRef, rowExtras }: Props) {
+export default function DiffLines({
+  lines, className = '', containerRef, rowExtras, lineNumbers = false,
+}: Props) {
+  const numbers = lineNumbers ? documentLineNumbers(lines) : null;
   return (
     <pre ref={containerRef} className={`m-0 font-mono overflow-x-auto ${className}`}>
       {lines.map((line, i) => {
         const extras = rowExtras?.(i);
         return (
           <div key={i} className={`relative ${ROW_CLASS[line.type]}`}>
+            {numbers && (
+              <span
+                aria-hidden
+                className="sticky left-0 mr-2 inline-block w-9 select-none border-r border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] pr-1.5 text-right text-[10px] leading-5 text-[var(--color-text-secondary)] opacity-70"
+              >
+                {numbers[i] ?? ''}
+              </span>
+            )}
             <span className="select-none opacity-50 mr-1.5">{ROW_MARK[line.type]}</span>
             {line.content || '\u00A0'}
             {extras && (

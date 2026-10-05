@@ -162,13 +162,14 @@ describe('ancestorIds / defaultExpansion', () => {
     expect(ancestorIds(tree, 'nope.cfg')).toEqual([]);
   });
 
-  it('expands the active file and its ancestors only', () => {
+  it('expands the folders on the way to the active file, and only those', () => {
     const expansion = defaultExpansion(tree, 'a/b/other.cfg');
-    expect(expansion).toEqual({ 'folder:a': true, 'folder:a/b': true, 'file:a/b/other.cfg': true });
+    expect(expansion).toEqual({ 'folder:a': true, 'folder:a/b': true });
   });
 
-  it('folds everything else', () => {
+  it('leaves the active file itself folded — its sections open on request', () => {
     const expansion = defaultExpansion(tree, 'printer.cfg');
-    expect(Object.keys(expansion)).toEqual(['file:printer.cfg']);
+    expect(expansion).toEqual({});
+    expect(defaultExpansion(tree, 'a/b/other.cfg')).not.toHaveProperty('file:a/b/other.cfg');
   });
 });

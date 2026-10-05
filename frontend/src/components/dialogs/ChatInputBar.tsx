@@ -73,7 +73,6 @@ export interface ChatInputBarProps {
   references?: ChatReferenceChip[];
   onRemoveReference?: (id: string) => void;
   onPromoteReference?: () => void;
-  onReferenceJump?: (id: string) => void;
   /** Resolve the `@`-mention popup's rows for the token being typed. */
   onMentionQuery?: (query: string) => MentionSource[];
   onMentionAccept?: (source: MentionSource) => void;
@@ -119,7 +118,6 @@ const ChatInputBar: React.FC<ChatInputBarProps> = ({
   references = [],
   onRemoveReference,
   onPromoteReference,
-  onReferenceJump,
   onMentionQuery,
   onMentionAccept,
 }) => {
@@ -178,74 +176,56 @@ const ChatInputBar: React.FC<ChatInputBarProps> = ({
 
   return (
     <div className="border-t border-[var(--color-bg-tertiary)]">
-      {/* Attached context references */}
+      {/* Attached context references. ONE control per pill: the pill itself
+          toggles. A suggestion (`preview`) shows `+` and attaches when
+          clicked; anything already attached shows `×` and detaches when
+          clicked. The glyph states what the pill will do — it is not a second
+          button beside a third meaning on the label (Cliff, 2026-10-04). */}
       {references.length > 0 && (
         <div className={`flex flex-wrap gap-1 pt-2 ${compact ? 'px-3 pb-1.5' : 'px-4 pb-2.5'}`}>
-          {references.map((chip) => (
-            <span
-              key={chip.id}
-              className={`inline-flex max-w-full items-center gap-1.5 rounded-full border py-1 pl-2.5 pr-1.5 font-mono text-[10px] ${
-                chip.role === 'preview'
-                  ? 'border-dashed border-[var(--color-accent)] text-[var(--color-accent)]'
-                  : 'border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]'
-              }`}
-              title={
-                chip.role === 'preview'
-                  ? 'Suggested context — click to attach it to the message'
-                  : chip.role === 'selection'
-                    ? 'Your current editor selection is attached'
-                    : 'Attached context'
-              }
-            >
-              <span className="shrink-0 opacity-60">{KIND_GLYPH[chip.kind]}</span>
+          {references.map((chip) => {
+            const suggested = chip.role === 'preview';
+            return (
               <button
+                key={chip.id}
                 type="button"
-                // A suggested chip (`preview`) is one click from attached: the
-                // chip IS the affordance, not just the glyph inside it.
-                onClick={() => (chip.role === 'preview'
-                  ? onPromoteReference?.()
-                  : onReferenceJump?.(chip.id))}
-                className="min-w-0 truncate hover:text-[var(--color-text-primary)]"
-                title={chip.role === 'preview'
-                  ? 'Attach this context to the message'
-                  : 'Jump to this part of the config'}
-              >
-                {chip.label}
-              </button>
-              {chip.findingsSeverity && chip.findingsCount > 0 && (
-                <span className="inline-flex shrink-0 items-center gap-1" title={`${chip.findingsCount} finding(s) in this scope`}>
-                  <span className={`h-1.5 w-1.5 rounded-full ${SEVERITY_DOT[chip.findingsSeverity]}`} />
-                  {chip.findingsCount}
-                </span>
-              )}
-              {/* Both glyphs live on the same side, and both are a real hit
-                  target — they were a 10px text node before. */}
-              <span className="flex shrink-0 items-center">
-                {chip.role === 'preview' && (
-                  <button
-                    type="button"
-                    onClick={() => onPromoteReference?.()}
-                    className={CHIP_ACTION_CLASS}
-                    title="Attach this context to the message"
-                  >
-                    +
-                  </button>
-                )}
-                <button
-                  type="button"
-                  onClick={() => onRemoveReference?.(chip.id)}
-                  className={`${CHIP_ACTION_CLASS} hover:text-[var(--color-error)]`}
-                  title={chip.role === 'preview'
-                    ? 'Dismiss this suggestion'
+                onClick={() => (suggested ? onPromoteReference?.() : onRemoveReference?.(chip.id))}
+                title={
+                  suggested
+                    ? 'Suggested context — click to attach it to the message'
                     : chip.role === 'selection'
-                      ? 'Detach this selection'
-                      : 'Remove this context'}
+                      ? 'Your current editor selection is attached — click to detach'
+                      : 'Attached context — click to detach'
+                }
+                className={`group inline-flex max-w-full items-center gap-1.5 rounded-full border py-1 pl-2.5 pr-1.5 font-mono text-[10px] transition-colors ${
+                  suggested
+                    ? 'border-dashed border-[var(--color-accent)] text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10'
+                    : 'border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
+                }`}
+              >
+                <span className="shrink-0 opacity-60">{KIND_GLYPH[chip.kind]}</span>
+                <span className="min-w-0 truncate">{chip.label}</span>
+                {chip.findingsSeverity && chip.findingsCount > 0 && (
+                  <span className="inline-flex shrink-0 items-center gap-1" title={`${chip.findingsCount} finding(s) in this scope`}>
+                    <span className={`h-1.5 w-1.5 rounded-full ${SEVERITY_DOT[chip.findingsSeverity]}`} />
+                    {chip.findingsCount}
+                  </span>
+                )}
+                {/* The state glyph: `+` when detached, `×` when attached. It
+                    rides the pill's own hover — the whole pill is the target. */}
+                <span
+                  aria-hidden
+                  className={`${CHIP_ACTION_CLASS} shrink-0 ${
+                    suggested
+                      ? 'group-hover:bg-[var(--color-accent)]/20'
+                      : 'group-hover:bg-[var(--color-error)]/15 group-hover:text-[var(--color-error)]'
+                  }`}
                 >
-                  ×
-                </button>
-              </span>
-            </span>
-          ))}
+                  {suggested ? '+' : '×'}
+                </span>
+              </button>
+            );
+          })}
         </div>
       )}
 
