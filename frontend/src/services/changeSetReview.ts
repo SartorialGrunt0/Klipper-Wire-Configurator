@@ -25,6 +25,7 @@ import * as api from './api';
 import type { PendingConfigEdit } from './api';
 import { useChangeSetStore } from '../stores/changeSetStore';
 import { useConfigStore } from '../stores/configStore';
+import { usePendingEditStore } from '../stores/pendingEditStore';
 import { planApprovedEditApply } from '../utils/approvalApply';
 
 /** The one line both surfaces show when a set cannot be replayed. */
@@ -196,4 +197,26 @@ export async function keepFile(file: string, ids: string[]): Promise<void> {
 export async function undoFile(file: string, ids: string[]): Promise<void> {
   useChangeSetStore.getState().undoFile(file, ids);
   await resolveChangeSet();
+}
+
+// ── Discarding the buffer discards the review ────────────────────────
+
+/**
+ * A wholesale replacement of the working buffer takes the review with it.
+ *
+ * The change set is a RUNNING TOTAL, and a decision replays every UNDECIDED
+ * row as kept (`keptIdsFor`) from the OLDEST request's baseline. That is
+ * exactly right while the buffer still holds those edits — and a live bug the
+ * moment it does not: *ask the chat to add something → Revert → ask it to add
+ * something else* used to write the reverted addition back into the file on
+ * the next keep/undo, because the segment that staged it was still in the set.
+ *
+ * So every path that throws the buffer away calls this first: Revert (both the
+ * original-import and the re-read-from-the-Pi branches), a re-read from the Pi
+ * with "clear existing", and a fresh generate. Nothing here can re-derive the
+ * text — the ops' baselines belong to a file state that no longer exists.
+ */
+export function discardReview(): void {
+  useChangeSetStore.getState().clear();
+  usePendingEditStore.getState().clearPending();
 }

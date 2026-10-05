@@ -7,6 +7,7 @@ import * as api from '../../services/api';
 import { buildProjectGraph } from '../../utils/graphBuilder';
 import { restoreLayoutAfterRebuild } from '../../utils/layoutPersistence';
 import { isBackupConfigFilename } from '../../utils/backupFiles';
+import { discardReview } from '../../services/changeSetReview';
 import type { ConfigFile, ValidationResult } from '../../types/config';
 
 interface OpenFromPiDialogProps {
@@ -115,6 +116,8 @@ export default function OpenFromPiDialog({ onClose }: OpenFromPiDialogProps) {
       }
 
       if (clearExisting) {
+        // The existing project is discarded, so any review of it is void.
+        discardReview();
         useConfigStore.getState().clearAll();
         useGraphStore.getState().clearGraph();
       }

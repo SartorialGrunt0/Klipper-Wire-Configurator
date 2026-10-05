@@ -14,7 +14,11 @@ import * as api from '@/services/api';
 import type { ChangeSetPayload } from '@/services/api';
 import { useChangeSetStore } from '@/stores/changeSetStore';
 import { useConfigStore } from '@/stores/configStore';
-import { keepSection, resolveChangeSet, undoSection } from '@/services/changeSetReview';
+import { usePendingEditStore } from '@/stores/pendingEditStore';
+import type { PendingDiffModel } from '@/utils/pendingDiff';
+import {
+  discardReview, keepSection, resolveChangeSet, undoSection,
+} from '@/services/changeSetReview';
 
 /**
  * The decision engine is ONE implementation for both surfaces (the chat's
@@ -178,5 +182,49 @@ describe('undo', () => {
     await resolveChangeSet();
     expect(useChangeSetStore.getState().note).toContain('printer.cfg');
     expect(useChangeSetStore.getState().busy).toBe(false);
+  });
+});
+
+/**
+ * A wholesale replacement of the working buffer — Revert, a fresh generate, a
+ * re-read from the Pi — takes the review with it.
+ *
+ * Live report 2026-10-04 (Cliff): *ask the chat to add something → revert →
+ * ask it to add something else → the reverted addition is back in the diff.*
+ * The change set is a running total, and every UNDECIDED row is replayed as
+ * KEPT, so a segment that survived the revert replays its ops onto the oldest
+ * baseline and writes the discarded edit back into the file.
+ */
+describe('a discarded working buffer', () => {
+  beforeEach(() => {
+    usePendingEditStore.setState({
+      pending: { approvalId: 'stale' } as unknown as PendingDiffModel,
+      takeover: 'shown',
+    });
+  });
+
+  it('drops the review, so no later decision can replay it back in', () => {
+    discardReview();
+
+    expect(useChangeSetStore.getState().segments).toEqual([]);
+    expect(useChangeSetStore.getState().view).toBeNull();
+    expect(useChangeSetStore.getState().frames).toEqual({});
+    expect(usePendingEditStore.getState().pending).toBeNull();
+    expect(usePendingEditStore.getState().takeover).toBe('auto');
+
+    // A later request stages its own change. Its decision chain is that
+    // request ALONE: the reverted edit is not in the buffer, so replaying it
+    // would be inventing text.
+    useChangeSetStore.getState().setFromStream('req-2', payload());
+    const segments = useChangeSetStore.getState().resolveSegments();
+    expect(segments.map((segment) => segment.requestId)).toEqual(['req-2']);
+  });
+
+  it('control: an UNDISCARDED review still spans requests', () => {
+    // The running total is the wanted behaviour when the buffer is intact —
+    // this is the behaviour the discard exists to end.
+    useChangeSetStore.getState().setFromStream('req-2', payload());
+    expect(useChangeSetStore.getState().resolveSegments().map((segment) => segment.requestId))
+      .toEqual(['req-1', 'req-2']);
   });
 });
