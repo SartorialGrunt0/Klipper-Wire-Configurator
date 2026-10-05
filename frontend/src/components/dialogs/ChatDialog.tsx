@@ -24,7 +24,7 @@ import {
 } from '../../utils/approvalDiff';
 import { buildChatRequestCredentials } from '../../utils/chatRequestBase';
 import { selectUnsavedDrafts } from '../../utils/chatContext';
-import { buildReferenceContext, findingsForScope, mentionMatches, nodeToReference, referenceLabel, type ChatReference, type MentionSource } from '../../utils/chatReferences';
+import { buildReferenceContext, mentionMatches, nodeToReference, referenceLabel, type ChatReference, type MentionSource } from '../../utils/chatReferences';
 import { isNearBottom, nextStickToBottom } from '../../utils/chatScroll';
 import {
   EMPTY_PROGRESS,
@@ -1122,22 +1122,17 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   // ── Composer reference chips ────────────────────────────────────
   // Three sources, in a fixed order: pinned (sent), the single transient
   // preview (NOT sent until `+` promotes it), and the live editor selection
-  // (sent). Findings ride along as a coloured badge so the chip shows what
-  // the model will also be told.
+  // (sent). The chip carries the reference and nothing else — the severity
+  // badge that used to ride along was noise on a pill whose whole job is
+  // "this is what I am pointing at" (Cliff, 2026-10-04).
   const chipFor = useCallback(
-    (reference: ChatReference, role: ChatReferenceChip['role']): ChatReferenceChip => {
-      const findings = findingsForScope(reference, validation, visibility);
-      return {
-        id: reference.id,
-        label: referenceLabel(reference),
-        kind: reference.kind,
-        role,
-        findingsCount: findings.length,
-        // findingsForScope returns worst-first.
-        findingsSeverity: findings.length > 0 ? findings[0].severity : null,
-      };
-    },
-    [validation, visibility],
+    (reference: ChatReference, role: ChatReferenceChip['role']): ChatReferenceChip => ({
+      id: reference.id,
+      label: referenceLabel(reference),
+      kind: reference.kind,
+      role,
+    }),
+    [],
   );
 
   const attachedReferenceChips = useMemo<ChatReferenceChip[]>(() => {

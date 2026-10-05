@@ -31,23 +31,15 @@ export interface ChatReferenceChip {
   kind: ChatReferenceKind;
   /** `preview` is the not-yet-attached slot: it renders a `+` and is not sent. */
   role: 'pinned' | 'preview' | 'selection';
-  findingsCount: number;
-  findingsSeverity: 'error' | 'warning' | 'info' | null;
 }
 
-/** Kind glyphs — neutral by design; severity is what carries colour. */
+/** Kind glyphs — neutral by design. */
 const KIND_GLYPH: Record<ChatReferenceKind, string> = {
   file: '▤',
   section: '§',
   param: '▪',
   lines: '≡',
   finding: '●',
-};
-
-const SEVERITY_DOT: Record<'error' | 'warning' | 'info', string> = {
-  error: 'bg-[var(--color-error)]',
-  warning: 'bg-[var(--color-warning)]',
-  info: 'bg-[var(--color-text-secondary)]',
 };
 
 // ── Props ───────────────────────────────────────────────────────────
@@ -205,12 +197,6 @@ const ChatInputBar: React.FC<ChatInputBarProps> = ({
               >
                 <span className="shrink-0 opacity-60">{KIND_GLYPH[chip.kind]}</span>
                 <span className="min-w-0 truncate">{chip.label}</span>
-                {chip.findingsSeverity && chip.findingsCount > 0 && (
-                  <span className="inline-flex shrink-0 items-center gap-1" title={`${chip.findingsCount} finding(s) in this scope`}>
-                    <span className={`h-1.5 w-1.5 rounded-full ${SEVERITY_DOT[chip.findingsSeverity]}`} />
-                    {chip.findingsCount}
-                  </span>
-                )}
                 {/* The state glyph: `+` when detached, `×` when attached. It
                     rides the pill's own hover — the whole pill is the target. */}
                 <span
