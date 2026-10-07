@@ -23,10 +23,6 @@ interface Props {
   rows: readonly ChangeSetRow[];
   /** Row ids currently unfolded. */
   expanded: readonly string[];
-  /** Row ids the user has undone (shown as such, still in the record). */
-  undone: readonly string[];
-  /** Row ids the user has kept (decided; the row stays as the record). */
-  kept: readonly string[];
   onToggle: (id: string) => void;
 }
 
@@ -45,10 +41,8 @@ const Badge: React.FC<{ count: number; glyph: string; className: string; title: 
 const EditRow: React.FC<{
   row: ChangeSetRow;
   open: boolean;
-  undone: boolean;
-  kept: boolean;
   onToggle: (id: string) => void;
-}> = ({ row, open, undone, kept, onToggle }) => {
+}> = ({ row, open, onToggle }) => {
   const lines = useMemo(() => (open ? parsePatch(row.diffText) : []), [open, row.diffText]);
   const badge = row.badge;
 
@@ -73,12 +67,6 @@ const EditRow: React.FC<{
           <span className="shrink-0 italic text-[var(--color-text-secondary)]">
             replaced by a later edit
           </span>
-        )}
-        {undone && !row.superseded && (
-          <span className="shrink-0 italic text-[var(--color-text-secondary)]">undone</span>
-        )}
-        {kept && !undone && !row.superseded && (
-          <span className="shrink-0 text-[var(--color-text-secondary)]">kept</span>
         )}
       </button>
       {open && (
@@ -118,10 +106,8 @@ const EditRow: React.FC<{
   );
 };
 
-const ChatEditRows: React.FC<Props> = ({ rows, expanded, undone, kept, onToggle }) => {
+const ChatEditRows: React.FC<Props> = ({ rows, expanded, onToggle }) => {
   if (rows.length === 0) return null;
-  const gone = new Set(undone);
-  const decided = new Set(kept);
   return (
     <div className="mb-3 space-y-1" aria-label="Changes made in this reply">
       {rows.map((row) => (
@@ -129,8 +115,6 @@ const ChatEditRows: React.FC<Props> = ({ rows, expanded, undone, kept, onToggle 
           key={row.id}
           row={row}
           open={expanded.includes(row.id)}
-          undone={gone.has(row.id)}
-          kept={decided.has(row.id)}
           onToggle={onToggle}
         />
       ))}

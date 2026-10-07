@@ -234,7 +234,7 @@ export function selectionOverlapsChange(
 export type PaneTakeover = 'auto' | 'shown' | 'hidden';
 
 /** What the pane renders right now. */
-export type PendingPaneMode = 'editor' | 'review' | 'diff' | 'chip';
+export type PendingPaneMode = 'editor' | 'review' | 'mirror' | 'diff' | 'chip';
 
 /**
  * The takeover rule, in one place.
@@ -250,18 +250,20 @@ export type PendingPaneMode = 'editor' | 'review' | 'diff' | 'chip';
  *
  * `review` is the Zed-model takeover (Sir, 2026-10-05): the review strip sits
  * above the NORMAL, still-editable editor, whose overlay carries the pending
- * tints — undecided changes never take the buffer out of edit mode. `diff`
- * stays the explicit read-only whole-document view, reached from the chip or
- * from the un-applied path below.
+ * tints — undecided changes never take the buffer out of edit mode.
  *
  * `live` says the pending rows are ALREADY IN the buffer — the post-hoc change
- * set (edits applied, awaiting keep/undo). Then the takeover rule relaxes:
- * there is no pane to take away, the tints paint the very lines the reader is
- * pointing at, and the chip only earns its keep after "Back to editing"
- * (`hidden`). The APPROVAL-CARD path — a proposal not yet applied, the buffer
- * still showing `before` — keeps the original rule verbatim: it cannot tint
- * changes that are not in the text, so the overlap check and the read-only
- * takeover still apply.
+ * set (edits applied, awaiting keep/undo). Its source is the mechanical ledger
+ * (`reviewEngine`), not a card model: `hasReview` says the ledger has runs.
+ * `shown` on the live path now means the compact MIRROR (`mirror`) — only the
+ * changed runs, mini-diff style — because the whole-document read-only takeover
+ * (the card path's `diff`) no longer fits a review that keeps the buffer live
+ * (Sir, 2026-10-07).
+ *
+ * The APPROVAL-CARD path — a proposal not yet applied, the buffer still showing
+ * `before` — keeps the original rule verbatim: it cannot tint changes that are
+ * not in the text, so the overlap check and the read-only `diff` takeover still
+ * apply.
  */
 export function paneModeFor(input: {
   model: PendingDiffModel | null;
@@ -270,12 +272,20 @@ export function paneModeFor(input: {
   selection: ChatReference | null;
   /** The pending rows are applied to the live buffer (change-set path). */
   live?: boolean;
+  /** The live path's review presence: the ledger has runs for this review. */
+  hasReview?: boolean;
 }): PendingPaneMode {
-  const { model, takeover, isActive, selection, live } = input;
-  if (!model || !isActive) return 'editor';
+  const { model, takeover, isActive, selection, live, hasReview } = input;
+  if (!isActive) return 'editor';
+  if (live) {
+    if (!model && !hasReview) return 'editor';
+    if (takeover === 'shown') return 'mirror';
+    if (takeover === 'hidden') return 'chip';
+    return 'review';
+  }
+  if (!model) return 'editor';
   if (takeover === 'shown') return 'diff';
   if (takeover === 'hidden') return 'chip';
-  if (live) return 'review';
   return selectionOverlapsChange(model, selection) ? 'chip' : 'diff';
 }
 

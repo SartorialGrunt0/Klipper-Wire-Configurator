@@ -55,17 +55,22 @@ import type { ApprovalCard } from '../../services/api';
 import ChatInputBar, { type ChatReferenceChip } from './ChatInputBar';
 import ChatEditRows from './ChatEditRows';
 import ChangeSetBar from './ChangeSetBar';
-import { useChangeSetStore, changeSetTotals } from '../../stores/changeSetStore';
+import { useChangeSetStore } from '../../stores/changeSetStore';
 import {
   applyStagedEdits,
   buildDecisionContext,
-  keepAll as keepAllEdits,
-  keepFile as keepFileEdits,
-  keepSection as keepSectionEdits,
-  undoAll as undoAllEdits,
-  undoFile as undoFileEdits,
-  undoSection as undoSectionEdits,
 } from '../../services/changeSetReview';
+import {
+  framesFromChangeSet,
+  groupLedgerSections,
+  keepAll,
+  keepAllIn,
+  keepRun,
+  ledgerFrom,
+  undoAll,
+  undoAllIn,
+  undoRun,
+} from '../../services/reviewEngine';
 import { buildChangeSetView, rowsForRequest, type ChangeSetRow } from '../../utils/changeSet';
 import type { PendingAiChatRequest } from '../../types/ai';
 import type { AiChatRole } from '../../services/api';
@@ -196,22 +201,22 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   const [progress, setProgress] = useState<ProgressDisplay>(EMPTY_PROGRESS);
   // ── Post-hoc edit review (2026-10-02) ──
   // The change set is applied to the editor as it accumulates and reviewed
-  // here after the reply: rows in the transcript (from the store, so the
-  // transcript and the footer can never disagree) plus a resolve call for
-  // every keep/undo. `appliedStagedRef` dedupes the poll's per-file
-  // snapshots so the same text is not re-parsed every 1.5s.
-  const changeSetView = useChangeSetStore((state) => state.view);
+  // here after the reply. Decisions are the mechanical ledger's (Sir,
+  // 2026-10-07): the footer bar renders `diff(FRAME, LIVE)` per file, straight
+  // from the store's frames + the editor's live text. `appliedStagedRef`
+  // dedupes the poll's per-file snapshots so the same text is not re-parsed
+  // every 1.5s.
   const changeSetSegments = useChangeSetStore((state) => state.segments);
   const changeSetExpanded = useChangeSetStore((state) => state.expanded);
-  const changeSetUndone = useChangeSetStore((state) => state.undone);
-  const changeSetKept = useChangeSetStore((state) => state.kept);
-  const changeSet = useChangeSetStore((state) => state);
+  const changeSetReviewFrames = useChangeSetStore((state) => state.reviewFrames);
+  const liveTexts = useConfigStore((state) => state.liveTexts);
+  // The bar's rows: the ledger's runs, labelled and previewed. Re-derived
+  // whenever the frames, the live text or the files change.
+  const ledgerSections = useMemo(
+    () => groupLedgerSections(ledgerFrom({ reviewFrames: changeSetReviewFrames, liveTexts, configFiles })),
+    [changeSetReviewFrames, liveTexts, configFiles],
+  );
   const appliedStagedRef = useRef<string>('');
-  // Keep/undo state lives in the change-set store, not here: the text view's
-  // pane makes the same decisions, and the two surfaces must show one status
-  // (`busy`) and one note.
-  const changeSetBusy = useChangeSetStore((state) => state.busy);
-  const changeSetNote = useChangeSetStore((state) => state.note);
   const [showSettings, setShowSettings] = useState(false);
   const [showChatHistory, setShowChatHistory] = useState(false);
   const [showCarryOverPrompt, setShowCarryOverPrompt] = useState(false);
@@ -437,7 +442,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       // does NOT clear the edits an earlier one staged. Those stay in the
       // review summary until they are kept or undone.
       appliedStagedRef.current = '';
-      useChangeSetStore.setState({ note: null });
 
       const userMsg = { role: 'user' as const, content: trimmedMessage, hiddenFromUser: options?.hiddenFromUser === true };
       const previousMessages = options?.hiddenFromUser ? [] : messages;
@@ -583,13 +587,17 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
             setError(`The AI's change to ${failed.join(', ')} could not be applied to the editor — check the file before saving.`);
           }
         }
-        // The reply's change set is authoritative — it is what the resolve
-        // endpoint replays — so it replaces whatever the poll last showed
-        // (a final edit may have landed after the last poll tick). It joins
-        // the running total rather than replacing it.
+        // The reply's change set is authoritative — it is what the ledger's
+        // frames seed from — so it replaces whatever the poll last showed (a
+        // final edit may have landed after the last poll tick). It joins the
+        // running total rather than replacing it, and its FRAMES seed the
+        // review (a review already in progress keeps its frames).
         useChangeSetStore.getState().setFromStream(
           stopRequestId,
           finalMessage.changeSet ?? null,
+        );
+        useChangeSetStore.getState().seedFrames(
+          framesFromChangeSet(finalMessage.changeSet ?? null),
         );
         // Background completion signal: if the dialog is closed when the reply
         // lands, flag the toolbar button so the user knows it's ready.
@@ -776,6 +784,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       }
       if (poll.changeSet) {
         useChangeSetStore.getState().setFromStream(stopRequestId, poll.changeSet);
+        useChangeSetStore.getState().seedFrames(framesFromChangeSet(poll.changeSet));
       }
     };
     void tick();
@@ -811,13 +820,11 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         <ChatEditRows
           rows={rows}
           expanded={changeSetExpanded}
-          undone={changeSetUndone}
-          kept={changeSetKept}
           onToggle={(id) => useChangeSetStore.getState().toggleExpanded(id)}
         />
       );
     },
-    [changeSetExpanded, changeSetUndone, changeSetKept],
+    [changeSetExpanded],
   );
 
   const editRowsFor = useCallback(
@@ -842,21 +849,12 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     stopRequestId ? rowsForRequest(changeSetSegments, stopRequestId) : [],
   );
 
-  const handleKeepAll = useCallback(() => keepAllEdits(), []);
-  const handleUndoAll = useCallback(() => { void undoAllEdits(); }, []);
-  const handleKeepSection = useCallback(
-    (file: string, section: string, ids: string[]) => keepSectionEdits(file, section, ids),
-    [],
-  );
-  const handleUndoSection = useCallback(
-    (file: string, section: string, ids: string[]) => { void undoSectionEdits(file, section, ids); },
-    [],
-  );
-  const handleKeepFile = useCallback((file: string, ids: string[]) => keepFileEdits(file, ids), []);
-  const handleUndoFile = useCallback(
-    (file: string, ids: string[]) => { void undoFileEdits(file, ids); },
-    [],
-  );
+  const handleKeepAll = useCallback(() => keepAll(), []);
+  const handleUndoAll = useCallback(() => { void undoAll(); }, []);
+  const handleKeepFile = useCallback((file: string) => keepAllIn(file), []);
+  const handleUndoFile = useCallback((file: string) => { void undoAllIn(file); }, []);
+  const handleKeepRun = useCallback((file: string, key: string) => keepRun(file, key), []);
+  const handleUndoRun = useCallback((file: string, key: string) => { void undoRun(file, key); }, []);
 
   // ── Mid-loop steering ───────────────────────────────────────────
   // While a request is in flight the composer steers it: the message is
@@ -1402,27 +1400,22 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       </div>
 
       {/* Input bar */}
-      {/* Post-hoc review summary: only what still needs a decision — keep or
-          undo a change here and it leaves the list; when nothing is left the
-          whole summary goes away. */}
-      {changeSetView && (
-        <ChangeSetBar
-          groups={changeSet.pendingGroups()}
-          totals={changeSetTotals(changeSet)}
-          busy={changeSetBusy}
-          note={changeSetNote}
-          onKeepAll={handleKeepAll}
-          onUndoAll={handleUndoAll}
-          onKeepSection={handleKeepSection}
-          onUndoSection={handleUndoSection}
-          onKeepFile={handleKeepFile}
-          onUndoFile={handleUndoFile}
-          onOpenFile={(file) => {
-            const config = configFiles[file];
-            if (config) useConfigStore.getState().setActiveFile(file);
-          }}
-        />
-      )}
+      {/* Post-hoc review summary: the LEDGER — one row per run of
+          diff(FRAME, LIVE). Keep or undo a run and it leaves the diff; when
+          nothing is left the whole bar goes away (Sir, 2026-10-07). */}
+      <ChangeSetBar
+        files={ledgerSections}
+        onKeepAll={handleKeepAll}
+        onUndoAll={handleUndoAll}
+        onKeepFile={handleKeepFile}
+        onUndoFile={handleUndoFile}
+        onKeepRun={handleKeepRun}
+        onUndoRun={handleUndoRun}
+        onOpenFile={(file) => {
+          const config = configFiles[file];
+          if (config) useConfigStore.getState().setActiveFile(file);
+        }}
+      />
       <ChatInputBar
         input={input}
         loading={loading}

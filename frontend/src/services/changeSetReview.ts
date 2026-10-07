@@ -1,25 +1,19 @@
 /**
- * The ONE post-hoc decision engine.
+ * The staged-edit apply path, shared by stage and the review engine.
  *
- * A change is kept or undone from two places — the chat's footer bar and the
- * text view's pending pane — and they must never be two implementations of
- * the same decision. Both call the functions here; what a surface *renders*
- * (`busy`, `note`) also lives in `changeSetStore`, so the two cannot disagree
- * about the state of the review either.
+ * What is LEFT of the old decision engine after the mechanical ledger took
+ * over the decisions (Sir, 2026-10-07). The keep/undo verbs and the server
+ * `resolve` replay are gone — `services/reviewEngine` owns them now, as
+ * splices on the frame/live texts with no server involvement. This module
+ * keeps only the two things the ledger still needs:
  *
- * The laws this file exists to keep:
+ *  - `applyStagedEdits`: write backend-produced file texts through the ONE
+ *    apply path, so stage / undo cannot drift. (The engine reuses it for a
+ *    decision on a file the text view is not holding.)
+ *  - `buildDecisionContext`: the client's current text per file, for the
+ *    approval-card decision POST (a different, still server-side flow).
  *
- *  1. **Keep changes no text.** The edit is already applied; keeping ends the
- *     decision. It does still refresh the pane's FRAME (the marks are defined
- *     by the decided set), so both verbs make the same call.
- *  2. **Undo is `replay(kept ops)`**, never a text revert here — reverting in
- *     the client would leave the residue of a dropped op behind. The server
- *     replays each request's kept ops onto the state the previous one left.
- *  3. **One mutation surface.** Text the server returns goes through the same
- *     apply path staged edits use, so stage / keep / undo cannot drift.
- *
- * No React: the docked panel and the text view are different trees (which is
- * why `pendingEditStore` exists), and this is the shared floor under both.
+ * No React: this is the shared floor under the chat and the text view.
  */
 import * as api from './api';
 import type { PendingConfigEdit } from './api';
@@ -27,9 +21,6 @@ import { useChangeSetStore } from '../stores/changeSetStore';
 import { useConfigStore } from '../stores/configStore';
 import { usePendingEditStore } from '../stores/pendingEditStore';
 import { planApprovedEditApply } from '../utils/approvalApply';
-
-/** The one line both surfaces show when a set cannot be replayed. */
-const GONE_NOTE = 'This change set is no longer available — the changes in the editor stand as they are.';
 
 /**
  * Apply backend-produced file texts to the editor draft.
@@ -73,8 +64,9 @@ export async function applyStagedEdits(edits: PendingConfigEdit[]): Promise<stri
  * The client's current working text per file.
  *
  * This is the evidence behind the server's "the human edited this file, their
- * text wins" rule — so it is every loaded file, not a subset someone
- * remembered to send. Without it a replay could clobber a hand edit.
+ * text wins" rule for the approval-card decision POST — so it is every loaded
+ * file, not a subset someone remembered to send. Without it a decision could
+ * clobber a hand edit.
  */
 export async function buildDecisionContext(): Promise<Record<string, { content: string; label: string }>> {
   const store = useConfigStore.getState();
@@ -94,127 +86,17 @@ export async function buildDecisionContext(): Promise<Record<string, { content: 
   return ctx;
 }
 
-/**
- * Replay the current decisions and apply the result.
- *
- * Every terminal path reports through the store's `note` (stale ops, a
- * vanished set, a failed apply) so whichever surface the user is looking at
- * says the same thing.
- */
-export async function resolveChangeSet(): Promise<void> {
-  const store = useChangeSetStore.getState();
-  const segments = store.resolveSegments();
-  if (segments.length === 0) return;
-  useChangeSetStore.setState({ busy: true, note: null });
-  try {
-    const contextFiles = await buildDecisionContext();
-    const out = await api.resolveChangeSet({ segments, contextFiles });
-    if (out.status !== 'ok' || !out.files) {
-      useChangeSetStore.setState({ note: GONE_NOTE });
-      return;
-    }
-    // The pane's frame follows the decisions (design B): the backend replays
-    // the DECIDED-kept ops into it, so a kept edit stops being marked while
-    // an undecided one stays. An empty map means nothing has been decided —
-    // the pane then uses the file's pre-review text from the change set.
-    useChangeSetStore.setState({ frames: out.frames ?? {} });
-    const resolved: PendingConfigEdit[] = Object.entries(out.files).map(([file, entry]) => ({
-      file,
-      op: entry.deleted ? 'delete_file' : 'update',
-      summary: '',
-      newText: entry.content,
-    }));
-    const failed = await applyStagedEdits(resolved);
-    // A rejected change set leaves the text exactly as it was on disk; the
-    // dirty flag must say so rather than flag a project for saving nothing.
-    useConfigStore.getState().markCleanIfMatchesDisk();
-    if (failed.length > 0) {
-      useChangeSetStore.setState({
-        note: `${failed.join(', ')} could not be updated in the editor — check the file before saving.`,
-      });
-    } else if (out.stale && out.stale.length > 0) {
-      useChangeSetStore.setState({
-        note: `${out.stale.length} change(s) could not be re-applied: `
-          + out.stale.map((entry) => entry.reason).join('; '),
-      });
-    }
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'resolve failed';
-    useChangeSetStore.setState({ note: `Could not resolve the change set: ${message}` });
-  } finally {
-    useChangeSetStore.setState({ busy: false });
-  }
-}
-
-// ── The decisions themselves ─────────────────────────────────────────
-// Keep changes no text, but it DOES change the pane's frame: the marks are
-// defined by the DECIDED set (design B), so a keep replays too. Both verbs
-// therefore go through the same call — one path, one status, one note.
-//
-// `keepEdits`/`undoEdits` decide an EXPLICIT set of ids: that is the text
-// view's per-change decision (one stop in the diff). The file- and
-// section-level entry points below are the chat's summary bar.
-
-export async function keepAll(): Promise<void> {
-  useChangeSetStore.setState({ note: null });
-  useChangeSetStore.getState().keepAll();
-  await resolveChangeSet();
-}
-
-export async function undoAll(): Promise<void> {
-  useChangeSetStore.getState().undoAll();
-  await resolveChangeSet();
-}
-
-export async function keepEdits(file: string, ids: string[]): Promise<void> {
-  useChangeSetStore.setState({ note: null });
-  useChangeSetStore.getState().keepFile(file, ids);
-  await resolveChangeSet();
-}
-
-export async function undoEdits(file: string, ids: string[]): Promise<void> {
-  useChangeSetStore.getState().undoFile(file, ids);
-  await resolveChangeSet();
-}
-
-export async function keepSection(file: string, section: string, ids: string[]): Promise<void> {
-  useChangeSetStore.setState({ note: null });
-  useChangeSetStore.getState().keepSection(file, section, ids);
-  await resolveChangeSet();
-}
-
-export async function undoSection(file: string, section: string, ids: string[]): Promise<void> {
-  useChangeSetStore.getState().undoSection(file, section, ids);
-  await resolveChangeSet();
-}
-
-export async function keepFile(file: string, ids: string[]): Promise<void> {
-  useChangeSetStore.setState({ note: null });
-  useChangeSetStore.getState().keepFile(file, ids);
-  await resolveChangeSet();
-}
-
-export async function undoFile(file: string, ids: string[]): Promise<void> {
-  useChangeSetStore.getState().undoFile(file, ids);
-  await resolveChangeSet();
-}
-
 // ── Discarding the buffer discards the review ────────────────────────
 
 /**
  * A wholesale replacement of the working buffer takes the review with it.
  *
- * The change set is a RUNNING TOTAL, and a decision replays every UNDECIDED
- * row as kept (`keptIdsFor`) from the OLDEST request's baseline. That is
- * exactly right while the buffer still holds those edits — and a live bug the
- * moment it does not: *ask the chat to add something → Revert → ask it to add
- * something else* used to write the reverted addition back into the file on
- * the next keep/undo, because the segment that staged it was still in the set.
- *
- * So every path that throws the buffer away calls this first: Revert (both the
- * original-import and the re-read-from-the-Pi branches), a re-read from the Pi
- * with "clear existing", and a fresh generate. Nothing here can re-derive the
- * text — the ops' baselines belong to a file state that no longer exists.
+ * A review is `diff(FRAME, LIVE)`, and the frame belongs to a file state that
+ * no longer exists the moment the buffer is thrown away. Left standing, a
+ * keep/undo would splice a decided run against a frame from a document the
+ * user already discarded. So every path that replaces the buffer — Revert
+ * (both branches), a re-read from the Pi with "clear existing", a fresh
+ * generate — calls this first.
  */
 export function discardReview(): void {
   useChangeSetStore.getState().clear();

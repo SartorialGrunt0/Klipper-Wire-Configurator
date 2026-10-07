@@ -92,6 +92,14 @@ interface ConfigState {
   selectedSectionFile: string | null; // config file owning the selected section (duplicate-header safe)
   selectedSectionLine: number | null; // line number of the selected section (duplicate-header safe)
   originalTexts: Record<string, string>; // original exported text at import time
+  /**
+   * file → the text the TEXT EDITOR currently holds, kept fresh on every
+   * keystroke. The post-hoc review's ledger diffs the frame against this, and
+   * `configFiles[file].raw_text` cannot serve: it lags the textarea by the
+   * parse debounce, so a marker would trail the typing. A file with no entry
+   * (never opened in the text view) falls back to raw_text/originalTexts.
+   */
+  liveTexts: Record<string, string>;
   isDirty: boolean; // true when config has unsaved changes
   textParseErrors: Record<string, string>; // per-file parse failures in the text view (last-good model is held)
   /** One-shot "go to this line" request set by another surface (e.g. the
@@ -152,6 +160,8 @@ interface ConfigState {
 
   /* Original text tracking */
   setOriginalText: (filename: string, text: string) => void;
+  /** Publish the text editor's current buffer for a file (ledger input). */
+  setLiveText: (filename: string, text: string) => void;
   removeOriginalTexts: (filenames: string[]) => void;
 
   /* File operations */
@@ -189,6 +199,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   selectedSectionFile: null,
   selectedSectionLine: null,
   originalTexts: {},
+  liveTexts: {},
   isDirty: false,
   textParseErrors: {},
   pendingLineJump: null,
@@ -255,6 +266,11 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const nextTextParseErrors = { ...s.textParseErrors };
       delete nextTextParseErrors[filename];
 
+      // The ledger's live text dies with the file: a removed file must not
+      // keep feeding `liveTexts` a buffer the editor no longer holds.
+      const nextLiveTexts = { ...s.liveTexts };
+      delete nextLiveTexts[filename];
+
       const remainingFiles = Object.keys(nextConfigFiles);
 
       return {
@@ -263,6 +279,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         validation: nextValidation,
         validationText: nextValidationText,
         textParseErrors: nextTextParseErrors,
+        liveTexts: nextLiveTexts,
         activeFile: s.activeFile === filename ? remainingFiles[0] || 'printer.cfg' : s.activeFile,
         selectedSection: s.activeFile === filename || s.selectedSectionFile === filename ? null : s.selectedSection,
         selectedSectionFile: s.selectedSectionFile === filename ? null : s.selectedSectionFile,
@@ -495,6 +512,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       selectedSectionFile: null,
       selectedSectionLine: null,
       originalTexts: {},
+      liveTexts: {},
       isDirty: false,
       textParseErrors: {},
       pendingLineJump: null,
@@ -510,6 +528,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       selectedSectionLine: null,
       textParseErrors: {},
       pendingLineJump: null,
+      liveTexts: {},
       // The whole-project maps must not survive a project switch: a file
       // present in the previous project but absent in this one would leave
       // stale findings that drive getSaveButtonClass (which iterates the
@@ -522,6 +541,11 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     set((s) => ({
       originalTexts: { ...s.originalTexts, [filename]: text },
     })),
+
+  setLiveText: (filename, text) =>
+    set((s) => (s.liveTexts[filename] === text
+      ? s
+      : { liveTexts: { ...s.liveTexts, [filename]: text } })),
 
   removeOriginalTexts: (filenames) =>
     set((s) => {
@@ -559,6 +583,11 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         nextValidationText[newName] = nextValidationText[oldName];
         delete nextValidationText[oldName];
       }
+      const nextLiveTexts = { ...s.liveTexts };
+      if (nextLiveTexts[oldName] != null) {
+        nextLiveTexts[newName] = nextLiveTexts[oldName];
+        delete nextLiveTexts[oldName];
+      }
       // Update include directives in other files that reference the old name
       for (const [fn, cf] of Object.entries(next)) {
         if (cf.includes.includes(oldName)) {
@@ -573,6 +602,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         validationText: nextValidationText,
         originalTexts: nextOriginals,
         textParseErrors: nextTextParseErrors,
+        liveTexts: nextLiveTexts,
         selectedSection: s.selectedSection,
         selectedSectionFile: s.selectedSectionFile === oldName ? newName : s.selectedSectionFile,
         selectedSectionLine: s.selectedSectionLine,

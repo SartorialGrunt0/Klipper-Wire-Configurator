@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { createTwoFilesPatch } from 'diff';
 import { useConfigStore } from '../../stores/configStore';
 import { useChangeSetStore } from '../../stores/changeSetStore';
-import { unreviewedIds } from '../../utils/changeSet';
+import { ledgerFrom } from '../../services/reviewEngine';
 import { useNativeStore } from '../../stores/nativeStore';
 import { useVisibility } from '../../stores/validationSettingsStore';
 import { getSaveButtonClass } from '../../utils/saveButtonClass';
@@ -187,10 +187,17 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
   const { configPath } = useNativeStore();
   const isDirty = useConfigStore((s) => s.isDirty);
   const validation = useConfigStore((s) => s.validation);
-  // Post-hoc review: how many AI-chat changes nobody has kept or undone yet.
-  // Derived in the selector so this banner re-renders when a decision lands.
-  const unreviewedChanges = useChangeSetStore((s) =>
-    s.view ? unreviewedIds(s.view, [...s.kept, ...s.undone]).length : 0);
+  // Post-hoc review: how many AI-chat runs nobody has kept or undone yet. The
+  // ledger is the count now (Sir, 2026-10-07) — a run leaves the diff the
+  // moment it is decided, so the number is just the runs on screen.
+  const reviewFrames = useChangeSetStore((s) => s.reviewFrames);
+  const liveTexts = useConfigStore((s) => s.liveTexts);
+  const allConfigFiles = useConfigStore((s) => s.configFiles);
+  const unreviewedChanges = useMemo(
+    () => ledgerFrom({ reviewFrames, liveTexts, configFiles: allConfigFiles })
+      .reduce((sum, file) => sum + file.runs.length, 0),
+    [reviewFrames, liveTexts, allConfigFiles],
+  );
   // saveButtonClass is computed AFTER gateIssues below — the dialog's Save
   // button turns red only when a SELECTED file is blocked (the toolbar keeps
   // the project-wide red; a deselected broken file doesn't block this save).

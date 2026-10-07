@@ -152,3 +152,19 @@ describe('runSectionLabel', () => {
     expect(runSectionLabel(live, L('[printer]', 'max_velocity: 200', '', '[extruder]', 'nozzle: 0.4'), runs[0])).toBe('[printer]');
   });
 });
+
+describe('trailing-newline convention survives a splice', () => {
+  it('keep of a newline-terminated pair keeps the newline', () => {
+    const frame = L('a', 'b') + '\n';
+    const live = L('a', 'B') + '\n';
+    const runs = reviewRuns(frame, live);
+    expect(keepRunsInFrame(frame, live, runs, new Set(runs.map((r) => r.key)))).toBe(live);
+  });
+
+  it('undo restores the frame text byte-exact, newline included', () => {
+    const frame = L('a', 'gone') + '\n';
+    const live = L('a', 'kept') + '\n';
+    const runs = reviewRuns(frame, live);
+    expect(undoRunsInLive(frame, live, runs, new Set(runs.map((r) => r.key)))).toBe(frame);
+  });
+});

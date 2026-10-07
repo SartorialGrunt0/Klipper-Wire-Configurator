@@ -154,13 +154,27 @@ export function keepRunsInFrame(
   const targets = runs.filter((run) => keepKeys.has(run.key));
   if (targets.length === 0) return frame ?? '';
   const frameLines = partLines(frame ?? '');
-  const liveLines = partLines(live);
   const ordered = [...targets].sort((a, b) => b.frameStart - a.frameStart);
   for (const run of ordered) {
     const at = Math.min(Math.max(run.frameStart - 1, 0), frameLines.length);
     frameLines.splice(at, run.frameCount, ...run.added);
   }
-  return frameLines.join('\n');
+  return joinLines(frameLines, live);
+}
+
+/**
+ * Rebuild text from spliced LINES keeping TEXT's trailing-newline convention.
+ *
+ * Config files end with a newline; `partLines` drops it and `join('\n')` would
+ * silently cost it — the spliced text would then differ from disk by one byte
+ * and `markCleanIfMatchesDisk` would call an untouched save dirty (E2E
+ * 2026-10-07). The convention comes from the text whose region is being
+ * written INTO the target (keep → live's convention, undo → frame's): the
+ * decision writes that side's content, so its ending travels with it.
+ */
+function joinLines(lines: string[], conventionFrom: string): string {
+  const joined = lines.join('\n');
+  return conventionFrom.endsWith('\n') && joined !== '' ? joined + '\n' : joined;
 }
 
 /**
@@ -190,7 +204,7 @@ export function undoRunsInLive(
     const deleteCount = Math.max(0, run.liveEnd - run.liveStart + 1);
     liveLines.splice(at, deleteCount, ...run.removed);
   }
-  return liveLines.join('\n');
+  return joinLines(liveLines, frame);
 }
 
 /**

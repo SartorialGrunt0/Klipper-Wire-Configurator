@@ -369,7 +369,7 @@ describe('liveLineForContentRow', () => {
   });
 });
 
-describe('paneModeFor with the live (change-set) path', () => {
+describe('paneModeFor with the live (ledger) path', () => {
   const model = buildPendingDiffModel(card())!;
   const base = { isActive: true } as const;
 
@@ -380,14 +380,23 @@ describe('paneModeFor with the live (change-set) path', () => {
     expect(paneModeFor({ ...base, model, takeover: 'auto', selection: lines(4, 4), live: true })).toBe('review');
   });
 
-  it('keeps the explicit overrides: chip click shows the read-only diff, Back to editing chips', () => {
-    expect(paneModeFor({ ...base, model, takeover: 'shown', selection: null, live: true })).toBe('diff');
+  it('the chip click flips to the compact MIRROR; Back to editing chips', () => {
+    // On the live path "Show diff" is the mini-diff mirror, never the
+    // whole-document read-only takeover (that is the card path's).
+    expect(paneModeFor({ ...base, model, takeover: 'shown', selection: null, live: true })).toBe('mirror');
     expect(paneModeFor({ ...base, model, takeover: 'hidden', selection: null, live: true })).toBe('chip');
   });
 
-  it('never reviews from another view or with no model', () => {
+  it('a ledger review with no card model still reviews (hasReview)', () => {
+    expect(paneModeFor({ ...base, model: null, takeover: 'auto', selection: null, live: true, hasReview: true })).toBe('review');
+    expect(paneModeFor({ ...base, model: null, takeover: 'shown', selection: null, live: true, hasReview: true })).toBe('mirror');
+    expect(paneModeFor({ ...base, model: null, takeover: 'hidden', selection: null, live: true, hasReview: true })).toBe('chip');
+  });
+
+  it('never reviews from another view or with no review at all', () => {
     expect(paneModeFor({ model, takeover: 'auto', isActive: false, selection: null, live: true })).toBe('editor');
     expect(paneModeFor({ model: null, takeover: 'auto', isActive: true, selection: null, live: true })).toBe('editor');
+    expect(paneModeFor({ model: null, takeover: 'auto', isActive: true, selection: null, live: true, hasReview: false })).toBe('editor');
   });
 });
 

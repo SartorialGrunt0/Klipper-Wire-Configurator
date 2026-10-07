@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import type { ChangeSetPayload } from '@/services/api';
-import { changeSetTotals, useChangeSetStore } from '@/stores/changeSetStore';
+import { useChangeSetStore } from '@/stores/changeSetStore';
 
 const edit = (id: string, section: string) => ({
   id,
@@ -71,8 +71,6 @@ describe('changeSetStore', () => {
     state().setFromStream('req-1', payload());
     expect(state().segments.map((segment) => segment.requestId)).toEqual(['req-1']);
     expect(state().view?.rows.map((row) => row.id)).toEqual(['req-1:e0', 'req-1:e1']);
-    expect(state().unreviewedCount()).toBe(2);
-    expect(state().pendingIds()).toEqual(['req-1:e0', 'req-1:e1']);
   });
 
   it('KEEPS a running total across messages (Sir, 2026-10-02)', () => {
@@ -80,152 +78,24 @@ describe('changeSetStore', () => {
     state().setFromStream('req-2', secondPayload());
     // Both requests are still listed, oldest first, with namespaced ids.
     expect(state().segments.map((segment) => segment.requestId)).toEqual(['req-1', 'req-2']);
-    expect(state().pendingIds()).toEqual([
+    expect(state().view?.rows.map((row) => row.id)).toEqual([
       'req-1:e0', 'req-1:e1', 'req-2:e0',
     ]);
-    expect(state().unreviewedCount()).toBe(3);
-    expect(changeSetTotals(state())).toEqual({ added: 3, removed: 3 });
-  });
-
-  it('a decision on an older request survives a newer one', () => {
-    state().setFromStream('req-1', payload());
-    state().keepSection('printer.cfg', 'printer', ['req-1:e0']);
-    state().setFromStream('req-2', secondPayload());
-    expect(state().kept).toEqual(['req-1:e0']);
-    expect(state().pendingIds()).toEqual(['req-1:e1', 'req-2:e0']);
-  });
-
-  it('the pane frame is the OLDEST request\'s pre-edit text', () => {
-    // The pane shows the document before the REVIEW, not before the latest
-    // message: a later request's frame already contains the earlier one's
-    // edits, so it must not win.
-    state().setFromStream('req-1', payload({
-      files: [{ ...payload().files[0], beforeText: 'BEFORE THE REVIEW' }],
-    }));
-    state().setFromStream('req-2', secondPayload());
-    state().setFromStream('req-3', payload({
-      files: [{ ...payload().files[0], beforeText: 'AFTER REQUEST 1' }],
-    }));
-    expect(state().view?.frames['printer.cfg']).toBe('BEFORE THE REVIEW');
   });
 
   it('re-publishing the SAME request refreshes it without duplicating', () => {
     state().setFromStream('req-1', payload());
     state().setFromStream('req-1', payload());
     expect(state().segments).toHaveLength(1);
-    expect(state().unreviewedCount()).toBe(2);
+    expect(state().view?.rows).toHaveLength(2);
   });
 
-  it('keeps decisions when the same request refreshes from the poll', () => {
-    state().setFromStream('req-1', payload());
-    state().undoSection('printer.cfg', 'stepper_x');
-    state().setFromStream('req-1', payload());
-    expect(state().undone).toEqual(['req-1:e1']);
-  });
-
-  it('drops decisions about rows that no longer exist', () => {
-    state().setFromStream('req-1', payload());
-    state().undoSection('printer.cfg', 'stepper_x');
-    const shrunk = payload({ edits: [edit('e0', 'printer')] });
-    state().setFromStream('req-1', {
-      ...shrunk,
-      files: [{ ...shrunk.files[0], sections: [payload().files[0].sections[0]] }],
-    });
-    expect(state().undone).toEqual([]);
-  });
-
-  it('builds the resolve chain per request, oldest first', () => {
+  it('an empty payload removes that request, leaving the rest of the total', () => {
     state().setFromStream('req-1', payload());
     state().setFromStream('req-2', secondPayload());
-    state().undoSection('printer.cfg', 'stepper_x');   // drops req-1:e1
-    expect(state().resolveSegments()).toEqual([
-      // The frame list is the DECIDED keeps only — nothing has been decided
-      // here, which is what keeps both changes marked in the pane.
-      { requestId: 'req-1', keptEditIds: ['e0'], frameKeptEditIds: [] },
-      { requestId: 'req-2', keptEditIds: ['e0'], frameKeptEditIds: [] },
-    ]);
-  });
-
-  it('keepAll decides every undecided edit without touching the text', () => {
-    state().setFromStream('req-1', payload());
-    state().setFromStream('req-2', secondPayload());
-    state().keepAll();
-    expect(state().unreviewedCount()).toBe(0);
-    expect(state().kept).toEqual(['req-1:e0', 'req-1:e1', 'req-2:e0']);
-    expect(state().undone).toEqual([]);
-  });
-
-  it('undoAll drops every undecided edit and leaves the kept ones alone', () => {
-    state().setFromStream('req-1', payload());
-    state().keepSection('printer.cfg', 'printer', ['req-1:e0']);
-    state().undoAll();
-    expect(state().undone).toEqual(['req-1:e1']);
-    expect(state().resolveSegments()).toEqual([
-      { requestId: 'req-1', keptEditIds: ['e0'], frameKeptEditIds: ['e0'] },
-    ]);
-    expect(state().unreviewedCount()).toBe(0);
-    expect(changeSetTotals(state())).toEqual({ added: 0, removed: 0 });
-  });
-
-  it('a decided edit leaves the summary, and the totals follow', () => {
-    state().setFromStream('req-1', payload());
-    expect(changeSetTotals(state())).toEqual({ added: 2, removed: 2 });
-
-    state().keepSection('printer.cfg', 'printer', ['req-1:e0']);
-    expect(state().pendingGroups()[0].sections.map((s) => s.section)).toEqual(['stepper_x']);
-    expect(changeSetTotals(state())).toEqual({ added: 1, removed: 1 });
-
-    state().undoSection('printer.cfg', 'stepper_x');
-    expect(state().pendingGroups()).toEqual([]);   // nothing left to review
-    expect(changeSetTotals(state())).toEqual({ added: 0, removed: 0 });
-  });
-
-  it('decides exactly the ids the text view hands it, and no more', () => {
-    state().setFromStream('req-1', payload());
-    const rows = state().pendingRowsForFile('printer.cfg');
-    expect(rows.map((row) => row.id)).toEqual(['req-1:e0', 'req-1:e1']);
-
-    // The pane's Keep acts on the change it is showing, so the unit here is
-    // the stop's ids — never "the file".
-    state().keepFile('printer.cfg', ['req-1:e0']);
-
-    expect(state().kept).toEqual(['req-1:e0']);
-    expect(state().pendingIds()).toEqual(['req-1:e1']);
-    expect(state().pendingRowsForFile('printer.cfg').map((row) => row.id)).toEqual(['req-1:e1']);
-  });
-
-  it('undoes exactly those ids', () => {
-    state().setFromStream('req-1', payload());
-    state().undoFile('printer.cfg', ['req-1:e1']);
-    expect(state().undone).toEqual(['req-1:e1']);
-    expect(state().pendingIds()).toEqual(['req-1:e0']);
-  });
-
-  it('ignores an empty id list rather than falling back to the whole file', () => {
-    state().setFromStream('req-1', payload());
-    state().keepFile('printer.cfg', []);
-    expect(state().kept).toEqual([]);
-    expect(state().pendingIds()).toEqual(['req-1:e0', 'req-1:e1']);
-  });
-
-  it('groups a section that two requests both touched under one entry', () => {
-    state().setFromStream('req-1', payload());
-    state().setFromStream('req-2', secondPayload());
-    const groups = state().pendingGroups();
-    expect(groups).toHaveLength(1);
-    expect(groups[0].sections[0].ids).toEqual(['req-1:e0', 'req-2:e0']);
-    expect(groups[0].sections[0].added).toBe(2);
-  });
-
-  it('lists the undecided rows of one file for the text view pane', () => {
-    state().setFromStream('req-1', payload());
-    state().setFromStream('req-2', secondPayload());
-    expect(state().pendingRowsForFile('printer.cfg').map((row) => row.id))
-      .toEqual(['req-1:e0', 'req-1:e1', 'req-2:e0']);
-    state().keepSection('printer.cfg', 'printer', ['req-1:e0', 'req-2:e0']);
-    expect(state().pendingRowsForFile('printer.cfg').map((row) => row.id))
-      .toEqual(['req-1:e1']);
-    expect(state().pendingRowsForFile('other.cfg')).toEqual([]);
+    state().setFromStream('req-2', null);
+    expect(state().segments.map((segment) => segment.requestId)).toEqual(['req-1']);
+    expect(state().view?.rows).toHaveLength(2);
   });
 
   it('tracks unfolded rows per id', () => {
@@ -236,21 +106,55 @@ describe('changeSetStore', () => {
     expect(state().expanded).toEqual([]);
   });
 
-  it('an empty payload removes that request, leaving the rest of the total', () => {
+  it('drops unfolded rows that no longer exist', () => {
     state().setFromStream('req-1', payload());
-    state().setFromStream('req-2', secondPayload());
-    state().setFromStream('req-2', null);
-    expect(state().segments.map((segment) => segment.requestId)).toEqual(['req-1']);
-    expect(state().pendingIds()).toEqual(['req-1:e0', 'req-1:e1']);
+    state().toggleExpanded('req-1:e1');
+    const shrunk = payload({ edits: [edit('e0', 'printer')] });
+    state().setFromStream('req-1', {
+      ...shrunk,
+      files: [{ ...shrunk.files[0], sections: [payload().files[0].sections[0]] }],
+    });
+    expect(state().expanded).toEqual([]);
   });
 
-  it('clear forgets everything (new chat / loading another conversation)', () => {
+  it('clear forgets everything, including the review frames', () => {
     state().setFromStream('req-1', payload());
-    state().keepAll();
+    state().seedFrames({ 'printer.cfg': 'FRAME' });
     state().clear();
     expect(state().view).toBeNull();
     expect(state().segments).toEqual([]);
-    expect(state().kept).toEqual([]);
-    expect(state().pendingGroups()).toEqual([]);
+    expect(state().reviewFrames).toEqual({});
+  });
+});
+
+/**
+ * The ledger's FRAMES (Sir, 2026-10-07): seeded once per request, never
+ * clobbering a review already in progress.
+ */
+describe('review frames', () => {
+  it('seeds each file only when the key is not already present', () => {
+    state().seedFrames({ 'printer.cfg': 'PRE-REVIEW', 'other.cfg': 'B' });
+    expect(state().reviewFrames).toEqual({ 'printer.cfg': 'PRE-REVIEW', 'other.cfg': 'B' });
+
+    // A review in progress keeps its frame — a later poll must not reset it.
+    state().seedFrames({ 'printer.cfg': 'STALE', 'third.cfg': 'C' });
+    expect(state().reviewFrames['printer.cfg']).toBe('PRE-REVIEW');
+    expect(state().reviewFrames['third.cfg']).toBe('C');
+  });
+
+  it('a created file seeds a null frame', () => {
+    state().seedFrames({ 'new.cfg': null });
+    expect(state().reviewFrames['new.cfg']).toBeNull();
+  });
+
+  it('setReviewFrame replaces one file and removeReviewFrame drops one', () => {
+    state().seedFrames({ 'a.cfg': 'A', 'b.cfg': 'B' });
+    state().setReviewFrame('a.cfg', 'A');
+    expect(state().reviewFrames['a.cfg']).toBe('A');
+    state().setReviewFrame('a.cfg', 'A2');
+    expect(state().reviewFrames['a.cfg']).toBe('A2');
+    state().removeReviewFrame('a.cfg');
+    expect('a.cfg' in state().reviewFrames).toBe(false);
+    expect(state().reviewFrames['b.cfg']).toBe('B');
   });
 });

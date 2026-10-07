@@ -32,13 +32,16 @@ import ConfigTree from './ConfigTree';
 import ChatDock from './ChatDock';
 import { ChatBubbleIcon, FileTreeIcon } from './icons';
 import PendingDiffPane, { PendingDiffChip, PendingReviewStrip } from './PendingDiffPane';
-import { buildReviewStops, type ReviewFileInput } from '../utils/pendingChanges';
-import { addedRanges, liveLineForContentRow, livePendingLines } from '../utils/pendingDiff';
-import type { ChangeSetRow } from '../utils/changeSet';
+import ReviewMirrorPane from './ReviewMirrorPane';
+import { addedRanges, livePendingLines } from '../utils/pendingDiff';
 import {
-  keepEdits as keepEditsDecision,
-  undoEdits as undoEditsDecision,
-} from '../services/changeSetReview';
+  groupLedgerSections,
+  keepRun,
+  ledgerFrom,
+  setLiveApplier,
+  stopsFrom,
+  undoRun,
+} from '../services/reviewEngine';
 import { useChangeSetStore } from '../stores/changeSetStore';
 import { useUiStore } from '../stores/uiStore';
 import { useAiStore } from '../stores/aiStore';
@@ -119,16 +122,11 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   const selectionReference = useChatReferenceStore((s) => s.selection);
   // The unreviewed change set is the LIVE source for this pane: whichever
   // chat made the edits (the top-bar AI Chat dialog or the docked panel),
-  // the unreviewed red/green lines show here. The approval card model stays
-  // as the fallback for the dormant gate's first irreversible tool.
-  const changeSetView = useChangeSetStore((s) => s.view);
-  const changeSetKept = useChangeSetStore((s) => s.kept);
-  const changeSetUndone = useChangeSetStore((s) => s.undone);
-  // The frame after the last decision (design B), the shared busy/note the
-  // chat's footer reads, and the decision actions the pane calls.
-  const changeSetFrames = useChangeSetStore((s) => s.frames);
-  const changeSetBusy = useChangeSetStore((s) => s.busy);
-  const changeSetNote = useChangeSetStore((s) => s.note);
+  // the unreviewed red/green lines show here. The review is the mechanical
+  // ledger now (Sir, 2026-10-07): the store holds one FRAME per file, and the
+  // runs are `diff(FRAME, LIVE)` recomputed from it plus the editor's text.
+  const changeSetReviewFrames = useChangeSetStore((s) => s.reviewFrames);
+  const liveTexts = useConfigStore((s) => s.liveTexts);
   // The pane's model is derived BELOW, once `textForFile` exists: the frame
   // it diffs against needs the editor's current text for the active file.
   // (Declaring it here would read that callback before it is initialised.)
@@ -187,6 +185,10 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
         setEditText(text);
         setEditTextFile(activeFile);
         markFallbackExport(activeFile, usedFallback);
+        // The textarea now holds the model's export for this file — publish it
+        // as the ledger's live side, so a file switch or an external change
+        // does not leave a stale buffer feeding the review.
+        useConfigStore.getState().setLiveText(activeFile, text);
       }
     });
   }, [isActive, activeFile, config, exportConfigText, markFallbackExport]);
@@ -531,87 +533,56 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     return configFiles[fn]?.raw_text ?? allFilesText[fn] ?? '';
   }, [activeFile, editTextFile, editText, configFiles, allFilesText]);
 
-  // ── Pending AI change (the text view's diff pane) ────────────────
-  // The pane renders the WHOLE DOCUMENT with the unreviewed changes marked,
-  // not the neighbourhood of each hunk: it stands in for the buffer, so it
-  // shows all of it — and it is a REVIEW surface, so it also moves between the
-  // changes and decides them (through `services/changeSetReview`, the same
-  // engine the chat's footer bar calls).
+  // ── Pending AI change (the text view's review) ───────────────────
+  // The review is the mechanical ledger (Sir, 2026-10-07): `diff(FRAME,
+  // LIVE)` per file, where the FRAME is the store's per-file frame and LIVE is
+  // the editor's current text. The chat's footer bar and this pane read the
+  // SAME ledger, so the two can never disagree.
   //
   // The review is ONE list across EVERY file (Sir, 2026-10-04): the strip's
-  // `change i of n` counts every undecided change the model made, and the
-  // arrows walk from one file into the next, switching the text view as they
-  // go. So the documents are built per file here — each with its own frame —
-  // and `buildReviewStops` concatenates their stops in walk order.
+  // `change i of n` counts every run, and the arrows walk from one file into
+  // the next, switching the text view as they go.
   //
-  // The frame is the document with only the DECIDED-kept edits applied: the
-  // backend replays it after every decision (design B), so a kept edit stops
-  // being marked. While nothing is decided that is exactly the file's
-  // pre-review text, which the change set itself carries — the fallback, and
-  // the only source after a reload. Without both halves (an unloaded file, or
-  // a payload from an older server) the model falls back to the rows' own
-  // diffs. What gets rendered is decided by `paneModeFor` (pure, tested):
-  // another view is never taken over, and a highlight over the very lines
-  // being changed earns the header chip.
-  const changeSetReview = useMemo(() => {
-    if (!changeSetView) return null;
-    const decided = new Set([...changeSetKept, ...changeSetUndone]);
-    // Grouped in the change set's own order: the walk visits the files in the
-    // order the model first touched them, which is the order the chat lists.
-    const byFile = new Map<string, ChangeSetRow[]>();
-    for (const row of changeSetView.rows) {
-      if (row.superseded || decided.has(row.id)) continue;
-      const rows = byFile.get(row.file);
-      if (rows) rows.push(row);
-      else byFile.set(row.file, [row]);
-    }
-    const inputs: ReviewFileInput[] = [...byFile].map(([file, rows]) => ({
-      file,
-      rows,
-      // A file the editor does not hold has no current text to diff: the pane
-      // then falls back to the rows' own diffs rather than claiming a document.
-      before: changeSetFrames[file] ?? changeSetView.frames[file],
-      after: configFiles[file] ? textForFile(file) : null,
-    }));
-    const { models, stops } = buildReviewStops(inputs);
-    if (stops.length === 0) return null;
-    // The document to show: the file being edited when it has changes, else
-    // the first change of the walk — the review opens on a change, never on a
-    // file that happens to have none.
-    const file = models[activeFile] ? activeFile : stops[0].file;
-    return { model: models[file], stops };
-  }, [
-    changeSetView, changeSetKept, changeSetUndone, changeSetFrames,
-    activeFile, configFiles, textForFile,
-  ]);
-  const paneModel = changeSetReview?.model ?? pendingEdit;
-  // Which path raised the pending surface decides the takeover rule: the
-  // change-set rows are ALREADY in the buffer (review tints them in place),
-  // the approval-card rows are a proposal the buffer does not carry yet (it
-  // keeps the read-only takeover). See `paneModeFor` for the rule.
-  const pendingIsLive = paneModel != null && paneModel === changeSetReview?.model;
+  // What gets rendered is decided by `paneModeFor` (pure, tested): another
+  // view is never taken over, and a highlight over the very lines being
+  // changed earns the header chip. The live path keeps the buffer editable
+  // (the Zed-model takeover); its explicit "Show diff" flips to the compact
+  // MIRROR, never the whole-document read-only takeover (that is the card
+  // path's, for a proposal the buffer does not carry yet).
+  const ledgerFiles = useMemo(
+    () => ledgerFrom({ reviewFrames: changeSetReviewFrames, liveTexts, configFiles }),
+    [changeSetReviewFrames, liveTexts, configFiles],
+  );
+  const reviewStopList = useMemo(() => stopsFrom(ledgerFiles), [ledgerFiles]);
+  const ledgerSections = useMemo(() => groupLedgerSections(ledgerFiles), [ledgerFiles]);
+  const hasReview = reviewStopList.length > 0;
+  // The change-set review is LIVE (the edits are already in the buffer) and
+  // takes precedence: a card model is the fallback only when the ledger is
+  // empty.
+  const paneModel = hasReview ? null : pendingEdit;
   const pendingPane = useMemo(
     () => paneModeFor({
       model: paneModel,
       takeover: pendingTakeover,
       isActive,
       selection: selectionReference,
-      live: pendingIsLive,
+      live: hasReview,
+      hasReview,
     }),
-    [paneModel, pendingTakeover, isActive, selectionReference, pendingIsLive],
+    [paneModel, pendingTakeover, isActive, selectionReference, hasReview],
   );
 
-  // In review mode the pending marks live in the ACTIVE file's own text: the
-  // frame for THAT file against the live textarea. No frame (a file the
-  // review never framed, an older server) means no marks — the strip and the
-  // chat still carry the review; the tints are the only thing that needs it.
+  // In review mode the pending marks live in the ACTIVE file's own text: its
+  // frame against the live textarea. A file the review never framed means no
+  // marks — the strip and the chat still carry the review. A file the review
+  // CREATED has a null frame, so its whole live text reads as pending.
   const livePending = useMemo(() => {
-    if (pendingPane !== 'review' || !changeSetReview) return null;
+    if (pendingPane !== 'review') return null;
     if (editTextFile !== activeFile) return null;
-    const frame = changeSetFrames[activeFile] ?? changeSetView?.frames[activeFile];
-    if (typeof frame !== 'string') return null;
-    return livePendingLines(frame, editText);
-  }, [pendingPane, changeSetReview, editTextFile, activeFile, changeSetFrames, changeSetView, editText]);
+    const frame = changeSetReviewFrames[activeFile];
+    if (frame === undefined) return null;
+    return livePendingLines(frame ?? '', editText);
+  }, [pendingPane, editTextFile, activeFile, changeSetReviewFrames, editText]);
 
   // The band layer's rows: one green band per contiguous run of added lines,
   // and one red rule per undecided deletion (at the live line it would return
@@ -770,7 +741,26 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     // Editing the token revives a suggestion that Esc dismissed.
     setCompletionDismissed(null);
     setEditText(newText);
+    // The review's LIVE side must beat the debounced model write: publish the
+    // buffer NOW so a pending marker follows the typing, not the 600ms parse
+    // (Sir, 2026-10-07).
+    useConfigStore.getState().setLiveText(activeFile, newText);
   };
+
+  // The ledger's splice into the ACTIVE file moves the TEXTAREA, not the model
+  // (the editor is the source of truth there; its debounced parse writes the
+  // model afterwards). Register while a file is on screen, and only once the
+  // textarea actually holds that file's text — a splice against the previous
+  // file's buffer would edit the wrong document.
+  useEffect(() => {
+    if (!isActive) return undefined;
+    if (editTextFile !== activeFile) return undefined;
+    setLiveApplier(activeFile, (text: string) => {
+      exportingRef.current = false;
+      setEditText(text);
+    });
+    return () => setLiveApplier(activeFile, null);
+  }, [isActive, activeFile, editTextFile]);
 
   // ── completion sources ──────────────────────────────────────────────────
   const schemas = useConfigStore((s) => s.schemas);
@@ -1935,24 +1925,34 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
         {/* Editor with line numbers and inline issues. In review mode the
             strip rides above the LIVE editor — the buffer is never taken out
             of edit mode (Sir, 2026-10-05); the pending tints are painted into
-            the overlay and the deletions into the gutter. The chip only when
-            the takeover was suppressed or declined; the read-only pane when
-            the user explicitly asked for the diff (or the card path holds). */}
-        {pendingPane === 'chip' && paneModel && (
+            the overlay and the deletions into the gutter. The chip shows when
+            the takeover was declined ("Back to editing"); the compact MIRROR
+            when the user asked for the diff on the LIVE path; the read-only
+            whole-document pane when the CARD path holds. */}
+        {pendingPane === 'chip' && (
           <PendingDiffChip
-            model={paneModel}
+            file={hasReview ? (reviewStopList[0]?.file ?? activeFile) : (pendingEdit?.file ?? '')}
+            label={hasReview
+              ? `${reviewStopList.length} change${reviewStopList.length === 1 ? '' : 's'}`
+              : (pendingEdit?.op ?? '')}
             onShow={() => usePendingEditStore.getState().showDiff()}
           />
         )}
 
-        {pendingPane === 'diff' && paneModel && changeSetReview ? (
+        {pendingPane === 'mirror' ? (
+          <ReviewMirrorPane
+            files={ledgerSections}
+            onKeepRun={(file, key) => keepRun(file, key)}
+            onUndoRun={(file, key) => { void undoRun(file, key); }}
+            onOpenFile={setActiveFile}
+            onHide={() => usePendingEditStore.getState().hideDiff()}
+          />
+        ) : pendingPane === 'diff' && paneModel ? (
           <PendingDiffPane
             model={paneModel}
-            stops={changeSetReview.stops}
-            busy={changeSetBusy}
-            note={changeSetNote}
-            onKeepEdits={(file, ids) => { void keepEditsDecision(file, ids); }}
-            onUndoEdits={(file, ids) => { void undoEditsDecision(file, ids); }}
+            stops={[]}
+            onKeepRun={(file, key) => keepRun(file, key)}
+            onUndoRun={(file, key) => { void undoRun(file, key); }}
             onOpenFile={setActiveFile}
             onHide={() => usePendingEditStore.getState().hideDiff()}
           />
@@ -1963,30 +1963,28 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
             onFocusCapture={() => setEditorFocused(true)}
             onBlurCapture={handleEditorColumnBlur}
           >
-            {pendingPane === 'review' && changeSetReview && (
+            {pendingPane === 'review' && (
               <PendingReviewStrip
-                stops={changeSetReview.stops}
+                stops={reviewStopList}
                 activeFile={activeFile}
-                busy={changeSetBusy}
-                onKeepEdits={(file, ids) => { void keepEditsDecision(file, ids); }}
-                onUndoEdits={(file, ids) => { void undoEditsDecision(file, ids); }}
+                onKeepRun={(file, key) => keepRun(file, key)}
+                onUndoRun={(file, key) => { void undoRun(file, key); }}
                 onOpenFile={setActiveFile}
                 onHide={() => usePendingEditStore.getState().hideDiff()}
                 onRevealStop={(stop, byCursor) => {
-                  // The arrows walked to a change in THIS file: scroll the
-                  // live editor to its line. Scroll ONLY — never jumpToLine,
-                  // which focuses the textarea, collapses the caret, and
-                  // clears the published selection reference: the reviewer
-                  // walking stops must not lose where they were. The opening
-                  // reveal does not move the scroll at all.
+                  // The arrows walked to a run in THIS file: scroll the live
+                  // editor to its line. Scroll ONLY — never jumpToLine, which
+                  // focuses the textarea, collapses the caret, and clears the
+                  // published selection reference: the reviewer walking stops
+                  // must not lose where they were. The opening reveal does not
+                  // move the scroll at all.
                   if (!byCursor) return;
                   const el = textareaRef.current;
                   if (!el) return;
                   const cs = window.getComputedStyle(el);
                   const lineHeight = parseFloat(cs.lineHeight) || 22.75;
                   const paddingTop = parseFloat(cs.paddingTop) || 16;
-                  const lineTop = paddingTop
-                    + (liveLineForContentRow(changeSetReview.model.lines, stop.row) - 1) * lineHeight;
+                  const lineTop = paddingTop + (stop.line - 1) * lineHeight;
                   el.scrollTop = Math.max(0, lineTop - el.clientHeight * 0.2);
                   syncLineNumbersScroll();
                 }}

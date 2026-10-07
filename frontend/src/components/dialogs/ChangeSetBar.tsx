@@ -1,60 +1,51 @@
 /**
  * The post-hoc review summary, shown above the composer.
  *
- * This is the decision surface for a change set (the transcript rows are the
- * record). It shows ONLY what still needs a decision: keeping or undoing an
- * edit removes it from here, the counters count only the remainder, and when
- * nothing is left undecided the whole summary goes away.
+ * This is the chat's decision surface for the review; the transcript rows are
+ * the history. It renders the LEDGER (Sir, 2026-10-07): one row per run of
+ * `diff(FRAME, LIVE)`. A decision is a splice, not a server replay — keeping a
+ * run freezes the live version into the frame and the run leaves the diff;
+ * undoing puts the frame version back and it leaves the diff too. So the list
+ * is exactly what still differs, and when nothing does the whole bar goes away.
  *
- * The header folds the per-file/section list out (▸/▾) — the same gesture as
+ * The header folds the per-file/per-run list out (▸/▾) — the same gesture as
  * the progress strip, rather than a separate "review" button.
- *
- * Undo is expressed as a KEEP LIST and replayed server-side; keep changes
- * nothing in the text (the edit is already applied) and only ends the
- * decision.
  */
 import { useState } from 'react';
 
 import EditDecisionPair from '../EditDecisionPair';
-import type { PendingFile } from '../../utils/changeSet';
+import type { LedgerSectionFile } from '../../services/reviewEngine';
 
 export interface ChangeSetBarProps {
-  /** Undecided edits, grouped by file and section (decided ones are gone). */
-  groups: PendingFile[];
-  totals: { added: number; removed: number };
-  /** A resolve request is in flight — the row is not re-clickable. */
-  busy: boolean;
-  /** Honest note from the last resolution (stale ops, failures). */
-  note?: string | null;
+  /** The review's files, each with its runs already labelled and previewed. */
+  files: LedgerSectionFile[];
   onKeepAll: () => void;
   onUndoAll: () => void;
-  onKeepSection: (file: string, section: string, ids: string[]) => void;
-  onUndoSection: (file: string, section: string, ids: string[]) => void;
-  onKeepFile: (file: string, ids: string[]) => void;
-  onUndoFile: (file: string, ids: string[]) => void;
+  onKeepFile: (file: string) => void;
+  onUndoFile: (file: string) => void;
+  onKeepRun: (file: string, key: string) => void;
+  onUndoRun: (file: string, key: string) => void;
   /** Jump the editor to a file (navigation only). */
   onOpenFile?: (file: string) => void;
 }
 
 const ChangeSetBar: React.FC<ChangeSetBarProps> = ({
-  groups,
-  totals,
-  busy,
-  note,
+  files,
   onKeepAll,
   onUndoAll,
-  onKeepSection,
-  onUndoSection,
   onKeepFile,
   onUndoFile,
+  onKeepRun,
+  onUndoRun,
   onOpenFile,
 }) => {
   const [open, setOpen] = useState(false);
-  const pending = groups.reduce(
-    (sum, file) => sum + file.sections.reduce((n, section) => n + section.ids.length, 0),
-    0,
+  const totalRuns = files.reduce((sum, file) => sum + file.runs.length, 0);
+  if (totalRuns === 0) return null;
+  const totals = files.reduce(
+    (acc, file) => ({ added: acc.added + file.added, removed: acc.removed + file.removed }),
+    { added: 0, removed: 0 },
   );
-  if (pending === 0) return null;
 
   return (
     <div className="border-t border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-3 py-2 text-[10px]">
@@ -69,7 +60,7 @@ const ChangeSetBar: React.FC<ChangeSetBarProps> = ({
           <span className="select-none opacity-60">{open ? '▾' : '▸'}</span>
           Changes
           <span className="rounded-full bg-[var(--color-warning)]/20 px-2 py-0.5 font-medium normal-case tracking-normal text-[var(--color-warning)]">
-            {pending} unreviewed
+            {totalRuns} unreviewed
           </span>
           {totals.added > 0 && <span className="normal-case text-green-400">+{totals.added}</span>}
           {totals.removed > 0 && <span className="normal-case text-red-400">−{totals.removed}</span>}
@@ -78,28 +69,24 @@ const ChangeSetBar: React.FC<ChangeSetBarProps> = ({
         <button
           type="button"
           onClick={onUndoAll}
-          disabled={busy}
-          className="rounded border border-[var(--color-bg-tertiary)] px-2 py-0.5 font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-error)] hover:text-[var(--color-error)] disabled:opacity-40"
-          title="Drop every unreviewed change from this reply"
+          className="rounded border border-[var(--color-bg-tertiary)] px-2 py-0.5 font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-error)] hover:text-[var(--color-error)]"
+          title="Put back every unreviewed change"
         >
-          Reject all
+          Undo all
         </button>
         <button
           type="button"
           onClick={onKeepAll}
-          disabled={busy}
-          className="rounded bg-[var(--color-accent)] px-2 py-0.5 font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
-          title="Keep every unreviewed change from this reply"
+          className="rounded bg-[var(--color-accent)] px-2 py-0.5 font-medium text-white transition-opacity hover:opacity-90"
+          title="Keep every unreviewed change"
         >
           Keep all
         </button>
       </div>
 
-      {note && <p className="mt-1 text-[var(--color-warning)]">{note}</p>}
-
       {open && (
         <div className="mt-2 max-h-56 space-y-2 overflow-y-auto">
-          {groups.map((file) => (
+          {files.map((file) => (
             <div key={file.file} className="rounded border border-[var(--color-bg-tertiary)]">
               <div className="flex items-center gap-2 border-b border-[var(--color-bg-tertiary)] px-2 py-1">
                 <button
@@ -109,43 +96,40 @@ const ChangeSetBar: React.FC<ChangeSetBarProps> = ({
                   title="Show this file"
                 >
                   {file.file}
+                  {file.created && <span className="ml-1 italic text-[var(--color-text-secondary)]">(new file)</span>}
                 </button>
                 {file.added > 0 && <span className="text-green-400">+{file.added}</span>}
                 {file.removed > 0 && <span className="text-red-400">−{file.removed}</span>}
                 <EditDecisionPair
-                  busy={busy}
+                  busy={false}
                   keepLabel="Keep file"
                   undoLabel="Undo file"
                   keepTitle={`Keep every change to ${file.file}`}
-                  undoTitle={`Drop every change to ${file.file}`}
-                  onKeep={() => onKeepFile(file.file, file.sections.flatMap((s) => s.ids))}
-                  onUndo={() => onUndoFile(file.file, file.sections.flatMap((s) => s.ids))}
+                  undoTitle={`Put back every change to ${file.file}`}
+                  onKeep={() => onKeepFile(file.file)}
+                  onUndo={() => onUndoFile(file.file)}
                 />
               </div>
-              {file.sections.map((section) => (
-                <div
-                  key={`${file.file}:${section.section}`}
-                  className="flex items-center gap-2 px-2 py-1"
-                >
-                  <span className="min-w-0 flex-1 truncate font-mono text-[var(--color-text-secondary)]">
-                    [{section.section}]
+              {file.runs.map((run) => (
+                <div key={run.key} className="flex items-center gap-2 px-2 py-1">
+                  <span className="min-w-0 flex-1 truncate">
+                    <span className="font-mono text-[var(--color-text-secondary)]">
+                      {run.label || file.file}
+                    </span>
+                    {run.preview && (
+                      <span className="ml-2 font-mono text-[var(--color-text-primary)]">{run.preview}</span>
+                    )}
                   </span>
-                  {section.advisories.error > 0 && (
-                    <span className="text-[var(--color-error)]">✕{section.advisories.error}</span>
-                  )}
-                  {section.advisories.warning > 0 && (
-                    <span className="text-[var(--color-warning)]">⚠{section.advisories.warning}</span>
-                  )}
-                  {section.added > 0 && <span className="text-green-400">+{section.added}</span>}
-                  {section.removed > 0 && <span className="text-red-400">−{section.removed}</span>}
+                  {run.added > 0 && <span className="text-green-400">+{run.added}</span>}
+                  {run.removed > 0 && <span className="text-red-400">−{run.removed}</span>}
                   <EditDecisionPair
-                    busy={busy}
+                    busy={false}
                     keepLabel="Keep"
                     undoLabel="Undo"
-                    keepTitle={`Keep the changes to [${section.section}]`}
-                    undoTitle={`Drop the changes to [${section.section}]`}
-                    onKeep={() => onKeepSection(file.file, section.section, section.ids)}
-                    onUndo={() => onUndoSection(file.file, section.section, section.ids)}
+                    keepTitle={`Keep the change to ${run.label || file.file}`}
+                    undoTitle={`Put back the change to ${run.label || file.file}`}
+                    onKeep={() => onKeepRun(file.file, run.key)}
+                    onUndo={() => onUndoRun(file.file, run.key)}
                   />
                 </div>
               ))}
@@ -153,7 +137,7 @@ const ChangeSetBar: React.FC<ChangeSetBarProps> = ({
           ))}
           <p className="text-[var(--color-text-secondary)]">
             Keeping leaves the change in the editor; undoing takes it out.
-            Undoing a file the model created removes the file.
+            Undoing every change to a file the model created removes the file.
           </p>
         </div>
       )}

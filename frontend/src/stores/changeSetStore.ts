@@ -1,35 +1,31 @@
 /**
  * The live change set under review (post-hoc edit review).
  *
- * A store, not component state: the transcript rows, the footer summary, the
- * text view's diff pane and the save gate all read the SAME set.
+ * A store, not component state: the transcript rows, the footer summary and
+ * the text view's review all read the SAME set.
  *
  * **It is a running total, not a per-reply set** (Sir, 2026-10-02). Sending
  * another message must not clear the edits the last one staged: segments
- * accumulate, oldest first, and a decision can cover edits from several
- * requests. That is also why decisions are tracked as ids, never as text —
- * undoing is a REPLAY of the kept ops on the backend
- * (`POST /ai/chat/changes/resolve`, which takes the whole chain), so the
- * server produces the text and the client only says what survives.
+ * accumulate, oldest first, so the transcript can show every request's rows.
+ * Those rows are now DISPLAY-ONLY history — nothing is decided by id.
  *
- * Decision semantics: keep and undo both END a decision, and a decided edit
- * leaves the summary — the summary is a to-do list. Keeping changes nothing in
- * the text (it is already applied); undoing removes the edit and its effect.
+ * Decisions are the mechanical ledger's (Sir, 2026-10-07):
+ *
+ *     review(file) = diff(FRAME, LIVE)
+ *
+ * This store holds only the FRAME per file — the document as far as the
+ * decisions go — seeded once from the change-set payload and thereafter
+ * spliced by `services/reviewEngine`. There is no kept/undone id list: a
+ * decided run self-records by no longer being a difference, so stale
+ * operations cannot exist and no server call is involved.
  */
 import { create } from 'zustand';
 
 import type { ChangeSetPayload } from '../services/api';
 import {
   buildChangeSetView,
-  fileEditIds,
-  groupRows,
   mergeChangeSetViews,
-  namespacedId,
-  sectionEditIds,
-  totalsForIds,
-  unreviewedIds,
   type ChangeSetView,
-  type PendingFile,
 } from '../utils/changeSet';
 
 /** One request's share of the running total. */
@@ -43,83 +39,40 @@ export interface ChangeSetState {
   segments: ChangeSetSegment[];
   /** The merged review view over every segment (null when nothing is staged). */
   view: ChangeSetView | null;
-  /** Namespaced ids the user KEPT (`requestId:rowId`). */
-  kept: string[];
-  /** Namespaced ids the user UNDID: their effect is gone from the text. */
-  undone: string[];
   /** Rows the user has unfolded (display only, per namespaced id). */
   expanded: string[];
   /**
-   * A decision is being replayed right now.
-   *
-   * Shared, not per-surface: the chat's footer bar and the text view's pane
-   * are two views of ONE review, so a button in either must be disabled while
-   * the other's request is in flight (2026-10-03).
+   * file → the review's FRAME. `null` means the review CREATED the file, so
+   * its whole live text is one green run. A file with no entry is not under
+   * review. Seeded once (`seedFrames`) and thereafter spliced by a keep — an
+   * undo never changes a frame, because the frame is the pre-review state by
+   * definition.
    */
-  busy: boolean;
-  /** Honest note from the last resolution (stale ops, failures, a gone set). */
-  note: string | null;
-  /**
-   * file → the pane's FRAME after the last decision: the document with only
-   * the decided-kept edits applied (design B, Sir 2026-10-03). Empty when
-   * nothing has been decided — the frame is then the pre-review text the
-   * change-set payload carries, and the pane falls back to it.
-   */
-  frames: Record<string, string>;
+  reviewFrames: Record<string, string | null>;
 
   /** Upsert one request's change set (progress rail or the finished reply). */
   setFromStream: (requestId: string | null, payload: ChangeSetPayload | null | undefined) => void;
+  /**
+   * Seed the FRAMES for a request, WITHOUT clobbering a review already in
+   * progress: a file that already has a frame keeps it (the review the user is
+   * in the middle of deciding must survive the next poll tick's payload).
+   */
+  seedFrames: (frames: Record<string, string | null>) => void;
+  /** Replace ONE file's frame (the engine's keep splice). */
+  setReviewFrame: (file: string, frame: string | null) => void;
+  /** Drop ONE file's frame (a created file undone away). */
+  removeReviewFrame: (file: string) => void;
   toggleExpanded: (id: string) => void;
-
-  /** Keep every edit that is still undecided. No replay: it is already applied. */
-  keepAll: () => void;
-  /** Undo every edit that is still undecided. */
-  undoAll: () => void;
-  keepSection: (file: string, section: string, ids?: readonly string[]) => void;
-  undoSection: (file: string, section: string, ids?: readonly string[]) => void;
-  keepFile: (file: string, ids?: readonly string[]) => void;
-  undoFile: (file: string, ids?: readonly string[]) => void;
   /** Forget everything — a new chat, or loading another conversation. */
   clear: () => void;
-
-  /** Every id the user has decided on (kept or undone). */
-  decidedIds: () => string[];
-  /** Edits still awaiting a decision. */
-  pendingIds: () => string[];
-  /** The summary's rows: undecided edits, grouped, with decided ones gone. */
-  pendingGroups: () => PendingFile[];
-  /** Undecided edits for ONE file (what the text view's pane shows). */
-  pendingRowsForFile: (file: string) => ChangeSetView['rows'];
-  /** `+A −R` over what is still undecided. */
-  pendingTotals: () => { added: number; removed: number };
-  /** How many edits still need a decision. */
-  unreviewedCount: () => number;
-  /** The local ids one request may keep (its row ids minus the undone ones). */
-  keptIdsFor: (requestId: string) => string[];
-  /** The local ids one request has DECIDED to keep (undecided excluded). */
-  frameKeptIdsFor: (requestId: string) => string[];
-  /** The whole chain's keep lists, oldest first, for the resolve call. */
-  resolveSegments: () => Array<{
-    requestId: string;
-    keptEditIds: string[];
-    frameKeptEditIds: string[];
-  }>;
 }
 
 const EMPTY = {
   segments: [] as ChangeSetSegment[],
   view: null as ChangeSetView | null,
-  kept: [] as string[],
-  undone: [] as string[],
   expanded: [] as string[],
-  busy: false,
-  note: null as string | null,
-  frames: {} as Record<string, string>,
+  reviewFrames: {} as Record<string, string | null>,
 };
-
-function mergedView(segments: ChangeSetSegment[]): ChangeSetView | null {
-  return mergeChangeSetViews(segments);
-}
 
 export const useChangeSetStore = create<ChangeSetState>((set, get) => ({
   ...EMPTY,
@@ -139,22 +92,39 @@ export const useChangeSetStore = create<ChangeSetState>((set, get) => ({
     } else {
       next = segments.map((segment, i) => (i === index ? { requestId, view } : segment));
     }
-    // Decisions survive the refresh, but only for rows that still exist —
-    // a segment that shrank must not leave orphan decisions behind. When one
-    // IS dropped the pane's frame is stale (it was replayed for a different
-    // decision set), so it goes too: the pane falls back to the file's
-    // pre-review text, which is exact while nothing is decided.
-    const merged = mergedView(next);
+    const merged = mergeChangeSetViews(next);
+    // Unfolded rows that no longer exist are dropped; the frame needs no such
+    // pruning — a decided run has already left the diff by construction.
     const live = new Set(merged?.rows.map((row) => row.id) ?? []);
-    const kept = get().kept.filter((id) => live.has(id));
-    const decisionsDropped = kept.length !== get().kept.length;
     set({
       segments: next,
       view: merged,
-      kept,
-      undone: get().undone.filter((id) => live.has(id)),
       expanded: get().expanded.filter((id) => live.has(id)),
-      frames: decisionsDropped ? {} : get().frames,
+    });
+  },
+
+  seedFrames: (frames) => {
+    const current = get().reviewFrames;
+    const next = { ...current };
+    let changed = false;
+    for (const [file, text] of Object.entries(frames)) {
+      if (file in next) continue;
+      next[file] = text;
+      changed = true;
+    }
+    if (changed) set({ reviewFrames: next });
+  },
+
+  setReviewFrame: (file, frame) => {
+    set((s) => ({ reviewFrames: { ...s.reviewFrames, [file]: frame } }));
+  },
+
+  removeReviewFrame: (file) => {
+    set((s) => {
+      if (!(file in s.reviewFrames)) return s;
+      const next = { ...s.reviewFrames };
+      delete next[file];
+      return { reviewFrames: next };
     });
   },
 
@@ -167,115 +137,5 @@ export const useChangeSetStore = create<ChangeSetState>((set, get) => ({
     });
   },
 
-  keepAll: () => {
-    if (!get().view) return;
-    set({ kept: [...new Set([...get().kept, ...get().pendingIds()])] });
-  },
-
-  undoAll: () => {
-    if (!get().view) return;
-    set({ undone: [...new Set([...get().undone, ...get().pendingIds()])] });
-  },
-
-  keepSection: (file, section, ids) => {
-    const state = get();
-    if (!state.view) return;
-    const target = ids ?? sectionEditIds(state.view, file, section, state.decidedIds());
-    if (target.length === 0) return;
-    set({ kept: [...new Set([...state.kept, ...target])] });
-  },
-
-  undoSection: (file, section, ids) => {
-    const state = get();
-    if (!state.view) return;
-    const target = ids ?? sectionEditIds(state.view, file, section, state.decidedIds());
-    if (target.length === 0) return;
-    set({ undone: [...new Set([...state.undone, ...target])] });
-  },
-
-  keepFile: (file, ids) => {
-    const state = get();
-    if (!state.view) return;
-    const target = ids ?? fileEditIds(state.view, file, state.decidedIds());
-    if (target.length === 0) return;
-    set({ kept: [...new Set([...state.kept, ...target])] });
-  },
-
-  undoFile: (file, ids) => {
-    const state = get();
-    if (!state.view) return;
-    const target = ids ?? fileEditIds(state.view, file, state.decidedIds());
-    if (target.length === 0) return;
-    set({ undone: [...new Set([...state.undone, ...target])] });
-  },
-
   clear: () => set({ ...EMPTY }),
-
-  decidedIds: () => {
-    const { kept, undone } = get();
-    return [...new Set([...kept, ...undone])];
-  },
-
-  pendingIds: () => {
-    const { view } = get();
-    return view ? unreviewedIds(view, get().decidedIds()) : [];
-  },
-
-  pendingGroups: () => {
-    const { view } = get();
-    if (!view) return [];
-    const decided = new Set(get().decidedIds());
-    return groupRows(view.rows.filter((row) => !row.superseded && !decided.has(row.id)));
-  },
-
-  pendingRowsForFile: (file) => {
-    const { view } = get();
-    if (!view) return [];
-    const decided = new Set(get().decidedIds());
-    return view.rows.filter(
-      (row) => !row.superseded && !decided.has(row.id) && row.file === file,
-    );
-  },
-
-  pendingTotals: () => {
-    const { view } = get();
-    if (!view) return { added: 0, removed: 0 };
-    return totalsForIds(view, get().pendingIds());
-  },
-
-  unreviewedCount: () => get().pendingIds().length,
-
-  keptIdsFor: (requestId) => {
-    const { segments, undone } = get();
-    const segment = segments.find((candidate) => candidate.requestId === requestId);
-    if (!segment) return [];
-    const gone = new Set(undone);
-    return segment.view.rows
-      .map((row) => row.id)
-      .filter((localId) => !gone.has(namespacedId(requestId, localId)));
-  },
-
-  frameKeptIdsFor: (requestId) => {
-    // Only the DECIDED keeps: an undecided edit is not in the frame yet, which
-    // is exactly what keeps it marked in the pane (design B).
-    const { segments, kept } = get();
-    const segment = segments.find((candidate) => candidate.requestId === requestId);
-    if (!segment) return [];
-    const decided = new Set(kept);
-    return segment.view.rows
-      .map((row) => row.id)
-      .filter((localId) => decided.has(namespacedId(requestId, localId)));
-  },
-
-  resolveSegments: () => get().segments.map((segment) => ({
-    requestId: segment.requestId,
-    keptEditIds: get().keptIdsFor(segment.requestId),
-    frameKeptEditIds: get().frameKeptIdsFor(segment.requestId),
-  })),
 }));
-
-/** Summary totals over the edits the user still has to decide. */
-export function changeSetTotals(state: ChangeSetState): { added: number; removed: number } {
-  if (!state.view) return { added: 0, removed: 0 };
-  return totalsForIds(state.view, state.pendingIds());
-}
