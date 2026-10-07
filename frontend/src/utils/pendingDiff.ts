@@ -307,16 +307,32 @@ export function paneModeFor(input: {
 export interface LivePendingMarks {
   addedLines: Set<number>;
   removedAnchors: Map<number, number>;
+  /** anchor line -> the removed lines' text, for the hover on the red rule. */
+  removedContents: Map<number, string[]>;
 }
 
 export function livePendingLines(before: string, live: string): LivePendingMarks {
   const addedLines = new Set<number>();
   const removedAnchors = new Map<number, number>();
-  if (before === live) return { addedLines, removedAnchors };
+  const removedContents = new Map<number, string[]>();
+  if (before === live) return { addedLines, removedAnchors, removedContents };
 
   // 1-based number of the NEXT live line.
   let line = 1;
   let pendingRemovals = 0;
+  let pendingText: string[] = [];
+  const absorbRemoval = (value: string) => {
+    const ls = value.split('\n');
+    if (ls.length > 0 && ls[ls.length - 1] === '') ls.pop();
+    pendingText.push(...ls);
+  };
+  const flushRemoval = (anchor: number) => {
+    if (pendingRemovals === 0) return;
+    removedAnchors.set(anchor, (removedAnchors.get(anchor) ?? 0) + pendingRemovals);
+    removedContents.set(anchor, [...(removedContents.get(anchor) ?? []), ...pendingText]);
+    pendingRemovals = 0;
+    pendingText = [];
+  };
   const countLines = (value: string): number => {
     if (value.length === 0) return 0;
     const newlines = value.split('\n').length - 1;
@@ -330,21 +346,16 @@ export function livePendingLines(before: string, live: string): LivePendingMarks
       line += n;
     } else if (part.removed) {
       pendingRemovals += n;
+      absorbRemoval(part.value);
     } else {
-      if (pendingRemovals > 0) {
-        removedAnchors.set(line, (removedAnchors.get(line) ?? 0) + pendingRemovals);
-        pendingRemovals = 0;
-      }
+      flushRemoval(line);
       line += n;
     }
   }
   // Deletions with no following live line: anchor at the last line (or 1 if
   // the live text is empty) so the gutter still says "N lines are gone here".
-  if (pendingRemovals > 0) {
-    const anchor = Math.max(1, line - 1);
-    removedAnchors.set(anchor, (removedAnchors.get(anchor) ?? 0) + pendingRemovals);
-  }
-  return { addedLines, removedAnchors };
+  flushRemoval(Math.max(1, line - 1));
+  return { addedLines, removedAnchors, removedContents };
 }
 
 /**
@@ -363,4 +374,20 @@ export function liveLineForContentRow(lines: readonly DiffLine[], row: number): 
     if (type === 'context' || type === 'added') live += 1;
   }
   return live;
+}
+
+/**
+ * Contiguous runs of 1-based live lines, for full-row band painting: a set of
+ * added lines becomes the fewest `[first, last]` ranges that cover it. Pure
+ * and tested so the band layer is nothing but placement math.
+ */
+export function addedRanges(addedLines: ReadonlySet<number>): Array<[number, number]> {
+  const sorted = [...addedLines].sort((a, b) => a - b);
+  const ranges: Array<[number, number]> = [];
+  for (const line of sorted) {
+    const last = ranges[ranges.length - 1];
+    if (last && line === last[1] + 1) last[1] = line;
+    else ranges.push([line, line]);
+  }
+  return ranges;
 }
