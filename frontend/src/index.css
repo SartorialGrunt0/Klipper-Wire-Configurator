@@ -55,15 +55,28 @@ body {
 }
 
 /* Pending AI marks in the LIVE editor (Zed-model review; intensity fix from
-   the 2026-10-06 dogfood). Two cooperating layers, one per concern:
-   - BAND (.kl-band-*): the full-row background, behind the text, translated
-     with the textarea. Same bg-green-500/15 the mini-diff rows use.
-   - TEXT (.kl-line-pending): the green glyphs — the mini-diff's DOMINANT cue
-     (DiffLines pairs bg-green-500/15 with text-green-400). RenderLine colors
-     tokens with inline styles, so only !important wins the line over to
-     uniform green; losing syntax color on a 2-3 line pending region is the
-     same trade the read-only diff pane already makes. */
-.kl-band-added {
+   the 2026-10-06 dogfood). INLINE by law (Sir + the drift bug, 2026-10-07):
+   the mark is the line's own span in the highlight overlay — painted by the
+   same line box that draws the characters — so it cannot drift from the text
+   at any zoom. The translated band layer this replaces computed row
+   positions OUTSIDE the text and slid −13px by line 702 at 90% browser
+   zoom (Sir's screenshot). Full-row coverage comes from `.kl-row-full`:
+   horizontal padding overflow with an equal negative margin, so the tint
+   stretches across the row while the advance stays net-zero and no text
+   shifts. NEVER add vertical padding here (inline vertical padding grows
+   the line box and changes the rhythm — measured 22.75 → 28.6px).
+   Green = lines the AI added that the reviewer can KEEP (the mini-diff's
+   cue: bg-green-500/15 + text-green-400 glyphs; RenderLine colors tokens
+   with inline styles, so only !important wins the line over — the same
+   trade the read-only diff pane makes). */
+.kl-row-full {
+  padding-right: 100vw;
+  margin-right: -100vw;
+  /* the stretch must not create a second horizontal extent to scroll:
+     the overlay's own scrollWidth rides the textarea's; keep it there. */
+  max-width: none;
+}
+.kl-line-pending {
   background-color: rgb(34 197 94 / 0.15);
 }
 .kl-line-pending,
@@ -71,23 +84,13 @@ body {
   color: #4ade80 !important; /* text-green-400, matching DiffLines */
 }
 /* An undecided deletion has no live line to own, so the row its content
-   would return to carries a red band — the mini-diff's red-row weight,
-   raised past /15 because there are no red glyphs to help it — with a −N
-   badge (removed text in the tooltip). */
-.kl-band-removed {
+   would return to carries the red mark — the mini-diff's red-row weight,
+   raised past /15 because there are no red glyphs to help it. The −N count
+   and removed text live in the gutter (one aligned text block) and the
+   review strip; the row itself stays quiet decoration. */
+.kl-line-removed {
   background-color: rgb(239 68 68 / 0.28);
   box-shadow: inset 0 2px 0 0 rgb(239 68 68 / 0.9);
-}
-.kl-band-removed-badge {
-  position: absolute;
-  left: 4px;
-  top: calc(50% - 8px);
-  padding: 0 4px;
-  border-radius: 4px;
-  background-color: rgb(239 68 68 / 0.35);
-  color: #fca5a5;
-  font: 500 10px/1.4 ui-monospace, 'Cascadia Mono', 'JetBrains Mono', Consolas, monospace;
-  white-space: nowrap;
 }
 
 /* Current-line highlight: ambient "where am I", painted on the line's own

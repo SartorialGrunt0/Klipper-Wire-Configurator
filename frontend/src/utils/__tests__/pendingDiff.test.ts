@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import {
   PANE_DIFF_CONTEXT,
   buildPendingDiffModel,
-  addedRanges,
   liveLineForContentRow,
   livePendingLines,
   paneModeFor,
@@ -400,17 +399,3 @@ describe('paneModeFor with the live (ledger) path', () => {
   });
 });
 
-describe('addedRanges', () => {
-  it('merges contiguous lines into one run', () => {
-    expect(addedRanges(new Set([2, 3, 4]))).toEqual([[2, 4]]);
-  });
-
-  it('splits runs at gaps and handles the empty set', () => {
-    expect(addedRanges(new Set([1, 3, 4, 9]))).toEqual([[1, 1], [3, 4], [9, 9]]);
-    expect(addedRanges(new Set())).toEqual([]);
-  });
-
-  it('sorts unsorted input', () => {
-    expect(addedRanges(new Set([7, 2, 1]))).toEqual([[1, 2], [7, 7]]);
-  });
-});

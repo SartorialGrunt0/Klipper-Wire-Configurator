@@ -183,7 +183,9 @@ describe('tint precedence (editable-pending round, 2026-10-05)', () => {
     const html = buildHighlightedHtml('a = 1\nb = 2', { pendingAdded: new Set([2]) });
     const [first, second] = html.split('\n');
     expect(first).not.toContain('kl-line-pending');
-    expect(second.startsWith('<span class="kl-line-pending">')).toBe(true);
+    // Full-row inline mark (2026-10-07 law): the pending tint stretches
+    // across the row via kl-row-full, still as the line's own inline span.
+    expect(second.startsWith('<span class="kl-line-pending kl-row-full">')).toBe(true);
   });
 
   it('error beats warning beats pending beats current-line', () => {
@@ -198,7 +200,7 @@ describe('tint precedence (editable-pending round, 2026-10-05)', () => {
     expect(rows[0]).toContain('class="kl-line-error"');
     expect(rows[0]).not.toContain('kl-line-current');
     expect(rows[1]).toContain('class="kl-line-warning"');
-    expect(rows[2]).toContain('class="kl-line-pending"');
+    expect(rows[2]).toContain('class="kl-line-pending kl-row-full"');
     expect(rows[2]).not.toContain('kl-line-current'); // pending beats the caret
     expect(rows[3]).not.toContain('kl-line-current'); // only ONE line carries it
     // sanity: current line itself paints when nothing stronger claims it
@@ -213,12 +215,36 @@ describe('tint precedence (editable-pending round, 2026-10-05)', () => {
     expect(blurred).toContain('kl-line-current-unfocused');
   });
 
+  it('an undecided deletion marks the return line red, inline and full-row', () => {
+    const html = buildHighlightedHtml('keep\nreturn\nkeep', {
+      pendingRemoved: new Set([2]),
+      currentLine: 2,
+      currentLineFocused: true,
+    });
+    const rows = html.split('\n');
+    expect(rows[0]).not.toContain('kl-line-removed');
+    expect(rows[1]).toContain('class="kl-line-removed kl-row-full"');
+    expect(rows[1]).not.toContain('kl-line-current'); // red beats the caret
+    expect(rows[2]).not.toContain('kl-line-removed');
+  });
+
+  it('error and warning still beat the pending marks', () => {
+    const html = buildHighlightedHtml('a\nb', {
+      lineSeverities: new Map([[1, 'error' as const]]),
+      pendingAdded: new Set([1]),
+      pendingRemoved: new Set([2]),
+    });
+    const rows = html.split('\n');
+    expect(rows[0]).toContain('class="kl-line-error"');
+    expect(rows[1]).toContain('kl-line-removed');
+  });
+
   it('keeps every tint an inline span around the line markup (drift law)', () => {
     const html = buildHighlightedHtml('[gcode_macro FOO]', {
       pendingAdded: new Set([1]),
       currentLine: 1,
     });
     // The class span WRAPS the section markup rather than replacing it.
-    expect(html).toMatch(/^<span class="kl-line-pending">.*\[/);
+    expect(html).toMatch(/^<span class="kl-line-pending kl-row-full">.*\[/);
   });
 });

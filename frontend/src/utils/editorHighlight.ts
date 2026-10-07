@@ -44,6 +44,14 @@ export interface HighlightOptions {
    */
   pendingAdded?: ReadonlySet<number>;
   /**
+   * 1-based lines where an undecided DELETION would return: painted with the
+   * red row mark (`.kl-line-removed`). Like every other live-editor mark it
+   * is INLINE — the text's own line box paints it, so it cannot drift from
+   * the text at any zoom (the band layer this replaced computed row positions
+   * outside the text and slid −13px by line 702 at 90% zoom, 2026-10-07).
+   */
+  pendingRemoved?: ReadonlySet<number>;
+  /**
    * 1-based line holding the caret, highlighted so "where am I" is ambient
    * (Zed renders it even unfocused). The weakest tint in the stack — see
    * TINT PRECEDENCE on `buildHighlightedHtml`.
@@ -69,6 +77,7 @@ export const TINT_CLASS: Record<'error' | 'warning', string> = {
   warning: 'kl-line-warning',
 };
 const PENDING_CLASS = 'kl-line-pending';
+const REMOVED_CLASS = 'kl-line-removed';
 const CURRENT_CLASS = 'kl-line-current';
 const CURRENT_UNFOCUSED_CLASS = 'kl-line-current-unfocused';
 
@@ -76,12 +85,18 @@ const CURRENT_UNFOCUSED_CLASS = 'kl-line-current-unfocused';
 export function tintClassFor(options: {
   severity?: IssueSeverity;
   pending?: boolean;
+  removed?: boolean;
   current?: boolean;
   focused?: boolean;
 }): string | null {
-  const { severity, pending, current, focused } = options;
+  const { severity, pending, removed, current, focused } = options;
   if (severity === 'error') return TINT_CLASS.error;
   if (severity === 'warning') return TINT_CLASS.warning;
+  // A pending line the reviewer can KEEP and a line an undecided deletion
+  // would RETURN to are mutually exclusive by construction (a live line is
+  // either new or pre-existing), so order between them is a formality; red
+  // first because the red row's return-point is the sharper claim.
+  if (removed) return REMOVED_CLASS;
   if (pending) return PENDING_CLASS;
   if (current) return focused ? CURRENT_CLASS : CURRENT_UNFOCUSED_CLASS;
   return null;
@@ -125,6 +140,7 @@ export function buildHighlightedHtml(text: string, options: HighlightOptions = {
   const severities = options.lineSeverities;
   const ghost = options.ghost;
   const pending = options.pendingAdded;
+  const removed = options.pendingRemoved;
   const current = options.currentLine ?? null;
   return text
     .split('\n')
@@ -142,11 +158,21 @@ export function buildHighlightedHtml(text: string, options: HighlightOptions = {
       const tint = tintClassFor({
         severity: severities?.get(lineNumber),
         pending: pending?.has(lineNumber) ?? false,
+        removed: removed?.has(lineNumber) ?? false,
         current: current === lineNumber,
         focused: options.currentLineFocused,
       });
       if (!tint) return html;
-      return `<span class="${tint}">${html}</span>`;
+      // Pending review marks paint the FULL row (the mini-diff's look) via
+      // the horizontal-overflow trick: padding-right stretches the tint
+      // across the row, the equal negative margin nets the advance back to
+      // zero so the text after it never shifts. Vertical padding is FORBIDDEN
+      // on these spans — inline vertical padding grows the line box and
+      // changes the pitch (measured 22.75 → 28.6px, 2026-10-07), which is
+      // exactly what the overlay must never do: it shares the textarea's
+      // rhythm character for character.
+      const fullRow = tint === PENDING_CLASS || tint === REMOVED_CLASS;
+      return `<span class="${tint}${fullRow ? ' kl-row-full' : ''}">${html}</span>`;
     })
     .join('\n');
 }

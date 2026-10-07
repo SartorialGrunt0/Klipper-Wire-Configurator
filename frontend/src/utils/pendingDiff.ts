@@ -386,18 +386,3 @@ export function liveLineForContentRow(lines: readonly DiffLine[], row: number): 
   return live;
 }
 
-/**
- * Contiguous runs of 1-based live lines, for full-row band painting: a set of
- * added lines becomes the fewest `[first, last]` ranges that cover it. Pure
- * and tested so the band layer is nothing but placement math.
- */
-export function addedRanges(addedLines: ReadonlySet<number>): Array<[number, number]> {
-  const sorted = [...addedLines].sort((a, b) => a - b);
-  const ranges: Array<[number, number]> = [];
-  for (const line of sorted) {
-    const last = ranges[ranges.length - 1];
-    if (last && line === last[1] + 1) last[1] = line;
-    else ranges.push([line, line]);
-  }
-  return ranges;
-}

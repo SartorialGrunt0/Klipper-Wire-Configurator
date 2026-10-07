@@ -33,7 +33,7 @@ import ChatDock from './ChatDock';
 import { ChatBubbleIcon, FileTreeIcon } from './icons';
 import PendingDiffPane, { PendingDiffChip, PendingReviewStrip } from './PendingDiffPane';
 import ReviewMirrorPane from './ReviewMirrorPane';
-import { addedRanges, livePendingLines } from '../utils/pendingDiff';
+import { livePendingLines } from '../utils/pendingDiff';
 import {
   groupLedgerSections,
   keepRun,
@@ -227,21 +227,6 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   // while focus is elsewhere. Tracked on the whole editor column so a brief
   // focus hop to the completion popup does not blink the tint.
   const [editorFocused, setEditorFocused] = useState(false);
-  // Line metrics for the pending band layer, read from the TEXTAREA's own
-  // computed style (one source of truth) and refreshed by the ResizeObserver
-  // below, which fires on zoom and on any box resize. The bands are then pure
-  // arithmetic — `k * lineHeight` — with no per-row layout boxes anywhere,
-  // which is what keeps the e482e63 drift class from returning: there is no
-  // second layout to round differently, only multiples of the textarea's own
-  // rhythm (the same formula jumpToLine and the reveal-scroll already use).
-  const [editorMetrics, setEditorMetrics] = useState({ lineHeight: 22.75, paddingTop: 16 });
-  // The bands span the editor's full scroll width (a short line still gets a
-  // full-row tint — the diff pane's `w-max min-w-full` behavior). The
-  // textarea's scrollWidth is the content width; it is refreshed by the same
-  // observers that keep the gutter in step, plus a passive effect on text.
-  const [bandWidth, setBandWidth] = useState(0);
-  const bandScrollRef = useRef<HTMLDivElement>(null);
-  const bandInnerRef = useRef<HTMLDivElement>(null);
   const [showFileSidebar, setShowFileSidebar] = useState(true);
   const [issueStripCollapsed, setIssueStripCollapsed] = useState(() => readIssueStripCollapsed());
   const [showReferenceViewer, setShowReferenceViewer] = useState(false);
@@ -272,15 +257,6 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
       highlightRef.current.scrollTop = textareaRef.current.scrollTop;
       highlightRef.current.scrollLeft = textareaRef.current.scrollLeft;
     }
-    // The band layer is NOT scrolled — it is TRANSLATED on Y only. The bands
-    // already span the FULL content width (like the diff pane's
-    // `w-max min-w-full` rows), so horizontal scrolling needs nothing; a
-    // second scroll container is what gets its own clamp behavior, and that
-    // is the drift class. One transform, one formula.
-    if (bandInnerRef.current) {
-      bandInnerRef.current.style.transform =
-        `translateY(${-textareaRef.current.scrollTop}px)`;
-    }
   }, []);
 
   // The gutter and the overlay are separate scrolled elements kept in step by
@@ -297,17 +273,6 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
       // After layout, not during it.
       requestAnimationFrame(() => {
         syncLineNumbersScroll();
-        // The band metrics ride the same refresh: zoom and box resize land
-        // here, and the bands are arithmetic on these numbers.
-        const cs = window.getComputedStyle(el);
-        const lineHeight = parseFloat(cs.lineHeight) || 22.75;
-        const paddingTop = parseFloat(cs.paddingTop) || 16;
-        setEditorMetrics((prev) =>
-          prev.lineHeight === lineHeight && prev.paddingTop === paddingTop
-            ? prev
-            : { lineHeight, paddingTop });
-        const sw = el.scrollWidth;
-        setBandWidth((prev) => (prev === sw ? prev : sw));
       });
     });
     observer.observe(el);
@@ -584,37 +549,6 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     return livePendingLines(frame ?? '', editText);
   }, [pendingPane, editTextFile, activeFile, changeSetReviewFrames, editText]);
 
-  // The band layer's rows: one green band per contiguous run of added lines,
-  // and one red rule per undecided deletion (at the live line it would return
-  // to, carrying the removed text in its tooltip — the text is real, from the
-  // frame, not a summary). Keys include the line AND count so a hand edit
-  // that shifts or dissolves a change re-keys the band rather than leaving a
-  // stale one repainted in place.
-  const pendingBands = useMemo(() => {
-    if (!livePending) return [];
-    const bands: Array<{ key: string; kind: 'added' | 'removed'; line: number; count: number; title: string }> = [];
-    for (const [first, last] of addedRanges(livePending.addedLines)) {
-      bands.push({
-        key: `a${first}-${last}`,
-        kind: 'added',
-        line: first,
-        count: last - first + 1,
-        title: 'Added by the AI — undecided',
-      });
-    }
-    for (const [line, count] of livePending.removedAnchors) {
-      const text = livePending.removedContents.get(line) ?? [];
-      bands.push({
-        key: `r${line}-${count}`,
-        kind: 'removed',
-        line,
-        count,
-        title: `${count} line${count === 1 ? '' : 's'} removed by the AI:\n${text.join('\n')}`,
-      });
-    }
-    return bands;
-  }, [livePending]);
-
   // Gutter numbers as ONE text block (see the editor gutter comment): one
   // line per row, severity glyph + number, sharing the textarea's continuous
   // line rhythm so alignment holds at any zoom / device scaling. Inline
@@ -625,15 +559,25 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     return lines
       .map((_line, idx) => {
         const lineNum = idx + 1;
+        // Undecided deletion (review mode): the gutter is ONE aligned text
+        // block, so the −N count rides there rather than in a floating mark —
+        // every live-editor mark must live in the text's own flow or in the
+        // gutter (2026-10-07: the band layer that broke this law slid −13px
+        // deep in a file at 90% zoom). Tooltip: the removed text, real from
+        // the frame.
+        const gone = livePending ? livePending.removedAnchors.get(lineNum) : undefined;
+        const removedMark = gone
+          ? '<span title="' + escapeAttr((livePending?.removedContents.get(lineNum) ?? []).join('\n')) + '"><span style="color:#ef4444">−' + gone + '</span> </span>'
+          : '';
         const lineIssues = issuesByLine.get(lineNum);
-        if (!lineIssues?.length) return String(lineNum);
+        if (!lineIssues?.length) return removedMark + String(lineNum);
         const severity = worstSeverity(lineIssues.map((i) => i.severity)) ?? 'info';
         const spec = ISSUE_MARKER[severity];
         const title = escapeAttr(lineIssues.map((i) => i.text).join('\n'));
-        return `<span title="${title}"><span style="color:${spec.color}">${spec.marker}</span> ${lineNum}</span>`;
+        return removedMark + `<span title="${title}"><span style="color:${spec.color}">${spec.marker}</span> ${lineNum}</span>`;
       })
       .join('\n');
-  }, [editText, issuesByLine]);
+  }, [editText, issuesByLine, livePending]);
 
 
   // Text the search/replace acts on (the active file's live textarea text once
@@ -698,24 +642,18 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     return { line: lineIndex + 1, column, text: completion.ghostText };
   }, [completion, editText]);
 
-  // Content can widen without resizing the box (a long line typed into a
-  // short file): refresh the band span whenever the text changes.
-  useEffect(() => {
-    const el = textareaRef.current;
-    if (!el) return;
-    requestAnimationFrame(() => setBandWidth(el.scrollWidth));
-  }, [editText]);
-
   const highlightedHtml = useMemo(
     () => buildHighlightedHtml(editText, {
       lineSeverities: issueLineSeverities,
       ghost,
-      // Both sources on purpose (dogfood fix 2026-10-06): the band paints
-      // the full row; the overlay tint carries the green TEXT, which is the
-      // mini-diff's dominant cue (DiffLines pairs bg-green-500/15 with
-      // text-green-400). Same pendingLines set feeds both, so they cannot
-      // drift apart on a hand edit.
+      // The marks ARE the text's line boxes now (2026-10-07 inline law):
+      // green rows carry the mini-diff's dominant cue (text-green-400, what
+      // DiffLines pairs with the tint) and red rows mark the line an
+      // undecided deletion would return to. Both sets come from the same
+      // livePendingLines pass, so marks and strip cannot disagree on a hand
+      // edit, and no zoom can move them off their lines.
       pendingAdded: livePending ? livePending.addedLines : undefined,
+      pendingRemoved: livePending ? new Set(livePending.removedAnchors.keys()) : undefined,
       currentLine: caretLine,
       currentLineFocused: editorFocused,
     }),
@@ -2011,45 +1949,17 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
                   dangerouslySetInnerHTML={{ __html: gutterHtml }}
                 />
               </div>
-              {/* Text area with syntax color parsing overlay */}
+              {/* Text area with syntax color parsing overlay. Pending review
+                  marks (if any) ride INSIDE the overlay's own line boxes —
+                  see .kl-line-pending / .kl-line-removed in index.css for
+                  the inline law. There is deliberately no band layer here:
+                  positions computed outside the text drift with fractional
+                  zoom (−13.7px by line 702 at 90%, 2026-10-07). */}
               <div className="relative flex-1 overflow-hidden">
-                {/* Pending AI marks (review mode): full-row bands behind the
-                    text. Green = lines the AI added; a red rule sits at the
-                    line an undecided deletion would return to. ONE translated
-                    element, every position `paddingTop + k * lineHeight` —
-                    pure arithmetic on the textarea's own metrics, no per-row
-                    layout boxes and no second scroller, so the tint cannot
-                    accumulate its own rhythm (the e482e63 drift class). It is
-                    painted UNDER the transparent-text textarea and the
-                    overlay: the glyphs always stay on top. */}
-                <div ref={bandScrollRef} className="absolute inset-0 overflow-hidden pointer-events-none" aria-hidden>
-                  <div ref={bandInnerRef} className="absolute left-0 top-0" style={{ width: bandWidth || undefined }}>
-                    {pendingBands.map((band) => (
-                      <div
-                        key={band.key}
-                        className={band.kind === 'added' ? 'kl-band-added' : 'kl-band-removed'}
-                        title={band.title}
-                        style={{
-                          position: 'absolute',
-                          left: 0,
-                          width: '100%',
-                          top: editorMetrics.paddingTop + (band.line - 1) * editorMetrics.lineHeight,
-                          height: (band.kind === 'added' ? band.count : 1) * editorMetrics.lineHeight,
-                        }}
-                      >
-                        {band.kind === 'removed' && (
-                          <span className="kl-band-removed-badge">
-                            −{band.count}
-                          </span>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
                 <pre
                   ref={highlightRef}
                   aria-hidden
-                  className="pointer-events-none absolute inset-0 overflow-auto p-4 font-mono text-sm leading-relaxed"
+                  className="pointer-events-none absolute inset-0 overflow-hidden p-4 font-mono text-sm leading-relaxed"
                   style={{ margin: 0, tabSize: 4 }}
                   dangerouslySetInnerHTML={{ __html: highlightedHtml }}
                 />
