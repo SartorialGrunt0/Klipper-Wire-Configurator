@@ -29,6 +29,7 @@ import { buildApprovalDiffLines } from './approvalDiff';
 import { parsePatch } from './configDiff';
 import type { ChangeSetRow } from './changeSet';
 import { sectionLabel } from './changeSet';
+import { diffLines } from 'diff';
 
 export interface PendingDiffModel {
   /** Identity of the card this came from (stale-response guard). */
@@ -233,7 +234,7 @@ export function selectionOverlapsChange(
 export type PaneTakeover = 'auto' | 'shown' | 'hidden';
 
 /** What the pane renders right now. */
-export type PendingPaneMode = 'editor' | 'diff' | 'chip';
+export type PendingPaneMode = 'editor' | 'review' | 'diff' | 'chip';
 
 /**
  * The takeover rule, in one place.
@@ -246,16 +247,120 @@ export type PendingPaneMode = 'editor' | 'diff' | 'chip';
  *  - **A highlight over the changed lines wins.** Then we would be taking the
  *    pane out from under someone who is pointing at exactly those lines, so the
  *    header offers the chip instead.
+ *
+ * `review` is the Zed-model takeover (Sir, 2026-10-05): the review strip sits
+ * above the NORMAL, still-editable editor, whose overlay carries the pending
+ * tints — undecided changes never take the buffer out of edit mode. `diff`
+ * stays the explicit read-only whole-document view, reached from the chip or
+ * from the un-applied path below.
+ *
+ * `live` says the pending rows are ALREADY IN the buffer — the post-hoc change
+ * set (edits applied, awaiting keep/undo). Then the takeover rule relaxes:
+ * there is no pane to take away, the tints paint the very lines the reader is
+ * pointing at, and the chip only earns its keep after "Back to editing"
+ * (`hidden`). The APPROVAL-CARD path — a proposal not yet applied, the buffer
+ * still showing `before` — keeps the original rule verbatim: it cannot tint
+ * changes that are not in the text, so the overlap check and the read-only
+ * takeover still apply.
  */
 export function paneModeFor(input: {
   model: PendingDiffModel | null;
   takeover: PaneTakeover;
   isActive: boolean;
   selection: ChatReference | null;
+  /** The pending rows are applied to the live buffer (change-set path). */
+  live?: boolean;
 }): PendingPaneMode {
-  const { model, takeover, isActive, selection } = input;
+  const { model, takeover, isActive, selection, live } = input;
   if (!model || !isActive) return 'editor';
   if (takeover === 'shown') return 'diff';
   if (takeover === 'hidden') return 'chip';
+  if (live) return 'review';
   return selectionOverlapsChange(model, selection) ? 'chip' : 'diff';
+}
+
+
+/**
+ * The pending marks IN THE LIVE EDITOR'S OWN COORDINATES.
+ *
+ * The review mode keeps the buffer live and types into it (Zed's one-buffer
+ * model): the frame law already says a pending change is `before` vs whatever
+ * `textForFile` holds right now, and this exposes exactly that as line marks.
+ * A hand edit INSIDE a pending region shifts the marks along with the text,
+ * because the marks are recomputed from the frame against the live buffer
+ * every time, never patched.
+ *
+ * - `addedLines`     — 1-based live lines that are new vs the frame. Tinted
+ *   green by the overlay.
+ * - `removedAnchors` — live line -> how many frame lines are gone above it.
+ *   A removal has no line to own in the live text, and inventing a phantom
+ *   row would shift the textarea's line rhythm — the drift bug (e482e63) in
+ *   a new costume. So the deletion is ANCHORED to the live line it would
+ *   return to, with its count, shown in the gutter, not in the text.
+ *   A deletion at end-of-file anchors to the last live line (count added to
+ *   whatever anchor it already has); an empty live text anchors to line 1.
+ *
+ * Chunk values from `diffLines` carry their own trailing newlines: a chunk
+ * contributes lines by counting its newlines, and its unterminated tail
+ * (only possible at end of text) is one more line.
+ */
+export interface LivePendingMarks {
+  addedLines: Set<number>;
+  removedAnchors: Map<number, number>;
+}
+
+export function livePendingLines(before: string, live: string): LivePendingMarks {
+  const addedLines = new Set<number>();
+  const removedAnchors = new Map<number, number>();
+  if (before === live) return { addedLines, removedAnchors };
+
+  // 1-based number of the NEXT live line.
+  let line = 1;
+  let pendingRemovals = 0;
+  const countLines = (value: string): number => {
+    if (value.length === 0) return 0;
+    const newlines = value.split('\n').length - 1;
+    return value.endsWith('\n') ? newlines : newlines + 1;
+  };
+  for (const part of diffLines(before, live)) {
+    const n = countLines(part.value);
+    if (n === 0) continue;
+    if (part.added) {
+      for (let i = 0; i < n; i += 1) addedLines.add(line + i);
+      line += n;
+    } else if (part.removed) {
+      pendingRemovals += n;
+    } else {
+      if (pendingRemovals > 0) {
+        removedAnchors.set(line, (removedAnchors.get(line) ?? 0) + pendingRemovals);
+        pendingRemovals = 0;
+      }
+      line += n;
+    }
+  }
+  // Deletions with no following live line: anchor at the last line (or 1 if
+  // the live text is empty) so the gutter still says "N lines are gone here".
+  if (pendingRemovals > 0) {
+    const anchor = Math.max(1, line - 1);
+    removedAnchors.set(anchor, (removedAnchors.get(anchor) ?? 0) + pendingRemovals);
+  }
+  return { addedLines, removedAnchors };
+}
+
+/**
+ * The LIVE editor line a row of the pane's model falls on.
+ *
+ * The model's rows run through the whole document (frame law), so every
+ * context row and every ADDED row is a live line; a removed row is not in
+ * the live text and claims none. Counting the rows before `row` that do own
+ * one gives the 1-based live line for the stop — the strip's arrows can
+ * then scroll the live editor to the change they name.
+ */
+export function liveLineForContentRow(lines: readonly DiffLine[], row: number): number {
+  let live = 1;
+  for (let i = 0; i < row && i < lines.length; i += 1) {
+    const type = lines[i].type;
+    if (type === 'context' || type === 'added') live += 1;
+  }
+  return live;
 }

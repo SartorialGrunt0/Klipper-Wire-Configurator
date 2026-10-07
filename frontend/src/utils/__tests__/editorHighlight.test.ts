@@ -177,3 +177,48 @@ describe('buildHighlightedHtml — inline ghost text', () => {
     expect(buildHighlightedHtml('a\nb', { ghost: null })).toBe(buildHighlightedHtml('a\nb'));
   });
 });
+
+describe('tint precedence (editable-pending round, 2026-10-05)', () => {
+  it('pending paints its line green in the overlay', () => {
+    const html = buildHighlightedHtml('a = 1\nb = 2', { pendingAdded: new Set([2]) });
+    const [first, second] = html.split('\n');
+    expect(first).not.toContain('kl-line-pending');
+    expect(second.startsWith('<span class="kl-line-pending">')).toBe(true);
+  });
+
+  it('error beats warning beats pending beats current-line', () => {
+    // One tint class per line, strongest wins.
+    const html = buildHighlightedHtml('x\ny\nz\nw', {
+      lineSeverities: new Map([[1, 'error' as const], [2, 'warning' as const]]),
+      pendingAdded: new Set([3]),
+      currentLine: 1,
+      currentLineFocused: true,
+    });
+    const rows = html.split('\n');
+    expect(rows[0]).toContain('class="kl-line-error"');
+    expect(rows[0]).not.toContain('kl-line-current');
+    expect(rows[1]).toContain('class="kl-line-warning"');
+    expect(rows[2]).toContain('class="kl-line-pending"');
+    expect(rows[2]).not.toContain('kl-line-current'); // pending beats the caret
+    expect(rows[3]).not.toContain('kl-line-current'); // only ONE line carries it
+    // sanity: current line itself paints when nothing stronger claims it
+    const plain = buildHighlightedHtml('x\ny', { currentLine: 2, currentLineFocused: true });
+    expect(plain.split('\n')[1]).toContain('class="kl-line-current"');
+  });
+
+  it('an unfocused caret line paints the fainter class', () => {
+    const focused = buildHighlightedHtml('x', { currentLine: 1, currentLineFocused: true });
+    const blurred = buildHighlightedHtml('x', { currentLine: 1, currentLineFocused: false });
+    expect(focused).toContain('kl-line-current"');
+    expect(blurred).toContain('kl-line-current-unfocused');
+  });
+
+  it('keeps every tint an inline span around the line markup (drift law)', () => {
+    const html = buildHighlightedHtml('[gcode_macro FOO]', {
+      pendingAdded: new Set([1]),
+      currentLine: 1,
+    });
+    // The class span WRAPS the section markup rather than replacing it.
+    expect(html).toMatch(/^<span class="kl-line-pending">.*\[/);
+  });
+});

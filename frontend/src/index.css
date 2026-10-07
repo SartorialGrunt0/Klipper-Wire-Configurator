@@ -54,6 +54,24 @@ body {
   background-color: var(--color-warning-tint);
 }
 
+/* Pending AI change in the LIVE editor (Zed-model review, 2026-10-05): the
+   same green the read-only diff pane paints added rows (bg-green-500/15), so
+   "this line is the AI's" reads identically in both views. */
+.kl-line-pending {
+  background-color: rgb(34 197 94 / 0.15);
+}
+
+/* Current-line highlight: ambient "where am I", painted on the line's own
+   inline span like every other tint. Stronger while the editor has focus,
+   fainter without (Zed keeps it visible when focus is elsewhere); the weakest
+   tint in the precedence stack. */
+.kl-line-current {
+  background-color: rgb(255 255 255 / 0.06);
+}
+.kl-line-current-unfocused {
+  background-color: rgb(255 255 255 / 0.03);
+}
+
 /* Ghost text: a suggestion, not content. Uses the comment colour so it reads
    as "not really there" at a glance — without it the suggestion is the same
    colour as the code and looks like text the user already typed. */

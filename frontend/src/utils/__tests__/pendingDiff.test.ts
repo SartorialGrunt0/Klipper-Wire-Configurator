@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   PANE_DIFF_CONTEXT,
   buildPendingDiffModel,
+  liveLineForContentRow,
+  livePendingLines,
   paneModeFor,
   selectionOverlapsChange,
   type PendingDiffModel,
@@ -302,5 +304,88 @@ microsteps: 16
       row({ diffText: '@@ -4,3 +4,3 @@\n context\n-max_accel: 8000\n+max_accel: 12000' }),
     ], 'printer.cfg');
     expect(model?.changedLines).toEqual([5]);
+  });
+});
+
+describe('livePendingLines', () => {
+  it('marks nothing when the frame equals the live text', () => {
+    const marks = livePendingLines(BEFORE, BEFORE);
+    expect(marks.addedLines.size).toBe(0);
+    expect(marks.removedAnchors.size).toBe(0);
+  });
+
+  it('marks an added line and anchors a removal to the line it would return to', () => {
+    const frame = 'a\nb\nc\n';
+    const live = 'a\nB\nc\nd\n';
+    const marks = livePendingLines(frame, live);
+    expect([...marks.addedLines]).toEqual([2, 4]); // 'B' added; 'd' added
+    // 'b' removed; the live line following the deletion is 'c' at line 3.
+    expect(marks.removedAnchors.get(3)).toBe(1);
+  });
+
+  it('tracks the marks as the user hand-edits ABOVE a pending change', () => {
+    // The frame is the pre-review text; the live text grew a line at the top.
+    // The pending mark must ride the added line, not stay at the old number.
+    const frame = 'x = 1\n';
+    const pending = 'x = 2\n';
+    const marks1 = livePendingLines(frame, pending);
+    expect([...marks1.addedLines]).toEqual([1]);
+    const handEdited = '# note\nx = 2\n';
+    const marks2 = livePendingLines(frame, handEdited);
+    expect([...marks2.addedLines]).toEqual([1, 2]); // note (human) + x = 2 (AI)
+  });
+
+  it('anchors an end-of-file deletion to the last live line', () => {
+    const marks = livePendingLines('a\nb\nc\n', 'a\nb\n');
+    expect(marks.removedAnchors.get(2)).toBe(1);
+  });
+
+  it('anchors everything to line 1 when the live text is empty', () => {
+    const marks = livePendingLines('a\nb\n', '');
+    expect(marks.removedAnchors.get(1)).toBe(2);
+  });
+
+  it('counts a multi-line chunk, newline-terminated or not', () => {
+    const marks = livePendingLines('a\n', 'a\nb\nc');
+    expect([...marks.addedLines]).toEqual([2, 3]);
+  });
+});
+
+describe('liveLineForContentRow', () => {
+  const rows = parsePatch(createConfigPatch('f', 'a\nb\nc\n', 'a\nB\nc\n'));
+  const contentRows = rows.filter((r) => r.type !== 'header');
+  // content rows: context 'a', removed 'b', added 'B', context 'c', (EOF ctx)
+
+  it('maps rows before a removal to their live lines', () => {
+    expect(liveLineForContentRow(contentRows, 0)).toBe(1); // 'a'
+  });
+
+  it('does not let a removed row advance the live line count', () => {
+    // row 2 is the added 'B': one context line ('a') lives before it.
+    expect(liveLineForContentRow(contentRows, 2)).toBe(2);
+    // the trailing context 'c' sits on live line 3 despite the removal above.
+    expect(liveLineForContentRow(contentRows, 3)).toBe(3);
+  });
+});
+
+describe('paneModeFor with the live (change-set) path', () => {
+  const model = buildPendingDiffModel(card())!;
+  const base = { isActive: true } as const;
+
+  it('reviews in place, even while the highlight covers the changed lines', () => {
+    // The tints paint the very lines the reader is pointing at — there is no
+    // pane to take away from them, so the chip rule does not apply.
+    expect(paneModeFor({ ...base, model, takeover: 'auto', selection: null, live: true })).toBe('review');
+    expect(paneModeFor({ ...base, model, takeover: 'auto', selection: lines(4, 4), live: true })).toBe('review');
+  });
+
+  it('keeps the explicit overrides: chip click shows the read-only diff, Back to editing chips', () => {
+    expect(paneModeFor({ ...base, model, takeover: 'shown', selection: null, live: true })).toBe('diff');
+    expect(paneModeFor({ ...base, model, takeover: 'hidden', selection: null, live: true })).toBe('chip');
+  });
+
+  it('never reviews from another view or with no model', () => {
+    expect(paneModeFor({ model, takeover: 'auto', isActive: false, selection: null, live: true })).toBe('editor');
+    expect(paneModeFor({ model: null, takeover: 'auto', isActive: true, selection: null, live: true })).toBe('editor');
   });
 });

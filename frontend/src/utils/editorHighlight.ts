@@ -37,12 +37,55 @@ export interface HighlightOptions {
    * already exists and cannot move the text.
    */
   ghost?: { line: number; column: number; text: string } | null;
+  /**
+   * 1-based live lines that carry an undecided AI change (Zed-model review:
+   * pending changes tint the LIVE buffer instead of replacing it). Same
+   * inline-span rule as the severity tints.
+   */
+  pendingAdded?: ReadonlySet<number>;
+  /**
+   * 1-based line holding the caret, highlighted so "where am I" is ambient
+   * (Zed renders it even unfocused). The weakest tint in the stack — see
+   * TINT PRECEDENCE on `buildHighlightedHtml`.
+   */
+  currentLine?: number | null;
+  /** Focused editor: the caret line paints stronger than an unfocused one. */
+  currentLineFocused?: boolean;
 }
 
+/**
+ * TINT PRECEDENCE — designed once, in the editable-pending round (2026-10-05),
+ * so the highlights cannot fight one another as the stack grows:
+ *
+ *   error > warning > pending > current-line (focused or not)
+ *
+ * ONE tint class per line, strongest wins; a pending line that is also an
+ * error line shows red (the AI's change being wrong IS the news), and a
+ * pending line under the caret shows green — position loses to a claim about
+ * the content, because the caret marker is ambient, not information.
+ */
 export const TINT_CLASS: Record<'error' | 'warning', string> = {
   error: 'kl-line-error',
   warning: 'kl-line-warning',
 };
+const PENDING_CLASS = 'kl-line-pending';
+const CURRENT_CLASS = 'kl-line-current';
+const CURRENT_UNFOCUSED_CLASS = 'kl-line-current-unfocused';
+
+/** The tint class for one line under the precedence above, or null. */
+export function tintClassFor(options: {
+  severity?: IssueSeverity;
+  pending?: boolean;
+  current?: boolean;
+  focused?: boolean;
+}): string | null {
+  const { severity, pending, current, focused } = options;
+  if (severity === 'error') return TINT_CLASS.error;
+  if (severity === 'warning') return TINT_CLASS.warning;
+  if (pending) return PENDING_CLASS;
+  if (current) return focused ? CURRENT_CLASS : CURRENT_UNFOCUSED_CLASS;
+  return null;
+}
 
 export function escapeHtml(value: string): string {
   return value
@@ -81,6 +124,8 @@ export function ghostHtml(text: string): string {
 export function buildHighlightedHtml(text: string, options: HighlightOptions = {}): string {
   const severities = options.lineSeverities;
   const ghost = options.ghost;
+  const pending = options.pendingAdded;
+  const current = options.currentLine ?? null;
   return text
     .split('\n')
     .map((line, idx) => {
@@ -94,9 +139,14 @@ export function buildHighlightedHtml(text: string, options: HighlightOptions = {
           renderLine(line.slice(ghost.column))
         : renderLine(line);
 
-      const severity = severities?.get(lineNumber);
-      if (severity !== 'error' && severity !== 'warning') return html;
-      return `<span class="${TINT_CLASS[severity]}">${html}</span>`;
+      const tint = tintClassFor({
+        severity: severities?.get(lineNumber),
+        pending: pending?.has(lineNumber) ?? false,
+        current: current === lineNumber,
+        focused: options.currentLineFocused,
+      });
+      if (!tint) return html;
+      return `<span class="${tint}">${html}</span>`;
     })
     .join('\n');
 }

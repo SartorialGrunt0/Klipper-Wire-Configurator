@@ -31,8 +31,9 @@ import EditorIssueStrip from './EditorIssueStrip';
 import ConfigTree from './ConfigTree';
 import ChatDock from './ChatDock';
 import { ChatBubbleIcon, FileTreeIcon } from './icons';
-import PendingDiffPane, { PendingDiffChip } from './PendingDiffPane';
+import PendingDiffPane, { PendingDiffChip, PendingReviewStrip } from './PendingDiffPane';
 import { buildReviewStops, type ReviewFileInput } from '../utils/pendingChanges';
+import { liveLineForContentRow, livePendingLines } from '../utils/pendingDiff';
 import type { ChangeSetRow } from '../utils/changeSet';
 import {
   keepEdits as keepEditsDecision,
@@ -215,6 +216,15 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   /** True while an IME candidate window owns the keyboard. */
   const composingRef = useRef(false);
   const [caret, setCaret] = useState(0);
+  // The caret's 1-based LINE (current-line highlight). Derived from the DOM
+  // caret on every move in `syncCaret`, not from `caret`: a highlight that
+  // lags a render behind the caret is worse than none. 0 = no line painted
+  // (e.g. before the first caret event).
+  const [caretLine, setCaretLine] = useState(0);
+  // Focus for the current-line tint: Zed keeps the line visible (fainter)
+  // while focus is elsewhere. Tracked on the whole editor column so a brief
+  // focus hop to the completion popup does not blink the tint.
+  const [editorFocused, setEditorFocused] = useState(false);
   const [showFileSidebar, setShowFileSidebar] = useState(true);
   const [issueStripCollapsed, setIssueStripCollapsed] = useState(() => readIssueStripCollapsed());
   const [showReferenceViewer, setShowReferenceViewer] = useState(false);
@@ -458,26 +468,6 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     );
   }, [activeFile, handleAcknowledgeWarning]);
 
-  // Gutter numbers as ONE text block (see the editor gutter comment): one
-  // line per row, severity glyph + number, sharing the textarea's continuous
-  // line rhythm so alignment holds at any zoom / device scaling. Inline
-  // per-line spans keep the hover title without creating per-row layout boxes.
-  const gutterHtml = useMemo(() => {
-    const escapeAttr = (value: string) => escapeHtml(value).replace(/"/g, '&quot;');
-    const lines = editText.split('\n');
-    return lines
-      .map((_line, idx) => {
-        const lineNum = idx + 1;
-        const lineIssues = issuesByLine.get(lineNum);
-        if (!lineIssues?.length) return String(lineNum);
-        const severity = worstSeverity(lineIssues.map((i) => i.severity)) ?? 'info';
-        const spec = ISSUE_MARKER[severity];
-        const title = escapeAttr(lineIssues.map((i) => i.text).join('\n'));
-        return `<span title="${title}"><span style="color:${spec.color}">${spec.marker}</span> ${lineNum}</span>`;
-      })
-      .join('\n');
-  }, [editText, issuesByLine]);
-
   // All files as text for search — exported via backend for accuracy
   const [allFilesText, setAllFilesText] = useState<Record<string, string>>({});
   useEffect(() => {
@@ -558,15 +548,64 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     activeFile, configFiles, textForFile,
   ]);
   const paneModel = changeSetReview?.model ?? pendingEdit;
+  // Which path raised the pending surface decides the takeover rule: the
+  // change-set rows are ALREADY in the buffer (review tints them in place),
+  // the approval-card rows are a proposal the buffer does not carry yet (it
+  // keeps the read-only takeover). See `paneModeFor` for the rule.
+  const pendingIsLive = paneModel != null && paneModel === changeSetReview?.model;
   const pendingPane = useMemo(
     () => paneModeFor({
       model: paneModel,
       takeover: pendingTakeover,
       isActive,
       selection: selectionReference,
+      live: pendingIsLive,
     }),
-    [paneModel, pendingTakeover, isActive, selectionReference],
+    [paneModel, pendingTakeover, isActive, selectionReference, pendingIsLive],
   );
+
+  // In review mode the pending marks live in the ACTIVE file's own text: the
+  // frame for THAT file against the live textarea. No frame (a file the
+  // review never framed, an older server) means no marks — the strip and the
+  // chat still carry the review; the tints are the only thing that needs it.
+  const livePending = useMemo(() => {
+    if (pendingPane !== 'review' || !changeSetReview) return null;
+    if (editTextFile !== activeFile) return null;
+    const frame = changeSetFrames[activeFile] ?? changeSetView?.frames[activeFile];
+    if (typeof frame !== 'string') return null;
+    return livePendingLines(frame, editText);
+  }, [pendingPane, changeSetReview, editTextFile, activeFile, changeSetFrames, changeSetView, editText]);
+
+  // Gutter numbers as ONE text block (see the editor gutter comment): one
+  // line per row, severity glyph + number, sharing the textarea's continuous
+  // line rhythm so alignment holds at any zoom / device scaling. Inline
+  // per-line spans keep the hover title without creating per-row layout boxes.
+  const gutterHtml = useMemo(() => {
+    const escapeAttr = (value: string) => escapeHtml(value).replace(/"/g, '&quot;');
+    const removed = livePending?.removedAnchors;
+    const lines = editText.split('\n');
+    return lines
+      .map((_line, idx) => {
+        const lineNum = idx + 1;
+        // Undecided AI deletions anchor HERE (the line they would return to),
+        // with their count: a phantom red row in the text would shift the
+        // textarea's line rhythm — the drift bug (e482e63) in a new costume —
+        // so the gutter carries them instead. Inline spans only, same rhythm
+        // as the issue marker this block already paints.
+        const gone = removed?.get(lineNum);
+        const goneMark = gone
+          ? `<span title="${escapeAttr(`${gone} line${gone === 1 ? '' : 's'} removed by the AI`)}" style="color:var(--color-error,#f87171)">&#8722;${gone} </span>`
+          : '';
+        const lineIssues = issuesByLine.get(lineNum);
+        if (!lineIssues?.length) return `${goneMark}${lineNum}`;
+        const severity = worstSeverity(lineIssues.map((i) => i.severity)) ?? 'info';
+        const spec = ISSUE_MARKER[severity];
+        const title = escapeAttr(lineIssues.map((i) => i.text).join('\n'));
+        return `${goneMark}<span title="${title}"><span style="color:${spec.color}">${spec.marker}</span> ${lineNum}</span>`;
+      })
+      .join('\n');
+  }, [editText, issuesByLine, livePending]);
+
 
   // Text the search/replace acts on (the active file's live textarea text once
   // it belongs to that file, otherwise the stored text).
@@ -631,8 +670,14 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   }, [completion, editText]);
 
   const highlightedHtml = useMemo(
-    () => buildHighlightedHtml(editText, { lineSeverities: issueLineSeverities, ghost }),
-    [editText, issueLineSeverities, ghost],
+    () => buildHighlightedHtml(editText, {
+      lineSeverities: issueLineSeverities,
+      ghost,
+      pendingAdded: livePending?.addedLines,
+      currentLine: caretLine,
+      currentLineFocused: editorFocused,
+    }),
+    [editText, issueLineSeverities, ghost, livePending, caretLine, editorFocused],
   );
 
   // Focus search input when panel opens
@@ -738,8 +783,21 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   /** Caret bookkeeping shared by the textarea's key/click/select handlers. */
   const syncCaret = useCallback((el: HTMLTextAreaElement) => {
     setCaret(el.selectionStart);
+    // The caret LINE for the current-line highlight, computed from the DOM on
+    // every caret move — the `caret` state lags a render while typing, and a
+    // highlight one line behind the caret is worse than none.
+    setCaretLine(caretLineColumn(el.value, el.selectionStart).lineIndex + 1);
     updateCompletion(el);
   }, [updateCompletion]);
+
+  // Focus for the current-line tint: an OUTBOUND blur (to a node outside the
+  // editor column) dims the line; the state lives beside `caretLine`.
+  const handleEditorColumnBlur = useCallback((event: React.FocusEvent<HTMLDivElement>) => {
+    const container = event.currentTarget;
+    const next = event.relatedTarget as Node | null;
+    if (next && container.contains(next)) return;
+    setEditorFocused(false);
+  }, []);
 
   // ── Editor selection → chat reference ───────────────────────────
   // Highlighting lines IS the act of pointing at them, so the dock's
@@ -937,6 +995,10 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     // the message carried the same text twice (Cliff, 2026-10-04). A real
     // drag/highlight still publishes: that is a user pointing at lines.
     textareaRef.current.setSelectionRange(charPos, charPos);
+    // A jump moves the caret: paint the current-line highlight on the target
+    // line immediately (the programmatic move does not reliably fire a select
+    // event, same reason the reference slot is cleared by hand below).
+    setCaretLine(line);
     // Clearing the published slot here rather than relying on the textarea to
     // fire an event: a programmatic move does not always fire one, and a stale
     // chip would keep riding along with the next message.
@@ -1016,13 +1078,16 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     };
   }, [stopDragAutoScroll]);
 
-  // Follow a pending change to its file, so "Back to editing" lands where the
-  // change is. A file that is not loaded (new_file / delete_file) is left
+  // Follow a pending change to its file, so the surface lands where the
+  // change is — "Back to editing" from the card path, and the review's opening
+  // stop / cross-file arrow on the live path (the strip asks via onOpenFile;
+  // this is the same switch, also covering the review opening on another
+  // file). A file that is not loaded (new_file / delete_file) is left
   // alone: the diff pane renders from the card, and there is nothing to switch
-  // the editor TO. (The change-set pane is already per active file, so this
-  // only ever fires for the dormant approval card.)
+  // the editor TO.
   useEffect(() => {
-    if (pendingPane !== 'diff' || !paneModel) return;
+    if (pendingPane !== 'diff' && pendingPane !== 'review') return;
+    if (!paneModel) return;
     if (paneModel.file === activeFile) return;
     if (!configFiles[paneModel.file]) return;
     setActiveFile(paneModel.file);
@@ -1796,10 +1861,12 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
           </div>
         )}
 
-        {/* Pending AI change: the chip when the takeover was suppressed (the
-            user is pointing at the changed lines, or asked to keep editing),
-            the diff pane when it was not. The pane reviews from here — its
-            keep/undo go through the same engine as the chat's footer bar. */}
+        {/* Editor with line numbers and inline issues. In review mode the
+            strip rides above the LIVE editor — the buffer is never taken out
+            of edit mode (Sir, 2026-10-05); the pending tints are painted into
+            the overlay and the deletions into the gutter. The chip only when
+            the takeover was suppressed or declined; the read-only pane when
+            the user explicitly asked for the diff (or the card path holds). */}
         {pendingPane === 'chip' && paneModel && (
           <PendingDiffChip
             model={paneModel}
@@ -1807,7 +1874,6 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
           />
         )}
 
-        {/* Editor with line numbers and inline issues */}
         {pendingPane === 'diff' && paneModel && changeSetReview ? (
           <PendingDiffPane
             model={paneModel}
@@ -1821,7 +1887,40 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
           />
         ) : (
         <div className="flex-1 flex overflow-hidden">
-          <div className="flex flex-col flex-1 min-w-0 relative">
+          <div
+            className="flex flex-col flex-1 min-w-0 relative"
+            onFocusCapture={() => setEditorFocused(true)}
+            onBlurCapture={handleEditorColumnBlur}
+          >
+            {pendingPane === 'review' && changeSetReview && (
+              <PendingReviewStrip
+                stops={changeSetReview.stops}
+                activeFile={activeFile}
+                busy={changeSetBusy}
+                onKeepEdits={(file, ids) => { void keepEditsDecision(file, ids); }}
+                onUndoEdits={(file, ids) => { void undoEditsDecision(file, ids); }}
+                onOpenFile={setActiveFile}
+                onHide={() => usePendingEditStore.getState().hideDiff()}
+                onRevealStop={(stop, byCursor) => {
+                  // The arrows walked to a change in THIS file: scroll the
+                  // live editor to its line. Scroll ONLY — never jumpToLine,
+                  // which focuses the textarea, collapses the caret, and
+                  // clears the published selection reference: the reviewer
+                  // walking stops must not lose where they were. The opening
+                  // reveal does not move the scroll at all.
+                  if (!byCursor) return;
+                  const el = textareaRef.current;
+                  if (!el) return;
+                  const cs = window.getComputedStyle(el);
+                  const lineHeight = parseFloat(cs.lineHeight) || 22.75;
+                  const paddingTop = parseFloat(cs.paddingTop) || 16;
+                  const lineTop = paddingTop
+                    + (liveLineForContentRow(changeSetReview.model.lines, stop.row) - 1) * lineHeight;
+                  el.scrollTop = Math.max(0, lineTop - el.clientHeight * 0.2);
+                  syncLineNumbersScroll();
+                }}
+              />
+            )}
             <div className="flex-1 flex overflow-hidden" ref={editorScrollRef}>
               {/* Line numbers + issue indicators.
                   Rendered as ONE text block (like the textarea's own lines)

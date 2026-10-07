@@ -11,17 +11,22 @@ import { stopIndexForAnchor, type PendingStop } from '../utils/pendingChanges';
  * Two shapes over one model, so the pane and the card can never disagree about
  * which change is waiting:
  *
- *  - `PendingDiffPane` — the takeover. It renders the WHOLE document with the
- *    still-undecided changes marked (`buildUnreviewedDiffModel`), and its top
- *    strip reviews them: prev/next, `change 2 of 5 · printer.cfg ·
- *    [stepper_x] microsteps`, and Keep/Undo **for the change it is showing**.
- *    Whole-file and per-section decisions, and the `+N −M` totals, live in the
- *    chat's summary bar — this strip keeps one job.
+ *  - `PendingReviewStrip` — the review cursor: prev/next, `change 2 of 5 ·
+ *    printer.cfg · [stepper_x] microsteps`, and Keep/Undo **for the change it
+ *    is showing**. It is chrome, so it sits above BOTH review surfaces: the
+ *    read-only diff pane (`'diff'`) and the live editable editor with pending
+ *    tints (`'review'`, the Zed-model takeover, Sir 2026-10-05). Whole-file
+ *    and per-section decisions, and the `+N −M` totals, live in the chat's
+ *    summary bar — this strip keeps one job.
  *
  *    The count and the arrows span EVERY file in the review (Sir, 2026-10-04),
  *    so the arrows cross files: moving to a change that lives elsewhere asks
  *    the text view to switch to that file, and the strip names the file it is
  *    about to show.
+ *  - `PendingDiffPane` — the read-only takeover: the strip above `DiffLines`
+ *    rendering the WHOLE document with the still-undecided changes marked
+ *    (`buildUnreviewedDiffModel`), plus a Keep/Undo pair anchored at each
+ *    change's first row.
  *  - `PendingDiffChip` — the header strip shown when the takeover was
  *    suppressed (the user is highlighting the very lines being changed) or
  *    declined ("Back to editing").
@@ -54,15 +59,15 @@ const ROW_PAIR_CLASS =
   'flex items-center rounded border border-[var(--color-bg-tertiary)] '
   + 'bg-[var(--color-bg-secondary)] p-0.5 shadow-lg';
 
-export interface PendingDiffPaneProps {
-  model: PendingDiffModel;
+export interface PendingReviewStripProps {
   /**
    * Every undecided change in the review, across EVERY file, in walk order.
    * The one the cursor names may live in another file — see `onOpenFile`.
    */
   stops: PendingStop[];
+  /** The file rendered right now; the cursor opens on its first change. */
+  activeFile: string;
   busy: boolean;
-  note: string | null;
   /** Keep / undo the change currently shown. */
   onKeepEdits: (file: string, ids: string[]) => void;
   onUndoEdits: (file: string, ids: string[]) => void;
@@ -71,18 +76,31 @@ export interface PendingDiffPaneProps {
    * to show it: the cursor's file and the rendered document must agree.
    */
   onOpenFile: (file: string) => void;
-  /** User asked to keep editing — the pane returns to the buffer. */
+  /** Fold the strip away (Back to editing) — the takeover declines itself. */
   onHide: () => void;
+  /**
+   * The cursor moved (or the review re-pointed it): reveal the stop. The diff
+   * pane scrolls its rows; the live editor scrolls to the stop's LIVE line.
+   * `revealedByCursor` is false for the opening reveal of a freshly mounted
+   * strip — a surface that just appeared should not yank the reader's scroll
+   * (the diff pane is new, so scrolling there is fine; the live editor is
+   * where the reader already was).
+   */
+  onRevealStop?: (stop: PendingStop, revealedByCursor: boolean) => void;
 }
 
-export default function PendingDiffPane({
-  model, stops, busy, note, onKeepEdits, onUndoEdits, onOpenFile, onHide,
-}: PendingDiffPaneProps) {
-  const rowsRef = useRef<HTMLPreElement>(null);
+/**
+ * The review cursor — one instance per surface, the same walk across every
+ * file. State lives here: the cursor index and what it was anchored to, so
+ * both surfaces position identically.
+ */
+export function PendingReviewStrip({
+  stops, activeFile, busy, onKeepEdits, onUndoEdits, onOpenFile, onHide, onRevealStop,
+}: PendingReviewStripProps) {
   // The cursor is an index into the WHOLE review, not into this file. It opens
   // on this file's first change — the review never opens pointing at a change
   // the reader cannot see.
-  const firstHere = stops.findIndex((entry) => entry.file === model.file);
+  const firstHere = stops.findIndex((entry) => entry.file === activeFile);
   const [index, setIndex] = useState(() => (firstHere >= 0 ? firstHere : 0));
   // The change the cursor is on, by IDENTITY: ids survive a rebuild of the
   // list, so a decision made elsewhere cannot drag the reader off this change.
@@ -91,6 +109,11 @@ export default function PendingDiffPane({
   const ids = stop?.ids ?? [];
   const where = stop ? (stop.label ? `${stop.file} · ${stop.label}` : stop.file) : '';
   const current = `change ${index + 1} of ${stops.length}${where ? ` · ${where}` : ''}`;
+  // True once the USER has moved the cursor (an arrow). Until then the
+  // surface should not yank the reader's scroll: a freshly-appeared review
+  // opens where the editor already is. Reveals AFTER the first step follow
+  // the cursor — walking the review means looking at each stop.
+  const movedRef = useRef(false);
 
   /** Move the cursor, and record what it landed on. */
   const land = (next: number) => {
@@ -113,61 +136,32 @@ export default function PendingDiffPane({
   // request): the cursor belongs to the file on screen.
   useEffect(() => {
     if (firstHere < 0) return;
-    if (stops[index]?.file === model.file) return;
+    if (stops[index]?.file === activeFile) return;
     land(firstHere);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [model.file, stops, firstHere, index]);
+  }, [activeFile, stops, firstHere, index]);
 
-  // Keep the change on screen. Scrolling waits for the cursor's file to BE the
-  // rendered document, which is why a cross-file move renders first and scrolls
-  // on the render after the switch.
+  // Reveal the stop the cursor is on. A cross-file move renders the other
+  // document first, so this runs on the render AFTER the switch lands.
   useEffect(() => {
-    const container = rowsRef.current;
     const target = stops[index];
-    if (!container || !target || target.file !== model.file) return;
-    const row = container.children[target.row] as HTMLElement | undefined;
-    if (!row) return;
+    if (!target || target.file !== activeFile) return;
     anchorIds.current = target.ids;
-    container.scrollTop = Math.max(0, row.offsetTop - container.clientHeight * 0.2);
-  }, [index, stops, model]);
+    onRevealStop?.(target, movedRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [index, stops, activeFile]);
 
   /** The arrows: one step through the whole review, switching files if need be. */
   const stepTo = (next: number) => {
     const target = stops[next];
     if (!target) return;
+    movedRef.current = true;
     land(next);
-    if (target.file !== model.file) onOpenFile(target.file);
+    if (target.file !== activeFile) onOpenFile(target.file);
   };
 
-  // One Keep/Undo pair per change, anchored at the change's FIRST row, so the
-  // decision is next to the edit it acts on instead of only up in the strip.
-  // Both exist on purpose: the strip is where the reader is walking through the
-  // review, the row is where the reader has stopped. Only the rendered file's
-  // stops have rows here — a row index means nothing in another document.
-  const actionsByRow = useMemo(() => {
-    const map = new Map<number, React.ReactNode>();
-    stops.forEach((entry, stopIndex) => {
-      if (entry.file !== model.file || entry.ids.length === 0) return;
-      const currentStop = stopIndex === index;
-      map.set(entry.row, (
-        <span className={ROW_PAIR_CLASS}>
-          <EditDecisionPair
-            busy={busy}
-            onUndo={() => onUndoEdits(entry.file, entry.ids)}
-            onKeep={() => onKeepEdits(entry.file, entry.ids)}
-          >
-            {currentStop && (
-              <span className="w-1 self-stretch rounded-full bg-[var(--color-accent)]/60" aria-hidden />
-            )}
-          </EditDecisionPair>
-        </span>
-      ));
-    });
-    return map;
-  }, [stops, index, busy, model.file, onKeepEdits, onUndoEdits]);
-
   return (
-    <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+    <>
       <div className="flex items-center gap-2 px-3 py-1 border-b border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)]">
         <button
           type="button"
@@ -198,11 +192,78 @@ export default function PendingDiffPane({
             busy={busy}
             disabled={ids.length === 0}
             size="md"
-            onUndo={() => onUndoEdits(stop?.file ?? model.file, ids)}
-            onKeep={() => onKeepEdits(stop?.file ?? model.file, ids)}
+            onUndo={() => onUndoEdits(stop?.file ?? activeFile, ids)}
+            onKeep={() => onKeepEdits(stop?.file ?? activeFile, ids)}
           />
         </span>
       </div>
+    </>
+  );
+}
+
+export interface PendingDiffPaneProps {
+  model: PendingDiffModel;
+  stops: PendingStop[];
+  busy: boolean;
+  note: string | null;
+  /** Keep / undo the change currently shown. */
+  onKeepEdits: (file: string, ids: string[]) => void;
+  onUndoEdits: (file: string, ids: string[]) => void;
+  onOpenFile: (file: string) => void;
+  /** User asked to keep editing — the pane returns to the buffer. */
+  onHide: () => void;
+}
+
+/** The read-only takeover: strip + whole-document diff + per-row pairs. */
+export default function PendingDiffPane({
+  model, stops, busy, note, onKeepEdits, onUndoEdits, onOpenFile, onHide,
+}: PendingDiffPaneProps) {
+  const rowsRef = useRef<HTMLPreElement>(null);
+
+  /** The strip's cursor: scroll the rendered rows to its stop (the read-only
+      diff pane is a fresh surface — scrolling on the opening reveal is fine). */
+  const revealStop = (stop: PendingStop) => {
+    const container = rowsRef.current;
+    if (!container) return;
+    const row = container.children[stop.row] as HTMLElement | undefined;
+    if (!row) return;
+    container.scrollTop = Math.max(0, row.offsetTop - container.clientHeight * 0.2);
+  };
+
+  // One Keep/Undo pair per change, anchored at the change's FIRST row, so the
+  // decision is next to the edit it acts on instead of only up in the strip.
+  // Both exist on purpose: the strip is where the reader is walking through the
+  // review, the row is where the reader has stopped. Only the rendered file's
+  // stops have rows here — a row index means nothing in another document.
+  const actionsByRow = useMemo(() => {
+    const map = new Map<number, React.ReactNode>();
+    for (const entry of stops) {
+      if (entry.file !== model.file || entry.ids.length === 0) continue;
+      map.set(entry.row, (
+        <span className={ROW_PAIR_CLASS}>
+          <EditDecisionPair
+            busy={busy}
+            onUndo={() => onUndoEdits(entry.file, entry.ids)}
+            onKeep={() => onKeepEdits(entry.file, entry.ids)}
+          />
+        </span>
+      ));
+    }
+    return map;
+  }, [stops, busy, model.file, onKeepEdits, onUndoEdits]);
+
+  return (
+    <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+      <PendingReviewStrip
+        stops={stops}
+        activeFile={model.file}
+        busy={busy}
+        onKeepEdits={onKeepEdits}
+        onUndoEdits={onUndoEdits}
+        onOpenFile={onOpenFile}
+        onHide={onHide}
+        onRevealStop={(stop) => revealStop(stop)}
+      />
 
       {note && (
         <p className="px-3 py-1 text-[10px] text-[var(--color-warning)] bg-[var(--color-bg-secondary)]">
