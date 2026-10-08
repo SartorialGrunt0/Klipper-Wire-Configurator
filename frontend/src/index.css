@@ -94,10 +94,16 @@ body {
   margin-right: -100vw;
 }
 .kl-line-pending {
+  background-color: rgb(34 197 94 / 0.15); /* bg-green-500/15, matching DiffLines */
   color: #4ade80 !important; /* text-green-400, matching DiffLines */
 }
 .kl-line-pending * {
-  color: inherit; /* syntax spans step aside for the green (was !important) */
+  /* !important is load-bearing: RenderLine paints EVERY token with an
+     inline style, and a plain rule (even `color: inherit`) loses to an
+     inline style on the same element. Without it the parent's green never
+     reaches a single glyph — the whole mark rendered invisible
+     (regression in d3c6d92, playwright pixel probe 2026-10-07). */
+  color: #4ade80 !important;
 }
 /* An undecided deletion has no live line to own, so the row its content
    would return to carries the red mark — the mini-diff's red-row weight,
