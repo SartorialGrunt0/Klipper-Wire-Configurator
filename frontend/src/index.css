@@ -43,10 +43,12 @@ body {
 /* Text-view severity tints.
    INLINE, deliberately: the tint is wrapped around the line's own markup, so it
    is painted by the same line box that draws the characters and can never end
-   up on a different line. Never give these a display that creates a box per row
-   (block/inline-block) — that is the drift bug (0d4cfb8 / e482e63), and a
-   floating band layer is no safer: it computes the row's position outside the
-   text, so any layout difference moves the tint off its line. */
+   up on a different line. What is forbidden is a box positioned OUTSIDE the
+   text (per-row flex/div stacks, a translated band layer): any layout
+   difference moves it off its line (0d4cfb8 / e482e63, and the band layer's
+   -13.7px by line 702 at 90% zoom on 2026-10-07). Tiles inside the same
+   inline formatting context as the glyphs are safe by construction — see
+   .kl-row-full. */
 .kl-line-error {
   background-color: var(--color-error-tint);
 }
@@ -70,18 +72,32 @@ body {
    with inline styles, so only !important wins the line over — the same
    trade the read-only diff pane makes). */
 .kl-row-full {
+  /* One tinted row = ONE TILE. An inline-block's box is its own line box
+     tall — exactly the line-height — so consecutive tinted rows stack
+     edge-to-edge: no background sliver between them, no overlap to
+     double-darken, at any zoom (pixel-verified at 90% and 125%,
+     2026-10-07). The horizontal padding overflow + equal negative margin
+     stretches the tile across the full row while the advance stays
+     net-zero. This is NOT the forbidden box-per-row pattern (e482e63):
+     tiles live INSIDE the overlay's inline formatting context, positioned
+     by the same text layout that places the glyphs — drift is impossible
+     because there is nothing outside the text computing a position.
+     Vertical padding remains forbidden: it grows the line box
+     (22.75 → 28.6px measured) and the overlay must share the textarea's
+     rhythm character for character. */
+  display: inline-block;
+  /* Snap the tile to its line box: with height == line-height and the top
+     pinned to the line box top, consecutive tiles cover [T, T+lh] of their
+     own lines — exact tiling, no baseline shift bleeding a run's edges. */
+  vertical-align: top;
   padding-right: 100vw;
   margin-right: -100vw;
-  /* the stretch must not create a second horizontal extent to scroll:
-     the overlay's own scrollWidth rides the textarea's; keep it there. */
-  max-width: none;
 }
 .kl-line-pending {
-  background-color: rgb(34 197 94 / 0.15);
-}
-.kl-line-pending,
-.kl-line-pending * {
   color: #4ade80 !important; /* text-green-400, matching DiffLines */
+}
+.kl-line-pending * {
+  color: inherit; /* syntax spans step aside for the green (was !important) */
 }
 /* An undecided deletion has no live line to own, so the row its content
    would return to carries the red mark — the mini-diff's red-row weight,
