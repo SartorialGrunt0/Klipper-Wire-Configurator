@@ -41,6 +41,15 @@ describe('pendingEditStore', () => {
     expect(usePendingEditStore.getState().takeover).toBe('auto');
   });
 
+  it('resetTakeover lands the live path back on its default view', () => {
+    // Show diff → mirror; Back to editing resets to auto, which on the live
+    // path IS the review (the buffer with its tints), never the chip.
+    usePendingEditStore.getState().showDiff();
+    expect(usePendingEditStore.getState().takeover).toBe('shown');
+    usePendingEditStore.getState().resetTakeover();
+    expect(usePendingEditStore.getState().takeover).toBe('auto');
+  });
+
   it('keeps the user choice when the same card is re-published by the poll', () => {
     usePendingEditStore.getState().setPending(card());
     usePendingEditStore.getState().hideDiff();

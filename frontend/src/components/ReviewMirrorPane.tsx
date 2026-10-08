@@ -17,12 +17,9 @@ import type React from 'react';
 
 import DiffLines from './DiffLines';
 import EditDecisionPair from './EditDecisionPair';
+import { BUTTON_CLASS } from './PendingDiffPane';
 import type { DiffLine } from '../utils/configDiff';
 import type { LedgerSectionFile } from '../services/reviewEngine';
-
-const BACK_BUTTON_CLASS =
-  'text-[10px] px-2 py-0.5 rounded border border-[var(--color-accent)]/40 '
-  + 'text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10 transition-colors';
 
 export interface ReviewMirrorPaneProps {
   /** The review's files with their runs (empty-run files included). */
@@ -78,7 +75,7 @@ export default function ReviewMirrorPane({
         {totalAdded > 0 && <span className="text-[10px] text-green-400">+{totalAdded}</span>}
         {totalRemoved > 0 && <span className="text-[10px] text-red-400">−{totalRemoved}</span>}
         <span className="ml-auto shrink-0">
-          <button type="button" onClick={onHide} className={BACK_BUTTON_CLASS}>
+          <button type="button" onClick={onHide} className={BUTTON_CLASS}>
             Back to editing
           </button>
         </span>
@@ -98,7 +95,7 @@ export default function ReviewMirrorPane({
                       type="button"
                       onClick={() => onOpenFile(file.file)}
                       className="mr-1 text-[9px] text-[var(--color-text-secondary)] hover:text-[var(--color-accent)]"
-                      title="Show this file"
+                      title="Open this file in the editor"
                     >
                       open
                     </button>

@@ -30,14 +30,15 @@ import type { ReviewStop } from '../services/reviewEngine';
  * footer bar calls.
  */
 
-const BUTTON_CLASS =
-  'text-[10px] px-2 py-0.5 rounded border border-[var(--color-accent)]/40 '
-  + 'text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10 transition-colors';
-
 const NAV_BUTTON_CLASS =
   'text-[10px] w-5 h-5 rounded border border-[var(--color-bg-tertiary)] '
   + 'text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] '
   + 'hover:text-[var(--color-accent)] disabled:opacity-30 disabled:hover:border-[var(--color-bg-tertiary)]';
+
+/** The compact bordered-action button, shared by the strip and the mirror. */
+export const BUTTON_CLASS =
+  'text-[10px] px-2 py-0.5 rounded border border-[var(--color-accent)]/40 '
+  + 'text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10 transition-colors';
 
 /**
  * The frame the per-change pair sits in, in the diff row: a rectangular box
@@ -47,7 +48,7 @@ const NAV_BUTTON_CLASS =
  * notch cut out of the band; the rim and shadow make it a surface on top of
  * it. The verbs themselves are `EditDecisionPair` — never a local copy.
  */
-const ROW_PAIR_CLASS =
+export const ROW_PAIR_CLASS =
   'flex items-center rounded border border-[var(--color-bg-tertiary)] '
   + 'bg-[var(--color-bg-secondary)] p-0.5 shadow-lg';
 
@@ -67,8 +68,20 @@ export interface PendingReviewStripProps {
    * show it: the cursor's file and the rendered document must agree.
    */
   onOpenFile: (file: string) => void;
-  /** Fold the strip away (Back to editing). */
-  onHide: () => void;
+  /**
+   * Flip to the compact diff mirror (Sir, 2026-10-07): the edit view's
+   * review chrome offers the DIFF, not a fold-away. There is nothing to
+   * fold to — this IS the edit view — and "Back to editing" here was a lie
+   * that hid the pending tints behind the chip state. Optional: the card
+   * pane, which IS the diff, omits it.
+   */
+  onShowDiff?: () => void;
+  /**
+   * The CARD path only: the takeover pane offers a way back to the buffer
+   * (which chips). The live path has no fold — it renders through this prop
+   * being absent.
+   */
+  onBackToEditing?: () => void;
   /**
    * The cursor moved (or the review re-pointed it): reveal the run. The live
    * editor scrolls to the run's LIVE line. `revealedByCursor` is false for the
@@ -84,7 +97,7 @@ export interface PendingReviewStripProps {
  * so a decision made elsewhere cannot drag the reader off this run.
  */
 export function PendingReviewStrip({
-  stops, activeFile, onKeepRun, onUndoRun, onOpenFile, onHide, onRevealStop,
+  stops, activeFile, onKeepRun, onUndoRun, onOpenFile, onShowDiff, onBackToEditing, onRevealStop,
 }: PendingReviewStripProps) {
   // The cursor is an index into the WHOLE review, not into this file. It opens
   // on this file's first run — the review never opens pointing at a run the
@@ -175,9 +188,16 @@ export function PendingReviewStrip({
           {stops.length === 0 ? 'no unreviewed change' : current}
         </span>
         <span className="ml-auto flex items-center gap-2 shrink-0">
-          <button type="button" onClick={onHide} className={BUTTON_CLASS}>
-            Back to editing
-          </button>
+          {onBackToEditing && (
+            <button type="button" onClick={onBackToEditing} className={BUTTON_CLASS}>
+              Back to editing
+            </button>
+          )}
+          {onShowDiff && (
+            <button type="button" onClick={onShowDiff} className={BUTTON_CLASS}>
+              Show diff
+            </button>
+          )}
           <EditDecisionPair
             busy={false}
             disabled={!stop}
@@ -259,7 +279,7 @@ export default function PendingDiffPane({
         onKeepRun={onKeepRun}
         onUndoRun={onUndoRun}
         onOpenFile={onOpenFile}
-        onHide={onHide}
+        onBackToEditing={onHide}
         onRevealStop={(stop) => revealStop(stop)}
       />
 

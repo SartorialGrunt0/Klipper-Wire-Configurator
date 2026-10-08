@@ -260,6 +260,14 @@ export type PendingPaneMode = 'editor' | 'review' | 'mirror' | 'diff' | 'chip';
  * (the card path's `diff`) no longer fits a review that keeps the buffer live
  * (Sir, 2026-10-07).
  *
+ * `'hidden'` means nothing on the live path (2026-10-07): the fold-away it
+ * came from was the card's, and on the live path the edit view IS the review
+ * — the strip carries the decisions and the "Show diff" toggle, and it goes
+ * away when the ledger is empty, not when the user folds. A stale `'hidden'`
+ * from a declined card must not chip a live review into an uncolored buffer
+ * with a lone "Show diff" (Sir's bug report: the chip's button doing nothing
+ * useful, marks missing on return).
+ *
  * The APPROVAL-CARD path — a proposal not yet applied, the buffer still showing
  * `before` — keeps the original rule verbatim: it cannot tint changes that are
  * not in the text, so the overlap check and the read-only `diff` takeover still
@@ -280,7 +288,6 @@ export function paneModeFor(input: {
   if (live) {
     if (!model && !hasReview) return 'editor';
     if (takeover === 'shown') return 'mirror';
-    if (takeover === 'hidden') return 'chip';
     return 'review';
   }
   if (!model) return 'editor';

@@ -52,6 +52,15 @@ export interface HighlightOptions {
    */
   pendingRemoved?: ReadonlySet<number>;
   /**
+   * Lines that ANCHOR a pending run's inline Keep/Undo pair: 1-based live
+   * line → run key. Emits a zero-width marker span (`kl-run-anchor`,
+   * data-run-key) inside the line's own markup — invisible, layout-neutral,
+   * and MEASURABLE: the floating decision pair positions itself from this
+   * span's rect, so its vertical position comes from the text layout itself,
+   * never from font-metric arithmetic outside the text (the inline law).
+   */
+  runAnchors?: ReadonlyMap<number, string>;
+  /**
    * 1-based line holding the caret, highlighted so "where am I" is ambient
    * (Zed renders it even unfocused). The weakest tint in the stack — see
    * TINT PRECEDENCE on `buildHighlightedHtml`.
@@ -141,7 +150,9 @@ export function buildHighlightedHtml(text: string, options: HighlightOptions = {
   const ghost = options.ghost;
   const pending = options.pendingAdded;
   const removed = options.pendingRemoved;
+  const anchors = options.runAnchors;
   const current = options.currentLine ?? null;
+  const escapeAttr = (value: string) => escapeHtml(value).replace(/"/g, '&quot;');
   return text
     .split('\n')
     .map((line, idx) => {
@@ -149,7 +160,7 @@ export function buildHighlightedHtml(text: string, options: HighlightOptions = {
       // The ghost sits inside the line's markup at the caret column, so it
       // shares the line box and cannot shift the text that follows it.
       const atGhost = ghost && ghost.line === lineNumber && ghost.text.length > 0;
-      const html = atGhost
+      let html = atGhost
         ? renderLine(line.slice(0, ghost.column)) +
           ghostHtml(ghost.text) +
           renderLine(line.slice(ghost.column))
@@ -162,7 +173,15 @@ export function buildHighlightedHtml(text: string, options: HighlightOptions = {
         current: current === lineNumber,
         focused: options.currentLineFocused,
       });
-      if (!tint) return html;
+      // The pair's anchor marker: an EMPTY inline span at the line's start —
+      // zero-width, so it cannot shift a glyph, but its rect is a DOM truth
+      // the floating pair measures. Inside the tint wrapper when there is one
+      // (so it belongs to the same line box the tint paints).
+      const anchorKey = anchors?.get(lineNumber);
+      const marker = anchorKey !== undefined
+        ? `<span class="kl-run-anchor" data-run-key="${escapeAttr(anchorKey)}"></span>`
+        : '';
+      if (!tint) return marker + html;
       // Pending review marks paint the FULL row (the mini-diff's look) via
       // the horizontal-overflow trick: padding-right stretches the tint
       // across the row, the equal negative margin nets the advance back to
@@ -172,7 +191,7 @@ export function buildHighlightedHtml(text: string, options: HighlightOptions = {
       // exactly what the overlay must never do: it shares the textarea's
       // rhythm character for character.
       const fullRow = tint === PENDING_CLASS || tint === REMOVED_CLASS;
-      return `<span class="${tint}${fullRow ? ' kl-row-full' : ''}">${html}</span>`;
+      return `<span class="${tint}${fullRow ? ' kl-row-full' : ''}">${marker}${html}</span>`;
     })
     .join('\n');
 }

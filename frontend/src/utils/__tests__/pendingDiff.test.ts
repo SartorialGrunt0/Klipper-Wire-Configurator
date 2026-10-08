@@ -379,17 +379,21 @@ describe('paneModeFor with the live (ledger) path', () => {
     expect(paneModeFor({ ...base, model, takeover: 'auto', selection: lines(4, 4), live: true })).toBe('review');
   });
 
-  it('the chip click flips to the compact MIRROR; Back to editing chips', () => {
+  it('the chip click flips to the compact MIRROR; Back to editing lands on review', () => {
     // On the live path "Show diff" is the mini-diff mirror, never the
     // whole-document read-only takeover (that is the card path's).
     expect(paneModeFor({ ...base, model, takeover: 'shown', selection: null, live: true })).toBe('mirror');
-    expect(paneModeFor({ ...base, model, takeover: 'hidden', selection: null, live: true })).toBe('chip');
+    // 'hidden' is a card-path state (Sir, 2026-10-07): the live path has no
+    // fold — its edit view IS the review. A stale 'hidden' (a card the user
+    // folded, then a live review arrived) must not chip the buffer into an
+    // uncolored pane; that was the "marks vanish on return" bug.
+    expect(paneModeFor({ ...base, model, takeover: 'hidden', selection: null, live: true })).toBe('review');
   });
 
   it('a ledger review with no card model still reviews (hasReview)', () => {
     expect(paneModeFor({ ...base, model: null, takeover: 'auto', selection: null, live: true, hasReview: true })).toBe('review');
     expect(paneModeFor({ ...base, model: null, takeover: 'shown', selection: null, live: true, hasReview: true })).toBe('mirror');
-    expect(paneModeFor({ ...base, model: null, takeover: 'hidden', selection: null, live: true, hasReview: true })).toBe('chip');
+    expect(paneModeFor({ ...base, model: null, takeover: 'hidden', selection: null, live: true, hasReview: true })).toBe('review');
   });
 
   it('never reviews from another view or with no review at all', () => {

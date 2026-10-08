@@ -34,6 +34,17 @@ export interface PendingEditState {
   showDiff: () => void;
   /** User asked to keep editing (Back to editing). */
   hideDiff: () => void;
+  /**
+   * Back to the DEFAULT view (the live path's "Back to editing").
+   *
+   * 'hidden' is a declined-CARD state: it chips the pane. The live review
+   * path never chips — its edit view is the default `review` mode, so
+   * returning from the mirror must UNDO the explicit 'shown' request rather
+   * than decline the review. (2026-10-07: reusing hideDiff here made the
+   * return land in chip mode, where pending tints are not computed — the
+   * "marks vanish after Show diff" bug.)
+   */
+  resetTakeover: () => void;
 }
 
 const EMPTY = { pending: null as PendingDiffModel | null, takeover: 'auto' as PaneTakeover };
@@ -67,4 +78,5 @@ export const usePendingEditStore = create<PendingEditState>((set, get) => ({
 
   showDiff: () => set({ takeover: 'shown' }),
   hideDiff: () => set({ takeover: 'hidden' }),
+  resetTakeover: () => set({ takeover: 'auto' }),
 }));

@@ -248,3 +248,36 @@ describe('tint precedence (editable-pending round, 2026-10-05)', () => {
     expect(html).toMatch(/^<span class="kl-line-pending kl-row-full">.*\[/);
   });
 });
+
+describe('buildHighlightedHtml — run-anchor markers (inline pairs, 2026-10-07)', () => {
+  it('emits a zero-width keyed marker on the anchored line only', () => {
+    const html = buildHighlightedHtml('a\nb\nc', { runAnchors: new Map([[2, '4:2+1-0']]) });
+    const rows = html.split('\n');
+    expect(rows[0]).toBe('a');
+    expect(rows[1]).toBe('<span class="kl-run-anchor" data-run-key="4:2+1-0"></span>b');
+    expect(rows[2]).toBe('c');
+  });
+
+  it('the marker rides INSIDE the tint wrapper when the line is tinted', () => {
+    const html = buildHighlightedHtml('keep\nchanged', {
+      pendingAdded: new Set([2]),
+      runAnchors: new Map([[2, 'k1']]),
+    });
+    const row = html.split('\n')[1];
+    expect(row.startsWith('<span class="kl-line-pending kl-row-full"><span class="kl-run-anchor" data-run-key="k1"></span>')).toBe(true);
+  });
+
+  it('escapes quotes in a run key (attribute safety)', () => {
+    const html = buildHighlightedHtml('x', { runAnchors: new Map([[1, 'a"b\\c']]) });
+    expect(html).toContain('data-run-key="a&quot;b\\c"');
+  });
+
+  it('adds no line boxes and leaves unanchored output byte-identical', () => {
+    const text = 'a\nb\nc';
+    expect(buildHighlightedHtml(text, { runAnchors: new Map() })).toBe(buildHighlightedHtml(text));
+    const anchored = buildHighlightedHtml(text, { runAnchors: new Map([[1, 'k']]) });
+    expect(anchored.split('\n')).toHaveLength(3);
+    expect(anchored).not.toContain('display:');
+    expect(anchored).not.toContain('position:');
+  });
+});

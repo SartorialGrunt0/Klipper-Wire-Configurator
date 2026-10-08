@@ -32,6 +32,7 @@ import ConfigTree from './ConfigTree';
 import ChatDock from './ChatDock';
 import { ChatBubbleIcon, FileTreeIcon } from './icons';
 import PendingDiffPane, { PendingDiffChip, PendingReviewStrip } from './PendingDiffPane';
+import PendingRunPairs from './PendingRunPairs';
 import ReviewMirrorPane from './ReviewMirrorPane';
 import { livePendingLines } from '../utils/pendingDiff';
 import {
@@ -541,13 +542,56 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   // frame against the live textarea. A file the review never framed means no
   // marks — the strip and the chat still carry the review. A file the review
   // CREATED has a null frame, so its whole live text reads as pending.
+  //
+  // 'chip' computes them too (2026-10-07): the chip is the card path's folded
+  // state, and a review that shares the screen with it must keep its tints —
+  // returning from any diff view used to land on an uncolored buffer, which
+  // read as "the edits disappeared".
   const livePending = useMemo(() => {
-    if (pendingPane !== 'review') return null;
+    if (pendingPane !== 'review' && pendingPane !== 'chip') return null;
     if (editTextFile !== activeFile) return null;
     const frame = changeSetReviewFrames[activeFile];
     if (frame === undefined) return null;
     return livePendingLines(frame ?? '', editText);
   }, [pendingPane, editTextFile, activeFile, changeSetReviewFrames, editText]);
+
+  // The inline pair targets: the review's runs IN the active file, anchored
+  // at each run's top live line (a pure deletion anchors at its return line —
+  // the `stop.line` / `liveStart` coordinate). The ledger is the one source,
+  // so an inline pair, a strip stop, and a chat-bar row always describe the
+  // same run with the same key.
+  const inlineRunPairs = useMemo(() => {
+    if (pendingPane !== 'review' || editTextFile !== activeFile) return [];
+    if (changeSetReviewFrames[activeFile] === undefined) return [];
+    return reviewStopList
+      .filter((stop) => stop.file === activeFile)
+      .map((stop) => ({
+        key: stop.key,
+        title: stop.label ? `${stop.file} · ${stop.label}` : stop.file,
+        line: stop.line,
+        onKeep: () => keepRun(stop.file, stop.key),
+        onUndo: () => { void undoRun(stop.file, stop.key); },
+      }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingPane, editTextFile, activeFile, changeSetReviewFrames, reviewStopList]);
+
+  // Marker spans ride the overlay HTML, and the pair targets beside them, in
+  // ONE pass: line -> run key, first run claiming a line wins (a deletion
+  // anchor and an added run top cannot share a line by construction, but an
+  // EOF-deletion's liveStart is line-count+1 — clamped to the last rendered
+  // line, the same clamp `livePendingLines` applies to the gutter anchor).
+  const { runAnchorMap, inlinePairTargets } = useMemo(() => {
+    const map = new Map<number, string>();
+    const targets: typeof inlineRunPairs = [];
+    const lastLine = Math.max(1, editText.split('\n').length);
+    for (const pair of inlineRunPairs) {
+      const line = Math.min(pair.line, lastLine);
+      if (map.has(line)) continue;
+      map.set(line, pair.key);
+      targets.push(pair);
+    }
+    return { runAnchorMap: map, inlinePairTargets: targets };
+  }, [inlineRunPairs, editText]);
 
   // Gutter numbers as ONE text block (see the editor gutter comment): one
   // line per row, severity glyph + number, sharing the textarea's continuous
@@ -654,10 +698,15 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
       // edit, and no zoom can move them off their lines.
       pendingAdded: livePending ? livePending.addedLines : undefined,
       pendingRemoved: livePending ? new Set(livePending.removedAnchors.keys()) : undefined,
+      // Zero-width pair anchors: one marker per undecided run, at the run's
+      // top line (for a pure deletion, the line it would return to — the
+      // same line the red mark owns). The floating Keep/Undo pairs measure
+      // themselves against these spans.
+      runAnchors: livePending ? runAnchorMap : undefined,
       currentLine: caretLine,
       currentLineFocused: editorFocused,
     }),
-    [editText, issueLineSeverities, ghost, livePending, caretLine, editorFocused],
+    [editText, issueLineSeverities, ghost, livePending, runAnchorMap, caretLine, editorFocused],
   );
 
   // Focus search input when panel opens
@@ -1882,8 +1931,17 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
             files={ledgerSections}
             onKeepRun={(file, key) => keepRun(file, key)}
             onUndoRun={(file, key) => { void undoRun(file, key); }}
-            onOpenFile={setActiveFile}
-            onHide={() => usePendingEditStore.getState().hideDiff()}
+            // "open" lands in the EDITOR on that file — switching files alone
+            // left the mirror on screen when the run's file was already
+            // mounted (the common case), which read as a dead button.
+            onOpenFile={(file) => {
+              setActiveFile(file);
+              usePendingEditStore.getState().resetTakeover();
+            }}
+            // Back to the DEFAULT view, not the declined-card 'hidden' state:
+            // the edit view is the review, and 'hidden' used to drop the
+            // pending tints.
+            onHide={() => usePendingEditStore.getState().resetTakeover()}
           />
         ) : pendingPane === 'diff' && paneModel ? (
           <PendingDiffPane
@@ -1908,7 +1966,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
                 onKeepRun={(file, key) => keepRun(file, key)}
                 onUndoRun={(file, key) => { void undoRun(file, key); }}
                 onOpenFile={setActiveFile}
-                onHide={() => usePendingEditStore.getState().hideDiff()}
+                onShowDiff={() => usePendingEditStore.getState().showDiff()}
                 onRevealStop={(stop, byCursor) => {
                   // The arrows walked to a run in THIS file: scroll the live
                   // editor to its line. Scroll ONLY — never jumpToLine, which
@@ -2026,6 +2084,18 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
                   className="absolute inset-0 w-full resize-none overflow-auto bg-transparent p-4 font-mono text-sm leading-relaxed text-transparent caret-[var(--color-text-primary)] focus:outline-none"
                   style={{ tabSize: 4 }}
                 />
+                {/* Inline Keep/Undo per undecided run (Sir, 2026-10-07): the
+                    edit view IS the review, so the decisions ride the text.
+                    Each pair floats over its run's top line, positioned from
+                    the zero-width marker span the overlay paints inside that
+                    line's own markup — measured, never computed. */}
+                {pendingPane === 'review' && inlinePairTargets.length > 0 && (
+                  <PendingRunPairs
+                    overlayRef={highlightRef}
+                    textareaRef={textareaRef}
+                    runs={inlinePairTargets}
+                  />
+                )}
               </div>
             </div>
             {/* Findings strip. Collapsed to a severity summary by default —
