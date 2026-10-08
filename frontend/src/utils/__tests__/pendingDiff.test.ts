@@ -314,13 +314,47 @@ describe('livePendingLines', () => {
     expect(marks.removedAnchors.size).toBe(0);
   });
 
-  it('marks an added line and anchors a removal to the line it would return to', () => {
+  it("anchors a replacement's deletion at its OWN line, not the line below", () => {
+    // Sir's bug report 2026-10-08: the old walk flushed at the next context
+    // part, i.e. AFTER the added lines advanced the counter, so 'b'→'B'
+    // painted the untouched 'c' red and left the green 'B' unmarked.
     const frame = 'a\nb\nc\n';
     const live = 'a\nB\nc\nd\n';
     const marks = livePendingLines(frame, live);
     expect([...marks.addedLines]).toEqual([2, 4]); // 'B' added; 'd' added
-    // 'b' removed; the live line following the deletion is 'c' at line 3.
-    expect(marks.removedAnchors.get(3)).toBe(1);
+    expect(marks.removedAnchors.get(2)).toBe(1); // 'b' is gone at line 2 — where 'B' is
+    expect(marks.removedAnchors.get(3)).toBeUndefined(); // 'c' is innocent
+    expect(marks.removedContents.get(2)).toEqual(['b']);
+  });
+
+  it('anchors a pure deletion at the return line (unchanged by the fix)', () => {
+    // Nothing in a pure-deletion run advances the live counter, so the
+    // return line IS the run start — the law above, verbatim.
+    const frame = 'a\nb\nc\n';
+    const live = 'a\nc\n';
+    const marks = livePendingLines(frame, live);
+    expect(marks.removedAnchors.get(2)).toBe(1); // 'b' returns at line 2 ('c')
+    expect([...marks.addedLines]).toEqual([]);
+  });
+
+  it('anchors a multi-line replacement run at its top line with the full count', () => {
+    const frame = 'k = 1\nx = 2\ny = 3\nz = 4\n';
+    const live = 'k = 1\nx = 20\ny = 30\nz = 4\n';
+    const marks = livePendingLines(frame, live);
+    expect([...marks.addedLines]).toEqual([2, 3]);
+    expect(marks.removedAnchors.get(2)).toBe(2); // two frame lines gone, at the run top
+    expect(marks.removedAnchors.get(4)).toBeUndefined();
+  });
+
+  it("shares the run's top-line anchor with the strip stop on del+add runs", () => {
+    // Review-surface law 7: gutter mark, red row, strip stop, inline pair —
+    // ONE coordinate (ReviewRun.liveStart). Deletion mid-file + addition
+    // elsewhere must not smear the anchor.
+    const frame = '[a]\nx = 1\ny = 2\nz = 3\n\n[b]\nk = 9\n';
+    const live = '[a]\nx = 1\nz = 3\n\n[b]\nk = 9\nk2 = 10\n';
+    const marks = livePendingLines(frame, live);
+    expect(marks.removedAnchors.get(3)).toBe(1); // 'y = 2' returns at line 3 ('z = 3')
+    expect([...marks.addedLines]).toEqual([7]);
   });
 
   it('tracks the marks as the user hand-edits ABOVE a pending change', () => {

@@ -317,6 +317,17 @@ export function paneModeFor(input: {
  *   A deletion at end-of-file anchors to the last live line (count added to
  *   whatever anchor it already has); an empty live text anchors to line 1.
  *
+ * The anchor is the run's TOP line (`runStart`), not the next context
+ * boundary. A replacement run carries both sides — the frame line gone and
+ * the live line that replaced it — and anchoring at the boundary after the
+ * added lines advanced the counter would paint the innocent line BELOW the
+ * run red while the green line whose old text is actually gone stayed
+ * unmarked (Sir's bug report, 2026-10-08). For a pure deletion nothing in
+ * the run advances the live counter, so runStart is still exactly the line
+ * the removal would return to — the law above is unchanged there, and the
+ * mark now shares the coordinate of the run's strip stop / inline pair
+ * (`ReviewRun.liveStart`) instead of a third, drifting one.
+ *
  * Chunk values from `diffLines` carry their own trailing newlines: a chunk
  * contributes lines by counting its newlines, and its unterminated tail
  * (only possible at end of text) is one more line.
@@ -338,6 +349,12 @@ export function livePendingLines(before: string, live: string): LivePendingMarks
   let line = 1;
   let pendingRemovals = 0;
   let pendingText: string[] = [];
+  // The live line the current change run STARTS at — the anchor its removals
+  // flush to. Captured before either side of the run is consumed, so a
+  // replacement anchors at its own (green) line, not the innocent line the
+  // counter had advanced to by the time the next context part arrived.
+  let runStart = 1;
+  let inRun = false;
   const absorbRemoval = (value: string) => {
     const ls = value.split('\n');
     if (ls.length > 0 && ls[ls.length - 1] === '') ls.pop();
@@ -355,23 +372,34 @@ export function livePendingLines(before: string, live: string): LivePendingMarks
     const newlines = value.split('\n').length - 1;
     return value.endsWith('\n') ? newlines : newlines + 1;
   };
+  const openRun = () => {
+    if (!inRun) {
+      runStart = line;
+      inRun = true;
+    }
+  };
   for (const part of diffLines(before, live)) {
     const n = countLines(part.value);
     if (n === 0) continue;
     if (part.added) {
+      openRun();
       for (let i = 0; i < n; i += 1) addedLines.add(line + i);
       line += n;
     } else if (part.removed) {
+      openRun();
       pendingRemovals += n;
       absorbRemoval(part.value);
     } else {
-      flushRemoval(line);
+      flushRemoval(runStart);
+      inRun = false;
       line += n;
     }
   }
-  // Deletions with no following live line: anchor at the last line (or 1 if
-  // the live text is empty) so the gutter still says "N lines are gone here".
-  flushRemoval(Math.max(1, line - 1));
+  // Deletions with no following live line: clamp the anchor to the last line
+  // (or 1 if the live text is empty) so the gutter still says "N lines are
+  // gone here". A run that reaches EOF started past the text or at its tail;
+  // min(runStart, last) keeps both readings on a real line.
+  flushRemoval(Math.min(runStart, Math.max(1, line - 1)));
   return { addedLines, removedAnchors, removedContents };
 }
 

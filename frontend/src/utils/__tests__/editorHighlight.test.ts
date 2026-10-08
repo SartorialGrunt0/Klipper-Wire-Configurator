@@ -228,6 +228,20 @@ describe('tint precedence (editable-pending round, 2026-10-05)', () => {
     expect(rows[2]).not.toContain('kl-line-removed');
   });
 
+  it('a replacement line claims GREEN when its run also anchors a deletion', () => {
+    // Sir, 2026-10-08: the anchor fix puts a replacement run's −N gutter
+    // mark on the run's own (green) line. The line EXISTS with new content,
+    // so green owns the row; the gutter carries the deletion. The old
+    // precedence painted this line red and hid the AI's change.
+    const html = buildHighlightedHtml('a\nB\nc', {
+      pendingAdded: new Set([2]),
+      pendingRemoved: new Set([2]),
+    });
+    const rows = html.split('\n');
+    expect(rows[1]).toContain('class="kl-line-pending kl-row-full"');
+    expect(rows[1]).not.toContain('kl-line-removed');
+  });
+
   it('error and warning still beat the pending marks', () => {
     const html = buildHighlightedHtml('a\nb', {
       lineSeverities: new Map([[1, 'error' as const]]),

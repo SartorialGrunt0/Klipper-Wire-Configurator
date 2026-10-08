@@ -101,12 +101,15 @@ export function tintClassFor(options: {
   const { severity, pending, removed, current, focused } = options;
   if (severity === 'error') return TINT_CLASS.error;
   if (severity === 'warning') return TINT_CLASS.warning;
-  // A pending line the reviewer can KEEP and a line an undecided deletion
-  // would RETURN to are mutually exclusive by construction (a live line is
-  // either new or pre-existing), so order between them is a formality; red
-  // first because the red row's return-point is the sharper claim.
-  if (removed) return REMOVED_CLASS;
+  // Pending beats removed (Sir, 2026-10-08): on a REPLACEMENT run the two
+  // coincide — the run's removal anchors at its own top live line (law of
+  // `livePendingLines`), which is also the green line that replaced the old
+  // text. That line EXISTS in the buffer with new content, so green owns the
+  // row; the deletion it carries is not invisible — the gutter paints the
+  // red −N with the removed-text tooltip on the same line. A PURE deletion
+  // anchors on a context line no green claims, so it still gets the red row.
   if (pending) return PENDING_CLASS;
+  if (removed) return REMOVED_CLASS;
   if (current) return focused ? CURRENT_CLASS : CURRENT_UNFOCUSED_CLASS;
   return null;
 }
