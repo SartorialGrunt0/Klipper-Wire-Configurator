@@ -522,6 +522,14 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   const reviewStopList = useMemo(() => stopsFrom(ledgerFiles), [ledgerFiles]);
   const ledgerSections = useMemo(() => groupLedgerSections(ledgerFiles), [ledgerFiles]);
   const hasReview = reviewStopList.length > 0;
+  // Any undecided run that REMOVES or replaces lines (Sir, 2026-10-08): those
+  // reviews auto-open the mirror, where the old line shows in red at its
+  // frame number above the green new line at its live number. An overlay
+  // cannot host that extra row in the buffer (the drift law) — the mirror can.
+  const hasRemovalRun = useMemo(
+    () => ledgerFiles.some((entry) => entry.runs.some((run) => run.removed.length > 0)),
+    [ledgerFiles],
+  );
   // The change-set review is LIVE (the edits are already in the buffer) and
   // takes precedence: a card model is the fallback only when the ledger is
   // empty.
@@ -534,8 +542,9 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
       selection: selectionReference,
       live: hasReview,
       hasReview,
+      hasRemoval: hasRemovalRun,
     }),
-    [paneModel, pendingTakeover, isActive, selectionReference, hasReview],
+    [paneModel, pendingTakeover, isActive, selectionReference, hasReview, hasRemovalRun],
   );
 
   // In review mode the pending marks live in the ACTIVE file's own text: its
@@ -1934,14 +1943,17 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
             // "open" lands in the EDITOR on that file — switching files alone
             // left the mirror on screen when the run's file was already
             // mounted (the common case), which read as a dead button.
+            // Land on the TINTED editor, not back into the auto-opened
+            // mirror: 'auto' would re-open it while removals are undecided
+            // (Sir, 2026-10-08). 'hidden' is the user's explicit choice of
+            // the buffer — livePending tints and the gutter −N keep naming
+            // what is undecided there, and the next fresh request resets the
+            // takeover so the review after this one auto-opens again.
             onOpenFile={(file) => {
               setActiveFile(file);
-              usePendingEditStore.getState().resetTakeover();
+              usePendingEditStore.getState().hideDiff();
             }}
-            // Back to the DEFAULT view, not the declined-card 'hidden' state:
-            // the edit view is the review, and 'hidden' used to drop the
-            // pending tints.
-            onHide={() => usePendingEditStore.getState().resetTakeover()}
+            onHide={() => usePendingEditStore.getState().hideDiff()}
           />
         ) : pendingPane === 'diff' && paneModel ? (
           <PendingDiffPane

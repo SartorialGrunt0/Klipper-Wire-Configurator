@@ -19,7 +19,7 @@ import DiffLines from './DiffLines';
 import EditDecisionPair from './EditDecisionPair';
 import { BUTTON_CLASS } from './PendingDiffPane';
 import type { DiffLine } from '../utils/configDiff';
-import type { LedgerSectionFile } from '../services/reviewEngine';
+import { mirrorRowsFor, type LedgerSectionFile } from '../services/reviewEngine';
 
 export interface ReviewMirrorPaneProps {
   /** The review's files with their runs (empty-run files included). */
@@ -34,28 +34,33 @@ export interface ReviewMirrorPaneProps {
 interface MirrorFile {
   file: LedgerSectionFile;
   lines: DiffLine[];
+  /** Per-row gutter numbers: frame space for red, live space for green. */
+  rowNumbers: (number | null)[];
   /** Row index of each run's header line → the run it belongs to. */
   headers: Map<number, { key: string }>;
 }
 
-/** One file's changed runs as mini-diff rows, header line first per run. */
+/**
+ * One file's runs rendered through the engine's pure `mirrorRowsFor` (the
+ * row builder the tests pin): header first per run, removed rows numbered
+ * in the FRAME's space, added rows in the LIVE text's space. The header rows
+ * are where the run's Keep/Undo pair rides.
+ */
 function mirrorFile(file: LedgerSectionFile): MirrorFile {
-  const lines: DiffLine[] = [];
+  const rows = mirrorRowsFor(file);
   const headers = new Map<number, { key: string }>();
-  for (const entry of file.runs) {
-    headers.set(lines.length, { key: entry.key });
-    lines.push({
-      type: 'header',
-      content: `${file.file}${entry.label ? ` · ${entry.label}` : ''}`,
-    });
-    for (const text of entry.run.removed) lines.push({ type: 'removed', content: text });
-    for (const text of entry.run.added) lines.push({ type: 'added', content: text });
-  }
-  if (lines.length === 0) {
-    // A created file with no lines yet: still offer its Keep/Undo.
-    lines.push({ type: 'context', content: `${file.file} (empty)` });
-  }
-  return { file, lines, headers };
+  let runAt = 0;
+  rows.forEach((row, i) => {
+    if (row.type !== 'header') return;
+    headers.set(i, { key: file.runs[runAt]?.key ?? '' });
+    runAt += 1;
+  });
+  return {
+    file,
+    lines: rows.map(({ type, content }) => ({ type, content })),
+    rowNumbers: rows.map((row) => row.line),
+    headers,
+  };
 }
 
 export default function ReviewMirrorPane({
@@ -82,10 +87,12 @@ export default function ReviewMirrorPane({
       </div>
 
       <div className="flex-1 min-h-0 overflow-auto py-2">
-        {rendered.map(({ file, lines, headers }) => (
+        {rendered.map(({ file, lines, rowNumbers, headers }) => (
           <div key={file.file} className="mb-2 border-b border-[var(--color-bg-tertiary)] pb-2 last:border-b-0">
             <DiffLines
               lines={lines}
+              lineNumbers
+              rowNumbers={rowNumbers}
               rowExtras={(rowIndex) => {
                 const header = headers.get(rowIndex);
                 if (!header) return null;

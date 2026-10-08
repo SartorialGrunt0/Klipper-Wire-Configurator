@@ -64,18 +64,27 @@ interface Props {
    * must look like the SAME gutter, not a lookalike: the editor draws its
    * numbers at `text-sm` in the secondary text colour, right-aligned in a
    * 3rem column with a `border-r` and the panel background (`TextEditor`'s
-   * `lineNumbersRef` block). Numbers count the document the diff's AFTER side
-   * describes — the text the buffer holds — and a removed row, which is not in
-   * that document, shows a blank. The number is `sticky left-0` so it stays
-   * put while a long line scrolls sideways under it.
+   * `lineNumbersRef` block). By default numbers count the document the diff's
+   * AFTER side describes — the text the buffer holds — and a removed row,
+   * which is not in that document, shows a blank. The number is `sticky
+   * left-0` so it stays put while a long line scrolls sideways under it.
    */
   lineNumbers?: boolean;
+  /**
+   * Explicit per-row gutter numbers, overriding the AFTER-side count (with
+   * `lineNumbers`). The review mirror passes one (Sir, 2026-10-08): a
+   * replacement run's red row carries the number the old line held in the
+   * frame, its green row the number the new line holds in the live text —
+   * two moments of the file's life, each numbered in its own space, which
+   * is exactly the reading of "line 555 deleted, line 556 added".
+   */
+  rowNumbers?: (number | null)[];
 }
 
 export default function DiffLines({
-  lines, className = '', containerRef, rowExtras, lineNumbers = false,
+  lines, className = '', containerRef, rowExtras, lineNumbers = false, rowNumbers,
 }: Props) {
-  const numbers = lineNumbers ? documentLineNumbers(lines) : null;
+  const numbers = lineNumbers ? (rowNumbers ?? documentLineNumbers(lines)) : null;
   return (
     <pre ref={containerRef} className={`m-0 font-mono overflow-x-auto ${className}`}>
       {lines.map((line, i) => {

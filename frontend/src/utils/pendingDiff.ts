@@ -260,6 +260,17 @@ export type PendingPaneMode = 'editor' | 'review' | 'mirror' | 'diff' | 'chip';
  * (the card path's `diff`) no longer fits a review that keeps the buffer live
  * (Sir, 2026-10-07).
  *
+ * `hasRemoval` (Sir, 2026-10-08): the live path AUTO-OPENS the mirror when any
+ * undecided run removes or replaces lines. He rejected tints for replacements
+ * ("show the old replaced line in red above new line in green", each with its
+ * own line number): a textarea overlay physically cannot host the extra row —
+ * the drift law — so the red-over-green reading is the mirror's job, and the
+ * mirror is where removals get reviewed by default. Add-only runs stay in the
+ * live `review` tints. An explicit `hidden` (Back to editing) still lands on
+ * the tinted editor: the user chose the buffer, the marks ride there (the
+ * gutter −N names what is undecided), and the next fresh review re-arms `auto`
+ * by resetting the takeover.
+ *
  * `'hidden'` means nothing on the live path (2026-10-07): the fold-away it
  * came from was the card's, and on the live path the edit view IS the review
  * — the strip carries the decisions and the "Show diff" toggle, and it goes
@@ -282,12 +293,18 @@ export function paneModeFor(input: {
   live?: boolean;
   /** The live path's review presence: the ledger has runs for this review. */
   hasReview?: boolean;
+  /** Any undecided run removes or replaces lines (live path, Sir 2026-10-08). */
+  hasRemoval?: boolean;
 }): PendingPaneMode {
-  const { model, takeover, isActive, selection, live, hasReview } = input;
+  const { model, takeover, isActive, selection, live, hasReview, hasRemoval } = input;
   if (!isActive) return 'editor';
   if (live) {
     if (!model && !hasReview) return 'editor';
     if (takeover === 'shown') return 'mirror';
+    // Auto: removals and replacements are reviewed in the mirror — red old
+    // line over green new line, each with its own number (Sir, 2026-10-08).
+    // Add-only runs have nothing hidden from the buffer: live tints.
+    if (takeover === 'auto' && hasRemoval) return 'mirror';
     return 'review';
   }
   if (!model) return 'editor';

@@ -436,8 +436,13 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       setApprovalInvalidation(null);
       setApprovalBusy(false);
       // The text view's pending-diff pane follows the same slot: a new
-      // request starts with nothing pending.
+      // request starts with nothing pending. The takeover too — clearPending
+      // early-returns when no CARD was pending (the live path never has one),
+      // so a folded mirror ('hidden') from the last review would otherwise
+      // suppress this review's auto-open (Sir, 2026-10-08: removals review in
+      // the mirror by default; the fold is per-review, not permanent).
       usePendingEditStore.getState().clearPending();
+      usePendingEditStore.getState().resetTakeover();
       // Post-hoc review: the change set is a RUNNING TOTAL — a new message
       // does NOT clear the edits an earlier one staged. Those stay in the
       // review summary until they are kept or undone.

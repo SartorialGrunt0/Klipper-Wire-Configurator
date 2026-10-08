@@ -159,6 +159,45 @@ export function groupLedgerSections(files: readonly LedgerFile[]): LedgerSection
   });
 }
 
+// ── The mirror's rows ────────────────────────────────────────────────
+
+/** One mirror row plus its gutter number (see `mirrorRowsFor`). */
+export interface MirrorRow {
+  type: 'header' | 'removed' | 'added' | 'context';
+  content: string;
+  /** Gutter number in the row's OWN space, or null (header/context). */
+  line: number | null;
+}
+
+/**
+ * One file's changed runs as the review mirror's rows (Sir, 2026-10-08).
+ *
+ * Each row carries its own line number, in the space that moment of the
+ * file's life uses: a REMOVED row shows the number the line held in the
+ * FRAME (`frameStart + i`), an ADDED row the number it holds in the LIVE
+ * text (`liveStart + i`). A replacement run then reads exactly as asked —
+ * the old line in red at its old number above the new line in green at its
+ * new one — and keep/undo leave exactly one of the pair. Header rows carry
+ * the file/section name and no number; a created-but-empty file still gets
+ * one context row so its Keep/Undo has something to ride.
+ */
+export function mirrorRowsFor(file: LedgerSectionFile): MirrorRow[] {
+  const rows: MirrorRow[] = [];
+  for (const entry of file.runs) {
+    rows.push({
+      type: 'header',
+      content: `${file.file}${entry.label ? ` · ${entry.label}` : ''}`,
+      line: null,
+    });
+    entry.run.removed.forEach((text, i) => rows.push({ type: 'removed', content: text, line: entry.run.frameStart + i }));
+    entry.run.added.forEach((text, i) => rows.push({ type: 'added', content: text, line: entry.run.liveStart + i }));
+  }
+  if (rows.length === 0) {
+    rows.push({ type: 'context', content: `${file.file} (empty)`, line: null });
+  }
+  return rows;
+}
+
 /**
  * The FRAMES a change-set payload seeds. A created file's frame is `null` (its
  * whole live text is one green run); every other file's is its pre-review text.

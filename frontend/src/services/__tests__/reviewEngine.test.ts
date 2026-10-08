@@ -21,6 +21,7 @@ import {
   keepRun,
   ledgerFor,
   ledgerFrom,
+  mirrorRowsFor,
   reviewStops,
   setLiveApplier,
   stopsFrom,
@@ -157,6 +158,76 @@ describe('stopsFrom / groupLedgerSections', () => {
       liveTexts: { 'printer.cfg': L('a', 'c') },
     }));
     expect(groupLedgerSections(deleted)[0].runs[0].preview).toBe('gone');
+  });
+});
+
+describe('mirrorRowsFor — the mirror rows and their line numbers (Sir 2026-10-08)', () => {
+  const sections = (frames: Record<string, string | null>, live: Record<string, string>) =>
+    groupLedgerSections(ledgerFrom(snap({ reviewFrames: frames, liveTexts: live })))[0];
+
+  it('a replacement reads old-red at the FRAME number over new-green at the LIVE number', () => {
+    // frame line 5 changed → live line 5 too (same position, different text).
+    const file = sections(
+      { 'printer.cfg': L('a', 'b', 'max_velocity: 500', 'c') },
+      { 'printer.cfg': L('a', 'b', 'max_velocity: 300', 'c') },
+    );
+    const rows = mirrorRowsFor(file);
+    expect(rows.map((r) => r.type)).toEqual(['header', 'removed', 'added']);
+    expect(rows[1]).toMatchObject({ content: 'max_velocity: 500', line: 3 }); // frame number
+    expect(rows[2]).toMatchObject({ content: 'max_velocity: 300', line: 3 }); // live number
+    expect(rows[0].line).toBeNull();
+  });
+
+  it('an insertion shifts the numbering: red keeps the frame number, green the live', () => {
+    // A line inserted at 2 means everything after moved: frame 3 == live 4.
+    const file = sections(
+      { 'printer.cfg': L('a', 'x = 1', 'b') },
+      { 'printer.cfg': L('a', 'new = 0', 'x = 2', 'b') },
+    );
+    const rows = mirrorRowsFor(file);
+    // One run: removed x = 1 (frame line 2) + added new = 0 / x = 2 (live 2, 3).
+    expect(rows.map((r) => [r.type, r.line])).toEqual([
+      ['header', null],
+      ['removed', 2],
+      ['added', 2],
+      ['added', 3],
+    ]);
+  });
+
+  it('a pure deletion numbers only the red row, at its frame line', () => {
+    const file = sections(
+      { 'printer.cfg': L('a', 'gone', 'c') },
+      { 'printer.cfg': L('a', 'c') },
+    );
+    const rows = mirrorRowsFor(file);
+    expect(rows.map((r) => [r.type, r.line])).toEqual([
+      ['header', null],
+      ['removed', 2],
+    ]);
+  });
+
+  it('a created-but-empty file still gets a row for its Keep/Undo', () => {
+    const files = ledgerFrom(snap({ reviewFrames: { 'new.cfg': null }, liveTexts: { 'new.cfg': '' } }));
+    const file = groupLedgerSections(files)[0];
+    const rows = mirrorRowsFor(file);
+    expect(rows).toEqual([{ type: 'context', content: 'new.cfg (empty)', line: null }]);
+  });
+
+  it('multi-run files: each run gets its own header and per-space numbers', () => {
+    const file = sections(
+      { 'printer.cfg': L('a', 'b', 'c', 'd', 'e', 'f') },
+      { 'printer.cfg': L('a', 'B', 'c', 'd', 'e', 'F') },
+    );
+    const rows = mirrorRowsFor(file);
+    expect(rows.filter((r) => r.type === 'header')).toHaveLength(2);
+    expect(rows.map((r) => [r.type, r.content, r.line])).toEqual([
+      ['header', 'printer.cfg', null],
+      ['removed', 'b', 2],
+      ['added', 'B', 2],
+      ['header', 'printer.cfg', null],
+      ['removed', 'f', 6],
+      ['added', 'F', 6],
+    ]);
   });
 });
 
