@@ -109,10 +109,13 @@ body {
    would return to carries the red mark — the mini-diff's red-row weight,
    raised past /15 because there are no red glyphs to help it. The −N count
    and removed text live in the gutter (one aligned text block) and the
-   review strip; the row itself stays quiet decoration. */
+   review strip; the row itself stays quiet decoration.
+   Deliberately tint-only (Sir, 2026-10-07): the earlier solid red top-rule
+   is dropped — the tint + gutter −N read clearly, and the accepted trade is
+   that a pending-deletion row can look like an error-flag row at a glance
+   (the strip and gutter disambiguate; a crisper mark was not worth it). */
 .kl-line-removed {
   background-color: rgb(239 68 68 / 0.28);
-  box-shadow: inset 0 2px 0 0 rgb(239 68 68 / 0.9);
 }
 
 /* Current-line highlight: ambient "where am I", painted on the line's own
