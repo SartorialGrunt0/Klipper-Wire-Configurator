@@ -35,9 +35,15 @@ export interface RunPairTarget {
 }
 
 interface PlacedPair extends RunPairTarget {
-  x: number;
   y: number;
 }
+
+/** Gap between the pair and the editor box's right edge (Sir, 2026-10-08:
+ *  the pairs hug the RIGHT edge, not the anchor column — a deletion anchor
+ *  is zero-width at column 0, so a left placement sat in the middle of the
+ *  red line; the right edge is where change widgets live (VS Code's law)
+ *  and it never covers the run's text). */
+const RIGHT_EDGE_PX = 6;
 
 interface Props {
   /** The syntax-highlight overlay <pre> that carries the marker spans. */
@@ -47,9 +53,10 @@ interface Props {
   runs: readonly RunPairTarget[];
 }
 
-/** Cheap layout-change signature; identical → no re-render. */
+/** Cheap layout-change signature; identical → no re-render. X is constant
+ *  (CSS right edge), so the signature tracks the measured Y only. */
 function signature(pairs: readonly PlacedPair[]): string {
-  return pairs.map((p) => `${p.key}:${p.x}:${p.y}`).join('|');
+  return pairs.map((p) => `${p.key}:${p.y}`).join('|');
 }
 
 export default function PendingRunPairs({ overlayRef, textareaRef, runs }: Props) {
@@ -83,10 +90,11 @@ export default function PendingRunPairs({ overlayRef, textareaRef, runs }: Props
       // Off-screen runs (above the viewport or below it) render nothing —
       // they reappear with the scroll, same as the tint.
       if (y < -24 || y > hostRect.height) continue;
-      // Clamp to the left edge so a pair stays reachable when the run's line
-      // is scrolled horizontally out of view (VS Code's hunk-widget rule).
-      const x = Math.max(0, rect.left - hostRect.left);
-      next.push({ ...run, x: Math.round(x), y: Math.round(y) });
+      // X comes from the RIGHT EDGE of the box (see RIGHT_EDGE_PX), not the
+      // marker column: a deletion anchor is zero-width at column 0, so an
+      // x-from-marker pair sat over the red line's text. Y is still the
+      // measured marker — the drift law is vertical.
+      next.push({ ...run, y: Math.round(y) });
     }
     const sig = signature(next);
     if (sig !== sigRef.current) {
@@ -146,7 +154,7 @@ export default function PendingRunPairs({ overlayRef, textareaRef, runs }: Props
         <span
           key={pair.key}
           className={`${ROW_PAIR_CLASS} pointer-events-auto absolute`}
-          style={{ left: pair.x, top: pair.y }}
+          style={{ right: RIGHT_EDGE_PX, top: pair.y }}
           title={pair.title}
         >
           <EditDecisionPair
