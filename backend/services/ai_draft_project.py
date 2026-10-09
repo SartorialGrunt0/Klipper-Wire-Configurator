@@ -24,10 +24,11 @@ from __future__ import annotations
 
 import difflib
 import logging
+from functools import lru_cache
 import re
 from copy import deepcopy
 from dataclasses import dataclass, field
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 from parser.config_parser import SAVE_CONFIG_BANNER_RE, parse_config
 from parser.config_schema import get_all_section_types, get_section_def
@@ -169,6 +170,38 @@ def _section_exists_in_project(files: "dict[str, str]", header: str) -> bool:
             if match and match.group(1).strip().casefold() == wanted:
                 return True
     return False
+
+
+@lru_cache(maxsize=1)
+def _bundled_extras_tokens() -> frozenset[str]:
+    """Type tokens Klipper can load that the curated schema may not list.
+
+    klippy resolves a section's type token to the module FILENAME
+    ``extras/<token>.py``; the bundled reference snapshot (reference/klipper)
+    is exactly the firmware KWC's docs ship against. The curated schema is a
+    hand-maintained subset, so a token with a module file here is loadable
+    even when the schema misses it (sht3x, aht10, print_stats, ...). Cached
+    per process; a missing snapshot yields the empty set (gate degrades to
+    the schema-only behavior it shipped with).
+    """
+    extras = Path(__file__).resolve().parent.parent.parent \
+        / 'reference' / 'klipper' / 'klippy' / 'extras'
+    try:
+        return frozenset(p.stem for p in extras.glob('*.py'))
+    except OSError:
+        return frozenset()
+
+
+def _section_token_is_loadable(token: str) -> bool:
+    """True if the token names a real module file in the bundled reference.
+
+    Strict name check: only a bare lowercase module-name token can match, so
+    a traversal-shaped or odd-character token is refused without touching the
+    filesystem with it.
+    """
+    if not token.isidentifier() or token.lower() != token:
+        return False
+    return token in _bundled_extras_tokens()
 
 
 def _unknown_section_type_error(token: str) -> str:
@@ -878,6 +911,7 @@ class ProjectState:
         token = header.split(' ', 1)[0] if header else header
         if token and get_section_def(token) is None \
                 and get_section_def(token.lower()) is None \
+                and not _section_token_is_loadable(token) \
                 and not _section_exists_in_project(self.files, header):
             return _state_error(_unknown_section_type_error(token))
         block = [f'[{header}]']
