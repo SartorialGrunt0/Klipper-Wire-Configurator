@@ -24,14 +24,21 @@ def payload():
 
 
 def test_route_is_mounted_under_the_api_prefix():
-    # The app serves an SPA catch-all, so an un-prefixed path returns the shell
-    # rather than 404. What matters is that the JSON lives under /api and the
-    # un-prefixed path is not the endpoint.
+    # What matters is that the JSON lives under /api and the un-prefixed path
+    # is NOT the endpoint. When the built SPA is present, the catch-all serves
+    # the shell for it; when it isn't (CI installs backend deps only), the
+    # un-prefixed path is a 404. Both shapes satisfy the contract — pin both,
+    # never assert on the presence of frontend/dist.
     api = client.get('/api/gcode-commands')
     assert api.status_code == 200
     assert api.headers['content-type'].startswith('application/json')
     shell = client.get('/gcode-commands')
-    assert shell.headers['content-type'].startswith('text/html')
+    dist = Path(__file__).resolve().parents[1] / 'frontend' / 'dist'
+    if dist.is_dir():
+        assert shell.status_code == 200
+        assert shell.headers['content-type'].startswith('text/html')
+    else:
+        assert shell.status_code == 404
 
 
 def test_payload_shape():
