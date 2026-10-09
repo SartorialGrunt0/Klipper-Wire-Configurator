@@ -208,16 +208,36 @@ export function undoRunsInLive(
 }
 
 /**
- * The `[section]` a run belongs to: the nearest header at or above its first
- * live line (frame lines when the run is a pure deletion at EOF). Falls back
- * to the file name. One scan per call — stops are few.
+ * The `[section]` a run belongs to.
+ *
+ * 1. A header INSIDE the run wins: a run carrying `[...]` in its added
+ *    lines created or renamed a section (add_section at EOF starts the
+ *    run at the blank separator, so the upward scan alone would label
+ *    the NEW section with whatever sat above it — live report
+ *    2026-10-09: `CIRCLE_HOME` + `gcode_arcs` shown as
+ *    `[gcode_macro CANCEL_PRINT]`). First header wins — a run appending
+ *    several sections is labelled by the first one it introduces.
+ * 2. Else, for a run whose removed lines carry a header, that dead
+ *    header — the section was deleted.
+ * 3. Else the nearest header at or above the run's first live line
+ *    (frame lines when the run is a pure deletion at EOF). Falls back
+ *    to the file name. One scan per call — stops are few.
  */
 export function runSectionLabel(live: string | null, frame: string, run: ReviewRun): string {
+  const headerRe = /^\s*\[([^\]]+)\]/;
+  for (const line of run.added) {
+    const m = line.match(headerRe);
+    if (m) return `[${m[1]}]`;
+  }
+  for (const line of run.removed) {
+    const m = line.match(headerRe);
+    if (m) return `[${m[1]}]`;
+  }
   const source = run.removed.length > 0 && run.liveEnd < run.liveStart ? frame : (live ?? frame);
   const lines = partLines(source);
   const at = Math.min(Math.max(run.liveStart - 1, 0), Math.max(lines.length - 1, 0));
   for (let i = at; i >= 0; i -= 1) {
-    const m = lines[i]?.match(/^\s*\[([^\]]+)\]/);
+    const m = lines[i]?.match(headerRe);
     if (m) return `[${m[1]}]`;
   }
   return '';

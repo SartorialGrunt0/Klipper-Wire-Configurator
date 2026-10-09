@@ -151,6 +151,57 @@ describe('runSectionLabel', () => {
     const runs = reviewRuns(L('[printer]', 'max_velocity: 200', '', '[extruder]', 'nozzle: 0.4'), live);
     expect(runSectionLabel(live, L('[printer]', 'max_velocity: 200', '', '[extruder]', 'nozzle: 0.4'), runs[0])).toBe('[printer]');
   });
+
+  it('an appended section is labelled with its OWN header, not the section above (live report 2026-10-09)', () => {
+    // add_section at EOF appends a blank separator + the new section: the
+    // run starts at the separator, so the upward scan used to land on
+    // [gcode_macro CANCEL_PRINT] while the new header sits INSIDE added.
+    const frame = L('[printer]', 'kinematics: corexy', '', '[gcode_macro CANCEL_PRINT]', 'gcode:', '  M106 S0');
+    const live = L(
+      '[printer]', 'kinematics: corexy', '', '[gcode_macro CANCEL_PRINT]', 'gcode:', '  M106 S0',
+      '', '[gcode_macro CIRCLE_HOME]', 'gcode:', '  G28',
+    );
+    const runs = reviewRuns(frame, live);
+    expect(runs).toHaveLength(1);
+    expect(runSectionLabel(live, frame, runs[0])).toBe('[gcode_macro CIRCLE_HOME]');
+  });
+
+  it('a run adding several sections labels with the FIRST new header', () => {
+    const frame = L('[extruder]', 'nozzle: 0.4');
+    const live = L(
+      '[extruder]', 'nozzle: 0.4',
+      '', '[gcode_macro CIRCLE_HOME]', 'gcode:', '  G28',
+      '', '[gcode_arcs]', 'resolution: 1.0',
+    );
+    const runs = reviewRuns(frame, live);
+    expect(runs.length).toBeGreaterThanOrEqual(1);
+    expect(runSectionLabel(live, frame, runs[0])).toBe('[gcode_macro CIRCLE_HOME]');
+  });
+
+  it('a deleted section is labelled with its OWN (now gone) header', () => {
+    const frame = L('[printer]', 'kinematics: corexy', '', '[gcode_arcs]', 'resolution: 1.0', '', '[extruder]', 'nozzle: 0.4');
+    const live = L('[printer]', 'kinematics: corexy', '', '[extruder]', 'nozzle: 0.4');
+    const runs = reviewRuns(frame, live);
+    expect(runs).toHaveLength(1);
+    expect(runSectionLabel(live, frame, runs[0])).toBe('[gcode_arcs]');
+  });
+
+  it('a renamed section labels with the NEW header', () => {
+    const frame = L('[gcode_macro Level_Bed]', 'gcode:', '  PROBE_CALIBRATE');
+    const live = L('[gcode_macro BED_LEVEL]', 'gcode:', '  PROBE_CALIBRATE');
+    const runs = reviewRuns(frame, live);
+    expect(runs).toHaveLength(1);
+    expect(runSectionLabel(live, frame, runs[0])).toBe('[gcode_macro BED_LEVEL]');
+  });
+
+  it('a param line added mid-section still labels with the enclosing header', () => {
+    // No header inside the run — the upward scan must stay authoritative.
+    const frame = L('[printer]', 'max_velocity: 200', '', '[extruder]', 'nozzle: 0.4');
+    const live = L('[printer]', 'max_velocity: 200', 'max_accel: 5000', '', '[extruder]', 'nozzle: 0.4');
+    const runs = reviewRuns(frame, live);
+    expect(runs).toHaveLength(1);
+    expect(runSectionLabel(live, frame, runs[0])).toBe('[printer]');
+  });
 });
 
 describe('trailing-newline convention survives a splice', () => {
