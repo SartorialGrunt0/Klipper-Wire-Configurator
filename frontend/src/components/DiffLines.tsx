@@ -108,7 +108,7 @@ export default function DiffLines({
                 aria-hidden
                 className="sticky left-0 mr-2 inline-block w-12 shrink-0 border-r border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] pl-2 pr-2 text-right align-top text-[var(--color-text-secondary)]"
               >
-                {numbers[i] ?? ''}
+                {numbers[i] ?? '\u00A0'}
               </span>
             )}
             <span className="select-none opacity-50 mr-1.5">{ROW_MARK[line.type]}</span>
