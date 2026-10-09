@@ -62,9 +62,18 @@ export interface ChangeSetState {
   setReviewFrame: (file: string, frame: string | null) => void;
   /** Drop ONE file's frame (a created file undone away). */
   removeReviewFrame: (file: string) => void;
+  /** Move one file's frame to a new name (the file was renamed). */
+  migrateReviewFrameKey: (oldName: string, newName: string) => void;
   toggleExpanded: (id: string) => void;
-  /** Forget everything — a new chat, or loading another conversation. */
+  /** Forget everything — a new chat, or loading another conversation.
+   *  Bumps `epoch` so a still-running request's late poll writes (its
+   *  staged texts, segments, and frames) cannot resurrect a review the
+   *  user explicitly discarded (PR #36 review, B-4). */
   clear: () => void;
+  /** Monotonic generation counter: bumped by every explicit clear. A poll
+   *  run captures it at submit and checks `epoch > runEpoch` before any
+   *  write — the run is stale once the counter moved without it. */
+  epoch: number;
 }
 
 const EMPTY = {
@@ -76,6 +85,7 @@ const EMPTY = {
 
 export const useChangeSetStore = create<ChangeSetState>((set, get) => ({
   ...EMPTY,
+  epoch: 0,
 
   setFromStream: (requestId, payload) => {
     if (!requestId) return;
@@ -128,6 +138,20 @@ export const useChangeSetStore = create<ChangeSetState>((set, get) => ({
     });
   },
 
+  migrateReviewFrameKey: (oldName, newName) => {
+    set((s) => {
+      if (!(oldName in s.reviewFrames) || oldName === newName) return s;
+      const next = { ...s.reviewFrames };
+      // The new name wins only over its own stale leftovers? No: a rename
+      // onto a name that already carries a frame (an overwrite rename is
+      // refused upstream) cannot happen; if it somehow does, the OLD file's
+      // frame must not silently replace the target's — drop the old one.
+      next[newName] = next[newName] ?? next[oldName];
+      delete next[oldName];
+      return { reviewFrames: next };
+    });
+  },
+
   toggleExpanded: (id) => {
     const { expanded } = get();
     set({
@@ -137,5 +161,5 @@ export const useChangeSetStore = create<ChangeSetState>((set, get) => ({
     });
   },
 
-  clear: () => set({ ...EMPTY }),
+  clear: () => set((s) => ({ ...EMPTY, epoch: s.epoch + 1 })),
 }));

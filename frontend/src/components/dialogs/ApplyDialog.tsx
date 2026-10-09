@@ -570,6 +570,12 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
       // doesn't keep showing them as deleted forever.
       configStore.removeOriginalTexts(deleted);
       configStore.markClean();
+      // A save writes the buffer to disk: the running change set and its
+      // review frames describe edits that are now the file's own content.
+      // They must not survive to tint the next session's text view (PR #36
+      // review, claim 3). Bumping the epoch also retires an in-flight
+      // reply's late writes (B-4).
+      useChangeSetStore.getState().clear();
     } catch (err) {
       setStatus('error');
       setMessage(err instanceof Error ? err.message : 'Save failed');

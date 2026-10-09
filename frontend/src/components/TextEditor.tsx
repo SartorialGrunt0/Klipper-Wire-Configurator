@@ -16,7 +16,7 @@ import { autoScrollDelta } from '../utils/editorAutoScroll';
 import { buildHighlightedHtml, escapeHtml } from '../utils/editorHighlight';
 import { lineSeverities, worstSeverity, type IssueSeverity } from '../utils/issueSummary';
 import { readIssueStripCollapsed, writeIssueStripCollapsed } from '../utils/editorPrefs';
-import { findHits, replaceAll, replaceOne, countHits, type FindHit } from '../utils/findReplace';
+import { findHits, replaceAll, replaceOne, countHits } from '../utils/findReplace';
 import {
   completionsAt,
   acceptAt,
@@ -633,12 +633,15 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
 
   /** Feed the caret bridge from the DOM's current (DISPLAY) selection. */
   const bridgeCaretFromDom = useCallback((el: HTMLTextAreaElement) => {
-    if (!ghostsShowing) return;
+    // Always fed, ghosts or not (PR #36 review, L4): with no ghosts the
+    // display IS the live text, so the offsets pass through — and when a
+    // removal review first inserts its ghost rows, the re-place effect finds
+    // a caret promise instead of null and keeps the caret on its line.
     caretBridgeRef.current = [
       displayToLiveOffset(el.value, reviewDisplay.ghostDisplayLines, el.selectionStart),
       displayToLiveOffset(el.value, reviewDisplay.ghostDisplayLines, el.selectionEnd),
     ];
-  }, [ghostsShowing, reviewDisplay]);
+  }, [reviewDisplay]);
 
   // The inline pair targets: the review's runs IN the active file, anchored
   // at each run's top live line (a pure deletion anchors at its return line —
@@ -1099,6 +1102,11 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     // followed an accepted name until you typed or clicked again).
     setCaret(edit.start);
     setEditText(edit.text);
+    // The typing path publishes liveText immediately (PR #36 review, L5):
+    // a Tab indent or a completion accept must keep the ledger's LIVE side
+    // in step too, or the chat bar and the strip count a stale buffer until
+    // the debounced parse lands.
+    useConfigStore.getState().setLiveText(activeFile, edit.text);
   }, [ghostsShowing, reviewGhosts, activeFile]);
 
   useEffect(() => {
@@ -1164,6 +1172,10 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   // Tab / Shift+Tab indentation. The textarea had no key handler at all, so Tab
   // moved focus out of the editor and there was no way to indent a block.
   const handleEditorKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // IME guard (PR #36 review, L3): during a composition the browser owns
+    // Arrow/Escape/Enter for its candidate window — an accept here would
+    // splice text mid-composition and stealing Escape breaks the IME cancel.
+    if (e.nativeEvent.isComposing || composingRef.current) return;
     // Accepting is the RIGHT ARROW or End (Tab keeps its single meaning: indent),
     // and only when the caret sits at the end of the token with nothing after it
     // on the line, so the arrow never swallows a normal cursor move.

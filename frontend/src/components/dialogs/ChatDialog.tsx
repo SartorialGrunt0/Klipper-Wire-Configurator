@@ -265,6 +265,8 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   // the backend /ai/chat/stop endpoint (via requestId) cancels the work.
   const stopControllerRef = useRef<AbortController | null>(null);
   const stopRequestIdRef = useRef<string | null>(null);
+  // The change-set generation this submit run was born in (B-4 guard).
+  const runEpochRef = useRef(0);
 
   const loadedConfigFilenames = Object.keys(configFiles);
 
@@ -429,6 +431,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       stopControllerRef.current = stopController;
       stopRequestIdRef.current = stopRequestId;
       setStopRequestId(stopRequestId);
+      // Generation guard (PR #36 review, B-4): if the user discards the
+      // review (Revert / New Chat / Generate / Open-from-Pi) while this
+      // request is in flight, every later write of THIS run is stale.
+      runEpochRef.current = useChangeSetStore.getState().epoch;
       // Reset the approval card state for the new request; the poll
       // effect below picks up any card this request suspends on.
       setApprovalCard(null);
@@ -580,7 +586,13 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           ...pipelineResult.finalMessage,
           requestId: stopRequestId,
         };
-        setMessages([...newMessages, finalMessage]);
+        // Steer bubbles appended AFTER this submit (handleSteer writes the
+        // store directly) are not in the closure's `newMessages`; merge them
+        // back in so a message the user actually sent cannot vanish from
+        // the transcript when the reply lands (PR #36 review, L1).
+        const latest = useAiStore.getState().messages;
+        const steersAfterSubmit = latest.slice(newMessages.length).filter((m) => m.steer);
+        setMessages([...newMessages, ...steersAfterSubmit, finalMessage]);
         // Approved tool edits (Phase 2 gate): the resuming loop's final
         // reply carries the staged writes — put them into the editor draft
         // (dirty, save-gated). Declines/timeouts arrive with no staged
@@ -597,13 +609,15 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         // final edit may have landed after the last poll tick). It joins the
         // running total rather than replacing it, and its FRAMES seed the
         // review (a review already in progress keeps its frames).
-        useChangeSetStore.getState().setFromStream(
-          stopRequestId,
-          finalMessage.changeSet ?? null,
-        );
-        useChangeSetStore.getState().seedFrames(
-          framesFromChangeSet(finalMessage.changeSet ?? null),
-        );
+        if (useChangeSetStore.getState().epoch === runEpochRef.current) {
+          useChangeSetStore.getState().setFromStream(
+            stopRequestId,
+            finalMessage.changeSet ?? null,
+          );
+          useChangeSetStore.getState().seedFrames(
+            framesFromChangeSet(finalMessage.changeSet ?? null),
+          );
+        }
         // Background completion signal: if the dialog is closed when the reply
         // lands, flag the toolbar button so the user knows it's ready.
         if (!openRef.current) {
@@ -782,12 +796,19 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       // the signature check keeps the ~1.5s poll from re-parsing every tick.
       if (poll.stagedEdits && poll.stagedEdits.length > 0) {
         const signature = JSON.stringify(poll.stagedEdits);
-        if (signature !== appliedStagedRef.current) {
+        // Same stale-run guard as the change-set writes below (B-4): after
+        // an explicit discard the buffer was reset — do not restage into it.
+        if (signature !== appliedStagedRef.current
+            && useChangeSetStore.getState().epoch === runEpochRef.current) {
           appliedStagedRef.current = signature;
           void applyStagedEdits(poll.stagedEdits);
         }
       }
       if (poll.changeSet) {
+        // Stale-run guard (B-4): an explicit discardReview() bumped the
+        // epoch after this run started — the review was thrown away on
+        // purpose, so this tick's write must not resurrect it.
+        if (useChangeSetStore.getState().epoch !== runEpochRef.current) return;
         useChangeSetStore.getState().setFromStream(stopRequestId, poll.changeSet);
         useChangeSetStore.getState().seedFrames(framesFromChangeSet(poll.changeSet));
       }
@@ -1003,6 +1024,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   const handleStartNewChat = useCallback(() => {
     clearMessages();
     useChatReferenceStore.getState().clear();
+    // A new conversation inherits no running change set — the store's own
+    // contract (PR #36 review, claim 3). This also bumps the epoch, so an
+    // in-flight reply cannot re-seed the previous conversation's review.
+    useChangeSetStore.getState().clear();
   }, [clearMessages]);
 
   const handleNewChatWithSave = useCallback(() => {

@@ -2,10 +2,9 @@
  * Ghost rows: the deleted line, INSIDE the edit view (Sir, 2026-10-08).
  *
  * The report: a replacement review must read old-red-above-new-green in the
- * TEXT VIEW ITSELF — the editable textarea, never a read-only stand-in — with
- * the gutter renumbered over the virtual row count (red `555` over green
- * `556`), collapsing back to the real count the moment Keep or Undo decides
- * the run.
+ * TEXT VIEW ITSELF — the editable textarea, never a read-only stand-in. The
+ * gutter numbers LIVE rows only: a ghost row takes no number (8d3cd42), so
+ * every visible number is the line's real number at all times.
  *
  * The drift law (e482e63, eb61bf5) forbids rows positioned OUTSIDE the text's
  * flow: a floating band or injected per-line box rounds its offset
@@ -101,6 +100,11 @@ export function buildReviewDisplay(
  * either boundary of the slot. A match there is decisive — the ghost sits
  * where it was built, whatever the user did elsewhere.
  *
+ * A block whose content duplicates a LIVE line above the slot strips at the
+ * SLOT, never at the twin: content alone cannot tell a ghost from a repeat
+ * of the same text the user always had, and stripping the twin relocated
+ * live text (PR #36 review, B-1). Row arithmetic is the tiebreaker.
+ *
  * When the slot does NOT match, the block's fate depends on WHERE the rows
  * went, which the line counts answer exactly. Let `g` = ghosts the blocks
  * after this one still claim, and `s` = live rows the walk has emitted. If
@@ -139,6 +143,22 @@ export function stripGhostsFromDisplay(
     // numbers — out.length IS the live-row count, so ghosts consumed
     // earlier never skew it.)
     const slotLive = anchor - 1;
+    // SLOT-FIRST. The builder placed this block after exactly `slotLive`
+    // live rows, so its position in the text is i + (slotLive − out.length)
+    // — deterministic while the ghost sits where it was built. A match at
+    // that slot is decisive, and content matches ABOVE it are then live
+    // text the user has (a frame line duplicated in the buffer), NOT a
+    // shifted ghost: stripping a twin above the slot relocated text
+    // (PR #36 review, B-1). Only when the slot itself does NOT match is
+    // an above-slot content match meaningful — it means rows above were
+    // deleted and the ghost rode up with them.
+    const slot = i + (slotLive - out.length);
+    if (matchAt(slot, block)) {
+      for (let q = i; q < slot; q += 1) out.push(lines[q]);
+      for (let q = 0; q < block.length; q += 1) strippedDisplayLines.push(slot + q + 1);
+      i = slot + block.length;
+      continue;
+    }
     // Emit live rows up to the slot, stopping EARLY (robust to the user
     // deleting rows above this ghost) once the block matches at the walk.
     while (out.length < slotLive && !matchAt(i, block)) {

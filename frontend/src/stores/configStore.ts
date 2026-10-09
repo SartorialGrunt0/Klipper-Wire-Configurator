@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { ConfigFile, ConfigSection, ConfigParam, ValidationResult, SectionSchema } from '../types/config';
 import { useValidationSettingsStore } from './validationSettingsStore';
+import { useChangeSetStore } from './changeSetStore';
 
 /** Master validation switch (Settings menu). Read lazily so toggling takes
  *  effect immediately without store subscriptions; the validationSettings
@@ -286,6 +287,10 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         selectedSectionLine: s.selectedSectionFile === filename ? null : s.selectedSectionLine,
       };
     });
+    // A review frame keyed by a deleted file is orphaned evidence: it would
+    // render a phantom review whose Keep/Undo targets a file that is gone
+    // (PR #36 review, B-3).
+    useChangeSetStore.getState().removeReviewFrame(filename);
     // The include-comment pass above mutated OTHER files' section
     // models — their findings (and the include dots in the UI) must
     // re-derive, same debounced pass every other mutation schedules.
@@ -588,6 +593,11 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         nextLiveTexts[newName] = nextLiveTexts[oldName];
         delete nextLiveTexts[oldName];
       }
+      // The review ledger keys its FRAMES by filename: a rename that leaves
+      // the frame behind renders a phantom whole-file-deletion review under
+      // the dead name, and Keep/Undo then writes into a file that no longer
+      // exists (PR #36 review, B-3). The frame travels with the file.
+      useChangeSetStore.getState().migrateReviewFrameKey(oldName, newName);
       // Update include directives in other files that reference the old name
       for (const [fn, cf] of Object.entries(next)) {
         if (cf.includes.includes(oldName)) {

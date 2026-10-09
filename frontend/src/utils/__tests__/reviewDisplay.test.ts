@@ -108,6 +108,50 @@ describe('liveFromDisplay', () => {
     }
   });
 
+  it('strips the SLOT ghost, not a duplicate live line above it (PR #36 B-1)', () => {
+    // frame: A DUP B DUP C — live deleted the SECOND DUP. The ghost (DUP)
+    // is identical to the live DUP two rows above it, so a content-first
+    // walk strips the wrong row and relocates text. The slot's row
+    // arithmetic is decisive: the ghost sits at slotLive + ghosts-stripped.
+    const ghosts = new Map<number, string[]>([[4, ['DUP']]]);
+    const live = 'A\nDUP\nB\nC\n';
+    const built = buildReviewDisplay(live, ghosts);
+    expect(built.display).toBe('A\nDUP\nB\nDUP\nC\n');
+    expect(liveFromDisplay(built.display, ghosts)).toBe(live);
+  });
+
+  it('identity round trip survives a fuzz over duplicate-heavy texts (B-1)', () => {
+    const alpha = ['A', 'B', 'C', ''];
+    const seqs: string[][] = [];
+    const build = (n: number, prefix: string[]) => {
+      if (n === 0) { seqs.push(prefix); return; }
+      for (const a of alpha) build(n - 1, [...prefix, a]);
+    };
+    build(4, []);
+    let checked = 0;
+    for (const frameLines of seqs) {
+      for (let del = 0; del <= 2; del += 1) {
+        for (let d = 0; d + del <= frameLines.length; d += 1) {
+          const live = [...frameLines.slice(0, d), ...frameLines.slice(d + del)].join('\n');
+          const built = displayOf(frameLines.join('\n'), live);
+          checked += 1;
+          expect(liveFromDisplay(built.display, built.ghosts),
+            `frame=${JSON.stringify(frameLines)} live=${JSON.stringify(live)}`).toBe(live);
+        }
+      }
+    }
+    expect(checked).toBeGreaterThan(2000);
+  });
+
+  it('a macro that deletes one of two identical gcode: lines round-trips', () => {
+    const frame = '[gcode_macro X]\ngcode:\n  M117 a\n  M117 a\n  M117 b\n';
+    const live = '[gcode_macro X]\ngcode:\n  M117 a\n  M117 b\n';
+    const built = displayOf(frame, live);
+    expect(built.display.split('\n')).toEqual(
+      ['[gcode_macro X]', 'gcode:', '  M117 a', '  M117 a', '  M117 b', '']);
+    expect(liveFromDisplay(built.display, built.ghosts)).toBe(live);
+  });
+
   it('keeps a live edit made far from the ghost', () => {
     const built = displayOf(FRAME, LIVE);
     const editedDisplay = built.display.replace('max_accel: 15500', 'max_accel: 9999');

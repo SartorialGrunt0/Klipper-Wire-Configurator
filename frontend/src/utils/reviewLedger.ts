@@ -305,7 +305,13 @@ export function keepRunsInFrame(
  */
 function joinLines(lines: string[], conventionFrom: string): string {
   const joined = lines.join('\n');
-  return conventionFrom.endsWith('\n') && joined !== '' ? joined + '\n' : joined;
+  if (!conventionFrom.endsWith('\n')) return joined;
+  // The convention side is newline-terminated, so the result must be too —
+  // including the degenerate one-line-blank text: an empty result joins to
+  // '' and would silently drop the newline the convention carries (PR #36
+  // review, B-2: keep-all of frame '' vs live '\n' produced '', which never
+  // equals live, so the review stop could never clear).
+  return joined === '' ? '\n' : `${joined}\n`;
 }
 
 /**

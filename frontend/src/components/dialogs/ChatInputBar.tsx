@@ -13,8 +13,7 @@
  *
  * `compact` is the docked panel's density: the chip row wraps.
  */
-import React, { useState, useEffect } from 'react';
-import { extractMentionedConfigFilenames } from '../../utils/chatUtils';
+import React, { useState } from 'react';
 import { mentionQuery, type ChatReferenceKind, type MentionSource } from '../../utils/chatReferences';
 
 // ── Reference chips ────────────────────────────────────────────────

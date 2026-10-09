@@ -165,6 +165,35 @@ describe('configStore file operations', () => {
     expect(state.textParseErrors['renamed.cfg']).toBe('boom');
   });
 
+  it('renameConfigFile migrates the review frame; a rename never orphans a review (PR #36 B-3)', async () => {
+    const { useChangeSetStore } = await import('@/stores/changeSetStore');
+    const store = useConfigStore.getState();
+    store.setConfigFile('printer.cfg', makeConfigFile());
+    useChangeSetStore.getState().seedFrames({ 'printer.cfg': 'OLD FRAME\n' });
+
+    useConfigStore.getState().renameConfigFile('printer.cfg', 'main.cfg');
+
+    const frames = useChangeSetStore.getState().reviewFrames;
+    expect(frames['printer.cfg']).toBeUndefined();
+    expect(frames['main.cfg']).toBe('OLD FRAME\n');
+    useChangeSetStore.getState().clear();
+  });
+
+  it('removeConfigFile drops the removed file\'s review frame', async () => {
+    const { useChangeSetStore } = await import('@/stores/changeSetStore');
+    const store = useConfigStore.getState();
+    store.setConfigFile('extra.cfg', makeConfigFile());
+    store.setConfigFile('printer.cfg', makeConfigFile());
+    useChangeSetStore.getState().seedFrames({ 'extra.cfg': 'FRAME\n', 'printer.cfg': 'P\n' });
+
+    useConfigStore.getState().removeConfigFile('extra.cfg');
+
+    const frames = useChangeSetStore.getState().reviewFrames;
+    expect(frames['extra.cfg']).toBeUndefined();
+    expect(frames['printer.cfg']).toBe('P\n');
+    useChangeSetStore.getState().clear();
+  });
+
   it('renameConfigFile refuses to overwrite an existing target', () => {
     const store = useConfigStore.getState();
     store.setConfigFile('a.cfg', makeConfigFile());
