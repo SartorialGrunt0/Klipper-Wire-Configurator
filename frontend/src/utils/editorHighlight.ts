@@ -52,6 +52,17 @@ export interface HighlightOptions {
    */
   pendingRemoved?: ReadonlySet<number>;
   /**
+   * DISPLAY rows that are ghost rows — the deleted frame line re-inserted
+   * INSIDE the textarea's own value above the live line that replaced it
+   * (Sir, 2026-10-08). Painted as the mini-diff's red row (`.kl-line-ghost`,
+   * red glyphs + full-row red tint): the ghost is a display fiction, so it
+   * outranks every live-space tint and answers to none of them — severity,
+   * pending, and current-line maps arrive re-keyed to display rows and can
+   * never collide with a ghost row (liveLineToDisplayLine is strictly
+   * monotonic around the inserted block).
+   */
+  ghostRows?: ReadonlySet<number>;
+  /**
    * Lines that ANCHOR a pending run's inline Keep/Undo pair: 1-based live
    * line → run key. Emits a zero-width marker span (`kl-run-anchor`,
    * data-run-key) inside the line's own markup — invisible, layout-neutral,
@@ -87,6 +98,7 @@ export const TINT_CLASS: Record<'error' | 'warning', string> = {
 };
 const PENDING_CLASS = 'kl-line-pending';
 const REMOVED_CLASS = 'kl-line-removed';
+const GHOST_CLASS = 'kl-line-ghost';
 const CURRENT_CLASS = 'kl-line-current';
 const CURRENT_UNFOCUSED_CLASS = 'kl-line-current-unfocused';
 
@@ -95,10 +107,16 @@ export function tintClassFor(options: {
   severity?: IssueSeverity;
   pending?: boolean;
   removed?: boolean;
+  ghost?: boolean;
   current?: boolean;
   focused?: boolean;
 }): string | null {
-  const { severity, pending, removed, current, focused } = options;
+  const { severity, pending, removed, ghost, current, focused } = options;
+  // Ghost beats everything (Sir, 2026-10-08): the red old line is the whole
+  // news of its row — a severity or caret claim about a display fiction
+  // would rewrite the diff's own vocabulary. Callers re-key every live-space
+  // map to display rows, where ghost rows occupy slots no live line maps to.
+  if (ghost) return GHOST_CLASS;
   if (severity === 'error') return TINT_CLASS.error;
   if (severity === 'warning') return TINT_CLASS.warning;
   // Pending beats removed (Sir, 2026-10-08): on a REPLACEMENT run the two
@@ -153,6 +171,7 @@ export function buildHighlightedHtml(text: string, options: HighlightOptions = {
   const ghost = options.ghost;
   const pending = options.pendingAdded;
   const removed = options.pendingRemoved;
+  const ghostRows = options.ghostRows;
   const anchors = options.runAnchors;
   const current = options.currentLine ?? null;
   const escapeAttr = (value: string) => escapeHtml(value).replace(/"/g, '&quot;');
@@ -169,18 +188,22 @@ export function buildHighlightedHtml(text: string, options: HighlightOptions = {
           renderLine(line.slice(ghost.column))
         : renderLine(line);
 
+      const isGhostRow = ghostRows?.has(lineNumber) ?? false;
       const tint = tintClassFor({
         severity: severities?.get(lineNumber),
         pending: pending?.has(lineNumber) ?? false,
         removed: removed?.has(lineNumber) ?? false,
+        ghost: isGhostRow,
         current: current === lineNumber,
         focused: options.currentLineFocused,
       });
       // The pair's anchor marker: an EMPTY inline span at the line's start —
       // zero-width, so it cannot shift a glyph, but its rect is a DOM truth
       // the floating pair measures. Inside the tint wrapper when there is one
-      // (so it belongs to the same line box the tint paints).
-      const anchorKey = anchors?.get(lineNumber);
+      // (so it belongs to the same line box the tint paints). NEVER on a
+      // ghost row: a run's Keep/Undo pair belongs on its LIVE (green) line,
+      // and the caller's live→display re-key skips the ghost slots anyway.
+      const anchorKey = isGhostRow ? undefined : anchors?.get(lineNumber);
       const marker = anchorKey !== undefined
         ? `<span class="kl-run-anchor" data-run-key="${escapeAttr(anchorKey)}"></span>`
         : '';
@@ -193,7 +216,7 @@ export function buildHighlightedHtml(text: string, options: HighlightOptions = {
       // changes the pitch (measured 22.75 → 28.6px, 2026-10-07), which is
       // exactly what the overlay must never do: it shares the textarea's
       // rhythm character for character.
-      const fullRow = tint === PENDING_CLASS || tint === REMOVED_CLASS;
+      const fullRow = tint === PENDING_CLASS || tint === REMOVED_CLASS || tint === GHOST_CLASS;
       return `<span class="${tint}${fullRow ? ' kl-row-full' : ''}">${marker}${html}</span>`;
     })
     .join('\n');

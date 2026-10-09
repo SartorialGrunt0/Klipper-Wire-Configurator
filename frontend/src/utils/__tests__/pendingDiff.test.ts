@@ -430,17 +430,18 @@ describe('paneModeFor with the live (ledger) path', () => {
     expect(paneModeFor({ ...base, model: null, takeover: 'hidden', selection: null, live: true, hasReview: true })).toBe('review');
   });
 
-  it('removals auto-open the mirror; add-only runs keep the live tints (Sir 2026-10-08)', () => {
-    // A run that removes or replaces lines hides text from the buffer — the
-    // mirror shows old-in-red-over-new-in-green, each with its own number.
-    expect(paneModeFor({ ...base, model: null, takeover: 'auto', selection: null, live: true, hasReview: true, hasRemoval: true })).toBe('mirror');
-    // Add-only: nothing is hidden, the green tint IS the full story.
-    expect(paneModeFor({ ...base, model: null, takeover: 'auto', selection: null, live: true, hasReview: true, hasRemoval: false })).toBe('review');
-    // An explicit fold ('hidden' = Back to editing) beats the auto-open —
-    // the user chose the buffer; the marks ride there.
-    expect(paneModeFor({ ...base, model: null, takeover: 'hidden', selection: null, live: true, hasReview: true, hasRemoval: true })).toBe('review');
+  it('removals review IN the text view — ghosts, not the mirror (Sir 2026-10-08)', () => {
+    // The removal auto-open of the mirror was SUPERSEDED the same day: the
+    // red old line rides inside the live editor as a ghost row above its
+    // green replacement (reviewDisplay), gutter renumbered over the display
+    // rows. `auto` therefore stays on `review` for every live review…
+    expect(paneModeFor({ ...base, model: null, takeover: 'auto', selection: null, live: true, hasReview: true })).toBe('review');
+    // …and an explicit 'shown' still flips to the mirror — the only way
+    // there. 'hidden' is a card-path state (unchanged): it lands on review.
+    expect(paneModeFor({ ...base, model: null, takeover: 'shown', selection: null, live: true, hasReview: true })).toBe('mirror');
+    expect(paneModeFor({ ...base, model: null, takeover: 'hidden', selection: null, live: true, hasReview: true })).toBe('review');
     // Not active still wins over everything.
-    expect(paneModeFor({ model: null, takeover: 'auto', isActive: false, selection: null, live: true, hasReview: true, hasRemoval: true })).toBe('editor');
+    expect(paneModeFor({ model: null, takeover: 'auto', isActive: false, selection: null, live: true, hasReview: true })).toBe('editor');
   });
 
   it('never reviews from another view or with no review at all', () => {

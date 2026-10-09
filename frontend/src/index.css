@@ -118,6 +118,25 @@ body {
   background-color: rgb(239 68 68 / 0.28);
 }
 
+/* Ghost row (Sir, 2026-10-08): the deleted frame line rendered INSIDE the
+   textarea's own value, directly above the green line that replaced it.
+   Unlike .kl-line-removed (a context line that WOULD take the deletion
+   back — tint only), this row is the removed text itself, so it carries
+   the mini-diff's red GLYPHS like DiffLines' red rows, over a stronger
+   red field. The glyphs are display-only: the textarea's own characters
+   are transparent, so what the reader sees here is painted solely by the
+   overlay, and the row is stripped before any store/save/chat ever reads
+   the text (reviewDisplay). */
+.kl-line-ghost {
+  background-color: rgb(239 68 68 / 0.22);
+  color: #f87171 !important; /* red-400 — the old line reads as deleted text */
+}
+.kl-line-ghost * {
+  /* Same !important law as .kl-line-pending: RenderLine paints every token
+     with an inline style; a plain rule loses to it. */
+  color: #f87171 !important;
+}
+
 /* Pair anchor: the zero-width marker span at a pending run's top line
    (`kl-run-anchor`, editorHighlight). It must MEASURE a real rect for the
    floating Keep/Undo layer, while never shifting a glyph or growing the

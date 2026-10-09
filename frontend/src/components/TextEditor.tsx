@@ -14,7 +14,7 @@ import { filterFindings } from '../utils/validationVisibility';
 import { indentCaret, indentSelection, outdentSelection } from '../utils/textIndent';
 import { autoScrollDelta } from '../utils/editorAutoScroll';
 import { buildHighlightedHtml, escapeHtml } from '../utils/editorHighlight';
-import { lineSeverities, worstSeverity } from '../utils/issueSummary';
+import { lineSeverities, worstSeverity, type IssueSeverity } from '../utils/issueSummary';
 import { readIssueStripCollapsed, writeIssueStripCollapsed } from '../utils/editorPrefs';
 import { findHits, replaceAll, replaceOne, countHits, type FindHit } from '../utils/findReplace';
 import {
@@ -35,6 +35,16 @@ import PendingDiffPane, { PendingDiffChip, PendingReviewStrip } from './PendingD
 import PendingRunPairs from './PendingRunPairs';
 import ReviewMirrorPane from './ReviewMirrorPane';
 import { livePendingLines } from '../utils/pendingDiff';
+import {
+  buildReviewDisplay,
+  displayToLiveOffset,
+  displayToLiveOffsetAfterStrip,
+  ghostedRuns,
+  ghostsByLiveLine,
+  liveLineToDisplayLine,
+  liveToDisplayOffset,
+  stripGhostsFromDisplay,
+} from '../utils/reviewDisplay';
 import {
   groupLedgerSections,
   keepRun,
@@ -522,14 +532,6 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   const reviewStopList = useMemo(() => stopsFrom(ledgerFiles), [ledgerFiles]);
   const ledgerSections = useMemo(() => groupLedgerSections(ledgerFiles), [ledgerFiles]);
   const hasReview = reviewStopList.length > 0;
-  // Any undecided run that REMOVES or replaces lines (Sir, 2026-10-08): those
-  // reviews auto-open the mirror, where the old line shows in red at its
-  // frame number above the green new line at its live number. An overlay
-  // cannot host that extra row in the buffer (the drift law) — the mirror can.
-  const hasRemovalRun = useMemo(
-    () => ledgerFiles.some((entry) => entry.runs.some((run) => run.removed.length > 0)),
-    [ledgerFiles],
-  );
   // The change-set review is LIVE (the edits are already in the buffer) and
   // takes precedence: a card model is the fallback only when the ledger is
   // empty.
@@ -542,9 +544,8 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
       selection: selectionReference,
       live: hasReview,
       hasReview,
-      hasRemoval: hasRemovalRun,
     }),
-    [paneModel, pendingTakeover, isActive, selectionReference, hasReview, hasRemovalRun],
+    [paneModel, pendingTakeover, isActive, selectionReference, hasReview],
   );
 
   // In review mode the pending marks live in the ACTIVE file's own text: its
@@ -563,6 +564,81 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     if (frame === undefined) return null;
     return livePendingLines(frame ?? '', editText);
   }, [pendingPane, editTextFile, activeFile, changeSetReviewFrames, editText]);
+
+  // ── Ghost rows (Sir, 2026-10-08) ──────────────────────────────────
+  // A replacement/removal run shows its removed frame lines INSIDE the text
+  // view — red rows directly above the green ones, gutter renumbered over the
+  // virtual count — as real rows of the textarea's own value (a row outside
+  // the text's flow is the drift class; a row inside it is the flow). The
+  // textarea therefore holds DISPLAY = live + ghosts while a removal is
+  // pending, and `editText` stays the ghost-free LIVE text: the ledger, the
+  // parse, the save, and the chat only ever see live. Every handler that
+  // touches the textarea converts through the maps in reviewDisplay; the
+  // maps and the ghost rows derive from the same ledger runs, so marks are
+  // recomputed on every edit, never patched.
+  const reviewGhosts = useMemo(() => {
+    if (pendingPane !== 'review' && pendingPane !== 'chip') return new Map<number, string[]>();
+    if (editTextFile !== activeFile) return new Map<number, string[]>();
+    const frame = changeSetReviewFrames[activeFile];
+    if (frame === undefined) return new Map<number, string[]>();
+    return ghostsByLiveLine(ghostedRuns(frame ?? '', editText));
+  }, [pendingPane, editTextFile, activeFile, changeSetReviewFrames, editText]);
+  const reviewDisplay = useMemo(
+    () => buildReviewDisplay(editText, reviewGhosts),
+    [editText, reviewGhosts],
+  );
+  // True when the textarea's value differs from the ledger's live text.
+  const ghostsShowing = reviewDisplay.ghostDisplayLines.length > 0;
+  const ghostDisplayLineSet = useMemo(
+    () => new Set(reviewDisplay.ghostDisplayLines),
+    [reviewDisplay],
+  );
+
+  // The caret contract: the `caret` state and `pendingSelectionRef` hold
+  // LIVE offsets; the DOM holds DISPLAY offsets. `caretBridgeRef` carries the
+  // live [start,end] the user had — fed by every caret event (typing path,
+  // the ledger splice, keyup/click/select) — and after every re-display
+  // (ghosts appearing, dissolving, or vanishing on a Keep/Undo) the effect
+  // re-places the DOM caret at those live offsets translated into the new
+  // display. The browser cannot do it itself, its selection preservation is
+  // numeric, and a ghost row is worth a line of display the live text does
+  // not pay. (Scroll needs no bridge: React replaces the value on the same
+  // DOM node, so scrollTop survives; it only clamps when ghosts leave and
+  // the document shrinks — the position the user is looking at left with
+  // them, which is correct.)
+  const caretBridgeRef = useRef<[number, number] | null>(null);
+  // A bridge is a caret promise ABOUT this file's text — switching files
+  // cancels it. Declared BEFORE the re-place effect so that on a switch
+  // render where both fire, the clear wins first and the re-place sees
+  // nothing to do (effects run in declaration order).
+  useEffect(() => {
+    caretBridgeRef.current = null;
+  }, [activeFile]);
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    const bridge = caretBridgeRef.current;
+    if (!bridge) return;
+    const wantStart = ghostsShowing
+      ? liveToDisplayOffset(editText, reviewDisplay.display, reviewDisplay.ghostDisplayLines, bridge[0])
+      : Math.min(bridge[0], el.value.length);
+    const wantEnd = ghostsShowing
+      ? liveToDisplayOffset(editText, reviewDisplay.display, reviewDisplay.ghostDisplayLines, bridge[1])
+      : Math.min(bridge[1], el.value.length);
+    if (el.selectionStart !== wantStart || el.selectionEnd !== wantEnd) {
+      el.setSelectionRange(wantStart, wantEnd);
+    }
+    caretBridgeRef.current = null;
+  }, [reviewDisplay, ghostsShowing, editText]);
+
+  /** Feed the caret bridge from the DOM's current (DISPLAY) selection. */
+  const bridgeCaretFromDom = useCallback((el: HTMLTextAreaElement) => {
+    if (!ghostsShowing) return;
+    caretBridgeRef.current = [
+      displayToLiveOffset(el.value, reviewDisplay.ghostDisplayLines, el.selectionStart),
+      displayToLiveOffset(el.value, reviewDisplay.ghostDisplayLines, el.selectionEnd),
+    ];
+  }, [ghostsShowing, reviewDisplay]);
 
   // The inline pair targets: the review's runs IN the active file, anchored
   // at each run's top live line (a pure deletion anchors at its return line —
@@ -602,27 +678,57 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     return { runAnchorMap: map, inlinePairTargets: targets };
   }, [inlineRunPairs, editText]);
 
+  // One re-key pass for every LIVE-space line map the display renders:
+  // severity, the green pending lines, and the pair anchors all live in
+  // live-line coordinates; the gutter and the overlay render DISPLAY rows
+  // while ghosts show. A ghost block inserts strictly ABOVE its anchor, so
+  // no live line's display row is ever a ghost row — the re-keyed maps
+  // cannot collide with one. `removed`/−N marks DROP when ghosts show: the
+  // red ghost row above the anchor IS the deletion, shown as written.
+  const displayLineMaps = useMemo(() => {
+    if (!ghostsShowing) return null;
+    const toDisplay = (liveLine: number) => liveLineToDisplayLine(reviewGhosts, liveLine);
+    const severities = new Map<number, IssueSeverity>();
+    issueLineSeverities.forEach((sev, line) => severities.set(toDisplay(line), sev));
+    const issues = new Map<number, TextIssue[]>();
+    issuesByLine.forEach((list, line) => issues.set(toDisplay(line), list));
+    const added = new Set<number>();
+    livePending?.addedLines.forEach((line) => added.add(toDisplay(line)));
+    const anchors = new Map<number, string>();
+    runAnchorMap.forEach((key, line) => anchors.set(toDisplay(line), key));
+    return { severities, issues, added, anchors };
+  }, [ghostsShowing, reviewGhosts, issueLineSeverities, issuesByLine, livePending, runAnchorMap]);
+
   // Gutter numbers as ONE text block (see the editor gutter comment): one
   // line per row, severity glyph + number, sharing the textarea's continuous
   // line rhythm so alignment holds at any zoom / device scaling. Inline
   // per-line spans keep the hover title without creating per-row layout boxes.
+  // While ghosts show, the block counts DISPLAY rows (Sir, 2026-10-08): the
+  // ghost row's number continues the display sequence, painted red — the row
+  // is virtual, its number reads virtual. The −N deletion marks disappear in
+  // that mode: the red ghost row above the anchor IS the deletion, so a count
+  // on the green line would describe the same news twice.
   const gutterHtml = useMemo(() => {
     const escapeAttr = (value: string) => escapeHtml(value).replace(/"/g, '&quot;');
-    const lines = editText.split('\n');
-    return lines
+    const rows = ghostsShowing ? reviewDisplay.display.split('\n') : editText.split('\n');
+    const issuesByRow = displayLineMaps ? displayLineMaps.issues : issuesByLine;
+    return rows
       .map((_line, idx) => {
         const lineNum = idx + 1;
+        if (ghostsShowing && ghostDisplayLineSet.has(lineNum)) {
+          return `<span title="deleted line — Keep commits the change, Undo returns this text"><span style="color:#ef4444">${lineNum}</span></span>`;
+        }
         // Undecided deletion (review mode): the gutter is ONE aligned text
         // block, so the −N count rides there rather than in a floating mark —
         // every live-editor mark must live in the text's own flow or in the
         // gutter (2026-10-07: the band layer that broke this law slid −13px
         // deep in a file at 90% zoom). Tooltip: the removed text, real from
         // the frame.
-        const gone = livePending ? livePending.removedAnchors.get(lineNum) : undefined;
+        const gone = !ghostsShowing && livePending ? livePending.removedAnchors.get(lineNum) : undefined;
         const removedMark = gone
           ? '<span title="' + escapeAttr((livePending?.removedContents.get(lineNum) ?? []).join('\n')) + '"><span style="color:#ef4444">−' + gone + '</span> </span>'
           : '';
-        const lineIssues = issuesByLine.get(lineNum);
+        const lineIssues = issuesByRow.get(lineNum);
         if (!lineIssues?.length) return removedMark + String(lineNum);
         const severity = worstSeverity(lineIssues.map((i) => i.severity)) ?? 'info';
         const spec = ISSUE_MARKER[severity];
@@ -630,7 +736,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
         return removedMark + `<span title="${title}"><span style="color:${spec.color}">${spec.marker}</span> ${lineNum}</span>`;
       })
       .join('\n');
-  }, [editText, issuesByLine, livePending]);
+  }, [editText, reviewDisplay, ghostsShowing, ghostDisplayLineSet, displayLineMaps, issuesByLine, livePending]);
 
 
   // Text the search/replace acts on (the active file's live textarea text once
@@ -691,13 +797,19 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   // Which token, and what it adds, is decided in the pure layer.
   const ghost = useMemo(() => {
     if (!completion || !completion.ghostText) return null;
-    const { lineIndex, column } = caretLineColumn(editText, completion.context.tokenEnd);
+    // The completion's offsets are DISPLAY coordinates (updateCompletion
+    // reads the textarea); the overlay paints DISPLAY rows while ghosts
+    // show, so the anchor must be computed on the same text.
+    const { lineIndex, column } = caretLineColumn(
+      ghostsShowing ? reviewDisplay.display : editText,
+      completion.context.tokenEnd,
+    );
     return { line: lineIndex + 1, column, text: completion.ghostText };
-  }, [completion, editText]);
+  }, [completion, editText, ghostsShowing, reviewDisplay]);
 
   const highlightedHtml = useMemo(
-    () => buildHighlightedHtml(editText, {
-      lineSeverities: issueLineSeverities,
+    () => buildHighlightedHtml(ghostsShowing ? reviewDisplay.display : editText, {
+      lineSeverities: displayLineMaps ? displayLineMaps.severities : issueLineSeverities,
       ghost,
       // The marks ARE the text's line boxes now (2026-10-07 inline law):
       // green rows carry the mini-diff's dominant cue (text-green-400, what
@@ -705,17 +817,28 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
       // undecided deletion would return to. Both sets come from the same
       // livePendingLines pass, so marks and strip cannot disagree on a hand
       // edit, and no zoom can move them off their lines.
-      pendingAdded: livePending ? livePending.addedLines : undefined,
-      pendingRemoved: livePending ? new Set(livePending.removedAnchors.keys()) : undefined,
+      // While ghosts show, the marks arrive re-keyed to DISPLAY rows
+      // (displayLineMaps) and the ghost rows themselves paint as the
+      // mini-diff's red row — the deleted line, shown as written, directly
+      // above the green line that replaced it (Sir, 2026-10-08). The red
+      // anchor marks (.kl-line-removed) drop in that mode: the ghost IS the
+      // deletion's display.
+      pendingAdded: displayLineMaps
+        ? displayLineMaps.added
+        : (livePending ? livePending.addedLines : undefined),
+      pendingRemoved: ghostsShowing
+        ? undefined
+        : (livePending ? new Set(livePending.removedAnchors.keys()) : undefined),
+      ghostRows: ghostsShowing ? ghostDisplayLineSet : undefined,
       // Zero-width pair anchors: one marker per undecided run, at the run's
       // top line (for a pure deletion, the line it would return to — the
       // same line the red mark owns). The floating Keep/Undo pairs measure
       // themselves against these spans.
-      runAnchors: livePending ? runAnchorMap : undefined,
+      runAnchors: displayLineMaps ? displayLineMaps.anchors : (livePending ? runAnchorMap : undefined),
       currentLine: caretLine,
       currentLineFocused: editorFocused,
     }),
-    [editText, issueLineSeverities, ghost, livePending, runAnchorMap, caretLine, editorFocused],
+    [editText, reviewDisplay, ghostsShowing, ghostDisplayLineSet, displayLineMaps, issueLineSeverities, ghost, livePending, runAnchorMap, caretLine, editorFocused],
   );
 
   // Focus search input when panel opens
@@ -736,6 +859,27 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     exportingRef.current = false;
     // Editing the token revives a suggestion that Esc dismissed.
     setCompletionDismissed(null);
+    if (ghostsShowing) {
+      // The textarea holds DISPLAY; the store holds LIVE. Strip the
+      // surviving ghost rows to get the new live text, and carry the caret
+      // through the re-display (the browser preserves offsets numerically,
+      // which is wrong the moment a ghost row dissolves or re-forms).
+      // The strip reports where the ghost rows sit IN THE NEW TEXT, so the
+      // caret map never reads a stale row set: a typed-over ghost is live
+      // text now (caret stays inside it), a pushed-down ghost is reported
+      // at its new row.
+      const el = textareaRef.current;
+      const strip = stripGhostsFromDisplay(newText, reviewGhosts);
+      if (el) {
+        caretBridgeRef.current = [
+          displayToLiveOffsetAfterStrip(newText, strip.strippedDisplayLines, el.selectionStart),
+          displayToLiveOffsetAfterStrip(newText, strip.strippedDisplayLines, el.selectionEnd),
+        ];
+      }
+      setEditText(strip.live);
+      useConfigStore.getState().setLiveText(activeFile, strip.live);
+      return;
+    }
     setEditText(newText);
     // The review's LIVE side must beat the debounced model write: publish the
     // buffer NOW so a pending marker follows the typing, not the 600ms parse
@@ -839,13 +983,20 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
 
   /** Caret bookkeeping shared by the textarea's key/click/select handlers. */
   const syncCaret = useCallback((el: HTMLTextAreaElement) => {
-    setCaret(el.selectionStart);
+    setCaret(displayToLiveOffset(el.value, reviewDisplay.ghostDisplayLines, el.selectionStart));
     // The caret LINE for the current-line highlight, computed from the DOM on
     // every caret move — the `caret` state lags a render while typing, and a
-    // highlight one line behind the caret is worse than none.
+    // highlight one line behind the caret is worse than none. While ghosts
+    // show the overlay paints DISPLAY rows, so the DISPLAY line is exactly
+    // what the current-line tint wants.
     setCaretLine(caretLineColumn(el.value, el.selectionStart).lineIndex + 1);
+    // Keep the bridge warm for the next re-display: a click/keyup that does
+    // NOT change the text still moves the caret, and if a ghost forms or
+    // dissolves afterwards (e.g. the debounced parse landing), the effect
+    // must know where the user actually is.
+    bridgeCaretFromDom(el);
     updateCompletion(el);
-  }, [updateCompletion]);
+  }, [updateCompletion, bridgeCaretFromDom, reviewDisplay]);
 
   // Focus for the current-line tint: an OUTBOUND blur (to a node outside the
   // editor column) dims the line; the state lives beside `caretLine`.
@@ -862,22 +1013,34 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   // user to attach what they already selected. The store no-ops on an
   // unchanged value, so publishing on every click/keyup is cheap.
   const publishSelectionReference = useCallback((el: HTMLTextAreaElement) => {
-    const { selectionStart, selectionEnd } = el;
-    if (selectionStart === selectionEnd) {
+    // The reference feeds the CHAT, which reads the LIVE text (line numbers
+    // the model can quote against the real file). While ghosts show, the DOM
+    // offsets and rows are DISPLAY coordinates: convert the offsets, then
+    // compute everything on `editText`. A selection that drags across a
+    // ghost row collapses the ghost out of it — the chat gets the text as it
+    // truly is, never the display fiction.
+    const ghosts = ghostsShowing && el === textareaRef.current;
+    const start = ghosts
+      ? displayToLiveOffset(el.value, reviewDisplay.ghostDisplayLines, el.selectionStart)
+      : el.selectionStart;
+    const end = ghosts
+      ? displayToLiveOffset(el.value, reviewDisplay.ghostDisplayLines, el.selectionEnd)
+      : el.selectionEnd;
+    if (start === end) {
       useChatReferenceStore.getState().setSelection(null);
       return;
     }
-    const value = el.value;
-    const startLine = value.slice(0, selectionStart).split('\n').length;
+    const value = ghosts ? editText : el.value;
+    const startLine = value.slice(0, start).split('\n').length;
     // A selection ending exactly on a newline stops at the end of the
     // PREVIOUS line — counting the character after it would over-claim a
     // line the user never highlighted.
-    const endsOnBoundary = value[selectionEnd - 1] === '\n';
-    const endLine = value.slice(0, selectionEnd).split('\n').length - (endsOnBoundary ? 1 : 0);
+    const endsOnBoundary = value[end - 1] === '\n';
+    const endLine = value.slice(0, end).split('\n').length - (endsOnBoundary ? 1 : 0);
     useChatReferenceStore.getState().setSelection(
       selectionToReference(value, editTextFile, startLine, endLine),
     );
-  }, [editTextFile]);
+  }, [editTextFile, ghostsShowing, editText, reviewDisplay]);
 
   // Any change to the text — typing, an accepted suggestion, undo/redo, or the
   // model's own export landing after the debounced parse — invalidates what was
@@ -896,6 +1059,25 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
 
   const applyTextEdit = useCallback((edit: { text: string; start: number; end: number }) => {
     exportingRef.current = false; // a real user edit, not a model export echo
+    if (ghostsShowing) {
+      // `edit` was computed against the textarea's DISPLAY value (indent,
+      // completion). Convert the whole thing to LIVE: the ghosts that survive
+      // the edit are stripped, the caret offsets map through them. If an
+      // edit swallowed a ghost's text the ghost is retired and its text is
+      // live now — the strip answers both, exactly like the typing path.
+      // The caret re-places through the BRIDGE, not pendingSelectionRef:
+      // that ref feeds a bare setSelectionRange on the DOM, whose space is
+      // DISPLAY — the bridge converts live→display on the rebuilt value.
+      const strip = stripGhostsFromDisplay(edit.text, reviewGhosts);
+      caretBridgeRef.current = [
+        displayToLiveOffsetAfterStrip(edit.text, strip.strippedDisplayLines, edit.start),
+        displayToLiveOffsetAfterStrip(edit.text, strip.strippedDisplayLines, edit.end),
+      ];
+      setCaret(caretBridgeRef.current[0]);
+      setEditText(strip.live);
+      useConfigStore.getState().setLiveText(activeFile, strip.live);
+      return;
+    }
     pendingSelectionRef.current = [edit.start, edit.end];
     // Keep the completion's caret in step with the programmatic edit: a
     // setSelectionRange fires no `select` event, so without this the next
@@ -903,7 +1085,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     // followed an accepted name until you typed or clicked again).
     setCaret(edit.start);
     setEditText(edit.text);
-  }, []);
+  }, [ghostsShowing, reviewGhosts, activeFile]);
 
   useEffect(() => {
     const pending = pendingSelectionRef.current;
@@ -929,7 +1111,13 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     if (!completion) return;
     const candidate = completion.candidates[index ?? completion.index];
     if (!candidate) return;
-    const applied = applyCandidate(editText, completion.context, candidate);
+    // Apply against the textarea's CURRENT value, not `editText`: while
+    // ghosts show the completion's context offsets were computed on the
+    // DISPLAY text (updateCompletion reads el.value), so applying them to
+    // the live text would splice at the wrong offset. applyTextEdit strips
+    // the ghosts back out on the way to the store.
+    const base = textareaRef.current?.value ?? editText;
+    const applied = applyCandidate(base, completion.context, candidate);
     applyTextEdit({ text: applied.text, start: applied.caret, end: applied.caret });
     setCompletion(null);
     setCompletionListOpen(false);
@@ -938,7 +1126,13 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
 
   const dismissCompletion = useCallback(() => {
     if (completion) {
-      const { lineIndex, column } = caretLineColumn(editText, completion.context.replaceStart);
+      // Same space as updateCompletion's dismissal check (the textarea's
+      // DISPLAY value) — a mismatch would dismiss the wrong token's ghost.
+      const el = textareaRef.current;
+      const { lineIndex, column } = caretLineColumn(
+        el?.value ?? editText,
+        completion.context.replaceStart,
+      );
       setCompletionDismissed({ line: lineIndex, column });
     }
     setCompletion(null);
@@ -1006,11 +1200,15 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     }
     if (e.ctrlKey && e.key === ' ') {
       // Explicit request: compute now (past the idle delay and any Esc) and
-      // show the whole list rather than just the top ghost.
+      // show the whole list rather than just the top ghost. Computed on the
+      // textarea's DISPLAY value with the DOM caret — while ghosts show the
+      // live text and the display diverge, and every other completion path
+      // (updateCompletion) already reads the DOM.
       e.preventDefault();
-      const result = completionsAt(editText, caret, {
+      const el = e.currentTarget;
+      const result = completionsAt(el.value, el.selectionStart, {
         ...completionSources,
-        usedParamKeys: usedParamKeysAt(editText, caret),
+        usedParamKeys: usedParamKeysAt(el.value, el.selectionStart),
       });
       if (result) {
         setCompletion(result);
@@ -1039,9 +1237,14 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
 
   const jumpToLine = useCallback((line: number) => {
     if (!textareaRef.current || line < 1) return;
+    // `line` is a LIVE line (tree rows, findings, search results all speak
+    // the real file's numbering). While ghosts show the textarea renders
+    // DISPLAY rows, so the target translates first — landing on the ghost
+    // instead of its replacement is the classic off-by-a-row.
+    const targetLine = ghostsShowing ? liveLineToDisplayLine(reviewGhosts, line) : line;
     const lines = textareaRef.current.value.split('\n');
     let charPos = 0;
-    for (let i = 0; i < line - 1 && i < lines.length; i++) {
+    for (let i = 0; i < targetLine - 1 && i < lines.length; i++) {
       charPos += lines[i].length + 1;
     }
     textareaRef.current.focus();
@@ -1052,10 +1255,17 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     // the message carried the same text twice (Cliff, 2026-10-04). A real
     // drag/highlight still publishes: that is a user pointing at lines.
     textareaRef.current.setSelectionRange(charPos, charPos);
+    // Feed the bridge with the live caret so the next re-display keeps it.
+    caretBridgeRef.current = [
+      displayToLiveOffset(textareaRef.current.value, reviewDisplay.ghostDisplayLines, charPos),
+      displayToLiveOffset(textareaRef.current.value, reviewDisplay.ghostDisplayLines, charPos),
+    ];
     // A jump moves the caret: paint the current-line highlight on the target
     // line immediately (the programmatic move does not reliably fire a select
-    // event, same reason the reference slot is cleared by hand below).
-    setCaretLine(line);
+    // event, same reason the reference slot is cleared by hand below). The
+    // overlay paints DISPLAY rows while ghosts show — that is the line to
+    // tint.
+    setCaretLine(targetLine);
     // Clearing the published slot here rather than relying on the textarea to
     // fire an event: a programmatic move does not always fire one, and a stale
     // chip would keep riding along with the next message.
@@ -1067,12 +1277,12 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     const cs = window.getComputedStyle(textareaRef.current);
     const lineHeight = parseFloat(cs.lineHeight) || 22.75;
     const paddingTop = parseFloat(cs.paddingTop) || 16;
-    const lineTop = paddingTop + (line - 1) * lineHeight;
+    const lineTop = paddingTop + (targetLine - 1) * lineHeight;
     const viewportH = textareaRef.current.clientHeight || 400;
     // Bring the line to ~20% down from the top of the visible area.
     textareaRef.current.scrollTop = Math.max(0, lineTop - viewportH * 0.2);
     syncLineNumbersScroll();
-  }, [syncLineNumbersScroll]);
+  }, [syncLineNumbersScroll, ghostsShowing, reviewGhosts, reviewDisplay]);
 
   // --- Drag auto-scroll -----------------------------------------------------
   // Chromium/Firefox move a selected block of text natively, but nothing
@@ -1185,6 +1395,22 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   // are parsed up front and applied directly (never written blind).
   const applyReplacedText = async (file: string, nextText: string): Promise<boolean> => {
     if (file === activeFile) {
+      if (ghostsShowing) {
+        // `nextText` is LIVE (search ran on the live text), but the
+        // ghost-mode handleTextChange expects the textarea's DISPLAY value
+        // and strips ghosts out of it — feeding live through the strip would
+        // retire every ghost only because its text coincidentally vanished,
+        // and would map the caret in the wrong space. Write the live text
+        // directly; the display rebuilds from the new ghosts (the replaced
+        // run may itself dissolve — a replacement back to frame text nets
+        // to zero). Keep the caret where the reader has it.
+        const el = textareaRef.current;
+        if (el) bridgeCaretFromDom(el);
+        exportingRef.current = false;
+        setEditText(nextText);
+        useConfigStore.getState().setLiveText(activeFile, nextText);
+        return true;
+      }
       handleTextChange(nextText);
       return true;
     }
@@ -1985,14 +2211,19 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
                   // focuses the textarea, collapses the caret, and clears the
                   // published selection reference: the reviewer walking stops
                   // must not lose where they were. The opening reveal does not
-                  // move the scroll at all.
+                  // move the scroll at all. `stop.line` is a LIVE line; with
+                  // ghosts rendering, the display row sits below the ghost
+                  // block — translate before measuring.
                   if (!byCursor) return;
                   const el = textareaRef.current;
                   if (!el) return;
+                  const displayLine = ghostsShowing
+                    ? liveLineToDisplayLine(reviewGhosts, stop.line)
+                    : stop.line;
                   const cs = window.getComputedStyle(el);
                   const lineHeight = parseFloat(cs.lineHeight) || 22.75;
                   const paddingTop = parseFloat(cs.paddingTop) || 16;
-                  const lineTop = paddingTop + (stop.line - 1) * lineHeight;
+                  const lineTop = paddingTop + (displayLine - 1) * lineHeight;
                   el.scrollTop = Math.max(0, lineTop - el.clientHeight * 0.2);
                   syncLineNumbersScroll();
                 }}
@@ -2079,7 +2310,13 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
                 <textarea
                   ref={textareaRef}
                   aria-label="Configuration text editor with syntax highlighting overlay"
-                  value={editText}
+                  // While a removal is pending the textarea holds the DISPLAY
+                  // text (live + red ghost rows, reviewDisplay): the ghost is
+                  // a REAL line of the value, so it cannot drift from the
+                  // gutter or the overlay — it IS the line rhythm. Every
+                  // handler converts display↔live; the store never sees a
+                  // ghost (Sir, 2026-10-08).
+                  value={ghostsShowing ? reviewDisplay.display : editText}
                   onChange={(e) => handleTextChange(e.target.value)}
                   onKeyDown={handleEditorKeyDown}
                   onKeyUp={(e) => { syncCaret(e.currentTarget); publishSelectionReference(e.currentTarget); }}

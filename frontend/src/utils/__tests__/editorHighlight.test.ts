@@ -295,3 +295,52 @@ describe('buildHighlightedHtml — run-anchor markers (inline pairs, 2026-10-07)
     expect(anchored).not.toContain('position:');
   });
 });
+
+describe('buildHighlightedHtml — ghost rows (Sir, 2026-10-08)', () => {
+  // Display rows: 1 [printer] / 2 GHOST 600 / 3 green 300 / 4 tail
+  const DISPLAY = ['[printer]', 'max_velocity: 600', 'max_velocity: 300', 'x: 1'].join('\n');
+
+  it('paints ghost rows as the red full-width ghost row', () => {
+    const html = buildHighlightedHtml(DISPLAY, {
+      ghostRows: new Set([2]),
+      pendingAdded: new Set([3]),
+    });
+    const rows = html.split('\n');
+    expect(rows[1].startsWith('<span class="kl-line-ghost kl-row-full">')).toBe(true);
+    // The ghost's text still passes through the syntax renderer (token
+    // spans ride inside the ghost tint; the !important red reaches them —
+    // same law as .kl-line-pending).
+    expect(rows[1].replace(/<[^>]+>/g, '')).toBe('max_velocity: 600');
+    expect(rows[2].startsWith('<span class="kl-line-pending kl-row-full">')).toBe(true);
+  });
+
+  it('a ghost row outranks severity and current-line claims', () => {
+    const html = buildHighlightedHtml(DISPLAY, {
+      ghostRows: new Set([2]),
+      lineSeverities: new Map([[2, 'error' as const]]),
+      currentLine: 2,
+    });
+    const row = html.split('\n')[1];
+    expect(row.startsWith('<span class="kl-line-ghost kl-row-full">')).toBe(true);
+    expect(row).not.toContain('kl-line-error');
+    expect(row).not.toContain('kl-line-current');
+  });
+
+  it('never places a run-anchor marker on a ghost row', () => {
+    // A caller's re-key could hand an anchor to a ghost slot only through a
+    // bug — the overlay refuses it, so the Keep/Undo pair can never measure
+    // itself against a display fiction.
+    const html = buildHighlightedHtml(DISPLAY, {
+      ghostRows: new Set([2]),
+      runAnchors: new Map([[2, 'k1']]),
+    });
+    const rows = html.split('\n');
+    expect(rows[1]).not.toContain('kl-run-anchor');
+    expect(rows[2]).not.toContain('kl-run-anchor');
+  });
+
+  it('is byte-identical with no ghost rows', () => {
+    expect(buildHighlightedHtml(DISPLAY, { ghostRows: new Set() }))
+      .toBe(buildHighlightedHtml(DISPLAY));
+  });
+});
