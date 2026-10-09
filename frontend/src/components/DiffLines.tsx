@@ -15,12 +15,24 @@ import type React from 'react';
  * growing for a long line, so the colour reads as a row band rather than as
  * text highlighting. Header rows (`@@ … @@`) deliberately carry no +/- mark.
  */
+/**
+ * Tint/colour per row type. Padding lives OUTSIDE this table: with the
+ * gutter on, the row must have no left padding at all — the sticky gutter
+ * span carries its own `pl-2` and pins flush to the left edge, so the
+ * green/red band never peeks out to the LEFT of the numbers (Cliff,
+ * 2026-10-09: the 8px row padding read as a coloured box around each number).
+ */
 const ROW_CLASS: Record<DiffLine['type'], string> = {
-  added: 'w-max min-w-full bg-green-500/15 text-green-400 px-2',
-  removed: 'w-max min-w-full bg-red-500/15 text-red-400 px-2',
-  header: 'w-max min-w-full bg-blue-500/10 text-blue-400 px-2',
-  context: 'w-max min-w-full text-[var(--color-text-secondary)] px-2',
+  added: 'w-max min-w-full bg-green-500/15 text-green-400',
+  removed: 'w-max min-w-full bg-red-500/15 text-red-400',
+  header: 'w-max min-w-full bg-blue-500/10 text-blue-400',
+  context: 'w-max min-w-full text-[var(--color-text-secondary)]',
 };
+
+const ROW_PADDING = {
+  numbered: 'pr-2',
+  plain: 'px-2',
+} as const;
 
 const ROW_MARK: Record<DiffLine['type'], string> = {
   added: '+',
@@ -90,7 +102,7 @@ export default function DiffLines({
       {lines.map((line, i) => {
         const extras = rowExtras?.(i);
         return (
-          <div key={i} className={`relative ${ROW_CLASS[line.type]}`}>
+          <div key={i} className={`relative ${ROW_CLASS[line.type]} ${numbers ? ROW_PADDING.numbered : ROW_PADDING.plain}`}>
             {numbers && (
               <span
                 aria-hidden
