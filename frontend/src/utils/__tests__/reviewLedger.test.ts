@@ -202,6 +202,105 @@ describe('runSectionLabel', () => {
     expect(runs).toHaveLength(1);
     expect(runSectionLabel(live, frame, runs[0])).toBe('[printer]');
   });
+
+  it('TWO appended sections are TWO stops, each labelled with its own header (live report 2026-10-09)', () => {
+    const frame = L('[extruder]', 'nozzle: 0.4');
+    const live = L(
+      '[extruder]', 'nozzle: 0.4',
+      '', '[gcode_macro CIRCLE_HOME]', 'gcode:', '  G28',
+      '', '[gcode_arcs]', 'resolution: 1.0',
+    );
+    const runs = reviewRuns(frame, live);
+    expect(runs).toHaveLength(2);
+    expect(runSectionLabel(live, frame, runs[0])).toBe('[gcode_macro CIRCLE_HOME]');
+    expect(runSectionLabel(live, frame, runs[1])).toBe('[gcode_arcs]');
+    expect(runs.map((r) => r.added.length)).toEqual([4, 3]);
+    expect(new Set(runs.map((r) => r.key)).size).toBe(2);
+  });
+
+  it('keeping only the first appended section leaves the second under review', () => {
+    const frame = L('[extruder]', 'nozzle: 0.4');
+    const live = L(
+      '[extruder]', 'nozzle: 0.4',
+      '', '[gcode_macro CIRCLE_HOME]', 'gcode:', '  G28',
+      '', '[gcode_arcs]', 'resolution: 1.0',
+    );
+    const runs = reviewRuns(frame, live);
+    const kept = keepRunsInFrame(frame, live, runs, new Set([runs[0].key]));
+    const rest = reviewRuns(kept, live);
+    expect(rest).toHaveLength(1);
+    expect(runSectionLabel(live, kept, rest[0])).toBe('[gcode_arcs]');
+    // The kept frame really contains the macro and not the arcs section.
+    expect(kept).toContain('[gcode_macro CIRCLE_HOME]');
+    expect(kept).not.toContain('[gcode_arcs]');
+  });
+
+  it('undoing only the second appended section drops it and keeps the first', () => {
+    const frame = L('[extruder]', 'nozzle: 0.4');
+    const live = L(
+      '[extruder]', 'nozzle: 0.4',
+      '', '[gcode_macro CIRCLE_HOME]', 'gcode:', '  G28',
+      '', '[gcode_arcs]', 'resolution: 1.0',
+    );
+    const runs = reviewRuns(frame, live);
+    const undone = undoRunsInLive(frame, live, runs, new Set([runs[1].key]));
+    expect(undone).toContain('[gcode_macro CIRCLE_HOME]');
+    expect(undone).not.toContain('[gcode_arcs]');
+    // The first section is still a difference from the frame: one stop left.
+    const rest = reviewRuns(frame, undone);
+    expect(rest).toHaveLength(1);
+    expect(runSectionLabel(undone, frame, rest[0])).toBe('[gcode_macro CIRCLE_HOME]');
+  });
+
+  it('ONE appended section is NOT split at its own header', () => {
+    const frame = L('[extruder]', 'nozzle: 0.4');
+    const live = L('[extruder]', 'nozzle: 0.4', '', '[gcode_arcs]', 'resolution: 1.0');
+    const runs = reviewRuns(frame, live);
+    expect(runs).toHaveLength(1);
+    expect(runSectionLabel(live, frame, runs[0])).toBe('[gcode_arcs]');
+  });
+
+  it('newline-terminated frame: the append splits the same way (real printer.cfg shape)', () => {
+    const frame = L('[extruder]', 'nozzle: 0.4') + '\n';
+    const live = L(
+      '[extruder]', 'nozzle: 0.4',
+      '', '[gcode_macro CIRCLE_HOME]', 'gcode:', '  G28',
+      '', '[gcode_arcs]', 'resolution: 1.0',
+    ) + '\n';
+    const runs = reviewRuns(frame, live);
+    expect(runs).toHaveLength(2);
+    expect(runSectionLabel(live, frame, runs[0])).toBe('[gcode_macro CIRCLE_HOME]');
+    expect(runSectionLabel(live, frame, runs[1])).toBe('[gcode_arcs]');
+    // Keep-all collapses to the live text byte-exact, newline included.
+    expect(keepRunsInFrame(frame, live, runs, new Set(runs.map((r) => r.key)))).toBe(live);
+  });
+
+  it('TWO deleted sections are TWO red stops, each labelled with its dead header', () => {
+    const frame = L(
+      '[printer]', 'kinematics: corexy',
+      '', '[gcode_macro CIRCLE_HOME]', 'gcode:', '  G28',
+      '', '[gcode_arcs]', 'resolution: 1.0',
+    );
+    const live = L('[printer]', 'kinematics: corexy');
+    const runs = reviewRuns(frame, live);
+    expect(runs).toHaveLength(2);
+    expect(runSectionLabel(live, frame, runs[0])).toBe('[gcode_macro CIRCLE_HOME]');
+    expect(runSectionLabel(live, frame, runs[1])).toBe('[gcode_arcs]');
+  });
+
+  it('undoing one of two deleted sections returns exactly that section', () => {
+    const frame = L(
+      '[printer]', 'kinematics: corexy',
+      '', '[gcode_macro CIRCLE_HOME]', 'gcode:', '  G28',
+      '', '[gcode_arcs]', 'resolution: 1.0',
+    );
+    const live = L('[printer]', 'kinematics: corexy');
+    const runs = reviewRuns(frame, live);
+    const undone = undoRunsInLive(frame, live, runs, new Set([runs[1].key]));
+    expect(undone).toContain('[gcode_arcs]');
+    expect(undone).not.toContain('[gcode_macro CIRCLE_HOME]');
+    expect(undone.startsWith('[printer]\nkinematics: corexy')).toBe(true);
+  });
 });
 
 describe('trailing-newline convention survives a splice', () => {

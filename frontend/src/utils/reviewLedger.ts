@@ -62,6 +62,134 @@ function partLines(value: string): string[] {
   return lines;
 }
 
+const RUN_HEADER_RE = /^\s*\[([^\]]+)\]/;
+const RUN_BLANK_RE = /^\s*$/;
+
+/**
+ * Split a run's lines at section headers: one stop PER section.
+ *
+ * The model routinely appends several sections in one edit (CIRCLE_HOME +
+ * [gcode_arcs], live report 2026-10-09); one contiguous diff run would
+ * bury the second section under the first's label and share one Keep/Undo.
+ * A header after the run's first header starts a new group, pulling the
+ * blank separator line(s) directly above it into the new group — the same
+ * convention add_section writes. Returns the group offsets into `lines`;
+ * empty/single-header runs return [] (no split).
+ */
+function headerGroupOffsets(lines: readonly string[]): number[] {
+  const starts: number[] = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!RUN_HEADER_RE.test(lines[i])) continue;
+    if (starts.length === 0) {
+      starts.push(i); // the run's own first header: starts group 0, no split
+      continue;
+    }
+    let at = i;
+    while (at > starts[starts.length - 1] && RUN_BLANK_RE.test(lines[at - 1])) at -= 1;
+    starts.push(at);
+  }
+  return starts.length > 1 ? starts.slice(1) : [];
+}
+
+/**
+ * Normalise the newline-boundary pseudo-replacement (deterministic,
+ * splice-preserving).
+ *
+ * When one text ends without a trailing newline and the other continues
+ * past it, diffLines reports the boundary line as removed AND re-added:
+ * an append at EOF reads as `+N-1`, a delete-to-EOF as `+1-N`, a MIXED
+ * run that never splits per-section (live report 2026-10-09). Inside a
+ * single change region the added and removed line lists are disjoint by
+ * LCS — an identical prefix on both sides can only be that artifact. Fold
+ * the shared anchor lines away: the run becomes pure green (append) or
+ * pure red (deletion), splits apply, and keep/undo splices produce
+ * byte-identical text to the unnormalised run.
+ */
+function normalizeNewlineBoundary(run: ReviewRun): ReviewRun {
+  const a = run.added;
+  const r = run.removed;
+  if (a.length === 0 || r.length === 0) return run;
+  let k = 0;
+  while (k < a.length && k < r.length && a[k] === r[k]) k += 1;
+  if (k === 0 || (k < a.length && k < r.length)) return run; // not the artifact
+  if (k === r.length) {
+    // Append past the frame's unterminated last line: anchor lines stay.
+    return {
+      ...run,
+      liveStart: run.liveStart + k,
+      added: a.slice(k),
+      frameStart: run.frameStart + k,
+      frameCount: 0,
+      removed: [],
+    };
+  }
+  // Deletion down to an unterminated EOF in LIVE: the anchor stays live and
+  // the pure deletion returns to the line just past it.
+  const ls = run.liveStart + k;
+  return {
+    ...run,
+    liveStart: ls,
+    liveEnd: ls - 1,
+    added: [],
+    frameStart: run.frameStart + k,
+    frameCount: r.length - k,
+    removed: r.slice(k),
+  };
+}
+
+/**
+ * Expand runs into per-section stops (see `headerGroupOffsets`).
+ *
+ * Pure green (added-only) and pure red (removed-only) runs split; mixed
+ * runs stay whole — a replacement (incl. a rename) is one logical change
+ * the reader reviews as written. Split groups keep the parent's insertion
+ * point on the untouched side and advance on the counted side, so
+ * keep/undo splices stay byte-exact.
+ */
+function splitRunsAtHeaders(runs: ReviewRun[]): ReviewRun[] {
+  const out: ReviewRun[] = [];
+  for (const raw of runs) {
+    const run = normalizeNewlineBoundary(raw);
+    const mixed = run.added.length > 0 && run.removed.length > 0;
+    if (mixed || run.key.startsWith('create-') || run.key.startsWith('delete-')) {
+      out.push(run);
+      continue;
+    }
+    const addedOnly = run.added.length > 0;
+    const lines = addedOnly ? run.added : run.removed;
+    const offsets = headerGroupOffsets(lines);
+    if (offsets.length === 0) {
+      out.push(run);
+      continue;
+    }
+    const bounds = [0, ...offsets, lines.length];
+    for (let g = 0; g < bounds.length - 1; g += 1) {
+      const from = bounds[g];
+      const to = bounds[g + 1];
+      const chunk = lines.slice(from, to);
+      out.push(addedOnly ? {
+        ...run,
+        key: '',
+        liveStart: run.liveStart + from,
+        liveEnd: run.liveStart + to - 1,
+        added: chunk,
+        removed: [],
+      } : {
+        ...run,
+        key: '',
+        frameStart: run.frameStart + from,
+        frameCount: to - from,
+        added: [],
+        removed: chunk,
+      });
+    }
+  }
+  for (const run of out) {
+    if (!run.key) run.key = `${run.frameStart}:${run.liveStart}+${run.added.length}-${run.removed.length}`;
+  }
+  return out;
+}
+
 /**
  * The stops of one file: diff(frame, live) walked into runs.
  *
@@ -131,10 +259,7 @@ export function reviewRuns(frame: string | null, live: string | null): ReviewRun
     }
   }
   close();
-  for (const run of runs) {
-    run.key = `${run.frameStart}:${run.liveStart}+${run.added.length}-${run.removed.length}`;
-  }
-  return runs;
+  return splitRunsAtHeaders(runs);
 }
 
 /**
@@ -154,7 +279,13 @@ export function keepRunsInFrame(
   const targets = runs.filter((run) => keepKeys.has(run.key));
   if (targets.length === 0) return frame ?? '';
   const frameLines = partLines(frame ?? '');
-  const ordered = [...targets].sort((a, b) => b.frameStart - a.frameStart);
+  // DESCENDING frameStart so earlier coordinates stay valid; split groups of
+  // ONE appended region share a frameStart, so DESCENDING liveStart as the
+  // tie-break splices the LATER group first — the frame then holds them in
+  // live order.
+  const ordered = [...targets].sort(
+    (a, b) => b.frameStart - a.frameStart || b.liveStart - a.liveStart,
+  );
   for (const run of ordered) {
     const at = Math.min(Math.max(run.frameStart - 1, 0), frameLines.length);
     frameLines.splice(at, run.frameCount, ...run.added);
@@ -194,7 +325,13 @@ export function undoRunsInLive(
   if (targets.length === 0) return live;
   const liveLines = partLines(live);
   const frameLines = partLines(frame);
-  const ordered = [...targets].sort((a, b) => b.liveStart - a.liveStart);
+  // DESCENDING liveStart so earlier coordinates stay valid; split groups of
+  // ONE deleted region share a liveStart, so DESCENDING frameStart as the
+  // tie-break inserts them deepest-frame-line first — the final text then
+  // holds them in frame order.
+  const ordered = [...targets].sort(
+    (a, b) => b.liveStart - a.liveStart || b.frameStart - a.frameStart,
+  );
   for (const run of ordered) {
     const at = run.removed.length > 0 && run.added.length === 0
       // Pure deletion: the live range is empty and liveStart names the line

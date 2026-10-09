@@ -138,6 +138,19 @@ export function stopsFrom(files: readonly LedgerFile[]): ReviewStop[] {
   return stops;
 }
 
+/** A run's one-line preview: its section header when it introduces/retires
+ * one (split runs start at the blank separator — `added[0]` there is ''),
+ * else the first non-empty line, else as written. */
+function runPreview(run: { added: string[]; removed: string[] }): string {
+  for (const lines of [run.added, run.removed]) {
+    const header = lines.find((line) => /^\s*\[[^\]]+\]/.test(line));
+    if (header) return header.trim();
+    const first = lines.find((line) => line.trim() !== '');
+    if (first) return first;
+  }
+  return '';
+}
+
 /** The chat bar's rows: each file with its runs labelled and previewed. */
 export function groupLedgerSections(files: readonly LedgerFile[]): LedgerSectionFile[] {
   return files.map((file) => {
@@ -150,7 +163,7 @@ export function groupLedgerSections(files: readonly LedgerFile[]): LedgerSection
         run,
         key: run.key,
         label: runSectionLabel(file.live, file.frame ?? '', run),
-        preview: run.added[0] ?? run.removed[0] ?? '',
+        preview: runPreview(run),
         added: run.added.length,
         removed: run.removed.length,
       };

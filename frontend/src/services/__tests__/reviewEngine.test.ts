@@ -159,6 +159,23 @@ describe('stopsFrom / groupLedgerSections', () => {
     }));
     expect(groupLedgerSections(deleted)[0].runs[0].preview).toBe('gone');
   });
+
+  it('an appended section previews its HEADER, not the blank separator (split-run shape)', () => {
+    const appended = ledgerFrom(snap({
+      reviewFrames: { 'printer.cfg': L('[extruder]', 'nozzle: 0.4') },
+      liveTexts: {
+        'printer.cfg': L(
+          '[extruder]', 'nozzle: 0.4',
+          '', '[gcode_macro CIRCLE_HOME]', 'gcode:', '  G28',
+          '', '[gcode_arcs]', 'resolution: 1.0',
+        ),
+      },
+    }));
+    const groups = groupLedgerSections(appended);
+    expect(groups[0].runs.map((r) => r.label)).toEqual(['[gcode_macro CIRCLE_HOME]', '[gcode_arcs]']);
+    expect(groups[0].runs[0].preview).toBe('[gcode_macro CIRCLE_HOME]');
+    expect(groups[0].runs[1].preview).toBe('[gcode_arcs]');
+  });
 });
 
 describe('mirrorRowsFor — the mirror rows and their line numbers (Sir 2026-10-08)', () => {
