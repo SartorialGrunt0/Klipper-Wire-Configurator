@@ -703,21 +703,35 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   // line per row, severity glyph + number, sharing the textarea's continuous
   // line rhythm so alignment holds at any zoom / device scaling. Inline
   // per-line spans keep the hover title without creating per-row layout boxes.
-  // While ghosts show, the block counts DISPLAY rows (Sir, 2026-10-08): the
-  // ghost row's number continues the display sequence, painted red — the row
-  // is virtual, its number reads virtual. The −N deletion marks disappear in
+  // While ghosts show, the block numbers LIVE rows (Sir, 2026-10-09): a
+  // ghost row is virtual, so it takes NO number — its gutter cell is blank
+  // (same width as a number, so the right-aligned column and the row's place
+  // in the block hold; the cell still carries the tooltip). The live counter
+  // therefore never inflates over ghosts: every visible number is the row's
+  // real live-line number, matching the backend parse, the issue gutter, and
+  // the chat's line references at every moment of the review — and the
+  // number survives Keep unchanged. The −N deletion marks disappear in
   // that mode: the red ghost row above the anchor IS the deletion, so a count
   // on the green line would describe the same news twice.
   const gutterHtml = useMemo(() => {
     const escapeAttr = (value: string) => escapeHtml(value).replace(/"/g, '&quot;');
     const rows = ghostsShowing ? reviewDisplay.display.split('\n') : editText.split('\n');
-    const issuesByRow = displayLineMaps ? displayLineMaps.issues : issuesByLine;
+    // The gutter numbers live rows while ghosts show, so its issue glyphs
+    // read from the LIVE-keyed map (displayLineMaps re-keys for the
+    // overlay, which renders display rows — the two consumers differ).
+    const issuesByRow = issuesByLine;
+    // Blank gutter cells pad to the column's digit width so the tooltip stays
+    // hoverable and the column never jitters when ghosts appear.
+    const digitWidth = String(rows.length).length;
+    const ghostBlank = '&nbsp;'.repeat(digitWidth);
+    let liveNum = 0;
     return rows
       .map((_line, idx) => {
-        const lineNum = idx + 1;
-        if (ghostsShowing && ghostDisplayLineSet.has(lineNum)) {
-          return `<span title="deleted line — Keep commits the change, Undo returns this text"><span style="color:#ef4444">${lineNum}</span></span>`;
+        const displayRow = idx + 1;
+        if (ghostsShowing && ghostDisplayLineSet.has(displayRow)) {
+          return `<span title="deleted line — Keep commits the change, Undo returns this text">${ghostBlank}</span>`;
         }
+        const lineNum = ghostsShowing ? (liveNum += 1) : displayRow;
         // Undecided deletion (review mode): the gutter is ONE aligned text
         // block, so the −N count rides there rather than in a floating mark —
         // every live-editor mark must live in the text's own flow or in the
@@ -736,7 +750,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
         return removedMark + `<span title="${title}"><span style="color:${spec.color}">${spec.marker}</span> ${lineNum}</span>`;
       })
       .join('\n');
-  }, [editText, reviewDisplay, ghostsShowing, ghostDisplayLineSet, displayLineMaps, issuesByLine, livePending]);
+  }, [editText, reviewDisplay, ghostsShowing, ghostDisplayLineSet, issuesByLine, livePending]);
 
 
   // Text the search/replace acts on (the active file's live textarea text once
