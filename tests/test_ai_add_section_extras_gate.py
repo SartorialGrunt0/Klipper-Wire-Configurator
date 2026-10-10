@@ -17,9 +17,22 @@ refused.
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'backend'))
 
 from services.ai_draft_project import ProjectState  # noqa: E402
+
+# The acceptance tests below probe the module-file arm of the gate, which
+# reads the bundled reference snapshot — gitignored and absent in CI (the
+# gate then degrades to its documented schema-only behavior, see
+# _bundled_extras_tokens). Same convention as test_gcode_registry_extract.
+_EXTRAS_DIR = Path(__file__).resolve().parents[1] \
+    / 'reference' / 'klipper' / 'klippy' / 'extras'
+needs_reference_tree = pytest.mark.skipif(
+    not _EXTRAS_DIR.is_dir(),
+    reason="reference/klipper tree not present (gitignored; regenerate manually)",
+)
 
 
 BASE_CFG = """[printer]
@@ -50,17 +63,20 @@ def _add(section, text=''):
 STAGED = {'ok', 'applied_with_advisory'}
 
 
+@needs_reference_tree
 def test_real_extras_sensor_token_stages():
     st1, r = _add('sht3x my_chamber', 'sensor_type: sht3x')
     assert r['status'] in STAGED, r
     assert '[sht3x my_chamber]' in st1.files['printer.cfg']
 
 
+@needs_reference_tree
 def test_aht10_token_stages():
     _, r = _add('aht10 my_sensor')
     assert r['status'] in STAGED, r
 
 
+@needs_reference_tree
 def test_builtin_module_token_stages():
     _, r = _add('print_stats')
     assert r['status'] in STAGED, r
