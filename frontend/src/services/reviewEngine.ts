@@ -22,6 +22,7 @@ import {
   keepRunsInFrame,
   reviewRuns,
   runSectionLabel,
+  syncFrameOutsideRuns,
   undoRunsInLive,
   type ReviewRun,
 } from '../utils/reviewLedger';
@@ -300,6 +301,33 @@ function removeCreatedFile(file: string): void {
   // the file leaves the review entirely.
   useConfigStore.getState().removeConfigFile(file);
   useChangeSetStore.getState().removeReviewFrame(file);
+}
+
+/**
+ * Fold a HAND edit into the frame (Sir, 2026-10-10): the text view calls
+ * this on every edit IT makes, with prevLive = the buffer before the change.
+ * Hand edits outside the pending runs are absorbed into the frame (invisible
+ * to the review); edits on/inside a run join it. AI staging never calls
+ * this — its change IS the run, and the next fold computes the runs from
+ * the AI text, so a staging can never absorb itself.
+ *
+ * Consequences that define the semantics:
+ *  - after every run is decided (keep: frame==live; undo: live==frame), the
+ *    next fold leaves frame==live, so later typing shows NO marks — the
+ *    reported bug, dead by construction;
+ *  - an UNDO after hand edits restores only the AI region, because the
+ *    frame already carries the user's other edits as if they predated the
+ *    AI.
+ *
+ * A created file (frame null) has no text to fold into: its whole body is
+ * one AI run and every hand edit joins it (the frame stays null).
+ */
+export function syncReviewFrame(file: string, prevLive: string, newLive: string): void {
+  const store = useChangeSetStore.getState();
+  const frame = store.reviewFrames[file];
+  if (frame === undefined || frame === null) return;
+  if (prevLive === newLive) return;
+  store.setReviewFrame(file, syncFrameOutsideRuns(frame, prevLive, newLive));
 }
 
 // ── The decisions ────────────────────────────────────────────────────

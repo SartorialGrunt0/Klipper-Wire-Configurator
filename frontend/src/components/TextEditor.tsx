@@ -51,6 +51,7 @@ import {
   ledgerFrom,
   setLiveApplier,
   stopsFrom,
+  syncReviewFrame,
   undoRun,
 } from '../services/reviewEngine';
 import { useChangeSetStore } from '../stores/changeSetStore';
@@ -200,6 +201,11 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
         // as the ledger's live side, so a file switch or an external change
         // does not leave a stale buffer feeding the review.
         useConfigStore.getState().setLiveText(activeFile, text);
+        // NOT a hand edit (this is also how an AI staging reaches the
+        // buffer, via the model echo): advance the frame-sync baseline only,
+        // so the next hand fold diffs against the CURRENT text, never
+        // across this write (Sir 2026-10-10).
+        bufferLiveRef.current = text;
       }
     });
   }, [isActive, activeFile, config, exportConfigText, markFallbackExport]);
@@ -607,6 +613,27 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   // the document shrinks — the position the user is looking at left with
   // them, which is correct.)
   const caretBridgeRef = useRef<[number, number] | null>(null);
+  // The buffer's LIVE text as the editor last knew it — the frame-sync's
+  // prevLive (Sir 2026-10-10). Updated on EVERY buffer write (hand paths,
+  // the ledger splice, the model export/AI-staging echo), but only HAND
+  // paths call syncReviewFrame: an AI staging must never be folded, and
+  // keeping the ref current is what stops the next hand fold from spanning
+  // the staging (prevLive = pre-AI text would make the fold absorb the AI
+  // change itself). A ref, not closure state: every hand path reads the
+  // same current value regardless of render staleness.
+  const bufferLiveRef = useRef('');
+  /** Fold a HAND buffer edit into the review frame (no-op while the
+   * textarea still holds another file's text). An EMPTY ref means the
+   * buffer was never published (typing before the first export lands) —
+   * the baseline is unknown, so the fold is SKIPPED and only the ref
+   * moves: a missed fold keeps the frame stale for that one keystroke,
+   * a fold against the wrong baseline corrupts it. */
+  const foldHandEdit = useCallback((newLive: string) => {
+    if (editTextFile === activeFile && bufferLiveRef.current !== '') {
+      syncReviewFrame(activeFile, bufferLiveRef.current, newLive);
+    }
+    bufferLiveRef.current = newLive;
+  }, [editTextFile, activeFile]);
   // A bridge is a caret promise ABOUT this file's text — switching files
   // cancels it. Declared BEFORE the re-place effect so that on a switch
   // render where both fire, the clear wins first and the re-place sees
@@ -894,10 +921,14 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
         ];
       }
       setEditText(strip.live);
+      // Frame sync (Sir 2026-10-10): a HAND edit folds into the frame, so
+      // everything outside the pending runs stops reading as an AI change.
+      foldHandEdit(strip.live);
       useConfigStore.getState().setLiveText(activeFile, strip.live);
       return;
     }
     setEditText(newText);
+    foldHandEdit(newText);
     // The review's LIVE side must beat the debounced model write: publish the
     // buffer NOW so a pending marker follows the typing, not the 600ms parse
     // (Sir, 2026-10-07).
@@ -915,6 +946,10 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     setLiveApplier(activeFile, (text: string) => {
       exportingRef.current = false;
       setEditText(text);
+      // The ledger's own splice (an UNDO landing in this buffer): frame and
+      // live already agree the way the decision intends — advancing the
+      // frame-sync baseline is all it needs, never a fold (Sir 2026-10-10).
+      bufferLiveRef.current = text;
     });
     return () => setLiveApplier(activeFile, null);
   }, [isActive, activeFile, editTextFile]);
@@ -1092,6 +1127,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
       ];
       setCaret(caretBridgeRef.current[0]);
       setEditText(strip.live);
+      foldHandEdit(strip.live);
       useConfigStore.getState().setLiveText(activeFile, strip.live);
       return;
     }
@@ -1102,12 +1138,14 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     // followed an accepted name until you typed or clicked again).
     setCaret(edit.start);
     setEditText(edit.text);
+    // A Tab indent / completion accept is a HAND edit: it folds (Sir 2026-10-10).
+    foldHandEdit(edit.text);
     // The typing path publishes liveText immediately (PR #36 review, L5):
     // a Tab indent or a completion accept must keep the ledger's LIVE side
     // in step too, or the chat bar and the strip count a stale buffer until
     // the debounced parse lands.
     useConfigStore.getState().setLiveText(activeFile, edit.text);
-  }, [ghostsShowing, reviewGhosts, activeFile]);
+  }, [ghostsShowing, reviewGhosts, activeFile, foldHandEdit]);
 
   useEffect(() => {
     const pending = pendingSelectionRef.current;
@@ -1434,6 +1472,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
         if (el) bridgeCaretFromDom(el);
         exportingRef.current = false;
         setEditText(nextText);
+        foldHandEdit(nextText); // a search/replace is a HAND edit (Sir 2026-10-10)
         useConfigStore.getState().setLiveText(activeFile, nextText);
         return true;
       }

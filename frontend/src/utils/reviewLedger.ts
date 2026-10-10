@@ -138,6 +138,143 @@ function normalizeNewlineBoundary(run: ReviewRun): ReviewRun {
 }
 
 /**
+ * Hand-edit frame sync (Sir, 2026-10-10).
+ *
+ * The review law is `diff(FRAME, LIVE)` — but a FRAME frozen at the pre-AI
+ * document makes every hand edit the user types while a review is open
+ * reappear as a pending green/red run ("my own typing shows up like an AI
+ * edit"). The frame instead FOLLOWS the live text everywhere except across a
+ * pending run, so hand edits outside the AI's lines are absorbed as if they
+ * had been made before the AI, edits on the AI's lines join the run, and
+ * once every run is decided (frame == live) later typing diffs against
+ * nothing.
+ *
+ * The fold: walk `diff(prevLive, newLive)` — the hand edit. A change region
+ * whose prevLive span touches a pending run of `diff(frame, prevLive)` is
+ * PROTECTED: the frame keeps its own lines there, so the edit joins the run
+ * (editing an AI line, or deleting the whole AI block). A region that
+ * touches no run is folded into the frame: the frame's corresponding span
+ * (prevLive line j maps to frame line j + Σ(frameCount−liveCount) over the
+ * runs wholly above it) is replaced with the new text's window. Regions are
+ * merged when adjacent parts of one diff touch the same run, so one edit
+ * never half-folds.
+ *
+ * Pure: no React, no store. The trailing-newline convention of the LIVE
+ * text travels with the fold (the splice law, `joinLines`).
+ */
+export function syncFrameOutsideRuns(
+  frame: string,
+  prevLive: string,
+  newLive: string,
+): string {
+  if (prevLive === newLive) return frame;
+
+  // Pending runs of diff(frame, prevLive) as merged regions, with their
+  // spans in both texts. (Same walk as reviewRuns, without the per-section
+  // split: the frame has ONE contiguous span per changed region.)
+  interface OldRegion { frameStart: number; frameCount: number; liveStart: number; liveCount: number }
+  const regions: OldRegion[] = [];
+  {
+    let live = 1;
+    let fr = 1;
+    let cur: OldRegion | null = null;
+    for (const part of diffLines(frame, prevLive)) {
+      const n = partLineCount(part.value);
+      if (n === 0) continue;
+      if (!part.added && !part.removed) { cur = null; live += n; fr += n; continue; }
+      if (!cur) { cur = { frameStart: fr, frameCount: 0, liveStart: live, liveCount: 0 }; regions.push(cur); }
+      if (part.added) { cur.liveCount = n; live += n; } else { cur.frameCount = n; fr += n; }
+    }
+  }
+
+  /** prevLive line index j (1..len+1) → frame line index at the same spot.
+   * Only ever called for boundaries OUTSIDE any run (protected regions are
+   * folded away before this), so `wholly above` (liveStart+liveCount <= j)
+   * is the only relation that can hold. */
+  const frameAnchor = (j: number): number => {
+    let d = 0;
+    for (const r of regions) if (r.liveStart + r.liveCount <= j) d += r.frameCount - r.liveCount;
+    return j + d;
+  };
+  /** Does the hand region [ps..pe] (possibly an insertion boundary at ps=pe+1)
+   * touch a pending run's prevLive span? */
+  const touches = (r: OldRegion, ps: number, pe: number): boolean => {
+    if (pe >= ps) return r.liveCount > 0 && ps <= r.liveStart + r.liveCount - 1 && r.liveStart <= pe;
+    // An insertion boundary: only touches a zero-width span sitting AT it.
+    return r.liveCount === 0 && r.liveStart === ps;
+  };
+
+  // The hand edit's change regions over prevLive (merged across adjacent
+  // removed+added parts), each with its window in newLive.
+  interface HandRegion { ps: number; pe: number; ws: number; we: number }
+  const raw: HandRegion[] = [];
+  let p = 1;
+  let w = 1;
+  let region: HandRegion | null = null;
+  const flush = () => { if (region) raw.push(region); region = null; };
+  for (const part of diffLines(prevLive, newLive)) {
+    const n = partLineCount(part.value);
+    if (n === 0) continue;
+    if (!part.added && !part.removed) { flush(); p += n; w += n; continue; }
+    if (!region) region = { ps: p, pe: p - 1, ws: w, we: w - 1 };
+    if (part.removed) { region.pe = p + n - 1; p += n; }
+    if (part.added) { region.we = w + n - 1; w += n; }
+  }
+  flush();
+  // Fold the newline-boundary artifact FIRST (see normalizeNewlineBoundary):
+  // when prevLive lacks a trailing newline and newLive continues past it,
+  // diffLines reports the last line as removed AND re-added. Without this,
+  // a plain append-at-EOF reads as "the last prevLive line changed" and
+  // would wrongly protect a run sitting there. Inside one change region the
+  // removed and added lines are LCS-disjoint, so a removed-list that is a
+  // prefix of the added-list can only be that artifact: shrink to a pure
+  // insertion at the boundary after the region.
+  for (let i = 0; i < raw.length; i += 1) {
+    const r = raw[i];
+    if (r.pe < r.ps) continue;
+    const removed = partLines(prevLive).slice(r.ps - 1, r.pe);
+    const added = partLines(newLive).slice(r.ws - 1, r.we);
+    if (removed.length === 0 || added.length <= removed.length) continue;
+    if (removed.every((line, k) => added[k] === line)) {
+      r.ps = r.pe + 1; // insertion boundary after the last removed line
+      r.ws += removed.length;
+      r.we = r.ws + (added.length - removed.length) - 1;
+    }
+  }
+  const merged: HandRegion[] = [];
+  for (const r of raw) {
+    const last = merged[merged.length - 1];
+    if (last && last.pe >= last.ps && r.pe >= r.ps && r.ps <= last.pe + 1) { last.pe = r.pe; last.we = r.we; }
+    else merged.push(r);
+  }
+
+  // Fold the untouched regions into the frame (bottom-up so coordinates
+  // stay valid); touched regions protect the frame span.
+  const frameLines = partLines(frame);
+  const newLines = partLines(newLive);
+  const folds = merged
+    .filter((r) => !regions.some((x) => touches(x, r.ps, r.pe)))
+    .map((r) => ({
+      fA: frameAnchor(r.ps),
+      fB: frameAnchor(r.pe + 1) - 1,
+      ws: r.ws,
+      we: r.we,
+    }))
+    .sort((a, b) => b.fA - a.fA);
+  for (const s of folds) {
+    const lines = newLines.slice(s.ws - 1, Math.max(s.we, s.ws - 1));
+    const at = Math.min(Math.max(s.fA - 1, 0), frameLines.length);
+    const del = Math.max(0, Math.min(s.fB, frameLines.length) - s.fA + 1);
+    frameLines.splice(at, del, ...lines);
+  }
+  // The newline convention always follows the LIVE text: the frame is
+  // internal to the diff (never saved, never rendered), and reviewRuns
+  // already normalizes the EOF pseudo-replacement, so any convention here
+  // only has to agree with what the live side carries.
+  return joinLines(frameLines, newLive);
+}
+
+/**
  * Expand runs into per-section stops (see `headerGroupOffsets`).
  *
  * Pure green (added-only) and pure red (removed-only) runs split; mixed

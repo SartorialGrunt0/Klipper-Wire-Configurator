@@ -44,9 +44,12 @@ export interface ChangeSetState {
   /**
    * file → the review's FRAME. `null` means the review CREATED the file, so
    * its whole live text is one green run. A file with no entry is not under
-   * review. Seeded once (`seedFrames`) and thereafter spliced by a keep — an
-   * undo never changes a frame, because the frame is the pre-review state by
-   * definition.
+   * review. Seeded once (`seedFrames`), spliced by a keep — and FOLDED by
+   * `syncReviewFrame` on every hand edit outside a pending run (Sir,
+   * 2026-10-10), so the frame is not the frozen pre-review document but
+   * the document as far as the AI's pending changes go: hand typing outside
+   * the runs joins it silently, and once every run is decided the frame
+   * equals the live text, which empties the review for good.
    */
   reviewFrames: Record<string, string | null>;
 
