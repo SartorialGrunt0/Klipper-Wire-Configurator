@@ -7,6 +7,7 @@ import {
   ghostsByLiveLine,
   liveFromDisplay,
   liveLineToDisplayLine,
+  stripGhostsFromDisplay,
   liveToDisplayOffset,
 } from '../reviewDisplay';
 import { reviewRuns } from '../reviewLedger';
@@ -199,6 +200,64 @@ describe('liveFromDisplay', () => {
     const ghostRow = built.ghostDisplayLines[0];
     const deleted = [...rows.slice(0, ghostRow - 1), ...rows.slice(ghostRow)].join('\n');
     expect(liveFromDisplay(deleted, built.ghosts, 'a\nb\n')).toBe('a\nb\n');
+  });
+
+  it('keeps the LIVE twin when a SECOND ghost exists elsewhere (N1 residual)', () => {
+    // The newText===live short-circuit cannot fire here: after deleting
+    // ghost row 4 the text still differs from live (ghost Y remains). The
+    // old forward content search ran past the next anchor's slot and
+    // stripped the live '  M117 a' twin (round-3 R3 finding). The search
+    // window must end at the next ghost's slot.
+    const frame = '[gcode_macro X]\ngcode:\n  M117 a\n  M117 a\n\n[gcode_macro Y]\ngcode:\n  M117 b\n  M117 b\n';
+    const live = '[gcode_macro X]\ngcode:\n  M117 a\n\n[gcode_macro Y]\ngcode:\n  M117 b\n';
+    const built = displayOf(frame, live);
+    const rows = built.display.split('\n');
+    // Two ghost rows: the duplicated '  M117 a' and the duplicated '  M117 b'.
+    expect(built.ghostDisplayLines.length).toBe(2);
+    const ghostX = built.ghostDisplayLines.find((r) => rows[r - 1] === '  M117 a');
+    expect(ghostX).toBeDefined();
+    const deleted = [...rows.slice(0, ghostX! - 1), ...rows.slice(ghostX!)].join('\n');
+    const strip = stripGhostsFromDisplay(deleted, built.ghosts, live);
+    // Live '  M117 a' must survive; the X run retires, ghost Y still
+    // strips at its own slot (live has each line once).
+    expect(strip.live.split('\n').filter((l) => l === '  M117 a').length).toBe(1);
+    expect(strip.live.split('\n').filter((l) => l === '  M117 b').length).toBe(1);
+    expect(strip.live).toBe(live);
+  });
+
+  it('recovers a ghost pushed up by deletes above it (window must not break push-up)', () => {
+    // Deleting live rows ABOVE a ghost shifts it toward row 1; the block is
+    // no longer at its slot but must still be found and stripped — the
+    // fix for the twin case must not turn slot-miss into always-retire.
+    const frame = 'l1\nl2\ngone\nmid\ntail\n';
+    const live = 'l1\nl2\nmid\ntail\n';
+    const built = displayOf(frame, live);
+    const displayRows = built.display.split('\n');
+    // Delete live row 'l1': ghosts ride up but keep their relative order.
+    const kept = displayRows.filter((_, idx) => idx !== displayRows.indexOf('l1'));
+    const strip = stripGhostsFromDisplay(kept.join('\n'), built.ghosts, live);
+    expect(strip.live.split('\n')).toEqual(['l2', 'mid', 'tail', '']);
+  });
+
+  it('resolves the all-identical delete safe: bounce, never silent loss (N1 accepted-risk)', () => {
+    // Two byte-identical rows, one deleted: undecidable which was the
+    // ghost. Safe direction = treat as ghost-deleted (row effectively
+    // stays; ledger re-raises). Pinning this so the bounce is a tested
+    // behavior, not an accident.
+    const frame = 'a\nx\nx\n';
+    const live = 'a\nx\n';
+    const built = displayOf(frame, live);
+    const rows = built.display.split('\n');
+    const ghostRow = built.ghostDisplayLines[0];
+    // Delete the GHOST twin.
+    const delGhost = [...rows.slice(0, ghostRow - 1), ...rows.slice(ghostRow)].join('\n');
+    expect(stripGhostsFromDisplay(delGhost, built.ghosts, live).live).toBe(live);
+    // Delete the LIVE twin: byte-identical input → same safe output (the
+    // delete 'bounces'; the run is still under review).
+    const liveIdx = rows.findIndex((l, idx) => l === 'x' && idx + 1 !== ghostRow);
+    const delLive = [...rows.slice(0, liveIdx), ...rows.slice(liveIdx + 1)].join('\n');
+    expect(delGhost).toBe(delLive); // the undecidability proof: identical inputs
+    expect(stripGhostsFromDisplay(delLive, built.ghosts, live).live).toBe(live);
   });
 
   it('lets the user delete the ghost row without touching live', () => {

@@ -105,17 +105,14 @@ export function buildReviewDisplay(
  * of the same text the user always had, and stripping the twin relocated
  * live text (PR #36 review, B-1). Row arithmetic is the tiebreaker.
  *
- * When the slot does NOT match, the block's fate depends on WHERE the rows
- * went, which the line counts answer exactly. Let `g` = ghosts the blocks
- * after this one still claim, and `s` = live rows the walk has emitted. If
- * the edited text has exactly `g + (totalLive − anchor + 1)` rows left, then
- * every remaining row is accounted for as live text INCLUDING the slot rows:
- * the user's edit ate the ghost at its slot — the block dissolves (typed
- * text joins LIVE; the ledger's next diff decides what that means).
- * Otherwise the text holds more rows than that, so the ghost cannot have
- * been consumed: the user ADDED rows above the slot, and the block is found
- * by the first exact full-block match below. Deleting rows above the slot
- * needs no special case — the early stop at a content match finds it.
+ * When the slot does NOT match, the walk emits live rows up to the slot,
+ * stopping EARLY at a full-block content match: a match below the slot that
+ * does not collide with live's own row (see twin retirement above) is the
+ * ghost riding up with rows the user deleted above it, so it strips there.
+ * A one-row soft edge handles the blank an Enter leaves at the slot
+ * boundary. Failing all of that the block is retired — the user's edit
+ * consumed it at the slot — and its rows become LIVE text; the ledger's
+ * next diff decides what that means.
  *
  * Each stripped row is reported in `strippedDisplayLines` (row numbers in
  * the NEW text) — the caret bridge needs them: the caret sat at a row of
@@ -132,9 +129,6 @@ export function stripGhostsFromDisplay(
 ): { live: string; strippedDisplayLines: number[] } {
   if (ghosts.size === 0) return { live: newText, strippedDisplayLines: [] };
   const lines = newText.split('\n');
-  // Row budget for the twin-retirement law below: live's row count and the
-  // rows every ghost claims. Without `live` the law cannot run and the
-  // strip keeps its historical (content-search) behavior.
   // AMBIGUOUS-DELETE BIAS (round-2 N1): when the edited text has come to
   // EQUAL the caller's live text byte-for-byte, every ghost row is gone
   // from the textarea. Deleting a ghost whose content duplicates a live
@@ -152,6 +146,25 @@ export function stripGhostsFromDisplay(
   const anchors = [...ghosts.keys()].sort((a, b) => a - b);
   const matchAt = (start: number, block: readonly string[]): boolean =>
     block.length > 0 && block.every((g, k) => start + k < lines.length && lines[start + k] === g);
+  // TWIN RETIREMENT (round-2 N1, round-3 R3). A content match found ABOVE
+  // the slot (walk stop / Enter-boundary / forward search) is normally a
+  // ghost that rode up with deleted rows — but it is indistinguishable from
+  // the LIVE twin of a ghost the user deleted at its slot whenever the
+  // ghost's content duplicates a live line: both readings produce the same
+  // text (delete ghost = delete twin; byte-identical rows). Proof: frame
+  // '...a / a / ... / b / b', delete either 'a' row of the display — same
+  // newText, and row counts cannot separate the readings. So when `live`
+  // is given and the match at p would consume live's OWN line — live's row
+  // at out.length + (p - i) equals the block — retire the ghost instead of
+  // stripping: live is returned with that line intact. If the user really
+  // deleted the live twin, the deletion bounces (the ledger's next diff
+  // re-raises the run) — recoverable, never silent live loss. Without a
+  // twin at p the match is a genuine ride-up and strips as before.
+  const liveRows = live !== undefined ? live.split('\n') : null;
+  const isLiveTwinAt = (p: number, i: number, block: readonly string[]): boolean =>
+    liveRows !== null
+    && out.length + (p - i) < liveRows.length
+    && block.every((g, k) => liveRows[out.length + (p - i) + k] === g);
   let i = 0;
   for (const anchor of anchors) {
     const block = ghosts.get(anchor) ?? [];
@@ -169,17 +182,6 @@ export function stripGhostsFromDisplay(
     // an above-slot content match meaningful — it means rows above were
     // deleted and the ghost rode up with them.
     const slot = i + (slotLive - out.length);
-    // DECISIVE RETIREMENT (round-2 N1), before every content path, for the
-    // FIRST anchor only: the block is NOT at its slot and the text cannot
-    // hold ANY ghost row of this set — its length is at most the live row
-    // count. The ghost was deleted (or consumed) at its slot, so every
-    // remaining row is LIVE: a content search would strip a live TWIN when
-    // the ghost content duplicates the buffer, destroying live text. The
-    // ambiguous delete resolves safe: the ledger's next diff re-derives the
-    // run, and a removal the user actually made re-raises its mark rather
-    // than silently eating text. Later anchors are untouched: their row
-    // budget cannot prove absence once this call retires, and their slot
-    // search already handles twins (B-1).
     if (matchAt(slot, block)) {
       for (let q = i; q < slot; q += 1) out.push(lines[q]);
       for (let q = 0; q < block.length; q += 1) strippedDisplayLines.push(slot + q + 1);
@@ -188,16 +190,27 @@ export function stripGhostsFromDisplay(
     }
     // Emit live rows up to the slot, stopping EARLY (robust to the user
     // deleting rows above this ghost) once the block matches at the walk.
+    // A twin match RETIRES the ghost: the walk stops there without
+    // stripping and the rows flow to LIVE through the slot walk below.
     while (out.length < slotLive && !matchAt(i, block)) {
       out.push(lines[i]);
       i += 1;
     }
     if (matchAt(i, block)) {
+      if (isLiveTwinAt(i, i, block)) {
+        // Ambiguous twin at the walk stop — retire: emit rows up to the
+        // slot as LIVE (the match row included) and move on.
+        while (out.length < slotLive) {
+          out.push(lines[i]);
+          i += 1;
+        }
+        continue;
+      }
       for (let q = 0; q < block.length; q += 1) strippedDisplayLines.push(i + q + 1);
       i += block.length;
       continue;
     }
-    if (lines[i] === '' && matchAt(i + 1, block)) {
+    if (lines[i] === '' && matchAt(i + 1, block) && !isLiveTwinAt(i + 1, i + 1, block)) {
       // Enter-at-boundary: the blank row is the user's (live); the block
       // matches just below it.
       out.push(lines[i]);
