@@ -928,6 +928,17 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
       return;
     }
     setEditText(newText);
+    // Typing must NEVER be re-placed from the bridge: the promise was fed
+    // at the PREVIOUS keyup and is stale by exactly this keystroke, so
+    // re-applying it after the commit pins the caret one character behind
+    // the text ("insert key" typing, Sir 2026-10-10). Re-feed the bridge
+    // from the DOM NOW — the input event has already moved the browser
+    // caret to the right place, and no-ghosts display IS live, so the
+    // re-place effect sees want == actual and skips. A later ghost
+    // re-display still finds a caret promise, and it is the FRESH one
+    // (L4's contract intact).
+    const el = textareaRef.current;
+    if (el) bridgeCaretFromDom(el);
     foldHandEdit(newText);
     // The review's LIVE side must beat the debounced model write: publish the
     // buffer NOW so a pending marker follows the typing, not the 600ms parse
