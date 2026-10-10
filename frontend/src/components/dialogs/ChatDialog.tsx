@@ -598,7 +598,11 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         // (dirty, save-gated). Declines/timeouts arrive with no staged
         // edits, so plain Q&A and declined flows are untouched.
         const stagedEdits = finalMessage.pendingEdits;
-        if (stagedEdits && stagedEdits.length > 0) {
+        // Stale-run guard on the FINAL apply too (round-2 N5): a review the
+        // user discarded mid-flight must not have the reply's edits land in
+        // the reset buffer when the reply completes.
+        const runStale = useChangeSetStore.getState().epoch !== runEpochRef.current;
+        if (!runStale && stagedEdits && stagedEdits.length > 0) {
           const failed = await applyStagedEdits(stagedEdits);
           if (failed.length > 0) {
             setError(`The AI's change to ${failed.join(', ')} could not be applied to the editor — check the file before saving.`);
@@ -709,8 +713,11 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           setApprovalInvalidation(null);
           // Mirror the card into the text view's pending-diff pane. Keyed on
           // this same "new approvalId" moment so the pane and the card can
-          // never disagree about which change is waiting.
-          usePendingEditStore.getState().setPending(poll);
+          // never disagree about which change is waiting. Stale-run guard
+          // (round-2 N5): a discarded run cannot re-install its card.
+          if (useChangeSetStore.getState().epoch === runEpochRef.current) {
+            usePendingEditStore.getState().setPending(poll);
+          }
           // A NEW card is a fresh decision: busy is per-card, never
           // inherited. Without this, approving op 1 strands approvalBusy
           // (the ok path clears the card, not the flag) and op 2's card

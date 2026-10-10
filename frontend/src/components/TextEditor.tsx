@@ -886,7 +886,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
       // text now (caret stays inside it), a pushed-down ghost is reported
       // at its new row.
       const el = textareaRef.current;
-      const strip = stripGhostsFromDisplay(newText, reviewGhosts);
+      const strip = stripGhostsFromDisplay(newText, reviewGhosts, editText);
       if (el) {
         caretBridgeRef.current = [
           displayToLiveOffsetAfterStrip(newText, strip.strippedDisplayLines, el.selectionStart),
@@ -1085,7 +1085,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
       // The caret re-places through the BRIDGE, not pendingSelectionRef:
       // that ref feeds a bare setSelectionRange on the DOM, whose space is
       // DISPLAY — the bridge converts live→display on the rebuilt value.
-      const strip = stripGhostsFromDisplay(edit.text, reviewGhosts);
+      const strip = stripGhostsFromDisplay(edit.text, reviewGhosts, editText);
       caretBridgeRef.current = [
         displayToLiveOffsetAfterStrip(edit.text, strip.strippedDisplayLines, edit.start),
         displayToLiveOffsetAfterStrip(edit.text, strip.strippedDisplayLines, edit.end),

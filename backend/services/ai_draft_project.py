@@ -180,14 +180,17 @@ def _bundled_extras_tokens() -> frozenset[str]:
     ``extras/<token>.py``; the bundled reference snapshot (reference/klipper)
     is exactly the firmware KWC's docs ship against. The curated schema is a
     hand-maintained subset, so a token with a module file here is loadable
-    even when the schema misses it (sht3x, aht10, print_stats, ...). Cached
-    per process; a missing snapshot yields the empty set (gate degrades to
-    the schema-only behavior it shipped with).
+    even when the schema misses it (sht3x, aht10, print_stats, ...).
+    Package markers (``__init__``) are excluded: klippy never resolves a
+    section type to one, and a section named after it would be nonsense on
+    a printer. Cached per process; a missing snapshot yields the empty set
+    (gate degrades to the schema-only behavior it shipped with).
     """
     extras = Path(__file__).resolve().parent.parent.parent \
         / 'reference' / 'klipper' / 'klippy' / 'extras'
     try:
-        return frozenset(p.stem for p in extras.glob('*.py'))
+        return frozenset(p.stem for p in extras.glob('*.py')
+                         if not p.stem.startswith('__'))
     except OSError:
         return frozenset()
 

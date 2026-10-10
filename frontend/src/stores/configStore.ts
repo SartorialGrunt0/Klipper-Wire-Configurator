@@ -560,7 +560,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       return { originalTexts: next };
     }),
 
-  renameConfigFile: (oldName, newName) =>
+  renameConfigFile: (oldName, newName) => {
     set((s) => {
       if (!s.configFiles[oldName] || oldName === newName) return s;
       if (s.configFiles[newName]) return s; // target already exists
@@ -593,11 +593,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         nextLiveTexts[newName] = nextLiveTexts[oldName];
         delete nextLiveTexts[oldName];
       }
-      // The review ledger keys its FRAMES by filename: a rename that leaves
-      // the frame behind renders a phantom whole-file-deletion review under
-      // the dead name, and Keep/Undo then writes into a file that no longer
-      // exists (PR #36 review, B-3). The frame travels with the file.
-      useChangeSetStore.getState().migrateReviewFrameKey(oldName, newName);
       // Update include directives in other files that reference the old name
       for (const [fn, cf] of Object.entries(next)) {
         if (cf.includes.includes(oldName)) {
@@ -617,7 +612,19 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         selectedSectionFile: s.selectedSectionFile === oldName ? newName : s.selectedSectionFile,
         selectedSectionLine: s.selectedSectionLine,
       };
-    }),
+    });
+    // The review ledger keys its FRAMES by filename: a rename that leaves
+    // the frame behind renders a phantom whole-file-deletion review under
+    // the dead name, and Keep/Undo then writes into a file that no longer
+    // exists (PR #36 review, B-3). The frame travels with the file — OUTSIDE
+    // the reducer above, so no other store's subscribers fire mid-update
+    // (round-2 N4), and only when the rename actually happened (a refused
+    // overwrite rename leaves both maps untouched).
+    const after = get();
+    if (!after.configFiles[oldName] && after.configFiles[newName]) {
+      useChangeSetStore.getState().migrateReviewFrameKey(oldName, newName);
+    }
+  },
 
   copyConfigFile: (sourceName, newName) =>
     set((s) => {

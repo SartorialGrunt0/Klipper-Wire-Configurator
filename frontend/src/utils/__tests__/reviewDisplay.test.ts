@@ -179,6 +179,28 @@ describe('liveFromDisplay', () => {
     // Keep then takes the edited version (frame ← live); Undo restores 600.
   });
 
+  it('deleting a ghost row that duplicates a live line keeps the LIVE twin (N1)', () => {
+    // Ghost content equals a live line. Deleting the ghost row at its slot
+    // leaves the display with only the LIVE twin — a forward content search
+    // strips THAT and destroys live text. Positional reasoning must retire
+    // the ghost instead: live unchanged.
+    const frame = '[gcode_macro X]\ngcode:\n  M117 a\n  M117 a\n';
+    const live = '[gcode_macro X]\ngcode:\n  M117 a\n';
+    const built = displayOf(frame, live);
+    const rows = built.display.split('\n');
+    const ghostRow = built.ghostDisplayLines[0];
+    const deleted = [...rows.slice(0, ghostRow - 1), ...rows.slice(ghostRow)].join('\n');
+    expect(liveFromDisplay(deleted, built.ghosts, live)).toBe(live);
+  });
+
+  it('deleting a blank ghost row that duplicates a live blank keeps live (N1)', () => {
+    const built = displayOf('a\n\nb\n', 'a\nb\n');
+    const rows = built.display.split('\n');
+    const ghostRow = built.ghostDisplayLines[0];
+    const deleted = [...rows.slice(0, ghostRow - 1), ...rows.slice(ghostRow)].join('\n');
+    expect(liveFromDisplay(deleted, built.ghosts, 'a\nb\n')).toBe('a\nb\n');
+  });
+
   it('lets the user delete the ghost row without touching live', () => {
     const built = displayOf(FRAME, LIVE);
     // Deleting the ghost line in the textarea removes the whole row INCLUDING

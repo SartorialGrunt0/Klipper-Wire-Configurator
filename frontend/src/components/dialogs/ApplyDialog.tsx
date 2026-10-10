@@ -570,12 +570,21 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
       // doesn't keep showing them as deleted forever.
       configStore.removeOriginalTexts(deleted);
       configStore.markClean();
-      // A save writes the buffer to disk: the running change set and its
-      // review frames describe edits that are now the file's own content.
-      // They must not survive to tint the next session's text view (PR #36
-      // review, claim 3). Bumping the epoch also retires an in-flight
-      // reply's late writes (B-4).
-      useChangeSetStore.getState().clear();
+      // A save settles the review of the files it WROTE: their frames
+      // describe edits that are now the file's own content (PR #36 review,
+      // claim 3). A subset save must not discard the reviews of files that
+      // stayed on the shelf (round-2 N2) — those files keep their frames.
+      // Only when everything under review went to disk does the whole
+      // change set end (which also bumps the epoch, retiring an in-flight
+      // reply's late writes, B-4).
+      const changeSet = useChangeSetStore.getState();
+      const written = new Set([...Object.keys(exportedFiles), ...deleted]);
+      const underReview = Object.keys(changeSet.reviewFrames);
+      if (underReview.length > 0 && underReview.every((f) => written.has(f))) {
+        changeSet.clear();
+      } else {
+        for (const f of written) changeSet.removeReviewFrame(f);
+      }
     } catch (err) {
       setStatus('error');
       setMessage(err instanceof Error ? err.message : 'Save failed');

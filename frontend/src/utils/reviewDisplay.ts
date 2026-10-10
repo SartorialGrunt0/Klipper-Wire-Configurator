@@ -128,9 +128,25 @@ export function buildReviewDisplay(
 export function stripGhostsFromDisplay(
   newText: string,
   ghosts: ReadonlyMap<number, string[]>,
+  live?: string,
 ): { live: string; strippedDisplayLines: number[] } {
   if (ghosts.size === 0) return { live: newText, strippedDisplayLines: [] };
   const lines = newText.split('\n');
+  // Row budget for the twin-retirement law below: live's row count and the
+  // rows every ghost claims. Without `live` the law cannot run and the
+  // strip keeps its historical (content-search) behavior.
+  // AMBIGUOUS-DELETE BIAS (round-2 N1): when the edited text has come to
+  // EQUAL the caller's live text byte-for-byte, every ghost row is gone
+  // from the textarea. Deleting a ghost whose content duplicates a live
+  // line produces exactly this state — and is byte-identical to deleting
+  // the live twin instead (undecidable from text alone). The safe reading
+  // is the one that never loses live text: retire every ghost, return the
+  // live text unchanged. If the user actually deleted a live twin, the
+  // deletion visibly bounces back (the row stays, the ledger re-derives
+  // the run) — recoverable annoyance, never silent corruption.
+  if (live !== undefined && newText === live) {
+    return { live, strippedDisplayLines: [] };
+  }
   const strippedDisplayLines: number[] = [];
   const out: string[] = [];
   const anchors = [...ghosts.keys()].sort((a, b) => a - b);
@@ -153,6 +169,17 @@ export function stripGhostsFromDisplay(
     // an above-slot content match meaningful — it means rows above were
     // deleted and the ghost rode up with them.
     const slot = i + (slotLive - out.length);
+    // DECISIVE RETIREMENT (round-2 N1), before every content path, for the
+    // FIRST anchor only: the block is NOT at its slot and the text cannot
+    // hold ANY ghost row of this set — its length is at most the live row
+    // count. The ghost was deleted (or consumed) at its slot, so every
+    // remaining row is LIVE: a content search would strip a live TWIN when
+    // the ghost content duplicates the buffer, destroying live text. The
+    // ambiguous delete resolves safe: the ledger's next diff re-derives the
+    // run, and a removal the user actually made re-raises its mark rather
+    // than silently eating text. Later anchors are untouched: their row
+    // budget cannot prove absence once this call retires, and their slot
+    // search already handles twins (B-1).
     if (matchAt(slot, block)) {
       for (let q = i; q < slot; q += 1) out.push(lines[q]);
       for (let q = 0; q < block.length; q += 1) strippedDisplayLines.push(slot + q + 1);
@@ -209,9 +236,16 @@ export function stripGhostsFromDisplay(
   return { live: out.join('\n'), strippedDisplayLines };
 }
 
-/** Round-trip convenience: strip returning just the live text. */
-export function liveFromDisplay(display: string, ghosts: ReadonlyMap<number, string[]>): string {
-  return stripGhostsFromDisplay(display, ghosts).live;
+/** Round-trip convenience: strip returning just the live text. Pass the
+ *  caller's CURRENT live text to arm the twin-retirement law (N1) — the
+ *  strip alone cannot see it, and without it the ambiguous delete keeps
+ *  its historical content-search behavior. */
+export function liveFromDisplay(
+  display: string,
+  ghosts: ReadonlyMap<number, string[]>,
+  live?: string,
+): string {
+  return stripGhostsFromDisplay(display, ghosts, live).live;
 }
 
 /**
