@@ -199,8 +199,10 @@ export function stripGhostsFromDisplay(
     if (matchAt(i, block)) {
       if (isLiveTwinAt(i, i, block)) {
         // Ambiguous twin at the walk stop — retire: emit rows up to the
-        // slot as LIVE (the match row included) and move on.
-        while (out.length < slotLive) {
+        // slot as LIVE (the match row included) and move on. Bounded at
+        // the text's end: an overrun must never pad LIVE with phantom
+        // blank rows (round-4 review).
+        while (out.length < slotLive && i < lines.length) {
           out.push(lines[i]);
           i += 1;
         }
@@ -233,6 +235,18 @@ export function stripGhostsFromDisplay(
       j += 1;
     }
     if (found >= 0) {
+      // A forward match can ALSO be a live twin: the round-3 note that
+      // this path only answers ride-down was FALSE (round-4 review) — a
+      // ghost deleted at its slot with a second ghost defeating the
+      // newText===live short-circuit lands here, and every row from the
+      // walk to `found` is emitted live, so the block maps to live row
+      // out.length + (found - i). Twin → retire: emit through the match
+      // as LIVE, never strip live's own row.
+      if (isLiveTwinAt(found, i, block)) {
+        for (let q = i; q < found + block.length; q += 1) out.push(lines[q]);
+        i = found + block.length;
+        continue;
+      }
       for (let q = i; q < found; q += 1) out.push(lines[q]);
       for (let q = 0; q < block.length; q += 1) strippedDisplayLines.push(found + q + 1);
       i = found + block.length;

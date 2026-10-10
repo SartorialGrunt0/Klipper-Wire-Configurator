@@ -260,6 +260,33 @@ describe('liveFromDisplay', () => {
     expect(stripGhostsFromDisplay(delLive, built.ghosts, live).live).toBe(live);
   });
 
+  it('forward-search twin: byte-distinguishable ghost delete keeps the LIVE twin (R4 HIGH)', () => {
+    // live 'x y z B' + ghost B (above y) + ghost Z (above EOF) →
+    // display 'x B y z B Z'. Deleting ghost B leaves text that is NOT
+    // equal to live (ghost Z still shows), so the newText===live
+    // short-circuit cannot fire and the forward search runs; it must not
+    // strip the LIVE 'B' it finds further down.
+    const frame = 'x\nB\ny\nz\nB\nZ\n';
+    const live = 'x\ny\nz\nB\n';
+    const built = displayOf(frame, live);
+    expect(built.ghostDisplayLines).toEqual([2, 6]);
+    const rows = built.display.split('\n');
+    const deleted = [...rows.slice(0, 1), ...rows.slice(2)].join('\n');
+    expect(stripGhostsFromDisplay(deleted, built.ghosts, live).live).toBe(live);
+  });
+
+  it('retirement never grows the row count (R4 MEDIUM)', () => {
+    // Multi-delete ending in a twin-retire: the retire loop must stop at
+    // the text's end, not pad LIVE with phantom blank rows.
+    const frame = 'A\nB\nC\nD\nE\nA\nF\n';
+    const live = 'A\nB\nC\nD\nE\nF\n';
+    const built = displayOf(frame, live);
+    const deleted = 'A\nB\nF\n';
+    const strip = stripGhostsFromDisplay(deleted, built.ghosts, live);
+    expect(strip.live.split('\n').length).toBeLessThanOrEqual(deleted.split('\n').length);
+    expect(strip.live).toBe('A\nB\nF\n');
+  });
+
   it('lets the user delete the ghost row without touching live', () => {
     const built = displayOf(FRAME, LIVE);
     // Deleting the ghost line in the textarea removes the whole row INCLUDING
