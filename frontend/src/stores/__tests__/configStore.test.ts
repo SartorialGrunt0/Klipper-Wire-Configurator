@@ -165,6 +165,35 @@ describe('configStore file operations', () => {
     expect(state.textParseErrors['renamed.cfg']).toBe('boom');
   });
 
+  it('renameConfigFile migrates the review frame; a rename never orphans a review (PR #36 B-3)', async () => {
+    const { useChangeSetStore } = await import('@/stores/changeSetStore');
+    const store = useConfigStore.getState();
+    store.setConfigFile('printer.cfg', makeConfigFile());
+    useChangeSetStore.getState().seedFrames({ 'printer.cfg': 'OLD FRAME\n' });
+
+    useConfigStore.getState().renameConfigFile('printer.cfg', 'main.cfg');
+
+    const frames = useChangeSetStore.getState().reviewFrames;
+    expect(frames['printer.cfg']).toBeUndefined();
+    expect(frames['main.cfg']).toBe('OLD FRAME\n');
+    useChangeSetStore.getState().clear();
+  });
+
+  it('removeConfigFile drops the removed file\'s review frame', async () => {
+    const { useChangeSetStore } = await import('@/stores/changeSetStore');
+    const store = useConfigStore.getState();
+    store.setConfigFile('extra.cfg', makeConfigFile());
+    store.setConfigFile('printer.cfg', makeConfigFile());
+    useChangeSetStore.getState().seedFrames({ 'extra.cfg': 'FRAME\n', 'printer.cfg': 'P\n' });
+
+    useConfigStore.getState().removeConfigFile('extra.cfg');
+
+    const frames = useChangeSetStore.getState().reviewFrames;
+    expect(frames['extra.cfg']).toBeUndefined();
+    expect(frames['printer.cfg']).toBe('P\n');
+    useChangeSetStore.getState().clear();
+  });
+
   it('renameConfigFile refuses to overwrite an existing target', () => {
     const store = useConfigStore.getState();
     store.setConfigFile('a.cfg', makeConfigFile());
@@ -593,6 +622,38 @@ describe('approved tool edits land dirty and clear on save', () => {
     useConfigStore.getState().markDirty();
 
     expect(useConfigStore.getState().configFiles['macros.cfg']).toBeUndefined();
+    expect(useConfigStore.getState().isDirty).toBe(true);
+  });
+});
+
+describe('configStore.markCleanIfMatchesDisk (post-hoc undo)', () => {
+  it('clears the flag when every file matches the text on disk', () => {
+    const store = useConfigStore.getState();
+    store.setConfigFile('printer.cfg', { ...makeConfigFile(), raw_text: 'a: 1\n' });
+    useConfigStore.setState({ originalTexts: { 'printer.cfg': 'a: 1\n' }, isDirty: true });
+
+    useConfigStore.getState().markCleanIfMatchesDisk();
+    expect(useConfigStore.getState().isDirty).toBe(false);
+  });
+
+  it('keeps the flag while any file still differs from disk', () => {
+    const store = useConfigStore.getState();
+    store.setConfigFile('printer.cfg', { ...makeConfigFile(), raw_text: 'a: 2\n' });
+    useConfigStore.setState({ originalTexts: { 'printer.cfg': 'a: 1\n' }, isDirty: true });
+
+    useConfigStore.getState().markCleanIfMatchesDisk();
+    expect(useConfigStore.getState().isDirty).toBe(true);
+  });
+
+  it('keeps the flag when a file was deleted from the project', () => {
+    const store = useConfigStore.getState();
+    store.setConfigFile('printer.cfg', { ...makeConfigFile(), raw_text: 'a: 1\n' });
+    useConfigStore.setState({
+      originalTexts: { 'printer.cfg': 'a: 1\n', 'macros.cfg': 'b: 1\n' },
+      isDirty: true,
+    });
+
+    useConfigStore.getState().markCleanIfMatchesDisk();
     expect(useConfigStore.getState().isDirty).toBe(true);
   });
 });

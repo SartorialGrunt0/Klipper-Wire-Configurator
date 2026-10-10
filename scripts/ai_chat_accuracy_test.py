@@ -3171,13 +3171,11 @@ def chat_request(base_url: str, question: TestQuestion, settings: dict,
     if effective_edit is None:
         effective_edit = True
     payload["editTools"] = effective_edit
-    # Phase 2 approval gate: the bank tests model behavior PAST the
-    # gate, so an edit-tools-enabled request auto-approves (bypasses
-    # ONLY the human wait, never re-validation). Without this every
-    # write-tool run would block 90s then auto-decline. Gate-mode E2E is
-    # covered by the pytest suite + the manual Gate-2 dogfood pass.
-    if effective_edit:
-        payload["autoApproveEdits"] = True
+    # No autoApproveEdits: the in-loop approval gate was retired from the
+    # edit path 2026-10-02 (post-hoc review), so a validated write stages
+    # immediately and there is no 90s wait to bypass. The field is never
+    # read by the server (ChatRequest declares it, nothing consumes it);
+    # the harness used to send it purely to stop every run auto-declining.
     # Skill-gate A/B arm: force the skill ACTIVE (write tools advertised
     # immediately, edit law force-loaded) to compare edit QUALITY with vs
     # without model-triggered loading. Server accepts editSkill only as a

@@ -6,6 +6,7 @@ import { useNativeStore } from '../../stores/nativeStore';
 import * as api from '../../services/api';
 import { buildProjectGraph } from '../../utils/graphBuilder';
 import { restoreLayoutAfterRebuild } from '../../utils/layoutPersistence';
+import { discardReview } from '../../services/changeSetReview';
 import type { ConfigFile, ValidationResult } from '../../types/config';
 
 interface RevertDialogProps {
@@ -52,6 +53,11 @@ export default function RevertDialog({ onClose }: RevertDialogProps) {
           return;
         }
 
+        // The buffer is thrown away wholesale, so the review goes with it:
+        // `discardReview` clears the change set and the pane's pending view.
+        // Without it the next keep/undo replays this request's staged edits
+        // onto a file that no longer contains them (live report 2026-10-04).
+        discardReview();
         configStore.clearAll();
         useGraphStore.getState().clearGraph();
 
@@ -89,6 +95,9 @@ export default function RevertDialog({ onClose }: RevertDialogProps) {
           return;
         }
 
+        // Same reason as the native branch above: the buffer is replaced, so
+        // the post-hoc review of the old one is void.
+        discardReview();
         configStore.clearAll();
         useGraphStore.getState().clearGraph();
 

@@ -22,13 +22,16 @@ pattern).
 """
 from __future__ import annotations
 
+import difflib
 import logging
+from functools import lru_cache
 import re
 from copy import deepcopy
 from dataclasses import dataclass, field
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 from parser.config_parser import SAVE_CONFIG_BANNER_RE, parse_config
+from parser.config_schema import get_all_section_types, get_section_def
 from parser.validator import validate_project_configs
 
 from services.ai_draft_validation import (
@@ -150,6 +153,95 @@ def _header_name_part(header: str) -> str:
     family headers ('gcode_macro Level_Bed' -> 'Level_Bed'), else the
     header itself."""
     return header.split(' ', 1)[1] if ' ' in header else header
+
+
+def _section_exists_in_project(files: "dict[str, str]", header: str) -> bool:
+    """True when any project file already contains a section header equal
+    to ``header`` (case-insensitively).
+
+    Used by the add_section type gate: a section the project ALREADY uses
+    (a plugin/custom construct) is never the unknown-type bug, so naming it
+    stays legal. Only a brand-new unrecognized token is refused.
+    """
+    wanted = header.casefold()
+    for text in files.values():
+        for line in _split_lines(text):
+            match = RE_SECTION_HEADER.match(line)
+            if match and match.group(1).strip().casefold() == wanted:
+                return True
+    return False
+
+
+@lru_cache(maxsize=1)
+def _bundled_extras_tokens() -> frozenset[str]:
+    """Type tokens Klipper can load that the curated schema may not list.
+
+    klippy resolves a section's type token to the module FILENAME
+    ``extras/<token>.py``; the bundled reference snapshot (reference/klipper)
+    is exactly the firmware KWC's docs ship against. The curated schema is a
+    hand-maintained subset, so a token with a module file here is loadable
+    even when the schema misses it (sht3x, aht10, print_stats, ...).
+    Package markers (``__init__``) are excluded: klippy never resolves a
+    section type to one, and a section named after it would be nonsense on
+    a printer. Cached per process; a missing snapshot yields the empty set
+    (gate degrades to the schema-only behavior it shipped with).
+    """
+    extras = Path(__file__).resolve().parent.parent.parent \
+        / 'reference' / 'klipper' / 'klippy' / 'extras'
+    try:
+        return frozenset(p.stem for p in extras.glob('*.py')
+                         if not p.stem.startswith('__'))
+    except OSError:
+        return frozenset()
+
+
+def _section_token_is_loadable(token: str) -> bool:
+    """True if the token names a real module file in the bundled reference.
+
+    Strict name check: only a bare lowercase module-name token can match, so
+    a traversal-shaped or odd-character token is refused without touching the
+    filesystem with it.
+    """
+    if not token.isidentifier() or token.lower() != token:
+        return False
+    return token in _bundled_extras_tokens()
+
+
+def _unknown_section_type_error(token: str) -> str:
+    """Model-facing refusal for a NEW section whose TYPE token is not a
+    known Klipper section type (bug 2026-10-07: an op created
+    ``[bed_mesh_calibrate]`` — a gcode COMMAND name used as a header).
+
+    Klipper resolves a section's type token to a module FILENAME
+    (``extras/<token>.py``), so a bare unrecognized token can never load.
+    Offers the closest known types so the model can self-correct. The
+    known-type set is the validator's own (``parser.config_schema``) — not
+    a parallel list.
+    """
+    close = difflib.get_close_matches(token, get_all_section_types(), n=3)
+    # Prefer a known type that is a PREFIX of the bogus token: a gcode
+    # COMMAND built on a real section name ('bed_mesh_calibrate' ->
+    # 'bed_mesh') is the common shape, and difflib's length-shaped ranking
+    # would otherwise lead with the wrong hint ('delta_calibrate').
+    prefix = sorted((t for t in get_all_section_types()
+                     if t != token and token.startswith(t)),
+                    key=len, reverse=True)[:3]
+    if prefix:
+        close = prefix + [c for c in close if c not in prefix]
+    close = close[:3]
+    hint = (f" Closest known section types: {', '.join(close)}."
+            if close else "")
+    suggest = (f" If you meant the [{close[0]}] section, retry with that "
+               f"header." if close else "")
+    return (
+        f"Section type '{token}' is not a known section type and no section "
+        f"named '{token}' exists in the project — Klipper resolves a "
+        f"section's type token to a module file (extras/{token}.py), so "
+        f"this would create a section the config cannot load.{hint}"
+        f"{suggest} If '{token}' is a macro command, write it as a "
+        f"'[gcode_macro {token}]' section instead. A custom/plugin section "
+        f"is only legal here when the project already uses it."
+    )
 
 
 def _resolve_file_ref(requested: str, files: "dict[str, str]") -> str | None:
@@ -809,6 +901,22 @@ class ProjectState:
                 return _state_error(
                     f"Argument text must be the section BODY only (no '[{header}]' header line)."
                 )
+        # New-section TYPE token gate (bug 2026-10-07: an op created
+        # '[bed_mesh_calibrate]' — a gcode COMMAND name used as a section
+        # header). Klipper resolves a section's type token to a module
+        # FILENAME (extras/<token>.py), so a bare unrecognized token can
+        # never load; the validator only WARNS about it (genuine plugin
+        # sections are KWC's documented blind spot), so the add staged a
+        # config that cannot start. Only NEW unrecognized TOKENS are
+        # refused: a known type (any WRONG-CASE spelling is left to the
+        # validator's section_type_case gate) and a section the project
+        # already uses stay legal.
+        token = header.split(' ', 1)[0] if header else header
+        if token and get_section_def(token) is None \
+                and get_section_def(token.lower()) is None \
+                and not _section_token_is_loadable(token) \
+                and not _section_exists_in_project(self.files, header):
+            return _state_error(_unknown_section_type_error(token))
         block = [f'[{header}]']
         if body.strip():
             block.extend(body.strip('\n').split('\n'))

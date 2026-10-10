@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { ConfigFile, ConfigSection, ConfigParam, ValidationResult, SectionSchema } from '../types/config';
 import { useValidationSettingsStore } from './validationSettingsStore';
+import { useChangeSetStore } from './changeSetStore';
 
 /** Master validation switch (Settings menu). Read lazily so toggling takes
  *  effect immediately without store subscriptions; the validationSettings
@@ -92,6 +93,14 @@ interface ConfigState {
   selectedSectionFile: string | null; // config file owning the selected section (duplicate-header safe)
   selectedSectionLine: number | null; // line number of the selected section (duplicate-header safe)
   originalTexts: Record<string, string>; // original exported text at import time
+  /**
+   * file → the text the TEXT EDITOR currently holds, kept fresh on every
+   * keystroke. The post-hoc review's ledger diffs the frame against this, and
+   * `configFiles[file].raw_text` cannot serve: it lags the textarea by the
+   * parse debounce, so a marker would trail the typing. A file with no entry
+   * (never opened in the text view) falls back to raw_text/originalTexts.
+   */
+  liveTexts: Record<string, string>;
   isDirty: boolean; // true when config has unsaved changes
   textParseErrors: Record<string, string>; // per-file parse failures in the text view (last-good model is held)
   /** One-shot "go to this line" request set by another surface (e.g. the
@@ -152,6 +161,8 @@ interface ConfigState {
 
   /* Original text tracking */
   setOriginalText: (filename: string, text: string) => void;
+  /** Publish the text editor's current buffer for a file (ledger input). */
+  setLiveText: (filename: string, text: string) => void;
   removeOriginalTexts: (filenames: string[]) => void;
 
   /* File operations */
@@ -165,6 +176,8 @@ interface ConfigState {
   /* Dirty tracking */
   markDirty: () => void;
   markClean: () => void;
+  /** Clear the dirty flag only when every file matches its on-disk text. */
+  markCleanIfMatchesDisk: () => void;
   setTextParseError: (filename: string, message: string | null) => void;
 
   /* Helpers */
@@ -187,6 +200,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   selectedSectionFile: null,
   selectedSectionLine: null,
   originalTexts: {},
+  liveTexts: {},
   isDirty: false,
   textParseErrors: {},
   pendingLineJump: null,
@@ -253,6 +267,11 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const nextTextParseErrors = { ...s.textParseErrors };
       delete nextTextParseErrors[filename];
 
+      // The ledger's live text dies with the file: a removed file must not
+      // keep feeding `liveTexts` a buffer the editor no longer holds.
+      const nextLiveTexts = { ...s.liveTexts };
+      delete nextLiveTexts[filename];
+
       const remainingFiles = Object.keys(nextConfigFiles);
 
       return {
@@ -261,12 +280,17 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         validation: nextValidation,
         validationText: nextValidationText,
         textParseErrors: nextTextParseErrors,
+        liveTexts: nextLiveTexts,
         activeFile: s.activeFile === filename ? remainingFiles[0] || 'printer.cfg' : s.activeFile,
         selectedSection: s.activeFile === filename || s.selectedSectionFile === filename ? null : s.selectedSection,
         selectedSectionFile: s.selectedSectionFile === filename ? null : s.selectedSectionFile,
         selectedSectionLine: s.selectedSectionFile === filename ? null : s.selectedSectionLine,
       };
     });
+    // A review frame keyed by a deleted file is orphaned evidence: it would
+    // render a phantom review whose Keep/Undo targets a file that is gone
+    // (PR #36 review, B-3).
+    useChangeSetStore.getState().removeReviewFrame(filename);
     // The include-comment pass above mutated OTHER files' section
     // models — their findings (and the include dots in the UI) must
     // re-derive, same debounced pass every other mutation schedules.
@@ -493,6 +517,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       selectedSectionFile: null,
       selectedSectionLine: null,
       originalTexts: {},
+      liveTexts: {},
       isDirty: false,
       textParseErrors: {},
       pendingLineJump: null,
@@ -508,6 +533,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       selectedSectionLine: null,
       textParseErrors: {},
       pendingLineJump: null,
+      liveTexts: {},
       // The whole-project maps must not survive a project switch: a file
       // present in the previous project but absent in this one would leave
       // stale findings that drive getSaveButtonClass (which iterates the
@@ -521,6 +547,11 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       originalTexts: { ...s.originalTexts, [filename]: text },
     })),
 
+  setLiveText: (filename, text) =>
+    set((s) => (s.liveTexts[filename] === text
+      ? s
+      : { liveTexts: { ...s.liveTexts, [filename]: text } })),
+
   removeOriginalTexts: (filenames) =>
     set((s) => {
       if (filenames.length === 0) return s;
@@ -529,7 +560,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       return { originalTexts: next };
     }),
 
-  renameConfigFile: (oldName, newName) =>
+  renameConfigFile: (oldName, newName) => {
     set((s) => {
       if (!s.configFiles[oldName] || oldName === newName) return s;
       if (s.configFiles[newName]) return s; // target already exists
@@ -557,6 +588,11 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         nextValidationText[newName] = nextValidationText[oldName];
         delete nextValidationText[oldName];
       }
+      const nextLiveTexts = { ...s.liveTexts };
+      if (nextLiveTexts[oldName] != null) {
+        nextLiveTexts[newName] = nextLiveTexts[oldName];
+        delete nextLiveTexts[oldName];
+      }
       // Update include directives in other files that reference the old name
       for (const [fn, cf] of Object.entries(next)) {
         if (cf.includes.includes(oldName)) {
@@ -571,11 +607,24 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         validationText: nextValidationText,
         originalTexts: nextOriginals,
         textParseErrors: nextTextParseErrors,
+        liveTexts: nextLiveTexts,
         selectedSection: s.selectedSection,
         selectedSectionFile: s.selectedSectionFile === oldName ? newName : s.selectedSectionFile,
         selectedSectionLine: s.selectedSectionLine,
       };
-    }),
+    });
+    // The review ledger keys its FRAMES by filename: a rename that leaves
+    // the frame behind renders a phantom whole-file-deletion review under
+    // the dead name, and Keep/Undo then writes into a file that no longer
+    // exists (PR #36 review, B-3). The frame travels with the file — OUTSIDE
+    // the reducer above, so no other store's subscribers fire mid-update
+    // (round-2 N4), and only when the rename actually happened (a refused
+    // overwrite rename leaves both maps untouched).
+    const after = get();
+    if (!after.configFiles[oldName] && after.configFiles[newName]) {
+      useChangeSetStore.getState().migrateReviewFrameKey(oldName, newName);
+    }
+  },
 
   copyConfigFile: (sourceName, newName) =>
     set((s) => {
@@ -681,6 +730,28 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     set((s) => (s.isDirty ? s : { isDirty: true })),
 
   markClean: () => set({ isDirty: false }),
+
+  /**
+   * Clear the dirty flag only when nothing actually differs from disk.
+   *
+   * The undo path (post-hoc edit review) needs this: rejecting every change
+   * puts the text back exactly as it was on disk, and leaving the project
+   * flagged "Unsaved changes" would be a lie the Save button then acts on.
+   * Any file still differing — including one the user edited by hand — keeps
+   * the flag, so this can never hide real work.
+   */
+  markCleanIfMatchesDisk: () => set((s) => {
+    const names = new Set([
+      ...Object.keys(s.configFiles),
+      ...Object.keys(s.originalTexts),
+    ]);
+    for (const name of names) {
+      const current = s.configFiles[name]?.raw_text ?? null;
+      const original = s.originalTexts[name] ?? null;
+      if (current !== original) return s;
+    }
+    return s.isDirty ? { isDirty: false } : s;
+  }),
 
   setTextParseError: (filename, message) =>
     set((s) => {

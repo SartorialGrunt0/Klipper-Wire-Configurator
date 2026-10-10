@@ -19,6 +19,7 @@ harness ``editTools=False`` override is the only way to run read-only.
 """
 from __future__ import annotations
 
+import difflib
 import json
 import re
 from collections import OrderedDict
@@ -454,13 +455,240 @@ def write_cap() -> int:
         return EDIT_WRITE_CAP_DEFAULT
 
 
+# ── Change-set display helpers (post-hoc review, 2026-10-02) ───────────
+#
+# The chat transcript shows ONE ROW PER EDIT, collapsed to `file / section`
+# with +N / −N and an advisory badge, unfolding to the op's mini-diff. The
+# rows are computed from the op's own before/after text (server truth), so
+# a row can never claim something the change set does not contain.
+#
+# The unfold payload is a compact UNIFIED DIFF, not the before/after pair:
+# a multi-edit request would otherwise ship the whole file once per edit.
+# The frontend's parsePatch already reads exactly this shape.
+
+CHANGE_SET_DIFF_CONTEXT = 3
+
+
+def _unified_diff_lines(file_name: str, before: str, after: str):
+    return difflib.unified_diff(
+        before.splitlines(), after.splitlines(),
+        fromfile=file_name, tofile=file_name,
+        n=CHANGE_SET_DIFF_CONTEXT, lineterm="")
+
+
+def diff_counts(before: str, after: str) -> tuple[int, int]:
+    """(added, removed) line counts for one op's diff."""
+    added = removed = 0
+    for line in _unified_diff_lines("", before, after):
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+        if line.startswith("+"):
+            added += 1
+        elif line.startswith("-"):
+            removed += 1
+    return added, removed
+
+
+def diff_text(file_name: str, before: str, after: str) -> str:
+    """Compact unified diff for ONE op — what a collapsed row unfolds."""
+    return "\n".join(_unified_diff_lines(file_name, before, after))
+
+
+def resolve_change_chain(chain, context_files: dict | None = None,
+                         update_pushed: bool = True) -> dict:
+    """Replay the KEPT ops of a whole CHAIN of requests, oldest first.
+
+    Post-hoc review's single mutation (plan hard rule 4): undo is
+    ``replay(kept ops, baseline)``, never a text revert — dropping a rejected
+    op therefore cannot leave any of its residue behind, including residue a
+    later op built on.
+
+    The change set is a RUNNING TOTAL (Sir, 2026-10-02): sending a second
+    message must not discard the first message's unreviewed edits, so one
+    decision can cover edits staged by several requests. Each request's ops
+    replay onto the state the previous request left, starting from the OLDEST
+    request's pre-op baseline — which is what makes dropping an op from
+    request 1 also drop request 2's residue that was built on it.
+
+    ``chain`` is ``[(session, kept_ids, request_id), ...]`` in chronological
+    order; ``kept_ids`` of None means "keep everything this request staged".
+
+    Base text per file is that oldest baseline unless the client's current
+    text no longer matches the last text we pushed for it — that means the
+    human edited the file, and their text wins (hard rule 6). Ops whose
+    anchors no longer resolve are reported in ``stale`` rather than forced.
+
+    Returns ``{status, files: {name: {content, deleted}}, stale,
+    clientEdited}``. The caller feeds ``files`` to the same apply path the
+    staged edits use, so keep/undo and stage share one mutation surface.
+    """
+    entries = [(session, kept_ids, request_id)
+               for session, kept_ids, request_id in chain if session is not None]
+    if not entries:
+        return {"status": "not_found"}
+
+    current: dict[str, str] = {}
+    for file_name, meta in (context_files or {}).items():
+        content = (meta or {}).get("content", "")
+        current[str(file_name)] = content if isinstance(content, str) else ""
+
+    touched: list[str] = []
+    owners: dict[str, list] = {}
+    created: set[str] = set()
+    for session, _kept, _rid in entries:
+        for rec in session.edit_records:
+            file_name = rec["file"]
+            if not file_name:
+                continue
+            if file_name not in touched:
+                touched.append(file_name)
+            owners.setdefault(file_name, []).append(session)
+            if rec["op"] == "new_file":
+                created.add(file_name)
+
+    base_files: dict[str, str] = {}
+    client_edited: list[str] = []
+    for file_name in touched:
+        sessions = owners[file_name]
+        first, newest = sessions[0], sessions[-1]
+        if file_name in created and file_name not in first.baseline_files:
+            # Did not exist before the chain started: the new_file op has
+            # to be able to create it, so it is not seeded.
+            continue
+        cur = current.get(file_name)
+        last_pushed = newest.pushed_files.get(file_name)
+        if cur is None:
+            base_files[file_name] = first.baseline_files.get(file_name, "")
+        elif last_pushed is not None and cur == last_pushed:
+            base_files[file_name] = first.baseline_files.get(file_name, cur)
+        else:
+            base_files[file_name] = cur
+            client_edited.append(file_name)
+
+    state = ProjectState(files=_replay_files(entries, current, base_files, created))
+    stale: list[dict] = []
+    kept_ok: set[tuple] = set()
+    for session, kept_ids, request_id in entries:
+        kept_set = None if kept_ids is None else {str(i) for i in kept_ids}
+        for rec in session.edit_records:
+            if kept_set is not None and rec["id"] not in kept_set:
+                continue
+            raw_op = rec.get("_raw_op") or {}
+            if not raw_op:
+                stale.append({"id": rec["id"], "requestId": request_id or "",
+                              "file": rec["file"],
+                              "reason": "no replayable operation recorded"})
+                continue
+            # Fresh delta baseline per op: each op is validated against the
+            # state the previous one actually produced.
+            new_state, result = state.apply(state.validate(), raw_op)
+            if result["status"] == "error":
+                stale.append({
+                    "id": rec["id"],
+                    "requestId": request_id or "",
+                    "file": rec["file"],
+                    "reason": result.get("error")
+                    or "an earlier approved edit no longer applies",
+                })
+                continue
+            state = new_state
+            kept_ok.add((id(session), rec["id"]))
+
+    files: dict[str, dict] = {}
+    for file_name, text in state.files.items():
+        if file_name in touched:
+            files[file_name] = {"content": text, "deleted": False}
+    for file_name in created:
+        kept_creator = any(
+            (id(session), rec["id"]) in kept_ok
+            for session, _kept, _rid in entries
+            for rec in session.edit_records
+            if rec["op"] == "new_file" and rec["file"] == file_name)
+        if not kept_creator:
+            files[file_name] = {"content": "", "deleted": True}
+
+    # Every session in the chain now knows what the client holds for the
+    # files it touched, so the next decision's staleness check is honest.
+    #
+    # NOT for a FRAME pass (`update_pushed=False`): that call is a read-only
+    # "what would the file look like without the undecided ops", and letting
+    # it write back would tell the next decision the client holds a text it
+    # has never seen — silently disabling the hand-edit check (hard rule 6).
+    if update_pushed:
+        for session, _kept, _rid in entries:
+            for file_name in owners_of(session, touched, entries):
+                entry = files.get(file_name)
+                if entry is None:
+                    continue
+                if entry["deleted"]:
+                    session.pushed_files.pop(file_name, None)
+                else:
+                    session.pushed_files[file_name] = entry["content"]
+    return {"status": "ok", "files": files, "stale": stale,
+            "clientEdited": client_edited}
+
+
+def owners_of(session, touched, entries) -> list[str]:
+    """Files this session staged edits to (its own view of the chain)."""
+    owned = {rec["file"] for rec in session.edit_records if rec["file"]}
+    return [name for name in touched if name in owned]
+
+
+def _replay_files(entries, current: dict[str, str], base_files: dict[str, str],
+                  created: set[str]) -> dict[str, str]:
+    """The file set a replay VALIDATES in — the same world the ops were staged in.
+
+    Validation is file-set dependent, and not only in the obvious way: the
+    gcode-command passes re-derive cross-file, a ``rename_existing`` anywhere in
+    the include closure satisfies a shadow collision everywhere, and the
+    project-wide passes only run above one file. Seeding the replay with JUST
+    the files the chain touched therefore judged ops in a smaller world than
+    the one that accepted them, and a legitimate rename came back "failed
+    validation after merging" while its follow-up ops failed on the section the
+    rename never created (live report 2026-10-04: "2 changes could not be
+    re-applied").
+
+    So: every file the chain's sessions knew about, plus everything the client
+    currently holds (its text is the present truth for files this chain does not
+    edit), with each touched file at its REPLAY BASE so dropping an op still
+    reverts it. Files a request created are left out when the chain's oldest
+    baseline did not have them — the ``new_file`` op has to be able to create
+    them.
+    """
+    files: dict[str, str] = {}
+    for session, _kept, _rid in entries:
+        for name, text in session.baseline_files.items():
+            files.setdefault(name, text)
+    files.update(current)
+    files.update(base_files)
+    first_baseline = entries[0][0].baseline_files
+    for name in created:
+        if name not in first_baseline:
+            files.pop(name, None)
+    return files
+
+
 class EditSession:
     """Request-scoped edit session: live state + baseline + staged edits."""
 
     def __init__(self, context_files: dict[str, dict]) -> None:
         self.state = ProjectState.from_context_files(context_files)
         self.baseline = self.state.validate()
+        # Pre-request text per file. This is the hinge of post-hoc review
+        # (2026-10-02): undo == replay(kept ops, baseline), so the baseline
+        # has to be captured BEFORE the first op lands. Nothing else keeps
+        # it (the validation baseline above is findings, not text).
+        self.baseline_files: dict[str, str] = dict(self.state.files)
         self.pending_edits: list[dict] = []
+        # Chronological record of every op committed this request — the
+        # chat transcript rows. A superseded record stays (the transcript
+        # is honest history) but is excluded from the summary totals.
+        self.edit_records: list[dict] = []
+        # Last net text handed to the client per file (live staging). A
+        # frontend text that no longer matches this was edited by the
+        # human mid-loop, and an undo must replay onto THEIR text rather
+        # than clobber it (hard rule 6).
+        self.pushed_files: dict[str, str] = {}
         # Ops approved+committed during THIS request (in order), replayed
         # over a refreshed context on later approve re-validations.
         self.committed_ops: list[dict] = []
@@ -496,6 +724,11 @@ class EditSession:
         # _identical_failures: the kick is not a call failure, and the
         # repetition BLOCK must never veto the plugin resend.
         self._registry_kicks: dict[str, int] = {}
+        # Steer epoch (2026-10-02): incremented on every user steer that
+        # lands mid-loop. committed_ops entries are stamped with the epoch
+        # they were committed in, and the duplicate-target ledger only
+        # sees the current one — a steer is permission to re-edit.
+        self._steer_epoch = 0
         self._last_file: str | None = None
 
     def has_files(self) -> bool:
@@ -581,14 +814,43 @@ class EditSession:
         the user had already decided. Each bogus card taxes the human 90s
         (auto-decline window). A repeat on an identical target within one
         request is mechanically detectable; block it with an honest
-        kickback instead of opening another card."""
+        kickback instead of opening another card.
+
+        STEERING (2026-10-02): entries committed before the latest user
+        steer are out of scope. "Set microsteps 32" -> the user steers to
+        64 is a NEW instruction about the same target, so the guard must
+        not read the model's second attempt as flip-flopping. Nothing else
+        clears the ledger, so the oscillation family stays closed between
+        steers.
+        """
         target = self._resolved_op_target(op)
         if target is None:
             return None
         for entry in reversed(self.committed_ops):
+            if entry.get("epoch", 0) != self._steer_epoch:
+                continue
             if self._resolved_op_target(entry.get("raw_op") or {}) == target:
                 return entry
         return None
+
+    def apply_steer(self) -> None:
+        """A user steer arrived mid-loop: clear the deterministic ledgers.
+
+        Not intent-parsing — that a user message arrived is mechanical. It
+        means the previous instruction round is over, so: the duplicate-
+        target ledger reopens (the model may legitimately re-edit a target
+        the user just changed), the identical-failure ledger clears (the
+        same call may now be exactly what the user wants), and the write
+        budget resets — otherwise steering is useless precisely when it is
+        needed, after the model burned its writes driving the wrong way
+        (Sir, 2026-10-02). Bounded by the human doing the steering; the
+        tool-turn budget is reset by the loop itself.
+        """
+        self._steer_epoch += 1
+        self._identical_failures.clear()
+        self._registry_kicks.clear()
+        self.edit_attempts = 0
+        self._last_file = None
 
     @staticmethod
     def _call_key(name: str, args: dict) -> str:
@@ -907,7 +1169,13 @@ class EditSession:
         self.committed_ops.append(
             {"name": name, "op": result.get("op", name),
              "raw_op": dict(raw_op) if raw_op else {},
-             "result": result})
+             "result": result,
+             "epoch": self._steer_epoch})
+        # Post-hoc review (2026-10-02): one transcript record per op, and
+        # the net text we just handed the client for this file.
+        self._record_edit(name, result, raw_op)
+        if file_name:
+            self.pushed_files[file_name] = self.state.files.get(file_name, "")
 
     def revalidate_and_commit(
         self, op: dict, context_files: dict | None,
@@ -1004,6 +1272,156 @@ class EditSession:
             {k: e.get(k) for k in ("file", "op", "summary", "newText", "advisories")}
             for e in self.pending_edits
         ]
+
+    # ── Change set: transcript records + post-hoc resolution ───────────
+
+    @staticmethod
+    def _supersede_key(op: dict) -> tuple | None:
+        """Target identity for last-write-per-target collapsing.
+
+        Mirrors :meth:`_op_target` (set_param is keyed; a body op is
+        section-scoped) and NONE means "this op never supersedes".
+        ``patch_section`` is deliberately in that None group: two legit
+        hunks in one macro body are two changes, not a rewrite of one.
+        """
+        kind = str(op.get("op", ""))
+        file_name = str(op.get("file", "")).casefold()
+        section = str(op.get("section", "")).strip().strip("[]").casefold()
+        if kind == "set_param":
+            return ("set_param", file_name, section,
+                    str(op.get("key", "")).casefold())
+        if kind in ("replace_section", "add_section", "delete_section",
+                    "comment_section", "uncomment_section"):
+            return (kind, file_name, section)
+        if kind in ("rename_section", "add_include", "remove_include",
+                    "comment_include"):
+            return (kind, file_name, section,
+                    str(op.get("target_file", "")).casefold())
+        if kind in ("new_file", "delete_file"):
+            return (kind, file_name)
+        return None
+
+    def _record_edit(self, name: str, result: dict,
+                     raw_op: dict | None) -> None:
+        """Append one transcript record for a committed op, and mark any
+        earlier edit to the SAME target superseded.
+
+        The record is what the chat renders (file/section, counts, the
+        op's own unified diff) and what :meth:`resolve_change_set`
+        replays, so it keeps the raw op under an underscore key that
+        :meth:`change_set_payload` strips before anything ships.
+        """
+        op = dict(raw_op or {})
+        try:
+            resolved = self.state._resolve_op_section(dict(op))
+        except Exception:  # pragma: no cover - defensive, resolve is pure
+            resolved = op
+        file_name = result.get("file", "")
+        section = str(resolved.get("section", "") or "").strip().strip("[]")
+        key = (str(resolved.get("key", "") or "")
+               if resolved.get("op") == "set_param" else "")
+        diff = result.get("diff") or {}
+        before = str(diff.get("before", ""))
+        after = str(diff.get("after", ""))
+        added, removed = diff_counts(before, after)
+        record = {
+            "id": f"e{len(self.edit_records)}",
+            "file": file_name,
+            "section": section,
+            "key": key,
+            "op": result.get("op", name),
+            "summary": result.get("summary", ""),
+            "added": added,
+            "removed": removed,
+            "diffText": diff_text(file_name, before, after),
+            "advisories": list(result.get("advisories") or []),
+            "superseded": False,
+            "supersededBy": "",
+            "_key": self._supersede_key(resolved),
+            "_raw_op": op,
+        }
+        if record["_key"] is not None:
+            for prior in self.edit_records:
+                if prior["superseded"]:
+                    continue
+                if prior.get("_key") == record["_key"]:
+                    prior["superseded"] = True
+                    prior["supersededBy"] = record["id"]
+        self.edit_records.append(record)
+
+    _RECORD_KEYS = ("id", "file", "section", "key", "op", "summary",
+                    "added", "removed", "diffText", "advisories",
+                    "superseded", "supersededBy")
+
+    def change_set_payload(self) -> dict:
+        """The review payload: every edit in the order the model made it,
+        plus the summary grouped by file and section.
+
+        Flat chronological ``edits`` are the transcript (history — order
+        carries meaning). ``files`` is the decision surface, so it is
+        grouped and carries the NET totals of the surviving (non-
+        superseded) set; a superseded row is still listed in ``edits``
+        with ``superseded: true`` and contributes nothing to a total.
+        Line numbers are deliberately absent: a change's identity is its
+        file and section, never its line range.
+
+        Each file ALSO carries ``beforeText`` — the file as it stood before
+        this request's first edit to it. That is the FRAME the text view's
+        pane diffs against (Sir, 2026-10-03: the pane shows the WHOLE
+        document with the changed lines marked, not the neighbourhood of
+        each hunk). It is the one text the client cannot derive: the
+        current text it already holds (it is the buffer), the pre-review
+        text only ever existed here. Shipped once per FILE per request —
+        never once per edit, which is what the per-row ``diffText`` exists
+        to avoid.
+        """
+        edits = [{k: r.get(k) for k in self._RECORD_KEYS}
+                 for r in self.edit_records]
+        groups: "OrderedDict[tuple, dict]" = OrderedDict()
+        for rec in self.edit_records:
+            if rec["superseded"]:
+                continue
+            group = groups.get((rec["file"], rec["section"]))
+            if group is None:
+                group = {"file": rec["file"], "section": rec["section"],
+                         "added": 0, "removed": 0, "edits": [],
+                         "advisories": {"error": 0, "warning": 0, "other": 0}}
+                groups[(rec["file"], rec["section"])] = group
+            group["added"] += rec["added"]
+            group["removed"] += rec["removed"]
+            group["edits"].append(rec["id"])
+            for adv in rec["advisories"]:
+                sev = str(adv.get("severity", "")).lower()
+                if sev == "error":
+                    group["advisories"]["error"] += 1
+                elif sev == "warning":
+                    group["advisories"]["warning"] += 1
+                else:
+                    group["advisories"]["other"] += 1
+        files: "OrderedDict[str, dict]" = OrderedDict()
+        for group in groups.values():
+            entry = files.get(group["file"])
+            if entry is None:
+                entry = {"file": group["file"], "added": 0, "removed": 0,
+                         "sections": [],
+                         "beforeText": self.baseline_files.get(group["file"], "")}
+                files[group["file"]] = entry
+            entry["added"] += group["added"]
+            entry["removed"] += group["removed"]
+            entry["sections"].append(group)
+        return {
+            "edits": edits,
+            "files": list(files.values()),
+            "totalAdded": sum(f["added"] for f in files.values()),
+            "totalRemoved": sum(f["removed"] for f in files.values()),
+            "createdFiles": [r["file"] for r in self.edit_records
+                             if r["op"] == "new_file" and not r["superseded"]],
+        }
+
+    def resolve_change_set(self, kept_ids, context_files: dict | None = None,
+                           ) -> dict:
+        """Replay ONE request's KEPT ops (see :func:`resolve_change_chain`)."""
+        return resolve_change_chain([(self, kept_ids, None)], context_files)
 
     def has_inert_draft(self, blocks: list[str]) -> bool:
         """True when a ```cfg block contains config substance that is NOT

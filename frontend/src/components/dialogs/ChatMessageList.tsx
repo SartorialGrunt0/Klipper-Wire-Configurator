@@ -125,6 +125,17 @@ export interface ChatMessageListProps {
   onReviewPrinterMemory: (content: string) => void;
   /** Replace the user message at `index` with `newText` and regenerate. */
   onEditMessage?: (index: number, newText: string) => void;
+  /**
+   * Post-hoc edit review rows for ONE assistant message (the edits its own
+   * request staged), rendered immediately BEFORE the reply.
+   *
+   * The model makes its edits before it writes the reply, so the rows belong
+   * there in the transcript — below the reply they would read as an
+   * afterthought to an answer that has already accounted for them.
+   */
+  editRowsFor?: (message: ChatMessage) => React.ReactNode;
+  /** The same, for the reply that is still streaming. */
+  streamingEditRows?: React.ReactNode;
   messagesEndRef: React.RefObject<HTMLDivElement | null>;
 }
 
@@ -231,6 +242,8 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
   activeFile,
   onReviewPrinterMemory,
   onEditMessage,
+  editRowsFor,
+  streamingEditRows,
   messagesEndRef,
 }) => {
   const [toolDetailsMessageIndex, setToolDetailsMessageIndex] = useState<number | null>(null);
@@ -263,7 +276,10 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
         const hasPrinterMemBlock = msg.role === 'assistant' && hasPrinterMemoryBlock(msg.content);
 
         return (
-          <div key={i} className={`mb-2 ${msg.role === 'user' ? 'text-right' : 'text-left'}`}>
+          <React.Fragment key={i}>
+          {/* This reply's edits, before the reply itself. */}
+          {msg.role === 'assistant' && editRowsFor ? editRowsFor(msg) : null}
+          <div className={`mb-2 ${msg.role === 'user' ? 'text-right' : 'text-left'}`}>
             <div
               className={`inline-block max-w-[80%] px-3 py-2 rounded-lg text-xs leading-6 ${
                 msg.role === 'user'
@@ -272,6 +288,11 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
               }`}
               style={{ wordBreak: 'break-word' }}
             >
+              {msg.steer && (
+                <div className="mb-1 text-[9px] uppercase tracking-[0.14em] text-white/70">
+                  steered the running reply
+                </div>
+              )}
               {editMessageIndex === i ? (
                 <div>
                   <textarea
@@ -476,8 +497,12 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
               )}
             </div>
           </div>
+          </React.Fragment>
         );
       })}
+
+      {/* The reply still in flight: its edits, before the pending bubble. */}
+      {loading ? streamingEditRows : null}
 
       {/* Loading indicator + mid-loop progress strip (Phase 6.5.4).
           The strip is visually subordinate (smaller, secondary text):

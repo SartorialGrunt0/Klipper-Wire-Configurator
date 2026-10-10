@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import * as api from '../../services/api';
 import { extractHeadings, slugifyHeading } from '../../utils/referenceDoc';
+import { buildReferenceIndex, searchReference, hitHeadings } from '../../utils/referenceSearch';
 
 const LIVE_REFERENCE_URL = 'https://raw.githubusercontent.com/Klipper3d/klipper/master/docs/Config_Reference.md';
 const LOCAL_REFERENCE_URL = '/reference/docs/Config_Reference.md';
@@ -52,6 +53,8 @@ export default function ConfigReferenceDialog({ onClose }: ConfigReferenceDialog
   const [content, setContent] = useState('');
   const [source, setSource] = useState<ReferenceSource | null>(null);
   const [error, setError] = useState('');
+  const [query, setQuery] = useState('');
+  const [debouncedQuery, setDebouncedQuery] = useState('');
 
   // Load order: live Klipper repo → backend mirror → bundled asset
   useEffect(() => {
@@ -107,6 +110,26 @@ export default function ConfigReferenceDialog({ onClose }: ConfigReferenceDialog
   const headings = useMemo(() => (content ? extractHeadings(content) : []), [content]);
   const tocHeadings = headings.filter((h) => h.level >= 2);
 
+  // One pass over the document; searches are then O(lines).
+  const referenceIndex = useMemo(
+    () => (content ? buildReferenceIndex(content, headings) : []),
+    [content, headings],
+  );
+
+  // Debounce the query: Config_Reference.md is ~10k lines and every keystroke
+  // would otherwise rescan it while the user is still typing.
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedQuery(query), 150);
+    return () => window.clearTimeout(timer);
+  }, [query]);
+
+  const hits = useMemo(
+    () => (debouncedQuery.trim() ? searchReference(referenceIndex, debouncedQuery) : []),
+    [referenceIndex, debouncedQuery],
+  );
+  const searchHeadings = useMemo(() => hitHeadings(hits), [hits]);
+  const searching = query.trim().length > 0;
+
   const scrollToHeading = (id: string) => {
     document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
@@ -132,12 +155,42 @@ export default function ConfigReferenceDialog({ onClose }: ConfigReferenceDialog
               </span>
             )}
           </div>
-          <button
-            onClick={onClose}
-            className="shrink-0 rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-xs text-[var(--color-text-primary)]"
-          >
-            Close
-          </button>
+          <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
+            <div className="relative min-w-0 flex-1 max-w-sm">
+              <input
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') {
+                    if (query) setQuery('');
+                    else onClose();
+                  }
+                  if (e.key === 'Enter' && hits[0]?.headingId) {
+                    scrollToHeading(hits[0].headingId);
+                  }
+                }}
+                placeholder="Search the reference…"
+                aria-label="Search the configuration reference"
+                className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-2 py-1 text-xs text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none"
+              />
+              {query && (
+                <button
+                  onClick={() => setQuery('')}
+                  title="Clear search"
+                  className="absolute right-1 top-1/2 -translate-y-1/2 px-1 text-[10px] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+            <button
+              onClick={onClose}
+              className="shrink-0 rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-xs text-[var(--color-text-primary)]"
+            >
+              Close
+            </button>
+          </div>
         </div>
 
         {error && (
@@ -154,7 +207,45 @@ export default function ConfigReferenceDialog({ onClose }: ConfigReferenceDialog
 
         {content && (
           <div className="flex min-h-0 flex-1">
-            {tocHeadings.length > 0 && (
+            {searching ? (
+              <nav
+                className="w-80 shrink-0 overflow-y-auto border-r border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] p-2"
+                aria-label="Reference search results"
+              >
+                <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-secondary)]">
+                  {hits.length}
+                  {hits.length === 100 ? '+' : ''} match{hits.length === 1 ? '' : 'es'}
+                  {searchHeadings.length > 0
+                    ? ` · ${searchHeadings.length} section${searchHeadings.length === 1 ? '' : 's'}`
+                    : ''}
+                </div>
+                {hits.map((hit) => (
+                  <button
+                    key={`${hit.line}-${hit.matchStart}`}
+                    onClick={() => hit.headingId && scrollToHeading(hit.headingId)}
+                    title={hit.heading ? `Jump to ${hit.heading}` : undefined}
+                    className="block w-full rounded px-2 py-1 text-left transition-colors hover:bg-[var(--color-bg-tertiary)]"
+                  >
+                    <div className="flex items-baseline gap-1.5">
+                      <span className="min-w-0 flex-1 truncate text-[10px] font-semibold text-[var(--color-accent)]">
+                        {hit.heading || 'Introduction'}
+                      </span>
+                      <span className="shrink-0 text-[10px] text-[var(--color-text-secondary)]">L{hit.line}</span>
+                    </div>
+                    <div className="truncate font-mono text-[10px] text-[var(--color-text-secondary)]">
+                      {hit.text.slice(Math.max(0, hit.matchStart - 24), hit.matchStart)}
+                      <mark className="rounded-sm bg-[var(--color-accent)] not-italic text-[var(--color-bg-primary)]">
+                        {hit.text.slice(hit.matchStart, hit.matchEnd)}
+                      </mark>
+                      {hit.text.slice(hit.matchEnd, hit.matchEnd + 40)}
+                    </div>
+                  </button>
+                ))}
+                {hits.length === 0 && (
+                  <p className="px-2 py-2 text-[10px] text-[var(--color-text-secondary)]">No matches found.</p>
+                )}
+              </nav>
+            ) : tocHeadings.length > 0 && (
               <nav
                 className="w-60 shrink-0 overflow-y-auto border-r border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] p-2"
                 aria-label="Table of contents"

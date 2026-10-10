@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import time
+from collections import OrderedDict
 from enum import Enum
 from pathlib import Path
 import re
@@ -36,6 +37,7 @@ from services.ai_edit_tools import (
     format_approval_result,
     get_approval,
     remove_approval,
+    resolve_change_chain,
     was_decided,
 )
 
@@ -344,11 +346,24 @@ class ChatRequest(BaseModel):
     # tools.
     editSkill: bool | None = None
     # Approval-gate override (harness A/B runs ONLY; the frontend never
-    # sends it). Production default is human-only approval: with the edit
-    # tools on, every validated write suspends for a card. The accuracy
-    # bank must see model behavior PAST the gate, so it sets this True —
-    # which bypasses ONLY the Future await, never re-validation (invalid
-    # ops still kick back identically).
+    # sends it). INERT since the post-hoc review change (2026-10-02):
+    # nothing in the edit path suspends, so there is no wait to skip and
+    # nothing reads this field today — this declaration is its only
+    # occurrence in the backend.
+    #
+    # KEPT ON PURPOSE as the bypass hook for the DORMANT gate. When the
+    # first IRREVERSIBLE tool lands (a disk write, a firmware restart, a
+    # command sent to the printer) the gate gets a caller back, and a
+    # bank question covering that tool needs this flag to run past the
+    # card. See the REVIVAL note on _run_approval_gate for the wiring.
+    #
+    # It never guarded against a 422 — pydantic ignores unknown request
+    # fields (ChatRequest sets no extra="forbid"), so a stale sender
+    # cannot fail here either way. The hook is the only reason to keep it.
+    #
+    # Do NOT point this at an IRREVERSIBLE tool without deciding that
+    # deliberately: a blanket harness auto-approve on the irreversible
+    # class is exactly what the gate exists to prevent.
     autoApproveEdits: bool = False
     # Merge every system message into a single leading system message.
     # Default off: most OpenAI-compatible servers accept multiple system
@@ -361,6 +376,15 @@ class ChatRequest(BaseModel):
     # accepts. Set False explicitly only for A/B testing the trailing
     # task-anchor position.
     mergeSystemMessages: bool = True
+    # Explicitly attached context from the docked text-view panel: highlighted
+    # line ranges and pinned tree rows, each with the findings in its scope as
+    # the FRONTEND resolved them (severity visibility is frontend state, so the
+    # server cannot re-derive which tiers the user wants to see).
+    #
+    # Rendered server-side into one extra system message. Empty (the default)
+    # adds nothing at all, so an ordinary turn's prompt is byte-identical to
+    # what it was before this feature existed.
+    context_references: list[dict] = []
     # Prose-draft machinery (the fullRewriteGuard request field, server-side
     # draft validation/audit, and the KWC_SERVER_DRAFT_VALIDATION /
     # KWC_POST_APPLY_AUDIT env switches) was removed with the Phase-4 ratchet
@@ -430,6 +454,28 @@ async def chat_approval_decide(req: ApprovalDecisionRequest):
 
 class ChatStopRequest(BaseModel):
     requestId: str
+
+
+class ChatSteerRequest(BaseModel):
+    requestId: str
+    message: str
+
+
+# Mid-loop steering (2026-10-02): user speech injected at the next tool-turn
+# boundary of an IN-FLIGHT request. The channel is the same request id the
+# progress poll uses, symmetrically (GET /ai/chat/progress -> pollChatProgress,
+# POST /ai/chat/steer -> the steer). Queued, not applied inline: the loop is
+# already turn-by-turn, so the boundary is free and no generation is ever
+# cancelled mid-provider-call.
+_chat_steers: dict[str, list[str]] = {}
+STEER_MAX_CHARS = 2000
+
+
+def _drain_steers(request_id: str | None) -> list[str]:
+    """Take every steer queued for this request (in arrival order)."""
+    if not request_id:
+        return []
+    return _chat_steers.pop(request_id, []) or []
 
 
 class ChatStoppedError(Exception):
@@ -536,6 +582,33 @@ async def chat_stop(req: ChatStopRequest):
     return {"stopped": True}
 
 
+@router.post("/ai/chat/steer")
+async def chat_steer(req: ChatSteerRequest):
+    """Queue a mid-request steer: a real user message for the next turn.
+
+    Not a tool result and not a system nudge — this codebase has a
+    documented pathology where machine text sent in the user role gets
+    addressed back as if the user had said it, and a steer is the one
+    thing here that genuinely IS user speech.
+
+    ``{accepted: false}`` when the request is not in flight (already
+    finished, stopped, or unknown): the caller's UI should treat the
+    message as a fresh turn instead.
+    """
+    text = (req.message or "").strip()
+    if not req.requestId or not text:
+        return {"accepted": False, "reason": "empty steer"}
+    if req.requestId not in _chat_stop_events:
+        return {"accepted": False, "reason": "no in-flight request"}
+    queue = _chat_steers.setdefault(req.requestId, [])
+    queue.append(text[:STEER_MAX_CHARS])
+    logger.info(
+        "Steer queued | requestId=%s chars=%d queue=%d",
+        req.requestId, len(text), len(queue),
+    )
+    return {"accepted": True, "queued": len(queue)}
+
+
 @router.get("/ai/chat/progress")
 async def chat_progress_poll(requestId: str = ""):
     """Poll mid-loop progress for an in-flight /ai/chat request (Phase 6.5.3).
@@ -545,19 +618,186 @@ async def chat_progress_poll(requestId: str = ""):
     latest extracted-but-not-yet-executed tool batch plus the turn's
     narration, so the UI can show a subordinate progress strip during long
     tool chains. Display-only: nothing here ever feeds the final answer.
+
+    Also carries the request's staged edits (post-hoc review, 2026-10-02):
+    the change set is applied to the working overlay as it accumulates, so
+    the transcript rows and the editor are a live view of the same set —
+    not a summary reconstructed after the fact.
     """
     if not requestId:
         return {"pending": False}
     entry = _chat_progress.get(requestId)
     if entry is None:
         return {"pending": False}
-    return {
+    payload = {
         "pending": True,
         "turn": entry["turn"],
         "toolNames": list(entry["toolNames"]),
         "narration": entry["narration"],
         "elapsedMs": int((time.monotonic() - entry["startedAt"]) * 1000),
     }
+    staged = entry.get("stagedEdits")
+    if staged:
+        payload["stagedEdits"] = staged
+        payload["changeSet"] = entry.get("changeSet")
+    return payload
+
+
+# ── Change-set registry (post-hoc edit review, 2026-10-02) ──
+# A request's change set outlives the request: the user reviews it after
+# the reply lands, and every keep/undo is a REPLAY of the kept ops onto
+# the pre-request baseline (never a text revert), which needs the ops and
+# the baseline the session holds. Bounded LRU — a session is a handful of
+# file texts plus the op records, and only the most recent conversations
+# can still be on screen. Registered only when the request actually
+# staged something, so a pure Q&A turn keeps nothing alive.
+#
+# The bound is generous because the change set is a RUNNING TOTAL: a
+# decision can span edits staged across many messages, so every request
+# still carrying unreviewed edits has to stay resolvable.
+_edit_sessions: "OrderedDict[str, EditSession]" = OrderedDict()
+_EDIT_SESSIONS_MAX = 32
+
+
+def register_edit_session(request_id: str | None, session) -> None:
+    """Make a request's session (and so its change set) reachable by id.
+
+    Called when the request STARTS, not when it ends: the user reviews and
+    undoes while the model is still working — a group of staged edits can be
+    thrown away long before the reply lands — so a session that only became
+    resolvable at the end made every mid-loop decision answer 'not_found'
+    (live UI find, 2026-10-02). The session object is shared by reference,
+    so the registry always sees the live, growing change set.
+    """
+    if not request_id or session is None:
+        return
+    _edit_sessions[request_id] = session
+    _edit_sessions.move_to_end(request_id)
+    while len(_edit_sessions) > _EDIT_SESSIONS_MAX:
+        _edit_sessions.popitem(last=False)
+
+
+def get_edit_session(request_id: str | None):
+    if not request_id:
+        return None
+    session = _edit_sessions.get(request_id)
+    if session is not None:
+        _edit_sessions.move_to_end(request_id)
+    return session
+
+
+def _publish_staged_edits(request_id: str | None, session) -> None:
+    """Publish the accumulating change set to the progress poller.
+
+    Called after every staging write (canonical loop state: the op is
+    already in the working state, so this is a read of the session, never
+    a prediction). ``stagedEdits`` mirrors the final response's
+    ``pendingEdits`` shape — per-file NET text — so the client applies
+    snapshots idempotently as they arrive instead of replaying deltas.
+    """
+    if not request_id or session is None:
+        return
+    entry = _chat_progress.get(request_id)
+    if entry is None:
+        return
+    entry["stagedEdits"] = session.pending_edits_payload()
+    entry["changeSet"] = session.change_set_payload()
+
+
+class ChangeSetSegment(BaseModel):
+    """One request's share of a change set, in the order it was made."""
+    requestId: str
+    # The edit ids this request KEPT. Everything else it staged is dropped.
+    keptEditIds: list[str] = []
+    # The ids the user has DECIDED to keep (undecided ones excluded): the
+    # frame the text view's pane diffs against, so its marks follow the
+    # decisions. Empty means "nothing decided" — the pane falls back to the
+    # file's pre-review text.
+    frameKeptEditIds: list[str] = []
+
+
+class ChangeSetResolveRequest(BaseModel):
+    # Single-request form (kept for the harness + older clients).
+    requestId: str = ""
+    keptEditIds: list[str] = []
+    # Multi-request form: the change set is a RUNNING TOTAL, so a decision can
+    # cover edits staged by several requests. Chronological order matters —
+    # each request's ops replay onto the state the previous one left.
+    segments: list[ChangeSetSegment] = []
+    # The frontend's current working text ({file: {content, label}}). Used
+    # only to detect a file the human edited (hard rule 6): their text wins
+    # and stale anchors are reported instead of clobbered.
+    contextFiles: dict[str, dict[str, str]] = {}
+
+
+@router.get("/ai/chat/changes")
+async def chat_changes(requestId: str = ""):
+    """The change set of a recent request (rows + grouped summary)."""
+    session = get_edit_session(requestId)
+    if session is None:
+        return {"found": False}
+    return {"found": True, **session.change_set_payload()}
+
+
+@router.post("/ai/chat/changes/resolve")
+async def chat_changes_resolve(req: ChangeSetResolveRequest):
+    """Keep/undo a change set (or a chain of them): replay the kept ops.
+
+    Undo is ``replay(kept ops, baseline)`` — never a text revert — so a
+    rejected op cannot leave residue behind, including residue a later op
+    depended on. Ops whose anchors no longer apply come back in ``stale``
+    with an honest reason; nothing is forced through.
+
+    A segment whose session is gone (server restart, LRU eviction) fails the
+    whole call rather than replaying a partial chain: the text that would come
+    back silently drops the missing request's edits.
+    """
+    specs = list(req.segments)
+    if not specs and req.requestId:
+        specs = [ChangeSetSegment(requestId=req.requestId,
+                                  keptEditIds=req.keptEditIds)]
+    if not specs:
+        return {"status": "not_found"}
+
+    chain = []
+    missing: list[str] = []
+    for spec in specs:
+        session = get_edit_session(spec.requestId)
+        if session is None:
+            missing.append(spec.requestId)
+            continue
+        chain.append((session, spec.keptEditIds, spec.requestId))
+    if missing:
+        logger.warning(
+            "Change set resolve | missing sessions requestIds=%s", missing)
+        return {"status": "not_found", "missing": missing}
+
+    outcome = resolve_change_chain(chain, req.contextFiles or None)
+    logger.info(
+        "Change set resolved | segments=%d files=%d stale=%d",
+        len(chain), len(outcome.get("files", {})),
+        len(outcome.get("stale", [])),
+    )
+
+    # The pane's FRAME (Sir, 2026-10-03): the same chain replayed with only
+    # the ops the user has DECIDED to keep, so the text view can diff "the
+    # document as far as the decisions go" against the document now and mark
+    # exactly what is still awaiting a decision. With nothing decided the
+    # frame IS the baseline, which the change-set payload already carries, so
+    # this pass is skipped — no work, no field, and the client falls back to
+    # the pre-review text it was given.
+    if any(spec.frameKeptEditIds for spec in specs):
+        frame_chain = [
+            (session, spec.frameKeptEditIds, spec.requestId)
+            for spec, (session, _kept, _rid) in zip(specs, chain)
+        ]
+        frame = resolve_change_chain(frame_chain, None, update_pushed=False)
+        outcome["frames"] = {
+            file_name: entry.get("content", "")
+            for file_name, entry in (frame.get("files") or {}).items()
+            if not entry.get("deleted")
+        }
+    return outcome
 
 
 def _is_local_provider(provider: str, api_url: str = "") -> bool:
@@ -584,11 +824,97 @@ def _get_openai_compatible_default_url(provider: str) -> str:
     return defaults.get(provider, "")
 
 
+CONTEXT_REFERENCE_FINDING_CAP = 20
+
+
+def _reference_basename(path: str) -> str:
+    return path.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def _reference_label(ref: dict) -> str:
+    """One-line heading for a reference — mirrors the panel's chip label."""
+    name = _reference_basename(str(ref.get("file") or ""))
+    kind = str(ref.get("kind") or "")
+    if kind == "lines":
+        start = ref.get("startLine")
+        end = ref.get("endLine")
+        if start == end:
+            return f"{name}:{start}"
+        return f"{name}:{start}-{end}"
+    if kind == "section":
+        return f"{name}:[{ref.get('section') or ''}]"
+    if kind == "param":
+        return f"{name}:[{ref.get('section') or ''}] {ref.get('param') or ''}".rstrip()
+    if kind == "finding":
+        return f"{ref.get('severity') or 'info'} · line {ref.get('line') or '?'}"
+    return name
+
+
+def render_context_references(references: list | None) -> str | None:
+    """Render user-attached context as ONE trailing system message.
+
+    Returns None when nothing usable is attached, so an ordinary turn's prompt
+    is byte-identical to what it was before this feature existed.
+
+    Rendered HERE rather than on the client on purpose: the block is prompt
+    content, and this is where every other prompt element is built. Keeping a
+    second formatter in TypeScript would mean two sources of truth for one
+    format, drifting the moment either side is reworded. The client sends
+    structured references — findings included, already filtered through the
+    user's severity-visibility settings, which is frontend state the server
+    cannot see.
+    """
+    if not references:
+        return None
+
+    parts = [
+        "CONTEXT THE USER ATTACHED TO THIS MESSAGE",
+        "These are the exact regions of the user's project they pointed at. "
+        "Treat them as the subject of the question — do not ask which part of "
+        "the config they mean.",
+    ]
+
+    rendered = 0
+    for ref in references:
+        if not isinstance(ref, dict):
+            continue
+        rendered += 1
+        body = [f"[{rendered}] {_reference_label(ref)}"]
+
+        text = ref.get("text")
+        if isinstance(text, str) and text.strip():
+            start = ref.get("startLine")
+            if not isinstance(start, int) or start < 1:
+                start = 1
+            body.append("\n".join(
+                f"{start + offset}| {line}"
+                for offset, line in enumerate(text.splitlines())
+            ))
+
+        findings = ref.get("findings")
+        if isinstance(findings, list) and findings:
+            body.append(f"findings in [{rendered}]:")
+            for finding in findings[:CONTEXT_REFERENCE_FINDING_CAP]:
+                if not isinstance(finding, dict):
+                    continue
+                body.append(
+                    f"  - {finding.get('severity') or 'info'} · "
+                    f"line {finding.get('line_number')}: {finding.get('message') or ''}"
+                )
+
+        parts.append("\n".join(body))
+
+    if rendered == 0:
+        return None
+    return "\n\n".join(parts)
+
+
 def _prepare_messages(messages: list[dict],
                       edit_capable: bool = False, *,
                       skill_active: bool = False,
                       native_mode: bool = False,
-                      context_files: dict | None = None) -> list[dict]:
+                      context_files: dict | None = None,
+                      context_references: list | None = None) -> list[dict]:
     """Build a clean system prompt with MCP tool descriptions, printer memory,
     and user messages.
     """
@@ -735,11 +1061,24 @@ def _prepare_messages(messages: list[dict],
         "Your current task is the user's latest (last) message in this conversation. "
         "Earlier messages are history and context only."
     )
+
+    # User-attached context (the docked panel's chips) rides LAST as its own
+    # system message. Appending rather than splicing into the system prompt
+    # keeps the entire prefix — system prompt, tool context, memory, history —
+    # byte-identical to the no-reference case, so the local model's KV cache
+    # stays warm. Gated with the task anchor: `minimal` / `no_system` are
+    # prompt-ablation instruments and are never run with references attached.
+    references_text = render_context_references(context_references)
+    reference_messages = (
+        [{"role": "system", "content": references_text}] if references_text else []
+    )
+
     if prepared:
         return [
             *([] if no_system else [{"role": "system", "content": system_text}]),
             *prepared,
             *([] if (minimal or no_system) else [{"role": "system", "content": task_anchor}]),
+            *([] if (minimal or no_system) else reference_messages),
         ]
     return ([] if no_system else [{"role": "system", "content": system_text}]) + prepared
 
@@ -2349,8 +2688,19 @@ async def _run_approval_gate(
     request_id: str | None,
     log,
 ) -> tuple[str, dict | None]:
-    """Approval-gated write (Phase 2). Returns (lean content, details-or-None)
-    with the same contract as EditSession.execute().
+    """Approval-gated write (**DORMANT** — retired from the edit path).
+
+    NO CALLER since 2026-10-02 (post-hoc edit review): validated edits
+    stage immediately and are reviewed after the reply, so nothing in the
+    edit path suspends. This is kept, not deleted, because it is the
+    correct machinery for the FIRST IRREVERSIBLE tool — a disk write, a
+    firmware restart, a command sent to the printer — where a keep/undo
+    surface cannot take the decision back. Its contract is unchanged and
+    its wording is pinned by tests/test_ai_approval_gate.py, so landing
+    that tool does not re-derive any of it.
+
+    Returns (lean content, details-or-None) with the same contract as
+    EditSession.execute().
 
     Invalid calls kick back immediately — the gate NEVER produces a card
     for a call with new validation errors (plan law). A validated call
@@ -2359,6 +2709,35 @@ async def _run_approval_gate(
     against the latest frontend state before committing), and a 90s
     non-response auto-declines with an honest reason. The model loop never
     sees a fabricated user intent.
+
+    REVIVAL — when the first irreversible tool lands, three steps:
+
+    1. Restore the caller at BOTH dispatch sites (the main tool loop and
+       the empty-reprompt path). main's shape, which is the one to
+       recover, was::
+
+           if req.autoApproveEdits:
+               result_text, details = edit_session.execute(tool_call)
+           else:
+               result_text, details = await _run_approval_gate(...)
+
+       Scope the branch to the IRREVERSIBLE tool only — reversible
+       staging stays post-hoc reviewed, so do not route every write back
+       through here.
+
+    2. ChatRequest.autoApproveEdits is still declared on the request
+       model: that is the hook step 1 branches on. It is inert until
+       step 1 lands, and it is kept for exactly this.
+
+    3. The harness re-adds ONE line in
+       scripts/ai_chat_accuracy_test.py::chat_request()::
+
+           if effective_edit:
+               payload["autoApproveEdits"] = True
+
+       It was removed 2026-10-03 (commit 3b2cb23) because with no gate in
+       the path there was nothing left to bypass. A bank question for the
+       gated tool is what brings it back.
     """
     name = tool_call.get("name", "")
     content, result, _preview_state = session.prepare(tool_call)
@@ -3113,6 +3492,7 @@ async def chat_proxy(req: ChatRequest):
                                  edit_capable=edit_capable,
                                  skill_active=_skill_state['active'],
                                  context_files=req.contextFiles,
+                                 context_references=req.context_references,
                                  native_mode=_resolve_native_tools(
                                      req.apiProvider, req.apiUrl, req.toolProtocol,
                                      edit_capable=edit_capable,
@@ -3157,6 +3537,9 @@ async def chat_proxy(req: ChatRequest):
     if req.requestId:
         stop_event = asyncio.Event()
         _chat_stop_events[req.requestId] = stop_event
+        # The change set is reachable by request id from the first moment:
+        # keep/undo happens DURING the loop as often as after it.
+        register_edit_session(req.requestId, edit_session)
         # Progress registry (Phase 6.5.1/6.5.3): same lifecycle as the stop
         # event. startedAt drives elapsedMs; turns accumulate the per-turn
         # narration for harness grading (narrationTurns in the final
@@ -3208,6 +3591,9 @@ async def chat_proxy(req: ChatRequest):
             # Re-prompts issued to correct a malformed ```tool fence (see the
             # malformed tool-call guard in the loop below).
             malformed_reprompts = 0
+            # Mid-loop steers actually injected (2026-10-02) — the count
+            # keys the provider log context and the response payload.
+            steers_applied = 0
 
             # Edit-prose nudge budget (the nudge itself lives in the tool
             # loop's no-tool-calls branch — it must cover prose answers at
@@ -3258,6 +3644,59 @@ async def chat_proxy(req: ChatRequest):
             while tool_turns < turn_cap:
                 if stop_event is not None and stop_event.is_set():
                     raise ChatStoppedError()
+
+                # ── Mid-loop steer injection (turn boundary) ──
+                # A steer is user speech: it lands as the NEXT USER TURN,
+                # never as a tool result and never as a system nudge. The
+                # loop is already turn-by-turn, so the boundary is free —
+                # nothing is cancelled mid-provider-call. The response the
+                # model had already produced belongs to the previous
+                # instruction, so it is dropped and the model answers the
+                # steer instead.
+                _steers = _drain_steers(req.requestId)
+                if _steers:
+                    for _steer in _steers:
+                        current_messages.append(
+                            {"role": "user", "content": _steer})
+                    if edit_session is not None:
+                        # Deterministic ledger resets (see apply_steer):
+                        # a steer is a NEW instruction about a target the
+                        # model may already have written.
+                        edit_session.apply_steer()
+                    # The human bought another round: both budgets restart,
+                    # or steering would be useless exactly when it is
+                    # needed — after the model burned its writes driving
+                    # the wrong way.
+                    tool_turns = 0
+                    steers_applied += len(_steers)
+                    _progress_entry = _chat_progress.get(req.requestId)
+                    if _progress_entry is not None:
+                        _progress_entry.setdefault("steers", []).append(
+                            {"turn": steers_applied, "text": _steers[-1]})
+                    logger.info(
+                        "Steer injected | requestId=%s count=%d turn=%d "
+                        "preview=%s",
+                        req.requestId, len(_steers), steers_applied,
+                        _steers[-1][:120].replace("\n", " "),
+                    )
+                    _steer_payload = _build_provider_payload(
+                        req.apiProvider, current_messages, req.model,
+                        max_tokens=req.maxTokens,
+                        temperature=req.temperature,
+                        tools=native_tools,
+                        merge_system=req.mergeSystemMessages,
+                    )
+                    current_content, current_data = await _query_provider(
+                        client, req.apiUrl, headers, _steer_payload,
+                        req.apiProvider,
+                        logger_context=f"steer-{steers_applied}",
+                        stop_event=stop_event,
+                    )
+                    _steer_usage = _extract_usage_info(current_data)
+                    if _steer_usage:
+                        _steer_usage["context"] = f"steer-{steers_applied}"
+                        usage_events.append(_steer_usage)
+                    continue
 
                 # Native function calls come from the structured response body
                 # (OpenAI tool_calls / Anthropic tool_use blocks); otherwise
@@ -3602,20 +4041,28 @@ async def chat_proxy(req: ChatRequest):
                                 tool_call.get('name'))
                         else:
                             # Request-scoped write path (never the MCP server).
-                            if req.autoApproveEdits:
-                                # Harness override: skip ONLY the human wait;
-                                # validation (execute's apply+delta gate) is
-                                # unchanged.
-                                result_text, edit_details = edit_session.execute(tool_call)
-                            else:
-                                result_text, edit_details = await _run_approval_gate(
-                                    edit_session, tool_call, stop_event,
-                                    req.requestId, logger)
+                            #
+                            # POST-HOC REVIEW (2026-10-02): the write path no
+                            # longer suspends. A validated op stages straight
+                            # into the request's working state and change set;
+                            # the model finishes its reply; approve/decline
+                            # happens after it, on the change set (chat rows +
+                            # footer, text-view pane). The approval machinery
+                            # (ApprovalRequest, the /ai/chat/approval rail,
+                            # ChatApprovalCard, the 90s clock) is DORMANT —
+                            # kept intact for the first IRREVERSIBLE tool
+                            # (disk write, firmware restart, printer command),
+                            # which is what a blocking card is actually for.
+                            result_text, edit_details = edit_session.execute(tool_call)
                             logger.info(
                                 "Edit tool executed | name=%s attempts=%d ok=%s",
                                 tool_call["name"], edit_session.edit_attempts,
                                 edit_details is not None,
                             )
+                            # Live change set: the row appears in the
+                            # transcript and the edit lands in the editor
+                            # as it happens, not after the reply.
+                            _publish_staged_edits(req.requestId, edit_session)
                     elif (tool_call.get("name") == "list_hardware"):
                         # Chat-layer read tool (NOT the MCP server): the
                         # MCP server sees only disk, while the approval
@@ -3843,12 +4290,12 @@ async def chat_proxy(req: ChatRequest):
                         current_messages.append({"role": "assistant", "content": clean_assistant})
                     # Review fix 2026-09-26 (CRITICAL): this path used to
                     # run write calls through edit_session.execute()
-                    # directly, bypassing BOTH the load_skill gate and the
-                    # approval card — a text-protocol config_edit on the
-                    # empty re-prompt staged straight into the editor with
-                    # no human decision. Route through the SAME dispatch as
-                    # the main tool loop: skill-gate check first, then the
-                    # approval gate unless autoApproveEdits.
+                    # directly, bypassing the load_skill gate — a
+                    # text-protocol config_edit on the empty re-prompt
+                    # staged straight into the editor without the skill.
+                    # Route through the SAME dispatch as the main tool
+                    # loop: skill-gate check first, then the (now
+                    # un-gated) staging write.
                     reprompt_results = []
                     for c in reprompt_calls[:MAX_MCP_TOOL_TURNS]:
                         if edit_capable and c.get("name") == "load_skill":
@@ -3884,13 +4331,12 @@ async def chat_proxy(req: ChatRequest):
                                 logger.warning(
                                     "Edit tool blocked on re-prompt path | "
                                     "skill not loaded name=%s", c.get('name'))
-                            elif req.autoApproveEdits:
-                                reprompt_results.append(edit_session.execute(c)[0])
                             else:
-                                reprompt_results.append(
-                                    (await _run_approval_gate(
-                                        edit_session, c, stop_event,
-                                        req.requestId, logger))[0])
+                                # Same un-gated write path as the main loop
+                                # (see the post-hoc review note there): one
+                                # staging surface, no suspension, no card.
+                                reprompt_results.append(edit_session.execute(c)[0])
+                                _publish_staged_edits(req.requestId, edit_session)
                         else:
                             _set_working_overlay(edit_session)
                             reprompt_results.append(await _execute_tool_call_async(c))
@@ -4011,10 +4457,27 @@ async def chat_proxy(req: ChatRequest):
                     if edit_session is not None and edit_session.pending_edits
                     else None
                 ),
+                # Post-hoc edit review (2026-10-02): the request's change
+                # set — one record per edit, chronological, plus the
+                # summary grouped by file and section. The chat renders the
+                # records as rows; the footer and POST /ai/chat/changes/
+                # resolve work off the same set. null when nothing staged.
+                "changeSet": (
+                    edit_session.change_set_payload()
+                    if edit_session is not None and edit_session.edit_records
+                    else None
+                ),
                 # Per-call write-attempt accounting (Gate 1 oscillation
                 # analysis); null when the session never ran.
                 "editAttempts": (
                     edit_session.edit_attempts if edit_session is not None else None
+                ),
+                # Mid-loop steers the user sent while this request ran
+                # ({turn, text}), so the transcript can mark the message it
+                # already shows as landed rather than re-deriving it.
+                "steers": (
+                    list((_chat_progress.get(req.requestId) or {}).get("steers", []))
+                    if req.requestId else []
                 ),
                 "usage": {
                     "completionTokens": sum(
@@ -4049,8 +4512,13 @@ async def chat_proxy(req: ChatRequest):
             return {"error": f"API request failed: {str(e)}"}
         finally:
             if req.requestId:
+                # Keep the change set reachable for the post-hoc review
+                # (keep/undo is a replay of the kept ops, which needs this
+                # session's ops and pre-request baseline).
+                register_edit_session(req.requestId, edit_session)
                 _chat_stop_events.pop(req.requestId, None)
                 _chat_progress.pop(req.requestId, None)
+                _chat_steers.pop(req.requestId, None)
 
 
 # ── AI state + chat history file storage ─────────────────────────────

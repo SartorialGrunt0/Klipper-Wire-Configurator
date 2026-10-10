@@ -1,0 +1,728 @@
+"""Post-hoc edit review: the change set, its resolution, and steering.
+
+Three contracts, all of them about what happens AFTER (or during) a request
+that stages edits rather than suspending on them:
+
+1. **The change set** rides back with the reply — one record per edit in the
+   order the model made them, plus a summary grouped by file/section whose
+   totals count only the surviving (non-superseded) set.
+2. **Resolution** (keep/undo) is a REPLAY of the kept ops onto the file's
+   pre-request baseline, never a text revert — and a file the human edited
+   mid-loop is never clobbered; its stale ops are reported instead.
+3. **Steering** queues real user speech into an in-flight request at the
+   next tool-turn boundary, clearing the deterministic ledgers and both
+   budgets so a redirected request can act on the new instruction.
+"""
+import json
+import sys
+import threading
+import time
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'backend'))
+
+from fastapi.testclient import TestClient  # noqa: E402
+
+import api.ai_routes as ai_routes  # noqa: E402
+from main import app  # noqa: E402
+
+client = TestClient(app)
+
+PRINTER_CFG = """[printer]
+kinematics: cartesian
+max_velocity: 200
+max_accel: 1000
+
+[stepper_x]
+microsteps: 16
+rotation_distance: 40
+
+[gcode_macro PARK]
+gcode:
+    G91
+    G1 Z5
+"""
+
+
+def _ctx(content=PRINTER_CFG):
+    return {'printer.cfg': {'content': content}}
+
+
+def _tool_call(name, arguments):
+    block = f"```tool\n{json.dumps({'name': name, 'arguments': arguments})}\n```"
+    return {'choices': [{'message': {'content': f'Sure.\n\n{block}'}}]}
+
+
+def _final_reply(text='Done.'):
+    return {'choices': [{'message': {'content': text}}]}
+
+
+class _Resp:
+    def __init__(self, payload):
+        self._payload = payload
+        self.status_code = 200
+        self.text = json.dumps(payload)
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._payload
+
+
+class _ScriptedClient:
+    """Replies in order; optional hook per provider call."""
+
+    def __init__(self, replies, on_call=None):
+        self.replies = list(replies)
+        self.payloads = []
+        self.on_call = on_call
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def post(self, url, headers=None, json=None):
+        if self.on_call is not None:
+            self.on_call(len(self.payloads) + 1, json)
+        self.payloads.append(json)
+        reply = self.replies.pop(0) if self.replies else _final_reply()
+        return _Resp(reply)
+
+    async def get(self, url, headers=None):
+        raise AssertionError('Unexpected GET')
+
+
+def _install(monkeypatch, replies, on_call=None):
+    from api.printer_memory_routes import PrinterMemory
+    scripted = _ScriptedClient(replies, on_call=on_call)
+    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
+    monkeypatch.setattr(ai_routes.httpx, 'AsyncClient', lambda *a, **k: scripted)
+    return scripted
+
+
+def _payload(request_id, **overrides):
+    payload = {
+        'messages': [{'role': 'user', 'content': 'change my printer settings'}],
+        'apiKey': 'k', 'model': 'm',
+        'apiUrl': 'https://api.example.com/v1/chat/completions',
+        'apiProvider': 'chatgpt', 'contextFiles': _ctx(), 'editSkill': True,
+        'requestId': request_id,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _run(monkeypatch, replies, request_id, on_call=None, **overrides):
+    _install(monkeypatch, replies, on_call=on_call)
+    resp = client.post('/ai/chat', json=_payload(request_id, **overrides))
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+def _post_chat_bg(payload_holder):
+    """Run one in-flight chat request in a thread; return (thread, result)."""
+    result = {}
+
+    def run():
+        r = client.post('/ai/chat', json=payload_holder)
+        result['body'] = r.json() if r.status_code == 200 else r.text
+        result['status'] = r.status_code
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    return t, result
+
+
+SET_ACCEL = {'file': 'printer.cfg', 'op': 'set_param', 'section': 'printer',
+             'key': 'max_accel', 'value': '3000'}
+SET_VELOCITY = {'file': 'printer.cfg', 'op': 'set_param', 'section': 'printer',
+                'key': 'max_velocity', 'value': '300'}
+SET_MICROSTEPS = {'file': 'printer.cfg', 'op': 'set_param',
+                  'section': 'stepper_x', 'key': 'microsteps', 'value': '32'}
+
+
+# ══ The change set ══════════════════════════════════════════════════════
+
+
+def test_change_set_groups_by_file_and_section(monkeypatch):
+    body = _run(monkeypatch, [
+        _tool_call('config_edit', SET_ACCEL),
+        _tool_call('config_edit', SET_VELOCITY),
+        _final_reply('Both set.'),
+    ], 'cs-group-1')
+
+    change_set = body['changeSet']
+    assert [e['id'] for e in change_set['edits']] == ['e0', 'e1']
+    assert [e['section'] for e in change_set['edits']] == ['printer', 'printer']
+    assert change_set['totalAdded'] == 2
+    assert change_set['totalRemoved'] == 2
+
+    assert len(change_set['files']) == 1
+    entry = change_set['files'][0]
+    assert entry['file'] == 'printer.cfg'
+    assert [s['section'] for s in entry['sections']] == ['printer']
+    assert entry['sections'][0]['edits'] == ['e0', 'e1']
+    # Line numbers are deliberately NOT part of a row's identity.
+    assert 'line' not in json.dumps(change_set['edits'][0]).lower()
+
+
+def test_change_set_file_carries_the_pre_review_frame(monkeypatch):
+    """The whole-document pane's frame.
+
+    Each file ships the text it had BEFORE this request's first edit to it
+    (Sir, 2026-10-03). It is the one text the client cannot derive: the
+    current text it already holds — it is the buffer — while the pre-review
+    text only ever existed here.
+    """
+    body = _run(monkeypatch, [
+        _tool_call('config_edit', SET_ACCEL),
+        _tool_call('config_edit', SET_MICROSTEPS),
+        _final_reply('Both set.'),
+    ], 'cs-frame-1')
+    entry = body['changeSet']['files'][0]
+    # The WHOLE file, exactly — not the neighbourhood of the hunks.
+    assert entry['beforeText'] == PRINTER_CFG
+    assert 'max_accel: 1000' in entry['beforeText']    # pre-edit value
+    assert 'microsteps: 16' in entry['beforeText']     # untouched section too
+
+    # Per REQUEST, not per file history: the next message's frame is the text
+    # the previous one left. That is what lets a two-request running total
+    # diff against one baseline (the pane takes the OLDEST segment's frame).
+    after_first = PRINTER_CFG.replace('max_accel: 1000', 'max_accel: 3000')
+    body2 = _run(monkeypatch, [
+        _tool_call('config_edit', SET_VELOCITY),
+        _final_reply('Set max_velocity.'),
+    ], 'cs-frame-2', contextFiles=_ctx(after_first))
+    assert body2['changeSet']['files'][0]['beforeText'] == after_first
+
+
+def test_change_set_rows_carry_their_own_mini_diff(monkeypatch):
+    # A file long enough that "compact" is a real claim: the unfold payload
+    # must be the changed neighbourhood, not the whole file.
+    long_cfg = PRINTER_CFG + '\n'.join(
+        f'[gcode_macro M{i:02d}]\ngcode:\n    M117 hello {i}\n'
+        for i in range(20))
+    body = _run(monkeypatch, [
+        _tool_call('config_edit', SET_ACCEL),
+        _final_reply('Done.'),
+    ], 'cs-diff-1', contextFiles=_ctx(long_cfg))
+    diff_text = body['changeSet']['edits'][0]['diffText']
+    assert '-max_accel: 1000' in diff_text
+    assert '+max_accel: 3000' in diff_text
+    assert len(diff_text.splitlines()) < 15
+    assert 'M117 hello 19' not in diff_text       # not the whole file
+    # The before/after pair is still NOT shipped per ROW — that is why a row
+    # carries a unified diff in the first place. What does ship, once, is the
+    # FILE's pre-review text: the pane's whole-document frame (Sir,
+    # 2026-10-03). The lean-payload law therefore reads "one copy per FILE",
+    # not "smaller than the file" (see the scaling lock below).
+    assert json.dumps(body['changeSet']).count('"beforeText"') == 1
+    assert body['changeSet']['edits'][0]['key'] == 'max_accel'
+
+
+def test_the_frame_is_one_copy_per_file_not_per_edit(monkeypatch):
+    """Adding an edit costs a row, never another copy of the file.
+
+    The whole-document pane needs the file's pre-review text (design A,
+    Sir 2026-10-03) — that cost is one text per FILE per request. What must
+    NOT come back is the per-edit before/after pair the change set was
+    deliberately built to avoid shipping.
+    """
+    long_cfg = PRINTER_CFG + '\n'.join(
+        f'[gcode_macro M{i:02d}]\ngcode:\n    M117 hello {i}\n'
+        for i in range(20))
+    body = _run(monkeypatch, [
+        _tool_call('config_edit', SET_ACCEL),
+        _tool_call('config_edit', SET_VELOCITY),
+        _tool_call('config_edit', SET_MICROSTEPS),
+        _final_reply('Done.'),
+    ], 'frame-scale-1', contextFiles=_ctx(long_cfg))
+    payload = json.dumps(body['changeSet'])
+    # Three edits, one frame: the pre-review text appears exactly once.
+    assert len(payload.split('"beforeText"')) - 1 == 1
+    assert payload.count(json.dumps(long_cfg)[1:-1]) == 1
+    # And the whole payload is still smaller than three copies of the file
+    # the old law compared against — the rows stayed compact.
+    assert len(payload) < 3 * len(long_cfg)
+
+
+def test_changes_endpoint_serves_the_same_set(monkeypatch):
+    body = _run(monkeypatch, [
+        _tool_call('config_edit', SET_ACCEL),
+        _final_reply('Done.'),
+    ], 'cs-get-1')
+    served = client.get('/ai/chat/changes?requestId=cs-get-1').json()
+    assert served['found'] is True
+    assert served['edits'] == body['changeSet']['edits']
+    assert client.get('/ai/chat/changes?requestId=nope').json() == {'found': False}
+
+
+# ══ Resolution: keep / undo is a replay, never a text revert ════════════
+
+
+def test_resolve_undoes_only_the_dropped_edit(monkeypatch):
+    _run(monkeypatch, [
+        _tool_call('config_edit', SET_ACCEL),
+        _tool_call('config_edit', SET_VELOCITY),
+        _final_reply('Both set.'),
+    ], 'resolve-keep-1')
+    # Keep only the accel edit: the velocity edit's effect must be GONE,
+    # not merely marked.
+    out = client.post('/ai/chat/changes/resolve', json={
+        'requestId': 'resolve-keep-1',
+        'keptEditIds': ['e0'],
+        'contextFiles': {'printer.cfg': {'content': (
+            PRINTER_CFG.replace('max_accel: 1000', 'max_accel: 3000')
+                       .replace('max_velocity: 200', 'max_velocity: 300'))}},
+    }).json()
+    assert out['status'] == 'ok'
+    text = out['files']['printer.cfg']['content']
+    assert 'max_accel: 3000' in text      # kept op survives
+    assert 'max_velocity: 200' in text    # dropped op reverted to baseline
+    assert out['stale'] == []
+
+
+def test_resolve_with_nothing_kept_restores_the_baseline(monkeypatch):
+    _run(monkeypatch, [
+        _tool_call('config_edit', SET_ACCEL),
+        _tool_call('config_edit', SET_VELOCITY),
+        _final_reply('Both set.'),
+    ], 'resolve-none-1')
+    out = client.post('/ai/chat/changes/resolve', json={
+        'requestId': 'resolve-none-1', 'keptEditIds': [],
+    }).json()
+    assert out['files']['printer.cfg']['content'].strip() == PRINTER_CFG.strip()
+
+
+# ══ The pane's frame: marks follow the decisions (design B) ════════════
+
+
+def test_resolve_returns_the_frame_for_the_still_unreviewed_edits(monkeypatch):
+    """Design B (Sir, 2026-10-03): the frame is baseline + the ops the user
+    has DECIDED to keep, so an edit that was kept stops being marked and the
+    undecided one is exactly what is left."""
+    _run(monkeypatch, [
+        _tool_call('config_edit', SET_ACCEL),
+        _tool_call('config_edit', SET_VELOCITY),
+        _final_reply('Both set.'),
+    ], 'frame-resolve-1')
+    edited = PRINTER_CFG.replace('max_accel: 1000', 'max_accel: 3000') \
+                        .replace('max_velocity: 200', 'max_velocity: 300')
+
+    out = client.post('/ai/chat/changes/resolve', json={
+        'segments': [{
+            'requestId': 'frame-resolve-1',
+            'keptEditIds': ['e0', 'e1'],       # what the text keeps
+            'frameKeptEditIds': ['e0'],        # what has been DECIDED
+        }],
+        'contextFiles': {'printer.cfg': {'content': edited}},
+    }).json()
+
+    assert out['status'] == 'ok'
+    assert 'max_accel: 3000' in out['files']['printer.cfg']['content']
+    assert 'max_velocity: 300' in out['files']['printer.cfg']['content']
+    frame = out['frames']['printer.cfg']
+    assert 'max_accel: 3000' in frame            # decided: in the frame
+    assert 'max_velocity: 200' in frame          # undecided: still the old text
+    assert 'max_velocity: 300' not in frame
+
+
+def test_resolve_with_nothing_decided_carries_no_frame(monkeypatch):
+    """With nothing decided the frame IS the baseline, which the change-set
+    payload already ships — no second replay, and the client falls back."""
+    _run(monkeypatch, [
+        _tool_call('config_edit', SET_ACCEL),
+        _final_reply('Set.'),
+    ], 'frame-resolve-2')
+    out = client.post('/ai/chat/changes/resolve', json={
+        'segments': [{'requestId': 'frame-resolve-2',
+                      'keptEditIds': ['e0'], 'frameKeptEditIds': []}],
+    }).json()
+    assert out['status'] == 'ok'
+    assert 'frames' not in out
+
+
+def test_the_frame_pass_never_rewrites_what_the_client_holds(monkeypatch):
+    """The frame replay is read-only. If it wrote back the file it computed,
+    the next decision would think the client holds a text it has never seen
+    and silently stop reporting hand edits (hard rule 6)."""
+    _run(monkeypatch, [
+        _tool_call('config_edit', SET_ACCEL),
+        _tool_call('config_edit', SET_VELOCITY),
+        _final_reply('Both set.'),
+    ], 'frame-resolve-3')
+    edited = PRINTER_CFG.replace('max_accel: 1000', 'max_accel: 3000') \
+                        .replace('max_velocity: 200', 'max_velocity: 300')
+    first = client.post('/ai/chat/changes/resolve', json={
+        'segments': [{'requestId': 'frame-resolve-3',
+                      'keptEditIds': ['e0', 'e1'], 'frameKeptEditIds': ['e0']}],
+        'contextFiles': {'printer.cfg': {'content': edited}},
+    }).json()
+    assert first['frames']                       # the frame pass ran
+
+    # The client now holds exactly what that resolve returned. The session
+    # must agree — otherwise this second call reports a hand edit that never
+    # happened.
+    second = client.post('/ai/chat/changes/resolve', json={
+        'segments': [{'requestId': 'frame-resolve-3',
+                      'keptEditIds': ['e0', 'e1']}],
+        'contextFiles': {
+            'printer.cfg': {'content': first['files']['printer.cfg']['content']},
+        },
+    }).json()
+    assert second['clientEdited'] == []
+    assert second['stale'] == []
+
+
+def test_resolve_reports_a_stale_op_instead_of_clobbering_a_manual_edit(
+        monkeypatch):
+    """The user edited the anchor mid-loop: their text wins, and the op that
+    no longer applies is reported — never forced through."""
+    patch = {'file': 'printer.cfg', 'op': 'patch_section',
+             'section': 'gcode_macro PARK', 'old_text': 'G1 Z5',
+             'new_text': 'G1 Z10'}
+    _run(monkeypatch, [
+        _tool_call('config_edit', patch),
+        _final_reply('Park lifts to Z10.'),
+    ], 'resolve-stale-1')
+    edited = PRINTER_CFG.replace('G1 Z5', 'G1 Z7')
+    out = client.post('/ai/chat/changes/resolve', json={
+        'requestId': 'resolve-stale-1', 'keptEditIds': ['e0'],
+        'contextFiles': {'printer.cfg': {'content': edited}},
+    }).json()
+    assert out['clientEdited'] == ['printer.cfg']
+    assert [s['id'] for s in out['stale']] == ['e0']
+    assert 'G1 Z7' in out['files']['printer.cfg']['content']  # manual edit kept
+    assert 'G1 Z10' not in out['files']['printer.cfg']['content']
+
+
+def test_resolve_deletes_a_file_the_request_created_when_it_is_rejected(
+        monkeypatch):
+    body = _run(monkeypatch, [
+        _tool_call('config_write', {
+            'file': 'macros.cfg', 'content': '[gcode_macro HI]\ngcode:\n    M117 HI\n'}),
+        _final_reply('Created macros.cfg.'),
+    ], 'resolve-newfile-1')
+    assert body['changeSet']['createdFiles'] == ['macros.cfg']
+    out = client.post('/ai/chat/changes/resolve', json={
+        'requestId': 'resolve-newfile-1', 'keptEditIds': [],
+    }).json()
+    assert out['files']['macros.cfg'] == {'content': '', 'deleted': True}
+    # Keeping it keeps the file.
+    out2 = client.post('/ai/chat/changes/resolve', json={
+        'requestId': 'resolve-newfile-1', 'keptEditIds': ['e0'],
+    }).json()
+    assert out2['files']['macros.cfg']['deleted'] is False
+    assert 'gcode_macro HI' in out2['files']['macros.cfg']['content']
+
+
+def test_the_replay_validates_against_the_whole_project(monkeypatch):
+    """A replay must judge an op in the same world it was staged in.
+
+    Live report 2026-10-04 (Cliff): renaming a macro to a registered command
+    validated clean at staging — the project has the rest of the config, and a
+    `rename_existing` ANYWHERE in the active files satisfies a shadow collision
+    — but came back "failed validation after merging" on Keep, because
+    `resolve_change_chain` seeded its `ProjectState` with ONLY the files the
+    chain touched. A multi-file project then validated as a one-file one, and
+    the verdict genuinely differs (the cross-file passes only run with >1
+    file). Follow-up ops on the section the failed rename never created then
+    failed too: "2 changes could not be re-applied".
+    """
+    printer = ('[include kamp.cfg]\n\n[bed_mesh]\nspeed: 200\n\n'
+               '[gcode_macro Level_Bed]\n'
+               '#rename_existing: _BED_MESH_CALIBRATE\n'
+               'gcode:\n    G28\n')
+    kamp = ('[gcode_macro BED_MESH_CALIBRATE]\n'
+            'rename_existing: _BED_MESH_CALIBRATE\n'
+            'gcode:\n    G28\n')
+    context = {
+        'printer.cfg': {'content': printer, 'label': 'printer.cfg'},
+        'kamp.cfg': {'content': kamp, 'label': 'kamp.cfg'},
+    }
+    _run(monkeypatch, [
+        _tool_call('config_edit', {
+            'file': 'printer.cfg', 'op': 'rename_section',
+            'section': 'gcode_macro Level_Bed',
+            'new_section': 'gcode_macro bed_mesh_calibrate'}),
+        _final_reply('Renamed.'),
+    ], 'replay-world-1', contextFiles=context)
+
+    out = client.post('/ai/chat/changes/resolve', json={
+        'segments': [{'requestId': 'replay-world-1', 'keptEditIds': ['e0']}],
+        'contextFiles': context,
+    }).json()
+    assert out['status'] == 'ok'
+    assert out['stale'] == []
+    assert '[gcode_macro bed_mesh_calibrate]' in out['files']['printer.cfg']['content']
+    # The file the chain never touched is context, never a result.
+    assert 'kamp.cfg' not in out['files']
+
+
+def test_resolve_unknown_request_is_not_found():
+    out = client.post('/ai/chat/changes/resolve', json={
+        'requestId': 'nope', 'keptEditIds': []}).json()
+    assert out == {'status': 'not_found', 'missing': ['nope']}
+    # No segment at all is not_found too (nothing to replay).
+    assert client.post('/ai/chat/changes/resolve', json={}).json() == {
+        'status': 'not_found'}
+
+
+def test_a_decision_can_span_several_requests(monkeypatch):
+    """The change set is a RUNNING TOTAL (Sir, 2026-10-02): a second message
+    does not discard the first message's unreviewed edits, so one undo has to
+    replay the whole chain — oldest first, each request's ops onto the state
+    the previous one left."""
+    _run(monkeypatch, [
+        _tool_call('config_edit', SET_ACCEL),
+        _final_reply('Set max_accel.'),
+    ], 'chain-1')
+    # The second message starts from the text the first one produced.
+    after_first = PRINTER_CFG.replace('max_accel: 1000', 'max_accel: 3000')
+    _run(monkeypatch, [
+        _tool_call('config_edit', SET_VELOCITY),
+        _final_reply('Set max_velocity.'),
+    ], 'chain-2', contextFiles=_ctx(after_first))
+    after_second = after_first.replace('max_velocity: 200', 'max_velocity: 300')
+
+    # Drop the FIRST request's edit: the second's survives, because the chain
+    # replays it onto the oldest baseline.
+    out = client.post('/ai/chat/changes/resolve', json={
+        'segments': [
+            {'requestId': 'chain-1', 'keptEditIds': []},
+            {'requestId': 'chain-2', 'keptEditIds': ['e0']},
+        ],
+        'contextFiles': {'printer.cfg': {'content': after_second}},
+    }).json()
+    assert out['status'] == 'ok'
+    text = out['files']['printer.cfg']['content']
+    assert 'max_accel: 1000' in text        # dropped, back to the baseline
+    assert 'max_velocity: 300' in text      # kept
+    assert out['stale'] == []
+
+    # Keeping only the first drops the second's edit, even though it sits on
+    # top: replay order is what makes that possible. The client now holds the
+    # text the previous decision produced, and sends that back — which is what
+    # tells the server nobody edited by hand in between.
+    out2 = client.post('/ai/chat/changes/resolve', json={
+        'segments': [
+            {'requestId': 'chain-1', 'keptEditIds': ['e0']},
+            {'requestId': 'chain-2', 'keptEditIds': []},
+        ],
+        'contextFiles': {'printer.cfg': {'content': text}},
+    }).json()
+    text2 = out2['files']['printer.cfg']['content']
+    assert out2['clientEdited'] == []
+    assert 'max_accel: 3000' in text2
+    assert 'max_velocity: 200' in text2
+
+    # A missing segment fails the whole call rather than replaying a partial
+    # chain (that would silently drop a request's edits).
+    out3 = client.post('/ai/chat/changes/resolve', json={
+        'segments': [
+            {'requestId': 'chain-1', 'keptEditIds': []},
+            {'requestId': 'gone-request', 'keptEditIds': []},
+        ],
+    }).json()
+    assert out3 == {'status': 'not_found', 'missing': ['gone-request']}
+
+
+def test_change_set_is_resolvable_while_the_request_is_still_running(
+        monkeypatch):
+    """Live UI find (2026-10-02): review happens DURING the loop as often as
+    after it — 'Reject all' on a change that is still streaming must replay,
+    not answer not_found because the reply has not landed yet."""
+    import asyncio
+
+    class _HoldingClient(_ScriptedClient):
+        """Holds the follow-up provider call open so the request is
+        demonstrably still in flight when the decision is posted."""
+
+        async def post(self, url, headers=None, json=None):
+            if self.payloads:
+                await asyncio.sleep(1.0)
+            return await super().post(url, headers=headers, json=json)
+
+    from api.printer_memory_routes import PrinterMemory
+    holding = _HoldingClient([
+        _tool_call('config_edit', SET_ACCEL),
+        _final_reply('Set max_accel to 3000.'),
+    ])
+    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
+    monkeypatch.setattr(ai_routes.httpx, 'AsyncClient', lambda *a, **k: holding)
+
+    t, result = _post_chat_bg(_payload('resolve-midloop-1'))
+    session = None
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        session = ai_routes._edit_sessions.get('resolve-midloop-1')
+        if session is not None and session.edit_records:
+            break
+        time.sleep(0.02)
+    assert session is not None and session.edit_records, 'no staged edit seen'
+    assert t.is_alive(), 'precondition: the request must still be running'
+
+    out = client.post('/ai/chat/changes/resolve', json={
+        'requestId': 'resolve-midloop-1', 'keptEditIds': []}).json()
+    assert out['status'] == 'ok'
+    assert 'max_accel: 1000' in out['files']['printer.cfg']['content']
+    t.join(timeout=20)
+    assert result['status'] == 200
+
+
+# ══ Steering ════════════════════════════════════════════════════════════
+
+
+def test_steer_endpoint_rejects_requests_that_are_not_in_flight():
+    out = client.post('/ai/chat/steer', json={
+        'requestId': 'ghost-request', 'message': 'use 64'}).json()
+    assert out['accepted'] is False
+    assert out['reason'] == 'no in-flight request'
+    out = client.post('/ai/chat/steer', json={
+        'requestId': '', 'message': 'use 64'}).json()
+    assert out['accepted'] is False
+
+
+def test_steered_re_edit_is_one_net_change_with_no_duplicate_target(
+        monkeypatch):
+    """The plan's probe: stage microsteps 32, the user steers 'use 64', the
+    model re-edits the SAME target — one net change to 64, no DUPLICATE
+    TARGET kickback, and the transcript keeps both rows honestly."""
+    state = {'steered': False}
+
+    def on_call(index, request_json):
+        # The user types while the loop is between turns: queue the steer
+        # the moment the first tool result is on its way back to the model.
+        if index == 2 and not state['steered']:
+            state['steered'] = True
+            ai_routes._chat_steers.setdefault('steer-1', []).append('use 64')
+
+    scripted = _install(monkeypatch, [
+        _tool_call('config_edit', SET_MICROSTEPS),          # turn 1
+        _tool_call('config_edit', dict(SET_MICROSTEPS, value='64')),  # dropped
+        _tool_call('config_edit', dict(SET_MICROSTEPS, value='64')),  # re-edit
+        _final_reply('Microsteps are 64.'),
+    ], on_call=on_call)
+
+    resp = client.post('/ai/chat', json=_payload('steer-1'))
+    assert resp.status_code == 200
+    body = resp.json()
+
+    # The steer was injected as USER SPEECH, never a tool result.
+    steer_payload = scripted.payloads[2]
+    assert steer_payload['messages'][-1] == {'role': 'user',
+                                             'content': 'use 64'}
+    # The response the model had produced for the OLD instruction was
+    # dropped, not executed. editAttempts is the BUDGET counter, which the
+    # steer reset — so the steered re-edit reads 1, not 2.
+    assert body['editAttempts'] == 1
+
+    tool_output = json.dumps(body['toolCalls'])
+    assert 'DUPLICATE TARGET' not in tool_output
+    assert body['steers'] == [{'turn': 1, 'text': 'use 64'}]
+
+    change_set = body['changeSet']
+    assert [e['id'] for e in change_set['edits']] == ['e0', 'e1']
+    assert change_set['edits'][0]['superseded'] is True
+    assert change_set['edits'][1]['superseded'] is False
+    assert change_set['totalAdded'] == 1     # net: 16 -> 64 is one hunk
+    assert change_set['totalRemoved'] == 1
+    assert 'microsteps: 64' in body['pendingEdits'][0]['newText']
+    assert 'microsteps: 32' not in body['pendingEdits'][0]['newText']
+
+
+def test_steer_resets_the_write_budget(monkeypatch):
+    """A steer resets the write budget: without it, the re-edit after a
+    redirect would be refused by a cap the model already spent driving the
+    wrong way."""
+    monkeypatch.setenv('KWC_EDIT_WRITE_CAP', '1')
+    state = {'steered': False}
+
+    def on_call(index, request_json):
+        if index == 2 and not state['steered']:
+            state['steered'] = True
+            ai_routes._chat_steers.setdefault('steer-budget-1', []).append(
+                'actually use 64')
+
+    _install(monkeypatch, [
+        _tool_call('config_edit', SET_MICROSTEPS),
+        _tool_call('config_edit', dict(SET_MICROSTEPS, value='64')),
+        _tool_call('config_edit', dict(SET_MICROSTEPS, value='64')),
+        _final_reply('Microsteps are 64.'),
+    ], on_call=on_call)
+
+    resp = client.post('/ai/chat', json=_payload('steer-budget-1'))
+    assert resp.status_code == 200
+    body = resp.json()
+    assert 'WRITE LIMIT REACHED' not in json.dumps(body['toolCalls'])
+    assert 'microsteps: 64' in body['pendingEdits'][0]['newText']
+
+
+def test_steer_endpoint_accepts_while_the_request_is_live(monkeypatch):
+    """The HTTP rail itself: an in-flight request accepts a steer and it
+    reaches the model; a finished request's id is not steerable."""
+    accepted = {}
+
+    def on_call(index, request_json):
+        if index == 1:
+            # The request is registered before its first provider call, so
+            # this is the same window the UI posts in.
+            r = client.post('/ai/chat/steer', json={
+                'requestId': 'steer-live-1', 'message': 'use 64'})
+            accepted['body'] = r.json()
+
+    scripted = _install(monkeypatch, [
+        _tool_call('config_edit', SET_MICROSTEPS),
+        _tool_call('config_edit', dict(SET_MICROSTEPS, value='64')),
+        _tool_call('config_edit', dict(SET_MICROSTEPS, value='64')),
+        _final_reply('Microsteps are 64.'),
+    ], on_call=on_call)
+
+    resp = client.post('/ai/chat', json=_payload('steer-live-1'))
+    assert resp.status_code == 200
+    assert accepted['body'] == {'accepted': True, 'queued': 1}
+    assert resp.json()['steers'] == [{'turn': 1, 'text': 'use 64'}]
+    assert any('use 64' in json.dumps(p) for p in scripted.payloads)
+
+
+def test_steer_queue_is_drained_once(monkeypatch):
+    """The queue is a queue: after injection the same text is not
+    re-injected on the next boundary."""
+    state = {'steered': False}
+
+    def on_call(index, request_json):
+        if index == 2 and not state['steered']:
+            state['steered'] = True
+            ai_routes._chat_steers.setdefault('steer-once-1', []).append('use 64')
+
+    scripted = _install(monkeypatch, [
+        _tool_call('config_edit', SET_MICROSTEPS),
+        _tool_call('config_edit', dict(SET_MICROSTEPS, value='64')),
+        _tool_call('config_edit', dict(SET_MICROSTEPS, value='64')),
+        _final_reply('Microsteps are 64.'),
+    ], on_call=on_call)
+    resp = client.post('/ai/chat', json=_payload('steer-once-1'))
+    assert resp.status_code == 200
+    assert resp.json()['steers'] == [{'turn': 1, 'text': 'use 64'}]
+    assert not ai_routes._chat_steers.get('steer-once-1')
+
+
+def test_steer_clears_the_identical_failure_ledger(monkeypatch):
+    """A failed call repeated after a steer is not the 3x repetition loop —
+    the ledger was cleared by the user's message."""
+    from services.ai_edit_tools import EditSession
+    session = EditSession(_ctx())
+    bad = {'name': 'config_edit', 'arguments': {
+        'file': 'printer.cfg', 'op': 'set_param', 'section': 'ghost',
+        'key': 'x', 'value': '1'}}
+    for _ in range(3):
+        session.execute(bad)
+    assert session._repetition_blocked('config_edit', bad['arguments'])
+    session.apply_steer()
+    assert session._repetition_blocked('config_edit', bad['arguments']) is None
+    assert session.edit_attempts == 0

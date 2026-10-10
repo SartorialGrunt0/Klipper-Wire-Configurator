@@ -10,20 +10,21 @@
  * Single source of truth for settings editing state lives here,
  * passed down to ChatSettingsPanel as props.
  */
-import React, { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from 'react';
 import { useAiStore, AiProvider, providerRequiresApiKey, type ChatMessage } from '../../stores/aiStore';
 import { useChatHistoryStore } from '../../stores/chatHistoryStore';
 import { useConfigStore } from '../../stores/configStore';
+import { usePendingEditStore } from '../../stores/pendingEditStore';
 import { usePrinterMemoryStore, DEFAULT_PRINTER_MEMORY, type PrinterMemory } from '../../stores/printerMemoryStore';
 import * as api from '../../services/api';
 import { extractPrinterMemoryBlock } from '../../utils/printerMemory';
-import { planApprovedEditApply } from '../../utils/approvalApply';
 import {
   foldApprovalCountdown,
   type ApprovalCountdownAnchor,
 } from '../../utils/approvalDiff';
 import { buildChatRequestCredentials } from '../../utils/chatRequestBase';
 import { selectUnsavedDrafts } from '../../utils/chatContext';
+import { buildReferenceContext, mentionMatches, nodeToReference, referenceLabel, type ChatReference, type MentionSource } from '../../utils/chatReferences';
 import { isNearBottom, nextStickToBottom } from '../../utils/chatScroll';
 import {
   EMPTY_PROGRESS,
@@ -31,6 +32,7 @@ import {
   type ProgressDisplay,
 } from '../../utils/chatProgress';
 import {
+  PROVIDER_OPTIONS,
   PROVIDER_DEFAULTS,
   isLocalProvider,
   resolveProviderApiUrl,
@@ -38,14 +40,38 @@ import {
 } from '../../utils/chatProviders';
 import { runReplyValidationPipeline, createPrinterMemoryReplyValidator } from '../../utils/replyValidation';
 import { useAssistantDraft } from '../../hooks/useAssistantDraft';
+import { createPortal } from 'react-dom';
+import { useUiStore } from '../../stores/uiStore';
+import { useChatReferenceStore } from '../../stores/chatReferenceStore';
+import { useVisibility } from '../../stores/validationSettingsStore';
 import ChatSettingsPanel from './ChatSettingsPanel';
 import ChatHistoryDialog from './ChatHistoryDialog';
 import PrinterMemoryDialog from './PrinterMemoryDialog';
+import { ChatBubbleIcon, BookIcon } from '../icons';
 import ChatMessageList from './ChatMessageList';
 import ChatApprovalCard from './ChatApprovalCard';
 import ApprovalDiffPreview from './ApprovalDiffPreview';
 import type { ApprovalCard } from '../../services/api';
-import ChatInputBar from './ChatInputBar';
+import ChatInputBar, { type ChatReferenceChip } from './ChatInputBar';
+import ChatEditRows from './ChatEditRows';
+import ChangeSetBar from './ChangeSetBar';
+import { useChangeSetStore } from '../../stores/changeSetStore';
+import {
+  applyStagedEdits,
+  buildDecisionContext,
+} from '../../services/changeSetReview';
+import {
+  framesFromChangeSet,
+  groupLedgerSections,
+  keepAll,
+  keepAllIn,
+  keepRun,
+  ledgerFrom,
+  undoAll,
+  undoAllIn,
+  undoRun,
+} from '../../services/reviewEngine';
+import { buildChangeSetView, rowsForRequest, type ChangeSetRow } from '../../utils/changeSet';
 import type { PendingAiChatRequest } from '../../types/ai';
 import type { AiChatRole } from '../../services/api';
 import type { SavedConversation } from '../../stores/chatHistoryStore';
@@ -68,12 +94,18 @@ interface ChatDialogProps {
   onClose: () => void;
   pendingRequest?: PendingAiChatRequest | null;
   onPendingRequestHandled?: () => void;
-}
-
-interface AttachedConfigFile {
-  id: string;
-  name: string;
-  content: string;
+  /**
+   * `'modal'` (default) is the overlay the toolbar opens. `'dock'` renders
+   * the SAME content tree as a narrow column, portalled into the host
+   * element `TextEditor` publishes in the text view's flex row.
+   *
+   * This is a shell-level switch ONLY. The dialog is deliberately a single
+   * mounted instance (`Toolbar` never unmounts it) so that one conversation,
+   * one draft and one in-flight request survive folding and view switches;
+   * giving the dock its own component would mean two drafts, two approval
+   * cards, and an "which instance owns the request?" bug on the first switch.
+   */
+  variant?: 'modal' | 'dock';
 }
 
 // ── Constants ───────────────────────────────────────────────────────
@@ -93,9 +125,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   onClose,
   pendingRequest = null,
   onPendingRequestHandled,
+  variant = 'modal',
 }) => {
   // ── Stores ──────────────────────────────────────────────────────
-  const { settings, setSettings, isConfigured, messages, setMessages, clearMessages } = useAiStore();
+  const { settings, setSettings, isConfigured, messages, setMessages, clearMessages, chatStatus } = useAiStore();
   const {
     configFiles,
     activeFile,
@@ -107,6 +140,23 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     removeConfigFile,
     markDirty,
   } = useConfigStore();
+
+  // ── Docked panel (text view) ────────────────────────────────────
+  // The dock is this same instance rendered into a host element that the
+  // editor's flex row publishes, instead of into a full-screen overlay.
+  // `docked` is false when the rail is collapsed or the text view is
+  // unmounted — the component stays MOUNTED either way, so an in-flight
+  // request keeps running and the reply is there when the panel reopens.
+  const dockHost = useUiStore((s) => s.dockHost);
+  const showChatDock = useUiStore((s) => s.showChatDock);
+  const composerFocusNonce = useUiStore((s) => s.composerFocusNonce);
+  const docked = variant === 'dock' && dockHost !== null && showChatDock && isConfigured();
+
+  // ── Attached context references ─────────────────────────────────
+  const visibility = useVisibility();
+  const pinnedReferences = useChatReferenceStore((s) => s.pinned);
+  const selectionReference = useChatReferenceStore((s) => s.selection);
+  const previewReference = useChatReferenceStore((s) => s.preview);
 
   // ── Draft Hook (request helper) ─────────────────────────────────
   const {
@@ -149,11 +199,25 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   // only: narration is the model's own tool-turn text, visually
   // subordinate; it never substitutes for the answer (never-final law).
   const [progress, setProgress] = useState<ProgressDisplay>(EMPTY_PROGRESS);
+  // ── Post-hoc edit review (2026-10-02) ──
+  // The change set is applied to the editor as it accumulates and reviewed
+  // here after the reply. Decisions are the mechanical ledger's (Sir,
+  // 2026-10-07): the footer bar renders `diff(FRAME, LIVE)` per file, straight
+  // from the store's frames + the editor's live text. `appliedStagedRef`
+  // dedupes the poll's per-file snapshots so the same text is not re-parsed
+  // every 1.5s.
+  const changeSetSegments = useChangeSetStore((state) => state.segments);
+  const changeSetExpanded = useChangeSetStore((state) => state.expanded);
+  const changeSetReviewFrames = useChangeSetStore((state) => state.reviewFrames);
+  const liveTexts = useConfigStore((state) => state.liveTexts);
+  // The bar's rows: the ledger's runs, labelled and previewed. Re-derived
+  // whenever the frames, the live text or the files change.
+  const ledgerSections = useMemo(
+    () => groupLedgerSections(ledgerFrom({ reviewFrames: changeSetReviewFrames, liveTexts, configFiles })),
+    [changeSetReviewFrames, liveTexts, configFiles],
+  );
+  const appliedStagedRef = useRef<string>('');
   const [showSettings, setShowSettings] = useState(false);
-  // EXPERIMENT (auto-attach off): don't auto-select the active file.
-  // Context only includes files the user explicitly checks in "Include Files".
-  const [selectedConfigContextFiles, setSelectedConfigContextFiles] = useState<string[]>([]);
-  const [attachedConfigFiles, setAttachedConfigFiles] = useState<AttachedConfigFile[]>([]);
   const [showChatHistory, setShowChatHistory] = useState(false);
   const [showCarryOverPrompt, setShowCarryOverPrompt] = useState(false);
   const [showPrinterMemory, setShowPrinterMemory] = useState(false);
@@ -189,22 +253,30 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   const stickToBottomRef = useRef(true);
   const lastScrollTopRef = useRef(0);
   const inputRef = useRef<HTMLDivElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const handledPendingRequestIdRef = useRef<string | null>(null);
   // Live open state for async completions: the toolbar button only flashes
   // green/red when the dialog is closed at the moment the request finishes.
   const openRef = useRef(open);
-  openRef.current = open;
+  // "The user is looking at the chat right now" — true for the modal and for
+  // a folded-out dock. Used only to decide whether a background event needs
+  // to hail the toolbar status dot; when the panel is on screen it doesn't.
+  openRef.current = open || docked;
   // Stop button: AbortController cancels the client fetch immediately;
   // the backend /ai/chat/stop endpoint (via requestId) cancels the work.
   const stopControllerRef = useRef<AbortController | null>(null);
   const stopRequestIdRef = useRef<string | null>(null);
+  // The change-set generation this submit run was born in (B-4 guard).
+  const runEpochRef = useRef(0);
 
   const loadedConfigFilenames = Object.keys(configFiles);
 
-  // ── Sync settings to edit state when dialog opens ───────────────
+  // ── Sync settings to edit state when the panel is VISIBLE ───────
+  // `open` is the modal flag; the docked panel renders while it is false
+  // (`docked`, line ~148). Gating this on `open` alone left the mirror
+  // unhydrated the first time Settings was opened from the dock — a fresh
+  // page → text view → Settings showed values that had never been copied in.
   useEffect(() => {
-    if (open) {
+    if (open || docked) {
       setEditApiKey(settings.apiKey);
       setEditProviderModels(settings.providerModels);
       setEditModel(getProviderModel(settings.apiProvider, settings.providerModels, settings.model, settings.apiProvider));
@@ -221,30 +293,18 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       // the conversation now).
       useAiStore.getState().setChatStatus('idle');
     } else if (
+      !docked &&
       approvalCardRef.current &&
       !approvalBusy &&
       useAiStore.getState().chatStatus === 'idle'
     ) {
       // Re-raising: an unresolved approval card is still waiting on a
       // decision — closing the dialog (e.g. after peeking at it) should
-      // turn the button green again.
+      // turn the button green again. NOT in the dock: the panel is on
+      // screen, so the user is already looking at the card.
       useAiStore.getState().setChatStatus('awaiting');
     }
-  }, [open, settings]);
-
-  // ── EXPERIMENT (auto-attach off) ───────────────────────────────
-  // Removed the old "seed the active file into the selection when the
-  // dialog opens" effect. Context now only includes files the user
-  // explicitly checks in "Include Files" (or manually attaches).
-
-  // ── Prune config context files when files are removed ───────────
-  useEffect(() => {
-    const availableFiles = new Set(Object.keys(configFiles));
-    setSelectedConfigContextFiles((prev) => {
-      const next = prev.filter((f) => availableFiles.has(f));
-      return next.length === prev.length ? prev : next;
-    });
-  }, [configFiles]);
+  }, [open, docked, settings]);
 
   // ── Auto-scroll to bottom (sticky) ──────────────────────────────
   // Follows new messages AND content growth (approval cards, progress
@@ -331,30 +391,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     setSettings,
   ]);
 
-  // ── File Attach ─────────────────────────────────────────────────
-  const handleAttachConfigFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || []);
-    if (files.length === 0) return;
-    try {
-      const loadedFiles = await Promise.all(
-        files.map(async (file, index) => ({
-          id: `${file.name}-${file.lastModified}-${index}`,
-          name: file.name,
-          content: await file.text(),
-        })),
-      );
-      setAttachedConfigFiles((prev) => [...prev, ...loadedFiles]);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to import config file.');
-    } finally {
-      e.target.value = '';
-    }
-  };
-
-  const handleRemoveAttachedFile = (id: string) => {
-    setAttachedConfigFiles((prev) => prev.filter((file) => file.id !== id));
-  };
-
   // ── Helper: get config text (draft or saved) ────────────────────
   const getConfigText = useCallback(
     async (filename: string): Promise<string | null> => {
@@ -374,48 +410,11 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     [activeFile],
   );
 
-  // ── Approved tool edits → editor draft ──────────────────────────
-  // The approval card gate (Phase 2) stages validated writes SERVER-side;
-  // once the user approves, the resuming backend loop returns the final
-  // assistant message carrying `pendingEdits` (full post-apply file text,
-  // backend truth — never model prose). Applying them here marks the
-  // editor dirty like any other edit: approved ≠ saved, the Save flow
-  // (and its validation gate) remains the only path to disk.
-  const applyApprovedToolEdits = useCallback(
-    async (edits: NonNullable<ChatMessage['pendingEdits']>): Promise<void> => {
-      const { upserts, deletes } = planApprovedEditApply(edits);
-      if (upserts.length === 0 && deletes.length === 0) return;
-      for (const { file, newText } of upserts) {
-        try {
-          const parsed = await api.parseConfigText(newText, file);
-          const config = { ...parsed.config, raw_text: newText };
-          // updateConfigFile (NOT setConfigFile + single-file validateConfig):
-          // the store's debounced revalidation validates the WHOLE project,
-          // so include-graph-aware findings (gcode registry macros defined in
-          // included files, cross-file dups/pins) re-derive correctly. A
-          // single-file result written here flags every included-file macro
-          // as unknown_gcode_command (live report 2026-09-20: CLEAN_NOZZLE,
-          // AUX_FAN_ON/OFF from clean.cfg / aux_fan.cfg).
-          updateConfigFile(file, config);
-        } catch (err: unknown) {
-          // Should not happen: newText comes from the backend's own
-          // writer. Surface rather than silently drop the approved change.
-          console.error('[Approval] Failed to apply approved edit to', file, err);
-          setError(`Approved change to ${file} could not be applied to the editor — check the diff before saving.`);
-        }
-      }
-      deletes.forEach((file) => removeConfigFile(file));
-      if (upserts.length > 0 || deletes.length > 0) markDirty();
-      if (deletes.length > 0) {
-        // Deletion alone schedules nothing (removeConfigFile only drops the
-        // file's own entry) — re-derive the OTHER files' findings (e.g. a
-        // dangling include) against the surviving project now. Upsert-only
-        // flows are already covered by updateConfigFile's debounced pass.
-        void useConfigStore.getState().revalidateAll();
-      }
-    },
-    [updateConfigFile, removeConfigFile, markDirty],
-  );
+  // ── Backend edits → editor draft ────────────────────────────────
+  // Staged edits and the resolve replay share ONE apply path
+  // (`services/changeSetReview.applyStagedEdits`), so stage / keep / undo
+  // cannot drift: approved ≠ saved, the Save flow stays the only path to
+  // disk.
 
   // ── Submit Message ──────────────────────────────────────────────
   const submitMessage = useCallback(
@@ -432,12 +431,28 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       stopControllerRef.current = stopController;
       stopRequestIdRef.current = stopRequestId;
       setStopRequestId(stopRequestId);
+      // Generation guard (PR #36 review, B-4): if the user discards the
+      // review (Revert / New Chat / Generate / Open-from-Pi) while this
+      // request is in flight, every later write of THIS run is stale.
+      runEpochRef.current = useChangeSetStore.getState().epoch;
       // Reset the approval card state for the new request; the poll
       // effect below picks up any card this request suspends on.
       setApprovalCard(null);
       approvalCardRef.current = null;
       setApprovalInvalidation(null);
       setApprovalBusy(false);
+      // The text view's pending-diff pane follows the same slot: a new
+      // request starts with nothing pending. The takeover too — clearPending
+      // early-returns when no CARD was pending (the live path never has one),
+      // so a folded mirror ('hidden') from the last review would otherwise
+      // suppress this review's auto-open (Sir, 2026-10-08: removals review in
+      // the mirror by default; the fold is per-review, not permanent).
+      usePendingEditStore.getState().clearPending();
+      usePendingEditStore.getState().resetTakeover();
+      // Post-hoc review: the change set is a RUNNING TOTAL — a new message
+      // does NOT clear the edits an earlier one staged. Those stay in the
+      // review summary until they are kept or undone.
+      appliedStagedRef.current = '';
 
       const userMsg = { role: 'user' as const, content: trimmedMessage, hiddenFromUser: options?.hiddenFromUser === true };
       const previousMessages = options?.hiddenFromUser ? [] : messages;
@@ -453,6 +468,21 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       } else {
         newMessages = options?.retry ? messages : [...previousMessages, userMsg];
       }
+      // Take the attached context for this message and empty the slots in ONE
+      // step. Reading the store and clearing it separately is how the first
+      // live build sent an empty list — see takeAttachedReferences. Findings
+      // are resolved here because severity visibility is frontend state: a
+      // tier the user has hidden must never be sent silently.
+      const contextReferences = buildReferenceContext(
+        useChatReferenceStore.getState().takeAttachedReferences(),
+        validation,
+        visibility,
+        // The live buffer, not what the reference looked like when it was
+        // attached: a file/section/param reference carries the text it points
+        // at, and the user may have edited since.
+        (file) => useConfigStore.getState().configFiles[file]?.raw_text,
+      );
+
       setMessages(newMessages);
       setInput('');
       if (inputRef.current) inputRef.current.textContent = '';
@@ -475,34 +505,13 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           stopRequestId,
         );
 
-        // EXPERIMENT (auto-attach off): mentioned files are NOT auto-injected.
-        // Only files the user explicitly checks in "Include Files" are sent
-        // as context.
-        const contextTargets = Array.from(new Set(selectedConfigContextFiles));
-
-        // Phase 4: collect the candidate files (checked in "Include Files" +
-        // manually attached) with their content and labels. Content is sent
-        // to the backend as contextFiles for the edit session's working state
-        // — nothing is dumped into the prompt; the model fetches via
-        // read_user_config.
-        const candidateFiles = new Map<string, { text: string; label: string }>();
-        for (const filename of contextTargets) {
-          const fileText = await getConfigText(filename);
-          if (fileText != null) {
-            candidateFiles.set(filename, { text: fileText, label: getConfigContextLabel(filename) });
-          }
-        }
-        for (const file of attachedConfigFiles) {
-          candidateFiles.set(file.name, { text: file.content, label: 'User-attached local Klipper config file' });
-        }
-
-        // Context files sent to the backend for the edit session / approval
-        // re-validation (content never lands in the prompt here — the model
-        // must fetch).
+        // No context-file picker (2026-10-03): a request carries the editor's
+        // UNSAVED DRAFTS and nothing else. Files the user has not touched are
+        // not shipped — the backend arms the edit session from its own
+        // user-config mirror (`_mirror_user_config_files`), and the model
+        // finds what it needs with list_user_configs / read_user_config,
+        // directed by the user's message or a reference chip.
         const contextFilesPayload: Record<string, { content: string; label: string }> = {};
-        for (const [filename, candidate] of candidateFiles) {
-          contextFilesPayload[filename] = { content: candidate.text, label: candidate.label };
-        }
 
         // Unsaved-delta carry-over (live report 2026-09-25): files edited in
         // the editor but not yet saved — INCLUDING files the AI created and
@@ -544,7 +553,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
 
         // First request
         const assistantAttempt = await draftRequestMessage(
-          { ...chatRequestBase, contextFiles: contextFilesPayload },
+          { ...chatRequestBase, contextFiles: contextFilesPayload, context_references: contextReferences },
           requestConversation,
           undefined,
           { signal: stopController.signal },
@@ -557,7 +566,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         // prose draft to validate or retry.
         const pipelineResult = await runReplyValidationPipeline({
           requestFn: (conversation) => draftRequestMessage(
-            { ...chatRequestBase, contextFiles: contextFilesPayload },
+            { ...chatRequestBase, contextFiles: contextFilesPayload, context_references: contextReferences },
             conversation,
             undefined,
             { signal: stopController.signal },
@@ -571,14 +580,47 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         });
 
         if (pipelineResult.warnings) setError(pipelineResult.warnings);
-        setMessages([...newMessages, pipelineResult.finalMessage]);
+        // Stamp the request id on the reply: the review rows are looked up by
+        // it, so this reply's edits stay with this reply.
+        const finalMessage: ChatMessage = {
+          ...pipelineResult.finalMessage,
+          requestId: stopRequestId,
+        };
+        // Steer bubbles appended AFTER this submit (handleSteer writes the
+        // store directly) are not in the closure's `newMessages`; merge them
+        // back in so a message the user actually sent cannot vanish from
+        // the transcript when the reply lands (PR #36 review, L1).
+        const latest = useAiStore.getState().messages;
+        const steersAfterSubmit = latest.slice(newMessages.length).filter((m) => m.steer);
+        setMessages([...newMessages, ...steersAfterSubmit, finalMessage]);
         // Approved tool edits (Phase 2 gate): the resuming loop's final
         // reply carries the staged writes — put them into the editor draft
         // (dirty, save-gated). Declines/timeouts arrive with no staged
         // edits, so plain Q&A and declined flows are untouched.
-        const stagedEdits = pipelineResult.finalMessage.pendingEdits;
-        if (stagedEdits && stagedEdits.length > 0) {
-          await applyApprovedToolEdits(stagedEdits);
+        const stagedEdits = finalMessage.pendingEdits;
+        // Stale-run guard on the FINAL apply too (round-2 N5): a review the
+        // user discarded mid-flight must not have the reply's edits land in
+        // the reset buffer when the reply completes.
+        const runStale = useChangeSetStore.getState().epoch !== runEpochRef.current;
+        if (!runStale && stagedEdits && stagedEdits.length > 0) {
+          const failed = await applyStagedEdits(stagedEdits);
+          if (failed.length > 0) {
+            setError(`The AI's change to ${failed.join(', ')} could not be applied to the editor — check the file before saving.`);
+          }
+        }
+        // The reply's change set is authoritative — it is what the ledger's
+        // frames seed from — so it replaces whatever the poll last showed (a
+        // final edit may have landed after the last poll tick). It joins the
+        // running total rather than replacing it, and its FRAMES seed the
+        // review (a review already in progress keeps its frames).
+        if (useChangeSetStore.getState().epoch === runEpochRef.current) {
+          useChangeSetStore.getState().setFromStream(
+            stopRequestId,
+            finalMessage.changeSet ?? null,
+          );
+          useChangeSetStore.getState().seedFrames(
+            framesFromChangeSet(finalMessage.changeSet ?? null),
+          );
         }
         // Background completion signal: if the dialog is closed when the reply
         // lands, flag the toolbar button so the user knows it's ready.
@@ -622,8 +664,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     },
     [
       activeFile,
-      applyApprovedToolEdits,
-      attachedConfigFiles,
       configFiles,
       draftRequestMessage,
       getConfigContextLabel,
@@ -633,7 +673,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       loading,
       messages,
       originalTexts,
-      selectedConfigContextFiles,
       setMessages,
     ],
   );
@@ -672,6 +711,13 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           setApprovalCard(poll);
           setApprovalNow(Date.now());
           setApprovalInvalidation(null);
+          // Mirror the card into the text view's pending-diff pane. Keyed on
+          // this same "new approvalId" moment so the pane and the card can
+          // never disagree about which change is waiting. Stale-run guard
+          // (round-2 N5): a discarded run cannot re-install its card.
+          if (useChangeSetStore.getState().epoch === runEpochRef.current) {
+            usePendingEditStore.getState().setPending(poll);
+          }
           // A NEW card is a fresh decision: busy is per-card, never
           // inherited. Without this, approving op 1 strands approvalBusy
           // (the ok path clears the card, not the flag) and op 2's card
@@ -705,9 +751,13 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         // Card resolved/closed server-side (e.g. timeout auto-decline):
         // drop it. A decision POST in flight keeps it visible until the
         // main request completes and loading clears.
+        const resolvedId = approvalCardRef.current.approvalId;
         approvalCardRef.current = null;
         setApprovalCard(null);
         setApprovalAnchor(null);
+        // The pane mirrors the card slot, so it drops with it — keyed on the
+        // card we are dropping so a late poll cannot clear a NEWER one.
+        usePendingEditStore.getState().clearPending(resolvedId);
         // The decision is no longer actionable — a lingering green
         // 'awaiting' would keep hailing the user for nothing. Return to
         // grey (only if WE raised the flag; never clobber an 'error').
@@ -746,6 +796,29 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         toolNames: poll.toolNames ?? [],
         elapsedMs: poll.elapsedMs ?? 0,
       }));
+      // ── Live staging (post-hoc review) ──
+      // The edit lands in the editor as the model makes it, and the rows in
+      // the transcript are the live view of the same accumulating set. The
+      // payload is per-file NET text, so applying it repeatedly is a no-op;
+      // the signature check keeps the ~1.5s poll from re-parsing every tick.
+      if (poll.stagedEdits && poll.stagedEdits.length > 0) {
+        const signature = JSON.stringify(poll.stagedEdits);
+        // Same stale-run guard as the change-set writes below (B-4): after
+        // an explicit discard the buffer was reset — do not restage into it.
+        if (signature !== appliedStagedRef.current
+            && useChangeSetStore.getState().epoch === runEpochRef.current) {
+          appliedStagedRef.current = signature;
+          void applyStagedEdits(poll.stagedEdits);
+        }
+      }
+      if (poll.changeSet) {
+        // Stale-run guard (B-4): an explicit discardReview() bumped the
+        // epoch after this run started — the review was thrown away on
+        // purpose, so this tick's write must not resurrect it.
+        if (useChangeSetStore.getState().epoch !== runEpochRef.current) return;
+        useChangeSetStore.getState().setFromStream(stopRequestId, poll.changeSet);
+        useChangeSetStore.getState().seedFrames(framesFromChangeSet(poll.changeSet));
+      }
     };
     void tick();
     const interval = window.setInterval(() => { void tick(); }, 1500);
@@ -763,19 +836,82 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     return () => window.clearInterval(interval);
   }, [approvalCard]);
 
-  const buildDecisionContext = useCallback(async (): Promise<Record<string, { content: string; label: string }>> => {
-    // Latest working content for re-validation: all loaded files (drafts
-    // win over saved), plus anything attached to this conversation.
-    const ctx: Record<string, { content: string; label: string }> = {};
-    for (const filename of Object.keys(configFiles)) {
-      const text = await getConfigText(filename);
-      if (text != null) ctx[filename] = { content: text, label: getConfigContextLabel(filename) };
+  // ── Keep/undo a change set (post-hoc review) ────────────────────
+  // The engine is `services/changeSetReview`: the text view's pane makes the
+  // same decisions, and there must be exactly one implementation of a replay
+  // (never a text revert) for both surfaces to call.
+
+  // ── Transcript rows ─────────────────────────────────────────────
+  // One row per edit, read-only, hung on the reply that made them: the model
+  // edits before it answers, so the rows sit immediately before its bubble.
+  // They are looked up per request, so earlier replies keep their own rows
+  // while a later message joins the running total.
+  const renderEditRows = useCallback(
+    (rows: ChangeSetRow[]) => {
+      if (rows.length === 0) return null;
+      return (
+        <ChatEditRows
+          rows={rows}
+          expanded={changeSetExpanded}
+          onToggle={(id) => useChangeSetStore.getState().toggleExpanded(id)}
+        />
+      );
+    },
+    [changeSetExpanded],
+  );
+
+  const editRowsFor = useCallback(
+    (message: ChatMessage) => {
+      if (message.requestId) {
+        const rows = rowsForRequest(changeSetSegments, message.requestId);
+        if (rows.length > 0) return renderEditRows(rows);
+      }
+      // A conversation restored from the backend carries its own change set
+      // and no live segment; show it so the reply still explains itself.
+      const restored = buildChangeSetView(message.changeSet ?? null);
+      return renderEditRows(restored?.rows ?? []);
+    },
+    [changeSetSegments, renderEditRows],
+  );
+
+  // While the reply is still streaming there is no message to hang the rows
+  // on, so show the rows of the request actually in flight. Looking up "the
+  // newest segment" instead showed the PREVIOUS reply's rows again under the
+  // new message, until the in-flight request staged its first edit.
+  const streamingEditRows = renderEditRows(
+    stopRequestId ? rowsForRequest(changeSetSegments, stopRequestId) : [],
+  );
+
+  const handleKeepAll = useCallback(() => keepAll(), []);
+  const handleUndoAll = useCallback(() => { void undoAll(); }, []);
+  const handleKeepFile = useCallback((file: string) => keepAllIn(file), []);
+  const handleUndoFile = useCallback((file: string) => { void undoAllIn(file); }, []);
+  const handleKeepRun = useCallback((file: string, key: string) => keepRun(file, key), []);
+  const handleUndoRun = useCallback((file: string, key: string) => { void undoRun(file, key); }, []);
+
+  // ── Mid-loop steering ───────────────────────────────────────────
+  // While a request is in flight the composer steers it: the message is
+  // queued and injected as a real user turn at the next tool-turn boundary,
+  // and it is shown in the transcript at the point it landed (the user's own
+  // words — never a tool result, never a system nudge).
+  const handleSteer = useCallback(async () => {
+    const text = input.trim();
+    if (!text || !loading) return;
+    const requestId = stopRequestIdRef.current;
+    if (!requestId) return;
+    setInput('');
+    if (inputRef.current) inputRef.current.textContent = '';
+    const result = await api.steerChat(requestId, text);
+    if (!result.accepted) {
+      // The reply landed first: the words are still the user's, so do not
+      // swallow them — put them back in the composer as a new message.
+      setInput(text);
+      if (inputRef.current) inputRef.current.textContent = text;
+      setError('The reply had already finished — send that as a new message.');
+      return;
     }
-    for (const file of attachedConfigFiles) {
-      ctx[file.name] = { content: file.content, label: 'User-attached local Klipper config file' };
-    }
-    return ctx;
-  }, [configFiles, getConfigText, getConfigContextLabel, attachedConfigFiles]);
+    setMessages([...messages, { role: 'user', content: text, steer: true }]);
+  }, [input, loading, messages, setMessages]);
 
   const handleApprovalDecision = useCallback(async (decision: 'approve' | 'decline') => {
     const card = approvalCardRef.current;
@@ -816,6 +952,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         setApprovalCard(null);
         setApprovalAnchor(null);
         setApprovalBusy(false);
+        usePendingEditStore.getState().clearPending(card.approvalId);
       } else {
         setApprovalInvalidation(
           result.status === 'already_decided'
@@ -825,6 +962,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         approvalCardRef.current = null;
         setApprovalCard(null);
         setApprovalAnchor(null);
+        usePendingEditStore.getState().clearPending(card.approvalId);
       }
     } catch {
       if (approvalCardRef.current?.approvalId === card.approvalId) {
@@ -884,18 +1022,19 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   const saveCurrentConversation = useCallback(() => {
     const { settings, messages } = useAiStore.getState();
     if (messages.length > 0) {
-      useChatHistoryStore.getState().saveConversation(
-        messages,
-        settings,
-        attachedConfigFiles.map(({ name, content }) => ({ name, content })),
-      );
+      useChatHistoryStore.getState().saveConversation(messages, settings);
     }
-  }, [attachedConfigFiles]);
+  }, []);
 
   // Start a fresh conversation. (The old draft-preview reset retired with
   // the Phase-4 ratchet — there is no prose draft to drop.)
   const handleStartNewChat = useCallback(() => {
     clearMessages();
+    useChatReferenceStore.getState().clear();
+    // A new conversation inherits no running change set — the store's own
+    // contract (PR #36 review, claim 3). This also bumps the epoch, so an
+    // in-flight reply cannot re-seed the previous conversation's review.
+    useChangeSetStore.getState().clear();
   }, [clearMessages]);
 
   const handleNewChatWithSave = useCallback(() => {
@@ -910,14 +1049,12 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     }
     saveCurrentConversation();
     handleStartNewChat();
-    setAttachedConfigFiles([]);
   }, [saveCurrentConversation, handleStartNewChat]);
 
   // Carry the existing conversation into the "new" chat so the next prompt
   // appends to it — the model keeps all prior context.
   const handleCarryOverContext = useCallback(() => {
     saveCurrentConversation();
-    setAttachedConfigFiles([]);
     setError(null);
     setShowCarryOverPrompt(false);
   }, [saveCurrentConversation]);
@@ -925,7 +1062,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   const handleStartFreshChat = useCallback(() => {
     saveCurrentConversation();
     handleStartNewChat();
-    setAttachedConfigFiles([]);
     setError(null);
     setShowCarryOverPrompt(false);
   }, [saveCurrentConversation, handleStartNewChat]);
@@ -936,15 +1072,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       saveCurrentConversation();
       setMessages(conversation.messages);
       setSettings(conversation.settings);
-      // Restore config files that were attached during the original chat so
-      // continuing the conversation keeps the same file context.
-      setAttachedConfigFiles(
-        (conversation.attachedConfigFiles ?? []).map((file, index) => ({
-          id: `${file.name}-${index}`,
-          name: file.name,
-          content: file.content,
-        })),
-      );
     },
     [saveCurrentConversation, setMessages, setSettings],
   );
@@ -988,14 +1115,24 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   );
 
   // ── Pending Request Handling ────────────────────────────────────
+  // A queued request (Save → "Analyze with AI") runs whether the surface
+  // showing it is the modal or the docked panel.
   useEffect(() => {
-    if (!open || !pendingRequest || loading || !isConfigured()) return;
+    if ((!open && !docked) || !pendingRequest || loading || !isConfigured()) return;
     if (handledPendingRequestIdRef.current === pendingRequest.id) return;
     handledPendingRequestIdRef.current = pendingRequest.id;
     onPendingRequestHandled?.();
     void submitMessage(pendingRequest.prompt, { hiddenFromUser: pendingRequest.hiddenFromUser });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isConfigured, loading, onPendingRequestHandled, open, pendingRequest]);
+  }, [isConfigured, loading, onPendingRequestHandled, open, docked, pendingRequest]);
+
+  // ── Composer focus requests ─────────────────────────────────────
+  // The toolbar's Chat button means "take me to the input" when the panel is
+  // already showing; a counter state flag is how that reaches across.
+  useEffect(() => {
+    if (composerFocusNonce === 0 || !docked) return;
+    inputRef.current?.focus();
+  }, [composerFocusNonce, docked]);
 
   // ── Shared settings panel props ─────────────────────────────────
   const settingsPanelProps = {
@@ -1017,6 +1154,77 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     onSaveSettings: handleSaveSettings,
   };
 
+  // ── Composer reference chips ────────────────────────────────────
+  // Three sources, in a fixed order: pinned (sent), the single transient
+  // preview (NOT sent until `+` promotes it), and the live editor selection
+  // (sent). The chip carries the reference and nothing else — the severity
+  // badge that used to ride along was noise on a pill whose whole job is
+  // "this is what I am pointing at" (Cliff, 2026-10-04).
+  const chipFor = useCallback(
+    (reference: ChatReference, role: ChatReferenceChip['role']): ChatReferenceChip => ({
+      id: reference.id,
+      label: referenceLabel(reference),
+      kind: reference.kind,
+      role,
+    }),
+    [],
+  );
+
+  const attachedReferenceChips = useMemo<ChatReferenceChip[]>(() => {
+    const chips = pinnedReferences.map((reference) => chipFor(reference, 'pinned'));
+    if (previewReference) chips.push(chipFor(previewReference, 'preview'));
+    if (selectionReference) chips.push(chipFor(selectionReference, 'selection'));
+    return chips;
+  }, [pinnedReferences, previewReference, selectionReference, chipFor]);
+
+  // ── @-mention sources ───────────────────────────────────────────
+  // Project files first, then the active file's sections and their params —
+  // the three things a Klipper question is ever about.
+  const mentionSources = useMemo<MentionSource[]>(() => {
+    const sources: MentionSource[] = loadedConfigFilenames.map((file) => ({
+      kind: 'file' as const,
+      file,
+      label: file,
+    }));
+    const active = activeFile ? configFiles[activeFile] : undefined;
+    if (activeFile && active) {
+      for (const section of active.sections) {
+        sources.push({
+          kind: 'section',
+          file: activeFile,
+          label: section.full_header,
+          section: section.full_header,
+          line: section.line_number,
+        });
+        for (const param of section.params) {
+          sources.push({
+            kind: 'param',
+            file: activeFile,
+            label: param.key,
+            section: section.full_header,
+          });
+        }
+      }
+    }
+    return sources;
+  }, [loadedConfigFilenames, configFiles, activeFile]);
+
+  const mentionSourceMatches = useCallback(
+    (query: string) => mentionMatches(query, mentionSources),
+    [mentionSources],
+  );
+
+  const acceptMention = useCallback((source: MentionSource) => {
+    const reference = nodeToReference({
+      kind: source.kind,
+      id: `${source.kind}:${source.file}:${source.label}`,
+      label: source.label,
+      file: source.file,
+      section: source.section,
+      line: source.line,
+    });
+    if (reference) useChatReferenceStore.getState().addPinned(reference);
+  }, []);
   // ═════════════════════════════════════════════════════════════════
   // RENDER
   // ═════════════════════════════════════════════════════════════════
@@ -1024,11 +1232,17 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   // The dialog stays MOUNTED when closed so an in-flight request keeps
   // running (validation retries, connection-recovery listener, WIP state).
   // Closing only hides the overlay; reopening shows the finished reply.
-  if (!open) {
+  // Folding the dock behaves the same way: `docked` going false renders
+  // nothing, but the instance — and therefore the streaming request, the
+  // draft and any pending approval card — survives untouched.
+  if (!open && !docked) {
     return null;
   }
 
   // ── Unconfigured State ──────────────────────────────────────────
+  // Modal only. With no provider there is no panel to dock: `ChatDock`
+  // renders its disabled rail and never publishes a host element, so
+  // `docked` is false and this stays the one configuration entry point.
   if (!isConfigured()) {
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
@@ -1055,130 +1269,218 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   }
 
   // ── Configured State ────────────────────────────────────────────
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
-      <div
-        className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[620px] overflow-hidden flex flex-col"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Title bar */}
-        <div className="flex items-center justify-between p-4 border-b border-[var(--color-bg-tertiary)]">
-          <div className="flex items-center gap-2">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" className="text-[var(--color-text-secondary)]">
-              <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2v10z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+  // One content tree, two shells. `docked` swaps the wrapper (overlay vs.
+  // column) and the header's density; nothing below this line knows or
+  // cares which shell it is in.
+
+  const statusTitle =
+    chatStatus === 'success' ? 'Last response is ready'
+      : chatStatus === 'awaiting' ? 'An edit is waiting for your decision'
+        : chatStatus === 'error' ? 'The last request failed'
+          : 'Idle';
+  const statusDotClass =
+    chatStatus === 'success' || chatStatus === 'awaiting' ? 'bg-green-500'
+      : chatStatus === 'error' ? 'bg-red-500'
+        : 'bg-[var(--color-bg-tertiary)]';
+  const iconButtonClass =
+    'rounded p-1 text-[var(--color-text-secondary)] transition-colors hover:text-[var(--color-text-primary)] disabled:opacity-40 disabled:cursor-not-allowed';
+
+  const header = docked ? (
+    // Mirrors ConfigTree's header so the two side panels read as a pair:
+    // label + status on the left, controls on the right, `>` to fold.
+    <div className="shrink-0 border-b border-[var(--color-bg-tertiary)]">
+      <div className="flex h-9 items-center justify-between gap-2 px-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className={`h-2 w-2 shrink-0 rounded-full ${statusDotClass}`} title={statusTitle} />
+          <h2 className="truncate text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-secondary)]">
+            AI Chat
+          </h2>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          <button
+            onClick={handleNewChatWithSave}
+            disabled={loading || messages.length === 0}
+            className={iconButtonClass}
+            title="Start a new chat"
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+              <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
             </svg>
-            <h2 className="text-sm font-semibold">AI Chat</h2>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => {
-                setShowPrinterMemory(true);
-                // Clear any stale proposal when opening manually
-                setProposedMemory(null);
-              }}
-              className="px-2 py-1 rounded text-[10px] font-medium bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
-              title="View and edit printer memory"
-            >
-              Printer Memory
-            </button>
-            <button
-              onClick={() => setShowChatHistory(true)}
-              className="px-2 py-1 rounded text-[10px] font-medium bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
-              title="View and load past conversations"
-            >
-              Chat History
-            </button>
-            <button
-              onClick={handleNewChatWithSave}
-              disabled={loading || messages.length === 0}
-              className="px-2 py-1 rounded text-[10px] font-medium bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] disabled:opacity-40 disabled:cursor-not-allowed"
-              title="Start a new chat"
-            >
-              New Chat
-            </button>
-            <button
-              onClick={() => setShowSettings(!showSettings)}
-              className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
-              title="AI Settings"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
-                <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.5"/>
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-              </svg>
-            </button>
-            <button onClick={onClose} className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]">
-              ✕
-            </button>
-          </div>
+          </button>
+          <button
+            onClick={() => setShowChatHistory(true)}
+            className={iconButtonClass}
+            title="View and load past conversations"
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+              <circle cx="8" cy="8" r="5.5" stroke="currentColor" strokeWidth="1.5" />
+              <path d="M8 5v3.2l2 1.3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+          <button
+            onClick={() => {
+              setShowPrinterMemory(true);
+              // Clear any stale proposal when opening manually
+              setProposedMemory(null);
+            }}
+            className={iconButtonClass}
+            title="View and edit printer memory"
+          >
+            <BookIcon />
+          </button>
+          <button
+            onClick={() => setShowSettings(!showSettings)}
+            className={iconButtonClass}
+            title="AI Settings"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+              <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.5" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
         </div>
-
-        {/* Inline Settings Panel */}
-        {showSettings && (
-          <ChatSettingsPanel standalone={false} {...settingsPanelProps} />
-        )}
-
-        {/* Messages area */}
-        <div
-          ref={messagesScrollRef}
-          onScroll={handleMessagesScroll}
-          className="flex-1 overflow-y-auto p-4"
-          style={{ minHeight: 350, maxHeight: 450 }}
+      </div>
+    </div>
+  ) : (
+    <div className="flex items-center justify-between p-4 border-b border-[var(--color-bg-tertiary)]">
+      <div className="flex items-center gap-2">
+        <span className="text-[var(--color-text-secondary)]"><ChatBubbleIcon size={16} /></span>
+        <h2 className="text-sm font-semibold">AI Chat</h2>
+      </div>
+      <div className="flex items-center gap-2">
+        <button
+          onClick={() => {
+            setShowPrinterMemory(true);
+            // Clear any stale proposal when opening manually
+            setProposedMemory(null);
+          }}
+          className="px-2 py-1 rounded text-[10px] font-medium bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
+          title="View and edit printer memory"
         >
-          <ChatMessageList
-            messages={messages}
-            loading={loading}
-            progress={progress}
-            error={connectionLost ? 'Connection lost — the last question will resend automatically when the network returns.' : error}
-            onRetry={handleRetry}
-            activeFile={activeFile}
-            onReviewPrinterMemory={handleReviewPrinterMemory}
-            onEditMessage={handleEditMessage}
-            messagesEndRef={messagesEndRef}
-          />
-          {approvalCard && (
-            <ChatApprovalCard
-              card={approvalCard}
-              receivedAtMs={approvalAnchor?.receivedAtMs ?? approvalNow}
-              nowMs={approvalNow}
-              busy={approvalBusy}
-              invalidation={approvalInvalidation}
-              onApprove={() => { void handleApprovalDecision('approve'); }}
-              onDecline={() => { void handleApprovalDecision('decline'); }}
-              onShowFullDiff={() => { if (approvalCard) setApprovalDiffPreview(approvalCard); }}
-            />
-          )}
-        </div>
+          Printer Memory
+        </button>
+        <button
+          onClick={() => setShowChatHistory(true)}
+          className="px-2 py-1 rounded text-[10px] font-medium bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
+          title="View and load past conversations"
+        >
+          Chat History
+        </button>
+        <button
+          onClick={handleNewChatWithSave}
+          disabled={loading || messages.length === 0}
+          className="px-2 py-1 rounded text-[10px] font-medium bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] disabled:opacity-40 disabled:cursor-not-allowed"
+          title="Start a new chat"
+        >
+          New Chat
+        </button>
+        <button
+          onClick={() => setShowSettings(!showSettings)}
+          className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
+          title="AI Settings"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+            <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.5"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+        </button>
+        <button onClick={onClose} className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]">
+          ✕
+        </button>
+      </div>
+    </div>
+  );
 
-        {/* File input (hidden) */}
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".cfg,text/plain"
-          multiple
-          className="hidden"
-          onChange={handleAttachConfigFiles}
-        />
+  const body = (
+    <>
+      {header}
 
-        {/* Input bar */}
-        <ChatInputBar
-          input={input}
+      {/* Inline Settings Panel */}
+      {showSettings && (
+        <ChatSettingsPanel standalone={false} {...settingsPanelProps} />
+      )}
+
+      {/* Messages area */}
+      <div
+        ref={messagesScrollRef}
+        onScroll={handleMessagesScroll}
+        className={docked ? 'flex-1 overflow-y-auto p-3' : 'flex-1 overflow-y-auto p-4'}
+        // The dock is a full-height column, so the modal's fixed height band
+        // is dropped rather than translated into a shorter window.
+        style={docked ? undefined : { minHeight: 350, maxHeight: 450 }}
+      >
+        <ChatMessageList
+          messages={messages}
           loading={loading}
-          selectedConfigContextFiles={selectedConfigContextFiles}
-          loadedConfigFilenames={loadedConfigFilenames}
+          progress={progress}
+          error={connectionLost ? 'Connection lost — the last question will resend automatically when the network returns.' : error}
+          onRetry={handleRetry}
           activeFile={activeFile}
-          attachedConfigFiles={attachedConfigFiles}
-          onInputChange={setInput}
-          onSend={handleSend}
-          onStop={handleStop}
-          onKeyDown={handleKeyDown}
-          onAttachFiles={handleAttachConfigFiles}
-          onRemoveAttachedFile={handleRemoveAttachedFile}
-          onSelectedContextFilesChange={setSelectedConfigContextFiles}
-          inputRef={inputRef}
-          fileInputRef={fileInputRef}
+          onReviewPrinterMemory={handleReviewPrinterMemory}
+          onEditMessage={handleEditMessage}
+          messagesEndRef={messagesEndRef}
+          editRowsFor={editRowsFor}
+          streamingEditRows={streamingEditRows}
         />
+        {approvalCard && (
+          <ChatApprovalCard
+            card={approvalCard}
+            receivedAtMs={approvalAnchor?.receivedAtMs ?? approvalNow}
+            nowMs={approvalNow}
+            busy={approvalBusy}
+            invalidation={approvalInvalidation}
+            onApprove={() => { void handleApprovalDecision('approve'); }}
+            onDecline={() => { void handleApprovalDecision('decline'); }}
+            onShowFullDiff={() => { if (approvalCard) setApprovalDiffPreview(approvalCard); }}
+          />
+        )}
       </div>
 
+      {/* Input bar */}
+      {/* Post-hoc review summary: the LEDGER — one row per run of
+          diff(FRAME, LIVE). Keep or undo a run and it leaves the diff; when
+          nothing is left the whole bar goes away (Sir, 2026-10-07). */}
+      <ChangeSetBar
+        files={ledgerSections}
+        onKeepAll={handleKeepAll}
+        onUndoAll={handleUndoAll}
+        onKeepFile={handleKeepFile}
+        onUndoFile={handleUndoFile}
+        onKeepRun={handleKeepRun}
+        onUndoRun={handleUndoRun}
+        onOpenFile={(file) => {
+          const config = configFiles[file];
+          if (config) useConfigStore.getState().setActiveFile(file);
+        }}
+      />
+      <ChatInputBar
+        input={input}
+        loading={loading}
+        onSteer={() => { void handleSteer(); }}
+        onInputChange={setInput}
+        onSend={handleSend}
+        onStop={handleStop}
+        onKeyDown={handleKeyDown}
+        inputRef={inputRef}
+        compact={docked}
+        references={docked ? attachedReferenceChips : undefined}
+        onRemoveReference={(id) => {
+          const store = useChatReferenceStore.getState();
+          if (store.preview?.id === id) store.setPreview(null);
+          else if (store.selection?.id === id) store.dismissSelection();
+          // Detaching a pinned reference hands it back as the suggestion it
+          // came from, so the pill survives the click as a dashed grey `+`.
+          else store.unpinToPreview(id);
+        }}
+        onPromoteReference={() => useChatReferenceStore.getState().promotePreview()}
+        onMentionQuery={mentionSourceMatches}
+        onMentionAccept={acceptMention}
+      />
+    </>
+  );
+
+  const overlays = (
+    <>
       {/* Chat History Dialog */}
       {showChatHistory && (
         <ChatHistoryDialog
@@ -1236,6 +1538,39 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           </div>
         </div>
       )}
+    </>
+  );
+
+  // ── Docked shell ────────────────────────────────────────────────
+  // The panel is a real panel: it occupies its own flex column in the text
+  // view and pushes the editor's width. Dialogs it opens (history, printer
+  // memory, the diff preview, the carry-over prompt) stay full-screen
+  // overlays — they are modal decisions, not part of the column.
+  if (docked && dockHost) {
+    return (
+      <>
+        {createPortal(
+          <div className="flex h-full w-full flex-col overflow-hidden bg-[var(--color-bg-secondary)]">
+            {body}
+          </div>,
+          dockHost,
+        )}
+        {overlays}
+      </>
+    );
+  }
+
+  // ── Modal shell (unchanged) ─────────────────────────────────────
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
+      <div
+        className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[620px] overflow-hidden flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {body}
+      </div>
+
+      {overlays}
     </div>
   );
 };

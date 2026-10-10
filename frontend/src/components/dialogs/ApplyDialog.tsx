@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { createTwoFilesPatch } from 'diff';
 import { useConfigStore } from '../../stores/configStore';
+import { useChangeSetStore } from '../../stores/changeSetStore';
+import { ledgerFrom } from '../../services/reviewEngine';
 import { useNativeStore } from '../../stores/nativeStore';
 import { useVisibility } from '../../stores/validationSettingsStore';
 import { getSaveButtonClass } from '../../utils/saveButtonClass';
@@ -185,6 +187,17 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
   const { configPath } = useNativeStore();
   const isDirty = useConfigStore((s) => s.isDirty);
   const validation = useConfigStore((s) => s.validation);
+  // Post-hoc review: how many AI-chat runs nobody has kept or undone yet. The
+  // ledger is the count now (Sir, 2026-10-07) — a run leaves the diff the
+  // moment it is decided, so the number is just the runs on screen.
+  const reviewFrames = useChangeSetStore((s) => s.reviewFrames);
+  const liveTexts = useConfigStore((s) => s.liveTexts);
+  const allConfigFiles = useConfigStore((s) => s.configFiles);
+  const unreviewedChanges = useMemo(
+    () => ledgerFrom({ reviewFrames, liveTexts, configFiles: allConfigFiles })
+      .reduce((sum, file) => sum + file.runs.length, 0),
+    [reviewFrames, liveTexts, allConfigFiles],
+  );
   // saveButtonClass is computed AFTER gateIssues below — the dialog's Save
   // button turns red only when a SELECTED file is blocked (the toolbar keeps
   // the project-wide red; a deselected broken file doesn't block this save).
@@ -557,6 +570,21 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
       // doesn't keep showing them as deleted forever.
       configStore.removeOriginalTexts(deleted);
       configStore.markClean();
+      // A save settles the review of the files it WROTE: their frames
+      // describe edits that are now the file's own content (PR #36 review,
+      // claim 3). A subset save must not discard the reviews of files that
+      // stayed on the shelf (round-2 N2) — those files keep their frames.
+      // Only when everything under review went to disk does the whole
+      // change set end (which also bumps the epoch, retiring an in-flight
+      // reply's late writes, B-4).
+      const changeSet = useChangeSetStore.getState();
+      const written = new Set([...Object.keys(exportedFiles), ...deleted]);
+      const underReview = Object.keys(changeSet.reviewFrames);
+      if (underReview.length > 0 && underReview.every((f) => written.has(f))) {
+        changeSet.clear();
+      } else {
+        for (const f of written) changeSet.removeReviewFrame(f);
+      }
     } catch (err) {
       setStatus('error');
       setMessage(err instanceof Error ? err.message : 'Save failed');
@@ -730,6 +758,20 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
             }
           </p>
         </div>
+
+        {/* Unreviewed AI changes (post-hoc review, 2026-10-02): the chat's
+            change set is reviewed there, not here, but a save that silently
+            carried edits nobody looked at is the one thing this architecture
+            can get wrong — so say it, right where the saving happens. */}
+        {unreviewedChanges > 0 && (
+          <div className="mx-4 mt-2 px-3 py-2 rounded-lg bg-[var(--color-warning)]/10 border border-[var(--color-warning)]/30">
+            <p className="text-xs text-[var(--color-warning)]">
+              {unreviewedChanges} change{unreviewedChanges === 1 ? '' : 's'} from the AI chat
+              {unreviewedChanges === 1 ? ' has' : ' have'} not been reviewed yet.
+              Keep or undo them in the chat before saving.
+            </p>
+          </div>
+        )}
 
         {/* Body */}
         <div className="flex flex-1 overflow-hidden">
