@@ -192,7 +192,10 @@ export function stripGhostsFromDisplay(
     // deleting rows above this ghost) once the block matches at the walk.
     // A twin match RETIRES the ghost: the walk stops there without
     // stripping and the rows flow to LIVE through the slot walk below.
-    while (out.length < slotLive && !matchAt(i, block)) {
+    // Bounded at the text's end: a delete can leave the text SHORTER than
+    // the slot demands; pushing lines[i] past it would pad LIVE with
+    // undefined -> phantom blank rows (R5-1, same class as R4 MEDIUM).
+    while (out.length < slotLive && i < lines.length && !matchAt(i, block)) {
       out.push(lines[i]);
       i += 1;
     }

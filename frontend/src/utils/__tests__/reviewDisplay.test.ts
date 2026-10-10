@@ -287,6 +287,18 @@ describe('liveFromDisplay', () => {
     expect(strip.live).toBe('A\nB\nF\n');
   });
 
+  it('the up-walk never pads LIVE past the text end (R5-1)', () => {
+    // Same overrun class as R4 MEDIUM, sibling loop: when the edited text
+    // is SHORTER than the slot demands (multi-row selection-delete), the
+    // walk must stop at lines.length, not push undefined rows through
+    // join as phantom blanks.
+    const live = 'y\nB\ny\nA';
+    const ghosts = new Map<number, string[]>([[5, ['A']]]);
+    const strip = stripGhostsFromDisplay('B\ny', ghosts, live);
+    expect(strip.live.split('\n').length).toBeLessThanOrEqual(2);
+    expect(strip.live).toBe('B\ny');
+  });
+
   it('lets the user delete the ghost row without touching live', () => {
     const built = displayOf(FRAME, LIVE);
     // Deleting the ghost line in the textarea removes the whole row INCLUDING
