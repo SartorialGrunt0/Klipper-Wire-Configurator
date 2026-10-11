@@ -684,6 +684,86 @@ def test_flag_on_mirror_failure_disables_edit_tools(monkeypatch):
     assert 'config_edit' not in json.dumps(scripted.payloads[0])
 
 
+def test_draft_only_context_files_sees_mirror_files_too(monkeypatch):
+    """Regression (live report 2026-10-10): since the frontend retired the
+    context-file picker, contextFiles carries ONLY unsaved drafts. Seeding
+    the session from them exclusively made every config_edit on
+    printer.cfg kick back "File 'printer.cfg' is not in the project. Known
+    files: mainsail.cfg." the moment ANY file went dirty (ai_chat.log
+    22:06 trace). The mirror is now a FLOOR: the draft files AND the disk
+    files are all editable in one session."""
+    mirror = {'printer.cfg': {'content': PRINTER_CFG}}
+    monkeypatch.setattr(ai_routes, '_mirror_user_config_files', lambda: mirror)
+    draft = {'mainsail.cfg': {'content': '[gcode_macro DRAFT]\ngcode:\n    M117 x\n'}}
+    scripted = _install(monkeypatch, [
+        # The edit lands on a file NOT in contextFiles — the exact failing
+        # shape from the live trace.
+        _text_tool_call('config_edit', {'file': 'printer.cfg', 'op': 'set_param',
+                                        'section': 'printer', 'key': 'max_accel',
+                                        'value': '3000'}),
+        _final_reply('max_accel staged at 3000.'),
+    ])
+    payload = _chat_payload([{'role': 'user', 'content': 'set max_accel 3000'}])
+    payload['contextFiles'] = draft
+    response = client.post('/ai/chat', json=payload)
+    assert response.status_code == 200
+    body = response.json()
+    assert body['pendingEdits'] and body['pendingEdits'][0]['summary'].startswith(
+        'set [printer] max_accel')
+    assert 'FAILED' not in str(scripted.payloads[1]['messages'])
+
+
+def test_draft_content_wins_over_mirror_for_same_file(monkeypatch):
+    """The floor never overrides a draft: an unsaved edit to printer.cfg
+    must be what the session edits and stages, not the stale disk mirror
+    (approval re-validation still checks against the client's latest text
+    — same no-clobber guarantee as the old contextFiles-only seeding)."""
+    mirror = {'printer.cfg': {'content': PRINTER_CFG}}  # max_accel: 1000
+    monkeypatch.setattr(ai_routes, '_mirror_user_config_files', lambda: mirror)
+    draft_cfg = PRINTER_CFG.replace('max_accel: 1000', 'max_accel: 2500')
+    scripted = _install(monkeypatch, [
+        _text_tool_call('config_edit', {'file': 'printer.cfg', 'op': 'set_param',
+                                        'section': 'printer', 'key': 'max_z_velocity',
+                                        'value': '7.5'}),
+        _final_reply('max_z_velocity staged.'),
+    ])
+    payload = _chat_payload([{'role': 'user', 'content': 'set max_z_velocity 7.5'}])
+    payload['contextFiles'] = {'printer.cfg': {'content': draft_cfg}}
+    response = client.post('/ai/chat', json=payload)
+    assert response.status_code == 200
+    body = response.json()
+    assert body['pendingEdits'], body
+    staged_text = body['pendingEdits'][0]['newText']
+    assert 'max_z_velocity: 7.5' in staged_text
+    # The draft's unsaved value survived the mirror floor (a mirror-seeded
+    # text would carry max_accel: 1000 only via the untouched PRINTER_CFG;
+    # the draft had it replaced).
+    assert 'max_accel: 2500' in staged_text
+
+
+def test_mirror_failure_still_arms_from_drafts(monkeypatch):
+    """Mirror raises but contextFiles has content: the session arms from
+    the drafts alone (old behavior for that arm), so a disk hiccup never
+    drops an unsaved-draft edit session."""
+    def boom():
+        raise RuntimeError('disk on fire')
+
+    monkeypatch.setattr(ai_routes, '_mirror_user_config_files', boom)
+    scripted = _install(monkeypatch, [
+        _text_tool_call('config_edit', {'file': 'printer.cfg', 'op': 'set_param',
+                                        'section': 'printer', 'key': 'max_accel',
+                                        'value': '3000'}),
+        _final_reply('staged despite mirror outage.'),
+    ])
+    payload = _chat_payload([{'role': 'user', 'content': 'set max_accel 3000'}])
+    payload['contextFiles'] = _ctx()
+    response = client.post('/ai/chat', json=payload)
+    assert response.status_code == 200
+    body = response.json()
+    assert body['pendingEdits'] and body['pendingEdits'][0]['summary'].startswith(
+        'set [printer] max_accel')
+
+
 def test_edit_system_prompt_carries_tool_surface(edit_flag, monkeypatch):
     # Unlocked arm (editSkill=True): the text-protocol surface advertises
     # the write tools. The edit law itself only ever rides the load_skill

@@ -3427,45 +3427,46 @@ def _mirror_user_config_files() -> dict[str, dict]:
 async def chat_proxy(req: ChatRequest):
     """Proxy chat messages to the user's configured API provider."""
     # ── Tool-mediated config editing session ──
-    # Request-scoped: seeded from this request's contextFiles (the app's
-    # live working state), stacked edits returned as pendingEdits. No
-    # per-conversation draft store by design. Without live files there is
-    # nothing to edit — tools stay unadvertised. Product behavior since
-    # the Phase-6 flag removal (2026-09-24): only an explicit
-    # editTools=False (harness read-only arm) disables the session.
+    # Request-scoped: seeded from the user-config mirror as a FLOOR with
+    # this request's contextFiles layered on top per-file (drafts win),
+    # stacked edits returned as pendingEdits. No per-conversation draft
+    # store by design. Without any files there is nothing to edit — tools
+    # stay unadvertised. Product behavior since the Phase-6 flag removal
+    # (2026-09-24): only an explicit editTools=False (harness read-only
+    # arm) disables the session.
+    #
+    # Floor, not fallback (live report 2026-10-10): since the frontend
+    # retired the context-file picker (2026-10-03), contextFiles carries
+    # ONLY the unsaved drafts. Seeding from it exclusively meant that the
+    # moment ANY file went dirty — a manual edit, or an AI-created file the
+    # user approved (approved ≠ saved) — the session shrank to just the
+    # draft files, and every config_edit on printer.cfg kicked back
+    # "File 'printer.cfg' is not in the project. Known files:
+    # mainsail.cfg." while read_user_config read the same file off disk two
+    # turns earlier (ai_chat.log 22:06 trace, chat-1791695178806). Same
+    # floor shape as list_hardware below; the mirror never overrides a
+    # draft, so unsaved edits still win and approval re-validation still
+    # checks against the client's latest text.
     edit_enabled = req.editTools is not False
     edit_session: EditSession | None = None
-    if edit_enabled and req.contextFiles:
+    if edit_enabled:
+        seed: dict[str, dict] = {}
         try:
-            edit_session = EditSession(req.contextFiles)
-            if not edit_session.has_files():
-                edit_session = None
+            seed.update(_mirror_user_config_files())
         except Exception:
-            logger.exception("Edit session seed failed | edit tools disabled for request")
-            edit_session = None
-    if edit_enabled and edit_session is None:
-        # TRIDENT-16: editTools requested without contextFiles (harness,
-        # API clients, degraded UI state) used to leave the session
-        # un-armed — no write tools advertised, so prose fallback was the
-        # model's only option and every edit silently went inert. Seed
-        # from the backend's user-config mirror instead.
-        try:
-            mirror = _mirror_user_config_files()
-        except Exception:
-            logger.exception("Mirror seed failed | edit tools disabled for request")
-            mirror = {}
-        if mirror:
+            # TRIDENT-16: a raising/empty mirror must not 500 the chat nor
+            # silently drop the drafts — arm from contextFiles alone.
+            logger.warning("Mirror seed failed | arming from contextFiles only",
+                           exc_info=True)
+        for name, meta in (req.contextFiles or {}).items():
+            seed[name] = meta
+        if seed:
             try:
-                edit_session = EditSession(mirror)
+                edit_session = EditSession(seed)
                 if not edit_session.has_files():
                     edit_session = None
-                else:
-                    logger.info(
-                        "Edit session seeded from user-config mirror | files=%d",
-                        len(mirror),
-                    )
             except Exception:
-                logger.exception("Mirror edit session failed | edit tools disabled")
+                logger.exception("Edit session seed failed | edit tools disabled for request")
                 edit_session = None
     edit_capable = edit_session is not None
 
