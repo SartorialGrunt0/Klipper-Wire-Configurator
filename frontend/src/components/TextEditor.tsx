@@ -93,6 +93,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     revalidateFile,
     revalidateAll,
     pendingLineJump,
+    requestLineJump,
   } = useConfigStore();
   const isDirty = useConfigStore((s) => s.isDirty);
   const parseError = useConfigStore((s) => s.textParseErrors[activeFile]);
@@ -1456,13 +1457,12 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   }, [pendingLineJump, activeFile, editText, editTextFile, isActive, jumpToLine, setActiveFile]);
 
   const handleSearchResultClick = (file: string, line: number) => {
-    if (file !== activeFile) {
-      setActiveFile(file);
-    }
-    // Select the matching line after state settles
-    setTimeout(() => {
-      jumpToLine(line);
-    }, 0);
+    // Same routing as the tree: a cross-file hit must switch files and wait
+    // for the export before jumping. The old setActiveFile + setTimeout(0)
+    // could land the jump on the previous file's text while the new file's
+    // export was still in flight (same class as the tree-row bug,
+    // Cliff, 2026-10-10).
+    requestLineJump(file, line);
   };
 
   // Write replaced text back through the same paths a normal edit takes: the
@@ -1758,7 +1758,12 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
         collapsed={!showFileSidebar}
         onSelectFile={handleFileSwitch}
         onFileContextMenu={handleFileContextMenu}
-        onJumpToLine={jumpToLine}
+        // Route through the store's one-shot jump: the tree shows every file's
+        // sections, so a row's line only makes sense in ITS file. The consume
+        // effect switches files and waits for the async export before jumping
+        // (a bare jumpToLine would land the line in the CURRENT file —
+        // Cliff, 2026-10-10).
+        onJumpToLine={requestLineJump}
         onAddConfig={() => { setShowAddConfig(true); setAddConfigStep('choose'); setFileError(''); }}
         onReferenceNode={(reference) => useChatReferenceStore.getState().setPreview(reference)}
         previewReferenceId={previewReferenceId}

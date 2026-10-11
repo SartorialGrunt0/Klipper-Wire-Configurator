@@ -15,7 +15,12 @@ interface ConfigTreeProps {
   collapsed: boolean;
   onSelectFile: (file: string) => void;
   onFileContextMenu: (event: React.MouseEvent, file: string) => void;
-  onJumpToLine: (line: number) => void;
+  /**
+   * Jump to a line IN A FILE. The file travels with the line: the tree shows
+   * every file's sections at once, and a bare line number would otherwise
+   * land in whatever file happens to be active (Cliff, 2026-10-10).
+   */
+  onJumpToLine: (file: string, line: number) => void;
   onAddConfig: () => void;
   /**
    * Clicking a row jumps — and, because pointing at something is also how a
@@ -189,7 +194,7 @@ function ConfigTree({
         <div key={node.id}>
           <button
             onClick={() => {
-              onJumpToLine(node.line!);
+              onJumpToLine(node.file!, node.line!);
               if (reference) onReferenceNode?.(reference);
             }}
             title={node.label}
@@ -215,7 +220,7 @@ function ConfigTree({
       <button
         key={node.id}
         onClick={() => {
-          onJumpToLine(node.line!);
+          onJumpToLine(node.file!, node.line!);
           if (reference) onReferenceNode?.(reference);
         }}
         title={`${node.label} (line ${node.line})`}
