@@ -28,6 +28,7 @@ import {
 } from '../utils/reviewLedger';
 import { useChangeSetStore } from '../stores/changeSetStore';
 import { useConfigStore } from '../stores/configStore';
+import { syncGraphForFile } from './graphSync';
 import { applyStagedEdits } from './changeSetReview';
 
 /** The pure inputs the ledger reads — a snapshot of the two stores. */
@@ -301,6 +302,10 @@ function removeCreatedFile(file: string): void {
   // the file leaves the review entirely.
   useConfigStore.getState().removeConfigFile(file);
   useChangeSetStore.getState().removeReviewFrame(file);
+  // The created file's staging had reached the graph (applyStagedEdits
+  // syncs); undoing it must pull the cards back out too, or the canvas keeps
+  // cards for a file that no longer exists (Sir 2026-10-11).
+  void syncGraphForFile(file);
 }
 
 /**

@@ -17,6 +17,7 @@
  */
 import * as api from './api';
 import type { PendingConfigEdit } from './api';
+import { syncGraphAfterModelWrite } from './graphSync';
 import { useChangeSetStore } from '../stores/changeSetStore';
 import { useConfigStore } from '../stores/configStore';
 import { usePendingEditStore } from '../stores/pendingEditStore';
@@ -51,6 +52,15 @@ export async function applyStagedEdits(edits: PendingConfigEdit[]): Promise<stri
   }
   deletes.forEach((file) => useConfigStore.getState().removeConfigFile(file));
   if (upserts.length > 0 || deletes.length > 0) useConfigStore.getState().markDirty();
+  // The graph has no other trigger for a model-level write (Sir 2026-10-11):
+  // the text editor's re-parse of this text is an echo-skip, so without
+  // this a staged section never gets its card. Sync only the files that
+  // actually landed; a delete rebuilds (its orphaned cards hang off other
+  // files' hardware nodes).
+  const appliedFiles = upserts.filter((u) => !failed.includes(u.file)).map((u) => u.file);
+  if (appliedFiles.length > 0 || deletes.length > 0) {
+    void syncGraphAfterModelWrite(appliedFiles, deletes);
+  }
   if (deletes.length > 0) {
     // Deletion alone schedules nothing (removeConfigFile only drops the file's
     // own entry) — re-derive the OTHER files' findings (e.g. a dangling

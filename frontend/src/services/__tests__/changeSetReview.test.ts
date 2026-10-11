@@ -2,11 +2,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@/services/api', () => ({
   parseConfigText: vi.fn(async (text: string, file: string) => ({
-    config: { filename: file, raw_text: text, sections: [] },
+    config: { filename: file, raw_text: text, sections: [], includes: [], header_comments: [] },
   })),
   exportConfig: vi.fn(async (cf: { raw_text?: string }) => cf.raw_text ?? ''),
   validateConfig: vi.fn(async () => ({ has_errors: false, has_warnings: false, errors: [] })),
   validateProject: vi.fn(async () => ({})),
+  loadNativeLayout: vi.fn(async () => ({ layout: null })),
 }));
 
 import * as api from '@/services/api';
