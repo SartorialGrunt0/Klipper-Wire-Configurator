@@ -44,7 +44,16 @@ export async function applyStagedEdits(edits: PendingConfigEdit[]): Promise<stri
       // single-file result written here flags every included-file macro as
       // unknown_gcode_command (live report 2026-09-20: CLEAN_NOZZLE,
       // AUX_FAN_ON/OFF from clean.cfg / aux_fan.cfg).
+      // Publish the ledger's LIVE side with the model write: `liveTexts`
+      // shadows `raw_text` in `liveTextFor`, and a previously-viewed file
+      // keeps a stale entry after its editor buffer moved on. Without this,
+      // a staged edit to a NON-active file diffs to zero runs, so the chat's
+      // footer stays hidden until the user switches to that file and the
+      // editor's export echo re-publishes it (Sir's bug report 2026-10-11).
+      // The review engine's own apply path (`applyLive`) already pairs the
+      // two writes; the staging path is the same contract.
       useConfigStore.getState().updateConfigFile(file, { ...parsed.config, raw_text: newText });
+      useConfigStore.getState().setLiveText(file, newText);
     } catch (err: unknown) {
       console.error('[ChangeSet] Failed to apply edit to', file, err);
       failed.push(file);

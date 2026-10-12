@@ -12,6 +12,7 @@ vi.mock('@/services/api', () => ({
 
 import * as api from '@/services/api';
 import { applyStagedEdits, buildDecisionContext, discardReview } from '@/services/changeSetReview';
+import { ledgerFrom } from '@/services/reviewEngine';
 import { useChangeSetStore } from '@/stores/changeSetStore';
 import { useConfigStore } from '@/stores/configStore';
 import { usePendingEditStore } from '@/stores/pendingEditStore';
@@ -74,6 +75,44 @@ describe('applyStagedEdits', () => {
   it('is a no-op with no edits', async () => {
     expect(await applyStagedEdits([])).toEqual([]);
     expect(useConfigStore.getState().isDirty).toBe(false);
+  });
+
+  it('publishes the ledger live-text for a NON-active file, so the review appears without a file switch', async () => {
+    // Sir's bug report 2026-10-11: with printer.cfg selected, an edit staged
+    // into Hotkey.cfg applied but the chat footer stayed hidden until the
+    // view switched to Hotkey.cfg. Cause: `liveTextFor` prefers the store's
+    // `liveTexts` over `raw_text`, and a previously-VIEWED file keeps a stale
+    // entry there — the staging wrote the model but not the live side, so
+    // diff(FRAME, LIVE) netted zero runs. The fix pairs the writes, exactly
+    // as the engine's own `applyLive` does.
+    useConfigStore.setState({
+      configFiles: {
+        'printer.cfg': cfg('[printer]\nmax_velocity: 200\n'),
+        'Hotkey.cfg': cfg('[gcode_macro HOTKEY_1]\ngcode:\n  M117 one\n'),
+      },
+      activeFile: 'printer.cfg',
+    });
+    // The user viewed Hotkey.cfg earlier this session: the editor published
+    // its export into liveTexts, and it stays after the buffer moves on.
+    useConfigStore.getState().setLiveText('Hotkey.cfg', '[gcode_macro HOTKEY_1]\ngcode:\n  M117 one\n');
+
+    const before = '[gcode_macro HOTKEY_1]\ngcode:\n  M117 one\n';
+    const after = '[gcode_macro HOTKEY_1]\ngcode:\n  M117 AI-edited\n';
+    const failed = await applyStagedEdits([
+      { file: 'Hotkey.cfg', op: 'update', summary: '', newText: after },
+    ]);
+    expect(failed).toEqual([]);
+    useChangeSetStore.getState().seedFrames({ 'Hotkey.cfg': before });
+
+    expect(useConfigStore.getState().liveTexts['Hotkey.cfg']).toBe(after);
+    // What the footer renders: the ledger must see the run with the view
+    // still on printer.cfg.
+    const files = ledgerFrom({
+      reviewFrames: useChangeSetStore.getState().reviewFrames,
+      liveTexts: useConfigStore.getState().liveTexts,
+      configFiles: useConfigStore.getState().configFiles,
+    });
+    expect(files.flatMap((f) => f.runs).length).toBe(1);
   });
 });
 
