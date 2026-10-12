@@ -444,6 +444,95 @@ def test_search_user_configs_lists_all_matching_section_headers(tmp_path):
     assert "[neopixel hotkey_status]" in out
 
 
+def test_search_user_configs_occurrence_checklist_across_sections(tmp_path):
+    # live report 2026-10-12: "rename every reference to Level_Bed" missed
+    # `RESPOND TYPE=error MSG='Level_Bed'`. The tool showed only the first
+    # match's enclosing section plus a file-head snippet, so references
+    # living in OTHER sections were invisible and the model had no way to
+    # verify it swept everything. Search must enumerate every occurrence
+    # with section, line number, and line text — the rename checklist.
+    server, root = _server(tmp_path)
+    user_dir = root / "user_configs"
+    user_dir.mkdir(parents=True)
+    (user_dir / "printer.cfg").write_text(
+        "[include mainsail.cfg]\n"
+        "[heater_bed]\n"
+        "sensor_type: NTC 100k beta 3950\n"
+        "[gcode_macro Level_Bed]\n"
+        "gcode:\n"
+        "    RESPOND TYPE=error MSG='Level_Bed'\n"
+        "    G28\n"
+        "[gcode_macro PRINT_START]\n"
+        "gcode:\n"
+        "    Level_Bed\n",
+        encoding="utf-8",
+    )
+    out = _call_tool(server, "search_user_configs", {"query": "level_bed"})
+    # Each content hit: section label, xCOUNT, (LINES), and the line text.
+    assert "[gcode_macro Level_Bed] x1 (L6):" in out
+    assert "RESPOND TYPE=error MSG='Level_Bed'" in out
+    assert "[gcode_macro PRINT_START] x1 (L10): Level_Bed" in out
+
+
+def test_search_user_configs_occurrences_are_word_bounded(tmp_path):
+    # The count doubles as the rename done-check: after renaming to
+    # LEVEL_BED1, searching 'level_bed' must NOT count LEVEL_BED1 as a
+    # stale reference ('_' is a word char), only genuine bare Level_Bed.
+    server, root = _server(tmp_path)
+    user_dir = root / "user_configs"
+    user_dir.mkdir(parents=True)
+    (user_dir / "printer.cfg").write_text(
+        "[gcode_macro LEVEL_BED1]\n"
+        "gcode:\n"
+        "    LEVEL_BED1\n"
+        "    Level_Bed\n",
+        encoding="utf-8",
+    )
+    out = _call_tool(server, "search_user_configs", {"query": "level_bed"})
+    assert "(L4): Level_Bed" in out
+    assert "(L3)" not in out  # LEVEL_BED1 is not a stale level_bed hit
+    assert "x1 (" in out
+
+
+def test_search_user_configs_occurrences_truncate(tmp_path):
+    server, root = _server(tmp_path)
+    user_dir = root / "user_configs"
+    user_dir.mkdir(parents=True)
+    hits = "\n".join(f"    RESPOND TYPE=echo MSG='Level_Bed {i}'" for i in range(15))
+    (user_dir / "printer.cfg").write_text(
+        f"[gcode_macro Level_Bed]\ngcode:\n{hits}\n", encoding="utf-8",
+    )
+    out = _call_tool(server, "search_user_configs", {"query": "level_bed"})
+    assert "x15 (" in out          # total count survives the cap
+    assert "not listed" in out     # truncation is explicit, not silent
+
+
+def test_search_user_configs_snippet_anchored_to_match(tmp_path):
+    # The snippet used to be the first 5 lines of the WHOLE file — in
+    # printer.cfg always the [include ...] block, so every search returned
+    # the same useless preview. It must show lines around the match.
+    server, root = _server(tmp_path)
+    user_dir = root / "user_configs"
+    user_dir.mkdir(parents=True)
+    (user_dir / "printer.cfg").write_text(
+        "[include very_unique_include_a.cfg]\n"
+        "[include very_unique_include_b.cfg]\n"
+        "[mcu]\nserial: /dev/ttyAMA0\n"
+        "[virtual_sdcard]\npath: /tmp/gcode\n"
+        "[pause_resume]\n"
+        "[gcode_macro PRINT_END]\n"
+        "gcode:\n"
+        "    M117 printing macro done\n",
+        encoding="utf-8",
+    )
+    # Multi-token query: matches via folded term 'macro'; the raw-query
+    # occurrence list finds nothing (content has singular), so any 'macro'
+    # text in the output must come from the anchored snippet.
+    out = _call_tool(server, "search_user_configs", {"query": "macros"})
+    assert "printing macro done" in out
+    assert "very_unique_include" not in out
+
+
 def test_search_user_configs_top_of_file(tmp_path):
     # A match in the file preamble (before any [section]) must be labelled
     # "(top of file)" — includes are directives, not sections.
