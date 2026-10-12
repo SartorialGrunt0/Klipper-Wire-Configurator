@@ -424,6 +424,38 @@ def _section_body_text(lines: list[str], header_index: int, end: int) -> str:
     return '\n'.join(body)
 
 
+def _splice_blank_gutter(lines: list[str], splice: int) -> None:
+    """Cap the blank-line run meeting at ``splice`` after a deletion.
+
+    When a block is deleted, the blank gutter that preceded it and the
+    one that followed it join into a single run. The old cleanup was a
+    file-wide re.sub(r'\\n{3,}', '\\n\\n', ...): it squashed every 2+
+    blank separator in the file, including untouched sections (user
+    report 2026-10-11 — delete_section "removed white space lines").
+    This trims ONLY the run at the splice point and caps it at the
+    larger of the two original gutters, so a file's own separator
+    style survives the delete. Top of file keeps zero blanks; a
+    deletion reaching EOF leaves no trailing blanks (the terminating
+    '' element — the file's final newline — is never counted).
+    """
+    start = splice
+    while start > 0 and not lines[start - 1].strip():
+        start -= 1
+    pre = splice - start
+    end = splice
+    while end < len(lines) and lines[end].strip() == '':
+        end += 1
+    at_eof = end == len(lines)
+    # The trailing '' from split() is the final newline, not a blank
+    # gutter line: discount it from the post-run length.
+    post = end - splice - (1 if at_eof else 0)
+    if at_eof:
+        # Nothing real follows: keep only the final newline.
+        lines[start:] = [''] if lines[-1] == '' else []
+        return
+    lines[start:end] = [''] * (max(pre, post) if start > 0 else 0)
+
+
 def _default_body_indent(lines: list[str], header_index: int, end: int) -> str:
     for scan in range(header_index + 1, end):
         match = RE_PARAM_LINE.match(lines[scan])
@@ -1021,8 +1053,11 @@ class ProjectState:
         while end > header_index + 1 and not lines[end - 1].strip():
             end -= 1
         del lines[header_index:end]
-        # Collapse any double blank line left at the splice point.
-        self.files[filename] = re.sub(r'\n{3,}', '\n\n', '\n'.join(lines))
+        # Cap the blank run left at the splice point at the file's own
+        # separator style (was: file-wide blank-line collapse, which
+        # squashed blanks in sections this op never touched).
+        _splice_blank_gutter(lines, header_index)
+        self.files[filename] = '\n'.join(lines)
         return {'status': 'ok', 'file': filename, 'summary': f"deleted section [{header}] from {filename}"}
 
     def _op_rename_section(self, op: dict) -> dict:
@@ -1590,7 +1625,11 @@ class ProjectState:
         while end < len(lines) and not lines[end].strip():
             end += 1
         del lines[idx:end]
-        self.files[in_file] = re.sub(r'\n{3,}', '\n\n', '\n'.join(lines))
+        # Splice-scoped gutter trim (same fix class as delete_section:
+        # the old file-wide \\n{3,} collapse edited sections and lines
+        # this op never touched).
+        _splice_blank_gutter(lines, idx)
+        self.files[in_file] = '\n'.join(lines)
         return {'status': 'ok', 'file': in_file,
                 'summary': f"removed [include {path}] from {in_file}"}
 

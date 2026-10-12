@@ -776,6 +776,74 @@ def test_delete_section_clean_and_missing():
     assert r2['status'] == 'error' and 'not found' in r2['error']
 
 
+# ── blank-line splice (user report 2026-10-11: deletes squashed
+#    whitespace via a file-wide \n{3,} collapse) ────────────────────────
+
+def test_delete_section_preserves_two_blank_separators_everywhere():
+    """The old cleanup collapsed EVERY 2+ blank run in the file, not
+    just the splice point: deleting one section squashed the separator
+    style of sections it never touched."""
+    text = ("[printer]\nkinematics: cartesian\n\n\n[fan]\npin: PA8\n\n\n"
+            "[gcode_macro FOO]\ngcode:\n    G28\n\n\n[stepper_x]\n"
+            "step_pin: PF13\n")
+    st, base = _state(text)
+    st1, r = st.apply(base, {'op': 'delete_section', 'file': 'printer.cfg',
+                             'section': 'fan'})
+    assert r['status'] == 'applied', r
+    out = st1.files['printer.cfg']
+    assert '[fan]' not in out
+    # Splice point keeps the larger neighbor gutter (2 blanks).
+    assert out.startswith('[printer]\nkinematics: cartesian\n\n\n'
+                         '[gcode_macro FOO]')
+    # Untouched separators are byte-stable.
+    assert 'G28\n\n\n[stepper_x]' in out
+
+
+def test_delete_section_one_blank_style_unchanged():
+    """Single-blank files (repo style) stay single-blank at the splice."""
+    st, base = _state()
+    st1, r = st.apply(base, {'op': 'delete_section', 'file': 'printer.cfg',
+                             'section': 'stepper_y'})
+    assert r['status'] == 'applied', r
+    out = st1.files['printer.cfg']
+    assert '\n\n\n' not in out
+    assert 'microsteps: 16\n\n[stepper_z]' in out
+
+
+def test_delete_section_first_section_no_leading_blank():
+    """Deleting the FIRST section used to leave a stray leading blank
+    line (probe 2026-10-11)."""
+    text = "[fan]\npin: PA8\n\n[printer]\nkinematics: cartesian\n"
+    st, base = _state(text)
+    st1, r = st.apply(base, {'op': 'delete_section', 'file': 'printer.cfg',
+                             'section': 'fan'})
+    assert r['status'] == 'applied', r
+    assert st1.files['printer.cfg'] == "[printer]\nkinematics: cartesian\n"
+
+
+def test_delete_section_last_section_keeps_single_final_newline():
+    text = "[printer]\nkinematics: cartesian\n\n[fan]\npin: PA8\n"
+    st, base = _state(text)
+    st1, r = st.apply(base, {'op': 'delete_section', 'file': 'printer.cfg',
+                             'section': 'fan'})
+    assert r['status'] == 'applied', r
+    assert st1.files['printer.cfg'] == "[printer]\nkinematics: cartesian\n"
+
+
+def test_remove_include_preserves_two_blank_separators():
+    """Same fix class: the file-wide collapse in remove_include squashed
+    blanks across the whole file."""
+    text = ("[include macros.cfg]\n\n\n[printer]\nkinematics: cartesian\n\n\n"
+            "[fan]\npin: PA8\n")
+    st, base = _state(text)
+    st1, r = st.apply(base, {'op': 'remove_include', 'file': 'printer.cfg',
+                             'target_file': 'macros.cfg'})
+    assert r['status'] == 'applied', r
+    out = st1.files['printer.cfg']
+    assert 'macros.cfg' not in out
+    assert out.startswith('[printer]\nkinematics: cartesian\n\n\n[fan]')
+
+
 # ── rename_section (live report 2026-09-26: rename had no tool path) ───
 
 
