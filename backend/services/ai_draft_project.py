@@ -1389,6 +1389,21 @@ class ProjectState:
         # that never happened). A patch that changes nothing must say so,
         # and name the real tool for the most common no-op shape.
         if old_text == new_text:
+            # COMMENT-06 gemma r3 trace 2026-10-12: when the identical
+            # text is a '#'-prefixed line, the model's real intent was
+            # almost certainly an UNCOMMENT and the rename_section
+            # pointer misdirected it (3 identical retries, then it told
+            # the user the commented line was "preserved"). Name the
+            # uncomment shape directly instead of the rename pointer.
+            if old_text.lstrip().startswith('#'):
+                return _state_error(
+                    f"patch_section made NO change: old_text and new_text "
+                    f"are identical. If you meant to UNCOMMENT the line, "
+                    f"new_text must be old_text WITHOUT the leading '#' "
+                    f"(keep everything else the same, including leading "
+                    f"whitespace). Call again with new_text = the line "
+                    f"minus the '#'."
+                )
             return _state_error(
                 f"patch_section made NO change: old_text and new_text are "
                 f"identical. To rename the section itself use "

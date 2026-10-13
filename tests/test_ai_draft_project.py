@@ -896,6 +896,34 @@ def test_patch_section_identical_old_new_refused():
     assert st1.files['printer.cfg'] == st.files['printer.cfg']
 
 
+def test_patch_section_identical_old_new_commented_gets_uncomment_hint():
+    # COMMENT-06 gemma r3 trace 2026-10-12: the model TRIED to uncomment
+    # '#rename_existing:' three times but built the call with
+    # old_text == new_text == '#rename_existing: ...' (it never stripped
+    # the '#' in new_text). The generic error pointed at rename_section,
+    # which misdirected it further; it gave up and told the user the
+    # commented line had been "preserved". When the identical text is a
+    # '#'-prefixed line, the error must name the uncomment shape.
+    text = (
+        "[gcode_macro BED_MESH_CALIBRATE]\n"
+        "#rename_existing: _BED_MESH_CALIBRATE\n"
+        "gcode:\n"
+        "    BED_MESH_CALIBRATE\n"
+    )
+    st = ProjectState.from_context_files({'printer.cfg': {'content': text}})
+    base = st.validate()
+    st1, r = st.apply(base, {'op': 'patch_section', 'file': 'printer.cfg',
+                             'section': 'gcode_macro BED_MESH_CALIBRATE',
+                             'old_text': '#rename_existing: _BED_MESH_CALIBRATE',
+                             'new_text': '#rename_existing: _BED_MESH_CALIBRATE'})
+    assert r['status'] == 'error'
+    assert 'NO change' in r['error']
+    assert 'WITHOUT the leading' in r['error']
+    # the rename pointer must not compete when the text is a comment line
+    assert 'rename_section' not in r['error']
+    assert st1.files['printer.cfg'] == st.files['printer.cfg']
+
+
 def test_rename_section_missing_structured_error():
     st, base = _state()
     _, r = st.apply(base, {'op': 'rename_section', 'file': 'printer.cfg',
