@@ -27,6 +27,12 @@ export interface ChangeSetBarProps {
   onUndoRun: (file: string, key: string) => void;
   /** Jump the editor to a file (navigation only). */
   onOpenFile?: (file: string) => void;
+  /**
+   * Jump the text view to the exact document AND line of one run (Cliff,
+   * 2026-10-12). The line is the run's first LIVE line — the return line for
+   * a pure deletion.
+   */
+  onJumpToRun?: (file: string, line: number) => void;
 }
 
 const ChangeSetBar: React.FC<ChangeSetBarProps> = ({
@@ -38,6 +44,7 @@ const ChangeSetBar: React.FC<ChangeSetBarProps> = ({
   onKeepRun,
   onUndoRun,
   onOpenFile,
+  onJumpToRun,
 }) => {
   const [open, setOpen] = useState(false);
   const totalRuns = files.reduce((sum, file) => sum + file.runs.length, 0);
@@ -111,7 +118,20 @@ const ChangeSetBar: React.FC<ChangeSetBarProps> = ({
                 />
               </div>
               {file.runs.map((run) => (
-                <div key={run.key} className="flex items-center gap-2 px-2 py-1">
+                <div
+                  key={run.key}
+                  className={`flex items-center gap-2 px-2 py-1 ${
+                    onJumpToRun
+                      ? 'cursor-pointer transition-colors hover:bg-[var(--color-bg-tertiary)]'
+                      : ''
+                  }`}
+                  // The whole row jumps the text view to this run's exact
+                  // line (Cliff, 2026-10-12). Keep/Undo sit in a
+                  // stopPropagation wrapper so deciding never double-fires
+                  // the jump.
+                  onClick={() => onJumpToRun?.(file.file, run.run.liveStart)}
+                  title={onJumpToRun ? `Show this change at line ${run.run.liveStart}` : undefined}
+                >
                   <span className="min-w-0 flex-1 truncate">
                     <span className="font-mono text-[var(--color-text-secondary)]">
                       {run.label || file.file}
@@ -122,15 +142,17 @@ const ChangeSetBar: React.FC<ChangeSetBarProps> = ({
                   </span>
                   {run.added > 0 && <span className="text-green-400">+{run.added}</span>}
                   {run.removed > 0 && <span className="text-red-400">−{run.removed}</span>}
-                  <EditDecisionPair
-                    busy={false}
-                    keepLabel="Keep"
-                    undoLabel="Undo"
-                    keepTitle={`Keep the change to ${run.label || file.file}`}
-                    undoTitle={`Put back the change to ${run.label || file.file}`}
-                    onKeep={() => onKeepRun(file.file, run.key)}
-                    onUndo={() => onUndoRun(file.file, run.key)}
-                  />
+                  <span onClick={(event) => event.stopPropagation()} className="flex shrink-0">
+                    <EditDecisionPair
+                      busy={false}
+                      keepLabel="Keep"
+                      undoLabel="Undo"
+                      keepTitle={`Keep the change to ${run.label || file.file}`}
+                      undoTitle={`Put back the change to ${run.label || file.file}`}
+                      onKeep={() => onKeepRun(file.file, run.key)}
+                      onUndo={() => onUndoRun(file.file, run.key)}
+                    />
+                  </span>
                 </div>
               ))}
             </div>

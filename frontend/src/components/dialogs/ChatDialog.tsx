@@ -92,6 +92,8 @@ function looksLikeTransientFailure(err: unknown): boolean {
 interface ChatDialogProps {
   open: boolean;
   onClose: () => void;
+  /** Reveal the text view before a jump-line navigation (Cliff, 2026-10-12). */
+  onShowTextView?: () => void;
   pendingRequest?: PendingAiChatRequest | null;
   onPendingRequestHandled?: () => void;
   /**
@@ -123,6 +125,7 @@ function parseTemperature(value: string): number {
 const ChatDialog: React.FC<ChatDialogProps> = ({
   open,
   onClose,
+  onShowTextView,
   pendingRequest = null,
   onPendingRequestHandled,
   variant = 'modal',
@@ -1451,6 +1454,18 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         onOpenFile={(file) => {
           const config = configFiles[file];
           if (config) useConfigStore.getState().setActiveFile(file);
+        }}
+        onJumpToRun={(file, line) => {
+          // Same routing as the Save-gate findings rows: reveal the text
+          // view, then queue a (file, line) jump — the editor switches
+          // files and waits for the async export before jumping. Only
+          // close the chat when it is a MODAL overlay covering the
+          // editor; docked, the jump is visible beside the panel and
+          // closing would drop the pending request (Cliff, 2026-10-12).
+          if (!configFiles[file]) return;
+          onShowTextView?.();
+          useConfigStore.getState().requestLineJump(file, line);
+          if (!docked) onClose();
         }}
       />
       <ChatInputBar

@@ -115,6 +115,11 @@ export function PendingReviewStrip({
   // should not yank the reader's scroll: a freshly-appeared review opens where
   // the editor already is.
   const movedRef = useRef(false);
+  // Every arrow click bumps this, and the reveal effect depends on it: an
+  // arrow click must ALWAYS reveal its run, even when the cursor index does
+  // not change — with one stop there IS nowhere to move, and re-clicking the
+  // last stop should re-center the view (Cliff, 2026-10-12).
+  const [revealTick, setRevealTick] = useState(0);
   // `stopIndexForAnchor` matches on identity; a run's identity is its key.
   const idStops = useMemo(() => stops.map((entry) => ({ ids: [entry.key] })), [stops]);
 
@@ -152,16 +157,21 @@ export function PendingReviewStrip({
     anchorKeys.current = [target.key];
     onRevealStop?.(target, movedRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [index, stops, activeFile]);
+  }, [index, stops, activeFile, revealTick]);
 
-  /** The arrows: one step through the whole review, switching files if need be. */
+  /** The arrows: one step through the whole review, switching files if need
+   *  be. The walk WRAPS (Cliff, 2026-10-12): ↓ on the last stop lands on the
+   *  first, ↑ on the first lands on the last — the review is a cycle, and
+   *  every arrow click re-reveals even when the index cannot move. */
   const stepTo = (next: number) => {
     const target = stops[next];
     if (!target) return;
     movedRef.current = true;
     land(next);
     if (target.file !== activeFile) onOpenFile(target.file);
+    setRevealTick((tick) => tick + 1);
   };
+  const wrap = (next: number) => (next + stops.length) % stops.length;
 
   return (
     <>
@@ -169,8 +179,8 @@ export function PendingReviewStrip({
         <button
           type="button"
           className={NAV_BUTTON_CLASS}
-          onClick={() => stepTo(Math.max(0, index - 1))}
-          disabled={index <= 0}
+          onClick={() => stepTo(wrap(index - 1))}
+          disabled={stops.length === 0}
           title="Previous change"
         >
           ↑
@@ -178,8 +188,8 @@ export function PendingReviewStrip({
         <button
           type="button"
           className={NAV_BUTTON_CLASS}
-          onClick={() => stepTo(Math.min(stops.length - 1, index + 1))}
-          disabled={index >= stops.length - 1}
+          onClick={() => stepTo(wrap(index + 1))}
+          disabled={stops.length === 0}
           title="Next change"
         >
           ↓

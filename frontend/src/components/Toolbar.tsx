@@ -643,6 +643,7 @@ export default function Toolbar({
       <ChatDialog
         open={showChat}
         variant={dockUsable ? 'dock' : 'modal'}
+        onShowTextView={onShowTextView}
         onClose={() => {
           setShowChat(false);
           setPendingAiRequest(null);
