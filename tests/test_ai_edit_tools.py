@@ -414,6 +414,13 @@ def test_session_config_write_new_file_plus_include():
                       'content': '[gcode_macro EXTRA]\ngcode:\n    M117 x\n'},
     })
     assert details is not None
+    # 2026-10-12 (Sir): an orphan create is silently dead — the
+    # model-facing result must carry the imperative include directive.
+    assert 'NOT INCLUDED' in content
+    assert 'extra.cfg' in content
+    assert 'add_include' in content
+    # the UI-facing summary stays clean (no directive prose)
+    assert details['summary'] == 'created new file extra.cfg'
     content2, details2 = session.execute({
         'name': 'config_edit',
         'arguments': {'file': 'printer.cfg', 'op': 'add_include',
@@ -422,6 +429,42 @@ def test_session_config_write_new_file_plus_include():
     assert details2 is not None
     files = {e['file'] for e in session.pending_edits_payload()}
     assert files == {'extra.cfg', 'printer.cfg'}
+
+
+def test_session_config_write_already_included_no_directive():
+    """The dangling-include-then-create shape: the file is already
+    actively included, so the result confirms that and does NOT order
+    a second include."""
+    ctx = {'printer.cfg': {'content': '[include late.cfg]\n' + PRINTER_CFG}}
+    session = EditSession(ctx)
+    content, details = session.execute({
+        'name': 'config_write',
+        'arguments': {'file': 'late.cfg',
+                      'content': '[gcode_macro LATE]\ngcode:\n    M117 x\n'},
+    })
+    assert details is not None
+    assert 'NOT INCLUDED' not in content
+    assert 'already present' in content
+
+
+def test_approved_new_file_carries_the_include_directive():
+    """Gate-path parity (2026-09-30 drift law): the approved result must
+    render the SAME include directive as the auto-approve path."""
+    from services.ai_edit_tools import format_approval_result
+    content, _ = format_approval_result('config_write', {
+        'decision': 'approved', 'summary': 'created new file macros_x.cfg',
+        'needs_include': 'macros_x.cfg',
+    })
+    assert 'NOT INCLUDED' in content
+    assert 'macros_x.cfg' in content
+    assert 'add_include' in content
+
+
+def test_approved_non_create_result_has_no_include_directive():
+    from services.ai_edit_tools import format_approval_result
+    content, _ = format_approval_result('config_edit', {
+        'decision': 'approved', 'summary': 'set max_accel'})
+    assert 'NOT INCLUDED' not in content
 
 
 # ── route-level loop behavior ───────────────────────────────────────────

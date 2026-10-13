@@ -323,6 +323,9 @@ def _lean_success_content(name: str, result: dict) -> str:
     stale = _stale_callers_directive(result, advisories)
     if stale:
         head += "\n\n" + stale
+    incl = _include_needed_directive(result)
+    if incl:
+        head += "\n\n" + incl
     return head
 
 
@@ -424,6 +427,36 @@ def _stale_callers_directive(result: dict, advisories: list) -> str:
         f"(old_text quoting the call line, new_text using '{renamed_to.split(' ', 1)[1]}') "
         f"NOW, in this request. Do not ask the user whether to update "
         f"them; do not stop here."
+    )
+
+
+def _include_needed_directive(result: dict) -> str:
+    """Directive appended after a successful config_write of a file that
+    nothing includes.
+
+    Live report 2026-10-12 (Sir): models create a new .cfg, never add the
+    [include] line, and tell the user the file is live — but Klipper only
+    reads files an [include] pulls into the tree, and the validator does
+    NOT flag orphan files (same blind spot as dangling includes). The
+    tool DESCRIPTION already says "add an [include <file>] with
+    op=add_include" and demonstrably doesn't get followed; tool RESULTS
+    move local models far more. Set by _op_new_file as a structured field
+    (UI summaries stay clean); rendered only in the model-facing content
+    paths, like the rename stale-caller directive above.
+    """
+    fname = str(result.get("needs_include", ""))
+    if not fname:
+        return ""
+    return (
+        f"NOT INCLUDED: '{fname}' will NOT load — no [include] line anywhere "
+        "pulls it into the config tree, and Klipper ignores files it never "
+        "includes. This change is NOT finished. Unless the user explicitly "
+        "asked for the file to stay inactive, add the include NOW, in this "
+        "request, without asking first: config_edit "
+        f'{{"file": "printer.cfg", "op": "add_include", "target_file": "{fname}"}} '
+        "(the user's named parent file instead of printer.cfg if different). "
+        "If the file is meant to stay inactive, skip the include and say so "
+        "in your reply."
     )
 
 
@@ -1630,6 +1663,9 @@ class ApprovalRequest:
                        "advisories": outcome.get("advisories", []),
                        "renamed_from": outcome.get("renamed_from", ""),
                        "renamed_to": outcome.get("renamed_to", ""),
+                       # Same reasoning: the post-create include directive
+                       # needs it and it is on the gated result (2026-10-12).
+                       "needs_include": outcome.get("needs_include", ""),
                        "details": outcome["details"], "reason": ""}
         else:
             self.resolved = True
@@ -1767,6 +1803,10 @@ def format_approval_result(name: str, decision: dict) -> tuple[str, dict | None]
              "renamed_to": decision.get("renamed_to", "")}, advisories)
         if stale:
             content += "\n\n" + stale
+        incl = _include_needed_directive(
+            {"needs_include": decision.get("needs_include", "")})
+        if incl:
+            content += "\n\n" + incl
         return content, details
     if kind == "timeout":
         return (

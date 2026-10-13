@@ -1248,6 +1248,53 @@ def test_new_file_and_include_roundtrip():
     assert '[include macros.cfg]' not in st3.files['printer.cfg']
 
 
+def test_new_file_unincluded_flags_needs_include():
+    """2026-10-12 (Sir): an orphan new file is silently dead — Klipper
+    never reads it and the validator does not flag it. The raw outcome
+    carries the include nudge as a structured field; the UI summary
+    stays clean."""
+    st, base = _state()
+    st1, r = st.apply(base, {'op': 'new_file', 'file': 'orphan.cfg',
+                             'content': '[gcode_macro O]\ngcode:\n    M117 x\n'})
+    assert r['status'] in ('applied', 'applied_with_advisory')
+    assert r['needs_include'] == 'orphan.cfg'
+    assert r['summary'] == 'created new file orphan.cfg'
+
+
+def test_new_file_already_included_summarizes_without_nudge():
+    """Missing-file-then-create shape: printer.cfg already carries
+    [include late.cfg] (dangling until now). The result says so and
+    sets no needs_include, so the model doesn't double-include."""
+    st, base = _state('[include late.cfg]\n' + BASE_CFG)
+    st1, r = st.apply(base, {'op': 'new_file', 'file': 'late.cfg',
+                             'content': '[gcode_macro L]\ngcode:\n    M117 x\n'})
+    assert r['status'] in ('applied', 'applied_with_advisory')
+    assert 'needs_include' not in r
+    assert '[include late.cfg]' in r['summary']
+    assert 'already present' in r['summary']
+
+
+def test_new_file_already_included_dot_prefix_shape():
+    """KAMP writes '[include ./x.cfg]' — './'-prefixed includes resolve
+    to the same file, so the nudge must recognize them too."""
+    st, base = _state('[include ./KAMP/x.cfg]\n' + BASE_CFG)
+    st1, r = st.apply(base, {'op': 'new_file', 'file': 'KAMP/x.cfg',
+                             'content': '[gcode_macro K]\ngcode:\n    M117 x\n'})
+    assert r['status'] in ('applied', 'applied_with_advisory')
+    assert 'needs_include' not in r
+    assert 'already present' in r['summary']
+
+
+def test_commented_include_still_nudges():
+    """A '#[include x.cfg]' is inactive — the file would not load, so
+    the nudge correctly fires."""
+    st, base = _state('#[include parked.cfg]\n' + BASE_CFG)
+    st1, r = st.apply(base, {'op': 'new_file', 'file': 'parked.cfg',
+                             'content': '[gcode_macro P]\ngcode:\n    M117 x\n'})
+    assert r['status'] in ('applied', 'applied_with_advisory')
+    assert r['needs_include'] == 'parked.cfg'
+
+
 def test_delete_file_rules():
     st, base = _state()
     st1, _ = st.apply(base, {'op': 'new_file', 'file': 'tmp.cfg', 'content': '[gcode_macro T]\ngcode:\n    M117 x\n'})

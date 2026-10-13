@@ -669,7 +669,9 @@ class ProjectState:
         }
         # rename_section carries structured from/to through the raw outcome
         # for the chat layer's post-rename directive (see _op_rename_section).
-        for k in ('renamed_from', 'renamed_to'):
+        # needs_include carries through the same way for the post-create
+        # include directive (see _op_new_file, 2026-10-12).
+        for k in ('renamed_from', 'renamed_to', 'needs_include'):
             if k in outcome:
                 result[k] = outcome[k]
         if result['status'] == 'error':
@@ -1497,7 +1499,28 @@ class ProjectState:
         if not isinstance(content, str):
             return _state_error('Argument content must be a string')
         self.files[filename] = content if content.endswith('\n') or not content else content + '\n'
-        return {'status': 'ok', 'file': filename, 'summary': f"created new file {filename}"}
+        # Include nudge (Sir 2026-10-12): a created file with no
+        # [include] line is a silently dead file — Klipper never reads
+        # it, and the validator does NOT flag orphan files (same class
+        # as dangling includes). Tool RESULTS move local models far more
+        # than tool descriptions (which already mention add_include and
+        # demonstrably don't get followed), so the model-facing result
+        # carries an imperative directive. It rides as a structured
+        # field — rendered ONLY in the model-facing content paths
+        # (_lean_success_content / format_approval_result), never in the
+        # UI summary — exactly like the rename stale-caller directive.
+        for other in sorted(self.files):
+            if other == filename:
+                continue
+            for _, path in _include_lines(_split_lines(self.files[other])):
+                if path == filename or path.removeprefix('./') == filename:
+                    return {'status': 'ok', 'file': filename,
+                            'summary': f"created new file {filename} — "
+                                       f"[include {path}] is already present "
+                                       f"in {other}, no include needed"}
+        return {'status': 'ok', 'file': filename,
+                'summary': f"created new file {filename}",
+                'needs_include': filename}
 
     def _op_delete_file(self, op: dict) -> dict:
         filename = self._require_file(op.get('file'))
