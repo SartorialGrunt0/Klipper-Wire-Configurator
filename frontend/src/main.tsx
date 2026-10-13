@@ -5,6 +5,12 @@ import './index.css';
 import App from './App';
 import { useAiStore } from './stores/aiStore';
 import { useChatHistoryStore } from './stores/chatHistoryStore';
+import { installChunkReloadGuard } from './utils/chunkReload';
+
+// A bundle rebuild (installer or update-triggered restart) re-hashes the
+// lazily-imported chunks; reload once instead of leaving the shell without
+// its graph/text-view modules. See utils/chunkReload.ts.
+installChunkReloadGuard();
 
 // Load AI settings + saved chat history from the backend's local files
 // (migrating any legacy localStorage data on first run).
