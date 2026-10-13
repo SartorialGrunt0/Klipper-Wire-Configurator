@@ -162,6 +162,16 @@ PROVIDER_ORDER = ["chatgpt", "google", "anthropic", "github", "openai-compatible
 #                 case-insensitively (Klipper upper-cases gcode_macro
 #                 aliases, so a macro-name case difference is not observable)
 #   staged_count  "<n>" — exactly n files staged in pendingEdits
+#   new_file_included "<filename or empty>" — EVERY staged new_file (or
+#                 the named one) is ACTIVELY [include]d in some other
+#                 staged file's final text (2026-10-12: an orphan file
+#                 is silently dead — Klipper never reads it; graded on
+#                 the staged artifact because the product nudge exists
+#                 precisely because models skip the include). './'
+#                 include paths (KAMP shape) count; '#[include ...]'
+#                 does not. Limit: only staged texts are visible — an
+#                 include already present in an UNtouched file reads as
+#                 absent (no bank fixture has that shape).
 #   not_staged    "<filename>" — that file has no staged entry
 #   not_staged_any  "" — NO file has a staged entry (use for "don't change
 #                 my files" requests, where any file counts as a change)
@@ -1926,6 +1936,14 @@ def build_ambiguity_questions() -> list[TestQuestion]:
             # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
             edit_criteria=(
                 ("staged_new_file", ""),
+                # 2026-10-12: the include is IMPLIED by the request — a
+                # macros file nothing includes is silently dead, and the
+                # bank was PASSing exactly that (captured bank106-r1:
+                # gemma-4-12b + qwen3.5-9b staged macros.cfg with no
+                # [include], verdict PASS). Name-agnostic: the question
+                # deliberately gives no filename, so the kind checks
+                # every staged new_file is actively included somewhere.
+                ("new_file_included", ""),
             ),
         ),
         TestQuestion(
@@ -2877,6 +2895,38 @@ def criterion_ok(kind: str, value: str, content: str,
         return not any(c.get("name") == "load_skill" for c in tool_calls or [])
     if kind == "staged_new_file":
         return any(e.get("op") == "new_file" for e in pending_edits or [])
+    if kind == "new_file_included":
+        # Cross-file criterion (2026-10-12): every staged new_file must
+        # be ACTIVELY included by some other staged file, or it is a
+        # silently dead orphan. value = target filename, or "" for
+        # "every staged new_file". Matching mirrors the product's
+        # _op_new_file include scan: exact path or './'-stripped equal
+        # (KAMP writes '[include ./x.cfg]'); commented includes are
+        # inactive and do NOT count.
+        wanted = [value] if value else [
+            e.get("file") for e in (pending_edits or [])
+            if e.get("op") == "new_file"]
+        if not wanted:
+            return False
+        include_re = re.compile(r"^\s*\[include\s+([^\]]+)\]\s*(?:#.*)?$")
+        for target in wanted:
+            included = False
+            for e in (pending_edits or []):
+                if e.get("file") == target:
+                    continue  # a file never satisfies its own include
+                for line in (e.get("newText") or "").splitlines():
+                    m = include_re.match(line)
+                    if not m:
+                        continue
+                    path = m.group(1).strip()
+                    if path == target or path.removeprefix("./") == target:
+                        included = True
+                        break
+                if included:
+                    break
+            if not included:
+                return False
+        return True
     if kind == "staged_any_param":
         return any(value in (e.get("newText") or "") for e in pending_edits or [])
     if kind == "staged_regex":

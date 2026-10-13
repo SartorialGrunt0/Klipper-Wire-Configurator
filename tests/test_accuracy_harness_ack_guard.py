@@ -374,3 +374,78 @@ def test_tool_output_regex_requires_the_named_tool():
     real = [{"name": "generate_macro_template", "arguments": "{}",
              "output": "```\n[gcode_macro PRINT_START]\ngcode:\n    G28\n```"}]
     assert _crit_full(kind, value, calls=real) is True
+
+
+# ── new_file_included (2026-10-12 include-compliance criterion) ────────
+
+
+def _nf(path, text="[gcode_macro PARK]\ngcode:\n    G91\n"):
+    return {"file": path, "op": "new_file", "summary": "created",
+            "newText": text}
+
+
+def _inc(path, text):
+    return {"file": path, "op": "patch_section", "summary": "patched",
+            "newText": text}
+
+
+def test_new_file_included_requires_some_active_include():
+    # The orphan class: created file, no include anywhere -> FAIL.
+    assert _crit("new_file_included", "", edits=[_nf("macros.cfg")]) is False
+    # Include staged in printer.cfg -> PASS.
+    assert _crit("new_file_included", "", edits=[
+        _nf("macros.cfg"),
+        _inc("printer.cfg", "[include macros.cfg]\n[printer]\n")]) is True
+
+
+def test_new_file_included_dot_prefix_counts_and_commented_does_not():
+    # KAMP shape '[include ./x.cfg]' resolves to the same file -> PASS.
+    assert _crit("new_file_included", "", edits=[
+        _nf("macros.cfg"),
+        _inc("printer.cfg", "[include ./macros.cfg]\n")]) is True
+    # '#[include ...]' is inactive in Klipper -> FAIL.
+    assert _crit("new_file_included", "", edits=[
+        _nf("macros.cfg"),
+        _inc("printer.cfg", "#[include macros.cfg]\n")]) is False
+
+
+def test_new_file_included_needs_the_RIGHT_file_included():
+    # '[include mainsail.cfg]' does not include macros.cfg.
+    assert _crit("new_file_included", "", edits=[
+        _nf("macros.cfg"),
+        _inc("printer.cfg", "[include mainsail.cfg]\n")]) is False
+    # Self-include cannot satisfy the check: the new file's OWN text
+    # carries '[include macros.cfg]' but no OTHER file includes it.
+    assert _crit("new_file_included", "", edits=[
+        _nf("macros.cfg", "[include macros.cfg]\n[gcode_macro PARK]\n")]) is False
+
+
+def test_new_file_included_named_target_and_multiple_new_files():
+    # Named value checks ONE file even when others are staged.
+    edits = [_nf("macros.cfg"),
+             _inc("printer.cfg", "[include macros.cfg]\n")]
+    assert _crit("new_file_included", "macros.cfg", edits=edits) is True
+    assert _crit("new_file_included", "other.cfg", edits=edits) is False
+    # Empty value = EVERY staged new_file must be included: a second
+    # orphan drags the whole criterion down.
+    assert _crit("new_file_included", "",
+                 edits=edits + [_nf("extra.cfg")]) is False
+
+
+def test_new_file_included_no_new_file_fails():
+    # Nothing staged as new_file: the criterion's premise is absent.
+    assert _crit("new_file_included", "", edits=[]) is False
+    assert _crit("new_file_included", "",
+                 edits=[_inc("printer.cfg", "[printer]\n")]) is False
+
+
+def test_ambi_02_requires_include_alongside_new_file():
+    # The bank wiring: AMBI-02 grades the orphan class FAIL and the
+    # complete move PASS.
+    q = _bank()["AMBI-02"]
+    assert ("new_file_included", "") in q.edit_criteria
+    orphan = [_nf("macros.cfg")]
+    complete = [_nf("macros.cfg"),
+                _inc("printer.cfg", "[include macros.cfg]\n")]
+    assert not all(_crit_full(k, v, edits=orphan) for k, v in q.edit_criteria)
+    assert all(_crit_full(k, v, edits=complete) for k, v in q.edit_criteria)
