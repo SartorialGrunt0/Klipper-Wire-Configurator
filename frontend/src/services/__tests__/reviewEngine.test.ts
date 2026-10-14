@@ -15,6 +15,7 @@ import type { ChangeSetPayload } from '@/services/api';
 import { useChangeSetStore } from '@/stores/changeSetStore';
 import { useConfigStore } from '@/stores/configStore';
 import {
+  foldExternalEdit,
   framesFromChangeSet,
   groupLedgerSections,
   keepAll,
@@ -391,5 +392,58 @@ describe('reviewStops (store-reading)', () => {
     expect(stops).toHaveLength(1);
     expect(stops[0].file).toBe('printer.cfg');
     expect(stops[0].line).toBe(2);
+  });
+});
+
+describe('foldExternalEdit — hand edits to NON-active files (R6-C1)', () => {
+  it('folds a replace in a reviewed file the editor is not showing', () => {
+    // X.cfg under review with one AI run (500 -> 1000); the user
+    // Search/Replaces step_pin PA0 -> PB0 in X.cfg while viewing
+    // another file. Unfolded, the ledger would carry TWO runs: the AI
+    // one plus a phantom 'AI' run for the user's own replacement,
+    // Undo-able back over their typing. Folded, only the AI run remains.
+    useChangeSetStore.setState({
+      reviewFrames: { 'X.cfg': '[printer]\nmax_accel: 500\n[stepper_x]\nstep_pin: PA0\n' },
+    });
+    useConfigStore.setState({
+      configFiles: { 'X.cfg': { ...cfg(''), filename: 'X.cfg',
+        raw_text: '[printer]\nmax_accel: 500\n[stepper_x]\nstep_pin: PA0\n' } },
+      liveTexts: { 'X.cfg': '[printer]\nmax_accel: 1000\n[stepper_x]\nstep_pin: PA0\n' },
+    });
+    expect(ledgerFor('X.cfg')).toHaveLength(1); // only the AI run
+    foldExternalEdit('X.cfg', '[printer]\nmax_accel: 1000\n[stepper_x]\nstep_pin: PB0\n');
+    const runs = ledgerFor('X.cfg');
+    expect(runs).toHaveLength(1); // the hand replace folded into the frame
+    expect(runs[0].added.join('|')).toContain('1000'); // still the AI run
+    expect(runs[0].removed.join('|')).toContain('500');
+    expect(useChangeSetStore.getState().reviewFrames['X.cfg'])
+      .toBe('[printer]\nmax_accel: 500\n[stepper_x]\nstep_pin: PB0\n');
+    expect(useConfigStore.getState().liveTexts['X.cfg'])
+      .toBe('[printer]\nmax_accel: 1000\n[stepper_x]\nstep_pin: PB0\n');
+  });
+
+  it('is a no-op for files not under review', () => {
+    useConfigStore.setState({
+      configFiles: { 'Y.cfg': { ...cfg(''), filename: 'Y.cfg', raw_text: 'a\n' } },
+    });
+    foldExternalEdit('Y.cfg', 'b\n');
+    expect('Y.cfg' in useConfigStore.getState().liveTexts).toBe(false);
+    expect('Y.cfg' in useChangeSetStore.getState().reviewFrames).toBe(false);
+  });
+
+  it('baselines on raw_text when no live buffer exists', () => {
+    // Z.cfg under review, frame == raw_text (no liveTexts entry — the
+    // file was never opened). A hand replace OUTSIDE any run must fold
+    // against raw_text: the frame absorbs it and NO run appears. A
+    // broken baseline (e.g. '') would leave the hand delta on review.
+    useChangeSetStore.setState({ reviewFrames: { 'Z.cfg': 'x\ny\n' } });
+    useConfigStore.setState({
+      configFiles: { 'Z.cfg': { ...cfg(''), filename: 'Z.cfg', raw_text: 'x\ny\n' } },
+      liveTexts: {},
+    });
+    foldExternalEdit('Z.cfg', 'x\nz\ny\n');
+    expect(useChangeSetStore.getState().reviewFrames['Z.cfg']).toBe('x\nz\ny\n');
+    expect(ledgerFor('Z.cfg')).toHaveLength(0);
+    expect(useConfigStore.getState().liveTexts['Z.cfg']).toBe('x\nz\ny\n');
   });
 });

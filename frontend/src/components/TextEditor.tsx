@@ -46,6 +46,7 @@ import {
   stripGhostsFromDisplay,
 } from '../utils/reviewDisplay';
 import {
+  foldExternalEdit,
   groupLedgerSections,
   keepRun,
   ledgerFrom,
@@ -622,15 +623,20 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   // the staging (prevLive = pre-AI text would make the fold absorb the AI
   // change itself). A ref, not closure state: every hand path reads the
   // same current value regardless of render staleness.
-  const bufferLiveRef = useRef('');
+  const bufferLiveRef = useRef<string | null>(null);
   /** Fold a HAND buffer edit into the review frame (no-op while the
-   * textarea still holds another file's text). An EMPTY ref means the
+   * textarea still holds another file's text). A NULL ref means the
    * buffer was never published (typing before the first export lands) —
    * the baseline is unknown, so the fold is SKIPPED and only the ref
    * moves: a missed fold keeps the frame stale for that one keystroke,
-   * a fold against the wrong baseline corrupts it. */
+   * a fold against the wrong baseline corrupts it. NULL is the sentinel,
+   * NOT '': an empty published buffer is a legitimate baseline — with
+   * '' as the sentinel, typing in an EMPTY reviewed file skipped the
+   * fold and showed the user's first keystroke as a pending AI run,
+   * unrecoverable because the hand region then keeps re-touching the
+   * stale frame (round-6 R6-B2). */
   const foldHandEdit = useCallback((newLive: string) => {
-    if (editTextFile === activeFile && bufferLiveRef.current !== '') {
+    if (editTextFile === activeFile && bufferLiveRef.current !== null) {
       syncReviewFrame(activeFile, bufferLiveRef.current, newLive);
     }
     bufferLiveRef.current = newLive;
@@ -1492,6 +1498,10 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     }
     try {
       const result = await api.parseConfigText(nextText, file);
+      // Fold BEFORE the store update: foldExternalEdit baselines on the
+      // ledger's CURRENT live for this file, and updateConfigFile would
+      // overwrite raw_text with nextText first, making the fold a no-op.
+      foldExternalEdit(file, nextText);
       updateConfigFile(file, { ...result.config, raw_text: nextText });
       setTextParseError(file, null);
       return true;

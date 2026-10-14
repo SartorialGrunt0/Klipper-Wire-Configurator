@@ -335,6 +335,23 @@ export function syncReviewFrame(file: string, prevLive: string, newLive: string)
   store.setReviewFrame(file, syncFrameOutsideRuns(frame, prevLive, newLive));
 }
 
+/** Fold a HAND edit made to a file the editor is NOT displaying (round-6
+ * R6-C1): Search/Replace scoped to 'all' — or a hit in another file —
+ * reaches the store through updateConfigFile without ever touching the
+ * active buffer, so TextEditor's foldHandEdit never sees it and the
+ * user's own replacement stays on the review as a phantom AI run they
+ * can Undo. The baseline is whatever the ledger currently counts as
+ * this file's live (the stored live text, else raw_text); the frame
+ * folds that delta like any other hand edit, and the live side is
+ * published to match the new raw_text so the two views cannot diverge.
+ * syncReviewFrame is the no-op guard for files not under review. */
+export function foldExternalEdit(file: string, newLive: string): void {
+  const prev = snapshot();
+  if (prev.reviewFrames[file] === undefined) return;  // not under review
+  syncReviewFrame(file, liveTextFor(prev, file), newLive);
+  useConfigStore.getState().setLiveText(file, newLive);
+}
+
 // ── The decisions ────────────────────────────────────────────────────
 
 /** KEEP one run: the frame takes the live version of it. Text does not move. */
