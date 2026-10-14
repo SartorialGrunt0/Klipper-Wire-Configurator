@@ -126,7 +126,21 @@ def _include_lines(lines: list[str]) -> list[tuple[int, str]]:
     return out
 
 
-def _missing_section_hint(files: dict[str, str], header: str,
+def _include_resolves_to(path: str, includer: str, created: str) -> bool:
+    """Does the include spec `path` written in `includer` target the
+    project-relative file `created`? Klipper resolves includes relative
+    to the INCLUDING file's directory (klippy/configfile.py:
+    include_glob = os.path.join(os.path.dirname(source_filename),
+    include_spec)), so a bare '[include macros.cfg]' inside sub/a.cfg
+    points at sub/macros.cfg — NOT the root macros.cfg (round-6 R6-B2:
+    the old raw-text comparison answered 'already present' for the
+    wrong file, and folded './' on the include side only, R6-B1).
+    PurePosixPath folds '.' segments on both sides as a side effect."""
+    resolved = PurePosixPath(PurePosixPath(includer).parent, path)
+    return str(resolved) == str(PurePosixPath(created))
+
+
+def _missing_section_hint(files: "dict[str, str]", header: str,
                           filename: str) -> str:
     """Suffix for 'Section not found' errors: if the section exists in
     ANOTHER project file, name it. Wrong-file calls are the common cause
@@ -450,7 +464,12 @@ def _splice_blank_gutter(lines: list[str], splice: int) -> None:
     # gutter line: discount it from the post-run length.
     post = end - splice - (1 if at_eof else 0)
     if at_eof:
-        # Nothing real follows: keep only the final newline.
+        # Nothing real follows. The deletion may have EMPTIED the list
+        # (round-6 R6-A1: lines[-1] on [] -> IndexError past _apply_raw's
+        # catches, HTTP 500 for the whole turn); an emptied file is '' —
+        # no final newline to keep.
+        if not lines:
+            return
         lines[start:] = [''] if lines[-1] == '' else []
         return
     lines[start:end] = [''] * (max(pre, post) if start > 0 else 0)
@@ -1513,7 +1532,7 @@ class ProjectState:
             if other == filename:
                 continue
             for _, path in _include_lines(_split_lines(self.files[other])):
-                if path == filename or path.removeprefix('./') == filename:
+                if _include_resolves_to(path, other, filename):
                     return {'status': 'ok', 'file': filename,
                             'summary': f"created new file {filename} — "
                                        f"[include {path}] is already present "

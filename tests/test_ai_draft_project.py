@@ -830,6 +830,31 @@ def test_delete_section_last_section_keeps_single_final_newline():
     assert st1.files['printer.cfg'] == "[printer]\nkinematics: cartesian\n"
 
 
+def test_delete_section_empties_file_without_final_newline_no_crash():
+    """Round-6 review (R6-A1): the splice-gutter trim read lines[-1]
+    AFTER the deletion emptied the line list -> IndexError escaped
+    _apply_raw (which catches only _OpError/KeyError) and turned the
+    whole chat turn into a 500. Pre-cddb173 code applied this cleanly."""
+    st, base = _state("[fan]\npin: PA8")  # no trailing newline
+    st1, r = st.apply(base, {'op': 'delete_section', 'file': 'printer.cfg',
+                             'section': 'fan'})
+    assert r['status'] in ('applied', 'ok'), r
+    assert st1.files['printer.cfg'] == ''
+
+
+def test_remove_include_empties_file_no_crash():
+    """Round-6 review (R6-A1): a file whose only non-blank content is
+    the include line. Even WITH the trailing newline, del lines[idx:end]
+    empties the list and the at_eof branch read lines[-1] -> IndexError."""
+    st = ProjectState.from_context_files({'printer.cfg': {'content': "[include a.cfg]\n"},
+                                          'a.cfg': {'content': '# x\n'}})
+    base = st.validate()
+    st1, r = st.apply(base, {'op': 'remove_include', 'file': 'printer.cfg',
+                             'target_file': 'a.cfg'})
+    assert r['status'] in ('applied', 'ok'), r
+    assert st1.files['printer.cfg'] == ''
+
+
 def test_remove_include_preserves_two_blank_separators():
     """Same fix class: the file-wide collapse in remove_include squashed
     blanks across the whole file."""
@@ -1272,6 +1297,56 @@ def test_new_file_already_included_summarizes_without_nudge():
     assert 'needs_include' not in r
     assert '[include late.cfg]' in r['summary']
     assert 'already present' in r['summary']
+
+
+def test_new_file_subdir_include_does_not_satisfy_root_file():
+    """Round-6 review (R6-B2): Klipper resolves '[include macros.cfg]'
+    RELATIVE TO THE INCLUDING FILE (klippy/configfile.py
+    include_glob = join(dirname(source), spec)), so the bare include in
+    sub/a.cfg points at sub/macros.cfg — it does NOT make a freshly
+    created ROOT macros.cfg live. The old raw-text comparison answered
+    'already present in sub/a.cfg, no include needed': a positively
+    lying tool result for exactly the dead-orphan class the nudge
+    exists to prevent."""
+    st = ProjectState.from_context_files({
+        'printer.cfg': {'content': '[include sub/a.cfg]\n' + BASE_CFG},
+        'sub/a.cfg': {'content': '[include macros.cfg]\n'}})
+    base = st.validate()
+    st1, r = st.apply(base, {'op': 'new_file', 'file': 'macros.cfg',
+                             'content': '[gcode_macro FOO]\ngcode:\\n    M117 hi\n'})
+    assert r['status'] in ('applied', 'applied_with_advisory'), r
+    assert r.get('needs_include') == 'macros.cfg', r
+
+
+def test_new_file_sibling_include_counts_by_dirname():
+    """Mirror-image of R6-B2: creating sub/b.cfg while sub/a.cfg carries
+    '[include b.cfg]' — Klipper DOES load that (dirname-relative), so
+    the sibling include must satisfy the nudge: no needs_include,
+    'already present' summary."""
+    st = ProjectState.from_context_files({
+        'printer.cfg': {'content': '[include sub/a.cfg]\n' + BASE_CFG},
+        'sub/a.cfg': {'content': '[include b.cfg]\n'}})
+    base = st.validate()
+    st1, r = st.apply(base, {'op': 'new_file', 'file': 'sub/b.cfg',
+                             'content': '[gcode_macro B]\ngcode:\\n    M117 b\n'})
+    assert r['status'] in ('applied', 'applied_with_advisory'), r
+    assert 'needs_include' not in r, r
+    assert 'already present' in r['summary'], r
+
+
+def test_new_file_dot_prefixed_name_matches_plain_include():
+    """Round-6 review (R6-B1): the scan folded './' on the include side
+    only, so creating './macros.cfg' against an existing
+    '[include macros.cfg]' returned the FALSE imperative 'NOT
+    INCLUDED ... will NOT load' — then the model's follow-up add_include
+    got kicked by add_include's own both-sided duplicate guard. Fold
+    both sides."""
+    st, base = _state('[include macros.cfg]\n' + BASE_CFG)
+    st1, r = st.apply(base, {'op': 'new_file', 'file': './macros.cfg',
+                             'content': '[gcode_macro M]\ngcode:\\n    M117 m\n'})
+    assert r['status'] in ('applied', 'applied_with_advisory'), r
+    assert 'needs_include' not in r, r
+    assert 'already present' in r['summary'], r
 
 
 def test_new_file_already_included_dot_prefix_shape():
