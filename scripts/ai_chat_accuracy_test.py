@@ -100,7 +100,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "reports" / "ai-chat-accuracy"
@@ -2900,9 +2900,11 @@ def criterion_ok(kind: str, value: str, content: str,
         # be ACTIVELY included by some other staged file, or it is a
         # silently dead orphan. value = target filename, or "" for
         # "every staged new_file". Matching mirrors the product's
-        # _op_new_file include scan: exact path or './'-stripped equal
-        # (KAMP writes '[include ./x.cfg]'); commented includes are
-        # inactive and do NOT count.
+        # _op_new_file include scan (round-6 R6-B2): the include spec is
+        # resolved RELATIVE TO THE INCLUDING FILE's directory, exactly
+        # as Klipper's configfile.py does — a bare '[include macros.cfg]'
+        # in sub/a.cfg targets sub/macros.cfg, not the root file.
+        # Commented includes are inactive and do NOT count.
         wanted = [value] if value else [
             e.get("file") for e in (pending_edits or [])
             if e.get("op") == "new_file"]
@@ -2919,7 +2921,9 @@ def criterion_ok(kind: str, value: str, content: str,
                     if not m:
                         continue
                     path = m.group(1).strip()
-                    if path == target or path.removeprefix("./") == target:
+                    resolved = PurePosixPath(
+                        PurePosixPath(e.get("file") or ".").parent, path)
+                    if str(resolved) == str(PurePosixPath(target)):
                         included = True
                         break
                 if included:

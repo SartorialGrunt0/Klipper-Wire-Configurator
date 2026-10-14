@@ -1835,7 +1835,7 @@ class McpServer:
                 if header_name not in matched_headers:
                     matched_headers.append(header_name)
 
-        occurrences, occurrence_total, occurrence_sec_totals = (
+        occurrences, occurrence_total, occurrence_sec_totals, occurrence_capped = (
             self._find_user_config_occurrences(text, occ_terms or []))
 
         lines_list = text.split("\n")
@@ -1851,6 +1851,7 @@ class McpServer:
             "occurrences": occurrences,
             "occurrence_total": occurrence_total,
             "occurrence_sec_totals": occurrence_sec_totals,
+            "occurrence_capped": occurrence_capped,
         }
 
     @staticmethod
@@ -1883,7 +1884,7 @@ class McpServer:
     @staticmethod
     def _find_user_config_occurrences(
         text: str, occ_terms: list[str], max_lines: int = MAX_SEARCH_OCCURRENCE_LINES,
-    ) -> tuple[list[dict[str, Any]], int, dict[str, int]]:
+    ) -> tuple[list[dict[str, Any]], int, dict[str, int], bool]:
         """Every line with a word-bounded, case-insensitive occurrence of
         any occ_term, labelled with its enclosing [section] (None = top of
         file). '_' is a word char, so query 'level_bed' does NOT count
@@ -1892,18 +1893,23 @@ class McpServer:
         ('matching sections here') already reports them, and the checklist's
         job is the easy-to-miss references inside section bodies. Include
         directives DO count — renaming a file means fixing its [include]
-        lines.
-        Returns (listed_lines, total_occurrences, per_section_totals) —
-        per_section_totals counts ALL hits (listed or capped-out), keyed by
-        section name ('' = top of file)."""
+        lines. The SAVE_CONFIG tail is skipped entirely (R6-C2): Klipper
+        owns that block and the user may not edit it.
+        Returns (listed_lines, total_occurrences, per_section_totals,
+        capped) — per_section_totals counts ALL hits (listed or
+        capped-out), keyed by section name ('' = top of file); `capped`
+        is True only when matching LINES were actually withheld (R6-C1:
+        the old 'total > listed_lines' comparison mixed an occurrence
+        count with a line count, so a triple-hit line claimed a phantom
+        '2 more not listed' remainder)."""
         terms = sorted({t for t in occ_terms if len(t) >= 2}, key=len, reverse=True)
         if not terms:
-            return [], 0, {}
+            return [], 0, {}, False
         try:
             pattern = re.compile(
                 "|".join(rf"\b{re.escape(t)}\b" for t in terms), re.IGNORECASE)
         except re.error:
-            return [], 0, {}
+            return [], 0, {}, False
         # Header lines -> enclosing-section map, walking the same rules as
         # _enclosing_user_config_section (include directives are preamble).
         header_by_line: dict[int, str | None] = {}
@@ -1920,9 +1926,18 @@ class McpServer:
             header_by_line[line_no] = current
         results: list[dict[str, Any]] = []
         total = 0
+        capped = False
         sec_totals: dict[str, int] = {}
         current_section: str | None = None
+        # Round-6 review (R6-C2): the '#*# <...SAVE_CONFIG...>' tail is
+        # Klipper's own block — the banner says DO NOT EDIT THIS BLOCK OR
+        # BELOW, so its lines are not rename targets and counting them
+        # made the done-check unreachable (a sweep can never drive the
+        # count to 0 by editing legal lines).
+        from parser.config_parser import SAVE_CONFIG_BANNER_RE
         for line_no, line in enumerate(text.split("\n"), 1):
+            if SAVE_CONFIG_BANNER_RE.match(line.strip()):
+                break
             is_header = line_no in header_by_line
             if is_header:
                 current_section = header_by_line[line_no]
@@ -1942,7 +1957,9 @@ class McpServer:
                     "section": current_section,
                     "line": stripped[:140],
                 })
-        return results, total, sec_totals
+            else:
+                capped = True
+        return results, total, sec_totals, capped
 
     def _handle_search_user_configs(self, args: dict[str, Any]) -> str:
         query = args.get("query", "").strip().lower()
@@ -2052,9 +2069,13 @@ class McpServer:
                         f"  {sec} x{sec_totals.get(occ['section'] or '', 1)}"
                         f" (L{occ['line_no']}): {occ['line']}"
                     )
-                if total > len(occurrences):
+                if r.get("occurrence_capped"):
+                    # Only claim a remainder when lines were ACTUALLY
+                    # withheld (R6-C1): total-vs-listed-lines mixed
+                    # occurrence counts with line counts.
                     lines.append(
-                        f"  ... {total - len(occurrences)} more occurrence(s) not listed"
+                        f"  ... more matching lines not listed "
+                        f"(re-search after editing to confirm {total} -> 0)"
                     )
                 lines.append("")
             if r["snippet"]:

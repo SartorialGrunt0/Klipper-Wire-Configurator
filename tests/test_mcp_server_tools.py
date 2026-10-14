@@ -507,6 +507,53 @@ def test_search_user_configs_occurrences_truncate(tmp_path):
     assert "not listed" in out     # truncation is explicit, not silent
 
 
+def test_search_user_configs_all_listed_lines_leave_no_phantom_remainder(tmp_path):
+    # Round-6 review (R6-C1): the trailing '... N more occurrence(s) not
+    # listed' subtracted LISTED-LINE count from an OCCURRENCE total, so a
+    # single line holding 3 hits claimed '2 more not listed' while every
+    # matching line WAS on screen — a done-check that can never reach 0.
+    server, root = _server(tmp_path)
+    user_dir = root / "user_configs"
+    user_dir.mkdir(parents=True)
+    (user_dir / "printer.cfg").write_text(
+        "[gcode_macro Level_Bed]\n"
+        "gcode:\n"
+        "    RESPOND MSG='Level_Bed Level_Bed Level_Bed'\n",
+        encoding="utf-8",
+    )
+    out = _call_tool(server, "search_user_configs", {"query": "level_bed"})
+    assert "references to 'level_bed' in this file: 3" in out
+    assert "RESPOND MSG='Level_Bed Level_Bed Level_Bed'" in out
+    assert "not listed" not in out  # nothing was withheld
+
+
+def test_search_user_configs_occurrences_skip_save_config_tail(tmp_path):
+    # Round-6 review (R6-C2): the checklist walked into the
+    # '#*# <---- SAVE_CONFIG ---->' block, which Klipper rewrites itself
+    # and the user may not edit — listing its lines attributed them to
+    # the last real section and made the rename done-check unreachable.
+    server, root = _server(tmp_path)
+    user_dir = root / "user_configs"
+    user_dir.mkdir(parents=True)
+    (user_dir / "printer.cfg").write_text(
+        "[printer]\nmax_velocity: 300\nz_offset: 0\n"
+        "#*# <---------------------- SAVE_CONFIG ---------------------->\n"
+        "#*# DO NOT EDIT THIS BLOCK OR BELOW.\n"
+        "#*#\n"
+        "#*# [bed_mesh default]\n"
+        "#*# z_offset = 1.35\n",
+        encoding="utf-8",
+    )
+    out = _call_tool(server, "search_user_configs", {"query": "z_offset"})
+    assert "[printer] x1 (L3): z_offset: 0" in out
+    # The checklist block (from 'references to' to its blank line) must
+    # hold no '#*#' rows; the context SNIPPET may still show the banner,
+    # that is the reader's view around the match, not a rename target.
+    block = out[out.index("references to"):].split("\n\n")[0]
+    assert "#*#" not in block
+    assert "references to 'z_offset' in this file: 1" in out
+
+
 def test_search_user_configs_snippet_anchored_to_match(tmp_path):
     # The snippet used to be the first 5 lines of the WHOLE file — in
     # printer.cfg always the [include ...] block, so every search returned
