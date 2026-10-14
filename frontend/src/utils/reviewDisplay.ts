@@ -182,6 +182,16 @@ export function stripGhostsFromDisplay(
     // an above-slot content match meaningful — it means rows above were
     // deleted and the ghost rode up with them.
     const slot = i + (slotLive - out.length);
+    if (slot < i) {
+      // A previous twin-retirement already emitted MORE live rows than
+      // this anchor's slot assumed (out.length > slotLive): the ghost's
+      // position is BEHIND the walk. Clamping forward is the twin-law
+      // direction — never strip backward, and above all never set i
+      // backwards: a regressed i re-emits already-emitted rows in the
+      // tail walk and grows LIVE beyond the input (round-6 R6-A1, the
+      // sibling of R5-1). Monotonic i is the never-grows law.
+      continue;
+    }
     if (matchAt(slot, block)) {
       for (let q = i; q < slot; q += 1) out.push(lines[q]);
       for (let q = 0; q < block.length; q += 1) strippedDisplayLines.push(slot + q + 1);

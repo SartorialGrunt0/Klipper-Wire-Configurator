@@ -299,6 +299,33 @@ describe('liveFromDisplay', () => {
     expect(strip.live).toBe('B\ny');
   });
 
+  it('a slot behind the walk never re-emits rows (R6-A1)', () => {
+    // Third sibling of the never-grows family: after an earlier path
+    // emitted MORE live rows than the next anchor's slot assumed,
+    // slot = i + (slotLive - out.length) regresses BEHIND i, and the
+    // slot-strip rewound i, so the tail walk re-emitted rows already
+    // pushed — LIVE grew beyond the textarea. Pre-fix, the case below
+    // returned a row more than the input ('A\\nB\\nB\\nA' frame,
+    // 'B\\nA\\nA' live, delete 1 display row -> 'B\\nB\\nA\\n' grew).
+    // The clamp retires that ghost instead: never-grows holds, and the
+    // twin-law direction (keep live rows) is preserved.
+    const frame = 'A\nB\nB\nA';
+    const live = 'B\nA\nA';
+    const built = displayOf(frame, live);
+    const dispRows = built.display.split('\n');
+    let worst = '';
+    for (let cut = 0; cut < dispRows.length; cut++) {
+      const rows = dispRows.slice();
+      rows.splice(cut, 1);
+      const edited = rows.join('\n');
+      const strip = stripGhostsFromDisplay(edited, built.ghosts, live);
+      if (strip.live.split('\n').length > edited.split('\n').length) {
+        worst = `row${cut}: ${JSON.stringify(edited)} -> ${JSON.stringify(strip.live)}`;
+      }
+    }
+    expect(worst).toBe('');
+  });
+
   it('lets the user delete the ghost row without touching live', () => {
     const built = displayOf(FRAME, LIVE);
     // Deleting the ghost line in the textarea removes the whole row INCLUDING
