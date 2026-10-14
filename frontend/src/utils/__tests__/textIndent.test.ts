@@ -9,6 +9,7 @@ import {
   indentCaret,
   indentSelection,
   outdentSelection,
+  insertNewlineWithIndent,
 } from '../textIndent';
 
 // Line starts in DOC: alpha@0, '  beta'@6, '\tgamma'@13, ''@20, delta@21
@@ -196,6 +197,69 @@ describe('outdentSelection', () => {
       text: 'a\nb\nc',
       start: 0,
       end: 5,
+    });
+  });
+});
+
+describe('insertNewlineWithIndent', () => {
+  it("carries the caret line's indentation onto the new line", () => {
+    // The G28 case: Enter at end of "    G28" lands on "    ".
+    expect(insertNewlineWithIndent('alpha\n    G28', 13)).toEqual({
+      text: 'alpha\n    G28\n    ',
+      start: 18,
+      end: 18,
+    });
+  });
+
+  it('splits a mid-line caret and re-indents the tail', () => {
+    expect(insertNewlineWithIndent('    G28 X1', 6)).toEqual({
+      text: '    G2\n    8 X1',
+      start: 11,
+      end: 11,
+    });
+  });
+
+  it('is a plain newline on a flush-left line', () => {
+    expect(insertNewlineWithIndent('G28', 3)).toEqual({ text: 'G28\n', start: 4, end: 4 });
+  });
+
+  it('carries a tab indent verbatim', () => {
+    expect(insertNewlineWithIndent('\tG28', 4)).toEqual({ text: '\tG28\n\t', start: 6, end: 6 });
+  });
+
+  it('carries a short space indent verbatim', () => {
+    expect(insertNewlineWithIndent('  G28', 5)).toEqual({ text: '  G28\n  ', start: 8, end: 8 });
+  });
+
+  it('reads the indentation from the caret line, not the neighbour', () => {
+    // Caret at the start of an unindented line below an indented one.
+    expect(insertNewlineWithIndent('    G28\nG0 X1', 8)).toEqual({
+      text: '    G28\n\nG0 X1',
+      start: 9,
+      end: 9,
+    });
+  });
+
+  it('indents an empty document', () => {
+    expect(insertNewlineWithIndent('', 0)).toEqual({ text: '\n', start: 1, end: 1 });
+  });
+
+  it('replaces a range selection with the newline', () => {
+    // Caret-anchor at 4, selection covers 'G28 X1' (4..11): Enter swaps the
+    // selection for a newline + the line's own indent, exactly as a plain
+    // textarea would swap it for a bare newline.
+    expect(insertNewlineWithIndent('    G28 X1 Y1', 4, 11)).toEqual({
+      text: '    \n    Y1',
+      start: 9,
+      end: 9,
+    });
+  });
+
+  it('clamps a past-the-end caret to the text end', () => {
+    expect(insertNewlineWithIndent('    G28', 99)).toEqual({
+      text: '    G28\n    ',
+      start: 12,
+      end: 12,
     });
   });
 });

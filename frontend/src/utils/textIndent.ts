@@ -82,6 +82,29 @@ export function indentCaret(text: string, pos: number): TextEdit {
 }
 
 /**
+ * Press Enter: newline + the caret line's leading whitespace.
+ *
+ * G-code lives and dies by indentation (macro blocks, Jinja conditionals), so
+ * a bare Enter drops the next line flush-left and the user retypes the indent
+ * by hand. This mirrors what every code editor does: the line the caret sits
+ * ON contributes its leading whitespace verbatim (tab or spaces, as-is) to the
+ * new line, and the caret lands after it. A mid-line caret splits there and
+ * the tail keeps its own text. A range selection is replaced by the newline,
+ * matching the textarea's own Enter behaviour.
+ */
+export function insertNewlineWithIndent(text: string, pos: number, end?: number): TextEdit {
+  const start = Math.max(0, Math.min(pos, text.length));
+  const stop = Math.max(start, Math.min(end ?? start, text.length));
+  const indent = /^[ \t]*/.exec(text.slice(lineStartAt(text, start)))?.[0] ?? '';
+  const caret = start + 1 + indent.length;
+  return {
+    text: text.slice(0, start) + '\n' + indent + text.slice(stop),
+    start: caret,
+    end: caret,
+  };
+}
+
+/**
  * Prefix every line covered by `[start, end]` with one indent unit.
  *
  * The caret keeps its offset *within its line*; a multi-line selection grows by

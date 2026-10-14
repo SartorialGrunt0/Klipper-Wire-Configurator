@@ -11,7 +11,7 @@ import { acknowledgeableWarning } from '../utils/warningAcknowledgment';
 import { resolveIssueLine } from '../utils/issueLine';
 import { ISSUE_MARKER } from '../utils/issueMarker';
 import { filterFindings } from '../utils/validationVisibility';
-import { indentCaret, indentSelection, outdentSelection } from '../utils/textIndent';
+import { indentCaret, indentSelection, outdentSelection, insertNewlineWithIndent } from '../utils/textIndent';
 import { autoScrollDelta } from '../utils/editorAutoScroll';
 import { buildHighlightedHtml, escapeHtml } from '../utils/editorHighlight';
 import { lineSeverities, worstSeverity, type IssueSeverity } from '../utils/issueSummary';
@@ -1298,6 +1298,18 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
         setCompletionListOpen(true);
         setCompletionDismissed(null);
       }
+      return;
+    }
+    if (e.key === 'Enter' && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      // Enter keeps the line's indentation (Sir 2026-10-13): G-code blocks
+      // hang off the indent, so a bare newline after an indented `G28` made
+      // every following line flush-left. The caret line's leading whitespace
+      // — tab or spaces, verbatim — is re-inserted after the newline. The
+      // completion branch above already returned for ghost-accept Enter.
+      setCompletionListOpen(false);
+      const el = e.currentTarget;
+      e.preventDefault();
+      applyTextEdit(insertNewlineWithIndent(el.value, el.selectionStart, el.selectionEnd));
       return;
     }
     if (e.key !== 'Tab' || e.ctrlKey || e.metaKey || e.altKey) return;
