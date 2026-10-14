@@ -104,4 +104,13 @@ describe('useUiStore', () => {
     expect(useUiStore.getState().composerFocusNonce).toBe(2);
     expect(storage.length).toBe(0);
   });
+
+  it('counts save-dialog requests so a repeat Ctrl+S still lands', () => {
+    useUiStore.setState({ saveDialogNonce: 0 });
+    useUiStore.getState().requestOpenSaveDialog();
+    expect(useUiStore.getState().saveDialogNonce).toBe(1);
+    useUiStore.getState().requestOpenSaveDialog();
+    expect(useUiStore.getState().saveDialogNonce).toBe(2);
+    expect(storage.length).toBe(0);
+  });
 });

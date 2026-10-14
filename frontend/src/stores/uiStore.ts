@@ -26,11 +26,18 @@ export interface UiState {
    * button means "put me in the box" every time it is pressed.
    */
   composerFocusNonce: number;
+  /**
+   * Bumped to ask the toolbar to open the Save (Apply) dialog — the same
+   * action as clicking Save. A counter for the same reason as
+   * composerFocusNonce: repeat Ctrl+S requests must be distinguishable.
+   */
+  saveDialogNonce: number;
 
   setShowChatDock: (show: boolean) => void;
   toggleChatDock: () => void;
   setDockHost: (host: HTMLElement | null) => void;
   requestComposerFocus: () => void;
+  requestOpenSaveDialog: () => void;
 }
 
 /** Folded out by default — the panel is the point of the text view, and the
@@ -63,6 +70,7 @@ export const useUiStore = create<UiState>((set, get) => ({
   showChatDock: readShowChatDock(),
   dockHost: null,
   composerFocusNonce: 0,
+  saveDialogNonce: 0,
 
   setShowChatDock: (showChatDock) => {
     set({ showChatDock });
@@ -76,4 +84,6 @@ export const useUiStore = create<UiState>((set, get) => ({
   setDockHost: (dockHost) => set({ dockHost }),
 
   requestComposerFocus: () => set((state) => ({ composerFocusNonce: state.composerFocusNonce + 1 })),
+
+  requestOpenSaveDialog: () => set((state) => ({ saveDialogNonce: state.saveDialogNonce + 1 })),
 }));

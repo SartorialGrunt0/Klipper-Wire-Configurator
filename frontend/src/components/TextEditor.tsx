@@ -57,6 +57,7 @@ import {
 } from '../services/reviewEngine';
 import { useChangeSetStore } from '../stores/changeSetStore';
 import { useUiStore } from '../stores/uiStore';
+import { matchEditorShortcut } from '../utils/editorShortcuts';
 import { useAiStore } from '../stores/aiStore';
 import { useChatReferenceStore } from '../stores/chatReferenceStore';
 import { usePendingEditStore } from '../stores/pendingEditStore';
@@ -1579,6 +1580,25 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     });
   };
 
+  // Ctrl/Cmd+F opens the search panel; Ctrl/Cmd+H opens it with the replace
+  // row showing. Window-level so the chord works from anywhere in the text
+  // view (tree, editor, chat dock), and preventDefault keeps the browser's
+  // own find bar out. When search is already open the chord only re-focuses
+  // — closing it is Escape's job, so hitting F again never wipes the query.
+  useEffect(() => {
+    if (!isActive) return;
+    const handleShortcut = (e: KeyboardEvent) => {
+      const shortcut = matchEditorShortcut(e);
+      if (!shortcut) return;
+      e.preventDefault();
+      if (shortcut === 'replace') setShowReplace(true);
+      setShowSearch(true);
+      searchInputRef.current?.focus();
+    };
+    window.addEventListener('keydown', handleShortcut);
+    return () => window.removeEventListener('keydown', handleShortcut);
+  }, [isActive]);
+
   // Close context menu on outside click
   useEffect(() => {
     if (!contextMenu) return;
@@ -2013,6 +2033,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
             </button>
             <button
               onClick={toggleSearch}
+              title="Search all files (Ctrl+F)"
               className={`flex items-center gap-1.5 px-2 py-1 rounded text-xs font-medium transition-colors ${
                 showSearch
                   ? 'bg-[var(--color-accent)] text-[var(--color-bg-primary)]'

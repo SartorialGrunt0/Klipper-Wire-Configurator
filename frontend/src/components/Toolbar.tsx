@@ -129,6 +129,7 @@ export default function Toolbar({
   const showChatDock = useUiStore((s) => s.showChatDock);
   const setShowChatDock = useUiStore((s) => s.setShowChatDock);
   const requestComposerFocus = useUiStore((s) => s.requestComposerFocus);
+  const saveDialogNonce = useUiStore((s) => s.saveDialogNonce);
   const wideViewport = useMediaQuery(WIDE_VIEWPORT_QUERY);
   const dockUsable = showTextView && wideViewport && aiConfigured;
   const [showFlash, setShowFlash] = useState(false);
@@ -158,6 +159,16 @@ export default function Toolbar({
     showExportButton || showSaveButton || showRevertButton || showDiffButton;
   const showAiGroup = showAiChatButton || showFlashButton;
   const showBuilderGroup = showComponentButton || showMacroButton;
+
+  // Ctrl/Cmd+S asks the toolbar to open the Save dialog — the same action as
+  // clicking Save. Honors the button's own visibility: with no config loaded
+  // (or Save hidden in the settings menu) the chord does nothing rather than
+  // opening a dialog the user couldn't have clicked.
+  useEffect(() => {
+    if (saveDialogNonce === 0) return;
+    if (!showSaveButton) return;
+    setShowApply(true);
+  }, [saveDialogNonce, showSaveButton]);
   const showAnyOptionalGroup =
     showFileGroup || showProjectGroup || showAiGroup || showBuilderGroup;
   const hasHiddenItems = Object.values(hiddenItems).some(Boolean);
@@ -327,6 +338,7 @@ export default function Toolbar({
       {showSaveButton && (
         <button
           onClick={() => setShowApply(true)}
+          title="Save to Pi (Ctrl+S)"
           className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${saveButtonClass}`}
         >
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none">

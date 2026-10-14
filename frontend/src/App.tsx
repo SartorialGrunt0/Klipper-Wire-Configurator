@@ -45,6 +45,8 @@ import { combineValidationStatuses } from './utils/validationStatus';
 import { filterValidationMap } from './utils/validationVisibility';
 import { useVisibility } from './stores/validationSettingsStore';
 import { isBackupConfigFilename } from './utils/backupFiles';
+import { isSaveShortcut } from './utils/editorShortcuts';
+import { useUiStore } from './stores/uiStore';
 import {
   LAYOUT_STORAGE_KEY,
   buildLayoutPayload,
@@ -589,6 +591,20 @@ export default function App() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [undo, redo, showTextView]);
+
+  // Ctrl/Cmd+S opens the Save (Apply) dialog from anywhere, and always eats
+  // the chord — the browser's own "Save page" is never what a user means
+  // here. The Toolbar only honors the request when its Save button is
+  // actually visible (see saveDialogNonce).
+  useEffect(() => {
+    const handleSaveKey = (e: KeyboardEvent) => {
+      if (!isSaveShortcut(e)) return;
+      e.preventDefault();
+      useUiStore.getState().requestOpenSaveDialog();
+    };
+    window.addEventListener('keydown', handleSaveKey);
+    return () => window.removeEventListener('keydown', handleSaveKey);
+  }, []);
 
   const { toggleHardwareCollapse } = useGraphStore();
   const CHILD_TYPES = new Set(['subComponent', 'feature', 'group', 'customGroup']);
