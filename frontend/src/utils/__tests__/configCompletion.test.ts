@@ -9,6 +9,7 @@ import {
   acceptAt,
   applyCandidate,
   ghostRemainder,
+  sameCompletionTarget,
   type CompletionSources,
 } from '../configCompletion';
 import type { SectionSchema, ParamSchema } from '../../types/config';
@@ -621,5 +622,53 @@ describe('applyCandidate', () => {
     const applied = applyCandidate(text, result.context, result.ghost!);
     expect(applied.text.split('\n')[3]).toBe('max_velocity: 300');
     expect(applied.text.split('\n')[0]).toBe('[stepper_x]');
+  });
+});
+
+describe('sameCompletionTarget — arrow selection survives a caret re-sync', () => {
+  // The bug (Cliff 2026-10-15): ArrowDown moves `completion.index` on keydown;
+  // the arrow's keyup fires syncCaret → updateCompletion, which rebuilt the
+  // result from scratch and reset `index` to the ghost default. The guard is
+  // "same token ⇒ keep the current result", so the predicate must be true for
+  // a pure caret event on the unchanged token and false whenever the token
+  // itself moved (typed/edited text), the kind changed, or the prefix grew.
+  it('is true for two results computed on the same token', () => {
+    const { text, caret } = at('[stepper_x]\nst');
+    const a = completionsAt(text, caret, SOURCES)!;
+    const b = completionsAt(text, caret, SOURCES)!;
+    expect(sameCompletionTarget(a, b)).toBe(true);
+  });
+
+  it('is true when only the arrow-key index differs', () => {
+    const { text, caret } = at('[stepper_x]\nst');
+    const a = { ...completionsAt(text, caret, SOURCES)!, index: 3 };
+    const b = completionsAt(text, caret, SOURCES)!;
+    expect(sameCompletionTarget(a, b)).toBe(true);
+  });
+
+  it('is false once the prefix changes — a new token needs a new list', () => {
+    const a = completionsAt('[stepper_x]\nst', 14, SOURCES)!;
+    const b = completionsAt('[stepper_x]\nste', 15, SOURCES)!;
+    expect(sameCompletionTarget(a, b)).toBe(false);
+  });
+
+  it('is false when the kind changes under the caret (key → value)', () => {
+    const keyText = '[stepper_x]\nmicro';
+    const valueText = '[stepper_x]\nmicrosteps: ';
+    const key = completionsAt(keyText, keyText.length, SOURCES)!;
+    const value = completionsAt(valueText, valueText.length, SOURCES)!;
+    expect(sameCompletionTarget(key, value)).toBe(false);
+  });
+
+  it('is false when the same prefix sits on a different token (different line)', () => {
+    const a = completionsAt('[stepper_x]\nst', 14, SOURCES)!;
+    const moved = '[stepper_x]\nx: 1\nst';
+    const b = completionsAt(moved, moved.length, SOURCES)!;
+    expect(sameCompletionTarget(a, b)).toBe(false);
+  });
+
+  it('is false against a null current result (nothing to keep)', () => {
+    const b = completionsAt('[stepper_x]\nst', 14, SOURCES)!;
+    expect(sameCompletionTarget(null, b)).toBe(false);
   });
 });

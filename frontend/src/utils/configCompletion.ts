@@ -509,6 +509,33 @@ export function completionsAt(
   };
 }
 
+/**
+ * True when two results describe the SAME token — same kind, same replacement
+ * span, same prefix.
+ *
+ * The caret handlers re-run `completionsAt` on every caret event (keyup,
+ * click, select), and a fresh result always carries the ghost default in
+ * `index`. Without this check a keyup on the very arrow key that moved the
+ * highlight rebuilds the result and snaps the selection back to the top
+ * (Cliff, 2026-10-15): ArrowDown's keydown advances `index`, then its keyup
+ * re-syncs and stomps it. Any real edit changes the prefix or the token
+ * bounds, so a caret event on an unchanged token is the one case where the
+ * current result — with the user's chosen `index` — is strictly better than
+ * the recompute.
+ */
+export function sameCompletionTarget(
+  current: CompletionResult | null,
+  next: CompletionResult,
+): boolean {
+  if (!current) return false;
+  return (
+    current.context.kind === next.context.kind &&
+    current.context.replaceStart === next.context.replaceStart &&
+    current.context.replaceEnd === next.context.replaceEnd &&
+    current.context.prefix === next.context.prefix
+  );
+}
+
 /** The text edit accepting a candidate produces. */
 export function applyCandidate(
   text: string,

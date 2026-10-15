@@ -21,6 +21,7 @@ import {
   completionsAt,
   acceptAt,
   applyCandidate,
+  sameCompletionTarget,
   type CompletionResult,
   type CompletionSources,
 } from '../utils/configCompletion';
@@ -1087,7 +1088,13 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
       setCompletion(null);
       return;
     }
-    setCompletion(result);
+    // Keep the current result when the recompute describes the same token:
+    // the arrow keys move `index` on keydown, and the very same key's keyup
+    // lands here via syncCaret. Stomping a fresh result reset the highlight
+    // to the ghost default, so every ArrowDown snapped back to row 0
+    // (Cliff, 2026-10-15). Functional form: no `completion` dep, and the
+    // update races nothing.
+    setCompletion((current) => (sameCompletionTarget(current, result) ? current : result));
   }, [isActive, completionSources, usedParamKeysAt, completionDismissed]);
 
   /** Caret bookkeeping shared by the textarea's key/click/select handlers. */
