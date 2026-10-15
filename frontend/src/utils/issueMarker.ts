@@ -33,7 +33,11 @@ export const ISSUE_MARKER: Record<IssueSeverity, IssueMarkerSpec> = {
     title: 'Validation error',
   },
   warning: {
-    marker: '▲',
+    // ⚠ — the triangle-with-exclamation warning sign every other KWC surface
+    // already uses (Settings panel, chat edit rows, approval cards, changeset
+    // badges). The bare ▲ read as a generic arrow in the text-view gutter
+    // (Cliff, 2026-10-14).
+    marker: '⚠',
     color: 'var(--color-warning)',
     dotClass: 'w-2 h-2 rounded-full bg-[var(--color-warning)]',
     gutterDotClass: 'w-2 h-2 rounded-full bg-[var(--color-warning)]',
