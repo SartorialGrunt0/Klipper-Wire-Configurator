@@ -6,6 +6,7 @@ import { useUiStore } from '../stores/uiStore';
 import { useMediaQuery, WIDE_VIEWPORT_QUERY } from '../hooks/useMediaQuery';
 import { useValidationSettingsStore, useVisibility } from '../stores/validationSettingsStore';
 import { getSaveButtonClass } from '../utils/saveButtonClass';
+import { chatStatusActive, chatStatusButtonClass, chatStatusTitle } from '../utils/chatStatusDisplay';
 import { filterValidationMap } from '../utils/validationVisibility';
 import type { PendingAiChatRequest } from '../types/ai';
 import ImportDialog from './dialogs/ImportDialog';
@@ -385,13 +386,11 @@ export default function Toolbar({
         <button
           onClick={handleOpenChat}
           className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-            chatStatus === 'success' || chatStatus === 'awaiting'
-              ? 'bg-green-600 text-white hover:bg-green-700'
-              : chatStatus === 'error'
-                ? 'bg-red-600 text-white hover:bg-red-700'
-                : 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)]'
+            chatStatusActive(chatStatus)
+              ? chatStatusButtonClass(chatStatus)
+              : 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)]'
           }`}
-          title={chatStatus === 'success' ? 'AI Chat — response ready' : chatStatus === 'awaiting' ? 'AI Chat — an edit needs your decision' : chatStatus === 'error' ? 'AI Chat — last request failed' : 'AI Chat'}
+          title={chatStatusTitle(chatStatus, 'AI Chat')}
         >
           <ChatBubbleIcon />
           AI Chat

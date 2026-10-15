@@ -61,6 +61,7 @@ import { useChangeSetStore } from '../stores/changeSetStore';
 import { useUiStore } from '../stores/uiStore';
 import { matchEditorShortcut } from '../utils/editorShortcuts';
 import { useAiStore } from '../stores/aiStore';
+import { chatStatusActive, chatStatusDotClass, chatStatusTitle } from '../utils/chatStatusDisplay';
 import { useChatReferenceStore } from '../stores/chatReferenceStore';
 import { usePendingEditStore } from '../stores/pendingEditStore';
 import { paneModeFor } from '../utils/pendingDiff';
@@ -124,6 +125,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
   const setShowChatDock = useUiStore((s) => s.setShowChatDock);
   const registerDockHost = useUiStore((s) => s.setDockHost);
   const aiConfigured = useAiStore((s) => s.isConfigured());
+  const chatStatus = useAiStore((s) => s.chatStatus);
   const wideViewport = useMediaQuery(WIDE_VIEWPORT_QUERY);
   const dockAvailable = isActive && wideViewport;
   // Which tree row is currently the dock's preview, so it can highlight it.
@@ -2116,24 +2118,37 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
               Search
             </button>
             {/* The docked chat's fold toggle — same idea, other side. Disabled
-                while no provider is configured: the panel has nothing to show. */}
+                while no provider is configured: the panel has nothing to show.
+                Carries the background chat-status signal (same mapping as the
+                toolbar's AI Chat button): while folded, a landed reply, a
+                pending edit decision, or a failed request tints the button
+                and shows a dot. Unfolding consumes the signal. */}
             {dockAvailable && (
               <button
                 onClick={() => setShowChatDock(!showChatDock)}
                 disabled={!aiConfigured}
                 title={aiConfigured
-                  ? (showChatDock ? 'Hide the AI chat' : 'Show the AI chat')
+                  ? chatStatusTitle(chatStatus, showChatDock ? 'Hide the AI chat' : 'Show the AI chat')
                   : 'Configure an AI provider in AI Chat → Settings to enable the panel'}
                 aria-pressed={showChatDock && aiConfigured}
-                className={`flex shrink-0 items-center rounded border px-1.5 py-0.5 transition-colors ${
+                className={`relative flex shrink-0 items-center rounded border px-1.5 py-0.5 transition-colors ${
                   !aiConfigured
                     ? 'cursor-not-allowed border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] opacity-40'
-                    : showChatDock
-                      ? 'border-[var(--color-accent)]/40 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10'
-                      : 'border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]'
+                    : !showChatDock && chatStatusActive(chatStatus)
+                      ? chatStatus === 'error'
+                        ? 'border-red-500/60 text-red-400 hover:bg-red-500/10'
+                        : 'border-green-500/60 text-green-400 hover:bg-green-500/10'
+                      : showChatDock
+                        ? 'border-[var(--color-accent)]/40 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10'
+                        : 'border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]'
                 }`}
               >
                 <ChatBubbleIcon />
+                {!showChatDock && aiConfigured && chatStatusActive(chatStatus) && (
+                  <span
+                    className={`absolute -right-1 -top-1 h-2 w-2 rounded-full ring-2 ring-[var(--color-bg-secondary)] ${chatStatusDotClass(chatStatus)}`}
+                  />
+                )}
               </button>
             )}
           </div>

@@ -131,7 +131,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   variant = 'modal',
 }) => {
   // ── Stores ──────────────────────────────────────────────────────
-  const { settings, setSettings, isConfigured, messages, setMessages, clearMessages, chatStatus } = useAiStore();
+  const { settings, setSettings, isConfigured, messages, setMessages, clearMessages } = useAiStore();
   const {
     configFiles,
     activeFile,
@@ -1276,15 +1276,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   // column) and the header's density; nothing below this line knows or
   // cares which shell it is in.
 
-  const statusTitle =
-    chatStatus === 'success' ? 'Last response is ready'
-      : chatStatus === 'awaiting' ? 'An edit is waiting for your decision'
-        : chatStatus === 'error' ? 'The last request failed'
-          : 'Idle';
-  const statusDotClass =
-    chatStatus === 'success' || chatStatus === 'awaiting' ? 'bg-green-500'
-      : chatStatus === 'error' ? 'bg-red-500'
-        : 'bg-[var(--color-bg-tertiary)]';
   const iconButtonClass =
     'rounded p-1 text-[var(--color-text-secondary)] transition-colors hover:text-[var(--color-text-primary)] disabled:opacity-40 disabled:cursor-not-allowed';
 
@@ -1294,7 +1285,6 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     <div className="shrink-0 border-b border-[var(--color-bg-tertiary)]">
       <div className="flex h-9 items-center justify-between gap-2 px-3">
         <div className="flex min-w-0 items-center gap-2">
-          <span className={`h-2 w-2 shrink-0 rounded-full ${statusDotClass}`} title={statusTitle} />
           <h2 className="truncate text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-secondary)]">
             AI Chat
           </h2>
