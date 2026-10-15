@@ -3,7 +3,6 @@ import { describe, expect, it } from 'vitest';
 import {
   chatStatusActive,
   chatStatusButtonClass,
-  chatStatusDotClass,
   chatStatusTitle,
 } from '../chatStatusDisplay';
 
@@ -15,13 +14,7 @@ describe('chatStatusDisplay', () => {
     expect(chatStatusActive('error')).toBe(true);
   });
 
-  it('dot colors: green for success/awaiting, red for error', () => {
-    expect(chatStatusDotClass('success')).toContain('green');
-    expect(chatStatusDotClass('awaiting')).toContain('green');
-    expect(chatStatusDotClass('error')).toContain('red');
-  });
-
-  it('toolbar button classes match the pre-helper mapping', () => {
+  it('fold/toolbar button classes: green for success/awaiting, red for error', () => {
     expect(chatStatusButtonClass('success')).toBe('bg-green-600 text-white hover:bg-green-700');
     expect(chatStatusButtonClass('awaiting')).toBe('bg-green-600 text-white hover:bg-green-700');
     expect(chatStatusButtonClass('error')).toBe('bg-red-600 text-white hover:bg-red-700');

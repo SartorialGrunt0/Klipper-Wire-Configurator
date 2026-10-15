@@ -14,14 +14,8 @@ export function chatStatusActive(status: ChatStatus): boolean {
   return status !== 'idle';
 }
 
-/** Tailwind classes for the small status dot on the fold button. */
-export function chatStatusDotClass(status: ChatStatus): string {
-  return status === 'success' || status === 'awaiting'
-    ? 'bg-green-500'
-    : 'bg-red-500';
-}
-
-/** Filled-button classes for the toolbar AI Chat button. */
+/** Filled-button classes for the toolbar AI Chat button and the text view's
+ *  chat fold button, so both surfaces state the signal identically. */
 export function chatStatusButtonClass(status: ChatStatus): string {
   return status === 'success' || status === 'awaiting'
     ? 'bg-green-600 text-white hover:bg-green-700'

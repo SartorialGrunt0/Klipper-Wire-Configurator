@@ -62,7 +62,7 @@ import { useChangeSetStore } from '../stores/changeSetStore';
 import { useUiStore } from '../stores/uiStore';
 import { matchEditorShortcut } from '../utils/editorShortcuts';
 import { useAiStore } from '../stores/aiStore';
-import { chatStatusActive, chatStatusDotClass, chatStatusTitle } from '../utils/chatStatusDisplay';
+import { chatStatusActive, chatStatusButtonClass, chatStatusTitle } from '../utils/chatStatusDisplay';
 import { useChatReferenceStore } from '../stores/chatReferenceStore';
 import { usePendingEditStore } from '../stores/pendingEditStore';
 import { paneModeFor } from '../utils/pendingDiff';
@@ -2085,15 +2085,16 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
                 the editor toolbar, rather than in a collapsed rail: a rail is
                 40px of horizontal space doing nothing, and this is the same
                 spot the tree's own fold control occupies when it is open.
-                Accent blue while the tree is out, grey while it is folded. */}
+                Same filled grey/blue toggle idiom as the Search button next to
+                it, at the same h-6 height. */}
             <button
               onClick={() => setShowFileSidebar((prev) => !prev)}
               title={showFileSidebar ? 'Hide the file tree' : 'Show the file tree'}
               aria-pressed={showFileSidebar}
-              className={`flex shrink-0 items-center rounded border px-1.5 py-0.5 transition-colors ${
+              className={`flex h-6 shrink-0 items-center justify-center rounded px-2 transition-colors ${
                 showFileSidebar
-                  ? 'border-[var(--color-accent)]/40 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10'
-                  : 'border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]'
+                  ? 'bg-[var(--color-accent)] text-[var(--color-bg-primary)]'
+                  : 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)]'
               }`}
             >
               <FileTreeIcon />
@@ -2124,12 +2125,14 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
               </svg>
               Search
             </button>
-            {/* The docked chat's fold toggle — same idea, other side. Disabled
-                while no provider is configured: the panel has nothing to show.
-                Carries the background chat-status signal (same mapping as the
-                toolbar's AI Chat button): while folded, a landed reply, a
-                pending edit decision, or a failed request tints the button
-                and shows a dot. Unfolding consumes the signal. */}
+            {/* The docked chat's fold toggle — same idea, other side, and the
+                same filled grey/blue toggle geometry as the Search button.
+                Disabled while no provider is configured: the panel has nothing
+                to show. Carries the background chat-status signal with the
+                SAME filled green/red classes as the toolbar's AI Chat button
+                (via chatStatusButtonClass): while folded, a landed reply, a
+                pending edit decision, or a failed request fills the button.
+                Unfolding consumes the signal. */}
             {dockAvailable && (
               <button
                 onClick={() => setShowChatDock(!showChatDock)}
@@ -2138,24 +2141,17 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
                   ? chatStatusTitle(chatStatus, showChatDock ? 'Hide the AI chat' : 'Show the AI chat')
                   : 'Configure an AI provider in AI Chat → Settings to enable the panel'}
                 aria-pressed={showChatDock && aiConfigured}
-                className={`relative flex shrink-0 items-center rounded border px-1.5 py-0.5 transition-colors ${
+                className={`flex h-6 shrink-0 items-center justify-center rounded px-2 transition-colors ${
                   !aiConfigured
-                    ? 'cursor-not-allowed border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] opacity-40'
+                    ? 'cursor-not-allowed bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] opacity-40'
                     : !showChatDock && chatStatusActive(chatStatus)
-                      ? chatStatus === 'error'
-                        ? 'border-red-500/60 text-red-400 hover:bg-red-500/10'
-                        : 'border-green-500/60 text-green-400 hover:bg-green-500/10'
+                      ? chatStatusButtonClass(chatStatus)
                       : showChatDock
-                        ? 'border-[var(--color-accent)]/40 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10'
-                        : 'border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]'
+                        ? 'bg-[var(--color-accent)] text-[var(--color-bg-primary)]'
+                        : 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)]'
                 }`}
               >
                 <ChatBubbleIcon />
-                {!showChatDock && aiConfigured && chatStatusActive(chatStatus) && (
-                  <span
-                    className={`absolute -right-1 -top-1 h-2 w-2 rounded-full ring-2 ring-[var(--color-bg-secondary)] ${chatStatusDotClass(chatStatus)}`}
-                  />
-                )}
               </button>
             )}
           </div>
