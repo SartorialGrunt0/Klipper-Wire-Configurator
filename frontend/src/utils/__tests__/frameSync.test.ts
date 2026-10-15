@@ -75,6 +75,25 @@ describe('syncFrameOutsideRuns — the invariant', () => {
   scenario('repeated hand edits keep folding (two rounds)',
     L('[p]', 'max_accel: 1000'), L('[p]', 'max_accel: 3000'),
     L('# one', '[p]', 'max_accel: 3000'), ['+max_accel: 3000−max_accel: 1000@3']);
+
+  scenario('edit a line INSIDE a big added block, old text twin adjacent: no fold leak, no phantom deletion',
+    // Sir's ghost-in-the-tail report (2026-10-14): the AI appended a macro
+    // (one green run); the user retunes the FIRST of two identical F3000
+    // lines. diffLines anchors the surviving twin as context and reports the
+    // replace split as `+new / context / -old`; the `+new` part walks as an
+    // EMPTY region (insertion boundary inside the run). The old
+    // zero-width-only touches() folded it into the frame below the run —
+    // into the #*# SAVE_CONFIG tail — and the next diff raised a phantom
+    // red ghost deletion row there. Correct: the edit joins the run; the
+    // frame keeps its tail intact.
+    L('[p]', 'gcode:', '  G28', '', '#*# <--- SAVE_CONFIG --->', '#*# z_offset = -0.520'),
+    L('[p]', 'gcode:', '  G28', '',
+      '[gcode_macro CIRCLE_HOME]', 'gcode:', '  G2 X100 Y100 I50 J0 F3000', '  G2 X100 Y100 I50 J0 F3000', '',
+      '#*# <--- SAVE_CONFIG --->', '#*# z_offset = -0.520'),
+    L('[p]', 'gcode:', '  G28', '',
+      '[gcode_macro CIRCLE_HOME]', 'gcode:', '  G2 X100 Y100 I50 J0 F6000', '  G2 X100 Y100 I50 J0 F3000', '',
+      '#*# <--- SAVE_CONFIG --->', '#*# z_offset = -0.520'),
+    ['+[gcode_macro CIRCLE_HOME]|gcode:|  G2 X100 Y100 I50 J0 F6000|  G2 X100 Y100 I50 J0 F3000|−@5']);
 });
 
 describe('syncFrameOutsideRuns — unit edges', () => {

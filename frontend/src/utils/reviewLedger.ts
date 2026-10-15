@@ -200,8 +200,24 @@ export function syncFrameOutsideRuns(
    * touch a pending run's prevLive span? */
   const touches = (r: OldRegion, ps: number, pe: number): boolean => {
     if (pe >= ps) return r.liveCount > 0 && ps <= r.liveStart + r.liveCount - 1 && r.liveStart <= pe;
-    // An insertion boundary: only touches a zero-width span sitting AT it.
-    return r.liveCount === 0 && r.liveStart === ps;
+    // Insertion boundary between lines ps-1 and ps. Two protected shapes:
+    //  - a zero-width run (pure deletion) sitting exactly at it — inserting
+    //    at a ghost's anchor line belongs INSIDE the ghost region;
+    //  - STRICTLY INSIDE a run's lines. The old zero-width-only rule missed
+    //    this shape (Sir's ghost-in-the-tail report, 2026-10-14): diffLines
+    //    reports a replace whose OLD text still exists on the adjacent line
+    //    as `+new / context / -old`, and the walk flushes the `+new` part as
+    //    an EMPTY region — an insertion boundary inside the run. Judged as
+    //    not touching, the fold spliced the new line into the FRAME at the
+    //    run's frame offset (a width-0 replacement maps below the AI block,
+    //    into the SAVE_CONFIG tail in the report), mutating the frame with
+    //    run content and raising a phantom red ghost there.
+    // The trailing edge (ps = liveStart+liveCount, an append after the
+    // run's last line) FOLDS: the appended text sits below the region; the
+    // frame maps it at the run's frame-side end, which is exactly right
+    // ("type below the AI run" scenario).
+    if (r.liveCount === 0) return r.liveStart === ps;
+    return ps > r.liveStart && ps < r.liveStart + r.liveCount;
   };
 
   // The hand edit's change regions over prevLive (merged across adjacent
