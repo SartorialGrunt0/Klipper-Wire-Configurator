@@ -3,6 +3,8 @@ import {
   buildReviewDisplay,
   displayLineToLiveLine,
   displayToLiveOffset,
+  editTouchesGhost,
+  effectiveMutationRange,
   ghostedRuns,
   ghostsByLiveLine,
   liveFromDisplay,
@@ -391,6 +393,87 @@ describe('offset maps', () => {
     const next = displayOf(FRAME, liveFromDisplay(typedDisplay, built.ghosts));
     const caretNext = liveToDisplayOffset(next.live, next.display, next.ghostDisplayLines, caretLive);
     expect(next.display.slice(0, caretNext)).toBe('[printer]\nmax_velocity: 600\nmax_velocity: 601');
+  });
+});
+
+describe('editTouchesGhost', () => {
+  // display rows: 1 [printer] / 2 GHOST 600 / 3 300 / 4 15500
+  const built = displayOf(FRAME, LIVE);
+  const ghostStart = built.display.indexOf('max_velocity: 600'); // 10
+  const ghostEnd = ghostStart + 'max_velocity: 600'.length; // before its \n
+  const ghostMid = ghostStart + 5;
+
+  it('blocks an insertion anywhere inside the ghost row, edges included', () => {
+    expect(editTouchesGhost(built.display, built.ghostDisplayLines, ghostStart, ghostStart)).toBe(true);
+    expect(editTouchesGhost(built.display, built.ghostDisplayLines, ghostMid, ghostMid)).toBe(true);
+    expect(editTouchesGhost(built.display, built.ghostDisplayLines, ghostEnd, ghostEnd)).toBe(true);
+  });
+
+  it('allows an insertion on the live rows around it', () => {
+    // end of [printer] = just before the newline ABOVE the ghost
+    expect(editTouchesGhost(built.display, built.ghostDisplayLines, ghostStart - 1, ghostStart - 1)).toBe(false);
+    // start of the 300 row = just after the ghost's own newline
+    expect(editTouchesGhost(built.display, built.ghostDisplayLines, ghostEnd + 1, ghostEnd + 1)).toBe(false);
+    // deep inside the last row
+    const lastRow = built.display.length - 2;
+    expect(editTouchesGhost(built.display, built.ghostDisplayLines, lastRow, lastRow)).toBe(false);
+  });
+
+  it('blocks a deletion of ghost content (Backspace/Delete/selection delete)', () => {
+    expect(editTouchesGhost(built.display, built.ghostDisplayLines, ghostMid, ghostMid + 1)).toBe(true);
+    expect(editTouchesGhost(built.display, built.ghostDisplayLines, ghostStart, ghostEnd)).toBe(true);
+  });
+
+  it('blocks Backspace at the ghost start (eats the newline above it)', () => {
+    expect(editTouchesGhost(built.display, built.ghostDisplayLines, ghostStart - 1, ghostStart)).toBe(true);
+  });
+
+  it('blocks Delete at the ghost end (merges the live row up into it)', () => {
+    expect(editTouchesGhost(built.display, built.ghostDisplayLines, ghostEnd, ghostEnd + 1)).toBe(true);
+  });
+
+  it('blocks a selection spanning the ghost from either side', () => {
+    expect(editTouchesGhost(built.display, built.ghostDisplayLines, 0, ghostStart + 1)).toBe(true);
+    expect(editTouchesGhost(built.display, built.ghostDisplayLines, ghostEnd - 1, built.display.length)).toBe(true);
+    // backwards selection normalises
+    expect(editTouchesGhost(built.display, built.ghostDisplayLines, ghostMid + 2, ghostMid)).toBe(true);
+  });
+
+  it('allows a selection delete strictly inside a live row', () => {
+    const below = ghostEnd + 1; // start of the 300 row
+    expect(editTouchesGhost(built.display, built.ghostDisplayLines, below, below + 'max_velocity'.length)).toBe(false);
+  });
+
+  it('never fires with no ghosts', () => {
+    expect(editTouchesGhost('abc\ndef', [], 0, 7)).toBe(false);
+  });
+
+  it('covers every ghost of a multi-run display', () => {
+    // rows: 1 x1 / 2 x2 (ghosts) / 3 X / 4 keep / 5 y1 / 6 y2 (ghosts) / 7 Y
+    const multi = displayOf('x1\nx2\nkeep\ny1\ny2', 'X\nkeep\nY');
+    const rows = multi.display.split('\n');
+    const rowStart = (n: number) => rows.slice(0, n - 1).join('\n').length + (n > 1 ? 1 : 0);
+    expect(editTouchesGhost(multi.display, multi.ghostDisplayLines, rowStart(6), rowStart(6))).toBe(true);
+    expect(editTouchesGhost(multi.display, multi.ghostDisplayLines, rowStart(4), rowStart(4))).toBe(false);
+    // deletion between the runs crossing only live rows stays allowed
+    const keepRow = rowStart(4);
+    expect(editTouchesGhost(multi.display, multi.ghostDisplayLines, keepRow, keepRow + 1)).toBe(false);
+  });
+});
+
+describe('effectiveMutationRange', () => {
+  it('widens collapsed caret deletes to the character they eat', () => {
+    expect(effectiveMutationRange('abcdef', 3, 3, 'deleteContentBackward')).toEqual([2, 3]);
+    expect(effectiveMutationRange('abcdef', 3, 3, 'deleteContentForward')).toEqual([3, 4]);
+    // clamped at the text edges
+    expect(effectiveMutationRange('ab', 0, 0, 'deleteContentBackward')).toEqual([0, 0]);
+    expect(effectiveMutationRange('ab', 2, 2, 'deleteContentForward')).toEqual([2, 2]);
+  });
+
+  it('leaves everything else as-is', () => {
+    expect(effectiveMutationRange('abcdef', 3, 3, 'insertText')).toEqual([3, 3]);
+    expect(effectiveMutationRange('abcdef', 1, 4, 'deleteContentBackward')).toEqual([1, 4]);
+    expect(effectiveMutationRange('abcdef', 1, 4, 'historyUndo')).toEqual([1, 4]);
   });
 });
 

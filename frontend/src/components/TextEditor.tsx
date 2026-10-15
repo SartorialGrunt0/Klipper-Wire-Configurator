@@ -39,6 +39,8 @@ import {
   buildReviewDisplay,
   displayToLiveOffset,
   displayToLiveOffsetAfterStrip,
+  editTouchesGhost,
+  effectiveMutationRange,
   ghostedRuns,
   ghostsByLiveLine,
   liveLineToDisplayLine,
@@ -602,6 +604,40 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     () => new Set(reviewDisplay.ghostDisplayLines),
     [reviewDisplay],
   );
+
+  // Ghost rows are READ-ONLY (Sir 2026-10-13, Zed/VS Code law): the red
+  // pending-deletion preview is fiction — the caret may rest on it (reading,
+  // copy), but no browser-native mutation (typing, paste, cut, drop, delete,
+  // IME commit, native undo) may land on it. Vetoed with a NATIVE capture
+  // listener: React's synthetic onBeforeInput proved unreliable for
+  // deleteContentBackward in E2E (the native event fires, the synthetic one
+  // never reaches the guard), and a capture listener runs before the browser
+  // mutates the value either way. Programmatic branches in
+  // handleEditorKeyDown check the same predicate. The handler lives in a ref
+  // so the effect attaches once while always seeing the current display.
+  const ghostGuardRef = useRef<(e: Event) => void>(() => {});
+  ghostGuardRef.current = (e: Event) => {
+    if (!ghostsShowing) return;
+    const el = textareaRef.current;
+    if (!el || e.target !== el) return;
+    const inputType = (e as InputEvent).inputType ?? '';
+    const [s, t] = effectiveMutationRange(
+      el.value,
+      el.selectionStart,
+      el.selectionEnd,
+      inputType,
+    );
+    if (editTouchesGhost(el.value, reviewDisplay.ghostDisplayLines, s, t)) {
+      e.preventDefault();
+    }
+  };
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    const handler = (e: Event) => ghostGuardRef.current(e);
+    el.addEventListener('beforeinput', handler, true);
+    return () => el.removeEventListener('beforeinput', handler, true);
+  }, []);
 
   // The caret contract: the `caret` state and `pendingSelectionRef` hold
   // LIVE offsets; the DOM holds DISPLAY offsets. `caretBridgeRef` carries the
@@ -1190,6 +1226,14 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     if (!completion) return;
     const candidate = completion.candidates[index ?? completion.index];
     if (!candidate) return;
+    // Ghost rows are read-only fiction (Sir 2026-10-13, Zed/VS Code law):
+    // an accept anchored on a red row would edit it. The candidate list
+    // computing a token on a ghost line is already the frame's fiction —
+    // refuse the accept, keep the popup for the next real caret.
+    const el = textareaRef.current;
+    if (el && ghostsShowing && editTouchesGhost(el.value, reviewDisplay.ghostDisplayLines, el.selectionStart, el.selectionEnd)) {
+      return;
+    }
     // Apply against the textarea's CURRENT value, not `editText`: while
     // ghosts show the completion's context offsets were computed on the
     // DISPLAY text (updateCompletion reads el.value), so applying them to
@@ -1201,7 +1245,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     setCompletion(null);
     setCompletionListOpen(false);
     setCompletionDismissed(null);
-  }, [completion, editText, applyTextEdit]);
+  }, [completion, editText, applyTextEdit, ghostsShowing, reviewDisplay]);
 
   const dismissCompletion = useCallback(() => {
     if (completion) {
@@ -1240,11 +1284,19 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
     // Computed at the key press rather than read from state: accepting a param
     // leaves the caret after `key: `, and the next press has to see the value
     // suggestion with no keystroke, re-render or delay in between.
+    const el = e.currentTarget;
+    // Ghost rows are read-only (Sir 2026-10-13, Zed/VS Code law): no
+    // programmatic edit branch below may splice into one. A caret resting on
+    // a ghost still moves freely; the edit simply does not happen (the
+    // textarea's onBeforeInput vetoes the native paths, this covers ours).
+    const ghostTouched =
+      ghostsShowing &&
+      editTouchesGhost(el.value, reviewDisplay.ghostDisplayLines, el.selectionStart, el.selectionEnd);
     if (
       (e.key === 'ArrowRight' || e.key === 'End') &&
-      !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey
+      !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey &&
+      !ghostTouched
     ) {
-      const el = e.currentTarget;
       const applied = acceptAt(el.value, el.selectionStart, {
         ...completionSources,
         usedParamKeys: usedParamKeysAt(el.value, el.selectionStart),
@@ -1288,7 +1340,6 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
       // live text and the display diverge, and every other completion path
       // (updateCompletion) already reads the DOM.
       e.preventDefault();
-      const el = e.currentTarget;
       const result = completionsAt(el.value, el.selectionStart, {
         ...completionSources,
         usedParamKeys: usedParamKeysAt(el.value, el.selectionStart),
@@ -1300,21 +1351,27 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
       }
       return;
     }
-    if (e.key === 'Enter' && !e.ctrlKey && !e.altKey && !e.metaKey) {
+    if (e.key === 'Enter' && !e.ctrlKey && !e.altKey && !e.metaKey && !ghostTouched) {
       // Enter keeps the line's indentation (Sir 2026-10-13): G-code blocks
       // hang off the indent, so a bare newline after an indented `G28` made
       // every following line flush-left. The caret line's leading whitespace
       // — tab or spaces, verbatim — is re-inserted after the newline. The
       // completion branch above already returned for ghost-accept Enter.
+      // A ghost-touched Enter falls through UNSWALLOWED so the beforeinput
+      // veto answers for it (the red row stays put).
       setCompletionListOpen(false);
-      const el = e.currentTarget;
       e.preventDefault();
       applyTextEdit(insertNewlineWithIndent(el.value, el.selectionStart, el.selectionEnd));
       return;
     }
     if (e.key !== 'Tab' || e.ctrlKey || e.metaKey || e.altKey) return;
     setCompletionListOpen(false);
-    const el = e.currentTarget;
+    if (ghostTouched) {
+      // Keep focus in the editor — the edit is refused, not delegated
+      // (Sir 2026-10-13: ghost rows are read-only, Zed/VS Code law).
+      e.preventDefault();
+      return;
+    }
     const { selectionStart, selectionEnd } = el;
     const value = el.value;
     // Keep focus in the editor: preventDefault must happen before the edit.

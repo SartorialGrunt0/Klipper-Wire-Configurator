@@ -289,6 +289,82 @@ export function liveFromDisplay(
 }
 
 /**
+ * True when a mutation range touches ghost-row territory and must be refused.
+ *
+ * Ghost rows are pending-review fiction (Zed/VS Code law, Sir 2026-10-13):
+ * the red deleted-line preview is READ-ONLY — caret may rest on it (reading,
+ * Ctrl+C), but no mutation may land on it. Blocking covers four shapes:
+ *  - an insertion anywhere inside the ghost row, INCLUDING both edges
+ *    (typing at its start or before its newline would land on the red row);
+ *  - a deletion/replacement overlapping the ghost's content;
+ *  - a deletion crossing the ghost row's own trailing newline (merges the
+ *    live row below up into the ghost);
+ *  - a deletion crossing the newline IMMEDIATELY ABOVE the ghost (merges the
+ *    ghost down into the live row — Backspace at the ghost's start).
+ * A plain insertion at the very start of the live row below a ghost, or at
+ * the end of the live row above it, does NOT touch: typing flows normally
+ * around the ghost.
+ *
+ * `display`/`ghostDisplayLines` are the same pair `buildReviewDisplay`
+ * returned (rows 1-based); `lo`/`hi` are textarea offsets (unordered inputs
+ * are normalised).
+ */
+export function editTouchesGhost(
+  display: string,
+  ghostDisplayLines: readonly number[],
+  lo: number,
+  hi: number,
+): boolean {
+  if (ghostDisplayLines.length === 0) return false;
+  const start = Math.min(lo, hi);
+  const end = Math.max(lo, hi);
+  const ghosts = new Set(ghostDisplayLines);
+  const insertion = start === end;
+  let pos = 0;
+  let row = 0;
+  let rest = display;
+  while (row < ghostDisplayLines[ghostDisplayLines.length - 1] && rest.length > 0) {
+    row += 1;
+    const nl = rest.indexOf('\n');
+    const lineLen = nl === -1 ? rest.length : nl;
+    if (ghosts.has(row)) {
+      if (insertion) {
+        if (start >= pos && start <= pos + lineLen) return true;
+      } else {
+        if (end > pos && start < pos + lineLen) return true; // content
+        if (nl !== -1 && start <= pos + lineLen && end > pos + lineLen) return true; // its newline
+        if (pos > 0 && start < pos && end >= pos) return true; // newline above it
+      }
+    }
+    pos += lineLen + 1;
+    rest = nl === -1 ? '' : rest.slice(nl + 1);
+  }
+  return false;
+}
+
+/**
+ * Expand a collapsed caret into the range a delete inputType would mutate.
+ *
+ * beforeinput reports caret deletions (deleteContentBackward/Forward) with a
+ * COLLAPSED selection — the caret, not the deleted span. For the ghost guard
+ * to see "Backspace at the ghost's start eats the newline above it", the
+ * caret must first be widened to the one character the key removes. Any other
+ * inputType with a collapsed caret is a plain insertion and stays collapsed.
+ */
+export function effectiveMutationRange(
+  display: string,
+  start: number,
+  end: number,
+  inputType: string,
+): [number, number] {
+  if (start === end) {
+    if (inputType === 'deleteContentBackward') return [Math.max(0, start - 1), start];
+    if (inputType === 'deleteContentForward') return [start, Math.min(display.length, start + 1)];
+  }
+  return [start, end];
+}
+
+/**
  * Translate a caret/selection from the EDITED display text to LIVE, given
  * the rows `stripGhostsFromDisplay` just dropped. Stripped rows cost a line
  * + newline of display chars and no live chars; a caret inside a stripped
