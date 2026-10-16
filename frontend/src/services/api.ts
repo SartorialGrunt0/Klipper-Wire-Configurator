@@ -6,6 +6,7 @@ import type {
   ExampleConfig,
   SectionSchema,
 } from '../types/config';
+import type { ChatReference } from '../utils/chatReferences';
 
 const BASE_URL = (import.meta.env.VITE_API_URL as string | undefined) || '/api';
 
@@ -893,6 +894,13 @@ export interface AiChatRequest {
    * question without calling any tool.
    */
   contextFiles?: Record<string, { content: string; label: string }>;
+  /**
+   * Context the user attached explicitly in the docked panel — highlighted
+   * line ranges, pinned tree rows. Sent structured; the backend renders them
+   * into one trailing system message (omitted entirely when empty, so an
+   * ordinary turn's prompt is byte-identical to before this feature).
+   */
+  context_references?: ChatReference[];
 }
 
 export interface AiToolCallDetail {
@@ -923,6 +931,75 @@ export interface AiChatResponse {
   pendingEdits?: PendingConfigEdit[] | null;
   /** Write-tool call count for this reply (Gate 1 oscillation telemetry). */
   editAttempts?: number | null;
+  /**
+   * Post-hoc edit review: the request's whole change set — one record per
+   * edit the model made, in order, plus the summary grouped by file and
+   * section. Null when nothing was staged.
+   */
+  changeSet?: ChangeSetPayload | null;
+  /** Mid-loop steers the user sent while this request ran ({turn, text}). */
+  steers?: Array<{ turn: number; text: string }>;
+}
+
+/**
+ * One edit the model made (backend: EditSession._record_edit). Identity is
+ * its file and section — never a line number, which is navigation plumbing.
+ */
+export interface ChangeSetEdit {
+  id: string;
+  file: string;
+  section: string;
+  /** set_param only; '' for body ops. */
+  key: string;
+  op: string;
+  summary: string;
+  added: number;
+  removed: number;
+  /** Compact unified diff of this op alone — what a collapsed row unfolds. */
+  diffText: string;
+  advisories?: Array<{ severity?: string; section?: string; param?: string; message?: string }>;
+  /** A later edit rewrote this same target: shown, but not counted. */
+  superseded: boolean;
+  supersededBy: string;
+}
+
+export interface ChangeSetSection {
+  file: string;
+  section: string;
+  added: number;
+  removed: number;
+  /** Ids of the surviving edits in this section, in order. */
+  edits: string[];
+  advisories: { error: number; warning: number; other: number };
+}
+
+export interface ChangeSetFile {
+  file: string;
+  added: number;
+  removed: number;
+  sections: ChangeSetSection[];
+  /**
+   * The file as it stood BEFORE this request's first edit to it — the frame
+   * the text view's pane diffs against, so it can show the WHOLE document
+   * with the changed lines marked instead of the neighbourhood of each hunk
+   * (SIR 2026-10-03). The client already holds the current text (it is the
+   * buffer); this half only ever existed server-side. Shipped once per FILE,
+   * never once per edit — that is what `ChangeSetEdit.diffText` is for.
+   *
+   * Absent on a payload from a server that predates it; the pane then falls
+   * back to rendering the rows' own diffs.
+   */
+  beforeText?: string;
+}
+
+export interface ChangeSetPayload {
+  /** Chronological — the transcript is history, so order carries meaning. */
+  edits: ChangeSetEdit[];
+  /** Grouped — the decision surface, so identity is what matters. */
+  files: ChangeSetFile[];
+  totalAdded: number;
+  totalRemoved: number;
+  createdFiles: string[];
 }
 
 /** One staged write-tool change (backend services/ai_edit_tools.py). */
@@ -1029,6 +1106,13 @@ export interface ChatProgressPoll {
   narration?: string;
   toolNames?: string[];
   elapsedMs?: number;
+  /**
+   * The change set as it accumulates (post-hoc review): per-file NET text,
+   * the same shape the finished reply carries, so the client applies
+   * snapshots idempotently instead of replaying deltas.
+   */
+  stagedEdits?: PendingConfigEdit[];
+  changeSet?: ChangeSetPayload | null;
 }
 
 /** Poll mid-loop progress for an in-flight /ai/chat request. Best-effort:
@@ -1041,6 +1125,34 @@ export async function pollChatProgress(requestId: string): Promise<ChatProgressP
     return data && data.pending === true ? data : { pending: false };
   } catch {
     return { pending: false };
+  }
+}
+
+// ── Mid-loop steering (post-hoc review, 2026-10-02) ──────────────────
+
+export interface SteerResult {
+  accepted: boolean;
+  queued?: number;
+  reason?: string;
+}
+
+/**
+ * Send a mid-request steer: the user's message is queued and injected as a
+ * real user turn at the next tool-turn boundary of the in-flight request.
+ * `accepted: false` means there is nothing in flight — the caller should
+ * treat the message as an ordinary new turn instead.
+ */
+export async function steerChat(requestId: string, message: string): Promise<SteerResult> {
+  try {
+    const res = await fetch('/ai/chat/steer', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requestId, message }),
+    });
+    if (!res.ok) return { accepted: false };
+    return (await res.json()) as SteerResult;
+  } catch {
+    return { accepted: false };
   }
 }
 
@@ -1154,5 +1266,32 @@ export async function saveAiHistory(history: AiHistoryFile): Promise<void> {
     });
   } catch {
     // Best-effort — a failed save shouldn't break the chat UI.
+  }
+}
+
+/** G-code registry projection for editor completion (same source as validation). */
+export interface GcodeCommandsPayload {
+  source_rev: string | null;
+  commands: Record<
+    string,
+    {
+      requires_sections: string[];
+      requires_mode: string | null;
+      requires_flags: Record<string, string>;
+      extra: string | null;
+      simulated: boolean;
+    }
+  >;
+}
+
+/** Load the G-code command registry once for completion. Returns null when the
+ *  backend is unreachable — completion then falls back to project symbols. */
+export async function getGcodeCommands(): Promise<GcodeCommandsPayload | null> {
+  try {
+    const res = await fetch('/api/gcode-commands');
+    if (!res.ok) return null;
+    return (await res.json()) as GcodeCommandsPayload;
+  } catch {
+    return null;
   }
 }

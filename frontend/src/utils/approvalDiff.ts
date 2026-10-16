@@ -16,8 +16,9 @@ export function buildApprovalDiffLines(
   before: string,
   after: string,
   maxLines: number = APPROVAL_DIFF_MAX_LINES,
+  context = 2,
 ): DiffLine[] {
-  const patch = createConfigPatch(file, before, after, 'before', 'after', 2);
+  const patch = createConfigPatch(file, before, after, 'before', 'after', context);
   const lines = parsePatch(patch);
   if (lines.length <= maxLines) return lines;
   const kept = lines.slice(0, maxLines);

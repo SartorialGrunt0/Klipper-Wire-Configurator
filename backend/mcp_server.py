@@ -220,6 +220,10 @@ MAX_READ_CHARS = 16_000
 # guards pathological multi-file dumps. The truncation notice nudges the
 # model to targeted section reads instead of dumping huge files into context.
 MAX_USER_CONFIG_READ_CHARS = 32_000
+# Cap on per-file occurrence lines listed by search_user_configs (the
+# total count is always reported, so a rename sweep knows what the cap
+# hid). Live report 2026-10-12.
+MAX_SEARCH_OCCURRENCE_LINES = 12
 SNIPPET_CHARS = 300
 STOP_WORDS = frozenset({
     "a", "an", "and", "are", "as", "at", "be", "by", "can", "cfg",
@@ -1771,6 +1775,7 @@ class McpServer:
 
     def _score_user_config_text(
         self, rel_path: str, text: str, query_terms: list[str],
+        occ_terms: list[str] | None = None,
     ) -> dict[str, Any] | None:
         """Score one config file (name first, content fallback) for
         search_user_configs. Returns the result dict or None on no match.
@@ -1778,7 +1783,16 @@ class McpServer:
         Shared by the disk scan and the chat working-state overlay so both
         surfaces rank identically (live report 2026-09-27: staged drafts
         were invisible to search, so the model kept 'finding' the pre-edit
-        content)."""
+        content).
+
+        ``occ_terms`` (raw query words, NOT synonym-expanded) drive the
+        occurrence checklist: every line containing a word-bounded
+        occurrence of the query, with its enclosing section. Without it,
+        "rename every reference to Level_Bed" reliably missed references
+        living outside the first matched section — e.g.
+        ``RESPOND TYPE=error MSG='Level_Bed'`` — because the tool showed
+        only one enclosing section and a file-head snippet (live report
+        2026-10-12)."""
         name_part = rel_path.rsplit("/", 1)[-1]
         stem = name_part.rsplit(".", 1)[0] if "." in name_part else name_part
         search_text = f"{stem} {name_part} {rel_path}".lower().replace("-", " ")
@@ -1821,11 +1835,11 @@ class McpServer:
                 if header_name not in matched_headers:
                     matched_headers.append(header_name)
 
-        content_lines = [
-            l.strip() for l in text.split("\n")
-            if l.strip() and not l.strip().startswith("#")
-        ]
-        snippet = " ".join(content_lines[:5])[:200]
+        occurrences, occurrence_total, occurrence_sec_totals, occurrence_capped = (
+            self._find_user_config_occurrences(text, occ_terms or []))
+
+        lines_list = text.split("\n")
+        snippet = self._user_config_snippet(lines_list, match_pos)
 
         return {
             "filename": rel_path,
@@ -1834,7 +1848,118 @@ class McpServer:
             "match_pos": match_pos,
             "section": section,
             "matched_headers": matched_headers,
+            "occurrences": occurrences,
+            "occurrence_total": occurrence_total,
+            "occurrence_sec_totals": occurrence_sec_totals,
+            "occurrence_capped": occurrence_capped,
         }
+
+    @staticmethod
+    def _user_config_snippet(lines: list[str], match_pos: int,
+                             radius: int = 2, cap: int = 220) -> str:
+        """Preview snippet for one search hit: lines AROUND the first
+        content match (1 before + match + `radius` after). The old
+        snippet was the first 5 lines of the whole file — in printer.cfg
+        always the [include ...] block, so every search returned the same
+        useless preview (live report 2026-10-12). Filename-only matches
+        (no content match_pos) fall back to the file head."""
+        if match_pos < 0:
+            head = [
+                l.strip() for l in lines
+                if l.strip() and not l.strip().startswith("#")
+            ]
+            return " ".join(head[:5])[:cap]
+        char_count = 0
+        match_line = 0
+        for i, line in enumerate(lines):
+            if char_count + len(line) + 1 > match_pos:
+                match_line = i
+                break
+            char_count += len(line) + 1
+        start = max(0, match_line - 1)
+        end = min(len(lines), match_line + radius + 1)
+        window = [l.strip() for l in lines[start:end] if l.strip()]
+        return " ".join(window)[:cap]
+
+    @staticmethod
+    def _find_user_config_occurrences(
+        text: str, occ_terms: list[str], max_lines: int = MAX_SEARCH_OCCURRENCE_LINES,
+    ) -> tuple[list[dict[str, Any]], int, dict[str, int], bool]:
+        """Every line with a word-bounded, case-insensitive occurrence of
+        any occ_term, labelled with its enclosing [section] (None = top of
+        file). '_' is a word char, so query 'level_bed' does NOT count
+        'level_bed1' — the total doubles as the rename done-check.
+        Section-header lines are excluded: the header enumeration
+        ('matching sections here') already reports them, and the checklist's
+        job is the easy-to-miss references inside section bodies. Include
+        directives DO count — renaming a file means fixing its [include]
+        lines. The SAVE_CONFIG tail is skipped entirely (R6-C2): Klipper
+        owns that block and the user may not edit it.
+        Returns (listed_lines, total_occurrences, per_section_totals,
+        capped) — per_section_totals counts ALL hits (listed or
+        capped-out), keyed by section name ('' = top of file); `capped`
+        is True only when matching LINES were actually withheld (R6-C1:
+        the old 'total > listed_lines' comparison mixed an occurrence
+        count with a line count, so a triple-hit line claimed a phantom
+        '2 more not listed' remainder)."""
+        terms = sorted({t for t in occ_terms if len(t) >= 2}, key=len, reverse=True)
+        if not terms:
+            return [], 0, {}, False
+        try:
+            pattern = re.compile(
+                "|".join(rf"\b{re.escape(t)}\b" for t in terms), re.IGNORECASE)
+        except re.error:
+            return [], 0, {}, False
+        # Header lines -> enclosing-section map, walking the same rules as
+        # _enclosing_user_config_section (include directives are preamble).
+        header_by_line: dict[int, str | None] = {}
+        header_lines = sorted(
+            text[:m.start()].count("\n") + 1
+            for m in CONFIG_ALIAS_RE.finditer(text))
+        header_names = [
+            m.group(1).strip() for m in CONFIG_ALIAS_RE.finditer(text)
+        ]
+        current: str | None = None
+        for line_no, name in zip(header_lines, header_names):
+            if not name.lower().startswith("include "):
+                current = name
+            header_by_line[line_no] = current
+        results: list[dict[str, Any]] = []
+        total = 0
+        capped = False
+        sec_totals: dict[str, int] = {}
+        current_section: str | None = None
+        # Round-6 review (R6-C2): the '#*# <...SAVE_CONFIG...>' tail is
+        # Klipper's own block — the banner says DO NOT EDIT THIS BLOCK OR
+        # BELOW, so its lines are not rename targets and counting them
+        # made the done-check unreachable (a sweep can never drive the
+        # count to 0 by editing legal lines).
+        from parser.config_parser import SAVE_CONFIG_BANNER_RE
+        for line_no, line in enumerate(text.split("\n"), 1):
+            if SAVE_CONFIG_BANNER_RE.match(line.strip()):
+                break
+            is_header = line_no in header_by_line
+            if is_header:
+                current_section = header_by_line[line_no]
+            hits = pattern.findall(line)
+            if not hits:
+                continue
+            stripped = line.strip()
+            if (is_header and not stripped[len("["):].strip().lower()
+                    .startswith("include ")):
+                continue
+            total += len(hits)
+            sec_key = current_section or ""
+            sec_totals[sec_key] = sec_totals.get(sec_key, 0) + len(hits)
+            if len(results) < max_lines:
+                results.append({
+                    "line_no": line_no,
+                    "section": current_section,
+                    "line": stripped[:140],
+                })
+            else:
+                capped = True
+        return results, total, sec_totals, capped
 
     def _handle_search_user_configs(self, args: dict[str, Any]) -> str:
         query = args.get("query", "").strip().lower()
@@ -1847,6 +1972,12 @@ class McpServer:
         # Shared tokenizer: folds plurals and applies ALIAS_MAP synonyms so
         # natural-language queries match config terms (same as docs search).
         query_terms = list(dict.fromkeys(_expand_query_terms(query)))
+        # Occurrence checklist terms: RAW query words with underscores kept
+        # intact (tokenizer would split 'level_bed' into 'level'+'bed', and
+        # bare 'bed' hits — [heater_bed], unrelated prose — were exactly
+        # the noise that made the first-match section label misleading).
+        occ_terms = list(dict.fromkeys(
+            w for w in re.findall(r"[a-z0-9_]+", query) if not w.isdigit()))
         seen_filenames: set[str] = set()
 
         # Working-state files FIRST (chat overlay): staged drafts/approved
@@ -1856,7 +1987,7 @@ class McpServer:
             if rel_path in seen_filenames:
                 continue
             seen_filenames.add(rel_path)
-            hit = self._score_user_config_text(rel_path, text, query_terms)
+            hit = self._score_user_config_text(rel_path, text, query_terms, occ_terms)
             if hit is None:
                 continue
             # Only a genuinely-unsaved file carries the warning (see
@@ -1888,7 +2019,7 @@ class McpServer:
                     except OSError:
                         continue
 
-                    hit = self._score_user_config_text(rel_path, text, query_terms)
+                    hit = self._score_user_config_text(rel_path, text, query_terms, occ_terms)
                     if hit is None:
                         continue
                     results.append(hit)
@@ -1921,6 +2052,32 @@ class McpServer:
                     "matching sections here: "
                     + ", ".join(f"[{h}]" for h in extra)
                 )
+            occurrences = r.get("occurrences") or []
+            if occurrences or r.get("occurrence_total"):
+                # Rename checklist: EVERY body reference to the raw query,
+                # grouped by enclosing section with line numbers. The model
+                # edits from this list and re-searches to confirm 0 left
+                # (live report 2026-10-12: RESPOND TYPE=error MSG='Level_Bed'
+                # was invisible because only the first match's section and a
+                # file-head snippet were shown).
+                total = r.get("occurrence_total", 0)
+                lines.append(f"references to '{query}' in this file: {total}")
+                sec_totals = r.get("occurrence_sec_totals") or {}
+                for occ in occurrences:
+                    sec = f"[{occ['section']}]" if occ["section"] else "(top of file)"
+                    lines.append(
+                        f"  {sec} x{sec_totals.get(occ['section'] or '', 1)}"
+                        f" (L{occ['line_no']}): {occ['line']}"
+                    )
+                if r.get("occurrence_capped"):
+                    # Only claim a remainder when lines were ACTUALLY
+                    # withheld (R6-C1): total-vs-listed-lines mixed
+                    # occurrence counts with line counts.
+                    lines.append(
+                        f"  ... more matching lines not listed "
+                        f"(re-search after editing to confirm {total} -> 0)"
+                    )
+                lines.append("")
             if r["snippet"]:
                 lines.append(f"> {r['snippet']}\n")
         lines.append(f"\n{len(results)} match(es) total. Use read_user_config to read the full file.")

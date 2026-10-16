@@ -776,6 +776,99 @@ def test_delete_section_clean_and_missing():
     assert r2['status'] == 'error' and 'not found' in r2['error']
 
 
+# ── blank-line splice (user report 2026-10-11: deletes squashed
+#    whitespace via a file-wide \n{3,} collapse) ────────────────────────
+
+def test_delete_section_preserves_two_blank_separators_everywhere():
+    """The old cleanup collapsed EVERY 2+ blank run in the file, not
+    just the splice point: deleting one section squashed the separator
+    style of sections it never touched."""
+    text = ("[printer]\nkinematics: cartesian\n\n\n[fan]\npin: PA8\n\n\n"
+            "[gcode_macro FOO]\ngcode:\n    G28\n\n\n[stepper_x]\n"
+            "step_pin: PF13\n")
+    st, base = _state(text)
+    st1, r = st.apply(base, {'op': 'delete_section', 'file': 'printer.cfg',
+                             'section': 'fan'})
+    assert r['status'] == 'applied', r
+    out = st1.files['printer.cfg']
+    assert '[fan]' not in out
+    # Splice point keeps the larger neighbor gutter (2 blanks).
+    assert out.startswith('[printer]\nkinematics: cartesian\n\n\n'
+                         '[gcode_macro FOO]')
+    # Untouched separators are byte-stable.
+    assert 'G28\n\n\n[stepper_x]' in out
+
+
+def test_delete_section_one_blank_style_unchanged():
+    """Single-blank files (repo style) stay single-blank at the splice."""
+    st, base = _state()
+    st1, r = st.apply(base, {'op': 'delete_section', 'file': 'printer.cfg',
+                             'section': 'stepper_y'})
+    assert r['status'] == 'applied', r
+    out = st1.files['printer.cfg']
+    assert '\n\n\n' not in out
+    assert 'microsteps: 16\n\n[stepper_z]' in out
+
+
+def test_delete_section_first_section_no_leading_blank():
+    """Deleting the FIRST section used to leave a stray leading blank
+    line (probe 2026-10-11)."""
+    text = "[fan]\npin: PA8\n\n[printer]\nkinematics: cartesian\n"
+    st, base = _state(text)
+    st1, r = st.apply(base, {'op': 'delete_section', 'file': 'printer.cfg',
+                             'section': 'fan'})
+    assert r['status'] == 'applied', r
+    assert st1.files['printer.cfg'] == "[printer]\nkinematics: cartesian\n"
+
+
+def test_delete_section_last_section_keeps_single_final_newline():
+    text = "[printer]\nkinematics: cartesian\n\n[fan]\npin: PA8\n"
+    st, base = _state(text)
+    st1, r = st.apply(base, {'op': 'delete_section', 'file': 'printer.cfg',
+                             'section': 'fan'})
+    assert r['status'] == 'applied', r
+    assert st1.files['printer.cfg'] == "[printer]\nkinematics: cartesian\n"
+
+
+def test_delete_section_empties_file_without_final_newline_no_crash():
+    """Round-6 review (R6-A1): the splice-gutter trim read lines[-1]
+    AFTER the deletion emptied the line list -> IndexError escaped
+    _apply_raw (which catches only _OpError/KeyError) and turned the
+    whole chat turn into a 500. Pre-cddb173 code applied this cleanly."""
+    st, base = _state("[fan]\npin: PA8")  # no trailing newline
+    st1, r = st.apply(base, {'op': 'delete_section', 'file': 'printer.cfg',
+                             'section': 'fan'})
+    assert r['status'] in ('applied', 'ok'), r
+    assert st1.files['printer.cfg'] == ''
+
+
+def test_remove_include_empties_file_no_crash():
+    """Round-6 review (R6-A1): a file whose only non-blank content is
+    the include line. Even WITH the trailing newline, del lines[idx:end]
+    empties the list and the at_eof branch read lines[-1] -> IndexError."""
+    st = ProjectState.from_context_files({'printer.cfg': {'content': "[include a.cfg]\n"},
+                                          'a.cfg': {'content': '# x\n'}})
+    base = st.validate()
+    st1, r = st.apply(base, {'op': 'remove_include', 'file': 'printer.cfg',
+                             'target_file': 'a.cfg'})
+    assert r['status'] in ('applied', 'ok'), r
+    assert st1.files['printer.cfg'] == ''
+
+
+def test_remove_include_preserves_two_blank_separators():
+    """Same fix class: the file-wide collapse in remove_include squashed
+    blanks across the whole file."""
+    text = ("[include macros.cfg]\n\n\n[printer]\nkinematics: cartesian\n\n\n"
+            "[fan]\npin: PA8\n")
+    st, base = _state(text)
+    st1, r = st.apply(base, {'op': 'remove_include', 'file': 'printer.cfg',
+                             'target_file': 'macros.cfg'})
+    assert r['status'] == 'applied', r
+    out = st1.files['printer.cfg']
+    assert 'macros.cfg' not in out
+    assert out.startswith('[printer]\nkinematics: cartesian\n\n\n[fan]')
+
+
 # ── rename_section (live report 2026-09-26: rename had no tool path) ───
 
 
@@ -825,6 +918,34 @@ def test_patch_section_identical_old_new_refused():
                              'old_text': '    G28', 'new_text': '    G28'})
     assert r['status'] == 'error'
     assert 'NO change' in r['error'] and 'rename_section' in r['error']
+    assert st1.files['printer.cfg'] == st.files['printer.cfg']
+
+
+def test_patch_section_identical_old_new_commented_gets_uncomment_hint():
+    # COMMENT-06 gemma r3 trace 2026-10-12: the model TRIED to uncomment
+    # '#rename_existing:' three times but built the call with
+    # old_text == new_text == '#rename_existing: ...' (it never stripped
+    # the '#' in new_text). The generic error pointed at rename_section,
+    # which misdirected it further; it gave up and told the user the
+    # commented line had been "preserved". When the identical text is a
+    # '#'-prefixed line, the error must name the uncomment shape.
+    text = (
+        "[gcode_macro BED_MESH_CALIBRATE]\n"
+        "#rename_existing: _BED_MESH_CALIBRATE\n"
+        "gcode:\n"
+        "    BED_MESH_CALIBRATE\n"
+    )
+    st = ProjectState.from_context_files({'printer.cfg': {'content': text}})
+    base = st.validate()
+    st1, r = st.apply(base, {'op': 'patch_section', 'file': 'printer.cfg',
+                             'section': 'gcode_macro BED_MESH_CALIBRATE',
+                             'old_text': '#rename_existing: _BED_MESH_CALIBRATE',
+                             'new_text': '#rename_existing: _BED_MESH_CALIBRATE'})
+    assert r['status'] == 'error'
+    assert 'NO change' in r['error']
+    assert 'WITHOUT the leading' in r['error']
+    # the rename pointer must not compete when the text is a comment line
+    assert 'rename_section' not in r['error']
     assert st1.files['printer.cfg'] == st.files['printer.cfg']
 
 
@@ -1150,6 +1271,103 @@ def test_new_file_and_include_roundtrip():
     assert r4['status'] in ('applied', 'applied_with_advisory')
     assert not r4['newErrors']
     assert '[include macros.cfg]' not in st3.files['printer.cfg']
+
+
+def test_new_file_unincluded_flags_needs_include():
+    """2026-10-12 (Sir): an orphan new file is silently dead — Klipper
+    never reads it and the validator does not flag it. The raw outcome
+    carries the include nudge as a structured field; the UI summary
+    stays clean."""
+    st, base = _state()
+    st1, r = st.apply(base, {'op': 'new_file', 'file': 'orphan.cfg',
+                             'content': '[gcode_macro O]\ngcode:\n    M117 x\n'})
+    assert r['status'] in ('applied', 'applied_with_advisory')
+    assert r['needs_include'] == 'orphan.cfg'
+    assert r['summary'] == 'created new file orphan.cfg'
+
+
+def test_new_file_already_included_summarizes_without_nudge():
+    """Missing-file-then-create shape: printer.cfg already carries
+    [include late.cfg] (dangling until now). The result says so and
+    sets no needs_include, so the model doesn't double-include."""
+    st, base = _state('[include late.cfg]\n' + BASE_CFG)
+    st1, r = st.apply(base, {'op': 'new_file', 'file': 'late.cfg',
+                             'content': '[gcode_macro L]\ngcode:\n    M117 x\n'})
+    assert r['status'] in ('applied', 'applied_with_advisory')
+    assert 'needs_include' not in r
+    assert '[include late.cfg]' in r['summary']
+    assert 'already present' in r['summary']
+
+
+def test_new_file_subdir_include_does_not_satisfy_root_file():
+    """Round-6 review (R6-B2): Klipper resolves '[include macros.cfg]'
+    RELATIVE TO THE INCLUDING FILE (klippy/configfile.py
+    include_glob = join(dirname(source), spec)), so the bare include in
+    sub/a.cfg points at sub/macros.cfg — it does NOT make a freshly
+    created ROOT macros.cfg live. The old raw-text comparison answered
+    'already present in sub/a.cfg, no include needed': a positively
+    lying tool result for exactly the dead-orphan class the nudge
+    exists to prevent."""
+    st = ProjectState.from_context_files({
+        'printer.cfg': {'content': '[include sub/a.cfg]\n' + BASE_CFG},
+        'sub/a.cfg': {'content': '[include macros.cfg]\n'}})
+    base = st.validate()
+    st1, r = st.apply(base, {'op': 'new_file', 'file': 'macros.cfg',
+                             'content': '[gcode_macro FOO]\ngcode:\\n    M117 hi\n'})
+    assert r['status'] in ('applied', 'applied_with_advisory'), r
+    assert r.get('needs_include') == 'macros.cfg', r
+
+
+def test_new_file_sibling_include_counts_by_dirname():
+    """Mirror-image of R6-B2: creating sub/b.cfg while sub/a.cfg carries
+    '[include b.cfg]' — Klipper DOES load that (dirname-relative), so
+    the sibling include must satisfy the nudge: no needs_include,
+    'already present' summary."""
+    st = ProjectState.from_context_files({
+        'printer.cfg': {'content': '[include sub/a.cfg]\n' + BASE_CFG},
+        'sub/a.cfg': {'content': '[include b.cfg]\n'}})
+    base = st.validate()
+    st1, r = st.apply(base, {'op': 'new_file', 'file': 'sub/b.cfg',
+                             'content': '[gcode_macro B]\ngcode:\\n    M117 b\n'})
+    assert r['status'] in ('applied', 'applied_with_advisory'), r
+    assert 'needs_include' not in r, r
+    assert 'already present' in r['summary'], r
+
+
+def test_new_file_dot_prefixed_name_matches_plain_include():
+    """Round-6 review (R6-B1): the scan folded './' on the include side
+    only, so creating './macros.cfg' against an existing
+    '[include macros.cfg]' returned the FALSE imperative 'NOT
+    INCLUDED ... will NOT load' — then the model's follow-up add_include
+    got kicked by add_include's own both-sided duplicate guard. Fold
+    both sides."""
+    st, base = _state('[include macros.cfg]\n' + BASE_CFG)
+    st1, r = st.apply(base, {'op': 'new_file', 'file': './macros.cfg',
+                             'content': '[gcode_macro M]\ngcode:\\n    M117 m\n'})
+    assert r['status'] in ('applied', 'applied_with_advisory'), r
+    assert 'needs_include' not in r, r
+    assert 'already present' in r['summary'], r
+
+
+def test_new_file_already_included_dot_prefix_shape():
+    """KAMP writes '[include ./x.cfg]' — './'-prefixed includes resolve
+    to the same file, so the nudge must recognize them too."""
+    st, base = _state('[include ./KAMP/x.cfg]\n' + BASE_CFG)
+    st1, r = st.apply(base, {'op': 'new_file', 'file': 'KAMP/x.cfg',
+                             'content': '[gcode_macro K]\ngcode:\n    M117 x\n'})
+    assert r['status'] in ('applied', 'applied_with_advisory')
+    assert 'needs_include' not in r
+    assert 'already present' in r['summary']
+
+
+def test_commented_include_still_nudges():
+    """A '#[include x.cfg]' is inactive — the file would not load, so
+    the nudge correctly fires."""
+    st, base = _state('#[include parked.cfg]\n' + BASE_CFG)
+    st1, r = st.apply(base, {'op': 'new_file', 'file': 'parked.cfg',
+                             'content': '[gcode_macro P]\ngcode:\n    M117 x\n'})
+    assert r['status'] in ('applied', 'applied_with_advisory')
+    assert r['needs_include'] == 'parked.cfg'
 
 
 def test_delete_file_rules():

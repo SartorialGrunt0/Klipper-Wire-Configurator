@@ -22,13 +22,16 @@ pattern).
 """
 from __future__ import annotations
 
+import difflib
 import logging
+from functools import lru_cache
 import re
 from copy import deepcopy
 from dataclasses import dataclass, field
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 from parser.config_parser import SAVE_CONFIG_BANNER_RE, parse_config
+from parser.config_schema import get_all_section_types, get_section_def
 from parser.validator import validate_project_configs
 
 from services.ai_draft_validation import (
@@ -123,7 +126,21 @@ def _include_lines(lines: list[str]) -> list[tuple[int, str]]:
     return out
 
 
-def _missing_section_hint(files: dict[str, str], header: str,
+def _include_resolves_to(path: str, includer: str, created: str) -> bool:
+    """Does the include spec `path` written in `includer` target the
+    project-relative file `created`? Klipper resolves includes relative
+    to the INCLUDING file's directory (klippy/configfile.py:
+    include_glob = os.path.join(os.path.dirname(source_filename),
+    include_spec)), so a bare '[include macros.cfg]' inside sub/a.cfg
+    points at sub/macros.cfg — NOT the root macros.cfg (round-6 R6-B2:
+    the old raw-text comparison answered 'already present' for the
+    wrong file, and folded './' on the include side only, R6-B1).
+    PurePosixPath folds '.' segments on both sides as a side effect."""
+    resolved = PurePosixPath(PurePosixPath(includer).parent, path)
+    return str(resolved) == str(PurePosixPath(created))
+
+
+def _missing_section_hint(files: "dict[str, str]", header: str,
                           filename: str) -> str:
     """Suffix for 'Section not found' errors: if the section exists in
     ANOTHER project file, name it. Wrong-file calls are the common cause
@@ -150,6 +167,95 @@ def _header_name_part(header: str) -> str:
     family headers ('gcode_macro Level_Bed' -> 'Level_Bed'), else the
     header itself."""
     return header.split(' ', 1)[1] if ' ' in header else header
+
+
+def _section_exists_in_project(files: "dict[str, str]", header: str) -> bool:
+    """True when any project file already contains a section header equal
+    to ``header`` (case-insensitively).
+
+    Used by the add_section type gate: a section the project ALREADY uses
+    (a plugin/custom construct) is never the unknown-type bug, so naming it
+    stays legal. Only a brand-new unrecognized token is refused.
+    """
+    wanted = header.casefold()
+    for text in files.values():
+        for line in _split_lines(text):
+            match = RE_SECTION_HEADER.match(line)
+            if match and match.group(1).strip().casefold() == wanted:
+                return True
+    return False
+
+
+@lru_cache(maxsize=1)
+def _bundled_extras_tokens() -> frozenset[str]:
+    """Type tokens Klipper can load that the curated schema may not list.
+
+    klippy resolves a section's type token to the module FILENAME
+    ``extras/<token>.py``; the bundled reference snapshot (reference/klipper)
+    is exactly the firmware KWC's docs ship against. The curated schema is a
+    hand-maintained subset, so a token with a module file here is loadable
+    even when the schema misses it (sht3x, aht10, print_stats, ...).
+    Package markers (``__init__``) are excluded: klippy never resolves a
+    section type to one, and a section named after it would be nonsense on
+    a printer. Cached per process; a missing snapshot yields the empty set
+    (gate degrades to the schema-only behavior it shipped with).
+    """
+    extras = Path(__file__).resolve().parent.parent.parent \
+        / 'reference' / 'klipper' / 'klippy' / 'extras'
+    try:
+        return frozenset(p.stem for p in extras.glob('*.py')
+                         if not p.stem.startswith('__'))
+    except OSError:
+        return frozenset()
+
+
+def _section_token_is_loadable(token: str) -> bool:
+    """True if the token names a real module file in the bundled reference.
+
+    Strict name check: only a bare lowercase module-name token can match, so
+    a traversal-shaped or odd-character token is refused without touching the
+    filesystem with it.
+    """
+    if not token.isidentifier() or token.lower() != token:
+        return False
+    return token in _bundled_extras_tokens()
+
+
+def _unknown_section_type_error(token: str) -> str:
+    """Model-facing refusal for a NEW section whose TYPE token is not a
+    known Klipper section type (bug 2026-10-07: an op created
+    ``[bed_mesh_calibrate]`` — a gcode COMMAND name used as a header).
+
+    Klipper resolves a section's type token to a module FILENAME
+    (``extras/<token>.py``), so a bare unrecognized token can never load.
+    Offers the closest known types so the model can self-correct. The
+    known-type set is the validator's own (``parser.config_schema``) — not
+    a parallel list.
+    """
+    close = difflib.get_close_matches(token, get_all_section_types(), n=3)
+    # Prefer a known type that is a PREFIX of the bogus token: a gcode
+    # COMMAND built on a real section name ('bed_mesh_calibrate' ->
+    # 'bed_mesh') is the common shape, and difflib's length-shaped ranking
+    # would otherwise lead with the wrong hint ('delta_calibrate').
+    prefix = sorted((t for t in get_all_section_types()
+                     if t != token and token.startswith(t)),
+                    key=len, reverse=True)[:3]
+    if prefix:
+        close = prefix + [c for c in close if c not in prefix]
+    close = close[:3]
+    hint = (f" Closest known section types: {', '.join(close)}."
+            if close else "")
+    suggest = (f" If you meant the [{close[0]}] section, retry with that "
+               f"header." if close else "")
+    return (
+        f"Section type '{token}' is not a known section type and no section "
+        f"named '{token}' exists in the project — Klipper resolves a "
+        f"section's type token to a module file (extras/{token}.py), so "
+        f"this would create a section the config cannot load.{hint}"
+        f"{suggest} If '{token}' is a macro command, write it as a "
+        f"'[gcode_macro {token}]' section instead. A custom/plugin section "
+        f"is only legal here when the project already uses it."
+    )
 
 
 def _resolve_file_ref(requested: str, files: "dict[str, str]") -> str | None:
@@ -330,6 +436,43 @@ def _section_body_text(lines: list[str], header_index: int, end: int) -> str:
     while body and not body[-1].strip():
         body.pop()
     return '\n'.join(body)
+
+
+def _splice_blank_gutter(lines: list[str], splice: int) -> None:
+    """Cap the blank-line run meeting at ``splice`` after a deletion.
+
+    When a block is deleted, the blank gutter that preceded it and the
+    one that followed it join into a single run. The old cleanup was a
+    file-wide re.sub(r'\\n{3,}', '\\n\\n', ...): it squashed every 2+
+    blank separator in the file, including untouched sections (user
+    report 2026-10-11 — delete_section "removed white space lines").
+    This trims ONLY the run at the splice point and caps it at the
+    larger of the two original gutters, so a file's own separator
+    style survives the delete. Top of file keeps zero blanks; a
+    deletion reaching EOF leaves no trailing blanks (the terminating
+    '' element — the file's final newline — is never counted).
+    """
+    start = splice
+    while start > 0 and not lines[start - 1].strip():
+        start -= 1
+    pre = splice - start
+    end = splice
+    while end < len(lines) and lines[end].strip() == '':
+        end += 1
+    at_eof = end == len(lines)
+    # The trailing '' from split() is the final newline, not a blank
+    # gutter line: discount it from the post-run length.
+    post = end - splice - (1 if at_eof else 0)
+    if at_eof:
+        # Nothing real follows. The deletion may have EMPTIED the list
+        # (round-6 R6-A1: lines[-1] on [] -> IndexError past _apply_raw's
+        # catches, HTTP 500 for the whole turn); an emptied file is '' —
+        # no final newline to keep.
+        if not lines:
+            return
+        lines[start:] = [''] if lines[-1] == '' else []
+        return
+    lines[start:end] = [''] * (max(pre, post) if start > 0 else 0)
 
 
 def _default_body_indent(lines: list[str], header_index: int, end: int) -> str:
@@ -545,7 +688,9 @@ class ProjectState:
         }
         # rename_section carries structured from/to through the raw outcome
         # for the chat layer's post-rename directive (see _op_rename_section).
-        for k in ('renamed_from', 'renamed_to'):
+        # needs_include carries through the same way for the post-create
+        # include directive (see _op_new_file, 2026-10-12).
+        for k in ('renamed_from', 'renamed_to', 'needs_include'):
             if k in outcome:
                 result[k] = outcome[k]
         if result['status'] == 'error':
@@ -809,6 +954,22 @@ class ProjectState:
                 return _state_error(
                     f"Argument text must be the section BODY only (no '[{header}]' header line)."
                 )
+        # New-section TYPE token gate (bug 2026-10-07: an op created
+        # '[bed_mesh_calibrate]' — a gcode COMMAND name used as a section
+        # header). Klipper resolves a section's type token to a module
+        # FILENAME (extras/<token>.py), so a bare unrecognized token can
+        # never load; the validator only WARNS about it (genuine plugin
+        # sections are KWC's documented blind spot), so the add staged a
+        # config that cannot start. Only NEW unrecognized TOKENS are
+        # refused: a known type (any WRONG-CASE spelling is left to the
+        # validator's section_type_case gate) and a section the project
+        # already uses stay legal.
+        token = header.split(' ', 1)[0] if header else header
+        if token and get_section_def(token) is None \
+                and get_section_def(token.lower()) is None \
+                and not _section_token_is_loadable(token) \
+                and not _section_exists_in_project(self.files, header):
+            return _state_error(_unknown_section_type_error(token))
         block = [f'[{header}]']
         if body.strip():
             block.extend(body.strip('\n').split('\n'))
@@ -913,8 +1074,11 @@ class ProjectState:
         while end > header_index + 1 and not lines[end - 1].strip():
             end -= 1
         del lines[header_index:end]
-        # Collapse any double blank line left at the splice point.
-        self.files[filename] = re.sub(r'\n{3,}', '\n\n', '\n'.join(lines))
+        # Cap the blank run left at the splice point at the file's own
+        # separator style (was: file-wide blank-line collapse, which
+        # squashed blanks in sections this op never touched).
+        _splice_blank_gutter(lines, header_index)
+        self.files[filename] = '\n'.join(lines)
         return {'status': 'ok', 'file': filename, 'summary': f"deleted section [{header}] from {filename}"}
 
     def _op_rename_section(self, op: dict) -> dict:
@@ -1246,6 +1410,21 @@ class ProjectState:
         # that never happened). A patch that changes nothing must say so,
         # and name the real tool for the most common no-op shape.
         if old_text == new_text:
+            # COMMENT-06 gemma r3 trace 2026-10-12: when the identical
+            # text is a '#'-prefixed line, the model's real intent was
+            # almost certainly an UNCOMMENT and the rename_section
+            # pointer misdirected it (3 identical retries, then it told
+            # the user the commented line was "preserved"). Name the
+            # uncomment shape directly instead of the rename pointer.
+            if old_text.lstrip().startswith('#'):
+                return _state_error(
+                    f"patch_section made NO change: old_text and new_text "
+                    f"are identical. If you meant to UNCOMMENT the line, "
+                    f"new_text must be old_text WITHOUT the leading '#' "
+                    f"(keep everything else the same, including leading "
+                    f"whitespace). Call again with new_text = the line "
+                    f"minus the '#'."
+                )
             return _state_error(
                 f"patch_section made NO change: old_text and new_text are "
                 f"identical. To rename the section itself use "
@@ -1339,7 +1518,28 @@ class ProjectState:
         if not isinstance(content, str):
             return _state_error('Argument content must be a string')
         self.files[filename] = content if content.endswith('\n') or not content else content + '\n'
-        return {'status': 'ok', 'file': filename, 'summary': f"created new file {filename}"}
+        # Include nudge (Sir 2026-10-12): a created file with no
+        # [include] line is a silently dead file — Klipper never reads
+        # it, and the validator does NOT flag orphan files (same class
+        # as dangling includes). Tool RESULTS move local models far more
+        # than tool descriptions (which already mention add_include and
+        # demonstrably don't get followed), so the model-facing result
+        # carries an imperative directive. It rides as a structured
+        # field — rendered ONLY in the model-facing content paths
+        # (_lean_success_content / format_approval_result), never in the
+        # UI summary — exactly like the rename stale-caller directive.
+        for other in sorted(self.files):
+            if other == filename:
+                continue
+            for _, path in _include_lines(_split_lines(self.files[other])):
+                if _include_resolves_to(path, other, filename):
+                    return {'status': 'ok', 'file': filename,
+                            'summary': f"created new file {filename} — "
+                                       f"[include {path}] is already present "
+                                       f"in {other}, no include needed"}
+        return {'status': 'ok', 'file': filename,
+                'summary': f"created new file {filename}",
+                'needs_include': filename}
 
     def _op_delete_file(self, op: dict) -> dict:
         filename = self._require_file(op.get('file'))
@@ -1482,7 +1682,11 @@ class ProjectState:
         while end < len(lines) and not lines[end].strip():
             end += 1
         del lines[idx:end]
-        self.files[in_file] = re.sub(r'\n{3,}', '\n\n', '\n'.join(lines))
+        # Splice-scoped gutter trim (same fix class as delete_section:
+        # the old file-wide \\n{3,} collapse edited sections and lines
+        # this op never touched).
+        _splice_blank_gutter(lines, idx)
+        self.files[in_file] = '\n'.join(lines)
         return {'status': 'ok', 'file': in_file,
                 'summary': f"removed [include {path}] from {in_file}"}
 

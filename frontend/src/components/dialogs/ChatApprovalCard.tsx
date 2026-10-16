@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import type { ApprovalCard } from '../../services/api';
 import { buildApprovalDiffLines, remainingApprovalSeconds, summarizeAdvisorySeverities } from '../../utils/approvalDiff';
+import DiffLines from '../DiffLines';
 
 interface Props {
   card: ApprovalCard;
@@ -101,27 +102,10 @@ export default function ChatApprovalCard({
 
       {diffLines.length > 0 && (
         <div className="rounded-md border border-[var(--color-bg-tertiary)] overflow-hidden mb-2">
-          <pre className="text-[10px] leading-4 font-mono overflow-x-auto max-h-44 overflow-y-auto">
-            {diffLines.map((line, i) => (
-              <div
-                key={i}
-                className={
-                  line.type === 'added'
-                    ? 'w-max min-w-full bg-green-500/15 text-green-400 px-2'
-                    : line.type === 'removed'
-                      ? 'w-max min-w-full bg-red-500/15 text-red-400 px-2'
-                      : line.type === 'header'
-                        ? 'w-max min-w-full bg-blue-500/10 text-blue-400 px-2'
-                        : 'w-max min-w-full text-[var(--color-text-secondary)] px-2'
-                }
-              >
-                <span className="select-none opacity-50 mr-1.5">
-                  {line.type === 'added' ? '+' : line.type === 'removed' ? '-' : ' '}
-                </span>
-                {line.content || '\u00A0'}
-              </div>
-            ))}
-          </pre>
+          <DiffLines
+            lines={diffLines}
+            className="text-[10px] leading-4 max-h-44 overflow-y-auto"
+          />
           <button
             onClick={onShowFullDiff}
             className="w-full text-left text-[10px] px-2 py-1 border-t border-[var(--color-bg-tertiary)] text-[var(--color-accent)] hover:bg-[var(--color-bg-primary)]/50 transition-colors"

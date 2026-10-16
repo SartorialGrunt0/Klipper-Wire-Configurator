@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { loadAiState, saveAiState, type AiToolCallDetail, type PendingConfigEdit } from '../services/api';
+import { loadAiState, saveAiState, type AiToolCallDetail, type ChangeSetPayload, type PendingConfigEdit } from '../services/api';
 
 const STORAGE_KEY = 'klipper-wire-ai-state';
 const LEGACY_SETTINGS_KEY = 'klipper-wire-ai-settings';
@@ -22,6 +22,26 @@ export interface ChatMessage {
   repromptCount?: number;
   /** Changes staged by the config_edit/config_write write tools (server-validated). */
   pendingEdits?: PendingConfigEdit[];
+  /**
+   * Post-hoc edit review: the reply's whole change set (one record per edit
+   * plus the summary grouped by file/section). The dialog feeds it to the
+   * change-set store; the transcript rows and the footer bar both read it
+   * from there, so they can never disagree.
+   */
+  changeSet?: ChangeSetPayload | null;
+  /** Mid-loop steers this request received while it was running. */
+  steers?: Array<{ turn: number; text: string }>;
+  /**
+   * This message is a steer the user sent into an in-flight request, shown
+   * in the transcript at the point it landed (the user's own words).
+   */
+  steer?: boolean;
+  /**
+   * The request that produced this reply. The post-hoc review's rows are
+   * looked up by it, so a reply's edits stay with that reply in the
+   * transcript even after later messages join the running total.
+   */
+  requestId?: string;
 }
 
 export interface AiSettings {

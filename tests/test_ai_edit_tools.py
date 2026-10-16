@@ -80,10 +80,12 @@ def _chat_payload(messages, **over):
         'apiUrl': 'https://api.example.com/v1/chat/completions',
         'apiProvider': 'chatgpt',
         'contextFiles': _ctx(),
-        # Phase 2: validated writes now suspend for a human card. These
-        # tests exercise the tool LOOP, not the gate; the gate has its own
-        # suite (test_ai_approval_gate.py). Tests that want the real gate
-        # pass autoApproveEdits=False explicitly.
+        # Sent as a no-op. The edit path gates nothing since the post-hoc
+        # review change (2026-10-02), so this field is inert and the gate
+        # has no caller. It stays on the payload because the field is the
+        # reserved bypass hook for the dormant gate (see the REVIVAL note
+        # on _run_approval_gate); the gate's own contract is pinned in
+        # test_ai_approval_gate.py.
         'autoApproveEdits': True,
         # The model-triggered skill gate is product behavior since the
         # Phase-6 flag removal: the write tools stay hidden until
@@ -412,6 +414,13 @@ def test_session_config_write_new_file_plus_include():
                       'content': '[gcode_macro EXTRA]\ngcode:\n    M117 x\n'},
     })
     assert details is not None
+    # 2026-10-12 (Sir): an orphan create is silently dead — the
+    # model-facing result must carry the imperative include directive.
+    assert 'NOT INCLUDED' in content
+    assert 'extra.cfg' in content
+    assert 'add_include' in content
+    # the UI-facing summary stays clean (no directive prose)
+    assert details['summary'] == 'created new file extra.cfg'
     content2, details2 = session.execute({
         'name': 'config_edit',
         'arguments': {'file': 'printer.cfg', 'op': 'add_include',
@@ -420,6 +429,42 @@ def test_session_config_write_new_file_plus_include():
     assert details2 is not None
     files = {e['file'] for e in session.pending_edits_payload()}
     assert files == {'extra.cfg', 'printer.cfg'}
+
+
+def test_session_config_write_already_included_no_directive():
+    """The dangling-include-then-create shape: the file is already
+    actively included, so the result confirms that and does NOT order
+    a second include."""
+    ctx = {'printer.cfg': {'content': '[include late.cfg]\n' + PRINTER_CFG}}
+    session = EditSession(ctx)
+    content, details = session.execute({
+        'name': 'config_write',
+        'arguments': {'file': 'late.cfg',
+                      'content': '[gcode_macro LATE]\ngcode:\n    M117 x\n'},
+    })
+    assert details is not None
+    assert 'NOT INCLUDED' not in content
+    assert 'already present' in content
+
+
+def test_approved_new_file_carries_the_include_directive():
+    """Gate-path parity (2026-09-30 drift law): the approved result must
+    render the SAME include directive as the auto-approve path."""
+    from services.ai_edit_tools import format_approval_result
+    content, _ = format_approval_result('config_write', {
+        'decision': 'approved', 'summary': 'created new file macros_x.cfg',
+        'needs_include': 'macros_x.cfg',
+    })
+    assert 'NOT INCLUDED' in content
+    assert 'macros_x.cfg' in content
+    assert 'add_include' in content
+
+
+def test_approved_non_create_result_has_no_include_directive():
+    from services.ai_edit_tools import format_approval_result
+    content, _ = format_approval_result('config_edit', {
+        'decision': 'approved', 'summary': 'set max_accel'})
+    assert 'NOT INCLUDED' not in content
 
 
 # ── route-level loop behavior ───────────────────────────────────────────
@@ -680,6 +725,86 @@ def test_flag_on_mirror_failure_disables_edit_tools(monkeypatch):
     assert response.status_code == 200
     assert response.json()['content'] == 'ok plain answer'
     assert 'config_edit' not in json.dumps(scripted.payloads[0])
+
+
+def test_draft_only_context_files_sees_mirror_files_too(monkeypatch):
+    """Regression (live report 2026-10-10): since the frontend retired the
+    context-file picker, contextFiles carries ONLY unsaved drafts. Seeding
+    the session from them exclusively made every config_edit on
+    printer.cfg kick back "File 'printer.cfg' is not in the project. Known
+    files: mainsail.cfg." the moment ANY file went dirty (ai_chat.log
+    22:06 trace). The mirror is now a FLOOR: the draft files AND the disk
+    files are all editable in one session."""
+    mirror = {'printer.cfg': {'content': PRINTER_CFG}}
+    monkeypatch.setattr(ai_routes, '_mirror_user_config_files', lambda: mirror)
+    draft = {'mainsail.cfg': {'content': '[gcode_macro DRAFT]\ngcode:\n    M117 x\n'}}
+    scripted = _install(monkeypatch, [
+        # The edit lands on a file NOT in contextFiles — the exact failing
+        # shape from the live trace.
+        _text_tool_call('config_edit', {'file': 'printer.cfg', 'op': 'set_param',
+                                        'section': 'printer', 'key': 'max_accel',
+                                        'value': '3000'}),
+        _final_reply('max_accel staged at 3000.'),
+    ])
+    payload = _chat_payload([{'role': 'user', 'content': 'set max_accel 3000'}])
+    payload['contextFiles'] = draft
+    response = client.post('/ai/chat', json=payload)
+    assert response.status_code == 200
+    body = response.json()
+    assert body['pendingEdits'] and body['pendingEdits'][0]['summary'].startswith(
+        'set [printer] max_accel')
+    assert 'FAILED' not in str(scripted.payloads[1]['messages'])
+
+
+def test_draft_content_wins_over_mirror_for_same_file(monkeypatch):
+    """The floor never overrides a draft: an unsaved edit to printer.cfg
+    must be what the session edits and stages, not the stale disk mirror
+    (approval re-validation still checks against the client's latest text
+    — same no-clobber guarantee as the old contextFiles-only seeding)."""
+    mirror = {'printer.cfg': {'content': PRINTER_CFG}}  # max_accel: 1000
+    monkeypatch.setattr(ai_routes, '_mirror_user_config_files', lambda: mirror)
+    draft_cfg = PRINTER_CFG.replace('max_accel: 1000', 'max_accel: 2500')
+    scripted = _install(monkeypatch, [
+        _text_tool_call('config_edit', {'file': 'printer.cfg', 'op': 'set_param',
+                                        'section': 'printer', 'key': 'max_z_velocity',
+                                        'value': '7.5'}),
+        _final_reply('max_z_velocity staged.'),
+    ])
+    payload = _chat_payload([{'role': 'user', 'content': 'set max_z_velocity 7.5'}])
+    payload['contextFiles'] = {'printer.cfg': {'content': draft_cfg}}
+    response = client.post('/ai/chat', json=payload)
+    assert response.status_code == 200
+    body = response.json()
+    assert body['pendingEdits'], body
+    staged_text = body['pendingEdits'][0]['newText']
+    assert 'max_z_velocity: 7.5' in staged_text
+    # The draft's unsaved value survived the mirror floor (a mirror-seeded
+    # text would carry max_accel: 1000 only via the untouched PRINTER_CFG;
+    # the draft had it replaced).
+    assert 'max_accel: 2500' in staged_text
+
+
+def test_mirror_failure_still_arms_from_drafts(monkeypatch):
+    """Mirror raises but contextFiles has content: the session arms from
+    the drafts alone (old behavior for that arm), so a disk hiccup never
+    drops an unsaved-draft edit session."""
+    def boom():
+        raise RuntimeError('disk on fire')
+
+    monkeypatch.setattr(ai_routes, '_mirror_user_config_files', boom)
+    scripted = _install(monkeypatch, [
+        _text_tool_call('config_edit', {'file': 'printer.cfg', 'op': 'set_param',
+                                        'section': 'printer', 'key': 'max_accel',
+                                        'value': '3000'}),
+        _final_reply('staged despite mirror outage.'),
+    ])
+    payload = _chat_payload([{'role': 'user', 'content': 'set max_accel 3000'}])
+    payload['contextFiles'] = _ctx()
+    response = client.post('/ai/chat', json=payload)
+    assert response.status_code == 200
+    body = response.json()
+    assert body['pendingEdits'] and body['pendingEdits'][0]['summary'].startswith(
+        'set [printer] max_accel')
 
 
 def test_edit_system_prompt_carries_tool_surface(edit_flag, monkeypatch):

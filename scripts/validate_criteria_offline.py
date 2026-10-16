@@ -140,6 +140,30 @@ NEGATIVE_CONTROLS = [
           "summary": "patched [printer]",
           "newText": "[printer]\nmax_z_velocity: 15\nmax_accel: 15500\n"}],
       "tool_calls": []}),
+    # Controls added 2026-10-12 for the AMBI-02 include check
+    # (`new_file_included`): the orphan-create shapes the product nudge
+    # targets must grade FAIL.
+    ("AMBI-02: new file staged, NO include anywhere (the orphan class)",
+     "AMBI-02",
+     {"response": "Moved your macros into macros.cfg.", "pending_edits": [
+         {"file": "macros.cfg", "op": "new_file", "summary": "created",
+          "newText": "[gcode_macro PARK]\ngcode:\n    G91\n"}],
+      "tool_calls": []}),
+    ("AMBI-02: include only COMMENTED OUT (inactive)", "AMBI-02",
+     {"response": "Moved your macros into macros.cfg.", "pending_edits": [
+         {"file": "macros.cfg", "op": "new_file", "summary": "created",
+          "newText": "[gcode_macro PARK]\ngcode:\n    G91\n"},
+         {"file": "printer.cfg", "op": "patch_section", "summary": "patched",
+          "newText": "#[include macros.cfg]\n"}],
+      "tool_calls": []}),
+    ("AMBI-02: '[include other.cfg]' — different file, not the new one",
+     "AMBI-02",
+     {"response": "Moved your macros into macros.cfg.", "pending_edits": [
+         {"file": "macros.cfg", "op": "new_file", "summary": "created",
+          "newText": "[gcode_macro PARK]\ngcode:\n    G91\n"},
+         {"file": "printer.cfg", "op": "patch_section", "summary": "patched",
+          "newText": "[include mainsail.cfg]\n"}],
+      "tool_calls": []}),
 ]
 
 

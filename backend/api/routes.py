@@ -42,6 +42,7 @@ from services.board_detector import (
     fuzzy_match_examples,
     get_available_examples,
 )
+from services.gcode_registry import load_registry
 from services.warning_acknowledgments import (
     acknowledge_duplicate_section_type,
     acknowledge_warning_for_section,
@@ -57,6 +58,11 @@ from services.warning_acknowledgments import (
 )
 
 router = APIRouter()
+
+# Projection of the generated G-code registry served to the editor for
+# completion. Built once per process (load_registry is lru_cached, this just
+# avoids re-trimming the dict per request).
+_gcode_commands_payload: dict | None = None
 
 # Hard-failover doc/config sources (installed Klipper repo when present,
 # bundled copies otherwise) — shared with the MCP docs tools.
@@ -513,6 +519,34 @@ async def get_schema():
             ],
         }
     return {"schemas": schemas}
+
+
+@router.get("/gcode-commands")
+async def get_gcode_commands():
+    """Command names + gating info from the generated registry.
+
+    Same source the validator's unknown/conditional command scan uses, so the
+    editor's completion can never suggest a command that then fails validation.
+    Project-defined macros are layered per-project at validation time and are
+    deliberately NOT included here — the client knows its own project's macros.
+    """
+    global _gcode_commands_payload
+    if _gcode_commands_payload is None:
+        registry = load_registry()
+        commands = {}
+        for name, entry in sorted(registry.get("commands", {}).items()):
+            commands[name] = {
+                "requires_sections": list(entry.get("requires_sections", [])),
+                "requires_mode": entry.get("requires_mode"),
+                "requires_flags": dict(entry.get("requires_flags", {}) or {}),
+                "extra": entry.get("extra"),
+                "simulated": bool(entry.get("simulated", False)),
+            }
+        _gcode_commands_payload = {
+            "source_rev": registry.get("source_rev"),
+            "commands": commands,
+        }
+    return _gcode_commands_payload
 
 
 @router.get("/schema/{section_type}")

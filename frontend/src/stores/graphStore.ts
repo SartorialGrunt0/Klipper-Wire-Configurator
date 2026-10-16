@@ -1947,16 +1947,26 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     }
 
     // 3. Add nodes for new sections that don't have graph nodes
-    // Find the parent hardware node for this file
-    let parentNode = updatedNodes.find(
+    // Find the parent hardware node for this file. printer.cfg can host BOTH
+    // the SBC node and the primary mainboard node, and graphBuilder inserts
+    // the SBC FIRST — a bare find() parented every sync-added section to the
+    // SBC card. Mirror the include-edge resolution in step 4: among the
+    // file's hardware nodes prefer isPrimary.
+    const parentCandidates = updatedNodes.filter(
       (n) => n.type === 'hardware' && (n.data as Record<string, unknown>).configFile === filename,
     );
+    let parentNode = parentCandidates.find(
+      (n) => Boolean((n.data as Record<string, unknown>).isPrimary),
+    ) ?? parentCandidates[0];
     // Fallback: match by basename in case the path format differs
     if (!parentNode) {
       const bn = filename.replace(/^.*[\\/]/, '');
-      parentNode = updatedNodes.find(
+      const byBasename = updatedNodes.filter(
         (n) => n.type === 'hardware' && ((n.data as Record<string, unknown>).configFile as string || '').replace(/^.*[\\/]/, '') === bn,
       );
+      parentNode = byBasename.find(
+        (n) => Boolean((n.data as Record<string, unknown>).isPrimary),
+      ) ?? byBasename[0];
     }
     const parentId = parentNode?.id;
 

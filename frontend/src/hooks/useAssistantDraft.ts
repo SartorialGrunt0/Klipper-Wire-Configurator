@@ -16,6 +16,7 @@ import type { ChatMessage, AiProvider } from '../stores/aiStore';
 import type { AiChatRole, PendingConfigEdit } from '../services/api';
 import * as api from '../services/api';
 import { rewriteConfigEqualsSeparators } from '../utils/chatUtils';
+import type { ChatReference } from '../utils/chatReferences';
 
 interface ChatRequestBase {
   apiKey: string;
@@ -32,6 +33,13 @@ interface ChatRequestBase {
   toolProtocol?: 'auto' | 'native' | 'text';
   /** Loaded user-config content for the backend config-grounding fallback. */
   contextFiles?: Record<string, { content: string; label: string }>;
+  /**
+   * Context the user attached explicitly in the docked panel — highlighted
+   * line ranges, pinned tree rows. Sent structured; the backend renders them
+   * into one trailing system message (omitted entirely when empty, so an
+   * ordinary turn's prompt is byte-identical to before this feature).
+   */
+  context_references?: ChatReference[];
 }
 
 interface AssistantReplyAttempt {
@@ -66,6 +74,11 @@ export function useAssistantDraft() {
         toolCalls: response.toolCalls,
         repromptCount: response.repromptCount,
         pendingEdits: response.pendingEdits ?? undefined,
+        // Post-hoc review: the change set rides the message exactly like
+        // pendingEdits does, so a reloaded conversation keeps the set the
+        // reply produced (never re-derived from prose).
+        changeSet: response.changeSet ?? null,
+        steers: response.steers ?? [],
       };
       // Clone the assistant message (not just content) so pendingEdits
       // survive into the validation trail.

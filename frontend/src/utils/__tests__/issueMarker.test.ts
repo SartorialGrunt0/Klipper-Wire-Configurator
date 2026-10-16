@@ -5,7 +5,7 @@ describe('issueMarker', () => {
   it('error and warning keep their existing markers and colors', () => {
     expect(ISSUE_MARKER.error.marker).toBe('●');
     expect(ISSUE_MARKER.error.color).toBe('var(--color-error)');
-    expect(ISSUE_MARKER.warning.marker).toBe('▲');
+    expect(ISSUE_MARKER.warning.marker).toBe('⚠');
     expect(ISSUE_MARKER.warning.color).toBe('var(--color-warning)');
   });
 

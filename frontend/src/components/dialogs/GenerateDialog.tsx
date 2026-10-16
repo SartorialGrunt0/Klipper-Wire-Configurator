@@ -4,6 +4,7 @@ import { useGraphStore } from '../../stores/graphStore';
 import * as api from '../../services/api';
 import type { ExampleConfig, ConfigFile } from '../../types/config';
 import { buildGraphFromConfig } from '../../utils/graphBuilder';
+import { discardReview } from '../../services/changeSetReview';
 
 interface GenerateDialogProps {
   onClose: () => void;
@@ -59,6 +60,8 @@ export default function GenerateDialog({ onClose }: GenerateDialogProps) {
     setShowConfirm(false);
     try {
       // Clear ALL existing data before generating
+      // — including the post-hoc review of the project being replaced.
+      discardReview();
       clearAll();
       clearGraph();
 

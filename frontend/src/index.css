@@ -12,6 +12,13 @@
   --color-warning: #fbbf24;
   --color-success: #34d399;
 
+  /* Severity line tints for the text view's highlight overlay. Mixed from the
+     same tokens the severity dots use so the row colour always matches the dot
+     beside it. Info gets no tint on purpose: it is legal, order-dependent
+     context, not an alarm. */
+  --color-error-tint: color-mix(in srgb, var(--color-error) 26%, transparent);
+  --color-warning-tint: color-mix(in srgb, var(--color-warning) 26%, transparent);
+
   /* Component type colors */
   --color-sbc: #8b5cf6;
   --color-mainboard: #3b82f6;
@@ -31,6 +38,155 @@ body {
   background-color: var(--color-bg-primary);
   color: var(--color-text-primary);
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}
+
+/* Text-view severity tints.
+   INLINE, deliberately: the tint is wrapped around the line's own markup, so it
+   is painted by the same line box that draws the characters and can never end
+   up on a different line. What is forbidden is a box positioned OUTSIDE the
+   text (per-row flex/div stacks, a translated band layer): any layout
+   difference moves it off its line (0d4cfb8 / e482e63, and the band layer's
+   -13.7px by line 702 at 90% zoom on 2026-10-07). Tiles inside the same
+   inline formatting context as the glyphs are safe by construction — see
+   .kl-row-full. */
+.kl-line-error {
+  background-color: var(--color-error-tint);
+}
+.kl-line-warning {
+  background-color: var(--color-warning-tint);
+}
+
+/* Pending AI marks in the LIVE editor (Zed-model review; intensity fix from
+   the 2026-10-06 dogfood). INLINE by law (Sir + the drift bug, 2026-10-07):
+   the mark is the line's own span in the highlight overlay — painted by the
+   same line box that draws the characters — so it cannot drift from the text
+   at any zoom. The translated band layer this replaces computed row
+   positions OUTSIDE the text and slid −13px by line 702 at 90% browser
+   zoom (Sir's screenshot). Full-row coverage comes from `.kl-row-full`:
+   horizontal padding overflow with an equal negative margin, so the tint
+   stretches across the row while the advance stays net-zero and no text
+   shifts. NEVER add vertical padding here (inline vertical padding grows
+   the line box and changes the rhythm — measured 22.75 → 28.6px).
+   Green = lines the AI added that the reviewer can KEEP (the mini-diff's
+   cue: bg-green-500/15 + text-green-400 glyphs; RenderLine colors tokens
+   with inline styles, so only !important wins the line over — the same
+   trade the read-only diff pane makes). */
+.kl-row-full {
+  /* One tinted row = ONE TILE. An inline-block's box is its own line box
+     tall — exactly the line-height — so consecutive tinted rows stack
+     edge-to-edge: no background sliver between them, no overlap to
+     double-darken, at any zoom (pixel-verified at 90% and 125%,
+     2026-10-07). The horizontal padding overflow + equal negative margin
+     stretches the tile across the full row while the advance stays
+     net-zero. This is NOT the forbidden box-per-row pattern (e482e63):
+     tiles live INSIDE the overlay's inline formatting context, positioned
+     by the same text layout that places the glyphs — drift is impossible
+     because there is nothing outside the text computing a position.
+     Vertical padding remains forbidden: it grows the line box
+     (22.75 → 28.6px measured) and the overlay must share the textarea's
+     rhythm character for character. */
+  display: inline-block;
+  /* Snap the tile to its line box: with height == line-height and the top
+     pinned to the line box top, consecutive tiles cover [T, T+lh] of their
+     own lines — exact tiling, no baseline shift bleeding a run's edges. */
+  vertical-align: top;
+  padding-right: 100vw;
+  margin-right: -100vw;
+}
+.kl-line-pending {
+  background-color: rgb(34 197 94 / 0.15); /* bg-green-500/15, matching DiffLines */
+  color: #4ade80 !important; /* text-green-400, matching DiffLines */
+}
+.kl-line-pending * {
+  /* !important is load-bearing: RenderLine paints EVERY token with an
+     inline style, and a plain rule (even `color: inherit`) loses to an
+     inline style on the same element. Without it the parent's green never
+     reaches a single glyph — the whole mark rendered invisible
+     (regression in d3c6d92, playwright pixel probe 2026-10-07). */
+  color: #4ade80 !important;
+}
+/* An undecided deletion has no live line to own, so the row its content
+   would return to carries the red mark — the mini-diff's red-row weight,
+   raised past /15 because there are no red glyphs to help it. The −N count
+   and removed text live in the gutter (one aligned text block) and the
+   review strip; the row itself stays quiet decoration.
+   Deliberately tint-only (Sir, 2026-10-07): the earlier solid red top-rule
+   is dropped — the tint + gutter −N read clearly, and the accepted trade is
+   that a pending-deletion row can look like an error-flag row at a glance
+   (the strip and gutter disambiguate; a crisper mark was not worth it). */
+.kl-line-removed {
+  background-color: rgb(239 68 68 / 0.28);
+}
+
+/* Ghost row (Sir, 2026-10-08): the deleted frame line rendered INSIDE the
+   textarea's own value, directly above the green line that replaced it.
+   Unlike .kl-line-removed (a context line that WOULD take the deletion
+   back — tint only), this row is the removed text itself, so it carries
+   the mini-diff's red GLYPHS like DiffLines' red rows, over a stronger
+   red field. The glyphs are display-only: the textarea's own characters
+   are transparent, so what the reader sees here is painted solely by the
+   overlay, and the row is stripped before any store/save/chat ever reads
+   the text (reviewDisplay). */
+.kl-line-ghost {
+  background-color: rgb(239 68 68 / 0.22);
+  color: #f87171 !important; /* red-400 — the old line reads as deleted text */
+}
+.kl-line-ghost * {
+  /* Same !important law as .kl-line-pending: RenderLine paints every token
+     with an inline style; a plain rule loses to it. */
+  color: #f87171 !important;
+}
+
+/* Pair anchor: the zero-width marker span at a pending run's top line
+   (`kl-run-anchor`, editorHighlight). It must MEASURE a real rect for the
+   floating Keep/Undo layer, while never shifting a glyph or growing the
+   line box: a width-0 inline-block pinned to the line-box top is 1em tall
+   inside the 1.625 line-height, so the rhythm is untouched (same law as
+   .kl-row-full: nothing vertical may grow the box). */
+.kl-run-anchor {
+  display: inline-block;
+  width: 0;
+  height: 1em;
+  vertical-align: top;
+}
+
+/* Current-line highlight: ambient "where am I", painted on the line's own
+   inline span like every other tint. Stronger while the editor has focus,
+   fainter without (Zed keeps it visible when focus is elsewhere); the weakest
+   tint in the precedence stack. */
+.kl-line-current {
+  background-color: rgb(255 255 255 / 0.06);
+}
+.kl-line-current-unfocused {
+  background-color: rgb(255 255 255 / 0.03);
+}
+
+/* Ghost text: a suggestion, not content. Uses the comment colour so it reads
+   as "not really there" at a glance — without it the suggestion is the same
+   colour as the code and looks like text the user already typed. */
+.kl-ghost {
+  color: var(--color-text-secondary);
+  opacity: 0.75;
+}
+
+/* Tree fold-out: newly revealed children fade in rather than popping into
+   place. Opacity only (composited, no layout work), and it runs once per mount,
+   so a file switch does not re-animate rows that were already on screen. */
+@keyframes kl-fold-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.kl-fold {
+  animation: kl-fold-in 120ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .kl-fold {
+    animation: none;
+  }
 }
 
 /* Scrollbar styling */

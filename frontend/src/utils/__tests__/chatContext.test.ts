@@ -101,9 +101,10 @@ describe('selectUnsavedDrafts', () => {
   it('store flow: an approved-but-unsaved AI file is picked next turn', () => {
     // Dogfood 2026-09-25: turn 1 config_write + approve put
     // prepare_bed_mesh.cfg into the store as a dirty draft (no saved
-    // baseline). Turn 2 checks NOTHING in "Include Files" — the draft
-    // must still reach the edit session, or add_include reports
-    // 'Include file not found' for a file the user can see.
+    // baseline). Turn 2 ships only drafts (there is no context-file picker
+    // since 2026-10-03) — the draft must still reach the edit session, or
+    // add_include reports 'Include file not found' for a file the user can
+    // see.
     useConfigStore.setState({ configFiles: {}, originalTexts: {}, isDirty: false });
     vi.useFakeTimers(); // updateConfigFile schedules a debounced revalidation fetch
     useConfigStore.getState().setConfigFile('printer.cfg', cfg('printer.cfg'));
