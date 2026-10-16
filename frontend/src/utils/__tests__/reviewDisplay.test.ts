@@ -448,6 +448,28 @@ describe('editTouchesGhost', () => {
     expect(editTouchesGhost('abc\ndef', [], 0, 7)).toBe(false);
   });
 
+  it('vetoes the R7-N1 shape: selection delete over adjacent ghost rows', () => {
+    // The exact round-7 fuzz shape: frame 'A\n\nB\nA' / live 'B\n\nA\nA\n'.
+    // Display rows 1,2,4 are red ghosts, and rows 1-2 duplicate live
+    // content. Deleting them via a selection is the only way the slot-clamp
+    // margin (b5bb88c) could drop a live 'A'; the read-only veto (6519780)
+    // makes that edit unreachable — a span covering any ghost is refused.
+    const built = displayOf('A\n\nB\nA', 'B\n\nA\nA\n');
+    expect(built.ghostDisplayLines).toEqual([1, 2, 4]);
+    const rows = built.display.split('\n');
+    const span = rows[0].length + 1 + rows[1].length + 1; // rows 1-2 incl newlines
+    expect(editTouchesGhost(built.display, built.ghostDisplayLines, 0, span)).toBe(true);
+    // every single-key delete ON the ghost rows is refused; the
+    // forward-delete at offset 3 hits the live 'B' row and stays allowed
+    const fwdAllowedAt = new Set([3]);
+    for (let p = 0; p <= 3; p += 1) {
+      const [bLo, bHi] = effectiveMutationRange(built.display, p, p, 'deleteContentBackward');
+      const [fLo, fHi] = effectiveMutationRange(built.display, p, p, 'deleteContentForward');
+      expect(editTouchesGhost(built.display, built.ghostDisplayLines, bLo, bHi)).toBe(true);
+      expect(editTouchesGhost(built.display, built.ghostDisplayLines, fLo, fHi)).toBe(fwdAllowedAt.has(p) ? false : true);
+    }
+  });
+
   it('covers every ghost of a multi-run display', () => {
     // rows: 1 x1 / 2 x2 (ghosts) / 3 X / 4 keep / 5 y1 / 6 y2 (ghosts) / 7 Y
     const multi = displayOf('x1\nx2\nkeep\ny1\ny2', 'X\nkeep\nY');
