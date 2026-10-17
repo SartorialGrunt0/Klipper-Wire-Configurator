@@ -131,6 +131,24 @@ def test_any_of_forwards_tool_turns():
     assert c("any_of", arms, "fine", tool_turns=9)
 
 
+def test_staged_section_regex_line_anchored_pattern():
+    """BULK-03 re-run (2026-10-17): author wrote '^\\s+level_bed\\b'
+    expecting line anchoring; without re.MULTILINE the '^' matched only
+    string start and a correctly-staged body failed. re.M widens '^'/'$'
+    only — no pre-existing passing arm can flip to fail."""
+    pe = [{"file": "printer.cfg", "newText":
+           "[gcode_macro PRINT_START]\ngcode:\n    M104 S200\n    level_bed\n"}]
+    assert c("staged_section_regex",
+             "printer.cfg::gcode_macro PRINT_START::^\\s+level_bed\\b",
+             "", pending_edits=pe)
+    # negative control: the name only mid-line must NOT satisfy ^\s+
+    pe2 = [{"file": "printer.cfg", "newText":
+            "[gcode_macro PRINT_START]\ngcode:\n    RESPOND X=level_bed\n"}]
+    assert not c("staged_section_regex",
+                 "printer.cfg::gcode_macro PRINT_START::^\\s+level_bed\\b",
+                 "", pending_edits=pe2)
+
+
 # ── bank wiring ────────────────────────────────────────────────────────
 
 

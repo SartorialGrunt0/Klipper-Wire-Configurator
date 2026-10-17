@@ -2216,8 +2216,9 @@ def build_bulk_questions() -> list[TestQuestion]:
             qid="BULK-04",
             title="Constructive bulk add from a pin map (6 sections, one request)",
             text=("My wiring sheet is at the top of pins.cfg. Add the three "
-                  "steppers and their TMC2209 drivers as new sections "
-                  "exactly from that pin map — all six sections, this one "
+                  "steppers and their TMC2209 drivers as six new sections "
+                  "directly in pins.cfg, exactly from that pin map — do "
+                  "not create a new file. All six sections, this one "
                   "request."),
             context_files=(("pins.cfg", TRIDENT_FILE_LABEL, _BULK_PINS_CFG),),
             edit_tools=True,
@@ -3331,9 +3332,14 @@ def criterion_ok(kind: str, value: str, content: str,
                                      re.IGNORECASE | re.DOTALL)
         return False
     if kind == "staged_section_regex":
-        # "<file>::<section>::<regex>" — regex searched WITHIN the named
+        # "file::section::regex" — regex searched WITHIN the named
         # section body of the staged newText (section-aware so a stray
         # mention elsewhere in the file cannot satisfy it).
+        # re.MULTILINE (BULK-03 re-run 2026-10-17): criteria author
+        # `^\s+level_bed\b` expecting LINE anchoring, but the flags here
+        # were only IGNORECASE|DOTALL — `^` matched nothing but string
+        # start and the arm failed on a correctly-staged body. re.M can
+        # only ever widen `^`/`$` matching, never narrow it.
         parts = value.split("::")
         if len(parts) != 3:
             return False
@@ -3343,7 +3349,8 @@ def criterion_ok(kind: str, value: str, content: str,
             if e.get("file") != filename:
                 continue
             body = _staged_section_body(e.get("newText") or "", section)
-            if body is not None and re.search(pattern, body, re.IGNORECASE | re.DOTALL):
+            if body is not None and re.search(
+                    pattern, body, re.IGNORECASE | re.DOTALL | re.MULTILINE):
                 return True
         return False
     if kind == "staged_section_absent":
