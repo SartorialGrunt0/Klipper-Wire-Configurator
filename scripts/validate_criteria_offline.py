@@ -44,7 +44,8 @@ def bank() -> dict:
           + H.build_setup_questions() + H.build_live_context_questions()
           + H.build_edit_tool_questions() + H.build_rename_questions()
           + H.build_comment_questions() + H.build_skill_gate_questions()
-          + H.build_tool_coverage_questions() + H.build_ack_guard_questions())
+          + H.build_tool_coverage_questions() + H.build_ack_guard_questions()
+          + H.build_bulk_questions())
     return {q.qid: q for q in qs}
 
 
