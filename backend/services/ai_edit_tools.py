@@ -264,7 +264,12 @@ description of the change; make the tool call instead.
 
 Rules:
 - Read before you edit: read_user_config the file or section first so
-  anchors, keys, and current values are exact.
+  anchors, keys, and current values are exact. Batch the reads:
+  sections=['a','b'] fetches several sections and files=['a.cfg','b.cfg']
+  several whole files in ONE call. For "every reference"/rename jobs,
+  search_user_configs returns a per-file REFERENCES checklist (section +
+  line per occurrence) — work through the list, then re-search until the
+  counts read 0.
 - NEVER ask the user which file to edit or wait for confirmation of the
   target — the answer is discoverable with tools. Call list_user_configs
   to see the project's files and search_user_configs to find where a

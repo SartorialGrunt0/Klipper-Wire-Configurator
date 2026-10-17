@@ -1146,8 +1146,12 @@ _MCP_TOOL_SNIPPETS: dict[str, str] = {
     ),
     "search_user_configs": (
         "Search the user's config files by filename or content keyword "
-        "(query='level_bed'|'skr'|'bed_mesh', limit=N). Use when the user names "
-        "a macro or section without saying which file it is in."
+        "(query='level_bed'|'skr'|'bed_mesh', limit=N; several names at once: "
+        "keywords=['level_bed','old_probe_home']). Every hit lists a "
+        "REFERENCES checklist — each occurrence with section + line number — "
+        "so rename/'every reference' jobs edit from the list and re-search "
+        "until the counts hit 0. Use when the user names a macro or section "
+        "without saying which file it is in."
     ),
     "search_example_configs": "Search example configs by board or printer (query='voron', limit=N)",
     "read_example_config": "Read a full example config file (filename='generic-....cfg')",
