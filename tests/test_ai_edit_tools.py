@@ -30,7 +30,8 @@ from main import app  # noqa: E402
 from services.ai_edit_tools import (  # noqa: E402
     EDIT_TOOL_NAMES,
     EDIT_TOOL_SPECS,
-    EDIT_WRITE_CAP_DEFAULT,
+    READ_GRACE,
+    THRASH_BUDGET_DEFAULT,
     EditSession,
 )
 
@@ -115,7 +116,7 @@ def edit_flag(monkeypatch):
     are product behavior and the skill gate is unlocked per-request via
     editSkill=True in _chat_payload. Kept so gate-flow tests can still
     clear stray experiment env."""
-    monkeypatch.delenv('KWC_EDIT_WRITE_CAP', raising=False)
+    monkeypatch.delenv('KWC_THRASH_BUDGET', raising=False)
 
 
 class _ScriptedClient:
@@ -515,12 +516,13 @@ def test_flag_on_edit_applies_and_returns_pending_edits(edit_flag, monkeypatch):
     assert '"diff"' not in str(result_msgs[0]['content'])
 
 
-# ── Phase-5 per-request write-attempt cap (soft landing) ────────────────
-# The cap targets THRASH (a model re-issuing writes after kickbacks with
-# nothing staged), never legitimate multi-op work. Crossing it must be a
-# soft landing: the call is refused without touching state, the model is
-# ordered to stop editing and report, and the conversation still ends with
-# prose — plus the staged set so far, which stays intact.
+# ── per-request THRASH budget (soft landing; 2026-10-16 rework) ────────
+# The budget charges WASTE (failed writes, reads past grace, correction
+# and empty re-prompts), never successful work. Crossing it is a soft
+# landing: the call is refused without touching state, the model gets
+# facts + honesty clauses — NEVER a stop order (the old "no further write
+# calls will be" text manufactured the prose-fallback symptom) — and the
+# conversation still ends with prose plus the staged set, intact.
 
 def _failing_edit_args(i: int) -> dict:
     """A write call that always kickbacks (unknown section)."""
@@ -528,90 +530,196 @@ def _failing_edit_args(i: int) -> dict:
             'key': 'max_accel', 'value': '3000'}
 
 
-def test_session_write_cap_soft_lands(monkeypatch):
-    monkeypatch.delenv('KWC_EDIT_WRITE_CAP', raising=False)
+def _ok_edit_args(key: str, value: str = '3000') -> dict:
+    """A write call that stages successfully."""
+    return {'file': 'printer.cfg', 'op': 'set_param', 'section': 'printer',
+            'key': key, 'value': value}
+
+
+def test_session_failed_writes_charge_until_thrash_budget_spent(monkeypatch):
+    monkeypatch.delenv('KWC_THRASH_BUDGET', raising=False)
     session = EditSession(_ctx())
-    for i in range(EDIT_WRITE_CAP_DEFAULT):
+    # Default budget: failures charge one unit each; while within it the
+    # calls run and kick back normally.
+    for i in range(THRASH_BUDGET_DEFAULT):
         content, details = session.execute(
             {'name': 'config_edit', 'arguments': _failing_edit_args(i)})
-        assert 'WRITE LIMIT REACHED' not in content
+        assert 'WASTE BUDGET SPENT' not in content
         assert 'FAILED' in content and details is None
     assert session.last_write_outcome == 'correctable'
+    assert session.thrash_units == THRASH_BUDGET_DEFAULT
+    assert session.write_failures == THRASH_BUDGET_DEFAULT
 
+    # One more failure spends over the budget...
     content, details = session.execute(
         {'name': 'config_edit', 'arguments': _failing_edit_args(99)})
     assert details is None
-    assert 'WRITE LIMIT REACHED' in content
-    assert 'Stop calling write tools' in content
+    assert 'FAILED' in content
+    assert session.thrash_units == THRASH_BUDGET_DEFAULT + 1
+
+    # ...and the NEXT write call soft-lands with the facts.
+    content, details = session.execute(
+        {'name': 'config_edit', 'arguments': _failing_edit_args(100)})
+    assert details is None
+    assert 'WASTE BUDGET SPENT' in content
+    assert f'{THRASH_BUDGET_DEFAULT + 1} failed write calls' in content
+    # Design law: facts + honesty clauses, NEVER a stop order.
+    assert 'no further write calls' not in content
+    assert 'Stop calling write tools' not in content
+    assert 'Never claim a change was staged' in content
     assert session.last_write_outcome == 'budget'
     assert session.pending_edits == []
-    assert session.edit_attempts == EDIT_WRITE_CAP_DEFAULT + 1
+    # edit_attempts stays informational: every call counted, gating or not.
+    # +2: the (budget+1)th failure ran, the soft-landed call never reached
+    # the apply path but was still an attempt (informational count).
+    assert session.edit_attempts == THRASH_BUDGET_DEFAULT + 2
 
 
-def test_session_write_cap_keeps_earlier_staged_work(monkeypatch):
-    monkeypatch.setenv('KWC_EDIT_WRITE_CAP', '2')
+def test_session_successful_writes_never_charge(monkeypatch):
+    """The load-bearing inversion: 60 SUCCESSFUL ops spend zero waste —
+    work is free, the reviewable state change is the point."""
+    monkeypatch.delenv('KWC_THRASH_BUDGET', raising=False)
     session = EditSession(_ctx())
-    # A real staged edit, then enough failures to cross the cap.
-    session.execute({'name': 'config_edit', 'arguments': {
-        'file': 'printer.cfg', 'op': 'set_param', 'section': 'printer',
-        'key': 'max_accel', 'value': '3000'}})
+    for i in range(60):
+        content, details = session.execute({'name': 'config_edit', 'arguments': {
+            'file': 'printer.cfg', 'op': 'add_section',
+            'section': f'gcode_macro bulk{i}', 'text': 'gcode:\n  G4 P1'}})
+        assert 'WASTE BUDGET SPENT' not in content
+        assert details is not None
+    assert session.thrash_units == 0
+    assert session.edit_attempts == 60
+    assert len(session.edit_records) == 60
+
+
+def test_session_read_grace_charges_only_overflow():
+    session = EditSession(_ctx())
+    for _ in range(READ_GRACE):
+        assert session.charge_read() is False
+    assert session.thrash_units == 0
+    assert session.charge_read() is True   # 11th read
+    assert session.charge_read() is True   # 12th read
+    assert session.thrash_units == 2
+    assert session.read_calls == READ_GRACE + 2
+
+
+def test_session_blocked_identical_call_charges():
+    """A call refused by the 3x identical-failure ladder is wasted work:
+    it charges like any other failure."""
+    session = EditSession(_ctx())
+    args = {'file': 'printer.cfg', 'op': 'set_param', 'section': 'nope',
+            'key': 'max_accel', 'value': '3000'}
+    for _ in range(3):
+        session.execute({'name': 'config_edit', 'arguments': args})
+    assert session.thrash_units == 3
+    content, details = session.execute({'name': 'config_edit',
+                                        'arguments': args})
+    assert 'BLOCKED' in content and details is None
+    assert session.thrash_units == 4
+
+
+def test_session_charge_waste_api():
+    session = EditSession(_ctx())
+    session.charge_waste()          # malformed re-prompt (loop-side)
+    session.charge_waste()          # empty re-prompt (loop-side)
+    assert session.thrash_units == 2
+
+
+def test_session_thrash_budget_keeps_earlier_staged_work(monkeypatch):
+    monkeypatch.setenv('KWC_THRASH_BUDGET', '2')
+    session = EditSession(_ctx())
+    # A real staged edit — FREE — then enough failures to spend the budget.
+    session.execute({'name': 'config_edit', 'arguments':
+                     _ok_edit_args('max_accel')})
+    assert session.thrash_units == 0
     session.execute({'name': 'config_edit', 'arguments': _failing_edit_args(1)})
+    session.execute({'name': 'config_edit', 'arguments': _failing_edit_args(2)})
+    assert session.thrash_units == 2
+    # Within budget (2 <= 2) the next call still runs...
     content, _ = session.execute(
-        {'name': 'config_edit', 'arguments': _failing_edit_args(2)})
-    assert 'WRITE LIMIT REACHED' in content
-    # The approved set so far is untouched by the cap.
+        {'name': 'config_edit', 'arguments': _failing_edit_args(3)})
+    assert 'WASTE BUDGET SPENT' not in content and 'FAILED' in content
+    # ...and the one after it soft-lands.
+    content, _ = session.execute(
+        {'name': 'config_edit', 'arguments': _failing_edit_args(4)})
+    assert 'WASTE BUDGET SPENT' in content
+    # The staged work is untouched by the budget, and the directive says
+    # so with exact counts.
     payload = session.pending_edits_payload()
     assert len(payload) == 1 and 'max_accel: 3000' in payload[0]['newText']
+    assert '1 file change already staged remains awaiting' in content
+    assert '3 failed write calls' in content
 
 
-def test_session_write_cap_env_override_and_disable(monkeypatch):
-    monkeypatch.setenv('KWC_EDIT_WRITE_CAP', '2')
+def test_session_thrash_budget_env_override_and_disable(monkeypatch):
+    monkeypatch.setenv('KWC_THRASH_BUDGET', '2')
     session = EditSession(_ctx())
-    for i in range(2):
+    for i in range(3):
         session.execute({'name': 'config_edit', 'arguments': _failing_edit_args(i)})
     content, _ = session.execute(
         {'name': 'config_edit', 'arguments': _failing_edit_args(3)})
-    assert 'WRITE LIMIT REACHED' in content
+    assert 'WASTE BUDGET SPENT' in content
 
     # 0 = uncapped (the escape/A-B arm) — the guards, not the budget, then
     # own the loop.
-    monkeypatch.setenv('KWC_EDIT_WRITE_CAP', '0')
+    monkeypatch.setenv('KWC_THRASH_BUDGET', '0')
     session = EditSession(_ctx())
-    for i in range(EDIT_WRITE_CAP_DEFAULT + 3):
+    for i in range(THRASH_BUDGET_DEFAULT + 3):
         content, _ = session.execute(
             {'name': 'config_edit', 'arguments': _failing_edit_args(i)})
-    assert 'WRITE LIMIT REACHED' not in content
+    assert 'WASTE BUDGET SPENT' not in content
     assert session.last_write_outcome == 'correctable'
 
 
-def test_prepare_obeys_write_cap(monkeypatch):
+def test_prepare_obeys_thrash_budget(monkeypatch):
     # The approval path shares the session counter: a card is never opened
     # for a write the budget has already refused.
-    monkeypatch.setenv('KWC_EDIT_WRITE_CAP', '1')
+    monkeypatch.setenv('KWC_THRASH_BUDGET', '1')
     session = EditSession(_ctx())
     content, result, state = session.prepare(
         {'name': 'config_edit', 'arguments': _failing_edit_args(0)})
     assert result is None and state is None and 'FAILED' in content
+    # Budget check runs at call entry (<= cap): the failure above spent
+    # exactly 1 of 1, so one more call still runs — and spends over.
     content, result, state = session.prepare(
         {'name': 'config_edit', 'arguments': _failing_edit_args(1)})
+    assert result is None and state is None and 'FAILED' in content
+    # Now spent over: the next prepare() soft-lands, no card state.
+    content, result, state = session.prepare(
+        {'name': 'config_edit', 'arguments': _failing_edit_args(2)})
     assert result is None and state is None
-    assert 'WRITE LIMIT REACHED' in content
+    assert 'WASTE BUDGET SPENT' in content
     assert session.last_write_outcome == 'budget'
 
 
-def test_flag_on_write_cap_soft_lands_and_suppresses_prose_nudge(edit_flag, monkeypatch):
-    """End-to-end: past the cap the turn still ends with prose (never an
-    error), and the prose nudge is suppressed — the loop just ORDERED the
-    model to summarize, so a ```cfg block in that answer is the requested
+def test_session_steer_resets_thrash_budget():
+    """A steer resets waste accounting: fresh budget, fresh read count,
+    fresh failure facts (pinning what batch accounting changes cover)."""
+    session = EditSession(_ctx())
+    for i in range(3):
+        session.execute({'name': 'config_edit', 'arguments': _failing_edit_args(i)})
+    for _ in range(READ_GRACE + 2):
+        session.charge_read()
+    session.charge_waste()
+    assert session.thrash_units > 0
+    session.apply_steer()
+    assert session.thrash_units == 0
+    assert session.read_calls == 0
+    assert session.write_failures == 0
+    assert session.edit_attempts == 0
+
+
+def test_flag_on_thrash_soft_lands_and_suppresses_prose_nudge(edit_flag, monkeypatch):
+    """End-to-end: past the budget the turn still ends with prose (never an
+    error), and the prose nudge is suppressed — the loop just told the
+    model to rework/report, so a ```cfg block in that answer is the
     report, not an inert draft to nudge back into another write.
 
-    Cap pinned to 3 (behavior test, not a default-value test — the e2e
+    Budget pinned to 2 (behavior test, not a default-value test — the e2e
     loop is bounded by MAX_MCP_TOOL_TURNS_EDIT, so scripting
-    EDIT_WRITE_CAP_DEFAULT calls would exhaust the turn cap first)."""
-    monkeypatch.setenv('KWC_EDIT_WRITE_CAP', '3')
-    cap = 3
+    THRASH_BUDGET_DEFAULT failures would exhaust turns first)."""
+    monkeypatch.setenv('KWC_THRASH_BUDGET', '2')
     replies = [_text_tool_call('config_edit', _failing_edit_args(i))
-               for i in range(cap + 1)]
+               for i in range(4)]
     replies.append(_final_reply(
         'I could not apply that:\n\n```cfg\n[printer]\nmax_accel: 9999\n```'))
     scripted = _install(monkeypatch, replies)
@@ -619,21 +727,22 @@ def test_flag_on_write_cap_soft_lands_and_suppresses_prose_nudge(edit_flag, monk
         [{'role': 'user', 'content': 'set max_accel to 9999'}]))
     assert response.status_code == 200
     body = response.json()
-    # Attempts 1..cap ran; the (cap+1)th was refused with the directive.
-    assert body['editAttempts'] == cap + 1
+    # Calls 1-3 ran (3 failures spent the 2-unit budget); the 4th soft-landed.
+    assert body['editAttempts'] == 4
     assert body['pendingEdits'] is None
-    assert 'WRITE LIMIT REACHED' in str(scripted.payloads[-1]['messages'])
+    assert 'WASTE BUDGET SPENT' in str(scripted.payloads[-1]['messages'])
+    assert 'no further write calls' not in str(scripted.payloads[-1]['messages'])
     # One provider call per scripted reply — a nudge would add another turn.
-    assert len(scripted.payloads) == cap + 2
+    assert len(scripted.payloads) == 5
     assert 'Call the tool NOW' not in str(scripted.payloads[-1]['messages'])
 
 
-def test_flag_on_without_cap_still_nudges_inert_draft(edit_flag, monkeypatch):
-    """Control for the test above: with the cap disabled the same scripted
+def test_flag_on_without_thrash_budget_still_nudges_inert_draft(edit_flag, monkeypatch):
+    """Control for the test above: with the budget disabled the same scripted
     run ends on a CORRECTABLE outcome, so the cfg-block nudge DOES fire —
     the suppression is attributable to the 'budget' outcome, not to the
     fixture being inert."""
-    monkeypatch.setenv('KWC_EDIT_WRITE_CAP', '0')
+    monkeypatch.setenv('KWC_THRASH_BUDGET', '0')
     replies = [_text_tool_call('config_edit', _failing_edit_args(i))
                for i in range(3)]
     replies.append(_final_reply(
@@ -643,6 +752,93 @@ def test_flag_on_without_cap_still_nudges_inert_draft(edit_flag, monkeypatch):
         [{'role': 'user', 'content': 'set max_accel to 9999'}]))
     assert response.status_code == 200
     assert 'Call the tool NOW' in str(scripted.payloads[-1]['messages'])
+
+
+def test_flag_on_over_budget_directive_names_reads(monkeypatch):
+    """The directive's facts come from the trace: reads past grace are
+    counted and named, so 'rework' has a concrete referent."""
+    monkeypatch.setenv('KWC_THRASH_BUDGET', '1')
+    sections = ['printer'] + [f'stepper_{c}' for c in 'xy']
+    reads = [{'name': 'read_user_config',
+              'arguments': {'filename': 'printer.cfg', 'section': s}}
+             for s in sections]
+    # Pad to GRACE+3 distinct reads with doc queries.
+    reads += [{'name': 'search_user_configs',
+               'arguments': {'query': f'theme{i}'}} for i in range(9)]
+    assert len(reads) == READ_GRACE + 2
+    blocks = '\n'.join(
+        f'```tool\n{json.dumps(c)}\n```' for c in reads)
+    scripted = _install(monkeypatch, [
+        {'choices': [{'message': {'content': blocks}}]},
+        _text_tool_call('config_edit', _failing_edit_args(7)),
+        _final_reply('Reworking now.'),
+    ])
+    response = client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'comment every section'}]))
+    assert response.status_code == 200
+    last_msgs = str(scripted.payloads[-1]['messages'])
+    assert 'WASTE BUDGET SPENT' in last_msgs
+    assert '2 read past the 10-read allowance' in last_msgs
+
+
+def test_flag_on_sixty_op_request_completes_in_one(monkeypatch):
+    """The standing repro inverted: 60 successful ops in ONE request.
+    The old 20-write cap made this arithmetically impossible; with waste-
+    only budgeting, successful ops are free and every row stages."""
+    monkeypatch.delenv('KWC_THRASH_BUDGET', raising=False)
+    def _batch(start: int) -> dict:
+        blocks = '\n'.join(
+            '```tool\n' + json.dumps({'name': 'config_edit', 'arguments': {
+                'file': 'printer.cfg', 'op': 'add_section',
+                'section': f'gcode_macro bulk{i}',
+                'text': 'gcode:\n  G4 P1'}})
+            + '\n```' for i in range(start, start + 20))
+        return {'choices': [{'message': {'content': blocks}}]}
+    scripted = _install(monkeypatch, [
+        _batch(0), _batch(20), _batch(40),
+        _final_reply('Added all 60 macros.'),
+    ])
+    response = client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'add 60 macros'}]))
+    assert response.status_code == 200
+    body = response.json()
+    assert body['editAttempts'] == 60
+    change_set = body['changeSet']
+    assert len(change_set['edits']) == 60
+    assert not any(e['superseded'] for e in change_set['edits'])
+    assert 'WASTE BUDGET SPENT' not in json.dumps(body['toolCalls'])
+    assert len(scripted.payloads) == 4
+
+
+def test_flag_on_runaway_ceiling_stops_silent(monkeypatch):
+    """The invisible ceiling stops the loop WITHOUT telling the model
+    (no budget text, no directive) — it is a harness bug guard, not a
+    budget. Ceiling pinned to 12 executed calls; batches of 5 UNIQUE
+    reads (distinct args keep every call executing, past the repeat
+    guard). Reads past grace charge, but the budget is disabled so only
+    the ceiling can stop the loop."""
+    monkeypatch.setattr(ai_routes, 'MAX_TOOL_OPS_PER_REQUEST', 12)
+    monkeypatch.setenv('KWC_THRASH_BUDGET', '0')  # budget must not interfere
+    def _batch(b: int) -> dict:
+        blocks = '\n'.join(
+            '```tool\n' + json.dumps({'name': 'read_user_config',
+                                      'arguments': {
+                                          'filename': 'printer.cfg',
+                                          'section': f'nope{b}_{i}'}})
+            + '\n```' for i in range(5))
+        return {'choices': [{'message': {'content': 'Reading.\n\n' + blocks}}]}
+    replies = [_batch(b) for b in range(3)]
+    replies.append(_final_reply('done'))
+    scripted = _install(monkeypatch, replies)
+    response = client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'read everything'}]))
+    assert response.status_code == 200
+    # 3 batches x 5 = 15 executed: the 4th iteration sees 15 >= 12 and
+    # breaks at the loop top before another provider round.
+    body = response.json()
+    assert len(body['toolCalls']) == 15
+    assert len(scripted.payloads) <= 5
+    assert 'WASTE BUDGET SPENT' not in json.dumps(body['toolCalls'])
 
 
 def test_flag_on_kickback_loop_converges_in_two(edit_flag, monkeypatch):

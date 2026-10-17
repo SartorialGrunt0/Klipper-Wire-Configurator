@@ -460,32 +460,51 @@ def _include_needed_directive(result: dict) -> str:
     )
 
 
-# ── per-request write-attempt cap (Phase-5 convergence pass) ─────────
-# The cap exists for THRASH, not for legitimate multi-op work: a model that
-# keeps re-issuing writes after kickbacks burns the whole turn budget with
-# nothing to show (live: a 17-attempt loop; 20-call turns in the 09-23 bank).
-# Hitting it is a SOFT landing, never an error — the model is told to stop
-# editing and report honestly, whatever is already staged still stands, and
-# the user still gets the human approval cards for it.
-# `KWC_EDIT_WRITE_CAP` overrides the default; 0 (or negative) disables it.
-# Sir 2026-09-27: raised 5 -> 20. Real multi-op work (rename + fix every
-# caller + verify) kept hitting the 5-write wall mid-task, which reads to
-# the user as "the tools don't work". Thrash is still guarded by the
-# identical-call hard-stop (3x) and the request turn cap
-# (MAX_MCP_TOOL_TURNS_EDIT), so the budget cap only ever punishes
-# legitimate work.
-EDIT_WRITE_CAP_DEFAULT = 20
+# ── per-request THRASH budget (large-edit rework, 2026-10-16) ─────────
+# The old flat write cap charged WORK: every write attempt cost one unit,
+# so a legitimate 62-section request was arithmetically impossible in one
+# prompt and the "WRITE LIMIT REACHED ... no further write calls will be"
+# directive MANUFACTURED the prose-fallback symptom (it taught the model to
+# give up — the Hermes early-abandonment lesson). The semantics are now
+# inverted: the budget charges WASTE, never work.
+#
+# Charged (`thrash_units`):
+#   - each FAILED write attempt (+1)
+#   - each read past a grace allowance (`READ_GRACE`) per request (+1 each)
+#   - each malformed-call correction re-prompt (+1)
+#   - each empty re-prompt (+1)
+# FREE:
+#   - each SUCCESSFUL write op — a state change is reviewable work, and the
+#     oscillation family that a write cap used to (badly) guard is covered
+#     deterministically by _duplicate_of_committed + supersede keys.
+#
+# `edit_attempts` survives as an INFORMATIONAL counter (successful ops still
+# increment it; the response payload, confab guard, and BULK criteria read
+# it) but it no longer gates anything.
+#
+# Hitting the thrash budget is a SOFT landing, never a stop order: the
+# directive states facts (what failed, what was over-read) and keeps the
+# honesty clauses, but never claims further writes are blocked — pressure
+# is invisible until truly spent, and a wrong soft note is a useless hint,
+# never a changed path (fail-open).
+#
+# `KWC_THRASH_BUDGET` overrides the default; 0 (or negative) disables it.
+THRASH_BUDGET_DEFAULT = 50
+# Reads are cheap for the model's understanding but expensive in context
+# growth; the grace allowance covers a normal read->edit->verify loop, and
+# only the overflow past it counts as thrash.
+READ_GRACE = 10
 
 
-def write_cap() -> int:
-    """Write attempts allowed per request (<=0 = uncapped)."""
-    raw = _os.environ.get("KWC_EDIT_WRITE_CAP", "").strip()
+def thrash_budget() -> int:
+    """Waste units allowed per request (<=0 = uncapped)."""
+    raw = _os.environ.get("KWC_THRASH_BUDGET", "").strip()
     if not raw:
-        return EDIT_WRITE_CAP_DEFAULT
+        return THRASH_BUDGET_DEFAULT
     try:
         return int(raw)
     except ValueError:
-        return EDIT_WRITE_CAP_DEFAULT
+        return THRASH_BUDGET_DEFAULT
 
 
 # ── Change-set display helpers (post-hoc review, 2026-10-02) ───────────
@@ -726,6 +745,18 @@ class EditSession:
         # over a refreshed context on later approve re-validations.
         self.committed_ops: list[dict] = []
         self.edit_attempts = 0
+        # ── THRASH accounting (2026-10-16, see THRASH_BUDGET_DEFAULT) ──
+        # Waste actually spent this request: failed write attempts, reads
+        # past READ_GRACE, malformed-correction + empty re-prompts.
+        # Successful writes NEVER charge. Reset wholesale by apply_steer.
+        self.thrash_units = 0
+        # Read executions this request (grace is applied in charge_read();
+        # repeat-dead reads never reach the session — REPEAT_READ_FEEDBACK
+        # kills them in ai_routes before execution, unchanged).
+        self.read_calls = 0
+        # Fact source for the over-budget directive (and the Step-4
+        # completion-check ledger): per-call write failures, not units.
+        self.write_failures = 0
         # Classification of the most recent write-tool outcome:
         #   None         — no write call yet this request
         #   'success'    — staged (partial success counts; see 'correctable')
@@ -873,16 +904,21 @@ class EditSession:
         means the previous instruction round is over, so: the duplicate-
         target ledger reopens (the model may legitimately re-edit a target
         the user just changed), the identical-failure ledger clears (the
-        same call may now be exactly what the user wants), and the write
-        budget resets — otherwise steering is useless precisely when it is
-        needed, after the model burned its writes driving the wrong way
-        (Sir, 2026-10-02). Bounded by the human doing the steering; the
-        tool-turn budget is reset by the loop itself.
+        same call may now be exactly what the user wants), the write
+        counter resets, and the THRASH budget resets with the read count —
+        otherwise steering is useless precisely when it is needed, after
+        the model burned its waste driving the wrong way (Sir, 2026-10-02;
+        thrash counters included 2026-10-16 since batch accounting changes
+        what a "reset" covers). Bounded by the human doing the steering;
+        the tool-turn budget is reset by the loop itself.
         """
         self._steer_epoch += 1
         self._identical_failures.clear()
         self._registry_kicks.clear()
         self.edit_attempts = 0
+        self.thrash_units = 0
+        self.read_calls = 0
+        self.write_failures = 0
         self._last_file = None
 
     @staticmethod
@@ -923,29 +959,72 @@ class EditSession:
             "why. Never tell the user a blocked change was staged."
         )
 
-    def _over_write_budget(self) -> str | None:
-        """Lean soft-landing directive once this request's write cap is hit.
+    def charge_waste(self, units: int = 1) -> None:
+        """Charge waste units from OUTSIDE the write path (the loop calls
+        this for malformed-correction and empty re-prompts — the loop
+        knows those round-trips were spent; the session cannot see them).
+        Fail-open by contract: this only ever moves a counter."""
+        self.thrash_units = max(0, self.thrash_units + units)
 
-        Returns None while the request is still within budget. On cap this
-        is a STOP order for further writes, never an error and never a state
-        change: the model must report what it changed and what it could NOT
-        apply, so the turn ends with the approved set so far plus an honest
-        summary (plan Phase 5 — "never hard-fail the conversation").
+    def charge_read(self) -> bool:
+        """One executed read call (loop-side, after the repeat guard —
+        repeat-dead reads never execute and never charge). The first
+        READ_GRACE reads are free; every read past the grace is +1 waste
+        unit. Returns True when the read was charged."""
+        self.read_calls += 1
+        if self.read_calls > READ_GRACE:
+            self.thrash_units += 1
+            return True
+        return False
+
+    def _over_thrash_budget(self) -> str | None:
+        """Lean soft-landing directive once this request's THRASH budget
+        is spent.
+
+        Returns None while the request is still within budget. On overage
+        the write call is not applied and the model gets FACTS, never a
+        stop order (2026-10-16 rework): the old "no further write calls
+        will be. Stop calling write tools." text is exactly what taught
+        models to abandon bulk requests into prose promises (the Hermes
+        early-abandonment lesson). The directive names the failure/reading
+        pattern, keeps the honesty clauses, and says nothing about what
+        the harness will or will not accept next — a wrong note here is a
+        useless note, never a changed path.
         """
-        cap = write_cap()
-        if cap <= 0 or self.edit_attempts <= cap:
+        cap = thrash_budget()
+        if cap <= 0 or self.thrash_units <= cap:
             return None
         self.last_write_outcome = "budget"
-        # Review fix 2026-09-26: the count printed here included the
-        # just-rejected call ("6 of 5 used"), which reads as nonsense.
-        # State the cap, not the over-count.
+        # Every charge is +1, so the correction/re-prompt units are exact
+        # by subtraction — no separate counters to drift.
+        over_reads = max(0, self.read_calls - READ_GRACE)
+        reprompt_units = max(
+            0, self.thrash_units - self.write_failures - over_reads)
+        facts = []
+        if self.write_failures:
+            facts.append(f"{self.write_failures} failed write call"
+                         + ("" if self.write_failures == 1 else "s"))
+        if over_reads:
+            facts.append(f"{over_reads} read past the {READ_GRACE}-read "
+                         "allowance")
+        if reprompt_units:
+            facts.append(f"{reprompt_units} correction/re-prompt round-"
+                         "trip" + ("" if reprompt_units == 1 else "s"))
+        staged = len(self.pending_edits)
+        staged_note = (f" {staged} file change"
+                       + ("" if staged == 1 else "s")
+                       + " already staged "
+                       + ("remains" if staged == 1 else "remain")
+                       + " awaiting the user's review."
+                       if staged else "")
         return (
-            f"\n\nWRITE LIMIT REACHED — the {cap}-write cap for this "
-            "request is used up, so this call was NOT applied "
-            "and no further write calls will be. Stop calling write tools. "
-            "Tell the user what you changed, what you could NOT apply, and "
-            "what you would try next. Never claim a change was staged "
-            "unless a tool result said so."
+            "\n\nWASTE BUDGET SPENT — this call was not applied. This "
+            f"request has spent its {cap}-unit allowance on wasted round-"
+            f"trips: {'; '.join(facts)}.{staged_note} "
+            "Rework the approach with what the tool results already in "
+            "this conversation tell you. Tell the user what you changed, "
+            "what you could NOT apply, and what you would try next. "
+            "Never claim a change was staged unless a tool result said so."
         )
 
     def _repetition_blocked(self, name: str, args: dict) -> str | None:
@@ -1066,7 +1145,7 @@ class EditSession:
         args = tool_call.get("arguments", {}) or {}
         self.edit_attempts += 1
 
-        budget = self._over_write_budget()
+        budget = self._over_thrash_budget()
         if budget is not None:
             return budget, None
 
@@ -1076,7 +1155,10 @@ class EditSession:
 
         blocked = self._repetition_blocked(name, args)
         if blocked is not None:
+            # A refused repeat is a wasted call — charge the waste.
             self.last_write_outcome = "correctable"
+            self.thrash_units += 1
+            self.write_failures += 1
             return blocked, None
 
         dup = self._duplicate_of_committed(op)
@@ -1095,6 +1177,10 @@ class EditSession:
             # retry. user_gated now only comes from explicit user
             # decisions (duplicate target, decline, timeout, stop).
             self.last_write_outcome = "correctable"
+            # A failed write is the archetype of chargeable waste (the
+            # success path above stays FREE — reviewable work, not thrash).
+            self.thrash_units += 1
+            self.write_failures += 1
             count = self._note_failure(name, args)
             return (_lean_error_content(name, result)
                     + self._repeat_directive(name, count)), None
@@ -1102,7 +1188,9 @@ class EditSession:
         kick = self._registry_kickback(name, args, result)
         if kick is not None:
             # Correctable: unknown gcode gets one pre-staging correction
-            # round before any card/stage (Sir 2026-09-20).
+            # round before any card/stage (Sir 2026-09-20). NOT charged:
+            # the deliberate re-send is the model's plugin claim, not
+            # thrash (same reasoning as the duplicate kickback).
             self.last_write_outcome = "correctable"
             return kick, None
 
@@ -1125,7 +1213,7 @@ class EditSession:
         args = tool_call.get("arguments", {}) or {}
         self.edit_attempts += 1
 
-        budget = self._over_write_budget()
+        budget = self._over_thrash_budget()
         if budget is not None:
             return budget, None, None
 
@@ -1141,6 +1229,8 @@ class EditSession:
         blocked = self._repetition_blocked(name, args)
         if blocked is not None:
             self.last_write_outcome = "correctable"
+            self.thrash_units += 1
+            self.write_failures += 1
             return blocked, None, None
 
         dup = self._duplicate_of_committed(op)
@@ -1154,7 +1244,10 @@ class EditSession:
         if result["status"] == "error":
             # Correctable kickback (see execute() — the commented-param
             # refusals are gone, so no write error is user-gated).
+            # Failed write = charged waste (paths must not drift).
             self.last_write_outcome = "correctable"
+            self.thrash_units += 1
+            self.write_failures += 1
             count = self._note_failure(name, args)
             return (_lean_error_content(name, result)
                     + self._repeat_directive(name, count)), None, None

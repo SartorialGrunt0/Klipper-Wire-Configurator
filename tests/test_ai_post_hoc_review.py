@@ -636,30 +636,42 @@ def test_steered_re_edit_is_one_net_change_with_no_duplicate_target(
     assert 'microsteps: 32' not in body['pendingEdits'][0]['newText']
 
 
-def test_steer_resets_the_write_budget(monkeypatch):
-    """A steer resets the write budget: without it, the re-edit after a
-    redirect would be refused by a cap the model already spent driving the
-    wrong way."""
-    monkeypatch.setenv('KWC_EDIT_WRITE_CAP', '1')
+def test_steer_resets_the_thrash_budget(monkeypatch):
+    """A steer resets the THRASH budget: without it, the re-edit after a
+    redirect would soft-land on a waste budget the model already spent
+    driving the wrong way. (Migrated from the write-cap shape 2026-10-16:
+    the budget is now spent by FAILURES, so the pre-steer calls fail —
+    successful writes are free and would never prove the reset.)"""
+    monkeypatch.setenv('KWC_THRASH_BUDGET', '1')
     state = {'steered': False}
 
     def on_call(index, request_json):
-        if index == 2 and not state['steered']:
+        # Queued while provider call 3 is in flight: fail1 and fail2 have
+        # BOTH executed (budget spent over), and the reply the model
+        # generated for the old instruction (index 3) is dropped.
+        if index == 3 and not state['steered']:
             state['steered'] = True
             ai_routes._chat_steers.setdefault('steer-budget-1', []).append(
                 'actually use 64')
 
     _install(monkeypatch, [
-        _tool_call('config_edit', SET_MICROSTEPS),
-        _tool_call('config_edit', dict(SET_MICROSTEPS, value='64')),
-        _tool_call('config_edit', dict(SET_MICROSTEPS, value='64')),
+        _tool_call('config_edit', {'file': 'printer.cfg', 'op': 'set_param',
+                                   'section': 'nope1', 'key': 'max_accel',
+                                   'value': '1'}),                    # fail: 1 unit
+        _tool_call('config_edit', {'file': 'printer.cfg', 'op': 'set_param',
+                                   'section': 'nope2', 'key': 'max_accel',
+                                   'value': '2'}),                    # fail: over budget
+        _tool_call('config_edit', dict(SET_MICROSTEPS, value='32')),  # dropped by steer
+        _tool_call('config_edit', dict(SET_MICROSTEPS, value='64')),  # re-edit, fresh budget
         _final_reply('Microsteps are 64.'),
     ], on_call=on_call)
 
     resp = client.post('/ai/chat', json=_payload('steer-budget-1'))
     assert resp.status_code == 200
     body = resp.json()
-    assert 'WRITE LIMIT REACHED' not in json.dumps(body['toolCalls'])
+    # The steer landed after the budget was spent; the re-edit ran on a
+    # fresh budget instead of soft-landing.
+    assert 'WASTE BUDGET SPENT' not in json.dumps(body['toolCalls'])
     assert 'microsteps: 64' in body['pendingEdits'][0]['newText']
 
 

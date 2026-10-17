@@ -2816,8 +2816,22 @@ def _build_tool_result_message(tool_call: dict, result_text: str) -> str:
 
 MAX_MCP_TOOL_TURNS = 10
 # With the write tools on, multi-edit requests chain read->edit->retry
-# round-trips; 10 exhausted too early (plan Phase 1).
-MAX_MCP_TOOL_TURNS_EDIT = 20
+# round-trips; 10 exhausted too early (plan Phase 1). Raised 20 -> 50
+# (2026-10-16 large-edit rework): a 62-section request batched via ops[]
+# needs ~15-25 CALLS; 20 turned the cap itself into the early-exit the
+# user saw. The runaway guard is now the thrash budget + the absolute
+# per-request op ceiling below, not the turn cap.
+MAX_MCP_TOOL_TURNS_EDIT = 50
+# Per-message tool-call slice bound (the `tool_calls[:N]` execution
+# window). Non-edit requests stay at 10; an edit-capable request gets 20
+# per message so one batched multi-edit turn is never silently truncated.
+MAX_TOOL_CALLS_PER_MESSAGE = MAX_MCP_TOOL_TURNS
+MAX_TOOL_CALLS_PER_MESSAGE_EDIT = 20
+# Invisible runaway ceiling: absolute executed tool-call cap per request.
+# Never announced to the model (budget pressure stays invisible until the
+# thrash budget itself is spent); hitting it is a harness bug worth a
+# log line, not a budget the model is expected to plan around.
+MAX_TOOL_OPS_PER_REQUEST = 500
 # When a model ends its turn with only a tool call and no visible text
 # (tool-loop exhaustion, an unparseable call format, or a final tool-only
 # response), re-prompt it without tools to force a direct text answer.
@@ -3645,6 +3659,19 @@ async def chat_proxy(req: ChatRequest):
             while tool_turns < turn_cap:
                 if stop_event is not None and stop_event.is_set():
                     raise ChatStoppedError()
+                # Invisible runaway ceiling (2026-10-16): an absolute
+                # executed-call cap per request. NOT announced to the
+                # model and NOT part of the thrash directive — reaching
+                # 500 executed calls means the harness itself has a bug,
+                # so log loudly and stop with what we have.
+                if len(executed_tool_calls) >= MAX_TOOL_OPS_PER_REQUEST:
+                    logger.error(
+                        "Runaway ceiling hit | %d tool calls executed in "
+                        "one request (requestId=%s) — stopping the loop; "
+                        "this is a harness bug, not a budget",
+                        len(executed_tool_calls), req.requestId or 'none',
+                    )
+                    break
 
                 # ── Mid-loop steer injection (turn boundary) ──
                 # A steer is user speech: it lands as the NEXT USER TURN,
@@ -3718,6 +3745,10 @@ async def chat_proxy(req: ChatRequest):
                     ):
                         malformed_reprompts += 1
                         tool_turns += 1
+                        # THRASH charge: a format-correction round-trip is
+                        # spent work, whatever it produces (2026-10-16).
+                        if edit_session is not None:
+                            edit_session.charge_waste()
                         logger.warning(
                             "Malformed tool call | re-prompting with format "
                             "correction (%d/%d) preview=%s",
@@ -3789,10 +3820,10 @@ async def chat_proxy(req: ChatRequest):
                                     # decision. Refusal wins. (The commented-
                                     # param refusals this clause originally
                                     # guarded were removed 2026-09-20.)
-                                    # 'budget' (Phase-5 write cap) is the
-                                    # same shield: the loop ORDERED the model
-                                    # to stop editing and report, so a cfg
-                                    # block in that final answer is the report,
+                                    # 'budget' (thrash budget spent) is the
+                                    # same shield: the loop just told the
+                                    # model to rework/report, so a cfg block
+                                    # in that final answer is the report,
                                     # not an inert draft to nudge back.
                                     and edit_session.last_write_outcome
                                     not in ('user_gated', 'budget')
@@ -3978,7 +4009,13 @@ async def chat_proxy(req: ChatRequest):
                 # Execute every tool call in this round first, then build the
                 # follow-up messages in the format the provider expects.
                 results = []
-                for tool_call in tool_calls[:MAX_MCP_TOOL_TURNS]:
+                # Per-message execution window: an edit-capable request
+                # gets a wider slice so ONE batched multi-edit message is
+                # never silently truncated mid-batch (2026-10-16; the
+                # non-edit path keeps 10).
+                _msg_cap = (MAX_TOOL_CALLS_PER_MESSAGE_EDIT if edit_capable
+                            else MAX_TOOL_CALLS_PER_MESSAGE)
+                for tool_call in tool_calls[:_msg_cap]:
                     repeat_key = _repeat_read_key(tool_call)
                     if repeat_key and repeat_key in read_ledger:
                         # Literal repeat of a read already answered this
@@ -4120,6 +4157,14 @@ async def chat_proxy(req: ChatRequest):
                         # Executed for the first time this request: any
                         # literal repeat now gets the lean directive.
                         read_ledger.add(repeat_key)
+                        # THRASH charge (2026-10-16): one executed read
+                        # call. Only reaches here for REPEAT_GUARD_TOOLS
+                        # that actually ran — repeat-dead reads die above
+                        # and never charge, matching "reads past grace"
+                        # as the waste definition (reading different
+                        # things is discovery; the grace covers it).
+                        if edit_session is not None:
+                            edit_session.charge_read()
                     logger.info(
                         "Tool executed | name=%s result_chars=%d",
                         tool_call["name"], len(result_text),
@@ -4223,6 +4268,12 @@ async def chat_proxy(req: ChatRequest):
                 if stop_event is not None and stop_event.is_set():
                     raise ChatStoppedError()
                 empty_reprompts += 1
+                # THRASH charge: the empty round-trip was really spent.
+                # Deliberately NOT refunded when the re-prompt turns out
+                # productive (`empty_reprompts -= 1` below is display/
+                # accounting for the provider-reprompt counter only).
+                if edit_session is not None:
+                    edit_session.charge_waste()
                 logger.warning(
                     "Empty final content | re-prompting without tools (attempt %d/%d)",
                     empty_reprompts, EMPTY_REPROMPT_LIMIT,
