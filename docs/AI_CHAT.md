@@ -21,7 +21,7 @@ Provider settings, conversation history, and attached config files persist local
 
 1. **You send a message.** The app builds the request context: your message, recent conversation history, attached config files, and the current printer memory file.
 2. **The backend prepares the prompt.** It adds the assistant's operating rules, the built-in tool list (Klipper docs search, example configs, validation, board detection, macro templates, and more).
-3. **The model answers with tools.** Every provider — local servers included — uses native function calling, with the text `tool` protocol kept as a fallback for servers that cannot do it. The backend runs the requested tools (for example, searching the bundled docs or validating a snippet) and feeds the results back to the model: up to ten read-only tool rounds, extended to twenty when edit tools are in play, with a per-request write-attempt cap so a stuck edit loop lands on an honest summary instead of burning the budget.
+3. **The model answers with tools.** Every provider — local servers included — uses native function calling, with the text `tool` protocol kept as a fallback for servers that cannot do it. The backend runs the requested tools (for example, searching the bundled docs or validating a snippet) and feeds the results back to the model: up to ten read-only tool rounds, extended to fifty when edit tools are in play (2026-10-16 large-edit rework: a 62-section request batched via `ops[]` needs ~15–25 calls; the old cap of 20 *manufactured* early exits). Runaway protection is no longer the turn cap — it is the per-request **thrash budget** (below) plus an invisible absolute ceiling of 500 executed tool calls per request, which announces nothing and only ever logs a harness-bug line.
 4. **Config edits are staged, not written.** To change a file the model must call `config_edit` / `config_write`. The **server** applies each operation mechanically to a working copy of your project and validates the result, so the assistant cannot fabricate a change, silently rewrite a whole file, or mangle lines it did not touch. Invalid edits are kicked straight back to the model to fix before you ever see them.
 5. **You approve each change.** Every validated edit suspends the request and opens an **Approve / Decline** card showing the exact before/after lines the server computed. Approving puts the change into your **pending changes** as unsaved (dirty) work; declining leaves your config untouched. Nothing is written to disk until you use the toolbar "Save" menu — and your printer is never restarted behind your back. If no decision is made within 90 seconds the card **auto-declines** and the assistant reports honestly that you didn't respond; declining a card you still want to change is fine — just ask again.
 6. **Long tool chains show progress.** While the assistant is working through tools, a small subordinate strip under the typing dots shows what it said it was doing plus the tools it has run (deduped, collapsible). It is strictly display state — progress text is never the answer, and it disappears when the reply lands.
@@ -72,6 +72,57 @@ The assistant sees your printer memory (mainboard, toolhead, expander boards, ki
 >   name differs only by case is reported as the duplicate it is. Ambiguity
 >   is never guessed — the error lists the candidates.
 
+## Large edits: batching, occurrence sweeps, budgets (2026-10-16 rework)
+
+Requests like "comment out every macro" or "rename this everywhere" used to
+land in a prose dump of ```` ```cfg ```` drafts instead of staged edits. The
+rework fixed the machinery that manufactured that symptom:
+
+- **`ops[]` batching.** One `config_edit` / `config_write` call carries up to
+  32 operations (`MAX_OPS_PER_CALL`) in an `ops` array, each shaped exactly
+  like the single-op form plus an `op` name. The server **prepares** every op
+  against the working copy in order, then replays so the committed result and
+  the per-op feedback come from the same engine. Feedback is **per index**:
+  ops that applied stay applied, and only the failed indices bounce back with
+  their exact reasons ("op 7 failed: ..."), so one bad op never voids a good
+  batch. If a small model stringifies the array (JSON as a quoted string),
+  `parse_maybe_stringified` recovers it instead of rejecting the call.
+  Batching is always optional — single-op calls keep working unchanged.
+- **Occurrence sweeps.** `search_user_configs` takes `keywords=['level_bed',
+  'old_probe_home']` — several names per call — and every hit answers with a
+  **REFERENCES checklist**: each occurrence with its section and line number,
+  per-name counts included, in-string occurrences (`RESPOND MSG='level_bed'`)
+  covered, not just section headers. The rename/"every reference" contract is
+  now mechanical for the model: edit from the list, re-search, stop when the
+  counts hit 0. The table serves the model's own discovery — the harness
+  never grades "done" off it.
+- **Thrash budget — charges waste, not work.** The old flat write cap
+  charged every write attempt, so a legitimate 62-section request was
+  arithmetically impossible in one prompt and "WRITE LIMIT REACHED" *taught
+  the model to give up*. The budget is now inverted: it charges only waste —
+  failed write attempts, reads past a 10-read grace, malformed-call
+  corrections, empty re-prompts — while **successful write ops are free**
+  (a state change is reviewable work, and the oscillation family the write
+  cap guarded is covered deterministically by duplicate/supersede detection).
+  Default 50 waste units per request (`KWC_THRASH_BUDGET` overrides; ≤0
+  disables). Spending it is a **soft landing**: the directive states facts
+  (what failed, what was over-read) and never claims further writes are
+  blocked. Steering a request mid-flight resets the budget — the model
+  didn't waste anything driving where you redirected it.
+- **Completion check at the loop exit.** An edit-*intent* request that tries
+  to close with confident prose while its trace shows zero staged writes
+  gets **one** re-query that re-presents the request *and its own ledger*:
+  per-file staged-edit counts with sampled section names, and the failed-call
+  count with one-line errors. The model grades itself against facts instead
+  of a vacuum (self-grading alone is the documented failure: a 12B's
+  sycophancy asserts completion). Only one kick per request, like the ack
+  guard; a steer re-arms it. The check skips cfg-fenced answers,
+  continue-intent tails, and honest clarifying questions; the second prose
+  exit closes normally. `KWC_COMPLETION_CHECK=bare|ledger` picks the A/B
+  arm (default `ledger`); usage reports the kick count as
+  `completionKicks`. The reply is now also stamped with a failed-call note
+  when the loop gave up on any call, so "all done" cannot ride over errors.
+
 ## Stopping, retrying, and resuming
 
 - **Stop** — while the assistant is processing, the Send button becomes Stop. Pressing it cancels the request immediately.
@@ -88,7 +139,7 @@ How it works:
 - Every question checks two things: **answer accuracy** and **tool reliability** (does the model use the right embedded tool for the job?). For edit questions the graded artifact is the server-staged change set (`pendingEdits`), not the reply's prose — declared `edit_criteria` grade the change that will actually land.
 - Every step is logged: the request payload, raw response, tool names and tool-turn count, the per-question slice of the backend's own log, the pass/fail evaluation for each criterion, and a final summary.
 
-### Question Bank (106 questions)
+### Question Bank (111 questions)
 | Item / Feature | Description & Details |
 | :--- | :--- |
 | Core Tools (Q01–Q20, minus retired Q09) | Covers docs lookups, example configs, validation, calculations, and tool-mediated edit routing. |
@@ -105,6 +156,7 @@ How it works:
 | Rename Cases (RENAME-01..03) | Macro-section renames: the staged header must keep the `gcode_macro` family, and stale callers must be repaired. |
 | Comment Cases (COMMENT-01..06) | Comment/uncomment ops: whole-section disable including the header via `comment_section`, block restore via `uncomment_section`, single-line comment/uncomment via `patch_section`, and the rename+uncomment combo. |
 | Ack Guard (ACK-01/02, ACK-N01) | Mid-loop ack-guard probes (Phase 6.5.5): the same single-value edit pinned to native AND text protocol with `expect_no_ack_stall` (a promise-with-no-action rescued by the injected directive FAILS even when the staged artifact is right), plus a pure-Q&A case the guard must never touch. Run as `--questions ACK,ACK-N`. |
+| Bulk Edits (BULK-01..05) | Large-edit rework (2026-10-17): comment-every-section and comment-every-macro sweeps on engine-verified synthetic fixtures (thresholds derived from the fixture inventory, never hand-counted), a Level_Bed-shaped rename sweep with in-string `RESPOND MSG=` arms, a constructive pin-map add of six sections in one request, and an honesty trap (a named-but-missing section the reply must own up to). Graded trace-only: `coverage` counts distinct non-superseded sections in the server `changeSet`, `no_fence` rejects terminal-reply ```` ```cfg ```` drafts, `single_request` bounds loop economy, `failed_named_in_reply` is the honesty floor. Run as `--questions BULK`. No baselines yet — first numbers land with the ablation arms below. |
 | Optional Memory Check (MEMORY-01..03) | Adds printer-memory auto-fill checks when the `--include-memory` flag is used. |
 
 ### Baselines (pre-fix)
