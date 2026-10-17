@@ -705,6 +705,28 @@ def test_patch_section_include_misroute_names_right_op():
     assert rg2['status'] == 'error' and 'Missing required argument: section' in rg2['error']
 
 
+def test_add_section_new_section_key_alias():
+    """BULK-04 bank re-run (2026-10-17): gemma passed the add_section
+    header under 'new_section' — rename_section's NEW-side key — and
+    hit 'Missing required argument: section' 35 times before giving up
+    on config_edit entirely. Resolve the habit (name his way), value
+    lands verbatim case-preserved; add_section has no new/current pair
+    to confuse, so the alias is unambiguous."""
+    st, base = _state()
+    st1, r = st.apply(base, {'op': 'add_section', 'file': 'printer.cfg',
+                             'new_section': 'verify_heater hotend',
+                             'text': 'max_error: 120'})
+    assert r['status'] == 'applied', r
+    assert '[verify_heater hotend]' in st1.files['printer.cfg']
+    # explicit 'section' still wins when both are present
+    st2, r2 = st.apply(base, {'op': 'add_section', 'file': 'printer.cfg',
+                              'section': 'idle_timeout', 'new_section': 'zzz',
+                              'text': 'timeout: 600'})
+    assert r2['status'] == 'applied', r2
+    assert '[idle_timeout]' in st2.files['printer.cfg']
+    assert 'zzz' not in st2.files['printer.cfg']
+
+
 def test_missing_section_wrong_file_names_the_file():
     """Audit 2026-09-20: a section op pointed at the wrong file said
     only 'not found — read the file first', sending models to re-read

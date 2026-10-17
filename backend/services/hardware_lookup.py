@@ -208,11 +208,27 @@ def list_hardware(files: dict[str, str], hw_type: str = "") -> str:
                 "may genuinely be missing from the config.")
 
     if len(hits) > _MATCH_CAP:
+        # Overflow truncates VERBOSE bodies, NEVER the member list
+        # (BULK-02 bank re-run 2026-10-17): the prompt law says a class
+        # sweep must cover EVERY listed member, and the old branch
+        # listed only the first _MATCH_CAP headers — gcode_macro hits
+        # 82, page showed 30, and printer.cfg's RESET_ACCEL was
+        # invisible to a model that obeyed the law and swept only what
+        # it could see. Full header enumeration below; bodies stay
+        # capped (read_user_config covers the rest on demand).
+        body_cap = hits[:_MATCH_CAP]
+        rendered = "".join(_render(e) for e in body_cap)
         listing = "\n".join(f"- [{e['header']}] in {e['file']}"
-                            for e in hits[:_MATCH_CAP])
+                            for e in hits)
         return (f"# list_hardware type={hw_type} — {len(hits)} matches "
-                f"(showing first {_MATCH_CAP}):\n{listing}\n"
-                "# Narrow with a literal section type for full text.")
+                f"(working state, includes approved unsaved edits).\n"
+                f"# Full text for the first {len(body_cap)}; EVERY match "
+                "is listed at the end — a class sweep must cover the "
+                "whole list, not just the rendered ones. Fetch any "
+                "unrendered member's text with read_user_config or "
+                "narrow with a literal section type.\n\n"
+                + rendered +
+                "\n# ALL MATCHES (sweep checklist):\n" + listing + "\n")
 
     header_line = (f"# list_hardware type={hw_type} — {len(hits)} "
                    f"match{'es' if len(hits) != 1 else ''} (working "

@@ -720,6 +720,17 @@ class ProjectState:
 
     def _apply_raw(self, op: dict) -> dict:
         kind = op.get('op', '')
+        # add_section key alias (BULK-04 re-run 2026-10-17): gemma passed
+        # the header under 'new_section' — rename_section's NEW-side key —
+        # five identical times against 'Missing required argument:
+        # section'. Same law as _resolve_op_section: resolve the model's
+        # identifier habit, never land it in the config (the value is
+        # used verbatim as the header, case preserved). Unambiguous:
+        # add_section has no new-section/current-section pair to confuse.
+        if kind == 'add_section' \
+                and not str(op.get('section') or '').strip() \
+                and str(op.get('new_section') or '').strip():
+            op = {**op, 'section': op['new_section']}
         handler = {
             'set_param': self._op_set_param,
             'add_section': self._op_add_section,

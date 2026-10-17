@@ -290,6 +290,11 @@ SYSTEM_PROMPT = (
     "- Klipper G-code commands and macro names (G28, M104, BED_MESH_CALIBRATE, "
     "SET_FAN_SPEED, PRINT_START, etc.) are NOT tools — never invoke them as "
     "tool calls.\n"
+    "- After edits, the FINAL reply must contain NO fenced config or code "
+    "blocks at all — quote section and parameter names inline instead. The "
+    "edited text is already visible to the user in the review pane; a "
+    "pasted block there is a duplicate, and in chat it reads as an unsaved "
+    "draft that was never applied.\n"
 )
 
 

@@ -1946,6 +1946,24 @@ _HW_MAIN = (
     '[idle_timeout]\ntimeout: 600\n')
 
 
+def test_list_hardware_overflow_lists_every_member():
+    """BULK-02 bank re-run (2026-10-17): the class-sweep law says cover
+    EVERY listed member, but the overflow branch printed only the first
+    _MATCH_CAP headers — the bank's 82 gcode_macro hits showed 30 and
+    printer.cfg's RESET_ACCEL was invisible to a law-abiding sweep.
+    Bodies stay capped; the MEMBER LIST must never be."""
+    from services.hardware_lookup import list_hardware, _MATCH_CAP
+    n = _MATCH_CAP + 5
+    cfg = "".join(f"[gcode_macro MACRO_{i}]\ngcode:\n    M117 {i}\n\n"
+                  for i in range(n))
+    cfg += "[gcode_macro LAST_ONE]\ngcode:\n    M117 tail\n"
+    out = list_hardware({'printer.cfg': cfg}, 'macro')
+    assert f"{n + 1} matches" in out
+    # every member listed in the sweep checklist, cap included
+    assert f"MACRO_{n - 1}" in out and "LAST_ONE" in out
+    assert "sweep checklist" in out
+
+
 def test_list_hardware_led_class_is_structural():
     from services.hardware_lookup import list_hardware
     out = list_hardware({'printer.cfg': _HW_MAIN, 'leds.cfg': _HW_LEDS},
